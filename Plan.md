@@ -223,14 +223,17 @@ Lua plugin → buffer insert → engineer approval → Go server receives it. No
 - [x] `server/internal/socket/socket_test.go`: 6 tests — accept, dispatch, send, broadcast, disconnect, invalid JSON
 - [x] `bridge/cmd/junto-bridge/main_test.go`: 3 tests — stdin→socket relay, socket→stdout relay, stdin close
 
-**Status:** Go server + bridge verified end-to-end via CLI. Lua plugin written and installed
-(`make install` symlinks to `~/.config/micro/plug/agent/`). Not yet tested live in Micro.
+**Status:** ✅ COMPLETE AND TESTED
+- Go server + bridge verified end-to-end via CLI
+- Lua plugin written, installed, and tested live in Micro
+- Full loop works: server → socket → bridge → plugin → buffer insert → YNPrompt → approve/reject
 
-**To test in Micro:**
-1. `export PATH="$HOME/.local/bin:$PATH"` (or add to shell profile)
-2. Terminal 1: `junto-server` (prints socket path)
-3. Terminal 2: `micro /tmp/test.go`, then `:agent-start <socket-path>`
-4. Should see hardcoded insert appear + YNPrompt
+**Test script:** `./test-phase1.sh`
+- Automatically kills stale processes
+- Starts server, displays socket path
+- Waits for user input before launching Micro
+- Run `agent-start <socket-path>` in Micro to connect
+- Commands: `agent-start`, `agent-stop`, `agent-send`
 
 ---
 

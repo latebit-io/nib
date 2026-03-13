@@ -26,6 +26,8 @@ go.work.sum
 
 # env file
 .env
+bin
+.mcp.json
 
 # Editor/IDE
 # .idea/

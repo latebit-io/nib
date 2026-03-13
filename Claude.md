@@ -1,0 +1,39 @@
+# CLAUDE.md
+
+## demarkus-soul
+
+All project context — architecture, patterns, build commands, conventions, debugging notes, and roadmap — lives on the demarkus-soul MCP server.
+
+### Required Preflight (Every Session)
+
+1. `mark_fetch` `/index.md` — get the hub page
+2. `mark_fetch` `/patterns.md` — build commands, code style, workflow
+3. Fetch other pages as needed: `/architecture.md`, `/debugging.md`, `/roadmap.md`
+4. If MCP is unavailable, stop and ask the user before proceeding
+
+### During Work
+
+- Update soul pages when learning something new
+- Use `mark_append` for journal entries and incremental notes
+- Always use `expected_version` from a prior fetch when publishing or appending
+
+### End of Session
+
+- Add a journal entry to `/journal.md` if something significant happened
+
+### Content Structure
+
+```
+/index.md          — Hub page, add project workspace here 
+/junto/index.md    - Project specific workspace
+/junto/architecture.md   — System design, module boundaries, key decisions
+/junto/patterns.md       — Code patterns, build commands, conventions, workflow
+/junto/debugging.md      — Lessons from bugs and investigations
+/junto/roadmap.md        — What's done, what's next
+/junto/journal.md        — Session notes and evolution log
+/junto/thoughts.md       — Agent reflections and ideas
+/junto/guide.md          — Setup instructions for demarkus-soul
+```
+### Plans
+ - Agents should never store the plans in their own vendor specific folder
+ - The agent should always publish the plan to demarkus soul instead

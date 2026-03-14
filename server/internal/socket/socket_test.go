@@ -19,8 +19,8 @@ func startTestServer(t *testing.T, handler Handler) *Server {
 	}
 	t.Cleanup(func() { srv.Close() })
 	go srv.Serve()
-	// Give the listener a moment to start.
-	time.Sleep(10 * time.Millisecond)
+	// No sleep needed — net.Listen already bound the socket in NewServer.
+	// Serve() just calls Accept() which the OS queues connections for.
 	return srv
 }
 
@@ -38,6 +38,7 @@ func readLine(t *testing.T, conn net.Conn) []byte {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
 		t.Fatalf("readLine: no data (err=%v)", scanner.Err())
 	}

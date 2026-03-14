@@ -27,7 +27,8 @@ func main() {
 		if _, err := io.Copy(os.Stdout, conn); err != nil {
 			log.Printf("socket→stdout: %v", err)
 		}
-		os.Exit(0)
+		// Close conn to unblock the stdin→socket scanner, allowing main to return.
+		conn.Close()
 	}()
 
 	// stdin → socket

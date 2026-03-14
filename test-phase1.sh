@@ -7,7 +7,10 @@ cd "$REPO_DIR"
 
 # Ensure binaries are built
 echo "Building..."
-make build > /dev/null 2>&1
+if ! make build > /dev/null 2>&1; then
+    echo "Error: make build failed. Aborting."
+    exit 1
+fi
 
 # Add ~/.local/bin to PATH if not already there
 export PATH="$HOME/.local/bin:$PATH"
@@ -24,7 +27,8 @@ pkill -f "junto-server" 2>/dev/null || true
 sleep 0.3
 
 # Clean up stale socket files
-rm -f /var/folders/**/junto-*.sock /tmp/junto-*.sock 2>/dev/null || true
+find /var/folders -type s -name 'junto-*.sock' -delete 2>/dev/null || true
+rm -f /tmp/junto-*.sock 2>/dev/null || true
 
 # Create a temporary test file
 TEST_FILE="/tmp/test-junto.go"

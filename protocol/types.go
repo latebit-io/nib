@@ -11,13 +11,15 @@ const (
 )
 
 // EditOp is a single proposed code change from the agent.
+// Line and Col are 1-indexed (matching editor display). The plugin converts
+// to 0-indexed when calling Micro's buffer.Loc.
 type EditOp struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"` // "insert" | "replace" | "delete"
-	Line    int    `json:"line"`
-	Col     int    `json:"col"`
-	EndLine int    `json:"end_line,omitempty"`
-	EndCol  int    `json:"end_col,omitempty"`
+	Line    int    `json:"line"` // 1-indexed
+	Col     int    `json:"col"`  // 1-indexed
+	EndLine int    `json:"end_line,omitempty"` // 1-indexed
+	EndCol  int    `json:"end_col,omitempty"`  // 1-indexed
 	Text    string `json:"text"`
 	Reason  string `json:"reason"`
 }
@@ -29,12 +31,13 @@ type Step struct {
 }
 
 // Edit records a change made by either side, kept in a ring buffer.
+// Line and Col are 1-indexed.
 type Edit struct {
 	Source  string `json:"source"` // "agent" | "engineer"
-	Line    int    `json:"line"`
-	Col     int    `json:"col"`
-	EndLine int    `json:"end_line"`
-	EndCol  int    `json:"end_col"`
+	Line    int    `json:"line"`   // 1-indexed
+	Col     int    `json:"col"`    // 1-indexed
+	EndLine int    `json:"end_line"` // 1-indexed
+	EndCol  int    `json:"end_col"`  // 1-indexed
 	Text    string `json:"text"`
 }
 

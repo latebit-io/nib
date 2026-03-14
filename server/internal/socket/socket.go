@@ -93,24 +93,19 @@ func (s *Server) Broadcast(msg any) {
 		log.Printf("broadcast marshal error: %v", err)
 		return
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for c := range s.clients {
-		c.mu.Lock()
-		_, err := c.conn.Write(data)
-		c.mu.Unlock()
-		if err != nil {
-			log.Printf("broadcast write error: %v", err)
-		}
-	}
+	s.BroadcastRaw(data)
 }
 
 // BroadcastRaw sends pre-marshalled JSON bytes to all clients.
 func (s *Server) BroadcastRaw(data []byte) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	clients := make([]*Client, 0, len(s.clients))
 	for c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.mu.Unlock()
+
+	for _, c := range clients {
 		c.mu.Lock()
 		_, err := c.conn.Write(data)
 		c.mu.Unlock()

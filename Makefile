@@ -12,7 +12,6 @@ install: build
 	@# Install plugin
 	mkdir -p $(PLUGIN_DIR)
 	ln -sf $(CURDIR)/plugin/main.lua $(PLUGIN_DIR)/main.lua
-	ln -sf $(CURDIR)/plugin/json.lua $(PLUGIN_DIR)/json.lua
 	ln -sf $(CURDIR)/plugin/repo.json $(PLUGIN_DIR)/repo.json
 	@# Install binaries
 	mkdir -p $(BIN_DIR)

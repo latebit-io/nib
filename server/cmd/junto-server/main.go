@@ -28,7 +28,6 @@ func main() {
 		<-sig
 		log.Println("shutting down")
 		srv.Close()
-		os.Exit(0)
 	}()
 
 	if err := srv.Serve(); err != nil {
@@ -46,7 +45,7 @@ func handleMessage(client *socket.Client, msg any) {
 				ID:   "phase1-test",
 				Kind: "insert",
 				Line: 3,
-				Col:  0,
+				Col:  1,
 				Text: "// TODO: implement Verifier interface\n",
 				Reason: "Phase 1 test — hardcoded insert to verify the full path",
 			},

@@ -192,19 +192,22 @@ end
 -- Op application
 -------------------------------------------------------------------------------
 
+-- Protocol uses 1-indexed line/col; buffer.Loc takes 0-indexed (col, line).
+local function loc(line, col)
+    return buffer.Loc(col - 1, line - 1)
+end
+
 local function apply_op(op)
     if code_bp == nil then return end
     if op.kind == "insert" then
-        code_bp.Buf:Insert(buffer.Loc(op.col, op.line), op.text)
+        code_bp.Buf:Insert(loc(op.line, op.col), op.text)
     elseif op.kind == "replace" then
-        local start = buffer.Loc(op.col, op.line)
-        local finish = buffer.Loc(op.end_col, op.end_line)
+        local start = loc(op.line, op.col)
+        local finish = loc(op.end_line, op.end_col)
         code_bp.Buf:Remove(start, finish)
         code_bp.Buf:Insert(start, op.text)
     elseif op.kind == "delete" then
-        code_bp.Buf:Remove(
-            buffer.Loc(op.col, op.line),
-            buffer.Loc(op.end_col, op.end_line))
+        code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
     else
         micro.InfoBar():Error("agent: unknown op kind: " .. tostring(op.kind))
     end

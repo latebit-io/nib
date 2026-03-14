@@ -1,0 +1,216 @@
+package socket
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/latebit-io/junto/protocol"
+)
+
+// Handler is called for each parsed message or lifecycle event from a client.
+type Handler func(client *Client, msg any)
+
+// ConnectMsg is sent to the handler when a new client connects.
+type ConnectMsg struct{}
+
+// Server manages a Unix socket listener and connected clients.
+type Server struct {
+	listener net.Listener
+	sockPath string
+
+	mu      sync.Mutex
+	clients map[*Client]struct{}
+
+	handler Handler
+}
+
+// Client represents a single connected client.
+type Client struct {
+	conn net.Conn
+	srv  *Server
+	mu   sync.Mutex
+}
+
+// Send marshals and writes a message to this client.
+func (c *Client) Send(msg any) error {
+	data, err := protocol.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err = c.conn.Write(data)
+	c.conn.SetWriteDeadline(time.Time{})
+	return err
+}
+
+// NewServer creates a server listening on a Unix socket with a PID-based session path.
+func NewServer(handler Handler) (*Server, error) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("junto-%d.sock", os.Getpid()))
+
+	// Clean up stale socket file if it exists.
+	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("remove stale socket %s: %w", sockPath, err)
+	}
+
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
+	}
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("chmod %s: %w", sockPath, err)
+	}
+
+	log.Printf("listening on %s", sockPath)
+
+	return &Server{
+		listener: listener,
+		sockPath: sockPath,
+		clients:  make(map[*Client]struct{}),
+		handler:  handler,
+	}, nil
+}
+
+// SockPath returns the socket file path for clients to connect to.
+func (s *Server) SockPath() string {
+	return s.sockPath
+}
+
+// Serve accepts connections in a loop. Blocks until the listener is closed.
+func (s *Server) Serve() error {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return fmt.Errorf("accept: %w", err)
+		}
+		client := &Client{conn: conn, srv: s}
+		s.addClient(client)
+		go s.handleClient(client)
+	}
+}
+
+// Broadcast sends a message to all connected clients.
+func (s *Server) Broadcast(msg any) {
+	data, err := protocol.Marshal(msg)
+	if err != nil {
+		log.Printf("broadcast marshal error: %v", err)
+		return
+	}
+	s.BroadcastRaw(data)
+}
+
+// BroadcastRaw sends pre-marshalled JSON bytes to all clients.
+// Data must be newline-terminated; a trailing '\n' is appended if missing.
+func (s *Server) BroadcastRaw(data []byte) {
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		cp := make([]byte, len(data), len(data)+1)
+		copy(cp, data)
+		data = append(cp, '\n')
+	}
+	s.mu.Lock()
+	clients := make([]*Client, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.mu.Unlock()
+
+	for _, c := range clients {
+		c.mu.Lock()
+		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_, err := c.conn.Write(data)
+		c.conn.SetWriteDeadline(time.Time{})
+		c.mu.Unlock()
+		if err != nil {
+			log.Printf("broadcast write error, removing client: %v", err)
+			s.removeClient(c)
+		}
+	}
+}
+
+// Close shuts down the listener, closes all active client connections,
+// and removes the socket file.
+func (s *Server) Close() error {
+	err := s.listener.Close()
+
+	s.mu.Lock()
+	clients := make([]*Client, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+		delete(s.clients, c)
+	}
+	s.mu.Unlock()
+
+	for _, c := range clients {
+		c.mu.Lock()
+		c.conn.Close()
+		c.mu.Unlock()
+	}
+
+	os.Remove(s.sockPath)
+	return err
+}
+
+func (s *Server) addClient(c *Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clients[c] = struct{}{}
+	log.Printf("client connected (%d total)", len(s.clients))
+}
+
+func (s *Server) removeClient(c *Client) {
+	s.mu.Lock()
+	if _, ok := s.clients[c]; !ok {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.clients, c)
+	log.Printf("client disconnected (%d total)", len(s.clients))
+	s.mu.Unlock()
+
+	c.mu.Lock()
+	c.conn.Close()
+	c.mu.Unlock()
+}
+
+func (s *Server) handleClient(c *Client) {
+	defer s.removeClient(c)
+
+	// Notify handler of new connection.
+	if s.handler != nil {
+		s.handler(c, ConnectMsg{})
+	}
+
+	scanner := bufio.NewScanner(c.conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 64KB initial, 1MB max line
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		msg, err := protocol.Parse(line)
+		if err != nil {
+			log.Printf("parse error: %v", err)
+			continue
+		}
+
+		if s.handler != nil {
+			s.handler(c, msg)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("client read error: %v", err)
+	}
+}

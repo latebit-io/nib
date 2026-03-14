@@ -1,0 +1,12 @@
+[{
+  "Name": "agent",
+  "Description": "Realtime collaborative coding with an AI agent",
+  "Website": "https://github.com/latebit-io/junto",
+  "Tags": ["ai", "agent", "collaborative"],
+  "Versions": [{
+    "Version": "0.1.0",
+    "Require": {
+      "micro": ">=2.0.0"
+    }
+  }]
+}]

@@ -131,6 +131,12 @@ local function encode_string(s)
     s = s:gsub('\n', '\\n')
     s = s:gsub('\r', '\\r')
     s = s:gsub('\t', '\\t')
+    s = s:gsub('\b', '\\b')
+    s = s:gsub('\f', '\\f')
+    -- Escape any remaining control characters (bytes < 0x20)
+    s = s:gsub('[%z\1-\31]', function(c)
+        return string.format('\\u%04X', c:byte())
+    end)
     return '"' .. s .. '"'
 end
 
@@ -319,9 +325,14 @@ local function on_bridge_stderr(output)
 end
 
 local function on_bridge_exit()
+    if pending_op ~= nil then
+        undo_op(pending_op)
+        pending_op = nil
+    end
     micro.InfoBar():Message("agent: bridge exited")
     bridge_cmd = nil
     bridge_stdout_buf = ""
+    sock_path = nil
 end
 
 -------------------------------------------------------------------------------

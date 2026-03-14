@@ -57,7 +57,9 @@ func NewServer(handler Handler) (*Server, error) {
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("junto-%d.sock", os.Getpid()))
 
 	// Clean up stale socket file if it exists.
-	os.Remove(sockPath)
+	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("remove stale socket %s: %w", sockPath, err)
+	}
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {

@@ -399,7 +399,7 @@ Everything else (socket server, fan-out, JSON encoding, file I/O) uses the stand
 
 Done when all of the following work in a single session:
 
-1. Open a `.go` file in Micro, run `agent-start<socket-path>` (using the Unix socket path printed by `junto-server`)
+1. Open a `.go` file in Micro, run `agent-start <socket-path>` (using the Unix socket path printed by `junto-server`)
 2. Agent pane opens in a right split showing the plan and current step
 3. Claude streams reasoning into the agent pane token by token
 4. A proposed code block appears highlighted in the editor at the correct line

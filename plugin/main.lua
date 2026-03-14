@@ -210,17 +210,17 @@ local function loc(line, col)
 end
 
 local function apply_op(op)
-    if code_bp == nil then return end
+    if code_bp == nil then return false end
     if op.line == nil or op.col == nil then
         micro.InfoBar():Error("agent: malformed op: missing line/col")
-        return
+        return false
     end
     if op.kind == "insert" then
         code_bp.Buf:Insert(loc(op.line, op.col), op.text or "")
     elseif op.kind == "replace" then
         if op.end_line == nil or op.end_col == nil then
             micro.InfoBar():Error("agent: malformed replace op: missing end_line/end_col")
-            return
+            return false
         end
         local start = loc(op.line, op.col)
         local finish = loc(op.end_line, op.end_col)
@@ -229,12 +229,14 @@ local function apply_op(op)
     elseif op.kind == "delete" then
         if op.end_line == nil or op.end_col == nil then
             micro.InfoBar():Error("agent: malformed delete op: missing end_line/end_col")
-            return
+            return false
         end
         code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
     else
         micro.InfoBar():Error("agent: unknown op kind: " .. tostring(op.kind))
+        return false
     end
+    return true
 end
 
 local function undo_op(op)
@@ -285,8 +287,10 @@ end
 local function handle_message(msg)
     local t = msg.type
     if t == "pending_op" then
+        if not apply_op(msg.op) then
+            return
+        end
         pending_op = msg.op
-        apply_op(msg.op)
         show_approval_prompt()
     elseif t == "approved" then
         micro.InfoBar():Message("agent: op " .. msg.op_id .. " applied")

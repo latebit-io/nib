@@ -5,10 +5,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
-	"github.com/latebit/junto/protocol"
-	"github.com/latebit/junto/server/internal/socket"
+	"github.com/latebit-io/junto/protocol"
+	"github.com/latebit-io/junto/server/internal/socket"
 )
 
 func main() {
@@ -16,7 +17,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to start server: %v", err)
 	}
-	defer srv.Close()
+	var closeOnce sync.Once
+	closeSrv := func() { closeOnce.Do(func() { srv.Close() }) }
+	defer closeSrv()
 
 	// Print socket path so bridge/tests can find it.
 	fmt.Println(srv.SockPath())
@@ -27,7 +30,7 @@ func main() {
 	go func() {
 		<-sig
 		log.Println("shutting down")
-		srv.Close()
+		closeSrv()
 	}()
 
 	if err := srv.Serve(); err != nil {

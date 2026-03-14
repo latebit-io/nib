@@ -1,7 +1,7 @@
-module github.com/latebit/junto/server
+module github.com/latebit-io/junto/server
 
 go 1.24
 
-require github.com/latebit/junto/protocol v0.0.0
+require github.com/latebit-io/junto/protocol v0.0.0
 
-replace github.com/latebit/junto/protocol => ../protocol
+replace github.com/latebit-io/junto/protocol => ../protocol

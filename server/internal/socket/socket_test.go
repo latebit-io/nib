@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit/junto/protocol"
+	"github.com/latebit-io/junto/protocol"
 )
 
 func startTestServer(t *testing.T, handler Handler) *Server {

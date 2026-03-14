@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/latebit/junto/protocol"
+	"github.com/latebit-io/junto/protocol"
 )
 
 // Handler is called for each parsed message or lifecycle event from a client.
@@ -139,9 +139,25 @@ func (s *Server) BroadcastRaw(data []byte) {
 	}
 }
 
-// Close shuts down the listener and removes the socket file.
+// Close shuts down the listener, closes all active client connections,
+// and removes the socket file.
 func (s *Server) Close() error {
 	err := s.listener.Close()
+
+	s.mu.Lock()
+	clients := make([]*Client, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+		delete(s.clients, c)
+	}
+	s.mu.Unlock()
+
+	for _, c := range clients {
+		c.mu.Lock()
+		c.conn.Close()
+		c.mu.Unlock()
+	}
+
 	os.Remove(s.sockPath)
 	return err
 }

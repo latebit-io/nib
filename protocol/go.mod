@@ -1,3 +1,3 @@
-module github.com/latebit/junto/protocol
+module github.com/latebit-io/junto/protocol
 
 go 1.24

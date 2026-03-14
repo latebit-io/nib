@@ -4,6 +4,7 @@ local micro = import("micro")
 local config = import("micro/config")
 local shell = import("micro/shell")
 local buffer = import("micro/buffer")
+local gotime = import("time")
 
 -------------------------------------------------------------------------------
 -- Minimal JSON decode/encode
@@ -187,6 +188,89 @@ local bridge_cmd = nil   -- running bridge process
 local sock_path = nil    -- socket path for this session
 local pending_op = nil   -- current pending EditOp from server
 local code_bp = nil      -- BufPane where code edits happen
+local agent_buf = nil    -- BTScratch buffer for agent pane
+local agent_bp = nil     -- BufPane for agent pane
+local op_undo_count = 0  -- number of undo events for current pending_op
+local agent_cursor_active = false -- whether agent cursor exists in code pane
+
+-------------------------------------------------------------------------------
+-- Agent pane
+-------------------------------------------------------------------------------
+
+local function open_agent_pane(bp)
+    agent_buf = buffer.NewBuffer("", "agent")
+    agent_buf.Type.Scratch = true
+    agent_buf.Type.Readonly = true
+    agent_bp = bp:VSplitBuf(agent_buf)
+    -- VSplitBuf gives focus to the new (rightmost) pane; go back to code pane
+    agent_bp:PreviousSplit()
+end
+
+local function close_agent_pane()
+    if agent_bp ~= nil then
+        agent_bp:Quit()
+        agent_bp = nil
+    end
+    agent_buf = nil
+end
+
+local function agent_pane_append(text)
+    if agent_buf == nil then return end
+    -- Temporarily allow writes to append
+    agent_buf.Type.Readonly = false
+    local last_line = agent_buf:LinesNum() - 1
+    local last_col = #agent_buf:Line(last_line)
+    agent_buf:Insert(buffer.Loc(last_col, last_line), text)
+    agent_buf.Type.Readonly = true
+    -- Scroll agent pane to bottom without stealing focus
+    if agent_bp ~= nil then
+        local last_ln = agent_buf:LinesNum() - 1
+        agent_bp.Cursor.Y = last_ln
+        agent_bp.Cursor.X = 0
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Agent cursor (in code pane)
+-------------------------------------------------------------------------------
+
+-- SpawnCursorAtLoc creates a new cursor at the given Loc (0-indexed).
+-- The user's cursor (cursor 0) stays active for keyboard input.
+-- The agent cursor is always the last cursor in the list.
+
+local function spawn_agent_cursor(line, col)
+    if code_bp == nil then return end
+    local target = buffer.Loc(col - 1, line - 1)
+    micro.Log("agent: spawning cursor at col=" .. (col-1) .. " line=" .. (line-1))
+    code_bp:SpawnCursorAtLoc(target)
+    agent_cursor_active = true
+    micro.Log("agent: cursors after spawn: " .. code_bp.Buf:NumCursors())
+    -- Ensure user's cursor stays active for keyboard input
+    code_bp.Buf:SetCurCursor(0)
+    code_bp:Relocate()
+end
+
+local function move_agent_cursor(line, col)
+    if not agent_cursor_active or code_bp == nil then return end
+    -- Remove old agent cursor and spawn at new location
+    local n = code_bp.Buf:NumCursors()
+    if n > 1 then
+        code_bp.Buf:RemoveCursor(n - 1)
+    end
+    code_bp:SpawnCursorAtLoc(buffer.Loc(col - 1, line - 1))
+    code_bp.Buf:SetCurCursor(0)
+    code_bp:Relocate()
+end
+
+local function remove_agent_cursor()
+    if not agent_cursor_active or code_bp == nil then return end
+    local n = code_bp.Buf:NumCursors()
+    if n > 1 then
+        code_bp.Buf:RemoveCursor(n - 1)
+    end
+    agent_cursor_active = false
+    code_bp:Relocate()
+end
 
 -------------------------------------------------------------------------------
 -- Bridge communication
@@ -209,45 +293,92 @@ local function loc(line, col)
     return buffer.Loc(col - 1, line - 1)
 end
 
-local function apply_op(op)
+-- Insert text character-by-character with 20ms delays, then call on_done().
+-- Each character insert is one undo event so we can undo them all.
+local function animated_insert(line, col, text, on_done)
+    text = text or ""
+    if #text == 0 then
+        if on_done then on_done() end
+        return
+    end
+
+    local cur_line = line
+    local cur_col = col
+    local pos = 0
+
+    local function insert_next_char()
+        if code_bp == nil then return end
+        pos = pos + 1
+        local ch = text:sub(pos, pos)
+        code_bp.Buf:Insert(loc(cur_line, cur_col), ch)
+        op_undo_count = op_undo_count + 1
+
+        if ch == "\n" then
+            cur_line = cur_line + 1
+            cur_col = 1
+        else
+            cur_col = cur_col + 1
+        end
+
+        -- Move agent cursor to follow
+        move_agent_cursor(cur_line, cur_col)
+
+        if pos < #text then
+            micro.After(gotime.Millisecond * 20, insert_next_char)
+        else
+            if on_done then on_done() end
+        end
+    end
+
+    insert_next_char()
+end
+
+local function apply_op(op, on_done)
     if code_bp == nil then return false end
     if op.line == nil or op.col == nil then
         micro.InfoBar():Error("agent: malformed op: missing line/col")
         return false
     end
+    op_undo_count = 0
+    -- Position agent cursor at the op location
+    if not agent_cursor_active then
+        spawn_agent_cursor(op.line, op.col)
+    else
+        move_agent_cursor(op.line, op.col)
+    end
     if op.kind == "insert" then
-        code_bp.Buf:Insert(loc(op.line, op.col), op.text or "")
+        animated_insert(op.line, op.col, op.text, on_done)
+        return true -- on_done called asynchronously
     elseif op.kind == "replace" then
         if op.end_line == nil or op.end_col == nil then
             micro.InfoBar():Error("agent: malformed replace op: missing end_line/end_col")
             return false
         end
-        local start = loc(op.line, op.col)
-        local finish = loc(op.end_line, op.end_col)
-        code_bp.Buf:Remove(start, finish)
-        code_bp.Buf:Insert(start, op.text or "")
+        code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
+        op_undo_count = 1
+        animated_insert(op.line, op.col, op.text, on_done)
+        return true
     elseif op.kind == "delete" then
         if op.end_line == nil or op.end_col == nil then
             micro.InfoBar():Error("agent: malformed delete op: missing end_line/end_col")
             return false
         end
         code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
+        op_undo_count = 1
+        if on_done then on_done() end
+        return true
     else
         micro.InfoBar():Error("agent: unknown op kind: " .. tostring(op.kind))
         return false
     end
-    return true
 end
 
-local function undo_op(op)
+local function undo_pending_op()
     if code_bp == nil then return end
-    if op ~= nil and op.kind == "replace" then
-        -- replace is Remove + Insert = two undo events
-        code_bp.Buf:UndoOneEvent()
-        code_bp.Buf:UndoOneEvent()
-    else
+    for _ = 1, op_undo_count do
         code_bp.Buf:UndoOneEvent()
     end
+    op_undo_count = 0
 end
 
 -------------------------------------------------------------------------------
@@ -262,7 +393,7 @@ local function show_approval_prompt()
         op.kind, op.line, op.reason or "")
     micro.InfoBar():YNPrompt(desc, function(yes, cancelled)
         if cancelled then
-            undo_op(op)
+            undo_pending_op()
             send({type = "reject", op_id = op.id})
             micro.InfoBar():Message("agent: cancelled " .. op.id)
             pending_op = nil
@@ -272,7 +403,7 @@ local function show_approval_prompt()
             send({type = "approve", op_id = op.id})
             micro.InfoBar():Message("agent: approved " .. op.id)
         else
-            undo_op(op)
+            undo_pending_op()
             send({type = "reject", op_id = op.id})
             micro.InfoBar():Message("agent: rejected " .. op.id)
         end
@@ -287,19 +418,26 @@ end
 local function handle_message(msg)
     local t = msg.type
     if t == "pending_op" then
-        if not apply_op(msg.op) then
+        pending_op = msg.op
+        if not apply_op(msg.op, function()
+            show_approval_prompt()
+        end) then
+            pending_op = nil
             return
         end
-        pending_op = msg.op
-        show_approval_prompt()
     elseif t == "approved" then
         micro.InfoBar():Message("agent: op " .. msg.op_id .. " applied")
     elseif t == "rejected" then
         micro.InfoBar():Message("agent: op " .. msg.op_id .. " rejected by server")
     elseif t == "error" then
         micro.InfoBar():Error("agent: " .. msg.message)
-    elseif t == "token" or t == "step" or t == "context" then
-        -- Phase 2+
+    elseif t == "token" then
+        agent_pane_append(msg.text or "")
+    elseif t == "step" then
+        local prefix = string.format("\n--- Step %d/%d: ", msg.index or 0, msg.total or 0)
+        agent_pane_append(prefix .. (msg.description or "") .. " ---\n")
+    elseif t == "context" then
+        -- Phase 3+
     end
 end
 
@@ -330,13 +468,15 @@ end
 
 local function on_bridge_exit()
     if pending_op ~= nil then
-        undo_op(pending_op)
+        undo_pending_op()
         pending_op = nil
     end
+    remove_agent_cursor()
     micro.InfoBar():Message("agent: bridge exited")
     bridge_cmd = nil
     bridge_stdout_buf = ""
     sock_path = nil
+    close_agent_pane()
 end
 
 -------------------------------------------------------------------------------
@@ -345,24 +485,28 @@ end
 
 function agentStart(bp, args)
     if #args < 1 then
-        micro.InfoBar():Error("usage: agent-start <socket-path>")
+        micro.InfoBar():Error("usage: junto <socket-path>")
         return
     end
     if bridge_cmd ~= nil then
-        micro.InfoBar():Error("agent: already running. Use agent-stop first.")
+        micro.InfoBar():Error("junto: already running. Use junto-stop first.")
         return
     end
 
     sock_path = args[1]
     code_bp = bp
 
+    open_agent_pane(bp)
+
     bridge_cmd = shell.JobSpawn("junto-bridge", {sock_path},
         on_bridge_stdout, on_bridge_stderr, on_bridge_exit)
 
     if bridge_cmd == nil then
+        close_agent_pane()
         micro.InfoBar():Error("agent: failed to start bridge. Is junto-bridge in PATH?")
         return
     end
+    agent_pane_append("Agent connected to " .. sock_path .. "\n")
     micro.InfoBar():Message("agent: connected to " .. sock_path)
 end
 
@@ -372,12 +516,14 @@ function agentStop(bp, args)
         return
     end
     if pending_op ~= nil then
-        undo_op(pending_op)
+        undo_pending_op()
         pending_op = nil
     end
+    remove_agent_cursor()
     shell.JobStop(bridge_cmd)
     bridge_cmd = nil
     sock_path = nil
+    close_agent_pane()
     micro.InfoBar():Message("agent: stopped")
 end
 
@@ -395,7 +541,7 @@ function agentSend(bp, args)
 end
 
 function init()
-    config.MakeCommand("agent-start", agentStart, config.NoComplete)
-    config.MakeCommand("agent-stop", agentStop, config.NoComplete)
-    config.MakeCommand("agent-send", agentSend, config.NoComplete)
+    config.MakeCommand("junto", agentStart, config.NoComplete)
+    config.MakeCommand("junto-stop", agentStop, config.NoComplete)
+    config.MakeCommand("junto-send", agentSend, config.NoComplete)
 end

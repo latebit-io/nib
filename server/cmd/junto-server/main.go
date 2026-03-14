@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/latebit-io/junto/protocol"
 	"github.com/latebit-io/junto/server/internal/socket"
@@ -38,25 +39,156 @@ func main() {
 	}
 }
 
-// handleMessage dispatches incoming messages and manages the Phase 1 hardcoded flow.
-func handleMessage(client *socket.Client, msg any) {
-	// New client connected. Send a hardcoded pending_op.
-	if _, ok := msg.(socket.ConnectMsg); ok {
-		op := protocol.PendingOpMsg{
+// stubStep defines one step of the stub plan.
+type stubStep struct {
+	description string
+	reasoning   []string // tokens streamed to agent pane
+	op          protocol.EditOp
+}
+
+var stubPlan = []stubStep{
+	{
+		description: "Add Verifier interface",
+		reasoning:   []string{"Looking at ", "the code...\n", "We need ", "a Verifier ", "interface.\n"},
+		op: protocol.EditOp{
+			ID:     "step-1",
+			Kind:   "insert",
+			Line:   3,
+			Col:    1,
+			Text:   "type Verifier interface {\n\tVerify(data []byte) error\n}\n\n",
+			Reason: "Add Verifier interface",
+		},
+	},
+	{
+		description: "Add concrete implementation",
+		reasoning:   []string{"Now let's ", "add a ", "concrete type ", "that implements ", "Verifier.\n"},
+		op: protocol.EditOp{
+			ID:     "step-2",
+			Kind:   "insert",
+			Line:   7,
+			Col:    1,
+			Text:   "type SHA256Verifier struct{}\n\nfunc (v SHA256Verifier) Verify(data []byte) error {\n\treturn nil // TODO\n}\n\n",
+			Reason: "Add SHA256Verifier struct",
+		},
+	},
+	{
+		description: "Use Verifier in main",
+		reasoning:   []string{"Finally, ", "let's wire ", "it into ", "main.\n"},
+		op: protocol.EditOp{
+			ID:     "step-3",
+			Kind:   "insert",
+			Line:   17,
+			Col:    1,
+			Text:   "\tvar v Verifier = SHA256Verifier{}\n\t_ = v\n",
+			Reason: "Wire Verifier into main()",
+		},
+	},
+}
+
+// clientSession tracks the step-by-step progress of a single client.
+type clientSession struct {
+	mu       sync.Mutex
+	step     int           // current step index (0-based)
+	advance  chan struct{} // signaled when approve/reject received
+	rejected bool         // last step was rejected
+}
+
+var (
+	sessionsMu sync.Mutex
+	sessions   = map[*socket.Client]*clientSession{}
+)
+
+func getSession(client *socket.Client) *clientSession {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	return sessions[client]
+}
+
+// stubStream runs the multi-step plan for a client, waiting for approval between steps.
+func stubStream(client *socket.Client, sess *clientSession) {
+	total := len(stubPlan)
+
+	for i, step := range stubPlan {
+		sess.mu.Lock()
+		sess.step = i
+		sess.rejected = false
+		sess.mu.Unlock()
+
+		// Announce step in agent pane
+		if err := client.Send(protocol.StepMsg{
+			Type:        protocol.TypeStep,
+			Index:       i + 1,
+			Total:       total,
+			Description: step.description,
+		}); err != nil {
+			log.Printf("failed to send step: %v", err)
+			return
+		}
+
+		// Stream reasoning tokens to agent pane
+		for _, tok := range step.reasoning {
+			time.Sleep(80 * time.Millisecond)
+			if err := client.Send(protocol.TokenMsg{
+				Type: protocol.TypeToken,
+				Text: tok,
+			}); err != nil {
+				log.Printf("failed to send token: %v", err)
+				return
+			}
+		}
+
+		// Send the code edit as a pending_op
+		if err := client.Send(protocol.PendingOpMsg{
 			Type: protocol.TypePendingOp,
-			Op: protocol.EditOp{
-				ID:   "phase1-test",
-				Kind: "insert",
-				Line: 3,
-				Col:  1,
-				Text: "// TODO: implement Verifier interface\n",
-				Reason: "Phase 1 test — hardcoded insert to verify the full path",
-			},
-		}
-		if err := client.Send(op); err != nil {
+			Op:   step.op,
+		}); err != nil {
 			log.Printf("failed to send pending_op: %v", err)
+			return
 		}
-		log.Printf("sent hardcoded pending_op to new client")
+
+		// Wait for approve or reject before continuing
+		<-sess.advance
+
+		sess.mu.Lock()
+		wasRejected := sess.rejected
+		sess.mu.Unlock()
+
+		if wasRejected {
+			agent_pane_msg(client, "\n[Step rejected — moving on]\n")
+		} else {
+			agent_pane_msg(client, "\n[Step approved]\n")
+		}
+
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	agent_pane_msg(client, "\n--- Plan complete ---\n")
+}
+
+// agent_pane_msg sends a token to the agent pane.
+func agent_pane_msg(client *socket.Client, text string) {
+	_ = client.Send(protocol.TokenMsg{
+		Type: protocol.TypeToken,
+		Text: text,
+	})
+}
+
+// handleMessage dispatches incoming messages and manages the step-by-step flow.
+func handleMessage(client *socket.Client, msg any) {
+	if _, ok := msg.(socket.ConnectMsg); ok {
+		sess := &clientSession{
+			advance: make(chan struct{}, 1),
+		}
+		sessionsMu.Lock()
+		sessions[client] = sess
+		sessionsMu.Unlock()
+		go stubStream(client, sess)
+		return
+	}
+
+	sess := getSession(client)
+	if sess == nil {
+		log.Printf("no session for client, ignoring message: %T", msg)
 		return
 	}
 
@@ -67,8 +199,12 @@ func handleMessage(client *socket.Client, msg any) {
 			Type: protocol.TypeApproved,
 			OpID: m.OpID,
 		}); err != nil {
-			log.Printf("failed to send approved for op %s: %v", m.OpID, err)
+			log.Printf("failed to send approved: %v", err)
 		}
+		sess.mu.Lock()
+		sess.rejected = false
+		sess.mu.Unlock()
+		sess.advance <- struct{}{}
 
 	case *protocol.RejectMsg:
 		log.Printf("received reject for op %s", m.OpID)
@@ -76,8 +212,12 @@ func handleMessage(client *socket.Client, msg any) {
 			Type: protocol.TypeRejected,
 			OpID: m.OpID,
 		}); err != nil {
-			log.Printf("failed to send rejected for op %s: %v", m.OpID, err)
+			log.Printf("failed to send rejected: %v", err)
 		}
+		sess.mu.Lock()
+		sess.rejected = true
+		sess.mu.Unlock()
+		sess.advance <- struct{}{}
 
 	default:
 		log.Printf("unhandled message: %T", msg)

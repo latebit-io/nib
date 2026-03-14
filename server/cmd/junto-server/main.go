@@ -87,10 +87,11 @@ var stubPlan = []stubStep{
 
 // clientSession tracks the step-by-step progress of a single client.
 type clientSession struct {
-	mu       sync.Mutex
-	step     int           // current step index (0-based)
-	advance  chan struct{} // signaled when approve/reject received
-	rejected bool         // last step was rejected
+	mu          sync.Mutex
+	step        int           // current step index (0-based)
+	advance     chan struct{} // signaled when approve/reject received
+	rejected    bool          // last step was rejected
+	currentOpID string        // op ID currently awaiting approval
 }
 
 var (
@@ -137,7 +138,10 @@ func stubStream(client *socket.Client, sess *clientSession) {
 			}
 		}
 
-		// Send the code edit as a pending_op
+		// Track current op and send the code edit as a pending_op
+		sess.mu.Lock()
+		sess.currentOpID = step.op.ID
+		sess.mu.Unlock()
 		if err := client.Send(protocol.PendingOpMsg{
 			Type: protocol.TypePendingOp,
 			Op:   step.op,
@@ -146,8 +150,11 @@ func stubStream(client *socket.Client, sess *clientSession) {
 			return
 		}
 
-		// Wait for approve or reject before continuing
-		<-sess.advance
+		// Wait for approve or reject before continuing.
+		// Channel is closed on disconnect, causing return.
+		if _, ok := <-sess.advance; !ok {
+			return
+		}
 
 		sess.mu.Lock()
 		wasRejected := sess.rejected
@@ -186,6 +193,18 @@ func handleMessage(client *socket.Client, msg any) {
 		return
 	}
 
+	if _, ok := msg.(socket.DisconnectMsg); ok {
+		sessionsMu.Lock()
+		sess := sessions[client]
+		delete(sessions, client)
+		sessionsMu.Unlock()
+		if sess != nil {
+			close(sess.advance)
+		}
+		log.Printf("client session cleaned up")
+		return
+	}
+
 	sess := getSession(client)
 	if sess == nil {
 		log.Printf("no session for client, ignoring message: %T", msg)
@@ -195,26 +214,30 @@ func handleMessage(client *socket.Client, msg any) {
 	switch m := msg.(type) {
 	case *protocol.ApproveMsg:
 		log.Printf("received approve for op %s", m.OpID)
+		sess.mu.Lock()
+		if m.OpID != sess.currentOpID {
+			sess.mu.Unlock()
+			log.Printf("ignoring stale approve for op %s (current: %s)", m.OpID, sess.currentOpID)
+			return
+		}
+		sess.rejected = false
+		sess.mu.Unlock()
 		if err := client.Send(protocol.ApprovedMsg{
 			Type: protocol.TypeApproved,
 			OpID: m.OpID,
 		}); err != nil {
 			log.Printf("failed to send approved: %v", err)
 		}
-		sess.mu.Lock()
-		sess.rejected = false
-		sess.mu.Unlock()
 		sess.advance <- struct{}{}
 
 	case *protocol.RejectMsg:
 		log.Printf("received reject for op %s", m.OpID)
-		if err := client.Send(protocol.RejectedMsg{
-			Type: protocol.TypeRejected,
-			OpID: m.OpID,
-		}); err != nil {
-			log.Printf("failed to send rejected: %v", err)
-		}
 		sess.mu.Lock()
+		if m.OpID != sess.currentOpID {
+			sess.mu.Unlock()
+			log.Printf("ignoring stale reject for op %s (current: %s)", m.OpID, sess.currentOpID)
+			return
+		}
 		sess.rejected = true
 		sess.mu.Unlock()
 		sess.advance <- struct{}{}

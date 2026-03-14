@@ -293,6 +293,10 @@ local function loc(line, col)
     return buffer.Loc(col - 1, line - 1)
 end
 
+-- Generation counter for animated inserts; incremented on each new animation
+-- and on stop/disconnect so stale callbacks become no-ops.
+local animation_generation = 0
+
 -- Insert text character-by-character with 20ms delays, then call on_done().
 -- Each character insert is one undo event so we can undo them all.
 local function animated_insert(line, col, text, on_done)
@@ -302,11 +306,14 @@ local function animated_insert(line, col, text, on_done)
         return
     end
 
+    animation_generation = animation_generation + 1
+    local my_gen = animation_generation
     local cur_line = line
     local cur_col = col
     local pos = 0
 
     local function insert_next_char()
+        if my_gen ~= animation_generation then return end
         if code_bp == nil then return end
         pos = pos + 1
         local ch = text:sub(pos, pos)
@@ -467,6 +474,7 @@ local function on_bridge_stderr(output)
 end
 
 local function on_bridge_exit()
+    animation_generation = animation_generation + 1
     if pending_op ~= nil then
         undo_pending_op()
         pending_op = nil
@@ -515,6 +523,7 @@ function agentStop(bp, args)
         micro.InfoBar():Message("agent: not running")
         return
     end
+    animation_generation = animation_generation + 1
     if pending_op ~= nil then
         undo_pending_op()
         pending_op = nil

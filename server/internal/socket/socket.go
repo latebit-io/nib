@@ -20,6 +20,9 @@ type Handler func(client *Client, msg any)
 // ConnectMsg is sent to the handler when a new client connects.
 type ConnectMsg struct{}
 
+// DisconnectMsg is sent to the handler when a client disconnects.
+type DisconnectMsg struct{}
+
 // Server manages a Unix socket listener and connected clients.
 type Server struct {
 	listener net.Listener
@@ -182,6 +185,10 @@ func (s *Server) removeClient(c *Client) {
 	c.mu.Lock()
 	c.conn.Close()
 	c.mu.Unlock()
+
+	if s.handler != nil {
+		s.handler(c, DisconnectMsg{})
+	}
 }
 
 func (s *Server) handleClient(c *Client) {

@@ -22,13 +22,12 @@ if ! command -v junto-bridge &> /dev/null; then
     exit 1
 fi
 
-# Kill any stale junto-server processes
-pkill -f "junto-server" 2>/dev/null || true
+# Kill any stale junto-server processes (only those started from this repo)
+pkill -f "$REPO_DIR/server/bin/junto-server" 2>/dev/null || true
 sleep 0.3
 
-# Clean up stale socket files
-find /var/folders -type s -name 'junto-*.sock' -delete 2>/dev/null || true
-rm -f /tmp/junto-*.sock 2>/dev/null || true
+# Clean up stale socket files (restricted to system temp directory)
+rm -f "${TMPDIR:-/tmp}"/junto-*.sock 2>/dev/null || true
 
 # Create a temporary test file
 TEST_FILE="/tmp/test-junto.go"

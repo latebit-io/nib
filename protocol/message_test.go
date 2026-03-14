@@ -40,12 +40,12 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:     "pending_op message",
-			input:    `{"type":"pending_op","op":{"id":"abc","kind":"insert","line":4,"col":0,"text":"hello\n","reason":"test"}}`,
+			input:    `{"type":"pending_op","op":{"id":"abc","kind":"insert","line":4,"col":1,"text":"hello\n","reason":"test"}}`,
 			wantType: "*protocol.PendingOpMsg",
 			check: func(t *testing.T, msg any) {
 				t.Helper()
 				m := msg.(*PendingOpMsg)
-				if m.Op.ID != "abc" || m.Op.Kind != "insert" || m.Op.Line != 4 {
+				if m.Op.ID != "abc" || m.Op.Kind != "insert" || m.Op.Line != 4 || m.Op.Col != 1 {
 					t.Errorf("got %+v", m.Op)
 				}
 				if m.Op.Text != "hello\n" {
@@ -115,7 +115,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:     "edit message",
-			input:    `{"type":"edit","line":4,"col":0,"end_line":6,"end_col":1,"text":"new code"}`,
+			input:    `{"type":"edit","line":4,"col":1,"end_line":6,"end_col":1,"text":"new code"}`,
 			wantType: "*protocol.EditMsg",
 			check: func(t *testing.T, msg any) {
 				t.Helper()
@@ -187,7 +187,7 @@ func TestMarshal(t *testing.T) {
 		{"token", TokenMsg{Type: TypeToken, Text: "hello"}},
 		{"approve", ApproveMsg{Type: TypeApprove, OpID: "abc"}},
 		{"pending_op", PendingOpMsg{Type: TypePendingOp, Op: EditOp{
-			ID: "x", Kind: "insert", Line: 1, Col: 0, Text: "code\n", Reason: "test",
+			ID: "x", Kind: "insert", Line: 1, Col: 1, Text: "code\n", Reason: "test",
 		}}},
 		{"start", StartMsg{Type: TypeStart, File: "f.go", Plan: []Step{{Description: "s1"}}}},
 	}
@@ -219,7 +219,7 @@ func TestRoundTrip(t *testing.T) {
 			Line:    10,
 			Col:     5,
 			EndLine: 12,
-			EndCol:  0,
+			EndCol:  1,
 			Text:    "func Verify() error {\n\treturn nil\n}\n",
 			Reason:  "round trip test",
 		},

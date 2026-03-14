@@ -263,13 +263,23 @@ local function handle_message(msg)
     end
 end
 
+-- Buffer for partial stdout lines; stdout can be chunked arbitrarily.
+local bridge_stdout_buf = ""
+
 local function on_bridge_stdout(output)
-    for line in output:gmatch("[^\r\n]+") do
-        local ok, msg = pcall(json.decode, line)
-        if ok and type(msg) == "table" then
-            handle_message(msg)
-        else
-            micro.Log("agent: bad JSON from bridge: " .. line)
+    bridge_stdout_buf = bridge_stdout_buf .. output
+    while true do
+        local nl = bridge_stdout_buf:find("\n", 1, true)
+        if not nl then break end
+        local line = bridge_stdout_buf:sub(1, nl - 1):gsub("\r$", "")
+        bridge_stdout_buf = bridge_stdout_buf:sub(nl + 1)
+        if line ~= "" then
+            local ok, msg = pcall(json.decode, line)
+            if ok and type(msg) == "table" then
+                handle_message(msg)
+            else
+                micro.Log("agent: bad JSON from bridge: " .. line)
+            end
         end
     end
 end
@@ -281,6 +291,7 @@ end
 local function on_bridge_exit()
     micro.InfoBar():Message("agent: bridge exited")
     bridge_cmd = nil
+    bridge_stdout_buf = ""
 end
 
 -------------------------------------------------------------------------------

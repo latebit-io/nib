@@ -82,7 +82,7 @@ the same persistent connection. The Go standard library `net` package handles th
 ```json
 {"type":"token","text":"I'll keep the interface minimal..."}
 {"type":"step","index":2,"total":5,"description":"writing Verifier interface"}
-{"type":"pending_op","op":{"id":"abc123","kind":"insert","line":4,"col":0,"text":"type Verifier interface {\n\tVerify(doc Document) (Result, error)\n}\n","reason":"Minimal interface — two methods cover the plan"}}
+{"type":"pending_op","op":{"id":"abc123","kind":"insert","line":4,"col":1,"text":"type Verifier interface {\n\tVerify(doc Document) (Result, error)\n}\n","reason":"Minimal interface — two methods cover the plan"}}
 {"type":"approved","op_id":"abc123"}
 {"type":"rejected","op_id":"abc123"}
 {"type":"context","file":"verification.go","step":2,"total":5,"state":"pending"}
@@ -95,7 +95,7 @@ the same persistent connection. The Go standard library `net` package handles th
 {"type":"approve","op_id":"abc123"}
 {"type":"reject","op_id":"abc123"}
 {"type":"redirect","message":"add a ValidateWithContext method too"}
-{"type":"edit","line":4,"col":0,"end_line":6,"end_col":1,"text":"// engineer changed this"}
+{"type":"edit","line":4,"col":1,"end_line":6,"end_col":1,"text":"// engineer changed this"}
 {"type":"start","file":"verification.go","plan":["write Verifier interface","write Result struct","write impl"]}
 ```
 

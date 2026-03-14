@@ -75,14 +75,21 @@ func TestServerAcceptsConnection(t *testing.T) {
 
 func TestServerDispatchesMessage(t *testing.T) {
 	received := make(chan any, 1)
+	connected := make(chan struct{}, 1)
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if msg != nil {
-			received <- msg
+		if msg == nil {
+			connected <- struct{}{}
+			return
 		}
+		received <- msg
 	})
 
 	conn := dialTestServer(t, srv)
-	time.Sleep(20 * time.Millisecond) // let handler fire for nil (connect)
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for connect callback")
+	}
 
 	writeLine(t, conn, protocol.ApproveMsg{Type: protocol.TypeApprove, OpID: "test-1"})
 
@@ -150,10 +157,19 @@ func TestBroadcast(t *testing.T) {
 
 func TestClientDisconnect(t *testing.T) {
 	disconnected := make(chan struct{}, 1)
-	srv := startTestServer(t, func(c *Client, msg any) {})
+	connected := make(chan struct{}, 1)
+	srv := startTestServer(t, func(c *Client, msg any) {
+		if msg == nil {
+			connected <- struct{}{}
+		}
+	})
 
 	conn := dialTestServer(t, srv)
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for connect callback")
+	}
 
 	// Verify client count.
 	srv.mu.Lock()
@@ -188,14 +204,21 @@ func TestClientDisconnect(t *testing.T) {
 
 func TestInvalidJSONIgnored(t *testing.T) {
 	received := make(chan any, 1)
+	connected := make(chan struct{}, 1)
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if msg != nil {
-			received <- msg
+		if msg == nil {
+			connected <- struct{}{}
+			return
 		}
+		received <- msg
 	})
 
 	conn := dialTestServer(t, srv)
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for connect callback")
+	}
 
 	// Send invalid JSON, then valid JSON.
 	conn.Write([]byte("not json\n"))

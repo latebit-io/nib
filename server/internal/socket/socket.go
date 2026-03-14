@@ -3,6 +3,7 @@ package socket
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -46,7 +47,7 @@ func (c *Client) Send(msg any) error {
 	return err
 }
 
-// NewServer creates a server listening on a Unix socket with a random session suffix.
+// NewServer creates a server listening on a Unix socket with a PID-based session path.
 func NewServer(handler Handler) (*Server, error) {
 	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("junto-%d.sock", os.Getpid()))
 
@@ -78,6 +79,9 @@ func (s *Server) Serve() error {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			return fmt.Errorf("accept: %w", err)
 		}
 		client := &Client{conn: conn, srv: s}

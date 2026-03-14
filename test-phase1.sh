@@ -53,11 +53,17 @@ echo "Starting junto-server..."
 $REPO_DIR/server/bin/junto-server > /tmp/junto-server.out 2>&1 &
 SERVER_PID=$!
 
-# Wait for server to write socket path
-sleep 0.5
-
-# Extract socket path from server output
-SOCKET_PATH=$(head -1 /tmp/junto-server.out | grep -oE '/[^ ]+\.sock')
+# Wait for server to write socket path (poll up to 5s)
+SOCKET_PATH=""
+for i in $(seq 1 20); do
+    if [ -s /tmp/junto-server.out ]; then
+        SOCKET_PATH=$(grep -oE '/[^ ]+\.sock' /tmp/junto-server.out | head -n1 || true)
+        if [ -n "$SOCKET_PATH" ]; then
+            break
+        fi
+    fi
+    sleep 0.25
+done
 
 if [ -z "$SOCKET_PATH" ]; then
     echo "Error: Failed to start server or get socket path"

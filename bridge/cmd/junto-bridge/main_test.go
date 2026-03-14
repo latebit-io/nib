@@ -30,7 +30,8 @@ func startTestSocket(t *testing.T) (string, net.Listener) {
 				defer c.Close()
 				scanner := bufio.NewScanner(c)
 				for scanner.Scan() {
-					c.Write(append(scanner.Bytes(), '\n'))
+					c.Write(scanner.Bytes())
+					c.Write([]byte{'\n'})
 				}
 			}(conn)
 		}
@@ -60,7 +61,8 @@ func startTestSocketWithGreeting(t *testing.T, greeting string) (string, net.Lis
 				c.Write([]byte(greeting))
 				scanner := bufio.NewScanner(c)
 				for scanner.Scan() {
-					c.Write(append(scanner.Bytes(), '\n'))
+					c.Write(scanner.Bytes())
+					c.Write([]byte{'\n'})
 				}
 			}(conn)
 		}

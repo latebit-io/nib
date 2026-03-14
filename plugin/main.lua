@@ -117,7 +117,11 @@ decode_value = function(s, i)
 end
 
 function json.decode(s)
-    local val, _ = decode_value(s, 1)
+    local val, i = decode_value(s, 1)
+    i = skip_ws(s, i)
+    if i <= #s then
+        error("trailing characters at " .. i)
+    end
     return val
 end
 

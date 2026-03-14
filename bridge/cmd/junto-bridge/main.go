@@ -30,9 +30,11 @@ func run(in io.Reader, out io.Writer, conn net.Conn) {
 		if len(line) == 0 {
 			continue
 		}
-		// Re-append newline since scanner strips it.
-		line = append(line, '\n')
-		if _, err := conn.Write(line); err != nil {
+		// Copy and re-append newline (scanner.Bytes() shares internal buffer).
+		msg := make([]byte, len(line)+1)
+		copy(msg, line)
+		msg[len(line)] = '\n'
+		if _, err := conn.Write(msg); err != nil {
 			log.Printf("in→socket: %v", err)
 			return
 		}

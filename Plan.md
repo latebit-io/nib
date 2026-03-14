@@ -25,7 +25,7 @@ The Lua plugin uses these Micro APIs (see [plugins.md](https://github.com/micro-
 | `bp:VSplitIndex(buf, true)` | Open agent pane as right split |
 | `micro.InfoBar():YNPrompt(msg, cb)` | Approve/reject prompt |
 | `micro.InfoBar():Prompt(msg, default, type, cb)` | Redirect text input |
-| `config.MakeCommand(name, func, completer)` | Register `:agent-start` command |
+| `config.MakeCommand(name, func, completer)` | Register `agent-start` command |
 
 ---
 
@@ -210,8 +210,8 @@ Lua plugin → buffer insert → engineer approval → Go server receives it. No
 
 **Lua plugin tasks:**
 - [x] `repo.json`: minimal plugin metadata
-- [x] `main.lua`: on `init()`, register `:agent-start`, `:agent-stop`, `:agent-send` commands
-- [x] Start bridge via `shell.JobSpawn("junto-bridge", {sock_path}, ...)` on `:agent-start`
+- [x] `main.lua`: on `init()`, register `agent-start`, `agent-stop`, `agent-send` commands
+- [x] Start bridge via `shell.JobSpawn("junto-bridge", {sock_path}, ...)` on `agent-start`
 - [x] Receive lines from bridge stdout, parse JSON, dispatch on `type` field
 - [x] On `pending_op`: apply op to code buffer (insert/replace/delete), show YNPrompt
 - [x] On approve: send `{"type":"approve","op_id":"..."}` to bridge, keep edit
@@ -399,7 +399,7 @@ Everything else (socket server, fan-out, JSON encoding, file I/O) uses the stand
 
 Done when all of the following work in a single session:
 
-1. Open a `.go` file in Micro, run `:agent-start verification.go`
+1. Open a `.go` file in Micro, run `agent-start<socket-path>` (using the Unix socket path printed by `junto-server`)
 2. Agent pane opens in a right split showing the plan and current step
 3. Claude streams reasoning into the agent pane token by token
 4. A proposed code block appears highlighted in the editor at the correct line

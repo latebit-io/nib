@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,77 +69,107 @@ func startTestSocketWithGreeting(t *testing.T, greeting string) (string, net.Lis
 	return sockPath, ln
 }
 
-func TestBridgeRelaysStdinToSocket(t *testing.T) {
+// readLine reads one line from a PipeReader with a timeout.
+func readLine(t *testing.T, r *io.PipeReader) string {
+	t.Helper()
+	type result struct {
+		line string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		scanner := bufio.NewScanner(r)
+		if scanner.Scan() {
+			ch <- result{line: scanner.Text()}
+		} else {
+			ch <- result{err: scanner.Err()}
+		}
+	}()
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("readLine error: %v", res.err)
+		}
+		return res.line
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLine timed out")
+		return ""
+	}
+}
+
+func TestRunRelaysStdinToSocket(t *testing.T) {
 	sockPath, _ := startTestSocket(t)
 
-	// Connect directly to verify the echo server works.
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
 
-	msg := `{"type":"approve","op_id":"test"}` + "\n"
-	conn.Write([]byte(msg))
+	msg := `{"type":"approve","op_id":"test"}`
+	pr, pw := io.Pipe()
+	outR, outW := io.Pipe()
 
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	scanner := bufio.NewScanner(conn)
-	if !scanner.Scan() {
-		t.Fatalf("no echo: %v", scanner.Err())
+	go run(pr, outW, conn)
+
+	pw.Write([]byte(msg + "\n"))
+
+	got := readLine(t, outR)
+	if got != msg {
+		t.Errorf("echoed = %q, want %q", got, msg)
 	}
-	got := scanner.Text()
-	if got != strings.TrimSpace(msg) {
-		t.Errorf("echo = %q, want %q", got, strings.TrimSpace(msg))
-	}
+
+	pw.Close()
 }
 
-func TestBridgeRelaysSocketToStdout(t *testing.T) {
+func TestRunRelaysSocketToStdout(t *testing.T) {
 	greeting := `{"type":"token","text":"hello from server"}` + "\n"
 	sockPath, _ := startTestSocketWithGreeting(t, greeting)
 
-	// Simulate what the bridge does: connect, read from socket.
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
 
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	scanner := bufio.NewScanner(conn)
-	if !scanner.Scan() {
-		t.Fatalf("no greeting: %v", scanner.Err())
-	}
-	got := scanner.Text()
+	pr, pw := io.Pipe()
+	outR, outW := io.Pipe()
+
+	go run(pr, outW, conn)
+
+	got := readLine(t, outR)
 	want := strings.TrimSpace(greeting)
 	if got != want {
-		t.Errorf("greeting = %q, want %q", got, want)
+		t.Errorf("stdout = %q, want %q", got, want)
 	}
+
+	pw.Close()
 }
 
-func TestBridgeExitsOnStdinClose(t *testing.T) {
-	// Verify that closing stdin causes the scanner loop to exit.
-	r, w, err := os.Pipe()
+func TestRunExitsOnStdinClose(t *testing.T) {
+	sockPath, _ := startTestSocket(t)
+
+	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
-		t.Fatalf("pipe: %v", err)
+		t.Fatalf("dial: %v", err)
 	}
+	defer conn.Close()
 
-	// Write some data then close.
-	w.Write([]byte("hello\n"))
-	w.Close()
+	pr, pw := io.Pipe()
+	_, outW := io.Pipe()
 
-	scanner := bufio.NewScanner(r)
-	lines := 0
-	for scanner.Scan() {
-		lines++
-	}
-	if lines != 1 {
-		t.Errorf("expected 1 line, got %d", lines)
-	}
+	done := make(chan struct{})
+	go func() {
+		run(pr, outW, conn)
+		close(done)
+	}()
 
-	// Verify reading returns EOF after close.
-	buf := make([]byte, 1)
-	n, err := r.Read(buf)
-	if n != 0 || err != io.EOF {
-		t.Errorf("expected EOF, got n=%d err=%v", n, err)
+	pw.Write([]byte("hello\n"))
+	pw.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not exit after stdin close")
 	}
 }

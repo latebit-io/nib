@@ -37,8 +37,8 @@ func main() {
 
 // handleMessage dispatches incoming messages and manages the Phase 1 hardcoded flow.
 func handleMessage(client *socket.Client, msg any) {
-	// nil msg = new client connected. Send a hardcoded pending_op.
-	if msg == nil {
+	// New client connected. Send a hardcoded pending_op.
+	if _, ok := msg.(socket.ConnectMsg); ok {
 		op := protocol.PendingOpMsg{
 			Type: protocol.TypePendingOp,
 			Op: protocol.EditOp{

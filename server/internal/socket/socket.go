@@ -14,8 +14,11 @@ import (
 	"github.com/latebit/junto/protocol"
 )
 
-// Handler is called for each parsed message from a client.
+// Handler is called for each parsed message or lifecycle event from a client.
 type Handler func(client *Client, msg any)
+
+// ConnectMsg is sent to the handler when a new client connects.
+type ConnectMsg struct{}
 
 // Server manages a Unix socket listener and connected clients.
 type Server struct {
@@ -107,7 +110,13 @@ func (s *Server) Broadcast(msg any) {
 }
 
 // BroadcastRaw sends pre-marshalled JSON bytes to all clients.
+// Data must be newline-terminated; a trailing '\n' is appended if missing.
 func (s *Server) BroadcastRaw(data []byte) {
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		cp := make([]byte, len(data), len(data)+1)
+		copy(cp, data)
+		data = append(cp, '\n')
+	}
 	s.mu.Lock()
 	clients := make([]*Client, 0, len(s.clients))
 	for c := range s.clients {
@@ -144,6 +153,10 @@ func (s *Server) addClient(c *Client) {
 
 func (s *Server) removeClient(c *Client) {
 	s.mu.Lock()
+	if _, ok := s.clients[c]; !ok {
+		s.mu.Unlock()
+		return
+	}
 	delete(s.clients, c)
 	log.Printf("client disconnected (%d total)", len(s.clients))
 	s.mu.Unlock()
@@ -156,9 +169,9 @@ func (s *Server) removeClient(c *Client) {
 func (s *Server) handleClient(c *Client) {
 	defer s.removeClient(c)
 
-	// Notify handler of connection (msg=nil signals new client).
+	// Notify handler of new connection.
 	if s.handler != nil {
-		s.handler(c, nil)
+		s.handler(c, ConnectMsg{})
 	}
 
 	scanner := bufio.NewScanner(c.conn)

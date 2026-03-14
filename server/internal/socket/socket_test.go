@@ -59,7 +59,7 @@ func writeLine(t *testing.T, conn net.Conn, msg any) {
 func TestServerAcceptsConnection(t *testing.T) {
 	connected := make(chan struct{}, 1)
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if msg == nil {
+		if _, ok := msg.(ConnectMsg); ok {
 			connected <- struct{}{}
 		}
 	})
@@ -77,7 +77,7 @@ func TestServerDispatchesMessage(t *testing.T) {
 	received := make(chan any, 1)
 	connected := make(chan struct{}, 1)
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if msg == nil {
+		if _, ok := msg.(ConnectMsg); ok {
 			connected <- struct{}{}
 			return
 		}
@@ -109,7 +109,7 @@ func TestServerDispatchesMessage(t *testing.T) {
 
 func TestClientSend(t *testing.T) {
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if msg == nil {
+		if _, ok := msg.(ConnectMsg); ok {
 			// On connect, send a message back to the client.
 			c.Send(protocol.TokenMsg{Type: protocol.TypeToken, Text: "hello"})
 		}
@@ -132,7 +132,7 @@ func TestBroadcast(t *testing.T) {
 	clients.Add(2)
 
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if msg == nil {
+		if _, ok := msg.(ConnectMsg); ok {
 			clients.Done()
 		}
 	})
@@ -159,7 +159,7 @@ func TestClientDisconnect(t *testing.T) {
 	disconnected := make(chan struct{}, 1)
 	connected := make(chan struct{}, 1)
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if msg == nil {
+		if _, ok := msg.(ConnectMsg); ok {
 			connected <- struct{}{}
 		}
 	})
@@ -206,7 +206,7 @@ func TestInvalidJSONIgnored(t *testing.T) {
 	received := make(chan any, 1)
 	connected := make(chan struct{}, 1)
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if msg == nil {
+		if _, ok := msg.(ConnectMsg); ok {
 			connected <- struct{}{}
 			return
 		}

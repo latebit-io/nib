@@ -2,7 +2,6 @@ package socket
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -10,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/latebit/junto/protocol"
 )
@@ -115,10 +115,13 @@ func (s *Server) BroadcastRaw(data []byte) {
 
 	for _, c := range clients {
 		c.mu.Lock()
+		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_, err := c.conn.Write(data)
+		c.conn.SetWriteDeadline(time.Time{})
 		c.mu.Unlock()
 		if err != nil {
-			log.Printf("broadcast write error: %v", err)
+			log.Printf("broadcast write error, removing client: %v", err)
+			s.removeClient(c)
 		}
 	}
 }
@@ -139,10 +142,13 @@ func (s *Server) addClient(c *Client) {
 
 func (s *Server) removeClient(c *Client) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.clients, c)
-	c.conn.Close()
 	log.Printf("client disconnected (%d total)", len(s.clients))
+	s.mu.Unlock()
+
+	c.mu.Lock()
+	c.conn.Close()
+	c.mu.Unlock()
 }
 
 func (s *Server) handleClient(c *Client) {
@@ -158,12 +164,6 @@ func (s *Server) handleClient(c *Client) {
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
-			continue
-		}
-
-		// Validate it's JSON before parsing.
-		if !json.Valid(line) {
-			log.Printf("invalid JSON from client: %s", line)
 			continue
 		}
 

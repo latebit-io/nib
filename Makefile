@@ -5,7 +5,9 @@ BIN_DIR := $(HOME)/.local/bin
 
 build:
 	cd protocol && go build ./...
+	mkdir -p server/bin
 	cd server && go build -o bin/junto-server ./cmd/junto-server
+	mkdir -p bridge/bin
 	cd bridge && go build -o bin/junto-bridge ./cmd/junto-bridge
 
 install: build

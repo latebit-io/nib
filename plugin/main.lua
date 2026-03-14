@@ -199,14 +199,26 @@ end
 
 local function apply_op(op)
     if code_bp == nil then return end
+    if op.line == nil or op.col == nil then
+        micro.InfoBar():Error("agent: malformed op: missing line/col")
+        return
+    end
     if op.kind == "insert" then
-        code_bp.Buf:Insert(loc(op.line, op.col), op.text)
+        code_bp.Buf:Insert(loc(op.line, op.col), op.text or "")
     elseif op.kind == "replace" then
+        if op.end_line == nil or op.end_col == nil then
+            micro.InfoBar():Error("agent: malformed replace op: missing end_line/end_col")
+            return
+        end
         local start = loc(op.line, op.col)
         local finish = loc(op.end_line, op.end_col)
         code_bp.Buf:Remove(start, finish)
-        code_bp.Buf:Insert(start, op.text)
+        code_bp.Buf:Insert(start, op.text or "")
     elseif op.kind == "delete" then
+        if op.end_line == nil or op.end_col == nil then
+            micro.InfoBar():Error("agent: malformed delete op: missing end_line/end_col")
+            return
+        end
         code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
     else
         micro.InfoBar():Error("agent: unknown op kind: " .. tostring(op.kind))

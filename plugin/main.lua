@@ -367,9 +367,13 @@ function agentStop(bp, args)
         micro.InfoBar():Message("agent: not running")
         return
     end
+    if pending_op ~= nil then
+        undo_op(pending_op)
+        pending_op = nil
+    end
     shell.JobStop(bridge_cmd)
     bridge_cmd = nil
-    pending_op = nil
+    sock_path = nil
     micro.InfoBar():Message("agent: stopped")
 end
 

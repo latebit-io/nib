@@ -7,19 +7,22 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 )
 
 // run relays data between in/out and a network connection.
 // It copies conn→out in a goroutine and scans in→conn line-by-line.
 // Returns when in is closed/EOF or conn is closed.
 func run(in io.Reader, out io.Writer, conn net.Conn) {
+	var wg sync.WaitGroup
+
 	// socket → out
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if _, err := io.Copy(out, conn); err != nil {
 			log.Printf("socket→stdout: %v", err)
 		}
-		// Close conn to unblock the in→socket scanner, allowing run to return.
-		conn.Close()
 	}()
 
 	// in → socket
@@ -36,12 +39,16 @@ func run(in io.Reader, out io.Writer, conn net.Conn) {
 		msg[len(line)] = '\n'
 		if _, err := conn.Write(msg); err != nil {
 			log.Printf("in→socket: %v", err)
-			return
+			break
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		log.Printf("in read: %v", err)
 	}
+
+	// Close conn to unblock the socket→out goroutine, then wait for it.
+	conn.Close()
+	wg.Wait()
 }
 
 func main() {

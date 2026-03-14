@@ -60,17 +60,21 @@ func handleMessage(client *socket.Client, msg any) {
 	switch m := msg.(type) {
 	case *protocol.ApproveMsg:
 		log.Printf("received approve for op %s", m.OpID)
-		client.Send(protocol.ApprovedMsg{
+		if err := client.Send(protocol.ApprovedMsg{
 			Type: protocol.TypeApproved,
 			OpID: m.OpID,
-		})
+		}); err != nil {
+			log.Printf("failed to send approved for op %s: %v", m.OpID, err)
+		}
 
 	case *protocol.RejectMsg:
 		log.Printf("received reject for op %s", m.OpID)
-		client.Send(protocol.RejectedMsg{
+		if err := client.Send(protocol.RejectedMsg{
 			Type: protocol.TypeRejected,
 			OpID: m.OpID,
-		})
+		}); err != nil {
+			log.Printf("failed to send rejected for op %s: %v", m.OpID, err)
+		}
 
 	default:
 		log.Printf("unhandled message: %T", msg)

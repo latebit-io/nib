@@ -58,6 +58,10 @@ func NewServer(handler Handler) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
 	}
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("chmod %s: %w", sockPath, err)
+	}
 
 	log.Printf("listening on %s", sockPath)
 
@@ -150,7 +154,7 @@ func (s *Server) handleClient(c *Client) {
 	}
 
 	scanner := bufio.NewScanner(c.conn)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB max line
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 64KB initial, 1MB max line
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

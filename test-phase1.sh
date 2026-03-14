@@ -41,6 +41,13 @@ func main() {
 }
 EOF
 
+cleanup() {
+    kill "${SERVER_PID:-}" 2>/dev/null || true
+    rm -f "$TEST_FILE" /tmp/junto-server.out 2>/dev/null || true
+    rm -f "${TMPDIR:-/tmp}"/junto-*.sock 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 # Start the server in the background and capture output
 echo "Starting junto-server..."
 $REPO_DIR/server/bin/junto-server > /tmp/junto-server.out 2>&1 &
@@ -56,7 +63,6 @@ if [ -z "$SOCKET_PATH" ]; then
     echo "Error: Failed to start server or get socket path"
     echo "Server output:"
     cat /tmp/junto-server.out
-    kill $SERVER_PID 2>/dev/null || true
     exit 1
 fi
 
@@ -79,7 +85,7 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "📝 TO TEST:"
-echo "  1. Micro will open in 3 seconds..."
+echo "  1. After you press ENTER, Micro will open..."
 echo "  2. Press Ctrl+E (command mode)"
 echo "  3. Type: :agent-start $SOCKET_PATH"
 echo "  4. Press Enter"
@@ -102,8 +108,5 @@ read
 echo "Launching Micro..."
 micro "$TEST_FILE"
 
-# Cleanup
 echo ""
-echo "Cleaning up..."
-kill $SERVER_PID 2>/dev/null || true
-echo "✓ Done"
+echo "Done."

@@ -96,7 +96,7 @@ the same persistent connection. The Go standard library `net` package handles th
 {"type":"reject","op_id":"abc123"}
 {"type":"redirect","message":"add a ValidateWithContext method too"}
 {"type":"edit","line":4,"col":1,"end_line":6,"end_col":1,"text":"// engineer changed this"}
-{"type":"start","file":"verification.go","plan":["write Verifier interface","write Result struct","write impl"]}
+{"type":"start","file":"verification.go","plan":[{"description":"write Verifier interface","done":false},{"description":"write Result struct","done":false},{"description":"write impl","done":false}]}
 ```
 
 The Go server fans out all push events to every connected client. Multiple clients

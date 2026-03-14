@@ -49,9 +49,9 @@ The Lua plugin uses these Micro APIs (see [plugins.md](https://github.com/micro-
 │  │  - appends streaming tokens to log pane  │    │
 │  │  - sends engineer messages back          │    │
 │  └──────────────────────────────────────────┘    │
-│                │ shell.JobStart                   │
+│                │ shell.JobSpawn                   │
 │  ┌─────────────▼────────────────────────────┐    │
-│  │  agent-bridge (Go binary)                │    │
+│  │  junto-bridge (Go binary)                │    │
 │  │  - owned by plugin process lifetime      │    │
 │  │  - relays JSON lines stdin ↔ socket      │    │
 │  └─────────────┬────────────────────────────┘    │
@@ -342,8 +342,8 @@ reconnects after a Micro restart, or when a second observer connects.
 
 ### Bridge binary: the Lua ↔ socket adapter
 
-Lua in Micro cannot open Unix sockets. The bridge is a small Go binary (`agent-bridge`)
-started by the plugin via `shell.JobStart`. It owns the socket connection and relays JSON
+Lua in Micro cannot open Unix sockets. The bridge is a small Go binary (`junto-bridge`)
+started by the plugin via `shell.JobSpawn`. It owns the socket connection and relays JSON
 lines over its stdin/stdout. The plugin only sees a stream of lines — it doesn't know or
 care about the socket. The bridge exits when the plugin is unloaded (stdin closes).
 

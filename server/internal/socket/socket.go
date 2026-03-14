@@ -43,7 +43,9 @@ func (c *Client) Send(msg any) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, err = c.conn.Write(data)
+	c.conn.SetWriteDeadline(time.Time{})
 	return err
 }
 

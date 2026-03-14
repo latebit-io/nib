@@ -108,7 +108,9 @@ decode_value = function(s, i)
     else
         local num_str = s:match("^-?%d+%.?%d*[eE]?[+-]?%d*", i)
         if num_str then
-            return tonumber(num_str), i + #num_str
+            local num = tonumber(num_str)
+            if not num then error("invalid number at " .. i .. ": " .. num_str) end
+            return num, i + #num_str
         end
     end
     error("unexpected character at " .. i .. ": " .. c)
@@ -225,9 +227,15 @@ local function apply_op(op)
     end
 end
 
-local function undo_op()
+local function undo_op(op)
     if code_bp == nil then return end
-    code_bp.Buf:UndoOneEvent()
+    if op ~= nil and op.kind == "replace" then
+        -- replace is Remove + Insert = two undo events
+        code_bp.Buf:UndoOneEvent()
+        code_bp.Buf:UndoOneEvent()
+    else
+        code_bp.Buf:UndoOneEvent()
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -241,12 +249,18 @@ local function show_approval_prompt()
         "Agent: %s at line %d (%s) — approve? (y/n) ",
         op.kind, op.line, op.reason or "")
     micro.InfoBar():YNPrompt(desc, function(yes, cancelled)
-        if cancelled then return end
+        if cancelled then
+            undo_op(op)
+            send({type = "reject", op_id = op.id})
+            micro.InfoBar():Message("agent: cancelled " .. op.id)
+            pending_op = nil
+            return
+        end
         if yes then
             send({type = "approve", op_id = op.id})
             micro.InfoBar():Message("agent: approved " .. op.id)
         else
-            undo_op()
+            undo_op(op)
             send({type = "reject", op_id = op.id})
             micro.InfoBar():Message("agent: rejected " .. op.id)
         end

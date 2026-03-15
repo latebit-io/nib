@@ -79,36 +79,30 @@ var stubPlan = []stubStep{
 		description: "Add Verifier interface",
 		reasoning:   []string{"Looking at ", "the code...\n", "We need ", "a Verifier ", "interface.\n"},
 		op: protocol.EditOp{
-			ID:     "step-1",
-			Kind:   "insert",
-			Line:   3,
-			Col:    1,
-			Text:   "type Verifier interface {\n\tVerify(data []byte) error\n}\n\n",
-			Reason: "Add Verifier interface",
+			ID:      "step-1",
+			Search:  "package main\n",
+			Replace: "package main\n\ntype Verifier interface {\n\tVerify(data []byte) error\n}\n",
+			Reason:  "Add Verifier interface",
 		},
 	},
 	{
 		description: "Add concrete implementation",
 		reasoning:   []string{"Now let's ", "add a ", "concrete type ", "that implements ", "Verifier.\n"},
 		op: protocol.EditOp{
-			ID:     "step-2",
-			Kind:   "insert",
-			Line:   7,
-			Col:    1,
-			Text:   "type SHA256Verifier struct{}\n\nfunc (v SHA256Verifier) Verify(data []byte) error {\n\treturn nil // TODO\n}\n\n",
-			Reason: "Add SHA256Verifier struct",
+			ID:      "step-2",
+			Search:  "type Verifier interface {\n\tVerify(data []byte) error\n}",
+			Replace: "type Verifier interface {\n\tVerify(data []byte) error\n}\n\ntype SHA256Verifier struct{}\n\nfunc (v SHA256Verifier) Verify(data []byte) error {\n\treturn nil // TODO\n}",
+			Reason:  "Add SHA256Verifier struct",
 		},
 	},
 	{
 		description: "Use Verifier in main",
 		reasoning:   []string{"Finally, ", "let's wire ", "it into ", "main.\n"},
 		op: protocol.EditOp{
-			ID:     "step-3",
-			Kind:   "insert",
-			Line:   17,
-			Col:    1,
-			Text:   "\tvar v Verifier = SHA256Verifier{}\n\t_ = v\n",
-			Reason: "Wire Verifier into main()",
+			ID:      "step-3",
+			Search:  "func main() {",
+			Replace: "func main() {\n\tvar v Verifier = SHA256Verifier{}\n\t_ = v",
+			Reason:  "Wire Verifier into main()",
 		},
 	},
 }
@@ -227,9 +221,15 @@ func handleMessage(client *socket.Client, msg any) {
 		delete(sessions, client)
 		sessionsMu.Unlock()
 		if sess != nil {
+			sess.Mu.Lock()
+			if sess.CancelRun != nil {
+				sess.CancelRun()
+				sess.CancelRun = nil
+			}
+			sess.Mu.Unlock()
 			close(sess.Done)
 		}
-		log.Printf("client session cleaned up")
+		slog.Info("client session cleaned up")
 		return
 	}
 
@@ -273,7 +273,7 @@ func handleMessage(client *socket.Client, msg any) {
 		sess.CancelRun = cancel
 		sess.Mu.Unlock()
 		a := &agent.Agent{
-			Provider: llm.NewMiniMax(apiKey),
+			Provider: llm.NewAgentAPI("https://api.minimax.io/v1", "MiniMax-M2.5", apiKey),
 			Client:   client,
 			Session:  sess,
 		}

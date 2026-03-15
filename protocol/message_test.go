@@ -40,16 +40,13 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:     "pending_op message",
-			input:    `{"type":"pending_op","op":{"id":"abc","kind":"insert","line":4,"col":1,"text":"hello\n","reason":"test"}}`,
+			input:    `{"type":"pending_op","op":{"id":"abc","search":"old code","replace":"new code","reason":"test"}}`,
 			wantType: "*protocol.PendingOpMsg",
 			check: func(t *testing.T, msg any) {
 				t.Helper()
 				m := msg.(*PendingOpMsg)
-				if m.Op.ID != "abc" || m.Op.Kind != "insert" || m.Op.Line != 4 || m.Op.Col != 1 {
+				if m.Op.ID != "abc" || m.Op.Search != "old code" || m.Op.Replace != "new code" {
 					t.Errorf("got %+v", m.Op)
-				}
-				if m.Op.Text != "hello\n" {
-					t.Errorf("Text = %q, want %q", m.Op.Text, "hello\n")
 				}
 			},
 		},
@@ -187,7 +184,7 @@ func TestMarshal(t *testing.T) {
 		{"token", TokenMsg{Type: TypeToken, Text: "hello"}},
 		{"approve", ApproveMsg{Type: TypeApprove, OpID: "abc"}},
 		{"pending_op", PendingOpMsg{Type: TypePendingOp, Op: EditOp{
-			ID: "x", Kind: "insert", Line: 1, Col: 1, Text: "code\n", Reason: "test",
+			ID: "x", Search: "old", Replace: "new", Reason: "test",
 		}}},
 		{"start", StartMsg{Type: TypeStart, File: "f.go", Content: "code", Goal: "do stuff"}},
 	}
@@ -215,12 +212,8 @@ func TestRoundTrip(t *testing.T) {
 		Type: TypePendingOp,
 		Op: EditOp{
 			ID:      "rt-1",
-			Kind:    "replace",
-			Line:    10,
-			Col:     5,
-			EndLine: 12,
-			EndCol:  1,
-			Text:    "func Verify() error {\n\treturn nil\n}\n",
+			Search:  "func Verify() {}\n",
+			Replace: "func Verify() error {\n\treturn nil\n}\n",
 			Reason:  "round trip test",
 		},
 	}
@@ -241,9 +234,8 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("expected *PendingOpMsg, got %T", parsed)
 	}
 
-	if got.Op.ID != original.Op.ID || got.Op.Kind != original.Op.Kind ||
-		got.Op.Line != original.Op.Line || got.Op.Text != original.Op.Text ||
-		got.Op.Reason != original.Op.Reason {
+	if got.Op.ID != original.Op.ID || got.Op.Search != original.Op.Search ||
+		got.Op.Replace != original.Op.Replace || got.Op.Reason != original.Op.Reason {
 		t.Errorf("round trip mismatch:\n  got:  %+v\n  want: %+v", got.Op, original.Op)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestMiniMaxStream(t *testing.T) {
+func TestAgentAPIStream(t *testing.T) {
 	// Mock SSE server
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
@@ -36,7 +36,7 @@ func TestMiniMaxStream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := &MiniMax{
+	m := &AgentAPI{
 		APIKey:  "test-key",
 		BaseURL: srv.URL,
 		Model:   "test-model",
@@ -71,7 +71,7 @@ func TestMiniMaxStream(t *testing.T) {
 	}
 }
 
-func TestMiniMaxStreamDoneMarker(t *testing.T) {
+func TestAgentAPIStreamDoneMarker(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")
@@ -79,7 +79,7 @@ func TestMiniMaxStreamDoneMarker(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := &MiniMax{
+	m := &AgentAPI{
 		APIKey:  "test-key",
 		BaseURL: srv.URL,
 		client:  srv.Client(),
@@ -110,13 +110,13 @@ func TestMiniMaxStreamDoneMarker(t *testing.T) {
 	}
 }
 
-func TestMiniMaxStreamAPIError(t *testing.T) {
+func TestAgentAPIStreamAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 
-	m := &MiniMax{
+	m := &AgentAPI{
 		APIKey:  "bad-key",
 		BaseURL: srv.URL,
 		client:  srv.Client(),
@@ -130,7 +130,77 @@ func TestMiniMaxStreamAPIError(t *testing.T) {
 	}
 }
 
-func TestMiniMaxStreamCancellation(t *testing.T) {
+func TestAgentAPIStreamToolCalls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected flusher")
+		}
+		events := []string{
+			// Reasoning text
+			`data: {"choices":[{"delta":{"content":"I'll fix this."},"finish_reason":null}]}`,
+			// Tool call: first chunk with ID and name
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"edit_file","arguments":""}}]},"finish_reason":null}]}`,
+			// Tool call: argument chunks
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"search\":\"old"}}]},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\",\"replace\":\"new\",\"reason\":\"fix\"}"}}]},"finish_reason":null}]}`,
+			// Done
+			`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		}
+		for _, e := range events {
+			_, _ = fmt.Fprintf(w, "%s\n\n", e)
+			flusher.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	m := &AgentAPI{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+		Model:   "test-model",
+		client:  srv.Client(),
+	}
+
+	ch, err := m.Stream(context.Background(), []Message{
+		{Role: "user", Content: "fix the bug"},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var tokens []string
+	var toolCalls []ToolCall
+	for ev := range ch {
+		if ev.Done {
+			toolCalls = ev.ToolCalls
+			break
+		}
+		if ev.Token != "" {
+			tokens = append(tokens, ev.Token)
+		}
+	}
+
+	if len(tokens) != 1 || tokens[0] != "I'll fix this." {
+		t.Fatalf("unexpected tokens: %v", tokens)
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
+	}
+	tc := toolCalls[0]
+	if tc.ID != "call_abc" {
+		t.Fatalf("expected tool call ID call_abc, got %s", tc.ID)
+	}
+	if tc.Function.Name != "edit_file" {
+		t.Fatalf("expected function name edit_file, got %s", tc.Function.Name)
+	}
+	expected := `{"search":"old","replace":"new","reason":"fix"}`
+	if tc.Function.Arguments != expected {
+		t.Fatalf("expected arguments %q, got %q", expected, tc.Function.Arguments)
+	}
+}
+
+func TestAgentAPIStreamCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
@@ -145,7 +215,7 @@ func TestMiniMaxStreamCancellation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := &MiniMax{
+	m := &AgentAPI{
 		APIKey:  "test-key",
 		BaseURL: srv.URL,
 		client:  srv.Client(),

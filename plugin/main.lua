@@ -231,6 +231,24 @@ local function agent_pane_append(text)
 end
 
 -------------------------------------------------------------------------------
+-- safe_loc clamps to valid buffer bounds to prevent Micro panics
+-- when the LLM returns coordinates beyond the actual file size.
+-------------------------------------------------------------------------------
+
+local function safe_loc(line, col)
+    if code_bp == nil or code_bp.Buf == nil then return buffer.Loc(0, 0) end
+    local max_line = code_bp.Buf:LinesNum()
+    local l = line - 1
+    if l < 0 then l = 0 end
+    if l >= max_line then l = max_line - 1 end
+    local line_len = #code_bp.Buf:Line(l)
+    local c = col - 1
+    if c < 0 then c = 0 end
+    if c > line_len then c = line_len end
+    return buffer.Loc(c, l)
+end
+
+-------------------------------------------------------------------------------
 -- Agent cursor (in code pane)
 -------------------------------------------------------------------------------
 
@@ -240,8 +258,8 @@ end
 
 local function spawn_agent_cursor(line, col)
     if code_bp == nil then return end
-    local target = buffer.Loc(col - 1, line - 1)
-    micro.Log("agent: spawning cursor at col=" .. (col-1) .. " line=" .. (line-1))
+    local target = safe_loc(line, col)
+    micro.Log("agent: spawning cursor at col=" .. target.X .. " line=" .. target.Y)
     code_bp:SpawnCursorAtLoc(target)
     agent_cursor_active = true
     micro.Log("agent: cursors after spawn: " .. code_bp.Buf:NumCursors())
@@ -257,7 +275,7 @@ local function move_agent_cursor(line, col)
     if n > 1 then
         code_bp.Buf:RemoveCursor(n - 1)
     end
-    code_bp:SpawnCursorAtLoc(buffer.Loc(col - 1, line - 1))
+    code_bp:SpawnCursorAtLoc(safe_loc(line, col))
     code_bp.Buf:SetCurCursor(0)
     code_bp:Relocate()
 end
@@ -291,21 +309,6 @@ end
 -- Protocol uses 1-indexed line/col; buffer.Loc takes 0-indexed (col, line).
 local function loc(line, col)
     return buffer.Loc(col - 1, line - 1)
-end
-
--- safe_loc clamps to valid buffer bounds to prevent Micro panics
--- when the LLM returns coordinates beyond the actual file size.
-local function safe_loc(line, col)
-    if code_bp == nil or code_bp.Buf == nil then return buffer.Loc(0, 0) end
-    local max_line = code_bp.Buf:LinesNum()
-    local l = line - 1
-    if l < 0 then l = 0 end
-    if l >= max_line then l = max_line - 1 end
-    local line_len = #code_bp.Buf:Line(l)
-    local c = col - 1
-    if c < 0 then c = 0 end
-    if c > line_len then c = line_len end
-    return buffer.Loc(c, l)
 end
 
 -- Generation counter for animated inserts; incremented on each new animation
@@ -358,6 +361,9 @@ local function animated_insert(line, col, text, on_done)
         if pos < #text then
             micro.After(gotime.Millisecond * 20, insert_next_char)
         else
+            -- Remove agent cursor before giving control back to the user,
+            -- otherwise multi-cursor mode duplicates keystrokes.
+            remove_agent_cursor()
             -- Unlock code pane for user editing (approve/reject/edit)
             code_bp.Buf.Type.Readonly = false
             if on_done then on_done() end
@@ -367,44 +373,92 @@ local function animated_insert(line, col, text, on_done)
     insert_next_char()
 end
 
+-- find_text locates a search string in the buffer and returns
+-- (start_line, start_col, end_line, end_col) in 1-indexed coordinates,
+-- or nil if not found.
+local function find_text(search)
+    if code_bp == nil or code_bp.Buf == nil or search == nil or search == "" then
+        return nil
+    end
+    -- Build full buffer text
+    local lines = {}
+    for i = 0, code_bp.Buf:LinesNum() - 1 do
+        lines[#lines + 1] = code_bp.Buf:Line(i)
+    end
+    local full = table.concat(lines, "\n")
+    -- Plain text search (not pattern)
+    local start_idx = full:find(search, 1, true)
+    if not start_idx then return nil end
+    local end_idx = start_idx + #search - 1
+    -- Convert byte offsets to line/col (1-indexed)
+    local line = 1
+    local col = 1
+    local s_line, s_col, e_line, e_col
+    for i = 1, end_idx do
+        if i == start_idx then
+            s_line = line
+            s_col = col
+        end
+        if i == end_idx then
+            e_line = line
+            e_col = col
+        end
+        if full:sub(i, i) == "\n" then
+            line = line + 1
+            col = 1
+        else
+            col = col + 1
+        end
+    end
+    -- Handle edge case: search is at position 1
+    if start_idx == 1 and s_line == nil then
+        s_line = 1
+        s_col = 1
+    end
+    if end_idx == 0 then
+        e_line = s_line
+        e_col = s_col
+    end
+    return s_line, s_col, e_line, e_col
+end
+
 local function apply_op(op, on_done)
     if code_bp == nil then return false end
-    if op.line == nil or op.col == nil then
-        micro.InfoBar():Error("agent: malformed op: missing line/col")
+    if op.search == nil or op.search == "" then
+        micro.InfoBar():Error("agent: malformed op: missing search")
         return false
     end
     op_undo_count = 0
-    -- Position agent cursor at the op location
-    if not agent_cursor_active then
-        spawn_agent_cursor(op.line, op.col)
-    else
-        move_agent_cursor(op.line, op.col)
-    end
-    if op.kind == "insert" then
-        animated_insert(op.line, op.col, op.text, on_done)
-        return true -- on_done called asynchronously
-    elseif op.kind == "replace" then
-        if op.end_line == nil or op.end_col == nil then
-            micro.InfoBar():Error("agent: malformed replace op: missing end_line/end_col")
-            return false
-        end
-        code_bp.Buf:Remove(safe_loc(op.line, op.col), safe_loc(op.end_line, op.end_col))
-        op_undo_count = 1
-        animated_insert(op.line, op.col, op.text, on_done)
-        return true
-    elseif op.kind == "delete" then
-        if op.end_line == nil or op.end_col == nil then
-            micro.InfoBar():Error("agent: malformed delete op: missing end_line/end_col")
-            return false
-        end
-        code_bp.Buf:Remove(safe_loc(op.line, op.col), safe_loc(op.end_line, op.end_col))
-        op_undo_count = 1
-        if on_done then on_done() end
-        return true
-    else
-        micro.InfoBar():Error("agent: unknown op kind: " .. tostring(op.kind))
+
+    local s_line, s_col, e_line, e_col = find_text(op.search)
+    if s_line == nil then
+        micro.InfoBar():Error("agent: search text not found in buffer")
+        micro.Log("agent: search not found: " .. op.search)
         return false
     end
+
+    -- Position agent cursor at the match location
+    if not agent_cursor_active then
+        spawn_agent_cursor(s_line, s_col)
+    else
+        move_agent_cursor(s_line, s_col)
+    end
+
+    -- Remove the matched text (end_col + 1 to include the last char)
+    code_bp.Buf:Remove(safe_loc(s_line, s_col), safe_loc(e_line, e_col + 1))
+    op_undo_count = 1
+
+    local replacement = op.replace or ""
+    if replacement == "" then
+        -- Delete only — no text to insert
+        remove_agent_cursor()
+        if on_done then on_done() end
+        return true
+    end
+
+    -- Animated insert of the replacement text
+    animated_insert(s_line, s_col, replacement, on_done)
+    return true
 end
 
 local function undo_pending_op()
@@ -422,9 +476,10 @@ end
 local function show_approval_prompt()
     if pending_op == nil then return end
     local op = pending_op
+    local action = (op.replace == nil or op.replace == "") and "delete" or "replace"
     local desc = string.format(
-        "Agent: %s at line %d (%s) — approve? (y/n) ",
-        op.kind, op.line, op.reason or "")
+        "Agent: %s (%s) — approve? (y/n) ",
+        action, op.reason or "")
     micro.InfoBar():YNPrompt(desc, function(yes, cancelled)
         if cancelled then
             undo_pending_op()

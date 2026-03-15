@@ -4,7 +4,7 @@
 
 All project context — architecture, patterns, build commands, conventions, debugging notes, and roadmap — lives on the demarkus-soul MCP server.
 
-**imnportant**: never post sensitive information such as api keys, passwords, and anything that can be doc'd 
+**important**: never post sensitive information such as api keys, passwords, and anything that can be doc'd 
 
 ### Required Preflight (Every Session)
 

@@ -91,6 +91,7 @@ type clientSession struct {
 	step        int           // current step index (0-based)
 	advance     chan struct{} // signaled when approve/reject received
 	proceed     chan struct{} // signaled when continue received (after editing)
+	done        chan struct{} // closed on disconnect to unblock waits
 	rejected    bool          // last step was rejected
 	currentOpID string        // op ID currently awaiting approval
 }
@@ -151,9 +152,10 @@ func stubStream(client *socket.Client, sess *clientSession) {
 			return
 		}
 
-		// Wait for approve or reject before continuing.
-		// Channel is closed on disconnect, causing return.
-		if _, ok := <-sess.advance; !ok {
+		// Wait for approve or reject, or disconnect.
+		select {
+		case <-sess.advance:
+		case <-sess.done:
 			return
 		}
 
@@ -166,7 +168,9 @@ func stubStream(client *socket.Client, sess *clientSession) {
 		} else {
 			agentPaneMsg(client, "\n[Step approved — edit freely, then :junto-next to continue]\n")
 			// Wait for the developer to signal continue after editing.
-			if _, ok := <-sess.proceed; !ok {
+			select {
+			case <-sess.proceed:
+			case <-sess.done:
 				return
 			}
 			agentPaneMsg(client, "\n[Continuing...]\n")
@@ -192,6 +196,7 @@ func handleMessage(client *socket.Client, msg any) {
 		sess := &clientSession{
 			advance: make(chan struct{}, 1),
 			proceed: make(chan struct{}, 1),
+			done:    make(chan struct{}),
 		}
 		sessionsMu.Lock()
 		sessions[client] = sess
@@ -206,8 +211,7 @@ func handleMessage(client *socket.Client, msg any) {
 		delete(sessions, client)
 		sessionsMu.Unlock()
 		if sess != nil {
-			close(sess.advance)
-			close(sess.proceed)
+			close(sess.done)
 		}
 		log.Printf("client session cleaned up")
 		return
@@ -236,7 +240,10 @@ func handleMessage(client *socket.Client, msg any) {
 		}); err != nil {
 			log.Printf("failed to send approved: %v", err)
 		}
-		sess.advance <- struct{}{}
+		select {
+		case sess.advance <- struct{}{}:
+		default:
+		}
 
 	case *protocol.RejectMsg:
 		log.Printf("received reject for op %s", m.OpID)
@@ -254,11 +261,17 @@ func handleMessage(client *socket.Client, msg any) {
 		}); err != nil {
 			log.Printf("failed to send rejected: %v", err)
 		}
-		sess.advance <- struct{}{}
+		select {
+		case sess.advance <- struct{}{}:
+		default:
+		}
 
 	case *protocol.ContinueMsg:
 		log.Printf("received continue")
-		sess.proceed <- struct{}{}
+		select {
+		case sess.proceed <- struct{}{}:
+		default:
+		}
 
 	default:
 		log.Printf("unhandled message: %T", msg)

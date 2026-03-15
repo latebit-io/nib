@@ -159,8 +159,11 @@ func TestClientDisconnect(t *testing.T) {
 	disconnected := make(chan struct{}, 1)
 	connected := make(chan struct{}, 1)
 	srv := startTestServer(t, func(c *Client, msg any) {
-		if _, ok := msg.(ConnectMsg); ok {
+		switch msg.(type) {
+		case ConnectMsg:
 			connected <- struct{}{}
+		case DisconnectMsg:
+			disconnected <- struct{}{}
 		}
 	})
 
@@ -181,24 +184,18 @@ func TestClientDisconnect(t *testing.T) {
 
 	_ = conn.Close()
 
-	// Wait for disconnect to propagate.
-	go func() {
-		for {
-			srv.mu.Lock()
-			n := len(srv.clients)
-			srv.mu.Unlock()
-			if n == 0 {
-				disconnected <- struct{}{}
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
-
 	select {
 	case <-disconnected:
 	case <-time.After(2 * time.Second):
-		t.Fatal("client not removed after disconnect")
+		t.Fatal("handler did not receive DisconnectMsg")
+	}
+
+	// Verify client was removed.
+	srv.mu.Lock()
+	count = len(srv.clients)
+	srv.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("expected 0 clients after disconnect, got %d", count)
 	}
 }
 

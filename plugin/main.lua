@@ -566,15 +566,32 @@ end
 
 function agentSend(bp, args)
     if #args < 1 then
-        micro.InfoBar():Error("usage: junto-send <json>")
+        micro.InfoBar():Error("usage: junto-send <goal>")
         return
     end
     if bridge_cmd == nil then
         micro.InfoBar():Error("agent: bridge not running")
         return
     end
-    shell.JobSend(bridge_cmd, table.concat(args, " ") .. "\n")
-    micro.InfoBar():Message("agent: sent")
+    local goal = table.concat(args, " ")
+    local file_path = ""
+    local content = ""
+    if code_bp ~= nil and code_bp.Buf ~= nil then
+        file_path = code_bp.Buf.Path or ""
+        -- Get full buffer contents
+        local lines = {}
+        for i = 0, code_bp.Buf:LinesNum() - 1 do
+            lines[#lines + 1] = code_bp.Buf:Line(i)
+        end
+        content = table.concat(lines, "\n")
+    end
+    send({
+        type = "start",
+        file = file_path,
+        content = content,
+        goal = goal,
+    })
+    micro.InfoBar():Message("agent: task sent — " .. goal)
 end
 
 function init()

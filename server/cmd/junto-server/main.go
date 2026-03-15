@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -10,10 +12,16 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/protocol"
+	"github.com/latebit-io/junto/server/internal/agent"
+	"github.com/latebit-io/junto/server/internal/llm"
 	"github.com/latebit-io/junto/server/internal/socket"
 )
 
+var stubMode = flag.Bool("stub", false, "use hardcoded stub plan instead of LLM")
+
 func main() {
+	flag.Parse()
+
 	srv, err := socket.NewServer(handleMessage)
 	if err != nil {
 		log.Fatalf("failed to start server: %v", err)
@@ -24,6 +32,12 @@ func main() {
 
 	// Print socket path so bridge/tests can find it.
 	fmt.Println(srv.SockPath())
+
+	if !*stubMode {
+		if os.Getenv("MINIMAX_API_KEY") == "" {
+			log.Println("warning: MINIMAX_API_KEY not set, use --stub for testing without API key")
+		}
+	}
 
 	// Clean shutdown on signal.
 	sig := make(chan os.Signal, 1)
@@ -39,10 +53,13 @@ func main() {
 	}
 }
 
-// stubStep defines one step of the stub plan.
+// ---------------------------------------------------------------------------
+// Stub plan (used with --stub flag)
+// ---------------------------------------------------------------------------
+
 type stubStep struct {
 	description string
-	reasoning   []string // tokens streamed to agent pane
+	reasoning   []string
 	op          protocol.EditOp
 }
 
@@ -85,39 +102,34 @@ var stubPlan = []stubStep{
 	},
 }
 
-// clientSession tracks the step-by-step progress of a single client.
-type clientSession struct {
-	mu          sync.Mutex
-	step        int           // current step index (0-based)
-	advance     chan struct{} // signaled when approve/reject received
-	proceed     chan struct{} // signaled when continue received (after editing)
-	done        chan struct{} // closed on disconnect to unblock waits
-	rejected    bool          // last step was rejected
-	currentOpID string        // op ID currently awaiting approval
-}
+// ---------------------------------------------------------------------------
+// Session management
+// ---------------------------------------------------------------------------
 
 var (
 	sessionsMu sync.Mutex
-	sessions   = map[*socket.Client]*clientSession{}
+	sessions   = map[*socket.Client]*agent.Session{}
 )
 
-func getSession(client *socket.Client) *clientSession {
+func getSession(client *socket.Client) *agent.Session {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
 	return sessions[client]
 }
 
-// stubStream runs the multi-step plan for a client, waiting for approval between steps.
-func stubStream(client *socket.Client, sess *clientSession) {
+func agentPaneMsg(client *socket.Client, text string) {
+	_ = client.Send(protocol.TokenMsg{
+		Type: protocol.TypeToken,
+		Text: text,
+	})
+}
+
+// stubStream runs the hardcoded plan (--stub mode).
+func stubStream(client *socket.Client, sess *agent.Session) {
 	total := len(stubPlan)
 
 	for i, step := range stubPlan {
-		sess.mu.Lock()
-		sess.step = i
-		sess.rejected = false
-		sess.mu.Unlock()
-
-		// Announce step in agent pane
+		// Announce step
 		if err := client.Send(protocol.StepMsg{
 			Type:        protocol.TypeStep,
 			Index:       i + 1,
@@ -128,7 +140,7 @@ func stubStream(client *socket.Client, sess *clientSession) {
 			return
 		}
 
-		// Stream reasoning tokens to agent pane
+		// Stream reasoning tokens
 		for _, tok := range step.reasoning {
 			time.Sleep(80 * time.Millisecond)
 			if err := client.Send(protocol.TokenMsg{
@@ -140,10 +152,8 @@ func stubStream(client *socket.Client, sess *clientSession) {
 			}
 		}
 
-		// Track current op and send the code edit as a pending_op
-		sess.mu.Lock()
-		sess.currentOpID = step.op.ID
-		sess.mu.Unlock()
+		// Track current op and send
+		sess.SetCurrentOp(step.op.ID)
 		if err := client.Send(protocol.PendingOpMsg{
 			Type: protocol.TypePendingOp,
 			Op:   step.op,
@@ -152,25 +162,24 @@ func stubStream(client *socket.Client, sess *clientSession) {
 			return
 		}
 
-		// Wait for approve or reject, or disconnect.
+		// Wait for approve/reject or disconnect
 		select {
-		case <-sess.advance:
-		case <-sess.done:
+		case <-sess.Advance:
+		case <-sess.Done:
 			return
 		}
 
-		sess.mu.Lock()
-		wasRejected := sess.rejected
-		sess.mu.Unlock()
+		sess.Mu.Lock()
+		wasRejected := sess.Rejected
+		sess.Mu.Unlock()
 
 		if wasRejected {
 			agentPaneMsg(client, "\n[Step rejected — moving on]\n")
 		} else {
 			agentPaneMsg(client, "\n[Step approved — edit freely, then :junto-next to continue]\n")
-			// Wait for the developer to signal continue after editing.
 			select {
-			case <-sess.proceed:
-			case <-sess.done:
+			case <-sess.Proceed:
+			case <-sess.Done:
 				return
 			}
 			agentPaneMsg(client, "\n[Continuing...]\n")
@@ -182,26 +191,22 @@ func stubStream(client *socket.Client, sess *clientSession) {
 	agentPaneMsg(client, "\n--- Plan complete ---\n")
 }
 
-// agentPaneMsg sends a token to the agent pane.
-func agentPaneMsg(client *socket.Client, text string) {
-	_ = client.Send(protocol.TokenMsg{
-		Type: protocol.TypeToken,
-		Text: text,
-	})
-}
+// ---------------------------------------------------------------------------
+// Message handling
+// ---------------------------------------------------------------------------
 
-// handleMessage dispatches incoming messages and manages the step-by-step flow.
 func handleMessage(client *socket.Client, msg any) {
 	if _, ok := msg.(socket.ConnectMsg); ok {
-		sess := &clientSession{
-			advance: make(chan struct{}, 1),
-			proceed: make(chan struct{}, 1),
-			done:    make(chan struct{}),
-		}
+		sess := agent.NewSession()
 		sessionsMu.Lock()
 		sessions[client] = sess
 		sessionsMu.Unlock()
-		go stubStream(client, sess)
+
+		if *stubMode {
+			go stubStream(client, sess)
+		} else {
+			agentPaneMsg(client, "Connected. Send a task with :junto-send <goal>\n")
+		}
 		return
 	}
 
@@ -211,7 +216,7 @@ func handleMessage(client *socket.Client, msg any) {
 		delete(sessions, client)
 		sessionsMu.Unlock()
 		if sess != nil {
-			close(sess.done)
+			close(sess.Done)
 		}
 		log.Printf("client session cleaned up")
 		return
@@ -224,16 +229,34 @@ func handleMessage(client *socket.Client, msg any) {
 	}
 
 	switch m := msg.(type) {
-	case *protocol.ApproveMsg:
-		log.Printf("received approve for op %s", m.OpID)
-		sess.mu.Lock()
-		if m.OpID != sess.currentOpID {
-			sess.mu.Unlock()
-			log.Printf("ignoring stale approve for op %s (current: %s)", m.OpID, sess.currentOpID)
+	case *protocol.StartMsg:
+		log.Printf("received start: file=%s goal=%q", m.File, m.Goal)
+		if *stubMode {
+			log.Printf("ignoring start in stub mode")
 			return
 		}
-		sess.rejected = false
-		sess.mu.Unlock()
+		apiKey := os.Getenv("MINIMAX_API_KEY")
+		if apiKey == "" {
+			agentPaneMsg(client, "[Error: MINIMAX_API_KEY not set]\n")
+			return
+		}
+		a := &agent.Agent{
+			Provider: llm.NewMiniMax(apiKey),
+			Client:   client,
+			Session:  sess,
+		}
+		go a.Run(context.Background(), m.File, m.Content, m.Goal)
+
+	case *protocol.ApproveMsg:
+		log.Printf("received approve for op %s", m.OpID)
+		sess.Mu.Lock()
+		if m.OpID != sess.CurrentOpID {
+			sess.Mu.Unlock()
+			log.Printf("ignoring stale approve for op %s (current: %s)", m.OpID, sess.CurrentOpID)
+			return
+		}
+		sess.Rejected = false
+		sess.Mu.Unlock()
 		if err := client.Send(protocol.ApprovedMsg{
 			Type: protocol.TypeApproved,
 			OpID: m.OpID,
@@ -241,20 +264,20 @@ func handleMessage(client *socket.Client, msg any) {
 			log.Printf("failed to send approved: %v", err)
 		}
 		select {
-		case sess.advance <- struct{}{}:
+		case sess.Advance <- struct{}{}:
 		default:
 		}
 
 	case *protocol.RejectMsg:
 		log.Printf("received reject for op %s", m.OpID)
-		sess.mu.Lock()
-		if m.OpID != sess.currentOpID {
-			sess.mu.Unlock()
-			log.Printf("ignoring stale reject for op %s (current: %s)", m.OpID, sess.currentOpID)
+		sess.Mu.Lock()
+		if m.OpID != sess.CurrentOpID {
+			sess.Mu.Unlock()
+			log.Printf("ignoring stale reject for op %s (current: %s)", m.OpID, sess.CurrentOpID)
 			return
 		}
-		sess.rejected = true
-		sess.mu.Unlock()
+		sess.Rejected = true
+		sess.Mu.Unlock()
 		if err := client.Send(protocol.RejectedMsg{
 			Type: protocol.TypeRejected,
 			OpID: m.OpID,
@@ -262,14 +285,14 @@ func handleMessage(client *socket.Client, msg any) {
 			log.Printf("failed to send rejected: %v", err)
 		}
 		select {
-		case sess.advance <- struct{}{}:
+		case sess.Advance <- struct{}{}:
 		default:
 		}
 
 	case *protocol.ContinueMsg:
 		log.Printf("received continue")
 		select {
-		case sess.proceed <- struct{}{}:
+		case sess.Proceed <- struct{}{}:
 		default:
 		}
 

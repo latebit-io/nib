@@ -98,9 +98,10 @@ type EditMsg struct {
 }
 
 type StartMsg struct {
-	Type string `json:"type"`
-	File string `json:"file"`
-	Plan []Step `json:"plan"`
+	Type    string `json:"type"`
+	File    string `json:"file"`
+	Content string `json:"content"`
+	Goal    string `json:"goal"`
 }
 
 // Parse reads a JSON line and returns the typed message.

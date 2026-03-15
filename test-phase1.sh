@@ -1,6 +1,8 @@
 #!/bin/bash
-# test-phase1.sh — Launch junto server + Micro editor for Phase 1 testing
-# Usage: ./test-phase1.sh
+# test-junto.sh — Launch junto server + Micro editor for testing
+# Usage: ./test-phase1.sh [--stub]
+#   --stub    Use hardcoded stub plan (no API key needed)
+#   default   Use LLM mode (requires MINIMAX_API_KEY)
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
@@ -48,9 +50,30 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Parse flags
+SERVER_FLAGS=""
+MODE="LLM"
+if [[ "${1:-}" == "--stub" ]]; then
+    SERVER_FLAGS="--stub"
+    MODE="STUB"
+fi
+
+# Check for API key in LLM mode
+if [[ "$MODE" == "LLM" ]] && [[ -z "${MINIMAX_API_KEY:-}" ]]; then
+    echo "Warning: MINIMAX_API_KEY not set. Use --stub for testing without API key."
+    echo "  export MINIMAX_API_KEY='your-key-here'"
+    echo "  Or: ./test-phase1.sh --stub"
+    echo ""
+    read -p "Continue anyway? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
 # Start the server in the background and capture output
-echo "Starting junto-server..."
-$REPO_DIR/server/bin/junto-server > /tmp/junto-server.out 2>&1 &
+echo "Starting junto-server $SERVER_FLAGS..."
+$REPO_DIR/server/bin/junto-server $SERVER_FLAGS > /tmp/junto-server.out 2>&1 &
 SERVER_PID=$!
 
 # Wait for server to write socket path (poll up to 5s)
@@ -78,7 +101,7 @@ echo ""
 
 # Display instructions before launching Micro
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "TESTING PHASE 2 — Agent Pane (streaming log)"
+echo "TESTING JUNTO — Mode: $MODE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "Server running (PID $SERVER_PID)"
@@ -95,19 +118,31 @@ echo "  1. After you press ENTER, Micro will open..."
 echo "  2. Press Ctrl+E (command mode)"
 echo "  3. Type: junto $SOCKET_PATH"
 echo "  4. Press Enter"
+if [[ "$MODE" == "LLM" ]]; then
+echo "  5. Type: junto-send add error handling to main"
+echo "     (or any goal — this sends the file to the LLM)"
+fi
 echo ""
 echo "EXPECTED BEHAVIOR:"
-echo "  - Agent pane opens on the right"
-echo "  - Step headers stream in: '--- Step 1/3: Analyzing file structure ---'"
-echo "  - Tokens stream in between steps"
-echo "  - After streaming, text appears at line 3 in the code pane"
-echo "  - InfoBar prompt: 'Agent: insert at line 3 ... approve? (y/n)'"
-echo "  - Press 'y' to approve (text stays)"
-echo "  - Press 'n' to reject (text is undone)"
+if [[ "$MODE" == "STUB" ]]; then
+echo "  - Agent pane opens, stub plan streams automatically"
+echo "  - Step headers: '--- Step 1/3: Add Verifier interface ---'"
+echo "  - Code appears char-by-char at agent cursor"
+echo "  - Approval prompt: press 'y' to approve, 'n' to reject"
+echo "  - After approve: edit freely, then :junto-next to continue"
+else
+echo "  - Agent pane opens with 'Connected. Send a task with :junto-send'"
+echo "  - After :junto-send, LLM reasoning streams in agent pane"
+echo "  - Code edits appear char-by-char in code pane"
+echo "  - Approval prompt: press 'y' to approve, 'n' to reject"
+echo "  - After approve: edit freely, then :junto-next to continue"
+fi
 echo ""
-echo "DEBUG COMMANDS (in Micro Ctrl+E):"
-echo "  junto-stop               — disconnect bridge + close agent pane"
-echo "  junto-send {JSON}        — send raw JSON to server"
+echo "COMMANDS (Ctrl+E in Micro):"
+echo "  junto <socket>           — connect to server"
+echo "  junto-send <goal>        — send task to agent (LLM mode)"
+echo "  junto-next               — continue to next step (after editing)"
+echo "  junto-stop               — disconnect + close agent pane"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""

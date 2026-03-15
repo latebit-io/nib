@@ -127,12 +127,12 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name:     "start message",
-			input:    `{"type":"start","file":"main.go","plan":[{"description":"step 1","done":false}]}`,
+			input:    `{"type":"start","file":"main.go","content":"package main\n","goal":"add tests"}`,
 			wantType: "*protocol.StartMsg",
 			check: func(t *testing.T, msg any) {
 				t.Helper()
 				m := msg.(*StartMsg)
-				if m.File != "main.go" || len(m.Plan) != 1 || m.Plan[0].Description != "step 1" {
+				if m.File != "main.go" || m.Content != "package main\n" || m.Goal != "add tests" {
 					t.Errorf("got %+v", m)
 				}
 			},
@@ -189,7 +189,7 @@ func TestMarshal(t *testing.T) {
 		{"pending_op", PendingOpMsg{Type: TypePendingOp, Op: EditOp{
 			ID: "x", Kind: "insert", Line: 1, Col: 1, Text: "code\n", Reason: "test",
 		}}},
-		{"start", StartMsg{Type: TypeStart, File: "f.go", Plan: []Step{{Description: "s1"}}}},
+		{"start", StartMsg{Type: TypeStart, File: "f.go", Content: "code", Goal: "do stuff"}},
 	}
 
 	for _, tt := range tests {

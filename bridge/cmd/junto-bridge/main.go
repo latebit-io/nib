@@ -47,7 +47,7 @@ func run(in io.Reader, out io.Writer, conn net.Conn) {
 	}
 
 	// Close conn to unblock the socket→out goroutine, then wait for it.
-	conn.Close()
+	_ = conn.Close()
 	wg.Wait()
 }
 
@@ -62,7 +62,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to %s: %v", sockPath, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	run(os.Stdin, os.Stdout, conn)
 }

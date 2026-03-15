@@ -8,11 +8,11 @@ import (
 
 func TestParse(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
+		name     string
+		input    string
 		wantType string
-		check   func(t *testing.T, msg any)
-		wantErr bool
+		check    func(t *testing.T, msg any)
+		wantErr  bool
 	}{
 		{
 			name:     "token message",

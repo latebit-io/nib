@@ -18,7 +18,7 @@ func startTestSocket(t *testing.T) (string, net.Listener) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	go func() {
 		for {
@@ -27,11 +27,11 @@ func startTestSocket(t *testing.T) (string, net.Listener) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				scanner := bufio.NewScanner(c)
 				for scanner.Scan() {
-					c.Write(scanner.Bytes())
-					c.Write([]byte{'\n'})
+					_, _ = c.Write(scanner.Bytes())
+					_, _ = c.Write([]byte{'\n'})
 				}
 			}(conn)
 		}
@@ -48,7 +48,7 @@ func startTestSocketWithGreeting(t *testing.T, greeting string) (string, net.Lis
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 
 	go func() {
 		for {
@@ -57,12 +57,12 @@ func startTestSocketWithGreeting(t *testing.T, greeting string) (string, net.Lis
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
-				c.Write([]byte(greeting))
+				defer func() { _ = c.Close() }()
+				_, _ = c.Write([]byte(greeting))
 				scanner := bufio.NewScanner(c)
 				for scanner.Scan() {
-					c.Write(scanner.Bytes())
-					c.Write([]byte{'\n'})
+					_, _ = c.Write(scanner.Bytes())
+					_, _ = c.Write([]byte{'\n'})
 				}
 			}(conn)
 		}
@@ -106,7 +106,7 @@ func TestRunRelaysStdinToSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	msg := `{"type":"approve","op_id":"test"}`
 	pr, pw := io.Pipe()
@@ -114,14 +114,14 @@ func TestRunRelaysStdinToSocket(t *testing.T) {
 
 	go run(pr, outW, conn)
 
-	pw.Write([]byte(msg + "\n"))
+	_, _ = pw.Write([]byte(msg + "\n"))
 
 	got := readLine(t, outR)
 	if got != msg {
 		t.Errorf("echoed = %q, want %q", got, msg)
 	}
 
-	pw.Close()
+	_ = pw.Close()
 }
 
 func TestRunRelaysSocketToStdout(t *testing.T) {
@@ -132,7 +132,7 @@ func TestRunRelaysSocketToStdout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	pr, pw := io.Pipe()
 	outR, outW := io.Pipe()
@@ -145,7 +145,7 @@ func TestRunRelaysSocketToStdout(t *testing.T) {
 		t.Errorf("stdout = %q, want %q", got, want)
 	}
 
-	pw.Close()
+	_ = pw.Close()
 }
 
 func TestRunExitsOnStdinClose(t *testing.T) {
@@ -155,7 +155,7 @@ func TestRunExitsOnStdinClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	pr, pw := io.Pipe()
 	_, outW := io.Pipe()
@@ -166,8 +166,8 @@ func TestRunExitsOnStdinClose(t *testing.T) {
 		close(done)
 	}()
 
-	pw.Write([]byte("hello\n"))
-	pw.Close()
+	_, _ = pw.Write([]byte("hello\n"))
+	_ = pw.Close()
 
 	select {
 	case <-done:

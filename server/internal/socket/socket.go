@@ -20,6 +20,9 @@ type Handler func(client *Client, msg any)
 // ConnectMsg is sent to the handler when a new client connects.
 type ConnectMsg struct{}
 
+// DisconnectMsg is sent to the handler when a client disconnects.
+type DisconnectMsg struct{}
+
 // Server manages a Unix socket listener and connected clients.
 type Server struct {
 	listener net.Listener
@@ -46,9 +49,9 @@ func (c *Client) Send(msg any) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, err = c.conn.Write(data)
-	c.conn.SetWriteDeadline(time.Time{})
+	_ = c.conn.SetWriteDeadline(time.Time{})
 	return err
 }
 
@@ -66,7 +69,7 @@ func NewServer(handler Handler) (*Server, error) {
 		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
 	}
 	if err := os.Chmod(sockPath, 0o600); err != nil {
-		listener.Close()
+		_ = listener.Close()
 		return nil, fmt.Errorf("chmod %s: %w", sockPath, err)
 	}
 
@@ -128,9 +131,9 @@ func (s *Server) BroadcastRaw(data []byte) {
 
 	for _, c := range clients {
 		c.mu.Lock()
-		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_ = c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_, err := c.conn.Write(data)
-		c.conn.SetWriteDeadline(time.Time{})
+		_ = c.conn.SetWriteDeadline(time.Time{})
 		c.mu.Unlock()
 		if err != nil {
 			log.Printf("broadcast write error, removing client: %v", err)
@@ -148,17 +151,14 @@ func (s *Server) Close() error {
 	clients := make([]*Client, 0, len(s.clients))
 	for c := range s.clients {
 		clients = append(clients, c)
-		delete(s.clients, c)
 	}
 	s.mu.Unlock()
 
 	for _, c := range clients {
-		c.mu.Lock()
-		c.conn.Close()
-		c.mu.Unlock()
+		s.removeClient(c)
 	}
 
-	os.Remove(s.sockPath)
+	_ = os.Remove(s.sockPath)
 	return err
 }
 
@@ -180,8 +180,12 @@ func (s *Server) removeClient(c *Client) {
 	s.mu.Unlock()
 
 	c.mu.Lock()
-	c.conn.Close()
+	_ = c.conn.Close()
 	c.mu.Unlock()
+
+	if s.handler != nil {
+		s.handler(c, DisconnectMsg{})
+	}
 }
 
 func (s *Server) handleClient(c *Client) {

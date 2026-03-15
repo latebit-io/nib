@@ -538,7 +538,7 @@ end
 
 function agentSend(bp, args)
     if #args < 1 then
-        micro.InfoBar():Error("usage: agent-send <json>")
+        micro.InfoBar():Error("usage: junto-send <json>")
         return
     end
     if bridge_cmd == nil then

@@ -13,7 +13,7 @@ const (
 	TypePendingOp = "pending_op"
 	TypeApproved  = "approved"
 	TypeRejected  = "rejected"
-	TypeContext    = "context"
+	TypeContext   = "context"
 	TypeError     = "error"
 
 	// Plugin → Server

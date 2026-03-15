@@ -1,7 +1,7 @@
 PLUGIN_DIR := $(HOME)/.config/micro/plug/agent
 BIN_DIR := $(HOME)/.local/bin
 
-.PHONY: build clean install uninstall test
+.PHONY: build clean install uninstall test fmt vet
 
 build:
 	cd protocol && go build ./...
@@ -21,7 +21,7 @@ install: build
 	ln -sf $(CURDIR)/bridge/bin/junto-bridge $(BIN_DIR)/junto-bridge
 	@echo "Installed. Ensure $(BIN_DIR) is in PATH."
 	@echo "Start server: junto-server"
-	@echo "In micro: :agent-start <socket-path>"
+	@echo "In micro: :junto <socket-path>"
 
 uninstall:
 	rm -f $(BIN_DIR)/junto-server $(BIN_DIR)/junto-bridge
@@ -31,6 +31,16 @@ test:
 	cd protocol && go test ./...
 	cd server && go test ./...
 	cd bridge && go test ./...
+
+fmt:
+	cd protocol && go fmt ./...
+	cd server && go fmt ./...
+	cd bridge && go fmt ./...
+
+vet:
+	cd protocol && go vet ./...
+	cd server && go vet ./...
+	cd bridge && go vet ./...
 
 clean:
 	rm -f server/bin/* bridge/bin/*

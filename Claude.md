@@ -16,6 +16,7 @@ All project context — architecture, patterns, build commands, conventions, deb
 - Update soul pages when learning something new
 - Use `mark_append` for journal entries and incremental notes
 - Always use `expected_version` from a prior fetch when publishing or appending
+- After each implementation run tests and pre-commit.sh
 
 ### End of Session
 

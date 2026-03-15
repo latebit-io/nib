@@ -19,7 +19,7 @@ func main() {
 		log.Fatalf("failed to start server: %v", err)
 	}
 	var closeOnce sync.Once
-	closeSrv := func() { closeOnce.Do(func() { srv.Close() }) }
+	closeSrv := func() { closeOnce.Do(func() { _ = srv.Close() }) }
 	defer closeSrv()
 
 	// Print socket path so bridge/tests can find it.
@@ -161,19 +161,19 @@ func stubStream(client *socket.Client, sess *clientSession) {
 		sess.mu.Unlock()
 
 		if wasRejected {
-			agent_pane_msg(client, "\n[Step rejected — moving on]\n")
+			agentPaneMsg(client, "\n[Step rejected — moving on]\n")
 		} else {
-			agent_pane_msg(client, "\n[Step approved]\n")
+			agentPaneMsg(client, "\n[Step approved]\n")
 		}
 
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	agent_pane_msg(client, "\n--- Plan complete ---\n")
+	agentPaneMsg(client, "\n--- Plan complete ---\n")
 }
 
-// agent_pane_msg sends a token to the agent pane.
-func agent_pane_msg(client *socket.Client, text string) {
+// agentPaneMsg sends a token to the agent pane.
+func agentPaneMsg(client *socket.Client, text string) {
 	_ = client.Send(protocol.TokenMsg{
 		Type: protocol.TypeToken,
 		Text: text,
@@ -240,6 +240,12 @@ func handleMessage(client *socket.Client, msg any) {
 		}
 		sess.rejected = true
 		sess.mu.Unlock()
+		if err := client.Send(protocol.RejectedMsg{
+			Type: protocol.TypeRejected,
+			OpID: m.OpID,
+		}); err != nil {
+			log.Printf("failed to send rejected: %v", err)
+		}
 		sess.advance <- struct{}{}
 
 	default:

@@ -299,6 +299,8 @@ local animation_generation = 0
 
 -- Insert text character-by-character with 20ms delays, then call on_done().
 -- Each character insert is one undo event so we can undo them all.
+-- The code pane is locked (readonly) during animation to prevent user edits
+-- from interleaving with agent inserts, which would break undo.
 local function animated_insert(line, col, text, on_done)
     text = text or ""
     if #text == 0 then
@@ -312,12 +314,20 @@ local function animated_insert(line, col, text, on_done)
     local cur_col = col
     local pos = 0
 
+    -- Lock code pane to prevent user edits during animation
+    if code_bp ~= nil then
+        code_bp.Buf.Type.Readonly = true
+    end
+
     local function insert_next_char()
         if my_gen ~= animation_generation then return end
         if code_bp == nil then return end
         pos = pos + 1
         local ch = text:sub(pos, pos)
+        -- Temporarily unlock for programmatic insert
+        code_bp.Buf.Type.Readonly = false
         code_bp.Buf:Insert(loc(cur_line, cur_col), ch)
+        code_bp.Buf.Type.Readonly = true
         op_undo_count = op_undo_count + 1
 
         if ch == "\n" then
@@ -333,6 +343,8 @@ local function animated_insert(line, col, text, on_done)
         if pos < #text then
             micro.After(gotime.Millisecond * 20, insert_next_char)
         else
+            -- Unlock code pane for user editing (approve/reject/edit)
+            code_bp.Buf.Type.Readonly = false
             if on_done then on_done() end
         end
     end
@@ -475,6 +487,10 @@ end
 
 local function on_bridge_exit()
     animation_generation = animation_generation + 1
+    -- Ensure code pane is unlocked if animation was in progress
+    if code_bp ~= nil then
+        code_bp.Buf.Type.Readonly = false
+    end
     if pending_op ~= nil then
         undo_pending_op()
         pending_op = nil
@@ -524,6 +540,9 @@ function agentStop(bp, args)
         return
     end
     animation_generation = animation_generation + 1
+    if code_bp ~= nil then
+        code_bp.Buf.Type.Readonly = false
+    end
     if pending_op ~= nil then
         undo_pending_op()
         pending_op = nil

@@ -90,6 +90,7 @@ type clientSession struct {
 	mu          sync.Mutex
 	step        int           // current step index (0-based)
 	advance     chan struct{} // signaled when approve/reject received
+	proceed     chan struct{} // signaled when continue received (after editing)
 	rejected    bool          // last step was rejected
 	currentOpID string        // op ID currently awaiting approval
 }
@@ -163,7 +164,12 @@ func stubStream(client *socket.Client, sess *clientSession) {
 		if wasRejected {
 			agentPaneMsg(client, "\n[Step rejected — moving on]\n")
 		} else {
-			agentPaneMsg(client, "\n[Step approved]\n")
+			agentPaneMsg(client, "\n[Step approved — edit freely, then :junto-next to continue]\n")
+			// Wait for the developer to signal continue after editing.
+			if _, ok := <-sess.proceed; !ok {
+				return
+			}
+			agentPaneMsg(client, "\n[Continuing...]\n")
 		}
 
 		time.Sleep(300 * time.Millisecond)
@@ -185,6 +191,7 @@ func handleMessage(client *socket.Client, msg any) {
 	if _, ok := msg.(socket.ConnectMsg); ok {
 		sess := &clientSession{
 			advance: make(chan struct{}, 1),
+			proceed: make(chan struct{}, 1),
 		}
 		sessionsMu.Lock()
 		sessions[client] = sess
@@ -200,6 +207,7 @@ func handleMessage(client *socket.Client, msg any) {
 		sessionsMu.Unlock()
 		if sess != nil {
 			close(sess.advance)
+			close(sess.proceed)
 		}
 		log.Printf("client session cleaned up")
 		return
@@ -247,6 +255,10 @@ func handleMessage(client *socket.Client, msg any) {
 			log.Printf("failed to send rejected: %v", err)
 		}
 		sess.advance <- struct{}{}
+
+	case *protocol.ContinueMsg:
+		log.Printf("received continue")
+		sess.proceed <- struct{}{}
 
 	default:
 		log.Printf("unhandled message: %T", msg)

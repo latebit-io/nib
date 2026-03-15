@@ -19,6 +19,7 @@ const (
 	// Plugin → Server
 	TypeApprove  = "approve"
 	TypeReject   = "reject"
+	TypeContinue = "continue"
 	TypeRedirect = "redirect"
 	TypeEdit     = "edit"
 	TypeStart    = "start"
@@ -78,6 +79,10 @@ type RejectMsg struct {
 	OpID string `json:"op_id"`
 }
 
+type ContinueMsg struct {
+	Type string `json:"type"`
+}
+
 type RedirectMsg struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
@@ -127,6 +132,8 @@ func Parse(data []byte) (any, error) {
 		msg = &ApproveMsg{}
 	case TypeReject:
 		msg = &RejectMsg{}
+	case TypeContinue:
+		msg = &ContinueMsg{}
 	case TypeRedirect:
 		msg = &RedirectMsg{}
 	case TypeEdit:

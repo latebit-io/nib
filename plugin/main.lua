@@ -420,7 +420,7 @@ local function show_approval_prompt()
         end
         if yes then
             send({type = "approve", op_id = op.id})
-            micro.InfoBar():Message("agent: approved " .. op.id)
+            micro.InfoBar():Message("agent: approved — edit freely, then :junto-next")
         else
             undo_pending_op()
             send({type = "reject", op_id = op.id})
@@ -555,6 +555,15 @@ function agentStop(bp, args)
     micro.InfoBar():Message("agent: stopped")
 end
 
+function agentNext(bp, args)
+    if bridge_cmd == nil then
+        micro.InfoBar():Error("agent: not running")
+        return
+    end
+    send({type = "continue"})
+    micro.InfoBar():Message("agent: continuing to next step")
+end
+
 function agentSend(bp, args)
     if #args < 1 then
         micro.InfoBar():Error("usage: junto-send <json>")
@@ -571,5 +580,6 @@ end
 function init()
     config.MakeCommand("junto", agentStart, config.NoComplete)
     config.MakeCommand("junto-stop", agentStop, config.NoComplete)
+    config.MakeCommand("junto-next", agentNext, config.NoComplete)
     config.MakeCommand("junto-send", agentSend, config.NoComplete)
 end

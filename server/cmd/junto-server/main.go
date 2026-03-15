@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -18,9 +19,19 @@ import (
 )
 
 var stubMode = flag.Bool("stub", false, "use hardcoded stub plan instead of LLM")
+var debugMode = flag.Bool("debug", false, "enable verbose token/op logging")
 
 func main() {
 	flag.Parse()
+
+	// Configure slog level based on --debug flag
+	logLevel := slog.LevelInfo
+	if *debugMode {
+		logLevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+	})))
 
 	srv, err := socket.NewServer(handleMessage)
 	if err != nil {
@@ -240,12 +251,33 @@ func handleMessage(client *socket.Client, msg any) {
 			agentPaneMsg(client, "[Error: MINIMAX_API_KEY not set]\n")
 			return
 		}
+		// Cancel any previous run and drain channels
+		sess.Mu.Lock()
+		if sess.CancelRun != nil {
+			sess.CancelRun()
+		}
+		sess.CurrentOpID = ""
+		sess.Rejected = false
+		sess.Mu.Unlock()
+		// Drain buffered channels so the new run starts clean
+		select {
+		case <-sess.Advance:
+		default:
+		}
+		select {
+		case <-sess.Proceed:
+		default:
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		sess.Mu.Lock()
+		sess.CancelRun = cancel
+		sess.Mu.Unlock()
 		a := &agent.Agent{
 			Provider: llm.NewMiniMax(apiKey),
 			Client:   client,
 			Session:  sess,
 		}
-		go a.Run(context.Background(), m.File, m.Content, m.Goal)
+		go a.Run(ctx, m.File, m.Content, m.Goal)
 
 	case *protocol.ApproveMsg:
 		log.Printf("received approve for op %s", m.OpID)

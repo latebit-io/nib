@@ -53,10 +53,12 @@ trap cleanup EXIT INT TERM
 # Parse flags
 SERVER_FLAGS=""
 MODE="LLM"
-if [[ "${1:-}" == "--stub" ]]; then
-    SERVER_FLAGS="--stub"
-    MODE="STUB"
-fi
+for arg in "$@"; do
+    case "$arg" in
+        --stub)  SERVER_FLAGS="$SERVER_FLAGS --stub"; MODE="STUB" ;;
+        --debug) SERVER_FLAGS="$SERVER_FLAGS --debug" ;;
+    esac
+done
 
 # Check for API key in LLM mode
 if [[ "$MODE" == "LLM" ]] && [[ -z "${MINIMAX_API_KEY:-}" ]]; then

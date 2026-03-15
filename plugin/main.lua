@@ -293,6 +293,21 @@ local function loc(line, col)
     return buffer.Loc(col - 1, line - 1)
 end
 
+-- safe_loc clamps to valid buffer bounds to prevent Micro panics
+-- when the LLM returns coordinates beyond the actual file size.
+local function safe_loc(line, col)
+    if code_bp == nil or code_bp.Buf == nil then return buffer.Loc(0, 0) end
+    local max_line = code_bp.Buf:LinesNum()
+    local l = line - 1
+    if l < 0 then l = 0 end
+    if l >= max_line then l = max_line - 1 end
+    local line_len = #code_bp.Buf:Line(l)
+    local c = col - 1
+    if c < 0 then c = 0 end
+    if c > line_len then c = line_len end
+    return buffer.Loc(c, l)
+end
+
 -- Generation counter for animated inserts; incremented on each new animation
 -- and on stop/disconnect so stale callbacks become no-ops.
 local animation_generation = 0
@@ -326,7 +341,7 @@ local function animated_insert(line, col, text, on_done)
         local ch = text:sub(pos, pos)
         -- Temporarily unlock for programmatic insert
         code_bp.Buf.Type.Readonly = false
-        code_bp.Buf:Insert(loc(cur_line, cur_col), ch)
+        code_bp.Buf:Insert(safe_loc(cur_line, cur_col), ch)
         code_bp.Buf.Type.Readonly = true
         op_undo_count = op_undo_count + 1
 
@@ -373,7 +388,7 @@ local function apply_op(op, on_done)
             micro.InfoBar():Error("agent: malformed replace op: missing end_line/end_col")
             return false
         end
-        code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
+        code_bp.Buf:Remove(safe_loc(op.line, op.col), safe_loc(op.end_line, op.end_col))
         op_undo_count = 1
         animated_insert(op.line, op.col, op.text, on_done)
         return true
@@ -382,7 +397,7 @@ local function apply_op(op, on_done)
             micro.InfoBar():Error("agent: malformed delete op: missing end_line/end_col")
             return false
         end
-        code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
+        code_bp.Buf:Remove(safe_loc(op.line, op.col), safe_loc(op.end_line, op.end_col))
         op_undo_count = 1
         if on_done then on_done() end
         return true
@@ -573,7 +588,11 @@ function agentSend(bp, args)
         micro.InfoBar():Error("agent: bridge not running")
         return
     end
-    local goal = table.concat(args, " ")
+    local parts = {}
+    for i = 1, #args do
+        parts[i] = args[i]
+    end
+    local goal = table.concat(parts, " ")
     local file_path = ""
     local content = ""
     if code_bp ~= nil and code_bp.Buf ~= nil then

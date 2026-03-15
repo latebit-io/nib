@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/latebit-io/junto/protocol"
@@ -24,6 +24,7 @@ type Session struct {
 	Done        chan struct{} // closed on disconnect
 	Rejected    bool
 	CurrentOpID string
+	CancelRun   context.CancelFunc // cancels current agent run
 }
 
 // NewSession creates a session with initialized channels.
@@ -61,7 +62,7 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string) {
 
 	ch, err := a.Provider.Stream(ctx, messages)
 	if err != nil {
-		log.Printf("agent: stream error: %v", err)
+		slog.Error("stream failed", "err", err)
 		a.sendError(fmt.Sprintf("LLM error: %v", err))
 		return
 	}
@@ -74,15 +75,24 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string) {
 			break
 		}
 
+		slog.Debug("token received", "token", ev.Token)
 		reasoning, op := parser.Feed(ev.Token)
 		if reasoning != "" {
 			a.sendToken(reasoning)
 		}
 
 		if op != nil {
+			slog.Debug("op parsed", "op", op)
 			stepNum++
 			a.handleOp(op, stepNum)
 		}
+	}
+
+	// Check for a trailing op block (LLM may not send \n after closing ```)
+	if op := parser.FlushOp(); op != nil {
+		slog.Debug("flushed trailing op", "op", op)
+		stepNum++
+		a.handleOp(op, stepNum)
 	}
 
 	// Flush any remaining text
@@ -97,7 +107,6 @@ func (a *Agent) handleOp(op *protocol.EditOp, stepNum int) {
 	// Track current op
 	a.Session.Mu.Lock()
 	a.Session.CurrentOpID = op.ID
-	a.Session.Rejected = false
 	a.Session.Mu.Unlock()
 
 	// Send pending op to plugin
@@ -105,7 +114,7 @@ func (a *Agent) handleOp(op *protocol.EditOp, stepNum int) {
 		Type: protocol.TypePendingOp,
 		Op:   *op,
 	}); err != nil {
-		log.Printf("agent: failed to send pending_op: %v", err)
+		slog.Error("failed to send pending_op", "err", err)
 		return
 	}
 

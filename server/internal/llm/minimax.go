@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -92,8 +93,9 @@ func (m *MiniMax) Stream(ctx context.Context, messages []Message) (<-chan Stream
 		return nil, fmt.Errorf("http request: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("api error: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("api error: status %d: %s", resp.StatusCode, string(body))
 	}
 
 	ch := make(chan StreamEvent, 16)

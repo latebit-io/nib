@@ -231,6 +231,25 @@ local function agent_pane_append(text)
 end
 
 -------------------------------------------------------------------------------
+-- safe_loc clamps to valid buffer bounds to prevent Micro panics
+-- when the LLM returns coordinates beyond the actual file size.
+-------------------------------------------------------------------------------
+
+local function safe_loc(line, col)
+    if code_bp == nil or code_bp.Buf == nil then return buffer.Loc(0, 0) end
+    local max_line = code_bp.Buf:LinesNum()
+    if max_line == nil or max_line <= 0 then return buffer.Loc(0, 0) end
+    local l = line - 1
+    if l < 0 then l = 0 end
+    if l >= max_line then l = max_line - 1 end
+    local line_len = #code_bp.Buf:Line(l)
+    local c = col - 1
+    if c < 0 then c = 0 end
+    if c > line_len then c = line_len end
+    return buffer.Loc(c, l)
+end
+
+-------------------------------------------------------------------------------
 -- Agent cursor (in code pane)
 -------------------------------------------------------------------------------
 
@@ -240,8 +259,8 @@ end
 
 local function spawn_agent_cursor(line, col)
     if code_bp == nil then return end
-    local target = buffer.Loc(col - 1, line - 1)
-    micro.Log("agent: spawning cursor at col=" .. (col-1) .. " line=" .. (line-1))
+    local target = safe_loc(line, col)
+    micro.Log("agent: spawning cursor at col=" .. target.X .. " line=" .. target.Y)
     code_bp:SpawnCursorAtLoc(target)
     agent_cursor_active = true
     micro.Log("agent: cursors after spawn: " .. code_bp.Buf:NumCursors())
@@ -257,7 +276,7 @@ local function move_agent_cursor(line, col)
     if n > 1 then
         code_bp.Buf:RemoveCursor(n - 1)
     end
-    code_bp:SpawnCursorAtLoc(buffer.Loc(col - 1, line - 1))
+    code_bp:SpawnCursorAtLoc(safe_loc(line, col))
     code_bp.Buf:SetCurCursor(0)
     code_bp:Relocate()
 end
@@ -326,7 +345,7 @@ local function animated_insert(line, col, text, on_done)
         local ch = text:sub(pos, pos)
         -- Temporarily unlock for programmatic insert
         code_bp.Buf.Type.Readonly = false
-        code_bp.Buf:Insert(loc(cur_line, cur_col), ch)
+        code_bp.Buf:Insert(safe_loc(cur_line, cur_col), ch)
         code_bp.Buf.Type.Readonly = true
         op_undo_count = op_undo_count + 1
 
@@ -343,6 +362,9 @@ local function animated_insert(line, col, text, on_done)
         if pos < #text then
             micro.After(gotime.Millisecond * 20, insert_next_char)
         else
+            -- Remove agent cursor before giving control back to the user,
+            -- otherwise multi-cursor mode duplicates keystrokes.
+            remove_agent_cursor()
             -- Unlock code pane for user editing (approve/reject/edit)
             code_bp.Buf.Type.Readonly = false
             if on_done then on_done() end
@@ -352,44 +374,229 @@ local function animated_insert(line, col, text, on_done)
     insert_next_char()
 end
 
+-- offsets_to_coords converts a (start_idx, end_idx) byte range in `full`
+-- to 1-indexed (s_line, s_col, e_line, e_col).
+local function offsets_to_coords(full, start_idx, end_idx)
+    local line = 1
+    local col = 1
+    local s_line, s_col, e_line, e_col
+    for i = 1, end_idx do
+        if i == start_idx then
+            s_line = line
+            s_col = col
+        end
+        if i == end_idx then
+            e_line = line
+            e_col = col
+        end
+        if full:sub(i, i) == "\n" then
+            line = line + 1
+            col = 1
+        else
+            col = col + 1
+        end
+    end
+    if start_idx == 1 and s_line == nil then
+        s_line = 1
+        s_col = 1
+    end
+    if end_idx == 0 then
+        e_line = s_line
+        e_col = s_col
+    end
+    return s_line, s_col, e_line, e_col
+end
+
+-- get_buffer_text returns the full buffer content as a string.
+local function get_buffer_text()
+    if code_bp == nil or code_bp.Buf == nil then return "" end
+    local lines = {}
+    for i = 0, code_bp.Buf:LinesNum() - 1 do
+        lines[#lines + 1] = code_bp.Buf:Line(i)
+    end
+    return table.concat(lines, "\n")
+end
+
+-- trim_line strips leading and trailing whitespace from a single line.
+local function trim_line(s)
+    return s:match("^%s*(.-)%s*$")
+end
+
+-- split_lines splits a string into an array of lines.
+local function split_lines(s)
+    local result = {}
+    for line in s:gmatch("([^\n]*)\n?") do
+        result[#result + 1] = line
+    end
+    -- gmatch produces a trailing empty entry; remove it
+    if #result > 0 and result[#result] == "" then
+        result[#result] = nil
+    end
+    return result
+end
+
+-- find_text locates a search string in the buffer using multiple strategies:
+--   1. Exact match
+--   2. Line-trimmed match (ignore leading/trailing whitespace per line)
+--   3. Indentation-flexible match (ignore all leading whitespace)
+--   4. Block-anchor match (first+last lines anchor, middle lines fuzzy)
+-- Returns (start_line, start_col, end_line, end_col) in 1-indexed coords,
+-- or nil if not found.
+local function find_text(search)
+    if code_bp == nil or code_bp.Buf == nil or search == nil or search == "" then
+        return nil
+    end
+    local full = get_buffer_text()
+
+    -- Strategy 1: Exact match
+    local start_idx = full:find(search, 1, true)
+    if start_idx then
+        micro.Log("agent: find_text matched with strategy: exact")
+        return offsets_to_coords(full, start_idx, start_idx + #search - 1)
+    end
+
+    -- For line-based strategies, split both search and buffer into lines
+    local search_lines = split_lines(search)
+    local buf_lines = split_lines(full)
+
+    if #search_lines == 0 or #buf_lines == 0 then return nil end
+
+    -- Strategy 2: Line-trimmed match
+    -- Each search line is trimmed; find a contiguous run in the buffer where
+    -- every trimmed buffer line matches the corresponding trimmed search line.
+    local function try_trimmed()
+        local first_trimmed = trim_line(search_lines[1])
+        if first_trimmed == "" then return nil end
+        for bi = 1, #buf_lines - #search_lines + 1 do
+            if trim_line(buf_lines[bi]) == first_trimmed then
+                local ok = true
+                for si = 2, #search_lines do
+                    if trim_line(buf_lines[bi + si - 1]) ~= trim_line(search_lines[si]) then
+                        ok = false
+                        break
+                    end
+                end
+                if ok then return bi end
+            end
+        end
+        return nil
+    end
+
+    local match_start = try_trimmed()
+    if match_start then
+        micro.Log("agent: find_text matched with strategy: line-trimmed")
+        local match_end = match_start + #search_lines - 1
+        local s_col = 1
+        local e_col = #buf_lines[match_end]
+        if e_col == 0 then e_col = 1 end
+        return match_start, s_col, match_end, e_col
+    end
+
+    -- Strategy 3: Indentation-flexible match
+    -- Strip all leading whitespace from each line before comparing.
+    -- This handles cases where the LLM gets indentation wrong.
+    local function try_indent_flex()
+        local first_stripped = search_lines[1]:match("^%s*(.*)")
+        if first_stripped == "" then return nil end
+        for bi = 1, #buf_lines - #search_lines + 1 do
+            if buf_lines[bi]:match("^%s*(.*)") == first_stripped then
+                local ok = true
+                for si = 2, #search_lines do
+                    if buf_lines[bi + si - 1]:match("^%s*(.*)") ~= search_lines[si]:match("^%s*(.*)") then
+                        ok = false
+                        break
+                    end
+                end
+                if ok then return bi end
+            end
+        end
+        return nil
+    end
+
+    match_start = try_indent_flex()
+    if match_start then
+        micro.Log("agent: find_text matched with strategy: indent-flexible")
+        local match_end = match_start + #search_lines - 1
+        local s_col = 1
+        local e_col = #buf_lines[match_end]
+        if e_col == 0 then e_col = 1 end
+        return match_start, s_col, match_end, e_col
+    end
+
+    -- Strategy 4: Block-anchor match
+    -- Match first and last lines exactly (trimmed), allow middle lines to
+    -- differ as long as the line count matches. This handles the case where
+    -- the LLM gets the middle of a block slightly wrong but the boundaries
+    -- are correct.
+    if #search_lines >= 3 then
+        local first_trimmed = trim_line(search_lines[1])
+        local last_trimmed = trim_line(search_lines[#search_lines])
+        if first_trimmed ~= "" and last_trimmed ~= "" then
+            for bi = 1, #buf_lines - #search_lines + 1 do
+                if trim_line(buf_lines[bi]) == first_trimmed then
+                    local ei = bi + #search_lines - 1
+                    if ei <= #buf_lines and trim_line(buf_lines[ei]) == last_trimmed then
+                        micro.Log("agent: find_text matched with strategy: block-anchor")
+                        local e_col = #buf_lines[ei]
+                        if e_col == 0 then e_col = 1 end
+                        return bi, 1, ei, e_col
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 local function apply_op(op, on_done)
     if code_bp == nil then return false end
-    if op.line == nil or op.col == nil then
-        micro.InfoBar():Error("agent: malformed op: missing line/col")
+    if op.search == nil or op.search == "" then
+        micro.InfoBar():Error("agent: malformed op: missing search")
         return false
     end
     op_undo_count = 0
-    -- Position agent cursor at the op location
-    if not agent_cursor_active then
-        spawn_agent_cursor(op.line, op.col)
-    else
-        move_agent_cursor(op.line, op.col)
-    end
-    if op.kind == "insert" then
-        animated_insert(op.line, op.col, op.text, on_done)
-        return true -- on_done called asynchronously
-    elseif op.kind == "replace" then
-        if op.end_line == nil or op.end_col == nil then
-            micro.InfoBar():Error("agent: malformed replace op: missing end_line/end_col")
-            return false
-        end
-        code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
-        op_undo_count = 1
-        animated_insert(op.line, op.col, op.text, on_done)
-        return true
-    elseif op.kind == "delete" then
-        if op.end_line == nil or op.end_col == nil then
-            micro.InfoBar():Error("agent: malformed delete op: missing end_line/end_col")
-            return false
-        end
-        code_bp.Buf:Remove(loc(op.line, op.col), loc(op.end_line, op.end_col))
-        op_undo_count = 1
-        if on_done then on_done() end
-        return true
-    else
-        micro.InfoBar():Error("agent: unknown op kind: " .. tostring(op.kind))
+
+    local s_line, s_col, e_line, e_col = find_text(op.search)
+    if s_line == nil then
+        micro.InfoBar():Error("agent: search text not found in buffer")
+        micro.Log("agent: search not found: " .. op.search)
         return false
     end
+
+    -- Position agent cursor at the match location
+    if not agent_cursor_active then
+        spawn_agent_cursor(s_line, s_col)
+    else
+        move_agent_cursor(s_line, s_col)
+    end
+
+    -- Remove the matched text.
+    -- When the match ends on a newline (e_col > line length), advance to the
+    -- start of the next line so the trailing newline is also removed.
+    local startLoc = safe_loc(s_line, s_col)
+    local endLoc
+    local line_text = code_bp.Buf:Line(e_line)
+    local line_len = line_text and #line_text or 0
+    if e_col > line_len then
+        endLoc = safe_loc(e_line + 1, 1)
+    else
+        endLoc = safe_loc(e_line, e_col + 1)
+    end
+    code_bp.Buf:Remove(startLoc, endLoc)
+    op_undo_count = 1
+
+    local replacement = op.replace or ""
+    if replacement == "" then
+        -- Delete only — no text to insert
+        remove_agent_cursor()
+        if on_done then on_done() end
+        return true
+    end
+
+    -- Animated insert of the replacement text
+    animated_insert(s_line, s_col, replacement, on_done)
+    return true
 end
 
 local function undo_pending_op()
@@ -407,9 +614,10 @@ end
 local function show_approval_prompt()
     if pending_op == nil then return end
     local op = pending_op
+    local action = (op.replace == nil or op.replace == "") and "delete" or "replace"
     local desc = string.format(
-        "Agent: %s at line %d (%s) — approve? (y/n) ",
-        op.kind, op.line, op.reason or "")
+        "Agent: %s (%s) — approve? (y/n) ",
+        action, op.reason or "")
     micro.InfoBar():YNPrompt(desc, function(yes, cancelled)
         if cancelled then
             undo_pending_op()
@@ -560,21 +768,50 @@ function agentNext(bp, args)
         micro.InfoBar():Error("agent: not running")
         return
     end
-    send({type = "continue"})
+    local content = ""
+    if code_bp ~= nil and code_bp.Buf ~= nil then
+        local lines = {}
+        for i = 0, code_bp.Buf:LinesNum() - 1 do
+            lines[#lines + 1] = code_bp.Buf:Line(i)
+        end
+        content = table.concat(lines, "\n")
+    end
+    send({type = "continue", content = content})
     micro.InfoBar():Message("agent: continuing to next step")
 end
 
 function agentSend(bp, args)
     if #args < 1 then
-        micro.InfoBar():Error("usage: junto-send <json>")
+        micro.InfoBar():Error("usage: junto-send <goal>")
         return
     end
     if bridge_cmd == nil then
         micro.InfoBar():Error("agent: bridge not running")
         return
     end
-    shell.JobSend(bridge_cmd, table.concat(args, " ") .. "\n")
-    micro.InfoBar():Message("agent: sent")
+    local parts = {}
+    for i = 1, #args do
+        parts[i] = args[i]
+    end
+    local goal = table.concat(parts, " ")
+    local file_path = ""
+    local content = ""
+    if code_bp ~= nil and code_bp.Buf ~= nil then
+        file_path = code_bp.Buf.Path or ""
+        -- Get full buffer contents
+        local lines = {}
+        for i = 0, code_bp.Buf:LinesNum() - 1 do
+            lines[#lines + 1] = code_bp.Buf:Line(i)
+        end
+        content = table.concat(lines, "\n")
+    end
+    send({
+        type = "start",
+        file = file_path,
+        content = content,
+        goal = goal,
+    })
+    micro.InfoBar():Message("agent: task sent — " .. goal)
 end
 
 function init()

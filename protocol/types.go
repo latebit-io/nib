@@ -11,16 +11,12 @@ const (
 )
 
 // EditOp is a single proposed code change from the agent.
-// Line and Col are 1-indexed (matching editor display). The plugin converts
-// to 0-indexed when calling Micro's buffer.Loc.
+// The LLM specifies a Search string (exact text to find in the file) and a
+// Replace string (what to put in its place). Empty Replace means delete.
 type EditOp struct {
 	ID      string `json:"id"`
-	Kind    string `json:"kind"`               // "insert" | "replace" | "delete"
-	Line    int    `json:"line"`               // 1-indexed
-	Col     int    `json:"col"`                // 1-indexed
-	EndLine int    `json:"end_line,omitempty"` // 1-indexed
-	EndCol  int    `json:"end_col,omitempty"`  // 1-indexed
-	Text    string `json:"text"`
+	Search  string `json:"search"`  // exact text to find in the file
+	Replace string `json:"replace"` // replacement text (empty = delete)
 	Reason  string `json:"reason"`
 }
 

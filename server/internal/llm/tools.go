@@ -53,5 +53,19 @@ var EditFileTool = ToolDef{
 	},
 }
 
+// ReadFileTool lets the LLM read the current file content before editing.
+var ReadFileTool = ToolDef{
+	Type: "function",
+	Function: FunctionDef{
+		Name:        "read_file",
+		Description: "Read the current contents of the file being edited. Use this before making an edit to see the latest state of the file, especially after the developer may have made changes.",
+		Parameters: FunctionParams{
+			Type:       "object",
+			Properties: map[string]FunctionParam{},
+			Required:   []string{},
+		},
+	},
+}
+
 // DefaultTools is the set of tools provided to the LLM.
-var DefaultTools = []ToolDef{EditFileTool}
+var DefaultTools = []ToolDef{ReadFileTool, EditFileTool}

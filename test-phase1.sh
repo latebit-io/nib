@@ -2,7 +2,7 @@
 # test-junto.sh — Launch junto server + Micro editor for testing
 # Usage: ./test-phase1.sh [--stub]
 #   --stub    Use hardcoded stub plan (no API key needed)
-#   default   Use LLM mode (requires MINIMAX_API_KEY)
+#   default   Use LLM mode (requires LLM_API_KEY or MINIMAX_API_KEY)
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
@@ -61,9 +61,10 @@ for arg in "$@"; do
 done
 
 # Check for API key in LLM mode
-if [[ "$MODE" == "LLM" ]] && [[ -z "${MINIMAX_API_KEY:-}" ]]; then
-    echo "Warning: MINIMAX_API_KEY not set. Use --stub for testing without API key."
-    echo "  export MINIMAX_API_KEY='your-key-here'"
+if [[ "$MODE" == "LLM" ]] && [[ -z "${LLM_API_KEY:-}" ]] && [[ -z "${MINIMAX_API_KEY:-}" ]]; then
+    echo "Warning: No API key set. Use --stub for testing without API key."
+    echo "  export LLM_API_KEY='your-key-here'   (OpenRouter, OpenAI, etc.)"
+    echo "  export MINIMAX_API_KEY='your-key'     (legacy MiniMax)"
     echo "  Or: ./test-phase1.sh --stub"
     echo ""
     read -p "Continue anyway? (y/n) " -n 1 -r

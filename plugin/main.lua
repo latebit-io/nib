@@ -373,24 +373,9 @@ local function animated_insert(line, col, text, on_done)
     insert_next_char()
 end
 
--- find_text locates a search string in the buffer and returns
--- (start_line, start_col, end_line, end_col) in 1-indexed coordinates,
--- or nil if not found.
-local function find_text(search)
-    if code_bp == nil or code_bp.Buf == nil or search == nil or search == "" then
-        return nil
-    end
-    -- Build full buffer text
-    local lines = {}
-    for i = 0, code_bp.Buf:LinesNum() - 1 do
-        lines[#lines + 1] = code_bp.Buf:Line(i)
-    end
-    local full = table.concat(lines, "\n")
-    -- Plain text search (not pattern)
-    local start_idx = full:find(search, 1, true)
-    if not start_idx then return nil end
-    local end_idx = start_idx + #search - 1
-    -- Convert byte offsets to line/col (1-indexed)
+-- offsets_to_coords converts a (start_idx, end_idx) byte range in `full`
+-- to 1-indexed (s_line, s_col, e_line, e_col).
+local function offsets_to_coords(full, start_idx, end_idx)
     local line = 1
     local col = 1
     local s_line, s_col, e_line, e_col
@@ -410,7 +395,6 @@ local function find_text(search)
             col = col + 1
         end
     end
-    -- Handle edge case: search is at position 1
     if start_idx == 1 and s_line == nil then
         s_line = 1
         s_col = 1
@@ -420,6 +404,153 @@ local function find_text(search)
         e_col = s_col
     end
     return s_line, s_col, e_line, e_col
+end
+
+-- get_buffer_text returns the full buffer content as a string.
+local function get_buffer_text()
+    if code_bp == nil or code_bp.Buf == nil then return "" end
+    local lines = {}
+    for i = 0, code_bp.Buf:LinesNum() - 1 do
+        lines[#lines + 1] = code_bp.Buf:Line(i)
+    end
+    return table.concat(lines, "\n")
+end
+
+-- trim_line strips leading and trailing whitespace from a single line.
+local function trim_line(s)
+    return s:match("^%s*(.-)%s*$")
+end
+
+-- normalize_ws collapses all runs of whitespace to a single space and trims.
+local function normalize_ws(s)
+    return s:match("^%s*(.-)%s*$"):gsub("%s+", " ")
+end
+
+-- split_lines splits a string into an array of lines.
+local function split_lines(s)
+    local result = {}
+    for line in s:gmatch("([^\n]*)\n?") do
+        result[#result + 1] = line
+    end
+    -- gmatch produces a trailing empty entry; remove it
+    if #result > 0 and result[#result] == "" then
+        result[#result] = nil
+    end
+    return result
+end
+
+-- find_text locates a search string in the buffer using multiple strategies:
+--   1. Exact match
+--   2. Line-trimmed match (ignore leading/trailing whitespace per line)
+--   3. Indentation-flexible match (ignore all leading whitespace)
+--   4. Block-anchor match (first+last lines anchor, middle lines fuzzy)
+-- Returns (start_line, start_col, end_line, end_col) in 1-indexed coords,
+-- or nil if not found.
+local function find_text(search)
+    if code_bp == nil or code_bp.Buf == nil or search == nil or search == "" then
+        return nil
+    end
+    local full = get_buffer_text()
+
+    -- Strategy 1: Exact match
+    local start_idx = full:find(search, 1, true)
+    if start_idx then
+        micro.Log("agent: find_text matched with strategy: exact")
+        return offsets_to_coords(full, start_idx, start_idx + #search - 1)
+    end
+
+    -- For line-based strategies, split both search and buffer into lines
+    local search_lines = split_lines(search)
+    local buf_lines = split_lines(full)
+
+    if #search_lines == 0 or #buf_lines == 0 then return nil end
+
+    -- Strategy 2: Line-trimmed match
+    -- Each search line is trimmed; find a contiguous run in the buffer where
+    -- every trimmed buffer line matches the corresponding trimmed search line.
+    local function try_trimmed()
+        local first_trimmed = trim_line(search_lines[1])
+        if first_trimmed == "" then return nil end
+        for bi = 1, #buf_lines - #search_lines + 1 do
+            if trim_line(buf_lines[bi]) == first_trimmed then
+                local ok = true
+                for si = 2, #search_lines do
+                    if trim_line(buf_lines[bi + si - 1]) ~= trim_line(search_lines[si]) then
+                        ok = false
+                        break
+                    end
+                end
+                if ok then return bi end
+            end
+        end
+        return nil
+    end
+
+    local match_start = try_trimmed()
+    if match_start then
+        micro.Log("agent: find_text matched with strategy: line-trimmed")
+        local match_end = match_start + #search_lines - 1
+        local s_col = 1
+        local e_col = #buf_lines[match_end]
+        if e_col == 0 then e_col = 1 end
+        return match_start, s_col, match_end, e_col
+    end
+
+    -- Strategy 3: Indentation-flexible match
+    -- Strip all leading whitespace from each line before comparing.
+    -- This handles cases where the LLM gets indentation wrong.
+    local function try_indent_flex()
+        local first_stripped = search_lines[1]:match("^%s*(.*)")
+        if first_stripped == "" then return nil end
+        for bi = 1, #buf_lines - #search_lines + 1 do
+            if buf_lines[bi]:match("^%s*(.*)") == first_stripped then
+                local ok = true
+                for si = 2, #search_lines do
+                    if buf_lines[bi + si - 1]:match("^%s*(.*)") ~= search_lines[si]:match("^%s*(.*)") then
+                        ok = false
+                        break
+                    end
+                end
+                if ok then return bi end
+            end
+        end
+        return nil
+    end
+
+    match_start = try_indent_flex()
+    if match_start then
+        micro.Log("agent: find_text matched with strategy: indent-flexible")
+        local match_end = match_start + #search_lines - 1
+        local s_col = 1
+        local e_col = #buf_lines[match_end]
+        if e_col == 0 then e_col = 1 end
+        return match_start, s_col, match_end, e_col
+    end
+
+    -- Strategy 4: Block-anchor match
+    -- Match first and last lines exactly (trimmed), allow middle lines to
+    -- differ as long as the line count matches. This handles the case where
+    -- the LLM gets the middle of a block slightly wrong but the boundaries
+    -- are correct.
+    if #search_lines >= 3 then
+        local first_trimmed = trim_line(search_lines[1])
+        local last_trimmed = trim_line(search_lines[#search_lines])
+        if first_trimmed ~= "" and last_trimmed ~= "" then
+            for bi = 1, #buf_lines - #search_lines + 1 do
+                if trim_line(buf_lines[bi]) == first_trimmed then
+                    local ei = bi + #search_lines - 1
+                    if ei <= #buf_lines and trim_line(buf_lines[ei]) == last_trimmed then
+                        micro.Log("agent: find_text matched with strategy: block-anchor")
+                        local e_col = #buf_lines[ei]
+                        if e_col == 0 then e_col = 1 end
+                        return bi, 1, ei, e_col
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
 end
 
 local function apply_op(op, on_done)
@@ -630,7 +761,15 @@ function agentNext(bp, args)
         micro.InfoBar():Error("agent: not running")
         return
     end
-    send({type = "continue"})
+    local content = ""
+    if code_bp ~= nil and code_bp.Buf ~= nil then
+        local lines = {}
+        for i = 0, code_bp.Buf:LinesNum() - 1 do
+            lines[#lines + 1] = code_bp.Buf:Line(i)
+        end
+        content = table.concat(lines, "\n")
+    end
+    send({type = "continue", content = content})
     micro.InfoBar():Message("agent: continuing to next step")
 end
 

@@ -80,7 +80,8 @@ type RejectMsg struct {
 }
 
 type ContinueMsg struct {
-	Type string `json:"type"`
+	Type    string `json:"type"`
+	Content string `json:"content,omitempty"` // current buffer content
 }
 
 type RedirectMsg struct {

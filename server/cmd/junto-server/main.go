@@ -45,8 +45,10 @@ func main() {
 	fmt.Println(srv.SockPath())
 
 	if !*stubMode {
-		if os.Getenv("MINIMAX_API_KEY") == "" {
-			log.Println("warning: MINIMAX_API_KEY not set, use --stub for testing without API key")
+		if os.Getenv("LLM_API_KEY") == "" && os.Getenv("MINIMAX_API_KEY") == "" {
+			log.Println("warning: LLM_API_KEY not set, use --stub for testing without API key")
+			log.Println("  Set LLM_API_KEY, LLM_BASE_URL, LLM_MODEL for any OpenAI-compatible provider")
+			log.Println("  Or set MINIMAX_API_KEY for MiniMax (legacy)")
 		}
 	}
 
@@ -246,10 +248,29 @@ func handleMessage(client *socket.Client, msg any) {
 			log.Printf("ignoring start in stub mode")
 			return
 		}
-		apiKey := os.Getenv("MINIMAX_API_KEY")
+		// Resolve provider config from env vars
+		apiKey := os.Getenv("LLM_API_KEY")
+		baseURL := os.Getenv("LLM_BASE_URL")
+		model := os.Getenv("LLM_MODEL")
+		// Fallback to legacy MiniMax env var
 		if apiKey == "" {
-			agentPaneMsg(client, "[Error: MINIMAX_API_KEY not set]\n")
+			apiKey = os.Getenv("MINIMAX_API_KEY")
+			if baseURL == "" {
+				baseURL = "https://api.minimax.io/v1"
+			}
+			if model == "" {
+				model = "MiniMax-M2.5"
+			}
+		}
+		if apiKey == "" {
+			agentPaneMsg(client, "[Error: LLM_API_KEY not set]\n")
 			return
+		}
+		if baseURL == "" {
+			baseURL = "https://openrouter.ai/api/v1"
+		}
+		if model == "" {
+			model = "anthropic/claude-sonnet-4"
 		}
 		// Cancel any previous run and drain channels
 		sess.Mu.Lock()
@@ -272,8 +293,9 @@ func handleMessage(client *socket.Client, msg any) {
 		sess.Mu.Lock()
 		sess.CancelRun = cancel
 		sess.Mu.Unlock()
+		log.Printf("using LLM: %s @ %s", model, baseURL)
 		a := &agent.Agent{
-			Provider: llm.NewAgentAPI("https://api.minimax.io/v1", "MiniMax-M2.5", apiKey),
+			Provider: llm.NewAgentAPI(baseURL, model, apiKey),
 			Client:   client,
 			Session:  sess,
 		}
@@ -323,6 +345,9 @@ func handleMessage(client *socket.Client, msg any) {
 
 	case *protocol.ContinueMsg:
 		log.Printf("received continue")
+		sess.Mu.Lock()
+		sess.FileContent = m.Content
+		sess.Mu.Unlock()
 		select {
 		case sess.Proceed <- struct{}{}:
 		default:

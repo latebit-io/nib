@@ -576,7 +576,7 @@ local function apply_op(op, on_done)
     -- start of the next line so the trailing newline is also removed.
     local startLoc = safe_loc(s_line, s_col)
     local endLoc
-    local line_text = code_bp.Buf:Line(e_line)
+    local line_text = code_bp.Buf:Line(e_line - 1)
     local line_len = line_text and #line_text or 0
     if e_col > line_len then
         endLoc = safe_loc(e_line + 1, 1)

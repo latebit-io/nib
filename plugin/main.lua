@@ -238,6 +238,7 @@ end
 local function safe_loc(line, col)
     if code_bp == nil or code_bp.Buf == nil then return buffer.Loc(0, 0) end
     local max_line = code_bp.Buf:LinesNum()
+    if max_line == nil or max_line <= 0 then return buffer.Loc(0, 0) end
     local l = line - 1
     if l < 0 then l = 0 end
     if l >= max_line then l = max_line - 1 end
@@ -421,11 +422,6 @@ local function trim_line(s)
     return s:match("^%s*(.-)%s*$")
 end
 
--- normalize_ws collapses all runs of whitespace to a single space and trims.
-local function normalize_ws(s)
-    return s:match("^%s*(.-)%s*$"):gsub("%s+", " ")
-end
-
 -- split_lines splits a string into an array of lines.
 local function split_lines(s)
     local result = {}
@@ -575,8 +571,19 @@ local function apply_op(op, on_done)
         move_agent_cursor(s_line, s_col)
     end
 
-    -- Remove the matched text (end_col + 1 to include the last char)
-    code_bp.Buf:Remove(safe_loc(s_line, s_col), safe_loc(e_line, e_col + 1))
+    -- Remove the matched text.
+    -- When the match ends on a newline (e_col > line length), advance to the
+    -- start of the next line so the trailing newline is also removed.
+    local startLoc = safe_loc(s_line, s_col)
+    local endLoc
+    local line_text = code_bp.Buf:Line(e_line)
+    local line_len = line_text and #line_text or 0
+    if e_col > line_len then
+        endLoc = safe_loc(e_line + 1, 1)
+    else
+        endLoc = safe_loc(e_line, e_col + 1)
+    end
+    code_bp.Buf:Remove(startLoc, endLoc)
     op_undo_count = 1
 
     local replacement = op.replace or ""

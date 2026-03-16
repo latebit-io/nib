@@ -82,7 +82,7 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string) {
 		}
 
 		// Collect this turn's content and tool calls
-		var contentBuf string
+		var contentBuf strings.Builder
 		var toolCalls []llm.ToolCall
 
 		for ev := range ch {
@@ -95,7 +95,7 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string) {
 			// Strip <think> tags from reasoning
 			clean := llm.StripThinkTags(ev.Token, &thinkState)
 			if clean != "" {
-				contentBuf += clean
+				contentBuf.WriteString(clean)
 				a.sendToken(clean)
 			}
 		}
@@ -109,7 +109,7 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string) {
 		// Append assistant message to conversation history
 		assistantMsg := llm.Message{
 			Role:    "assistant",
-			Content: contentBuf,
+			Content: contentBuf.String(),
 		}
 		if len(toolCalls) > 0 {
 			assistantMsg.ToolCalls = toolCalls

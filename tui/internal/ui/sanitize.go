@@ -19,14 +19,12 @@ func sanitize(s string) string {
 		// Strip ANSI escape sequences: ESC [ ... final byte
 		if r == '\x1b' && i+1 < len(runes) && runes[i+1] == '[' {
 			i += 2 // skip ESC [
-			for i < len(runes) && runes[i] < 0x40 || runes[i] > 0x7e {
+			for i < len(runes) {
 				if runes[i] >= 0x40 && runes[i] <= 0x7e {
+					i++ // skip final byte
 					break
 				}
-				i++
-			}
-			if i < len(runes) {
-				i++ // skip final byte
+				i++ // skip parameter/intermediate bytes
 			}
 			continue
 		}

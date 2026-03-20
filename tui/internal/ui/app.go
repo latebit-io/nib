@@ -95,7 +95,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		slog.Debug("key event", "type", msg.Type, "string", msg.String(), "runes", msg.Runes)
 
 		// Toggle focus with Ctrl+\
-		if msg.Type == tea.KeyCtrlBackslash {
+		if msg.Type == tea.KeyCtrlBackslash && m.AgentLoop != nil {
 			if m.Focus == FocusEditor {
 				m.Focus = FocusAgent
 			} else {
@@ -116,20 +116,20 @@ func (m *AppModel) updateLayout() {
 		editorW = m.Width
 		agentW = 0
 	} else {
-		agentW = int(float64(m.Width) * m.AgentRatio)
-		if agentW < 20 {
-			agentW = 20
-		}
-		editorW = m.Width - agentW - 1 // -1 for divider
-		if editorW < 20 {
-			editorW = 20
-			agentW = m.Width - editorW - 1
-		}
-		if agentW < 0 {
+		// Too narrow for split — give everything to editor
+		if m.Width < 42 { // 20 + 1 divider + 20 + 1 margin
+			editorW = m.Width
 			agentW = 0
-		}
-		if editorW < 0 {
-			editorW = 0
+		} else {
+			agentW = int(float64(m.Width) * m.AgentRatio)
+			if agentW < 20 {
+				agentW = 20
+			}
+			editorW = m.Width - agentW - 1 // -1 for divider
+			if editorW < 20 {
+				editorW = 20
+				agentW = m.Width - editorW - 1
+			}
 		}
 	}
 
@@ -607,8 +607,8 @@ func (m *AppModel) View() string {
 
 	editorView := m.Editor.Render()
 
-	// Editor-only mode: no agent pane or divider
-	if m.AgentLoop == nil {
+	// Editor-only mode or too narrow for split
+	if m.AgentLoop == nil || m.AgentPane.Width == 0 {
 		return editorView
 	}
 

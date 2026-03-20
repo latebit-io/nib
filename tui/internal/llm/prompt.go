@@ -34,7 +34,12 @@ func BuildMessages(fileName, fileContent, goal string) []Message {
 		fmt.Fprintf(&numbered, "%4d | %s\n", i+1, line)
 	}
 
-	user := fmt.Sprintf("## File: %s\n\n```\n%s```\n\n## Task\n\n%s", fileName, numbered.String(), goal)
+	// Use a fence that doesn't appear in the file content
+	fence := "```"
+	for strings.Contains(numbered.String(), fence) {
+		fence += "`"
+	}
+	user := fmt.Sprintf("## File: %s\n\n%s\n%s%s\n\n## Task\n\n%s", fileName, fence, numbered.String(), fence, goal)
 
 	return []Message{
 		{Role: "system", Content: systemPrompt},

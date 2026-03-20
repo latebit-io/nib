@@ -66,7 +66,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agent.TokenMsg:
-		m.AgentPane.AppendText(msg.Text)
+		m.AgentPane.AppendText(sanitize(msg.Text))
 		return m, nil
 
 	case agent.StatusMsg:
@@ -109,21 +109,28 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) updateLayout() {
-	agentW := int(float64(m.Width) * m.AgentRatio)
-	if agentW < 20 {
-		agentW = 20
-	}
-	editorW := m.Width - agentW - 1 // -1 for divider
-	if editorW < 20 {
-		editorW = 20
-		agentW = m.Width - editorW - 1
-	}
-	// Clamp for very narrow windows
-	if agentW < 0 {
+	var editorW, agentW int
+
+	if m.AgentLoop == nil {
+		// Editor-only mode: full width
+		editorW = m.Width
 		agentW = 0
-	}
-	if editorW < 0 {
-		editorW = 0
+	} else {
+		agentW = int(float64(m.Width) * m.AgentRatio)
+		if agentW < 20 {
+			agentW = 20
+		}
+		editorW = m.Width - agentW - 1 // -1 for divider
+		if editorW < 20 {
+			editorW = 20
+			agentW = m.Width - editorW - 1
+		}
+		if agentW < 0 {
+			agentW = 0
+		}
+		if editorW < 0 {
+			editorW = 0
+		}
 	}
 
 	m.Editor.Width = editorW
@@ -599,6 +606,12 @@ func (m *AppModel) View() string {
 	}
 
 	editorView := m.Editor.Render()
+
+	// Editor-only mode: no agent pane or divider
+	if m.AgentLoop == nil {
+		return editorView
+	}
+
 	agentView := m.AgentPane.Render()
 
 	// Divider: exactly m.Height lines

@@ -138,8 +138,11 @@ func (a *Agent) Cancel() {
 }
 
 func (a *Agent) send(msg tea.Msg) {
-	if a.Program != nil {
-		a.Program.Send(msg)
+	a.mu.Lock()
+	p := a.Program
+	a.mu.Unlock()
+	if p != nil {
+		p.Send(msg)
 	}
 }
 

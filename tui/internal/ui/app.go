@@ -130,6 +130,23 @@ func (m *AppModel) updateLayout() {
 	m.Editor.Height = m.Height
 	m.AgentPane.Width = agentW
 	m.AgentPane.Height = m.Height
+
+	// Clamp scroll offsets for new viewport size
+	maxEditorScroll := m.Editor.Buf.LineCount() - m.Editor.VisibleLines()
+	if maxEditorScroll < 0 {
+		maxEditorScroll = 0
+	}
+	if m.Editor.ScrollOffset > maxEditorScroll {
+		m.Editor.ScrollOffset = maxEditorScroll
+	}
+
+	maxAgentScroll := len(m.AgentPane.Lines) - m.AgentPane.VisibleLines()
+	if maxAgentScroll < 0 {
+		maxAgentScroll = 0
+	}
+	if m.AgentPane.ScrollOffset > maxAgentScroll {
+		m.AgentPane.ScrollOffset = maxAgentScroll
+	}
 }
 
 func (m *AppModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {

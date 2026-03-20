@@ -12,7 +12,7 @@ type AgentPaneModel struct {
 	Width  int
 	Height int
 
-	// Content lines (streamed from agent, already wrapped)
+	// Content lines streamed from the agent; may exceed Width (truncated in render).
 	Lines []string
 
 	// Scroll

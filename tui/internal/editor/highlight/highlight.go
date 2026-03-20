@@ -54,13 +54,9 @@ func (h *Highlighter) Parse(source string) {
 	}
 
 	lines := strings.Split(source, "\n")
-	lineLens := make([]int, len(lines))
-	for i, l := range lines {
-		lineLens[i] = len(l)
-	}
 
 	h.cache = make([][]Token, len(lines))
-	h.collectAllTokens(h.tree.RootNode(), lineLens)
+	h.collectAllTokens(h.tree.RootNode(), lines)
 }
 
 // Close frees tree-sitter resources.
@@ -80,7 +76,8 @@ func (h *Highlighter) HighlightLine(lineNum int) []Token {
 }
 
 // collectAllTokens walks the tree once and populates h.cache for every line.
-func (h *Highlighter) collectAllTokens(node *sitter.Node, lineLens []int) {
+// Tree-sitter uses byte offsets; we convert to rune indices for the editor.
+func (h *Highlighter) collectAllTokens(node *sitter.Node, lines []string) {
 	childCount := node.ChildCount()
 	if childCount == 0 {
 		startRow := int(node.StartPosition().Row)
@@ -94,14 +91,23 @@ func (h *Highlighter) collectAllTokens(node *sitter.Node, lineLens []int) {
 		}
 
 		for line := startRow; line <= endRow && line < len(h.cache); line++ {
-			sc := 0
+			lineBytes := lines[line]
+			lineByteLen := len(lineBytes)
+
+			// Byte offsets for this line
+			scBytes := 0
 			if line == startRow {
-				sc = startCol
+				scBytes = startCol
 			}
-			ec := lineLens[line]
+			ecBytes := lineByteLen
 			if line == endRow {
-				ec = endCol
+				ecBytes = endCol
 			}
+
+			// Convert byte offsets to rune offsets
+			sc := len([]rune(lineBytes[:scBytes]))
+			ec := len([]rune(lineBytes[:ecBytes]))
+
 			if sc < ec {
 				h.cache[line] = append(h.cache[line], Token{
 					Col:   sc,
@@ -114,7 +120,7 @@ func (h *Highlighter) collectAllTokens(node *sitter.Node, lineLens []int) {
 	}
 
 	for i := range childCount {
-		h.collectAllTokens(node.Child(i), lineLens)
+		h.collectAllTokens(node.Child(i), lines)
 	}
 }
 

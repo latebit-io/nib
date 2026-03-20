@@ -76,14 +76,29 @@ func (a *Agent) Run(p *tea.Program, fileName, fileContent, goal string) {
 	if a.cancel != nil {
 		a.cancel()
 	}
+	// Drain stale signals from previous run
+	drain(a.approveCh)
+	drain(a.continueCh)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.Program = p
 	a.fileName = fileName
 	a.fileContent = fileContent
+	a.silentRetries = 0
 	a.mu.Unlock()
 
 	go a.run(ctx, fileName, fileContent, goal)
+}
+
+func drain[T any](ch chan T) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
 }
 
 // Approve signals that the user approved the pending edit.

@@ -7,9 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 )
 
@@ -72,9 +70,6 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message) (<-chan Strea
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
-
-	_ = os.WriteFile("/tmp/junto-debug-request.json", body, 0644)
-	slog.Debug("LLM request", "url", a.BaseURL+"/chat/completions", "model", a.Model, "body_len", len(body))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", a.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {

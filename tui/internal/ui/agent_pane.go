@@ -104,10 +104,18 @@ func (m *AgentPaneModel) SelectedRange() (int, int, int, int) {
 
 // SelectedText returns the text in the current selection.
 func (m *AgentPaneModel) SelectedText() string {
-	if !m.SelectionActive {
+	if !m.SelectionActive || len(m.Lines) == 0 {
 		return ""
 	}
 	sl, sc, el, ec := m.SelectedRange()
+	if sl < 0 {
+		sl = 0
+		sc = 0
+	}
+	if el >= len(m.Lines) {
+		el = len(m.Lines) - 1
+		ec = len([]rune(m.Lines[el]))
+	}
 	if sl == el {
 		if sl >= len(m.Lines) {
 			return ""

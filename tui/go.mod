@@ -1,6 +1,6 @@
 module github.com/latebit-io/junto/tui
 
-go 1.25.0
+go 1.26
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10

@@ -117,6 +117,13 @@ func (m *AppModel) updateLayout() {
 		editorW = 20
 		agentW = m.Width - editorW - 1
 	}
+	// Clamp for very narrow windows
+	if agentW < 0 {
+		agentW = 0
+	}
+	if editorW < 0 {
+		editorW = 0
+	}
 
 	m.Editor.Width = editorW
 	m.Editor.Height = m.Height
@@ -207,6 +214,12 @@ func (m *AppModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			col = 0
 		}
 		line := m.AgentPane.ScrollOffset + msg.Y - 1 // -1 for header row
+		if line < 0 {
+			line = 0
+		}
+		if line >= len(m.AgentPane.Lines) {
+			line = max(len(m.AgentPane.Lines)-1, 0)
+		}
 
 		switch msg.Action {
 		case tea.MouseActionPress:
@@ -273,9 +286,15 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.Editor.Buf.Path = path
 				m.Editor.Buf.Modified = true
 				m.Editor.MarkDirty()
+				m.PendingEdit = nil
+				m.AgentLoop.Approve()
+			} else {
+				// Search text no longer in buffer — reject so agent re-reads
+				slog.Warn("agent approve: search text not found, auto-rejecting")
+				m.AgentPane.AppendText("\n[Edit could not be applied — text changed]\n")
+				m.PendingEdit = nil
+				m.AgentLoop.Reject()
 			}
-			m.PendingEdit = nil
-			m.AgentLoop.Approve()
 		}
 		return m, nil
 
@@ -287,7 +306,7 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case ActionAgentContinue:
-		if m.AgentLoop != nil {
+		if m.AgentLoop != nil && m.AgentPane.Status == "editing" {
 			m.AgentLoop.Continue(m.Editor.Buf.Content())
 		}
 		return m, nil
@@ -330,6 +349,8 @@ func (m *AppModel) handleAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.Editor.StatusMsg = "" // clear transient status on any key
+
 	isShift := msg.Type == tea.KeyShiftUp || msg.Type == tea.KeyShiftDown ||
 		msg.Type == tea.KeyShiftLeft || msg.Type == tea.KeyShiftRight ||
 		msg.Type == tea.KeyShiftHome || msg.Type == tea.KeyShiftEnd
@@ -343,7 +364,11 @@ func (m *AppModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case ActionSave:
-		_ = m.Editor.Buf.Save()
+		if err := m.Editor.Buf.Save(); err != nil {
+			m.Editor.StatusMsg = "Save failed: " + err.Error()
+		} else {
+			m.Editor.StatusMsg = "Saved"
+		}
 		return m, nil
 
 	case ActionUndo:

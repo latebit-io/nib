@@ -31,6 +31,9 @@ type EditorModel struct {
 	// Syntax highlighting
 	Highlighter  *highlight.Highlighter
 	needsReparse bool
+
+	// Transient status message (shown in status bar, cleared on next key)
+	StatusMsg string
 }
 
 // NewEditorModel creates an editor model from a buffer.
@@ -401,12 +404,6 @@ func (m *EditorModel) Render() string {
 	vis := m.VisibleLines()
 	gutterStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
-	// Pre-compute highlight tokens for visible lines
-	var source string
-	if m.Highlighter != nil {
-		source = m.Buf.Content()
-	}
-
 	output := make([]string, m.Height)
 	row := 0
 
@@ -439,7 +436,7 @@ func (m *EditorModel) Render() string {
 
 			charStyles := make([]lipgloss.Style, contentW)
 			if m.Highlighter != nil {
-				tokens := m.Highlighter.HighlightLine(lineIdx, source)
+				tokens := m.Highlighter.HighlightLine(lineIdx)
 				for _, tok := range tokens {
 					for j := tok.Col; j < tok.Col+tok.Len && j < contentW; j++ {
 						charStyles[j] = tok.Style
@@ -498,6 +495,9 @@ func (m *EditorModel) renderStatusBar() string {
 	}
 
 	left := fmt.Sprintf(" %s%s", name, modified)
+	if m.StatusMsg != "" {
+		left += "  " + m.StatusMsg
+	}
 	right := fmt.Sprintf(" %d:%d ", m.CursorLine+1, m.CursorCol+1)
 
 	padding := m.Width - len(left) - len(right)

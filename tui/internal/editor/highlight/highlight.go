@@ -22,6 +22,7 @@ type Highlighter struct {
 	parser *sitter.Parser
 	tree   *sitter.Tree
 	lang   *sitter.Language
+	cache  [][]Token // per-line tokens, computed on Parse()
 }
 
 // New creates a highlighter for the given file extension.
@@ -44,9 +45,22 @@ func New(filename string) *Highlighter {
 	}
 }
 
-// Parse parses (or re-parses) the given source code.
+// Parse parses the source and caches highlight tokens for every line.
 func (h *Highlighter) Parse(source string) {
 	h.tree = h.parser.Parse([]byte(source), h.tree)
+	if h.tree == nil {
+		h.cache = nil
+		return
+	}
+
+	lines := strings.Split(source, "\n")
+	lineLens := make([]int, len(lines))
+	for i, l := range lines {
+		lineLens[i] = len(l)
+	}
+
+	h.cache = make([][]Token, len(lines))
+	h.collectAllTokens(h.tree.RootNode(), lineLens)
 }
 
 // Close frees tree-sitter resources.
@@ -57,64 +71,51 @@ func (h *Highlighter) Close() {
 	h.parser.Close()
 }
 
-// HighlightLine returns styled tokens for the given line of source.
-// lineNum is 0-indexed. source is the full file content.
-func (h *Highlighter) HighlightLine(lineNum int, source string) []Token {
-	if h.tree == nil {
+// HighlightLine returns cached tokens for the given line. O(1) lookup.
+func (h *Highlighter) HighlightLine(lineNum int) []Token {
+	if lineNum < 0 || lineNum >= len(h.cache) {
 		return nil
 	}
-
-	root := h.tree.RootNode()
-	return h.collectTokens(root, lineNum, []byte(source))
+	return h.cache[lineNum]
 }
 
-func (h *Highlighter) collectTokens(node *sitter.Node, lineNum int, source []byte) []Token {
-	var tokens []Token
-
+// collectAllTokens walks the tree once and populates h.cache for every line.
+func (h *Highlighter) collectAllTokens(node *sitter.Node, lineLens []int) {
 	childCount := node.ChildCount()
 	if childCount == 0 {
-		// Leaf node — check if it's on our line
 		startRow := int(node.StartPosition().Row)
 		endRow := int(node.EndPosition().Row)
-		if lineNum < startRow || lineNum > endRow {
-			return nil
-		}
-
 		startCol := int(node.StartPosition().Column)
 		endCol := int(node.EndPosition().Column)
 
-		// Clamp to this line
-		if lineNum > startRow {
-			startCol = 0
-		}
-		if lineNum < endRow {
-			// Node spans multiple lines; this line goes to end
-			// Use the line length as endCol
-			lines := strings.Split(string(source), "\n")
-			if lineNum < len(lines) {
-				endCol = len(lines[lineNum])
-			}
+		style := styleForNode(node.GrammarName())
+		if style.GetForeground() == nil {
+			return
 		}
 
-		nodeType := node.GrammarName()
-		style := styleForNode(nodeType)
-		if startCol < endCol {
-			tokens = append(tokens, Token{
-				Col:   startCol,
-				Len:   endCol - startCol,
-				Style: style,
-			})
+		for line := startRow; line <= endRow && line < len(h.cache); line++ {
+			sc := 0
+			if line == startRow {
+				sc = startCol
+			}
+			ec := lineLens[line]
+			if line == endRow {
+				ec = endCol
+			}
+			if sc < ec {
+				h.cache[line] = append(h.cache[line], Token{
+					Col:   sc,
+					Len:   ec - sc,
+					Style: style,
+				})
+			}
 		}
-		return tokens
+		return
 	}
 
 	for i := range childCount {
-		child := node.Child(i)
-		childTokens := h.collectTokens(child, lineNum, source)
-		tokens = append(tokens, childTokens...)
+		h.collectAllTokens(node.Child(i), lineLens)
 	}
-
-	return tokens
 }
 
 // Theme colors

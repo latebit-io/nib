@@ -192,8 +192,8 @@ func (m *AppModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Click — start selection or set cursor
-	if msg.Button == tea.MouseButtonLeft && x < dividerX {
+	// Click — start selection or set cursor (ignore status bar row)
+	if msg.Button == tea.MouseButtonLeft && x < dividerX && msg.Y < m.Editor.VisibleLines() {
 		gutterW := m.Editor.GutterWidth()
 		col := x - gutterW
 		if col < 0 {
@@ -225,8 +225,8 @@ func (m *AppModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Click/drag in agent pane — selection
-	if msg.Button == tea.MouseButtonLeft && x > dividerX {
+	// Click/drag in agent pane — selection (only in content area, not header/status)
+	if msg.Button == tea.MouseButtonLeft && x > dividerX && msg.Y > 0 && msg.Y < m.Height-1 {
 		col := x - dividerX - 1 // -1 for divider
 		if col < 0 {
 			col = 0
@@ -317,6 +317,8 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.Editor.Buf.Delete(line, col, searchRunes)
 				m.Editor.Buf.Insert(line, col, m.PendingEdit.Replace)
 				m.Editor.Buf.EndGroup()
+				m.Editor.ClearSelection()
+				m.Editor.MoveCursorTo(line, col)
 				m.Editor.MarkDirty()
 				m.PendingEdit = nil
 				m.AgentLoop.Approve()

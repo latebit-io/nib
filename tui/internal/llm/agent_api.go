@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -158,6 +159,7 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 
 		var chunk sseChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			slog.Warn("SSE unmarshal error", "err", err, "data", data[:min(len(data), 200)])
 			continue
 		}
 		if len(chunk.Choices) == 0 {
@@ -180,6 +182,11 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 			ch <- StreamEvent{Done: true, ToolCalls: tc.finalize()}
 			return
 		}
+	}
+
+	// Check for scanner errors (I/O failures, buffer overflow)
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		slog.Warn("SSE scanner error", "err", err)
 	}
 
 	// Stream ended without [DONE] or finish_reason (EOF or scanner error).

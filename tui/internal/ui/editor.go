@@ -333,10 +333,16 @@ func (m *EditorModel) SelectedText() string {
 	}
 	sl, sc, el, ec := m.SelectedRange()
 	if sl == el {
-		line := m.Buf.LineText(sl)
-		runes := []rune(line)
-		if ec > len(runes) {
-			ec = len(runes)
+		runes := []rune(m.Buf.LineText(sl))
+		lineLen := len(runes)
+		if sc > lineLen {
+			sc = lineLen
+		}
+		if ec > lineLen {
+			ec = lineLen
+		}
+		if sc > ec {
+			sc = ec
 		}
 		return string(runes[sc:ec])
 	}
@@ -344,6 +350,9 @@ func (m *EditorModel) SelectedText() string {
 	var sb strings.Builder
 	// First line
 	first := []rune(m.Buf.LineText(sl))
+	if sc > len(first) {
+		sc = len(first)
+	}
 	sb.WriteString(string(first[sc:]))
 	sb.WriteRune('\n')
 	// Middle lines

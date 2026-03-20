@@ -2,10 +2,16 @@ package ui
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/latebit-io/junto/tui/internal/agent"
 )
+
+// InputHeight is the number of rows reserved for the input area (separator + input + status).
+const InputHeight = 5
 
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
 type AgentPaneModel struct {
@@ -31,29 +37,249 @@ type AgentPaneModel struct {
 	CursorLine      int
 	CursorCol       int
 
-	// Input mode (for sending messages to agent)
+	// Input area
 	InputActive bool
-	Input       string
+	InputBuffer string
+
+	// Shared services
+	Services *Services
 }
 
 // NewAgentPaneModel creates a new agent pane.
-func NewAgentPaneModel() AgentPaneModel {
-	return AgentPaneModel{
-		Status: "idle",
+func NewAgentPaneModel(svc *Services) *AgentPaneModel {
+	return &AgentPaneModel{
+		Status:   "idle",
+		Services: svc,
 	}
 }
 
-// AppendText adds streaming text to the agent pane.
+// SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.
+func (m *AgentPaneModel) SetSize(width, height int) {
+	m.Width = width
+	m.Height = height
+	maxScroll := len(m.Lines) - m.VisibleLines()
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.ScrollOffset > maxScroll {
+		m.ScrollOffset = maxScroll
+	}
+}
+
+// Update handles messages for the agent pane. Implements Pane.
+func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case agent.TokenMsg:
+		m.AppendText(sanitize(msg.Text))
+		return nil
+
+	case agent.StatusMsg:
+		m.Status = msg.Status
+		return nil
+
+	case agent.EditProposedMsg:
+		m.Status = "waiting"
+		m.AppendText("\n--- Proposed: " + msg.Edit.Reason + " ---\n")
+		return nil
+
+	case agent.ErrorMsg:
+		m.AppendText("\nError: " + msg.Err + "\n")
+		return nil
+
+	case agent.DoneMsg:
+		m.Status = "idle"
+		m.AppendText("\n--- Done ---\n")
+		return nil
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
+	case tea.KeyMsg:
+		if m.InputActive {
+			return m.handleInput(msg)
+		}
+		return m.handleKey(msg)
+	}
+	return nil
+}
+
+func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
+	scrollLines := 3
+
+	switch {
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
+		m.ScrollOffset -= scrollLines
+		if m.ScrollOffset < 0 {
+			m.ScrollOffset = 0
+		}
+		return nil
+
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
+		maxScroll := len(m.Lines) - m.VisibleLines()
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		m.ScrollOffset += scrollLines
+		if m.ScrollOffset > maxScroll {
+			m.ScrollOffset = maxScroll
+		}
+		return nil
+	}
+
+	// Click/drag in content area (skip header row 0 and status row)
+	if msg.Button == tea.MouseButtonLeft && msg.Y > 0 && msg.Y < m.Height-1 {
+		col := msg.X
+		if col < 0 {
+			col = 0
+		}
+		line := m.ScrollOffset + msg.Y - 1 // -1 for header row
+		if line < 0 {
+			line = 0
+		}
+		if line >= len(m.Lines) {
+			line = max(len(m.Lines)-1, 0)
+		}
+
+		switch msg.Action {
+		case tea.MouseActionPress:
+			m.SelectionActive = true
+			m.SelectStartLine = line
+			m.SelectStartCol = col
+			m.CursorLine = line
+			m.CursorCol = col
+		case tea.MouseActionMotion:
+			if m.SelectionActive {
+				m.CursorLine = line
+				m.CursorCol = col
+			}
+		case tea.MouseActionRelease:
+			if m.SelectionActive &&
+				m.CursorLine == m.SelectStartLine &&
+				m.CursorCol == m.SelectStartCol {
+				m.SelectionActive = false
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *AgentPaneModel) handleInput(msg tea.KeyMsg) tea.Cmd {
+	// Paste from system clipboard (Ctrl+V)
+	if msg.Type == tea.KeyCtrlV {
+		if text := m.Services.Clipboard.Read(); text != "" {
+			text = strings.ReplaceAll(text, "\r\n", " ")
+			text = strings.ReplaceAll(text, "\r", " ")
+			text = strings.ReplaceAll(text, "\n", " ")
+			text = strings.ReplaceAll(text, "\t", " ")
+			m.InputBuffer += text
+		}
+		return nil
+	}
+
+	switch msg.Type {
+	case tea.KeyEnter:
+		goal := strings.TrimSpace(m.InputBuffer)
+		m.InputActive = false
+		m.InputBuffer = ""
+		if goal != "" {
+			return func() tea.Msg { return GoalSubmittedMsg{Goal: goal} }
+		}
+		return nil
+	case tea.KeyEscape:
+		m.InputActive = false
+		m.InputBuffer = ""
+		return nil
+	case tea.KeyBackspace:
+		if len(m.InputBuffer) > 0 {
+			runes := []rune(m.InputBuffer)
+			m.InputBuffer = string(runes[:len(runes)-1])
+		}
+		return nil
+	case tea.KeySpace:
+		m.InputBuffer += " "
+		return nil
+	case tea.KeyRunes:
+		text := string(msg.Runes)
+		text = strings.ReplaceAll(text, "\r\n", " ")
+		text = strings.ReplaceAll(text, "\r", " ")
+		text = strings.ReplaceAll(text, "\n", " ")
+		text = strings.ReplaceAll(text, "\t", " ")
+		slog.Debug("goal input runes", "len", len(msg.Runes), "text_len", len(text))
+		m.InputBuffer += text
+		return nil
+	}
+	return nil
+}
+
+func (m *AgentPaneModel) handleKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.Type {
+	case tea.KeyUp:
+		if m.ScrollOffset > 0 {
+			m.ScrollOffset--
+		}
+	case tea.KeyDown:
+		if m.ScrollOffset < len(m.Lines)-m.VisibleLines() {
+			m.ScrollOffset++
+		}
+	case tea.KeyCtrlC:
+		if m.SelectionActive {
+			_ = m.Services.Clipboard.Write(m.SelectedText())
+			m.SelectionActive = false
+		} else {
+			_ = m.Services.Clipboard.Write(strings.Join(m.Lines, "\n"))
+		}
+	}
+	return nil
+}
+
+// AppendText adds streaming text to the agent pane with word wrapping.
 func (m *AgentPaneModel) AppendText(text string) {
+	slog.Debug("agent pane append", "text_len", len(text))
 	parts := strings.Split(text, "\n")
 	for i, part := range parts {
 		if i == 0 && len(m.Lines) > 0 {
 			m.Lines[len(m.Lines)-1] += part
+			// Re-wrap the last line if it now exceeds width
+			if m.Width > 0 {
+				last := m.Lines[len(m.Lines)-1]
+				if len([]rune(last)) > m.Width {
+					m.Lines = m.Lines[:len(m.Lines)-1]
+					m.Lines = append(m.Lines, m.wrapLine(last)...)
+				}
+			}
 		} else {
-			m.Lines = append(m.Lines, part)
+			if m.Width > 0 && len([]rune(part)) > m.Width {
+				m.Lines = append(m.Lines, m.wrapLine(part)...)
+			} else {
+				m.Lines = append(m.Lines, part)
+			}
 		}
 	}
 	m.scrollToBottom()
+}
+
+// wrapLine wraps a single long line into multiple lines at word boundaries.
+func (m *AgentPaneModel) wrapLine(line string) []string {
+	if m.Width <= 0 {
+		return []string{line}
+	}
+	var result []string
+	runes := []rune(line)
+	for len(runes) > m.Width {
+		// Try to break at a space
+		breakAt := m.Width
+		for i := m.Width - 1; i > m.Width/2; i-- {
+			if runes[i] == ' ' {
+				breakAt = i + 1
+				break
+			}
+		}
+		result = append(result, string(runes[:breakAt]))
+		runes = runes[breakAt:]
+	}
+	result = append(result, string(runes))
+	return result
 }
 
 // SetStep updates the current step info.
@@ -74,9 +300,10 @@ func (m *AgentPaneModel) Clear() {
 	m.Status = "idle"
 }
 
-// VisibleLines returns the number of content lines visible (total height - header - status).
+// VisibleLines returns the number of content lines visible.
+// Layout: 1 header + content + 1 separator + 3 input rows.
 func (m *AgentPaneModel) VisibleLines() int {
-	h := m.Height - 2 // 1 header + 1 status
+	h := m.Height - 1 - InputHeight // 1 header + InputHeight bottom
 	if h < 1 {
 		h = 1
 	}
@@ -192,6 +419,12 @@ func (m *AgentPaneModel) Render() string {
 		Bold(true).
 		Foreground(lipgloss.Color("230")).
 		Background(lipgloss.Color("62"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("24"))
+	inputActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("230"))
+	inputDimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle := lipgloss.NewStyle().Reverse(true)
 
 	// Row 0: Header
 	output[row] = headerStyle.Render(m.padLine(" Agent"))
@@ -199,8 +432,6 @@ func (m *AgentPaneModel) Render() string {
 
 	// Content rows
 	vis := m.VisibleLines()
-	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("24"))
-
 	for i := range vis {
 		if row >= m.Height {
 			break
@@ -208,7 +439,6 @@ func (m *AgentPaneModel) Render() string {
 		lineIdx := m.ScrollOffset + i
 		if lineIdx < len(m.Lines) {
 			runes := []rune(m.Lines[lineIdx])
-			// Pad to width
 			for len(runes) < m.Width {
 				runes = append(runes, ' ')
 			}
@@ -216,7 +446,6 @@ func (m *AgentPaneModel) Render() string {
 				runes = runes[:m.Width]
 			}
 
-			// Render char by char if selection active on this line
 			sl, _, el, _ := m.SelectedRange()
 			if m.SelectionActive && lineIdx >= sl && lineIdx <= el {
 				var line strings.Builder
@@ -238,28 +467,86 @@ func (m *AgentPaneModel) Render() string {
 		row++
 	}
 
-	// Status line (last row)
-	for row < m.Height-1 {
+	// Fill remaining content area
+	contentEnd := m.Height - InputHeight
+	for row < contentEnd {
 		output[row] = strings.Repeat(" ", m.Width)
 		row++
 	}
 
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-	var statusText string
-	switch m.Status {
-	case "idle":
-		statusText = dimStyle.Render(m.padLine(" Ready"))
-	case "thinking":
-		statusText = statusStyle.Render(m.padLine(" Thinking..."))
-	case "editing":
-		statusText = statusStyle.Render(m.padLine(fmt.Sprintf(" Step %d/%d: %s", m.StepNum, m.StepTotal, m.StepDesc)))
-	case "waiting":
-		statusText = statusStyle.Render(m.padLine(" Waiting for approval..."))
-	default:
-		statusText = m.padLine("")
+	// Separator line
+	if row < m.Height-1 { // -1 to leave room for status
+		output[row] = dimStyle.Render(m.padLine(strings.Repeat("─", m.Width)))
+		row++
 	}
+
+	// Input area: fill rows between separator and status
+	inputRows := m.Height - row - 1 // -1 for status line
+	if inputRows < 0 {
+		inputRows = 0
+	}
+	var inputLines []string
+	if m.InputActive {
+		// Wrap input text to width-2 (1 for "> " prefix on first line)
+		inputW := m.Width - 2
+		if inputW < 1 {
+			inputW = 1
+		}
+		buf := m.InputBuffer
+		if len(buf) == 0 {
+			inputLines = []string{""}
+		} else {
+			runes := []rune(buf)
+			for len(runes) > inputW {
+				inputLines = append(inputLines, string(runes[:inputW]))
+				runes = runes[inputW:]
+			}
+			inputLines = append(inputLines, string(runes))
+		}
+	}
+
+	for i := range inputRows {
+		if row >= m.Height {
+			break
+		}
+		if m.InputActive && i < len(inputLines) {
+			prefix := "  "
+			if i == 0 {
+				prefix = "> "
+			}
+			lineText := prefix + inputLines[i]
+			// Add cursor at the end of the last input line
+			if i == len(inputLines)-1 {
+				lineText += cursorStyle.Render(" ")
+			}
+			runes := []rune(lineText)
+			if len(runes) < m.Width {
+				lineText += strings.Repeat(" ", m.Width-len(runes))
+			}
+			output[row] = inputActiveStyle.Render(lineText)
+		} else if !m.InputActive && i == 0 {
+			output[row] = inputDimStyle.Render(m.padLine(" Ctrl+G to send a goal"))
+		} else {
+			output[row] = strings.Repeat(" ", m.Width)
+		}
+		row++
+	}
+
+	// Status line (last row)
 	if row < m.Height {
+		var statusText string
+		switch m.Status {
+		case "idle":
+			statusText = dimStyle.Render(m.padLine(" Ready"))
+		case "thinking":
+			statusText = statusStyle.Render(m.padLine(" Thinking..."))
+		case "editing":
+			statusText = statusStyle.Render(m.padLine(fmt.Sprintf(" Step %d/%d: %s", m.StepNum, m.StepTotal, m.StepDesc)))
+		case "waiting":
+			statusText = statusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
+		default:
+			statusText = m.padLine("")
+		}
 		output[row] = statusText
 	}
 

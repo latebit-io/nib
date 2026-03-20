@@ -2,6 +2,7 @@
 package highlight
 
 import (
+	"log/slog"
 	"path/filepath"
 	"strings"
 
@@ -91,17 +92,27 @@ func (h *Highlighter) collectAllTokens(node *sitter.Node, lines []string) {
 		}
 
 		for line := startRow; line <= endRow && line < len(h.cache); line++ {
+			if line >= len(lines) {
+				slog.Debug("highlight: line index out of range", "line", line, "len", len(lines))
+				continue
+			}
 			lineBytes := lines[line]
 			lineByteLen := len(lineBytes)
 
-			// Byte offsets for this line
+			// Byte offsets for this line, clamped to line length
 			scBytes := 0
 			if line == startRow {
 				scBytes = startCol
 			}
+			if scBytes > lineByteLen {
+				scBytes = lineByteLen
+			}
 			ecBytes := lineByteLen
 			if line == endRow {
 				ecBytes = endCol
+			}
+			if ecBytes > lineByteLen {
+				ecBytes = lineByteLen
 			}
 
 			// Convert byte offsets to rune offsets

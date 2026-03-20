@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/tui/internal/editor/buffer"
 	"github.com/latebit-io/junto/tui/internal/editor/highlight"
@@ -12,6 +13,9 @@ import (
 )
 
 // EditorModel is the Bubble Tea model for the code editor pane.
+// It is a self-contained Pane: owns its own key handling, rendering,
+// and buffer manipulation. AppModel delegates key events here when
+// the editor has focus.
 type EditorModel struct {
 	Buf    *buffer.Buffer
 	Width  int
@@ -35,14 +39,25 @@ type EditorModel struct {
 
 	// Transient status message (shown in status bar, cleared on next key)
 	StatusMsg string
+
+	// Keymap for action matching (shared with AppModel)
+	Keymap *Keymap
+
+	// Shared services (clipboard, etc.)
+	Services *Services
+
+	// Internal clipboard buffer
+	Clipboard string
 }
 
 // NewEditorModel creates an editor model from a buffer.
-func NewEditorModel(buf *buffer.Buffer) EditorModel {
-	m := EditorModel{
-		Buf:    buf,
-		Width:  80,
-		Height: 24,
+func NewEditorModel(buf *buffer.Buffer, km *Keymap, svc *Services) *EditorModel {
+	m := &EditorModel{
+		Buf:      buf,
+		Width:    80,
+		Height:   24,
+		Keymap:   km,
+		Services: svc,
 	}
 	if buf.Path != "" {
 		m.Highlighter = highlight.New(buf.Path)
@@ -51,6 +66,19 @@ func NewEditorModel(buf *buffer.Buffer) EditorModel {
 		}
 	}
 	return m
+}
+
+// SetSize updates the editor dimensions and clamps scroll. Implements Pane.
+func (m *EditorModel) SetSize(width, height int) {
+	m.Width = width
+	m.Height = height
+	maxScroll := m.Buf.LineCount() - m.VisibleLines()
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.ScrollOffset > maxScroll {
+		m.ScrollOffset = maxScroll
+	}
 }
 
 // VisibleLines returns the number of content lines visible (reserving 1 for status bar).
@@ -428,27 +456,60 @@ func (m *EditorModel) Render() string {
 		var line strings.Builder
 
 		if lineIdx >= m.Buf.LineCount() {
-			gutter := gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~"))
-			line.WriteString(gutter)
+			gutterText := fmt.Sprintf("%*s ", gutterW-1, "~")
+			line.WriteString(gutterStyle.Render(gutterText))
 			line.WriteString(strings.Repeat(" ", contentW))
 		} else {
-			gutter := gutterStyle.Render(fmt.Sprintf("%*d ", gutterW-1, lineIdx+1))
-			line.WriteString(gutter)
+			gutterText := fmt.Sprintf("%*d ", gutterW-1, lineIdx+1)
+			line.WriteString(gutterStyle.Render(gutterText))
 
-			lineRunes := []rune(m.Buf.LineText(lineIdx))
+			// Build tab→display column mapping and expanded line
+			rawRunes := []rune(m.Buf.LineText(lineIdx))
+			var expandedRunes []rune
+			// bufToDisp maps buffer col → display col
+			bufToDisp := make([]int, len(rawRunes)+1)
+			dispCol := 0
+			for bi, r := range rawRunes {
+				bufToDisp[bi] = dispCol
+				if r == '\t' {
+					expandedRunes = append(expandedRunes, ' ', ' ', ' ', ' ')
+					dispCol += 4
+				} else {
+					expandedRunes = append(expandedRunes, r)
+					dispCol++
+				}
+			}
+			bufToDisp[len(rawRunes)] = dispCol
+
 			displayed := make([]rune, contentW)
 			for j := range displayed {
 				displayed[j] = ' '
 			}
-			for j := 0; j < len(lineRunes) && j < contentW; j++ {
-				displayed[j] = lineRunes[j]
+			for j := 0; j < len(expandedRunes) && j < contentW; j++ {
+				displayed[j] = expandedRunes[j]
+			}
+
+			// Map cursor and selection to display coords
+			displayCursorCol := -1
+			if lineIdx == m.CursorLine && m.CursorCol >= 0 && m.CursorCol <= len(rawRunes) {
+				displayCursorCol = bufToDisp[m.CursorCol]
 			}
 
 			charStyles := make([]lipgloss.Style, contentW)
 			if m.Highlighter != nil {
 				tokens := m.Highlighter.HighlightLine(lineIdx)
 				for _, tok := range tokens {
-					for j := tok.Col; j < tok.Col+tok.Len && j < contentW; j++ {
+					// Token cols are in buffer coords — convert to display
+					dStart := 0
+					if tok.Col < len(bufToDisp) {
+						dStart = bufToDisp[tok.Col]
+					}
+					dEnd := dStart + tok.Len
+					tokEnd := tok.Col + tok.Len
+					if tokEnd < len(bufToDisp) {
+						dEnd = bufToDisp[tokEnd]
+					}
+					for j := dStart; j < dEnd && j < contentW; j++ {
 						charStyles[j] = tok.Style
 					}
 				}
@@ -456,8 +517,20 @@ func (m *EditorModel) Render() string {
 
 			for j := range contentW {
 				ch := string(displayed[j])
-				isCursor := lineIdx == m.CursorLine && j == m.CursorCol
-				isSel := m.isSelected(lineIdx, j)
+				isCursor := j == displayCursorCol
+				// Convert display col back to buffer col for selection check
+				isSel := false
+				if m.SelectionActive {
+					// Find which buffer col this display col corresponds to
+					bufCol := len(rawRunes) // default: past end
+					for bi := range len(rawRunes) {
+						if bufToDisp[bi] > j {
+							break
+						}
+						bufCol = bi
+					}
+					isSel = m.isSelected(lineIdx, bufCol)
+				}
 
 				if isCursor {
 					line.WriteString(cursorStyle.Render(ch))
@@ -521,6 +594,351 @@ func (m *EditorModel) renderStatusBar() string {
 	bar = runewidth.Truncate(bar, m.Width, "")
 
 	return statusStyle.Render(bar)
+}
+
+// DisplayColToBufferCol converts a display column (after tab expansion) to a buffer column.
+func (m *EditorModel) DisplayColToBufferCol(line, displayCol int) int {
+	if line < 0 || line >= m.Buf.LineCount() {
+		return 0
+	}
+	runes := []rune(m.Buf.LineText(line))
+	dc := 0
+	for bi, r := range runes {
+		if dc >= displayCol {
+			return bi
+		}
+		if r == '\t' {
+			dc += 4
+		} else {
+			dc++
+		}
+	}
+	return len(runes)
+}
+
+// Update handles key and mouse events for the editor pane. Implements Pane.
+func (m *EditorModel) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+	case tea.KeyMsg:
+		return m.handleKey(msg)
+	}
+	return nil
+}
+
+func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
+	scrollLines := 3
+
+	switch {
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
+		m.ScrollOffset -= scrollLines
+		if m.ScrollOffset < 0 {
+			m.ScrollOffset = 0
+		}
+		return nil
+
+	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
+		maxScroll := m.Buf.LineCount() - m.VisibleLines()
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		m.ScrollOffset += scrollLines
+		if m.ScrollOffset > maxScroll {
+			m.ScrollOffset = maxScroll
+		}
+		return nil
+	}
+
+	// Click/drag — local X coordinate (already translated by RegionManager)
+	if msg.Button == tea.MouseButtonLeft && msg.Y < m.VisibleLines() {
+		gutterW := m.GutterWidth()
+		displayCol := msg.X - gutterW
+		if displayCol < 0 {
+			displayCol = 0
+		}
+		line := m.ScrollOffset + msg.Y
+		bufCol := m.DisplayColToBufferCol(line, displayCol)
+
+		switch msg.Action {
+		case tea.MouseActionPress:
+			m.ClearSelection()
+			m.MoveCursorTo(line, bufCol)
+			m.SelectionActive = true
+			m.SelectStartLine = m.CursorLine
+			m.SelectStartCol = m.CursorCol
+		case tea.MouseActionMotion:
+			if m.SelectionActive {
+				m.MoveCursorTo(line, bufCol)
+			}
+		case tea.MouseActionRelease:
+			if m.SelectionActive &&
+				m.CursorLine == m.SelectStartLine &&
+				m.CursorCol == m.SelectStartCol {
+				m.ClearSelection()
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
+
+	m.StatusMsg = "" // clear transient status on any key
+
+	isShift := keyMsg.Type == tea.KeyShiftUp || keyMsg.Type == tea.KeyShiftDown ||
+		keyMsg.Type == tea.KeyShiftLeft || keyMsg.Type == tea.KeyShiftRight ||
+		keyMsg.Type == tea.KeyShiftHome || keyMsg.Type == tea.KeyShiftEnd
+
+	action := m.Keymap.Match(keyMsg)
+
+	switch action {
+	case ActionSave:
+		if err := m.Buf.Save(); err != nil {
+			m.StatusMsg = "Save failed: " + err.Error()
+		} else {
+			m.StatusMsg = "Saved"
+		}
+		return nil
+
+	case ActionUndo:
+		l, c, ok := m.Buf.Undo()
+		if ok {
+			m.ClearSelection()
+			m.MoveCursorTo(l, c)
+			m.MarkDirty()
+		}
+		return nil
+
+	case ActionRedo:
+		l, c, ok := m.Buf.Redo()
+		if ok {
+			m.ClearSelection()
+			m.MoveCursorTo(l, c)
+			m.MarkDirty()
+		}
+		return nil
+
+	case ActionCopy:
+		if m.SelectionActive {
+			m.Clipboard = m.SelectedText()
+			_ = m.Services.Clipboard.Write(m.Clipboard)
+		}
+		return nil
+
+	case ActionCut:
+		if m.SelectionActive {
+			m.Clipboard = m.SelectedText()
+			_ = m.Services.Clipboard.Write(m.Clipboard)
+			m.DeleteSelection()
+			m.MarkDirty()
+		}
+		return nil
+
+	case ActionPaste:
+		if sys := m.Services.Clipboard.Read(); sys != "" {
+			m.Clipboard = sys
+		}
+		if m.Clipboard != "" {
+			m.PasteText(m.Clipboard)
+		}
+		return nil
+
+	case ActionSelectAll:
+		m.SelectionActive = true
+		m.SelectStartLine = 0
+		m.SelectStartCol = 0
+		lastLine := m.Buf.LineCount() - 1
+		m.CursorLine = lastLine
+		m.CursorCol = m.Buf.LineLen(lastLine)
+		return nil
+	}
+
+	// Escape (clear selection) — only reached when AppModel has no pending edit
+	if keyMsg.Type == tea.KeyEscape {
+		m.ClearSelection()
+		return nil
+	}
+
+	// Navigation and editing
+	switch keyMsg.Type {
+
+	// Selection navigation
+	case tea.KeyShiftUp:
+		m.StartSelection()
+		m.MoveCursor(-1, 0)
+		return nil
+	case tea.KeyShiftDown:
+		m.StartSelection()
+		m.MoveCursor(1, 0)
+		return nil
+	case tea.KeyShiftLeft:
+		m.StartSelection()
+		m.MoveCursor(0, -1)
+		return nil
+	case tea.KeyShiftRight:
+		m.StartSelection()
+		m.MoveCursor(0, 1)
+		return nil
+	case tea.KeyShiftHome:
+		m.StartSelection()
+		m.Home()
+		return nil
+	case tea.KeyShiftEnd:
+		m.StartSelection()
+		m.End()
+		return nil
+
+	// Navigation
+	case tea.KeyUp:
+		m.ClearSelection()
+		m.MoveCursor(-1, 0)
+		return nil
+	case tea.KeyDown:
+		m.ClearSelection()
+		m.MoveCursor(1, 0)
+		return nil
+	case tea.KeyLeft:
+		m.ClearSelection()
+		m.MoveCursor(0, -1)
+		return nil
+	case tea.KeyRight:
+		m.ClearSelection()
+		m.MoveCursor(0, 1)
+		return nil
+	case tea.KeyHome:
+		m.ClearSelection()
+		m.Home()
+		return nil
+	case tea.KeyEnd:
+		m.ClearSelection()
+		m.End()
+		return nil
+	case tea.KeyPgUp:
+		m.ClearSelection()
+		m.PageUp()
+		return nil
+	case tea.KeyPgDown:
+		m.ClearSelection()
+		m.PageDown()
+		return nil
+
+	// Word navigation
+	case tea.KeyCtrlRight:
+		m.ClearSelection()
+		m.WordRight()
+		return nil
+	case tea.KeyCtrlLeft:
+		m.ClearSelection()
+		m.WordLeft()
+		return nil
+
+	// Editing
+	case tea.KeyEnter:
+		if m.SelectionActive {
+			m.DeleteSelection()
+		}
+		m.InsertNewline()
+		return nil
+	case tea.KeyTab:
+		if m.SelectionActive {
+			m.DeleteSelection()
+		}
+		m.InsertTab()
+		return nil
+	case tea.KeyBackspace:
+		if m.SelectionActive {
+			m.DeleteSelection()
+			m.MarkDirty()
+		} else {
+			m.Backspace()
+		}
+		return nil
+	case tea.KeyDelete:
+		if m.SelectionActive {
+			m.DeleteSelection()
+			m.MarkDirty()
+		} else {
+			m.DeleteChar()
+		}
+		return nil
+
+	// Character input (also handles Cmd+V paste on macOS — arrives as multi-char KeyRunes)
+	case tea.KeyRunes:
+		if len(keyMsg.Runes) > 1 {
+			m.PasteText(string(keyMsg.Runes))
+		} else {
+			if m.SelectionActive {
+				m.DeleteSelection()
+			}
+			for _, r := range keyMsg.Runes {
+				m.InsertChar(r)
+			}
+		}
+		return nil
+	}
+
+	if !isShift {
+		m.ClearSelection()
+	}
+
+	return nil
+}
+
+// PasteText inserts text at the cursor, replacing any active selection.
+func (m *EditorModel) PasteText(text string) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	if m.SelectionActive {
+		m.DeleteSelection()
+	}
+	m.Buf.Insert(m.CursorLine, m.CursorCol, text)
+	cl, cc := m.CursorLine, m.CursorCol
+	for _, r := range text {
+		if r == '\n' {
+			cl++
+			cc = 0
+		} else {
+			cc++
+		}
+	}
+	m.MoveCursorTo(cl, cc)
+	m.MarkDirty()
+}
+
+// ApplyEdit applies a search-and-replace edit to the buffer.
+// Returns (true, "") on success, or (false, reason) on failure.
+// Edits are grouped for undo and the cursor is moved to the edit location.
+func (m *EditorModel) ApplyEdit(search, replace string) (bool, string) {
+	content := m.Buf.Content()
+	count := strings.Count(content, search)
+	switch count {
+	case 1:
+		idx := strings.Index(content, search)
+		line, col := 0, 0
+		for _, r := range content[:idx] {
+			if r == '\n' {
+				line++
+				col = 0
+			} else {
+				col++
+			}
+		}
+		searchRunes := len([]rune(search))
+		m.Buf.BeginGroup()
+		m.Buf.Delete(line, col, searchRunes)
+		m.Buf.Insert(line, col, replace)
+		m.Buf.EndGroup()
+		m.ClearSelection()
+		m.MoveCursorTo(line, col)
+		m.MarkDirty()
+		return true, ""
+	case 0:
+		return false, "Edit could not be applied — text not found"
+	default:
+		return false, fmt.Sprintf("Edit could not be applied — %d matches found, expected 1", count)
+	}
 }
 
 func isWordSeparator(r rune) bool {

@@ -2,6 +2,7 @@
 package buffer
 
 import (
+	"errors"
 	"os"
 	"strings"
 )
@@ -107,9 +108,12 @@ func (b *Buffer) Content() string {
 }
 
 // Save writes the buffer to its file path.
+// ErrNoPath is returned when Save is called on a buffer with no file path.
+var ErrNoPath = errors.New("no file path")
+
 func (b *Buffer) Save() error {
 	if b.Path == "" {
-		return nil
+		return ErrNoPath
 	}
 	content := b.Content() + "\n"
 	err := os.WriteFile(b.Path, []byte(content), 0644)

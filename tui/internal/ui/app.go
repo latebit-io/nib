@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -279,19 +280,37 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		slog.Debug("agent approve", "pending", m.PendingEdit != nil, "agent", m.AgentLoop != nil)
 		if m.PendingEdit != nil && m.AgentLoop != nil {
 			content := m.Editor.Buf.Content()
-			replaced := strings.Replace(content, m.PendingEdit.Search, m.PendingEdit.Replace, 1)
-			if replaced != content {
-				path := m.Editor.Buf.Path
-				*m.Editor.Buf = *buffer.NewFromString(replaced)
-				m.Editor.Buf.Path = path
-				m.Editor.Buf.Modified = true
+			count := strings.Count(content, m.PendingEdit.Search)
+			switch count {
+			case 1:
+				// Convert byte offset to (line, col) for buffer ops
+				idx := strings.Index(content, m.PendingEdit.Search)
+				line, col := 0, 0
+				for i := range idx {
+					if content[i] == '\n' {
+						line++
+						col = 0
+					} else {
+						col++
+					}
+				}
+				// Apply via buffer ops so undo history is preserved
+				searchRunes := len([]rune(m.PendingEdit.Search))
+				m.Editor.Buf.BeginGroup()
+				m.Editor.Buf.Delete(line, col, searchRunes)
+				m.Editor.Buf.Insert(line, col, m.PendingEdit.Replace)
+				m.Editor.Buf.EndGroup()
 				m.Editor.MarkDirty()
 				m.PendingEdit = nil
 				m.AgentLoop.Approve()
-			} else {
-				// Search text no longer in buffer — reject so agent re-reads
+			case 0:
 				slog.Warn("agent approve: search text not found, auto-rejecting")
-				m.AgentPane.AppendText("\n[Edit could not be applied — text changed]\n")
+				m.AgentPane.AppendText("\n[Edit could not be applied — text not found]\n")
+				m.PendingEdit = nil
+				m.AgentLoop.Reject()
+			default:
+				slog.Warn("agent approve: ambiguous match, auto-rejecting", "count", count)
+				m.AgentPane.AppendText(fmt.Sprintf("\n[Edit could not be applied — %d matches found, expected 1]\n", count))
 				m.PendingEdit = nil
 				m.AgentLoop.Reject()
 			}
@@ -339,10 +358,10 @@ func (m *AppModel) handleAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		// Copy selection or all agent output to system clipboard
 		if m.AgentPane.SelectionActive {
-			clipboardWrite(m.AgentPane.SelectedText())
+			_ = clipboardWrite(m.AgentPane.SelectedText())
 			m.AgentPane.SelectionActive = false
 		} else {
-			clipboardWrite(strings.Join(m.AgentPane.Lines, "\n"))
+			_ = clipboardWrite(strings.Join(m.AgentPane.Lines, "\n"))
 		}
 	}
 	return m, nil
@@ -392,14 +411,14 @@ func (m *AppModel) handleEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ActionCopy:
 		if m.Editor.SelectionActive {
 			m.Clipboard = m.Editor.SelectedText()
-			clipboardWrite(m.Clipboard)
+			_ = clipboardWrite(m.Clipboard)
 		}
 		return m, nil
 
 	case ActionCut:
 		if m.Editor.SelectionActive {
 			m.Clipboard = m.Editor.SelectedText()
-			clipboardWrite(m.Clipboard)
+			_ = clipboardWrite(m.Clipboard)
 			m.Editor.DeleteSelection()
 			m.Editor.MarkDirty()
 		}

@@ -147,10 +147,10 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 		}
 
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
 			ch <- StreamEvent{Done: true, ToolCalls: tc.finalize()}
 			return

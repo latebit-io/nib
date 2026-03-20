@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/tui/internal/editor/buffer"
 	"github.com/latebit-io/junto/tui/internal/editor/highlight"
+	"github.com/mattn/go-runewidth"
 )
 
 // EditorModel is the Bubble Tea model for the code editor pane.
@@ -500,15 +501,15 @@ func (m *EditorModel) renderStatusBar() string {
 	}
 	right := fmt.Sprintf(" %d:%d ", m.CursorLine+1, m.CursorCol+1)
 
-	padding := m.Width - len(left) - len(right)
+	leftW := runewidth.StringWidth(left)
+	rightW := runewidth.StringWidth(right)
+	padding := m.Width - leftW - rightW
 	if padding < 0 {
 		padding = 0
 	}
 
 	bar := left + strings.Repeat(" ", padding) + right
-	if len(bar) > m.Width {
-		bar = bar[:m.Width]
-	}
+	bar = runewidth.Truncate(bar, m.Width, "")
 
 	return statusStyle.Render(bar)
 }

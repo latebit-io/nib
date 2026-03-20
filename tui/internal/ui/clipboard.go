@@ -19,14 +19,14 @@ func clipboardRead() string {
 	return string(out)
 }
 
-// clipboardWrite writes to the system clipboard.
-func clipboardWrite(s string) {
+// clipboardWrite writes to the system clipboard. Returns an error if it fails.
+func clipboardWrite(s string) error {
 	cmd := clipboardWriteCmd()
 	if cmd == nil {
-		return
+		return nil
 	}
 	cmd.Stdin = strings.NewReader(s)
-	_ = cmd.Run()
+	return cmd.Run()
 }
 
 func clipboardReadCmd() *exec.Cmd {

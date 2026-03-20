@@ -283,11 +283,11 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			count := strings.Count(content, m.PendingEdit.Search)
 			switch count {
 			case 1:
-				// Convert byte offset to (line, col) for buffer ops
+				// Convert byte offset to rune-based (line, col) for buffer ops
 				idx := strings.Index(content, m.PendingEdit.Search)
 				line, col := 0, 0
-				for i := range idx {
-					if content[i] == '\n' {
+				for _, r := range content[:idx] {
+					if r == '\n' {
 						line++
 						col = 0
 					} else {

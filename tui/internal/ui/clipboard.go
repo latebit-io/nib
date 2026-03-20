@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -19,11 +20,11 @@ func clipboardRead() string {
 	return string(out)
 }
 
-// clipboardWrite writes to the system clipboard. Returns an error if it fails.
+// clipboardWrite writes to the system clipboard.
 func clipboardWrite(s string) error {
 	cmd := clipboardWriteCmd()
 	if cmd == nil {
-		return nil
+		return errors.New("clipboard not supported on this platform")
 	}
 	cmd.Stdin = strings.NewReader(s)
 	return cmd.Run()

@@ -192,11 +192,13 @@ func (b *Buffer) Undo() (int, int, bool) {
 		// ops[0] was the last undone (originally first inserted) — push in collected order
 		b.redo = append(b.redo, ops...)
 		b.redo = append(b.redo, operation{Kind: opGroupEnd})
+		b.Modified = true
 		return lastLine, lastCol, true
 	}
 
 	l, c := b.applyUndoOp(op)
 	b.redo = append(b.redo, op)
+	b.Modified = true
 	return l, c, true
 }
 
@@ -228,11 +230,13 @@ func (b *Buffer) Redo() (int, int, bool) {
 			b.undo = append(b.undo, o)
 		}
 		b.undo = append(b.undo, operation{Kind: opGroupEnd})
+		b.Modified = true
 		return lastLine, lastCol, true
 	}
 
 	l, c := b.applyRedoOp(op)
 	b.undo = append(b.undo, op)
+	b.Modified = true
 	return l, c, true
 }
 

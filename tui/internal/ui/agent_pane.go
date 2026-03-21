@@ -126,8 +126,8 @@ func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
-	// Click/drag in content area (skip header row 0 and status row)
-	if msg.Button == tea.MouseButtonLeft && msg.Y > 0 && msg.Y < m.Height-1 {
+	// Click/drag in content area only (skip header row 0, input area, and status)
+	if msg.Button == tea.MouseButtonLeft && msg.Y > 0 && msg.Y <= m.VisibleLines() {
 		col := msg.X
 		if col < 0 {
 			col = 0

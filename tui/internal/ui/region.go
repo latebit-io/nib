@@ -25,10 +25,13 @@ type Region struct {
 	Name    string
 	Pane    Pane
 	Ratio   float64 // proportion of available space (0.0-1.0)
-	Visible bool
+	Visible bool    // user intent — Show/Hide toggle
 
 	// Calculated by SetSize — position in global coordinates.
 	x, y, width, height int
+	// collapsed is set by recalculate when there isn't enough space.
+	// Unlike Visible, this is transient and recalculated on every resize.
+	collapsed bool
 }
 
 // RegionManager handles layout calculation, focus management,
@@ -129,21 +132,21 @@ func (rm *RegionManager) FocusByName(name string) {
 	}
 }
 
-// RegionAt returns the region at global coordinate x and the
-// local x offset within that region. Returns nil if no region is hit.
-func (rm *RegionManager) RegionAt(x int) (*Region, int) {
+// RegionAt returns the region at global coordinates (x, y) and the
+// local offsets within that region. Returns nil if no region is hit.
+func (rm *RegionManager) RegionAt(x, y int) (*Region, int, int) {
 	for _, r := range rm.visibleRegions() {
-		if x >= r.x && x < r.x+r.width {
-			return r, x - r.x
+		if x >= r.x && x < r.x+r.width && y >= r.y && y < r.y+r.height {
+			return r, x - r.x, y - r.y
 		}
 	}
-	return nil, 0
+	return nil, 0, 0
 }
 
 // HandleMouse translates global mouse coordinates to pane-local coordinates,
 // sets focus on the clicked region, and forwards the event to the pane.
 func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
-	region, localX := rm.RegionAt(msg.X)
+	region, localX, localY := rm.RegionAt(msg.X, msg.Y)
 	if region == nil {
 		return nil
 	}
@@ -151,9 +154,10 @@ func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
 	// Set focus to clicked region
 	rm.FocusByName(region.Name)
 
-	// Forward mouse with translated X coordinate
+	// Forward mouse with translated coordinates
 	localMsg := msg
 	localMsg.X = localX
+	localMsg.Y = localY
 	return region.Pane.Update(localMsg)
 }
 
@@ -172,7 +176,6 @@ func (rm *RegionManager) Render() string {
 	dividerStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("240")).
 		Background(lipgloss.Color("235"))
-	div := dividerStyle.Render("│")
 
 	// Render each pane and split into lines
 	paneLines := make([][]string, len(visible))
@@ -180,13 +183,32 @@ func (rm *RegionManager) Render() string {
 		paneLines[i] = strings.Split(r.Pane.Render(), "\n")
 	}
 
-	// Compose line by line
+	if rm.Direction == Vertical {
+		hDiv := dividerStyle.Render(strings.Repeat("─", rm.Width))
+		var lines []string
+		for i, pl := range paneLines {
+			lines = append(lines, pl...)
+			if i < len(paneLines)-1 {
+				lines = append(lines, hDiv)
+			}
+		}
+		for len(lines) < rm.Height {
+			lines = append(lines, "")
+		}
+		if len(lines) > rm.Height {
+			lines = lines[:rm.Height]
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// Horizontal layout: panes side by side with vertical dividers
+	vDiv := dividerStyle.Render("│")
 	output := make([]string, rm.Height)
 	for row := range rm.Height {
 		var line strings.Builder
 		for i, pl := range paneLines {
 			if i > 0 {
-				line.WriteString(div)
+				line.WriteString(vDiv)
 			}
 			if row < len(pl) {
 				line.WriteString(pl[row])
@@ -198,11 +220,11 @@ func (rm *RegionManager) Render() string {
 	return strings.Join(output, "\n")
 }
 
-// visibleRegions returns only regions with Visible=true.
+// visibleRegions returns regions that are both user-visible and not collapsed by layout.
 func (rm *RegionManager) visibleRegions() []*Region {
 	var result []*Region
 	for _, r := range rm.Regions {
-		if r.Visible {
+		if r.Visible && !r.collapsed {
 			result = append(result, r)
 		}
 	}
@@ -211,6 +233,12 @@ func (rm *RegionManager) visibleRegions() []*Region {
 
 // recalculate distributes available space among visible regions.
 func (rm *RegionManager) recalculate() {
+	// Reset collapsed state — recalculated every time based on current size
+	for _, r := range rm.Regions {
+		r.collapsed = false
+	}
+
+	// Get user-visible regions (collapsed is now all false)
 	visible := rm.visibleRegions()
 	if len(visible) == 0 {
 		return
@@ -222,9 +250,10 @@ func (rm *RegionManager) recalculate() {
 		rm.recalcVertical(visible)
 	}
 
-	// Clamp focus index
-	if rm.FocusIdx >= len(visible) {
-		rm.FocusIdx = len(visible) - 1
+	// Clamp focus index to visible (post-collapse) regions
+	actualVisible := rm.visibleRegions()
+	if len(actualVisible) > 0 && rm.FocusIdx >= len(actualVisible) {
+		rm.FocusIdx = len(actualVisible) - 1
 	}
 }
 
@@ -234,7 +263,7 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 
 	// Check if all panes fit at minimum width
 	if available < len(visible)*MinPaneWidth {
-		// Not enough space — show only the first pane at full width
+		// Not enough space — collapse all but the first pane
 		visible[0].x = 0
 		visible[0].width = rm.Width
 		visible[0].height = rm.Height
@@ -242,7 +271,7 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 		for _, r := range visible[1:] {
 			r.width = 0
 			r.height = 0
-			r.Visible = false
+			r.collapsed = true
 		}
 		return
 	}

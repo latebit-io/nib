@@ -515,22 +515,23 @@ func (m *EditorModel) Render() string {
 				}
 			}
 
+			// Precompute inverse mapping: display col → buffer col (O(1) lookup in render loop)
+			dispToBuf := make([]int, contentW)
+			if m.SelectionActive {
+				bufCol := 0
+				for j := range contentW {
+					// Advance bufCol while the next buffer position maps to this display col or earlier
+					for bufCol+1 < len(rawRunes) && bufToDisp[bufCol+1] <= j {
+						bufCol++
+					}
+					dispToBuf[j] = bufCol
+				}
+			}
+
 			for j := range contentW {
 				ch := string(displayed[j])
 				isCursor := j == displayCursorCol
-				// Convert display col back to buffer col for selection check
-				isSel := false
-				if m.SelectionActive {
-					// Find which buffer col this display col corresponds to
-					bufCol := len(rawRunes) // default: past end
-					for bi := range len(rawRunes) {
-						if bufToDisp[bi] > j {
-							break
-						}
-						bufCol = bi
-					}
-					isSel = m.isSelected(lineIdx, bufCol)
-				}
+				isSel := m.SelectionActive && m.isSelected(lineIdx, dispToBuf[j])
 
 				if isCursor {
 					line.WriteString(cursorStyle.Render(ch))
@@ -604,14 +605,14 @@ func (m *EditorModel) DisplayColToBufferCol(line, displayCol int) int {
 	runes := []rune(m.Buf.LineText(line))
 	dc := 0
 	for bi, r := range runes {
-		if dc >= displayCol {
+		width := 1
+		if r == '\t' {
+			width = 4
+		}
+		if displayCol < dc+width {
 			return bi
 		}
-		if r == '\t' {
-			dc += 4
-		} else {
-			dc++
-		}
+		dc += width
 	}
 	return len(runes)
 }

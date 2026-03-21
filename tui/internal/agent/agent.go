@@ -251,18 +251,25 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 
 	a.mu.Lock()
 	content := a.fileContent
+	retries := a.silentRetries
+	maxRetries := a.maxSilentRetries
 	a.mu.Unlock()
 
 	// Silent retry: validate search text exists before presenting to user
-	if !strings.Contains(content, args.Search) && a.silentRetries < a.maxSilentRetries {
+	if !strings.Contains(content, args.Search) && retries < maxRetries {
+		a.mu.Lock()
 		a.silentRetries++
+		remaining := maxRetries - a.silentRetries
+		a.mu.Unlock()
 		slog.Info("edit_file: search text not found, silent retry",
-			"attempt", a.silentRetries, "search_len", len(args.Search))
+			"attempt", retries+1, "search_len", len(args.Search))
 		return fmt.Sprintf("Error: search text not found in file. You have %d retries left. Read the file content carefully and copy the exact text.\n\nCurrent file:\n\n%s",
-			a.maxSilentRetries-a.silentRetries, content)
+			remaining, content)
 	}
 
+	a.mu.Lock()
 	a.silentRetries = 0
+	a.mu.Unlock()
 
 	// Send proposed edit to TUI
 	a.send(StatusMsg{Status: "waiting"})

@@ -100,9 +100,11 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message) (<-chan Strea
 }
 
 // toolCallAccumulator accumulates streamed tool call deltas.
+// Uses []*strings.Builder (not []strings.Builder) because strings.Builder
+// must not be copied after first use, and slice append can reallocate.
 type toolCallAccumulator struct {
 	calls []ToolCall
-	args  []strings.Builder
+	args  []*strings.Builder
 }
 
 func (tc *toolCallAccumulator) merge(deltas []sseDeltaCall) {
@@ -110,7 +112,7 @@ func (tc *toolCallAccumulator) merge(deltas []sseDeltaCall) {
 		// Grow slices if needed
 		for d.Index >= len(tc.calls) {
 			tc.calls = append(tc.calls, ToolCall{})
-			tc.args = append(tc.args, strings.Builder{})
+			tc.args = append(tc.args, &strings.Builder{})
 		}
 		if d.ID != "" {
 			tc.calls[d.Index].ID = d.ID

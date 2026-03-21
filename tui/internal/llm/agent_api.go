@@ -84,7 +84,8 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message) (<-chan Strea
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", a.BaseURL+"/chat/completions", bytes.NewReader(body))
+	base := strings.TrimRight(a.BaseURL, "/")
+	req, err := http.NewRequestWithContext(ctx, "POST", base+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

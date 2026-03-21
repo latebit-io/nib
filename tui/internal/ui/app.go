@@ -217,7 +217,7 @@ func (m *AppModel) View() string {
 
 	view := m.Regions.Render()
 
-	// Overlay dialog if active
+	// Replace view with dialog when active
 	if m.Dialog.Active {
 		view = m.Dialog.Render(m.Width, m.Height)
 	}

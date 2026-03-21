@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"log/slog"
 	"strings"
 
@@ -26,10 +25,7 @@ type AgentPaneModel struct {
 	ScrollOffset int
 
 	// Status
-	Status    string // "idle", "thinking", "editing", "waiting"
-	StepNum   int
-	StepTotal int
-	StepDesc  string
+	Status string // "idle", "thinking", "editing", "waiting"
 
 	// Selection
 	SelectionActive bool
@@ -82,11 +78,11 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 
 	case agent.EditProposedMsg:
 		m.Status = "waiting"
-		m.AppendText("\n--- Proposed: " + msg.Edit.Reason + " ---\n")
+		m.AppendText("\n--- Proposed: " + m.sanitizer.sanitize(msg.Edit.Reason) + " ---\n")
 		return nil
 
 	case agent.ErrorMsg:
-		m.AppendText("\nError: " + msg.Err + "\n")
+		m.AppendText("\nError: " + m.sanitizer.sanitize(msg.Err) + "\n")
 		return nil
 
 	case agent.DoneMsg:
@@ -314,22 +310,11 @@ func (m *AgentPaneModel) wrapLine(line string) []string {
 	return result
 }
 
-// SetStep updates the current step info.
-func (m *AgentPaneModel) SetStep(num, total int, desc string) {
-	m.StepNum = num
-	m.StepTotal = total
-	m.StepDesc = desc
-	m.Status = "editing"
-}
-
 // Clear clears the agent pane content.
 func (m *AgentPaneModel) Clear() {
 	m.RawLines = nil
 	m.Lines = nil
 	m.ScrollOffset = 0
-	m.StepNum = 0
-	m.StepTotal = 0
-	m.StepDesc = ""
 	m.Status = "idle"
 }
 
@@ -574,7 +559,7 @@ func (m *AgentPaneModel) Render() string {
 		case "thinking":
 			statusText = statusStyle.Render(m.padLine(" Thinking..."))
 		case "editing":
-			statusText = statusStyle.Render(m.padLine(fmt.Sprintf(" Step %d/%d: %s", m.StepNum, m.StepTotal, m.StepDesc)))
+			statusText = statusStyle.Render(m.padLine(" Ctrl+N to continue"))
 		case "waiting":
 			statusText = statusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
 		default:

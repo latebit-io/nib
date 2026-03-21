@@ -68,7 +68,7 @@ func New(provider llm.Provider) *Agent {
 	}
 }
 
-// Run starts the agent loop in a goroutine. Returns a tea.Cmd that delivers
+// Run starts the agent loop in a goroutine, using the given Program to send
 // messages to the Bubble Tea event loop.
 func (a *Agent) Run(p *tea.Program, fileName, fileContent, goal string) {
 	a.mu.Lock()

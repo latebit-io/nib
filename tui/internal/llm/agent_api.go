@@ -35,11 +35,16 @@ func NewAgentAPI(baseURL, model, apiKey string) *AgentAPI {
 }
 
 // agentTransport clones http.DefaultTransport and adds connection timeouts.
-// Preserves proxy support, keep-alive, and other defaults.
+// Preserves proxy support, keep-alive, and other defaults where possible.
 func agentTransport() *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.ResponseHeaderTimeout = 30 * time.Second
-	return t
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok && dt != nil {
+		t := dt.Clone()
+		t.ResponseHeaderTimeout = 30 * time.Second
+		return t
+	}
+	return &http.Transport{
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
 }
 
 type chatRequest struct {

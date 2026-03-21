@@ -170,7 +170,14 @@ func (rm *RegionManager) Render() string {
 	}
 
 	if len(visible) == 1 {
-		return visible[0].Pane.Render()
+		lines := strings.Split(visible[0].Pane.Render(), "\n")
+		for len(lines) < rm.Height {
+			lines = append(lines, "")
+		}
+		if len(lines) > rm.Height {
+			lines = lines[:rm.Height]
+		}
+		return strings.Join(lines, "\n")
 	}
 
 	dividerStyle := lipgloss.NewStyle().

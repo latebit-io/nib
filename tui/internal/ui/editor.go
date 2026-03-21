@@ -84,6 +84,9 @@ func (m *EditorModel) SetSize(width, height int) {
 
 // VisibleLines returns the number of content lines visible (reserving 1 for status bar).
 func (m *EditorModel) VisibleLines() int {
+	if m.Height <= 1 {
+		return 0
+	}
 	return m.Height - 1
 }
 

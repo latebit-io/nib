@@ -279,7 +279,7 @@ func (m *AgentPaneModel) isAtBottom() bool {
 func (m *AgentPaneModel) rewrap() {
 	m.Lines = nil
 	for _, raw := range m.RawLines {
-		if m.Width > 0 && len([]rune(raw)) > m.Width {
+		if m.Width > 0 && runewidth.StringWidth(raw) > m.Width {
 			m.Lines = append(m.Lines, m.wrapLine(raw)...)
 		} else {
 			m.Lines = append(m.Lines, raw)
@@ -298,16 +298,31 @@ func (m *AgentPaneModel) clampScroll() {
 }
 
 // wrapLine wraps a single long line into multiple lines at word boundaries.
+// Uses cell-width measurement to handle wide characters (CJK, emoji).
 func (m *AgentPaneModel) wrapLine(line string) []string {
 	if m.Width <= 0 {
 		return []string{line}
 	}
 	var result []string
 	runes := []rune(line)
-	for len(runes) > m.Width {
-		// Try to break at a space
-		breakAt := m.Width
-		for i := m.Width - 1; i > m.Width/2; i-- {
+	for runewidth.StringWidth(string(runes)) > m.Width {
+		// Find the last rune that fits within m.Width cells
+		cellW := 0
+		fitEnd := 0
+		for i, r := range runes {
+			w := runewidth.RuneWidth(r)
+			if cellW+w > m.Width {
+				break
+			}
+			cellW += w
+			fitEnd = i + 1
+		}
+		if fitEnd == 0 {
+			fitEnd = 1 // always make progress
+		}
+		// Try to break at a space within the second half
+		breakAt := fitEnd
+		for i := fitEnd - 1; i > fitEnd/2; i-- {
 			if runes[i] == ' ' {
 				breakAt = i + 1
 				break
@@ -468,28 +483,34 @@ func (m *AgentPaneModel) Render() string {
 		}
 		lineIdx := m.ScrollOffset + i
 		if lineIdx < len(m.Lines) {
-			runes := []rune(m.Lines[lineIdx])
-			for len(runes) < m.Width {
-				runes = append(runes, ' ')
-			}
-			if len(runes) > m.Width {
-				runes = runes[:m.Width]
-			}
+			lineText := m.Lines[lineIdx]
 
 			sl, _, el, _ := m.SelectedRange()
 			if m.SelectionActive && lineIdx >= sl && lineIdx <= el {
+				// Render char-by-char with selection highlighting
 				var line strings.Builder
-				for j, r := range runes[:m.Width] {
+				runes := []rune(lineText)
+				cellsUsed := 0
+				for j, r := range runes {
+					w := runewidth.RuneWidth(r)
+					if cellsUsed+w > m.Width {
+						break
+					}
 					ch := string(r)
 					if m.isSelected(lineIdx, j) {
 						line.WriteString(selStyle.Render(ch))
 					} else {
 						line.WriteString(ch)
 					}
+					cellsUsed += w
+				}
+				// Pad remaining cells
+				if cellsUsed < m.Width {
+					line.WriteString(strings.Repeat(" ", m.Width-cellsUsed))
 				}
 				output[row] = line.String()
 			} else {
-				output[row] = string(runes[:m.Width])
+				output[row] = m.padLine(lineText)
 			}
 		} else {
 			output[row] = strings.Repeat(" ", m.Width)

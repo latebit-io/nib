@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -33,6 +34,9 @@ func main() {
 			defer func() { _ = logFile.Close() }()
 			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		}
+	} else {
+		// Discard all logs — slog defaults to stderr which corrupts the alt-screen TUI.
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
 	var buf *buffer.Buffer

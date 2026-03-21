@@ -517,12 +517,14 @@ func (m *EditorModel) Render() string {
 			}
 
 			// Precompute inverse mapping: display col → buffer col (O(1) lookup in render loop)
+			// bufToDisp has len(rawRunes)+1 entries; the last maps to the EOL position.
 			dispToBuf := make([]int, contentW)
 			if m.SelectionActive {
 				bufCol := 0
 				for j := range contentW {
-					// Advance bufCol while the next buffer position maps to this display col or earlier
-					for bufCol+1 < len(rawRunes) && bufToDisp[bufCol+1] <= j {
+					// Advance bufCol while the next buffer position maps to this display col or earlier.
+					// Allow advancing to len(rawRunes) (EOL) so trailing spaces map correctly.
+					for bufCol+1 <= len(rawRunes) && bufToDisp[bufCol+1] <= j {
 						bufCol++
 					}
 					dispToBuf[j] = bufCol

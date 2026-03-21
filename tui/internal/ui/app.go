@@ -112,7 +112,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleDialogResult(msg)
 
 	case tea.MouseMsg:
-		m.recentMouse = true
+		// Only set recentMouse for scroll events — those are the ones that
+		// produce leaked CSI sequences during rapid scrolling.
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			m.recentMouse = true
+		}
 		cmd := m.Regions.HandleMouse(msg)
 		return m, cmd
 

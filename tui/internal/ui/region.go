@@ -265,6 +265,7 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 	if available < len(visible)*MinPaneWidth {
 		// Not enough space — collapse all but the first pane
 		visible[0].x = 0
+		visible[0].y = 0
 		visible[0].width = rm.Width
 		visible[0].height = rm.Height
 		visible[0].Pane.SetSize(rm.Width, rm.Height)

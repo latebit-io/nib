@@ -660,6 +660,14 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			displayCol = 0
 		}
 		line := m.ScrollOffset + msg.Y
+		// Clamp to valid buffer range before computing buffer column
+		if line >= m.Buf.LineCount() {
+			line = m.Buf.LineCount() - 1
+			if line < 0 {
+				line = 0
+			}
+			displayCol = m.Buf.LineLen(line) // click past EOF → end of last line
+		}
 		bufCol := m.DisplayColToBufferCol(line, displayCol)
 
 		switch msg.Action {

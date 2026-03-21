@@ -256,15 +256,22 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 	a.mu.Unlock()
 
 	// Silent retry: validate search text exists before presenting to user
-	if !strings.Contains(content, args.Search) && retries < maxRetries {
+	if !strings.Contains(content, args.Search) {
 		a.mu.Lock()
-		a.silentRetries++
-		remaining := maxRetries - a.silentRetries
+		if retries < maxRetries {
+			a.silentRetries++
+			remaining := maxRetries - a.silentRetries
+			a.mu.Unlock()
+			slog.Info("edit_file: search text not found, silent retry",
+				"attempt", retries+1, "search_len", len(args.Search))
+			return fmt.Sprintf("Error: search text not found in file. You have %d retries left. Read the file content carefully and copy the exact text.\n\nCurrent file:\n\n%s",
+				remaining, content)
+		}
+		a.silentRetries = 0
 		a.mu.Unlock()
-		slog.Info("edit_file: search text not found, silent retry",
-			"attempt", retries+1, "search_len", len(args.Search))
-		return fmt.Sprintf("Error: search text not found in file. You have %d retries left. Read the file content carefully and copy the exact text.\n\nCurrent file:\n\n%s",
-			remaining, content)
+		slog.Warn("edit_file: search text not found after max retries", "search_len", len(args.Search))
+		return fmt.Sprintf("Error: search text not found in file after %d retries. Use read_file to re-read the file and copy the exact text.\n\nCurrent file:\n\n%s",
+			maxRetries, content)
 	}
 
 	a.mu.Lock()

@@ -18,8 +18,9 @@ type AgentPaneModel struct {
 	Width  int
 	Height int
 
-	// Content lines streamed from the agent; may exceed Width (truncated in render).
-	Lines []string
+	// RawLines stores unwrapped content; Lines is derived by wrapping to Width.
+	RawLines []string
+	Lines    []string
 
 	// Scroll
 	ScrollOffset int
@@ -57,16 +58,15 @@ func NewAgentPaneModel(svc *Services) *AgentPaneModel {
 }
 
 // SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.
+// Re-wraps content when width changes so text reflows correctly.
 func (m *AgentPaneModel) SetSize(width, height int) {
+	oldWidth := m.Width
 	m.Width = width
 	m.Height = height
-	maxScroll := len(m.Lines) - m.VisibleLines()
-	if maxScroll < 0 {
-		maxScroll = 0
+	if width != oldWidth {
+		m.rewrap()
 	}
-	if m.ScrollOffset > maxScroll {
-		m.ScrollOffset = maxScroll
-	}
+	m.clampScroll()
 }
 
 // Update handles messages for the agent pane. Implements Pane.
@@ -243,30 +243,42 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// AppendText adds streaming text to the agent pane with word wrapping.
+// AppendText adds streaming text to the agent pane.
+// Raw text is stored unwrapped; wrapped Lines are derived for the current width.
 func (m *AgentPaneModel) AppendText(text string) {
 	slog.Debug("agent pane append", "text_len", len(text))
 	parts := strings.Split(text, "\n")
 	for i, part := range parts {
-		if i == 0 && len(m.Lines) > 0 {
-			m.Lines[len(m.Lines)-1] += part
-			// Re-wrap the last line if it now exceeds width
-			if m.Width > 0 {
-				last := m.Lines[len(m.Lines)-1]
-				if len([]rune(last)) > m.Width {
-					m.Lines = m.Lines[:len(m.Lines)-1]
-					m.Lines = append(m.Lines, m.wrapLine(last)...)
-				}
-			}
+		if i == 0 && len(m.RawLines) > 0 {
+			m.RawLines[len(m.RawLines)-1] += part
 		} else {
-			if m.Width > 0 && len([]rune(part)) > m.Width {
-				m.Lines = append(m.Lines, m.wrapLine(part)...)
-			} else {
-				m.Lines = append(m.Lines, part)
-			}
+			m.RawLines = append(m.RawLines, part)
 		}
 	}
+	m.rewrap()
 	m.scrollToBottom()
+}
+
+// rewrap derives wrapped Lines from RawLines for the current width.
+func (m *AgentPaneModel) rewrap() {
+	m.Lines = nil
+	for _, raw := range m.RawLines {
+		if m.Width > 0 && len([]rune(raw)) > m.Width {
+			m.Lines = append(m.Lines, m.wrapLine(raw)...)
+		} else {
+			m.Lines = append(m.Lines, raw)
+		}
+	}
+}
+
+func (m *AgentPaneModel) clampScroll() {
+	maxScroll := len(m.Lines) - m.VisibleLines()
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.ScrollOffset > maxScroll {
+		m.ScrollOffset = maxScroll
+	}
 }
 
 // wrapLine wraps a single long line into multiple lines at word boundaries.
@@ -302,6 +314,7 @@ func (m *AgentPaneModel) SetStep(num, total int, desc string) {
 
 // Clear clears the agent pane content.
 func (m *AgentPaneModel) Clear() {
+	m.RawLines = nil
 	m.Lines = nil
 	m.ScrollOffset = 0
 	m.StepNum = 0

@@ -38,7 +38,8 @@ func isLeakedMouseSequence(runes []rune) bool {
 // from streamed text. It is stateful to handle escape sequences split across
 // chunks (e.g., ESC arrives in one TokenMsg, [ and params in the next).
 type sanitizer struct {
-	inEscape bool // true when we've seen ESC [ but not yet the final byte
+	inEscape   bool // true when we've seen ESC [ but not yet the final byte
+	pendingESC bool // true when chunk ended with ESC (next chunk may start with [)
 }
 
 func (z *sanitizer) sanitize(s string) string {
@@ -47,6 +48,18 @@ func (z *sanitizer) sanitize(s string) string {
 
 	runes := []rune(s)
 	i := 0
+
+	// Handle pending ESC from previous chunk
+	if z.pendingESC {
+		z.pendingESC = false
+		if len(runes) > 0 && runes[0] == '[' {
+			// ESC [ split across chunks — enter escape mode
+			z.inEscape = true
+			i = 1
+		}
+		// If first rune isn't [, the ESC was a lone control char (already stripped)
+	}
+
 	for i < len(runes) {
 		r := runes[i]
 
@@ -75,9 +88,8 @@ func (z *sanitizer) sanitize(s string) string {
 					i++
 				}
 			} else if i+1 >= len(runes) {
-				// ESC at end of chunk — might be start of CSI split across chunks.
-				// Drop it; if next chunk starts with [, inEscape handles it.
-				// If not, the lone ESC is a control char we'd strip anyway.
+				// ESC at end of chunk — set pending for next chunk
+				z.pendingESC = true
 				i++
 			} else {
 				// ESC followed by something other than [ — strip the ESC

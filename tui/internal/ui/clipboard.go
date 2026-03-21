@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"log/slog"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -15,6 +16,7 @@ func clipboardRead() string {
 	}
 	out, err := cmd.Output()
 	if err != nil {
+		slog.Warn("clipboard read failed", "err", err)
 		return ""
 	}
 	return string(out)

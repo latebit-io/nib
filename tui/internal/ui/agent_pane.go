@@ -324,7 +324,7 @@ func (m *AgentPaneModel) Clear() {
 }
 
 // VisibleLines returns the number of content lines visible.
-// Layout: 1 header + content + 1 separator + 3 input rows.
+// Layout: 1 header + content + InputHeight bottom area (separator + input + status).
 func (m *AgentPaneModel) VisibleLines() int {
 	h := m.Height - 1 - InputHeight // 1 header + InputHeight bottom
 	if h < 1 {

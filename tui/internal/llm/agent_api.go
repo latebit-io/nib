@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // AgentAPI implements Provider using an OpenAI-compatible chat completions API.
@@ -26,7 +28,16 @@ func NewAgentAPI(baseURL, model, apiKey string) *AgentAPI {
 		APIKey:  apiKey,
 		BaseURL: baseURL,
 		Model:   model,
-		client:  &http.Client{},
+		client: &http.Client{
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   15 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+			},
+			// No client-level Timeout — would kill SSE streams mid-flight.
+		},
 	}
 }
 

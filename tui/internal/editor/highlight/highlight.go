@@ -137,12 +137,12 @@ func (h *Highlighter) collectAllTokens(node *sitter.Node, lines []string) {
 
 // Theme colors
 var (
-	keywordStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // magenta
-	stringStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
-	commentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray
-	numberStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
-	typeStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
-	funcStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("4")) // blue
+	keywordStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // magenta
+	stringStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
+	commentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray
+	numberStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
+	typeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
+
 	operatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("9")) // bright red
 	defaultStyle  = lipgloss.NewStyle()
 )
@@ -174,10 +174,6 @@ func styleForNode(nodeType string) lipgloss.Style {
 	// Types
 	case "type_identifier", "field_identifier":
 		return typeStyle
-
-	// Functions
-	case "function_declaration", "method_declaration":
-		return funcStyle
 
 	// Operators
 	case ":=", "=", "==", "!=", "<", ">", "<=", ">=",

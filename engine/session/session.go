@@ -50,6 +50,9 @@ func (s *Session) SubmitGoal(goal string) {
 	if s.CurrentIntent != "" && !s.IntentDone {
 		s.ArchiveIntent()
 	}
+	// Clear stale pending edit from previous run — Agent.Run cancels the
+	// prior run internally, so any pending approval is no longer valid.
+	s.PendingEdit = nil
 	s.CurrentIntent = goal
 	s.IntentDone = false
 	s.Agent.Run(s.Editor.Buf.Path, s.Editor.Buf.Content(), goal)

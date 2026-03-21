@@ -69,7 +69,9 @@ type Agent struct {
 }
 
 // New creates a new agent with the given LLM provider and event channel.
-// The frontend must read from the events channel to receive agent updates.
+// The frontend must continuously drain the events channel. Sends block
+// if the channel is full, providing backpressure to the agent loop.
+// Use a buffered channel (e.g. 64) to absorb bursts.
 func New(provider llm.Provider, events chan<- Event) *Agent {
 	return &Agent{
 		Provider:         provider,

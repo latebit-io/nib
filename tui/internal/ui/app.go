@@ -154,8 +154,10 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 	case agent.EditProposedEvent:
 		m.AgentPane.Status = "waiting"
 		m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
-		// Compute inline diff and create editable overlay.
-		diff := m.Editor.ComputeDiff(e.Edit.Search, e.Edit.Replace)
+		// ReviewEdit computes the diff AND marks the edit as reviewed.
+		// ApproveEdit will fail if this step is skipped — the engine enforces
+		// that every frontend shows the developer what the agent proposes.
+		diff := m.Session.ReviewEdit()
 		if diff != nil {
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
 			m.Editor.Overlay = NewDiffOverlay(diff)
@@ -244,22 +246,27 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit != nil, "agent", m.Session.HasAgent())
 		if m.Session.PendingEdit != nil {
-			// If the user edited the overlay, update the search/replace to use
-			// full affected lines so prefix/suffix edits are captured.
+			// Build the final search/replace from the overlay.
+			// The search is the full affected buffer lines; the replace is
+			// the overlay content (possibly modified by the developer).
+			var search, replace string
 			if m.Editor.Overlay != nil {
 				o := m.Editor.Overlay
 				var oldLines []string
 				for i := o.StartLine; i <= o.EndLine; i++ {
 					oldLines = append(oldLines, m.Editor.Buf.LineText(i))
 				}
-				m.Session.PendingEdit.Search = strings.Join(oldLines, "\n")
-				m.Session.PendingEdit.Replace = o.Content()
+				search = strings.Join(oldLines, "\n")
+				replace = o.Content()
+			} else {
+				// No overlay (diff computation failed) — use original values.
+				search = m.Session.PendingEdit.Search
+				replace = m.Session.PendingEdit.Replace
 			}
 			slog.Debug("overlay cleared", "reason", "approve",
-				"searchLen", len(m.Session.PendingEdit.Search),
-				"replaceLen", len(m.Session.PendingEdit.Replace))
+				"searchLen", len(search), "replaceLen", len(replace))
 			m.clearEditorOverlay()
-			ok, reason := m.Session.ApproveEdit()
+			ok, reason := m.Session.ApproveEdit(search, replace)
 			if !ok {
 				slog.Warn("agent approve: edit rejected", "reason", reason)
 				m.AgentPane.AppendText("\n[" + reason + "]\n")

@@ -9,7 +9,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/engine/editor"
-	"github.com/latebit-io/junto/engine/highlight"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -144,7 +143,6 @@ func (m *EditorModel) Render() string {
 	m.ensureCursorVisibleVisual()
 	m.syncExtraVisualLines()
 	m.ClampScroll()
-	m.ReparseIfNeeded()
 
 	gutterW := m.GutterWidth()
 	contentW := m.ContentWidth()
@@ -292,8 +290,7 @@ func (m *EditorModel) renderNormalLine(
 
 	// Syntax highlighting.
 	charStyles := make([]lipgloss.Style, contentW)
-	if m.Highlighter != nil {
-		tokens := m.Highlighter.HighlightLine(lineIdx)
+	if tokens := m.HighlightLine(lineIdx); len(tokens) > 0 {
 		for _, tok := range tokens {
 			dStart := 0
 			if tok.Col < len(bufToDisp) {
@@ -359,8 +356,7 @@ func (m *EditorModel) renderRemovedLine(
 
 	// Syntax highlighting on removed lines (they are real buffer lines).
 	charStyles := make([]lipgloss.Style, contentW)
-	if m.Highlighter != nil {
-		tokens := m.Highlighter.HighlightLine(lineIdx)
+	if tokens := m.HighlightLine(lineIdx); len(tokens) > 0 {
 		for _, tok := range tokens {
 			dStart := 0
 			if tok.Col < len(bufToDisp) {
@@ -941,20 +937,20 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 	return nil
 }
 
-// styleForTokenKind maps engine highlight.TokenKind to lipgloss.Style for TUI rendering.
-func styleForTokenKind(kind highlight.TokenKind) lipgloss.Style {
+// styleForTokenKind maps engine editor.TokenKind to lipgloss.Style for TUI rendering.
+func styleForTokenKind(kind editor.TokenKind) lipgloss.Style {
 	switch kind {
-	case highlight.KindKeyword:
+	case editor.KindKeyword:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // magenta
-	case highlight.KindString:
+	case editor.KindString:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
-	case highlight.KindComment:
+	case editor.KindComment:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray
-	case highlight.KindNumber:
+	case editor.KindNumber:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
-	case highlight.KindType:
+	case editor.KindType:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
-	case highlight.KindOperator:
+	case editor.KindOperator:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")) // bright red
 	default:
 		return lipgloss.NewStyle()

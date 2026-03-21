@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/latebit-io/junto/engine/sanitize"
+	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/mattn/go-runewidth"
 )
 

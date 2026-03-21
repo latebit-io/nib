@@ -1,8 +1,10 @@
-package llm
+package agent
 
 import (
 	"fmt"
 	"strings"
+
+	"github.com/latebit-io/junto/engine/llm"
 )
 
 const systemPrompt = `You are a pair-programming agent in a code editor. Make one edit at a time.
@@ -26,9 +28,9 @@ const systemPrompt = `You are a pair-programming agent in a code editor. Make on
 - Stay focused on the developer's stated intent. Every edit must directly serve the task. Do not refactor, clean up, or "improve" unrelated code. When the intent is fulfilled, stop.
 `
 
-// BuildMessages constructs the message list for an LLM request.
+// buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
-func BuildMessages(fileName, fileContent, goal string) []Message {
+func buildMessages(fileName, fileContent, goal string) []llm.Message {
 	// Number the lines for the LLM
 	lines := strings.Split(fileContent, "\n")
 	var numbered strings.Builder
@@ -43,7 +45,7 @@ func BuildMessages(fileName, fileContent, goal string) []Message {
 	}
 	user := fmt.Sprintf("## File: %s\n\n%s\n%s%s\n\n## Task\n\n%s", fileName, fence, numbered.String(), fence, goal)
 
-	return []Message{
+	return []llm.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: user},
 	}

@@ -1,40 +1,40 @@
 package llm
 
-// ToolDef is the OpenAI-compatible tool definition sent in API requests.
-type ToolDef struct {
+// toolDef is the OpenAI-compatible tool definition sent in API requests.
+type toolDef struct {
 	Type     string      `json:"type"` // "function"
-	Function FunctionDef `json:"function"`
+	Function functionDef `json:"function"`
 }
 
-// FunctionDef describes a function the LLM can call.
-type FunctionDef struct {
+// functionDef describes a function the LLM can call.
+type functionDef struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
-	Parameters  FunctionParams `json:"parameters"`
+	Parameters  functionParams `json:"parameters"`
 }
 
-// FunctionParams is a JSON Schema object for function parameters.
-type FunctionParams struct {
+// functionParams is a JSON Schema object for function parameters.
+type functionParams struct {
 	Type       string                   `json:"type"` // "object"
-	Properties map[string]FunctionParam `json:"properties"`
+	Properties map[string]functionParam `json:"properties"`
 	Required   []string                 `json:"required"`
 }
 
-// FunctionParam describes one parameter.
-type FunctionParam struct {
+// functionParam describes one parameter.
+type functionParam struct {
 	Type        string `json:"type"`
 	Description string `json:"description"`
 }
 
-// EditFileTool is the tool definition for search-and-replace editing.
-var EditFileTool = ToolDef{
+// editFileTool is the tool definition for search-and-replace editing.
+var editFileTool = toolDef{
 	Type: "function",
-	Function: FunctionDef{
+	Function: functionDef{
 		Name:        "edit_file",
 		Description: "Search for exact text in the file and replace it with new text. The search string must match the file content exactly (including whitespace and newlines). To delete text, set replace to an empty string. To insert, include anchor text in search and repeat it in replace with the new code added.",
-		Parameters: FunctionParams{
+		Parameters: functionParams{
 			Type: "object",
-			Properties: map[string]FunctionParam{
+			Properties: map[string]functionParam{
 				"search": {
 					Type:        "string",
 					Description: "Exact text to find in the file. Must match verbatim.",
@@ -53,19 +53,19 @@ var EditFileTool = ToolDef{
 	},
 }
 
-// ReadFileTool lets the LLM read the current file content before editing.
-var ReadFileTool = ToolDef{
+// readFileTool lets the LLM read the current file content before editing.
+var readFileTool = toolDef{
 	Type: "function",
-	Function: FunctionDef{
+	Function: functionDef{
 		Name:        "read_file",
 		Description: "Read the current contents of the file being edited. Use this before making an edit to see the latest state of the file, especially after the developer may have made changes.",
-		Parameters: FunctionParams{
+		Parameters: functionParams{
 			Type:       "object",
-			Properties: map[string]FunctionParam{},
+			Properties: map[string]functionParam{},
 			Required:   []string{},
 		},
 	},
 }
 
-// DefaultTools is the set of tools provided to the LLM.
-var DefaultTools = []ToolDef{ReadFileTool, EditFileTool}
+// defaultTools is the set of tools provided to the LLM.
+var defaultTools = []toolDef{readFileTool, editFileTool}

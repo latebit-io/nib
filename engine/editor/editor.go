@@ -36,8 +36,8 @@ type Editor struct {
 	SelectStartLine int
 	SelectStartCol  int
 
-	// Syntax highlighting
-	Highlighter  *highlight.Highlighter
+	// Syntax highlighting (internal — use HighlightLine to access)
+	highlighter  *highlight.Highlighter
 	needsReparse bool
 }
 
@@ -49,9 +49,9 @@ func New(buf *buffer.Buffer) *Editor {
 		Height: 24,
 	}
 	if buf.Path != "" {
-		e.Highlighter = highlight.New(buf.Path)
-		if e.Highlighter != nil {
-			e.Highlighter.Parse(buf.Content())
+		e.highlighter = highlight.New(buf.Path)
+		if e.highlighter != nil {
+			e.highlighter.Parse(buf.Content())
 		}
 	}
 	return e
@@ -59,8 +59,8 @@ func New(buf *buffer.Buffer) *Editor {
 
 // Close frees native tree-sitter resources. Call on shutdown.
 func (e *Editor) Close() {
-	if e.Highlighter != nil {
-		e.Highlighter.Close()
+	if e.highlighter != nil {
+		e.highlighter.Close()
 	}
 }
 
@@ -556,6 +556,23 @@ func (e *Editor) ApplyEdit(search, replace string) (bool, string) {
 
 // --- Highlight ---
 
+// Token re-exports highlight.Token for frontends that need token data.
+type Token = highlight.Token
+
+// TokenKind re-exports highlight.TokenKind for frontends that map to styles.
+type TokenKind = highlight.TokenKind
+
+// Token kind constants — re-exported for frontend use.
+const (
+	KindKeyword  = highlight.KindKeyword
+	KindString   = highlight.KindString
+	KindComment  = highlight.KindComment
+	KindNumber   = highlight.KindNumber
+	KindType     = highlight.KindType
+	KindOperator = highlight.KindOperator
+	KindNone     = highlight.KindNone
+)
+
 // MarkDirty flags the highlighter for reparse on next ReparseIfNeeded call.
 func (e *Editor) MarkDirty() {
 	e.needsReparse = true
@@ -563,10 +580,21 @@ func (e *Editor) MarkDirty() {
 
 // ReparseIfNeeded reparses the buffer for syntax highlighting.
 func (e *Editor) ReparseIfNeeded() {
-	if e.needsReparse && e.Highlighter != nil {
-		e.Highlighter.Parse(e.Buf.Content())
+	if e.needsReparse && e.highlighter != nil {
+		e.highlighter.Parse(e.Buf.Content())
 		e.needsReparse = false
 	}
+}
+
+// HighlightLine returns syntax tokens for the given line.
+// Returns nil if no highlighter is configured.
+// Calls ReparseIfNeeded internally so the caller doesn't have to.
+func (e *Editor) HighlightLine(line int) []Token {
+	e.ReparseIfNeeded()
+	if e.highlighter == nil {
+		return nil
+	}
+	return e.highlighter.HighlightLine(line)
 }
 
 // --- Display Helpers ---

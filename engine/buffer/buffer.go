@@ -9,7 +9,7 @@ import (
 
 // Buffer is a line-array text buffer with undo/redo.
 type Buffer struct {
-	Lines    [][]rune
+	lines    [][]rune
 	Path     string
 	Modified bool
 
@@ -40,7 +40,7 @@ type operation struct {
 // New creates an empty buffer.
 func New() *Buffer {
 	return &Buffer{
-		Lines: [][]rune{{}},
+		lines: [][]rune{{}},
 	}
 }
 
@@ -67,41 +67,41 @@ func (b *Buffer) loadString(s string) {
 	// Remove trailing newline to avoid empty final line
 	s = strings.TrimSuffix(s, "\n")
 	raw := strings.Split(s, "\n")
-	b.Lines = make([][]rune, len(raw))
+	b.lines = make([][]rune, len(raw))
 	for i, l := range raw {
-		b.Lines[i] = []rune(l)
+		b.lines[i] = []rune(l)
 	}
-	if len(b.Lines) == 0 {
-		b.Lines = [][]rune{{}}
+	if len(b.lines) == 0 {
+		b.lines = [][]rune{{}}
 	}
 	b.Modified = false
 }
 
 // LineCount returns the number of lines.
 func (b *Buffer) LineCount() int {
-	return len(b.Lines)
+	return len(b.lines)
 }
 
 // LineLen returns the length of line at index line.
 func (b *Buffer) LineLen(line int) int {
-	if line < 0 || line >= len(b.Lines) {
+	if line < 0 || line >= len(b.lines) {
 		return 0
 	}
-	return len(b.Lines[line])
+	return len(b.lines[line])
 }
 
 // LineText returns the string content of a line.
 func (b *Buffer) LineText(line int) string {
-	if line < 0 || line >= len(b.Lines) {
+	if line < 0 || line >= len(b.lines) {
 		return ""
 	}
-	return string(b.Lines[line])
+	return string(b.lines[line])
 }
 
 // Content returns the full buffer content as a string.
 func (b *Buffer) Content() string {
-	parts := make([]string, len(b.Lines))
-	for i, l := range b.Lines {
+	parts := make([]string, len(b.lines))
+	for i, l := range b.lines {
 		parts[i] = string(l)
 	}
 	return strings.Join(parts, "\n")
@@ -269,14 +269,14 @@ func (b *Buffer) clamp(line, col int) (int, int) {
 	if line < 0 {
 		line = 0
 	}
-	if line >= len(b.Lines) {
-		line = len(b.Lines) - 1
+	if line >= len(b.lines) {
+		line = len(b.lines) - 1
 	}
 	if col < 0 {
 		col = 0
 	}
-	if col > len(b.Lines[line]) {
-		col = len(b.Lines[line])
+	if col > len(b.lines[line]) {
+		col = len(b.lines[line])
 	}
 	return line, col
 }
@@ -296,13 +296,13 @@ func (b *Buffer) doInsert(line, col int, runes []rune) {
 
 	if len(parts) == 1 {
 		// Single-line insert
-		b.Lines[line] = insertRunes(b.Lines[line], col, runes)
+		b.lines[line] = insertRunes(b.lines[line], col, runes)
 		return
 	}
 
 	// Multi-line insert
-	after := append([]rune{}, b.Lines[line][col:]...)
-	b.Lines[line] = append(b.Lines[line][:col], []rune(parts[0])...)
+	after := append([]rune{}, b.lines[line][col:]...)
+	b.lines[line] = append(b.lines[line][:col], []rune(parts[0])...)
 
 	// Insert middle lines
 	newLines := make([][]rune, len(parts)-1)
@@ -313,7 +313,7 @@ func (b *Buffer) doInsert(line, col int, runes []rune) {
 	newLines[len(newLines)-1] = append([]rune(parts[len(parts)-1]), after...)
 
 	// Splice into Lines array
-	b.Lines = spliceLines(b.Lines, line+1, 0, newLines)
+	b.lines = spliceLines(b.lines, line+1, 0, newLines)
 }
 
 func (b *Buffer) doDelete(line, col int, runes []rune) {
@@ -322,13 +322,13 @@ func (b *Buffer) doDelete(line, col int, runes []rune) {
 	for _, r := range runes {
 		if r == '\n' {
 			// Join current line with next line
-			if curLine+1 < len(b.Lines) {
-				b.Lines[curLine] = append(b.Lines[curLine], b.Lines[curLine+1]...)
-				b.Lines = spliceLines(b.Lines, curLine+1, 1, nil)
+			if curLine+1 < len(b.lines) {
+				b.lines[curLine] = append(b.lines[curLine], b.lines[curLine+1]...)
+				b.lines = spliceLines(b.lines, curLine+1, 1, nil)
 			}
 		} else {
-			if curLine < len(b.Lines) && curCol < len(b.Lines[curLine]) {
-				b.Lines[curLine] = deleteRune(b.Lines[curLine], curCol)
+			if curLine < len(b.lines) && curCol < len(b.lines[curLine]) {
+				b.lines[curLine] = deleteRune(b.lines[curLine], curCol)
 			}
 		}
 	}
@@ -379,13 +379,13 @@ func (b *Buffer) collectRunes(line, col, count int) []rune {
 	var result []rune
 	l, c := line, col
 	for i := 0; i < count; i++ {
-		if l >= len(b.Lines) {
+		if l >= len(b.lines) {
 			break
 		}
-		if c < len(b.Lines[l]) {
-			result = append(result, b.Lines[l][c])
+		if c < len(b.lines[l]) {
+			result = append(result, b.lines[l][c])
 			c++
-		} else if l+1 < len(b.Lines) {
+		} else if l+1 < len(b.lines) {
 			// At end of line — the "character" here is the newline
 			result = append(result, '\n')
 			l++

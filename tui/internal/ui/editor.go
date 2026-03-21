@@ -236,13 +236,12 @@ func (m *EditorModel) Render() string {
 	return strings.Join(output, "\n")
 }
 
-// ensureCursorVisibleVisual corrects ScrollOffset after the engine's
-// EnsureCursorVisible sets it in buffer-line space. When an overlay exists
-// and the buffer cursor is after the diff, ScrollOffset must account for
-// the virtual added lines.
+// ensureCursorVisibleVisual corrects ScrollOffset in visual-line space.
+// When an overlay exists, the active cursor (buffer or overlay) must be
+// mapped to its visual line before adjusting scroll.
 func (m *EditorModel) ensureCursorVisibleVisual() {
 	overlay := m.Overlay
-	if overlay == nil || overlay.Active {
+	if overlay == nil {
 		return
 	}
 	addedCount := overlay.LineCount()
@@ -251,10 +250,16 @@ func (m *EditorModel) ensureCursorVisibleVisual() {
 		return
 	}
 
-	// Compute the visual line of the buffer cursor.
-	visualCursor := m.CursorLine
-	if m.CursorLine > overlay.EndLine {
-		visualCursor = m.CursorLine + addedCount
+	var visualCursor int
+	if overlay.Active {
+		// Overlay cursor: added lines start at visual line EndLine+1.
+		visualCursor = overlay.EndLine + 1 + overlay.Editor.CursorLine
+	} else {
+		// Buffer cursor: shift by addedCount if past the diff.
+		visualCursor = m.CursorLine
+		if m.CursorLine > overlay.EndLine {
+			visualCursor = m.CursorLine + addedCount
+		}
 	}
 
 	if visualCursor < m.ScrollOffset {
@@ -615,13 +620,27 @@ func (m *EditorModel) handleNormalLineClick(bufLine, displayCol int, action tea.
 
 // --- Key Handling ---
 
-// isOnRemovedLine returns true when the buffer cursor is on a line in the
-// overlay's removed range and the overlay cursor is not active.
-func (m *EditorModel) isOnRemovedLine() bool {
+// overlapsRemovedRange returns true when the cursor or selection touches the
+// overlay's removed line range. Used to block edits that would desync the diff.
+func (m *EditorModel) overlapsRemovedRange() bool {
 	if m.Overlay == nil || m.Overlay.Active {
 		return false
 	}
-	return m.CursorLine >= m.Overlay.StartLine && m.CursorLine <= m.Overlay.EndLine
+	start, end := m.Overlay.StartLine, m.Overlay.EndLine
+	if m.CursorLine >= start && m.CursorLine <= end {
+		return true
+	}
+	if m.SelectionActive {
+		selStart, selEnd := m.SelectStartLine, m.CursorLine
+		if selStart > selEnd {
+			selStart, selEnd = selEnd, selStart
+		}
+		// Selection overlaps if it isn't entirely before or after the range.
+		if selStart <= end && selEnd >= start {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
@@ -636,7 +655,7 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
 	// inserts/deletes lines above the diff.
 	linesBefore := m.Buf.LineCount()
 
-	readOnly := m.isOnRemovedLine()
+	readOnly := m.overlapsRemovedRange()
 	cmd := m.handleEditorKeyFor(keyMsg, m.Editor, readOnly)
 
 	m.adjustOverlayPosition(linesBefore)

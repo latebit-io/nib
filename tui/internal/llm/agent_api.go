@@ -156,7 +156,7 @@ func (tc *toolCallAccumulator) finalize() []ToolCall {
 
 func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- StreamEvent) {
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // 10MB — large file content in tool results
 
 	var tc toolCallAccumulator
 

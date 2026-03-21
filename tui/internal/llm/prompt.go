@@ -23,6 +23,7 @@ const systemPrompt = `You are a pair-programming agent in a code editor. Make on
 - The file below is shown with line numbers for reference only. Line numbers (e.g., "   1 | ") are NOT part of the file. Never include them in search text. Use read_file to get the raw content.
 - Do NOT repeat or summarize what you already said. Do NOT comment on the quality of previous edits.
 - After a rejection, try a different approach immediately. Do not explain why the previous attempt was wrong.
+- Stay focused on the developer's stated intent. Every edit must directly serve the task. Do not refactor, clean up, or "improve" unrelated code. When the intent is fulfilled, stop.
 `
 
 // BuildMessages constructs the message list for an LLM request.

@@ -49,6 +49,7 @@ type Agent struct {
 	cancel      context.CancelFunc
 	fileName    string
 	fileContent string
+	intent      string // current developer intent — included in every tool result
 
 	// Approval flow: agent blocks on these channels
 	approveCh  chan bool   // true = approved, false = rejected
@@ -85,6 +86,7 @@ func (a *Agent) Run(p *tea.Program, fileName, fileContent, goal string) {
 	a.Program = p
 	a.fileName = fileName
 	a.fileContent = fileContent
+	a.intent = goal
 	a.silentRetries = 0
 	a.mu.Unlock()
 
@@ -227,11 +229,23 @@ func (a *Agent) handleToolCall(ctx context.Context, tc llm.ToolCall) string {
 	}
 }
 
+// intentReminder returns a string reminding the LLM of the current intent.
+// Appended to tool results so the LLM sees it every turn.
+func (a *Agent) intentReminder() string {
+	a.mu.Lock()
+	intent := a.intent
+	a.mu.Unlock()
+	if intent == "" {
+		return ""
+	}
+	return "\n\nReminder — developer's intent: " + intent
+}
+
 func (a *Agent) handleReadFile() string {
 	a.mu.Lock()
 	content := a.fileContent
 	a.mu.Unlock()
-	return content
+	return content + a.intentReminder()
 }
 
 type editArgs struct {
@@ -273,14 +287,14 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 			slog.Info("edit_file: silent retry", "reason", errMsg,
 				"attempt", retries+1, "search_len", len(args.Search))
 			return fmt.Sprintf("Error: %s. You have %d retries left. Read the file content carefully and copy the exact text.\n\nCurrent file:\n\n%s",
-				errMsg, remaining, content)
+				errMsg, remaining, content) + a.intentReminder()
 		}
 		a.silentRetries = 0
 		a.mu.Unlock()
 		slog.Warn("edit_file: validation failed after max retries",
 			"matches", matchCount, "search_len", len(args.Search))
 		return fmt.Sprintf("Error: search text validation failed after %d retries. Use read_file to re-read the file and copy the exact text.\n\nCurrent file:\n\n%s",
-			maxRetries, content)
+			maxRetries, content) + a.intentReminder()
 	}
 
 	a.mu.Lock()
@@ -307,7 +321,7 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 			a.mu.Lock()
 			content = a.fileContent
 			a.mu.Unlock()
-			return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file:\n\n%s", content)
+			return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file:\n\n%s", content) + a.intentReminder()
 		}
 	}
 
@@ -324,6 +338,6 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 		a.mu.Unlock()
 		a.send(StatusMsg{Status: "thinking"})
 		a.send(TokenMsg{Text: "\n"})
-		return fmt.Sprintf("Edit applied successfully. The developer may have made additional changes.\n\nCurrent file:\n\n%s", newContent)
+		return fmt.Sprintf("Edit applied successfully. The developer may have made additional changes.\n\nCurrent file:\n\n%s", newContent) + a.intentReminder()
 	}
 }

@@ -2,8 +2,10 @@ package ui
 
 import (
 	"log/slog"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/tui/internal/agent"
 	"github.com/latebit-io/junto/tui/internal/editor/buffer"
 )
@@ -22,6 +24,11 @@ type AppModel struct {
 
 	// Agent loop (nil = editor-only mode)
 	AgentLoop *agent.Agent
+
+	// Intent — session-level contract between developer and agent
+	CurrentIntent string   // the active goal
+	IntentDone    bool     // true when intent was completed (not cleared)
+	IntentHistory []string // resolved intents archived in order
 
 	// Cross-pane state
 	PendingEdit *agent.PendingEdit
@@ -66,6 +73,22 @@ func NewApp(buf *buffer.Buffer, ag *agent.Agent) AppModel {
 	}
 }
 
+// ArchiveIntent marks the current intent as done.
+// The intent stays visible as completed until the developer starts a new one.
+func (m *AppModel) ArchiveIntent() {
+	if m.CurrentIntent != "" {
+		m.IntentDone = true
+		m.IntentHistory = append(m.IntentHistory, m.CurrentIntent)
+	}
+}
+
+// ClearIntent cancels the current intent without archiving.
+// Used when the developer explicitly escapes/deletes the intent.
+func (m *AppModel) ClearIntent() {
+	m.CurrentIntent = ""
+	m.IntentDone = false
+}
+
 func (m *AppModel) Init() tea.Cmd {
 	return nil
 }
@@ -86,7 +109,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
-		m.Regions.SetSize(msg.Width, msg.Height)
+		// Intent bar always takes 1 row; RegionManager gets the rest
+		m.Regions.SetSize(msg.Width, m.regionHeight())
 		return m, nil
 
 	// Agent messages — intercept EditProposedMsg (cross-cutting), delegate rest
@@ -95,13 +119,30 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.AgentPane.Update(msg)
 		return m, cmd
 
-	case agent.TokenMsg, agent.StatusMsg, agent.ErrorMsg, agent.DoneMsg:
+	case agent.TokenMsg, agent.StatusMsg:
+		cmd := m.AgentPane.Update(msg)
+		return m, cmd
+
+	case agent.ErrorMsg:
+		m.PendingEdit = nil
+		cmd := m.AgentPane.Update(msg)
+		return m, cmd
+
+	case agent.DoneMsg:
+		m.PendingEdit = nil
+		m.ArchiveIntent()
 		cmd := m.AgentPane.Update(msg)
 		return m, cmd
 
 	// Goal submitted from agent pane — wire up the agent run
 	case GoalSubmittedMsg:
 		if m.AgentLoop != nil {
+			// Archive previous intent if redirecting mid-run
+			if m.CurrentIntent != "" && !m.IntentDone {
+				m.ArchiveIntent()
+			}
+			m.CurrentIntent = msg.Goal
+			m.IntentDone = false
 			m.AgentPane.Clear()
 			m.AgentLoop.Run(m.program, m.Editor.Buf.Path, m.Editor.Buf.Content(), msg.Goal)
 		}
@@ -117,6 +158,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
 			m.recentMouse = true
 		}
+		// Translate Y for intent bar row
+		msg.Y -= 1
 		cmd := m.Regions.HandleMouse(msg)
 		return m, cmd
 
@@ -125,6 +168,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 	return m, nil
+}
+
+// regionHeight returns the height available for the RegionManager
+// (total height minus the intent bar which is always present).
+func (m *AppModel) regionHeight() int {
+	h := m.Height - 1 // 1 row for intent bar
+	if h < 1 {
+		h = 1
+	}
+	return h
 }
 
 func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -179,7 +232,14 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.AgentLoop.Reject()
 			return m, nil
 		}
-		// No pending edit — fall through to focused pane
+		// No pending edit — clear intent and cancel agent if active
+		if m.CurrentIntent != "" && m.AgentLoop != nil {
+			m.ClearIntent()
+			m.AgentLoop.Cancel()
+			m.AgentPane.Status = "idle"
+			return m, nil
+		}
+		// No intent either — fall through to focused pane
 
 	case ActionAgentContinue:
 		if m.AgentLoop != nil && m.AgentPane.Status == "editing" {
@@ -215,12 +275,53 @@ func (m *AppModel) View() string {
 		return "Initializing..."
 	}
 
-	view := m.Regions.Render()
-
 	// Replace view with dialog when active
 	if m.Dialog.Active {
-		view = m.Dialog.Render(m.Width, m.Height)
+		return m.Dialog.Render(m.Width, m.Height)
 	}
 
-	return view
+	return m.renderIntentBar() + "\n" + m.Regions.Render()
+}
+
+func (m *AppModel) renderIntentBar() string {
+	var text string
+	var style lipgloss.Style
+
+	idleStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
+		Background(lipgloss.Color("236"))
+	activeStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("230")).
+		Background(lipgloss.Color("235"))
+	doneStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("2")).
+		Background(lipgloss.Color("236"))
+
+	switch {
+	case m.CurrentIntent == "":
+		text = " Ctrl+G to set intent"
+		style = idleStyle
+	case m.IntentDone:
+		text = " done: " + m.CurrentIntent
+		style = doneStyle
+	default:
+		text = " " + m.CurrentIntent
+		style = activeStyle
+	}
+
+	// Truncate to fit width (one line, never wraps)
+	runes := []rune(text)
+	if len(runes) > m.Width {
+		runes = runes[:m.Width-1]
+		text = string(runes) + "…"
+	}
+
+	// Pad to full width
+	padding := m.Width - len([]rune(text))
+	if padding > 0 {
+		text += strings.Repeat(" ", padding)
+	}
+
+	return style.Render(text)
 }

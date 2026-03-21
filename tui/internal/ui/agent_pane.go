@@ -238,6 +238,10 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 // Raw text is stored unwrapped; wrapped Lines are derived for the current width.
 func (m *AgentPaneModel) AppendText(text string) {
 	slog.Debug("agent pane append", "text_len", len(text))
+
+	// Only auto-scroll if the user hasn't scrolled up to read earlier output
+	wasAtBottom := m.isAtBottom()
+
 	parts := strings.Split(text, "\n")
 	for i, part := range parts {
 		if i == 0 && len(m.RawLines) > 0 {
@@ -247,7 +251,19 @@ func (m *AgentPaneModel) AppendText(text string) {
 		}
 	}
 	m.rewrap()
-	m.scrollToBottom()
+	if wasAtBottom {
+		m.scrollToBottom()
+	}
+}
+
+// isAtBottom returns true if the view is scrolled to (or near) the bottom.
+func (m *AgentPaneModel) isAtBottom() bool {
+	vis := m.VisibleLines()
+	maxScroll := len(m.Lines) - vis
+	if maxScroll <= 0 {
+		return true
+	}
+	return m.ScrollOffset >= maxScroll-1
 }
 
 // rewrap derives wrapped Lines from RawLines for the current width.
@@ -301,6 +317,7 @@ func (m *AgentPaneModel) Clear() {
 	m.Lines = nil
 	m.ScrollOffset = 0
 	m.Status = "idle"
+	m.sanitizer = sanitize.Sanitizer{}
 }
 
 // VisibleLines returns the number of content lines visible.

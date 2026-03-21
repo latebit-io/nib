@@ -282,6 +282,9 @@ func (m *AppModel) renderIntentBar() string {
 		Background(lipgloss.Color("236"))
 
 	switch {
+	case !m.Session.HasAgent():
+		text = " Editor"
+		style = idleStyle
 	case m.Session.CurrentIntent == "":
 		text = " Ctrl+G to set intent"
 		style = idleStyle

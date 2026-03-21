@@ -19,8 +19,10 @@ type AgentPaneModel struct {
 	Height int
 
 	// RawLines stores unwrapped content; Lines is derived by wrapping to Width.
-	RawLines []string
-	Lines    []string
+	// wrappedIndex[i] is the index into Lines where RawLines[i] starts.
+	RawLines     []string
+	Lines        []string
+	wrappedIndex []int
 
 	// Scroll
 	ScrollOffset int
@@ -244,14 +246,21 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 // AppendText adds streaming text to the agent pane.
-// Raw text is stored unwrapped; wrapped Lines are derived for the current width.
+// Raw text is stored unwrapped; wrapped Lines are derived incrementally
+// for only the affected lines to avoid O(total_text) per token during streaming.
 func (m *AgentPaneModel) AppendText(text string) {
 	slog.Debug("agent pane append", "text_len", len(text))
 
-	// Only auto-scroll if the user hasn't scrolled up to read earlier output
 	wasAtBottom := m.isAtBottom()
 
 	parts := strings.Split(text, "\n")
+
+	// Track which raw line index was modified vs appended
+	firstAffected := len(m.RawLines) - 1
+	if firstAffected < 0 {
+		firstAffected = 0
+	}
+
 	for i, part := range parts {
 		if i == 0 && len(m.RawLines) > 0 {
 			m.RawLines[len(m.RawLines)-1] += part
@@ -259,7 +268,25 @@ func (m *AgentPaneModel) AppendText(text string) {
 			m.RawLines = append(m.RawLines, part)
 		}
 	}
-	m.rewrap()
+
+	// Incremental rewrap: truncate Lines to before firstAffected (O(1) via index),
+	// then wrap only the affected raw lines.
+	truncateTo := 0
+	if firstAffected < len(m.wrappedIndex) {
+		truncateTo = m.wrappedIndex[firstAffected]
+	}
+	m.Lines = m.Lines[:truncateTo]
+	m.wrappedIndex = m.wrappedIndex[:firstAffected]
+
+	for i := firstAffected; i < len(m.RawLines); i++ {
+		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
+		if m.Width > 0 && runewidth.StringWidth(m.RawLines[i]) > m.Width {
+			m.Lines = append(m.Lines, m.wrapLine(m.RawLines[i])...)
+		} else {
+			m.Lines = append(m.Lines, m.RawLines[i])
+		}
+	}
+
 	if wasAtBottom {
 		m.scrollToBottom()
 	}
@@ -278,7 +305,9 @@ func (m *AgentPaneModel) isAtBottom() bool {
 // rewrap derives wrapped Lines from RawLines for the current width.
 func (m *AgentPaneModel) rewrap() {
 	m.Lines = nil
+	m.wrappedIndex = nil
 	for _, raw := range m.RawLines {
+		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
 		if m.Width > 0 && runewidth.StringWidth(raw) > m.Width {
 			m.Lines = append(m.Lines, m.wrapLine(raw)...)
 		} else {
@@ -339,6 +368,7 @@ func (m *AgentPaneModel) wrapLine(line string) []string {
 func (m *AgentPaneModel) Clear() {
 	m.RawLines = nil
 	m.Lines = nil
+	m.wrappedIndex = nil
 	m.ScrollOffset = 0
 	m.Status = "idle"
 	m.sanitizer = sanitize.Sanitizer{}

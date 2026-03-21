@@ -154,9 +154,9 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 		m.AgentPane.Status = e.Status
 	case agent.EditProposedEvent:
 		m.AgentPane.Status = "waiting"
-		m.AgentPane.AppendText("\n--- Proposed: " + m.AgentPane.sanitizer.Sanitize(e.Edit.Reason) + " ---\n")
+		m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 	case agent.ErrorEvent:
-		m.AgentPane.AppendText("\nError: " + m.AgentPane.sanitizer.Sanitize(e.Err) + "\n")
+		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 	case agent.DoneEvent:
 		m.AgentPane.Status = "idle"
 		m.AgentPane.AppendText("\n--- Done ---\n")

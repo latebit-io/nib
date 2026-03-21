@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/engine/sanitize"
+	"github.com/mattn/go-runewidth"
 )
 
 // InputHeight is the number of rows reserved for the input area (separator + input + status).
@@ -83,8 +84,16 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 }
 
 // AppendToken sanitizes and appends streaming text from the agent.
+// Uses the stateful sanitizer to handle escape sequences split across chunks.
 func (m *AgentPaneModel) AppendToken(text string) {
 	m.AppendText(m.sanitizer.Sanitize(text))
+}
+
+// AppendMeta sanitizes and appends non-stream text (edit proposals, errors, status).
+// Uses a one-shot sanitizer so it doesn't interfere with the streaming sanitizer state.
+func (m *AgentPaneModel) AppendMeta(text string) {
+	var s sanitize.Sanitizer
+	m.AppendText(s.Sanitize(text))
 }
 
 func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
@@ -417,13 +426,14 @@ func (m *AgentPaneModel) isSelected(line, col int) bool {
 	return true
 }
 
-// padLine pads or truncates a string to exactly width characters.
+// padLine pads or truncates a string to exactly width display cells.
+// Uses cell-width measurement to handle wide characters (CJK, emoji).
 func (m *AgentPaneModel) padLine(s string) string {
-	runes := []rune(s)
-	if len(runes) >= m.Width {
-		return string(runes[:m.Width])
+	w := runewidth.StringWidth(s)
+	if w >= m.Width {
+		return runewidth.Truncate(s, m.Width, "")
 	}
-	return s + strings.Repeat(" ", m.Width-len(runes))
+	return s + strings.Repeat(" ", m.Width-w)
 }
 
 // Render renders the agent pane as exactly m.Height lines joined by \n.

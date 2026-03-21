@@ -123,13 +123,6 @@ func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 
 	// Click/drag in content area only (skip header row 0, input area, and status)
 	if msg.Button == tea.MouseButtonLeft && msg.Y > 0 && msg.Y <= m.VisibleLines() {
-		col := msg.X
-		if col < 0 {
-			col = 0
-		}
-		if col >= m.Width {
-			col = m.Width - 1
-		}
 		line := m.ScrollOffset + msg.Y - 1 // -1 for header row
 		if line < 0 {
 			line = 0
@@ -137,11 +130,24 @@ func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		if line >= len(m.Lines) {
 			line = max(len(m.Lines)-1, 0)
 		}
-		// Clamp col to actual line length
+
+		// Convert cell X → rune index (handles wide characters)
+		col := 0
 		if line < len(m.Lines) {
-			lineLen := len([]rune(m.Lines[line]))
-			if col > lineLen {
-				col = lineLen
+			cellX := msg.X
+			if cellX < 0 {
+				cellX = 0
+			}
+			runes := []rune(m.Lines[line])
+			cellsSeen := 0
+			col = len(runes) // default: past end of line
+			for ri, r := range runes {
+				w := runewidth.RuneWidth(r)
+				if cellsSeen+w > cellX {
+					col = ri
+					break
+				}
+				cellsSeen += w
 			}
 		}
 
@@ -205,9 +211,6 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyMsg) tea.Cmd {
 		m.InputBuffer += " "
 		return nil
 	case tea.KeyRunes:
-		if isLeakedMouseSequence(msg.Runes) {
-			return nil
-		}
 		text := string(msg.Runes)
 		text = strings.ReplaceAll(text, "\r\n", " ")
 		text = strings.ReplaceAll(text, "\r", " ")
@@ -328,39 +331,57 @@ func (m *AgentPaneModel) clampScroll() {
 
 // wrapLine wraps a single long line into multiple lines at word boundaries.
 // Uses cell-width measurement to handle wide characters (CJK, emoji).
+// Tracks remaining width incrementally to stay O(n) in line length.
 func (m *AgentPaneModel) wrapLine(line string) []string {
 	if m.Width <= 0 {
 		return []string{line}
 	}
-	var result []string
+
+	// Precompute per-rune widths once
 	runes := []rune(line)
-	for runewidth.StringWidth(string(runes)) > m.Width {
-		// Find the last rune that fits within m.Width cells
+	widths := make([]int, len(runes))
+	for i, r := range runes {
+		widths[i] = runewidth.RuneWidth(r)
+	}
+
+	var result []string
+	start := 0
+
+	for start < len(runes) {
+		// Find how many runes fit within m.Width cells
 		cellW := 0
-		fitEnd := 0
-		for i, r := range runes {
-			w := runewidth.RuneWidth(r)
-			if cellW+w > m.Width {
+		fitEnd := start
+		for i := start; i < len(runes); i++ {
+			if cellW+widths[i] > m.Width {
 				break
 			}
-			cellW += w
+			cellW += widths[i]
 			fitEnd = i + 1
 		}
-		if fitEnd == 0 {
-			fitEnd = 1 // always make progress
+
+		// If everything remaining fits, we're done
+		if fitEnd == len(runes) {
+			break
 		}
+
+		if fitEnd == start {
+			fitEnd = start + 1 // always make progress
+		}
+
 		// Try to break at a space within the second half
 		breakAt := fitEnd
-		for i := fitEnd - 1; i > fitEnd/2; i-- {
+		for i := fitEnd - 1; i > start+(fitEnd-start)/2; i-- {
 			if runes[i] == ' ' {
 				breakAt = i + 1
 				break
 			}
 		}
-		result = append(result, string(runes[:breakAt]))
-		runes = runes[breakAt:]
+
+		result = append(result, string(runes[start:breakAt]))
+		start = breakAt
 	}
-	result = append(result, string(runes))
+
+	result = append(result, string(runes[start:]))
 	return result
 }
 

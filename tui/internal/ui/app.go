@@ -174,10 +174,16 @@ func (m *AppModel) regionHeight() int {
 }
 
 func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Drop leaked CSI prefix from unparsed mouse events.
-	if m.recentMouse && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == '[' {
-		m.recentMouse = false
-		return m, nil
+	// Drop leaked mouse escape sequence fragments.
+	// During rapid scrolling, Bubble Tea's parser can fail to consume full SGR
+	// sequences. The fragments leak as KeyRunes — either a lone '[' (CSI prefix)
+	// or a full SGR body like '<65;14;32M'. Gate behind recentMouse so we never
+	// silently drop legitimate typed/pasted text.
+	if m.recentMouse && msg.Type == tea.KeyRunes {
+		if (len(msg.Runes) == 1 && msg.Runes[0] == '[') || isLeakedMouseSequence(msg.Runes) {
+			m.recentMouse = false
+			return m, nil
+		}
 	}
 	m.recentMouse = false
 

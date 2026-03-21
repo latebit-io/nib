@@ -184,10 +184,18 @@ func (rm *RegionManager) Render() string {
 		Foreground(lipgloss.Color("240")).
 		Background(lipgloss.Color("235"))
 
-	// Render each pane and split into lines
+	// Render each pane and normalize to its allocated height
 	paneLines := make([][]string, len(visible))
 	for i, r := range visible {
-		paneLines[i] = strings.Split(r.Pane.Render(), "\n")
+		lines := strings.Split(r.Pane.Render(), "\n")
+		h := r.height
+		for len(lines) < h {
+			lines = append(lines, "")
+		}
+		if len(lines) > h {
+			lines = lines[:h]
+		}
+		paneLines[i] = lines
 	}
 
 	if rm.Direction == Vertical {

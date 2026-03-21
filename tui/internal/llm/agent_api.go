@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -29,16 +28,18 @@ func NewAgentAPI(baseURL, model, apiKey string) *AgentAPI {
 		BaseURL: baseURL,
 		Model:   model,
 		client: &http.Client{
-			Transport: &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout: 30 * time.Second,
-				}).DialContext,
-				TLSHandshakeTimeout:   15 * time.Second,
-				ResponseHeaderTimeout: 30 * time.Second,
-			},
+			Transport: agentTransport(),
 			// No client-level Timeout — would kill SSE streams mid-flight.
 		},
 	}
+}
+
+// agentTransport clones http.DefaultTransport and adds connection timeouts.
+// Preserves proxy support, keep-alive, and other defaults.
+func agentTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = 30 * time.Second
+	return t
 }
 
 type chatRequest struct {

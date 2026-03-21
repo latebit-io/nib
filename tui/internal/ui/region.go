@@ -276,62 +276,97 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 		return
 	}
 
-	// Normalize ratios among visible regions
+	// Allocate minimum width first, then distribute remaining space by ratio
 	totalRatio := 0.0
 	for _, r := range visible {
 		totalRatio += r.Ratio
 	}
 
+	remaining := available - len(visible)*MinPaneWidth
 	x := 0
+	allocatedExtra := 0
 	for i, r := range visible {
-		w := int(float64(available) * (r.Ratio / totalRatio))
-		if w < MinPaneWidth {
-			w = MinPaneWidth
-		}
-		// Last region gets remaining space to avoid rounding gaps
-		if i == len(visible)-1 {
-			w = rm.Width - x - dividers + i
-			if w < MinPaneWidth {
-				w = MinPaneWidth
+		extra := 0
+		if remaining > 0 && totalRatio > 0 {
+			if i == len(visible)-1 {
+				extra = remaining - allocatedExtra
+			} else {
+				extra = int(float64(remaining) * (r.Ratio / totalRatio))
+			}
+			if extra < 0 {
+				extra = 0
 			}
 		}
+		w := MinPaneWidth + extra
+		allocatedExtra += extra
+
 		r.x = x
 		r.y = 0
 		r.width = w
 		r.height = rm.Height
 		r.Pane.SetSize(w, rm.Height)
 
-		x += w + 1 // +1 for divider
+		x += w
+		if i < len(visible)-1 {
+			x++ // divider
+		}
 	}
 }
+
+const minPaneHeight = 3
 
 func (rm *RegionManager) recalcVertical(visible []*Region) {
 	dividers := len(visible) - 1
 	available := rm.Height - dividers
 
+	// Not enough space — collapse all but first
+	if available < len(visible)*minPaneHeight {
+		visible[0].x = 0
+		visible[0].y = 0
+		visible[0].width = rm.Width
+		visible[0].height = rm.Height
+		visible[0].Pane.SetSize(rm.Width, rm.Height)
+		for _, r := range visible[1:] {
+			r.width = 0
+			r.height = 0
+			r.collapsed = true
+		}
+		return
+	}
+
+	// Allocate minimum height first, then distribute remaining space by ratio
 	totalRatio := 0.0
 	for _, r := range visible {
 		totalRatio += r.Ratio
 	}
 
+	remaining := available - len(visible)*minPaneHeight
 	y := 0
+	allocatedExtra := 0
 	for i, r := range visible {
-		h := int(float64(available) * (r.Ratio / totalRatio))
-		if h < 3 {
-			h = 3
-		}
-		if i == len(visible)-1 {
-			h = rm.Height - y - dividers + i
-			if h < 3 {
-				h = 3
+		extra := 0
+		if remaining > 0 && totalRatio > 0 {
+			if i == len(visible)-1 {
+				extra = remaining - allocatedExtra
+			} else {
+				extra = int(float64(remaining) * (r.Ratio / totalRatio))
+			}
+			if extra < 0 {
+				extra = 0
 			}
 		}
+		h := minPaneHeight + extra
+		allocatedExtra += extra
+
 		r.x = 0
 		r.y = y
 		r.width = rm.Width
 		r.height = h
 		r.Pane.SetSize(rm.Width, h)
 
-		y += h + 1
+		y += h
+		if i < len(visible)-1 {
+			y++ // divider
+		}
 	}
 }

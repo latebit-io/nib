@@ -101,12 +101,7 @@ func (d *DialogModel) Render(width, height int) string {
 		output = append(output, strings.Repeat(" ", width))
 	}
 	for _, line := range boxLines {
-		lineW := lipgloss.Width(line)
-		leftPad := (width - lineW) / 2
-		if leftPad < 0 {
-			leftPad = 0
-		}
-		output = append(output, strings.Repeat(" ", leftPad)+line)
+		output = append(output, lipgloss.Place(width, 1, lipgloss.Center, lipgloss.Center, line))
 	}
 	// Fill remaining lines
 	for len(output) < height {

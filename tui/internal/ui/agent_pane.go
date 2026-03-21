@@ -43,6 +43,9 @@ type AgentPaneModel struct {
 
 	// Shared services
 	Services *Services
+
+	// Stateful sanitizer for streamed text
+	sanitizer sanitizer
 }
 
 // NewAgentPaneModel creates a new agent pane.
@@ -70,7 +73,7 @@ func (m *AgentPaneModel) SetSize(width, height int) {
 func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case agent.TokenMsg:
-		m.AppendText(sanitize(msg.Text))
+		m.AppendText(m.sanitizer.sanitize(msg.Text))
 		return nil
 
 	case agent.StatusMsg:
@@ -200,6 +203,9 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyMsg) tea.Cmd {
 		m.InputBuffer += " "
 		return nil
 	case tea.KeyRunes:
+		if isLeakedMouseSequence(msg.Runes) {
+			return nil
+		}
 		text := string(msg.Runes)
 		text = strings.ReplaceAll(text, "\r\n", " ")
 		text = strings.ReplaceAll(text, "\r", " ")
@@ -224,10 +230,14 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	case tea.KeyCtrlC:
 		if m.SelectionActive {
-			_ = m.Services.Clipboard.Write(m.SelectedText())
+			if err := m.Services.Clipboard.Write(m.SelectedText()); err != nil {
+				slog.Warn("system clipboard write failed", "err", err)
+			}
 			m.SelectionActive = false
 		} else {
-			_ = m.Services.Clipboard.Write(strings.Join(m.Lines, "\n"))
+			if err := m.Services.Clipboard.Write(strings.Join(m.Lines, "\n")); err != nil {
+				slog.Warn("system clipboard write failed", "err", err)
+			}
 		}
 	}
 	return nil

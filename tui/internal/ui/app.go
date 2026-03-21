@@ -26,6 +26,7 @@ type AppModel struct {
 	// Cross-pane state
 	PendingEdit *agent.PendingEdit
 	Dialog      DialogModel
+	recentMouse bool // tracks leaked CSI prefix from unparsed mouse events
 
 	// Shared
 	Services *Services
@@ -70,11 +71,14 @@ func (m *AppModel) Init() tea.Cmd {
 }
 
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Dialog captures all input when active
+	// Dialog is modal — captures all input when active
 	if m.Dialog.Active {
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			cmd := m.Dialog.Update(keyMsg)
+		switch typed := msg.(type) {
+		case tea.KeyMsg:
+			cmd := m.Dialog.Update(typed)
 			return m, cmd
+		case tea.MouseMsg:
+			return m, nil // swallow mouse while dialog is visible
 		}
 	}
 
@@ -108,6 +112,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleDialogResult(msg)
 
 	case tea.MouseMsg:
+		m.recentMouse = true
 		cmd := m.Regions.HandleMouse(msg)
 		return m, cmd
 
@@ -119,6 +124,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Drop leaked CSI prefix from unparsed mouse events.
+	// During rapid scrolling, Bubble Tea's parser occasionally fails to
+	// consume SGR mouse sequences. The \x1b[ is partially parsed and
+	// the [ leaks through as KeyRunes after successfully parsed mouse events.
+	if m.recentMouse && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == '[' {
+		return m, nil
+	}
+	m.recentMouse = false
+
 	// Agent pane input mode — all keys go to agent pane
 	if m.AgentPane.InputActive {
 		cmd := m.AgentPane.Update(msg)

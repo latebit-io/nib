@@ -3,6 +3,7 @@ package ui
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -724,14 +725,18 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
 	case ActionCopy:
 		if m.SelectionActive {
 			m.Clipboard = m.SelectedText()
-			_ = m.Services.Clipboard.Write(m.Clipboard)
+			if err := m.Services.Clipboard.Write(m.Clipboard); err != nil {
+				slog.Warn("system clipboard write failed", "err", err)
+			}
 		}
 		return nil
 
 	case ActionCut:
 		if m.SelectionActive {
 			m.Clipboard = m.SelectedText()
-			_ = m.Services.Clipboard.Write(m.Clipboard)
+			if err := m.Services.Clipboard.Write(m.Clipboard); err != nil {
+				slog.Warn("system clipboard write failed", "err", err)
+			}
 			m.DeleteSelection()
 			m.MarkDirty()
 		}
@@ -867,6 +872,10 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
 
 	// Character input (also handles Cmd+V paste on macOS — arrives as multi-char KeyRunes)
 	case tea.KeyRunes:
+		// Drop leaked mouse escape sequence fragments (SGR: <N;N;NM)
+		if isLeakedMouseSequence(keyMsg.Runes) {
+			return nil
+		}
 		if len(keyMsg.Runes) > 1 {
 			m.PasteText(string(keyMsg.Runes))
 		} else {

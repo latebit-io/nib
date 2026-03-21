@@ -1,0 +1,22 @@
+package ui
+
+import tea "github.com/charmbracelet/bubbletea"
+
+// Pane is the interface for self-contained UI modules.
+// Each pane owns its own Update logic (keys, mouse, domain messages),
+// rendering, and size management. AppModel acts as a thin orchestrator
+// that handles cross-pane actions and delegates everything else.
+//
+// To add a new pane: implement this interface, register it with the
+// RegionManager, and add cross-pane routing in AppModel if needed.
+type Pane interface {
+	Update(msg tea.Msg) tea.Cmd
+	Render() string
+	SetSize(width, height int)
+}
+
+// GoalSubmittedMsg is emitted by the agent pane when the user submits a goal.
+// AppModel catches this and wires up the agent run with editor state.
+type GoalSubmittedMsg struct {
+	Goal string
+}

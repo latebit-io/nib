@@ -133,6 +133,7 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// consume SGR mouse sequences. The \x1b[ is partially parsed and
 	// the [ leaks through as KeyRunes after successfully parsed mouse events.
 	if m.recentMouse && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == '[' {
+		m.recentMouse = false
 		return m, nil
 	}
 	m.recentMouse = false

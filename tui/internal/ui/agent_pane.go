@@ -135,12 +135,22 @@ func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		if col < 0 {
 			col = 0
 		}
+		if col >= m.Width {
+			col = m.Width - 1
+		}
 		line := m.ScrollOffset + msg.Y - 1 // -1 for header row
 		if line < 0 {
 			line = 0
 		}
 		if line >= len(m.Lines) {
 			line = max(len(m.Lines)-1, 0)
+		}
+		// Clamp col to actual line length
+		if line < len(m.Lines) {
+			lineLen := len([]rune(m.Lines[line]))
+			if col > lineLen {
+				col = lineLen
+			}
 		}
 
 		switch msg.Action {

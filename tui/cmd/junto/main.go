@@ -75,7 +75,9 @@ func main() {
 	app.SetProgram(p)
 
 	if _, err := p.Run(); err != nil {
+		app.Editor.Close()
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	app.Editor.Close()
 }

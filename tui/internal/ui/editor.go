@@ -69,6 +69,13 @@ func NewEditorModel(buf *buffer.Buffer, km *Keymap, svc *Services) *EditorModel 
 	return m
 }
 
+// Close frees native tree-sitter resources. Call on shutdown.
+func (m *EditorModel) Close() {
+	if m.Highlighter != nil {
+		m.Highlighter.Close()
+	}
+}
+
 // SetSize updates the editor dimensions and clamps scroll. Implements Pane.
 func (m *EditorModel) SetSize(width, height int) {
 	m.Width = width
@@ -497,6 +504,10 @@ func (m *EditorModel) Render() string {
 			displayCursorCol := -1
 			if lineIdx == m.CursorLine && m.CursorCol >= 0 && m.CursorCol <= len(rawRunes) {
 				displayCursorCol = bufToDisp[m.CursorCol]
+				// Clamp to last visible column so cursor is renderable at EOL
+				if displayCursorCol >= contentW && contentW > 0 {
+					displayCursorCol = contentW - 1
+				}
 			}
 
 			charStyles := make([]lipgloss.Style, contentW)

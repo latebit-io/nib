@@ -23,7 +23,11 @@ type DialogModel struct {
 }
 
 // Show activates the dialog with a message and options.
+// At least one option is required; if none are provided the dialog is not shown.
 func (d *DialogModel) Show(message string, options ...string) {
+	if len(options) == 0 {
+		return
+	}
 	d.Message = message
 	d.Options = options
 	d.Selected = 0

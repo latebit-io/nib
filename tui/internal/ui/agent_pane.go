@@ -46,6 +46,9 @@ type AgentPaneModel struct {
 
 	// Stateful sanitizer for streamed text
 	sanitizer sanitize.Sanitizer
+
+	// HasAgent is true when an LLM provider is configured.
+	HasAgent bool
 }
 
 // NewAgentPaneModel creates a new agent pane.
@@ -525,6 +528,27 @@ func (m *AgentPaneModel) Render() string {
 	// Row 0: Header
 	output[row] = headerStyle.Render(m.padLine(" Agent"))
 	row++
+
+	// No LLM configured — show message and fill remaining rows
+	if !m.HasAgent {
+		if row < m.Height {
+			output[row] = dimStyle.Render(m.padLine(""))
+			row++
+		}
+		if row < m.Height {
+			output[row] = dimStyle.Render(m.padLine(" No LLM configured"))
+			row++
+		}
+		if row < m.Height {
+			output[row] = dimStyle.Render(m.padLine(" Set LLM_API_KEY to enable"))
+			row++
+		}
+		for row < m.Height {
+			output[row] = dimStyle.Render(m.padLine(""))
+			row++
+		}
+		return strings.Join(output, "\n")
+	}
 
 	// Content rows
 	vis := m.VisibleLines()

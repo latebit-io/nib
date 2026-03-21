@@ -23,8 +23,13 @@ type Editor struct {
 	CursorLine int
 	CursorCol  int
 
-	// Viewport scroll offset
+	// Viewport scroll offset (in visual-line space when ExtraVisualLines > 0)
 	ScrollOffset int
+
+	// ExtraVisualLines is the number of virtual lines inserted into the viewport
+	// by the frontend (e.g., inline diff overlay). Scroll methods account for
+	// these so the viewport can scroll through all visual content.
+	ExtraVisualLines int
 
 	// Selection
 	SelectionActive bool
@@ -92,14 +97,23 @@ func (e *Editor) ContentWidth() int {
 	return w
 }
 
+// totalVisualLines returns the total number of visual lines in the viewport,
+// including any extra virtual lines set by the frontend.
+func (e *Editor) totalVisualLines() int {
+	return e.Buf.LineCount() + e.ExtraVisualLines
+}
+
 // ClampScroll clamps the scroll offset to valid range.
 func (e *Editor) ClampScroll() {
-	maxScroll := e.Buf.LineCount() - e.VisibleLines()
+	maxScroll := e.totalVisualLines() - e.VisibleLines()
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
 	if e.ScrollOffset > maxScroll {
 		e.ScrollOffset = maxScroll
+	}
+	if e.ScrollOffset < 0 {
+		e.ScrollOffset = 0
 	}
 }
 
@@ -271,14 +285,8 @@ func (e *Editor) ScrollUp(lines int) {
 
 // ScrollDown scrolls the viewport down by the given number of lines.
 func (e *Editor) ScrollDown(lines int) {
-	maxScroll := e.Buf.LineCount() - e.VisibleLines()
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
 	e.ScrollOffset += lines
-	if e.ScrollOffset > maxScroll {
-		e.ScrollOffset = maxScroll
-	}
+	e.ClampScroll()
 }
 
 // --- Selection ---
@@ -407,10 +415,14 @@ func (e *Editor) InsertChar(ch rune) {
 
 // InsertNewline inserts a newline at the cursor, with auto-indent.
 func (e *Editor) InsertNewline() {
-	// Detect leading whitespace for auto-indent
+	// Detect leading whitespace for auto-indent, capped at cursor column
+	// so that splitting a whitespace-only line doesn't accumulate spaces.
 	lineText := e.Buf.LineText(e.CursorLine)
 	indent := ""
-	for _, ch := range lineText {
+	for i, ch := range lineText {
+		if i >= e.CursorCol {
+			break
+		}
 		if ch == ' ' || ch == '\t' {
 			indent += string(ch)
 		} else {

@@ -6,9 +6,11 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/latebit-io/junto/tui/internal/agent"
-	"github.com/latebit-io/junto/tui/internal/editor/buffer"
-	"github.com/latebit-io/junto/tui/internal/llm"
+	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/engine/buffer"
+	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/tui/internal/ui"
 )
 
@@ -45,6 +47,8 @@ func main() {
 		buf = buffer.New()
 	}
 
+	e := editor.New(buf)
+
 	// Create LLM provider from environment
 	var provider llm.Provider
 	apiKey := os.Getenv("LLM_API_KEY")
@@ -62,11 +66,16 @@ func main() {
 
 	// Create agent (nil provider = no agent, editor-only mode)
 	var ag *agent.Agent
+	var agentEvents <-chan agent.Event
 	if provider != nil {
-		ag = agent.New(provider)
+		events := make(chan agent.Event, 64)
+		agentEvents = events
+		ag = agent.New(provider, events)
 	}
 
-	app := ui.NewApp(buf, ag)
+	sess := session.New(e, ag, agentEvents)
+
+	app := ui.NewApp(sess)
 	p := tea.NewProgram(&app,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),

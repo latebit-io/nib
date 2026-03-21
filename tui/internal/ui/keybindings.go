@@ -21,49 +21,47 @@ const (
 	ActionAgentContinue
 )
 
-// KeyBinding maps a key event to an action.
-type KeyBinding struct {
-	Type   tea.KeyType // for special keys (ctrl+q, etc.)
-	String string      // for string-based matching ("ctrl+enter", etc.)
-}
-
-// Keymap holds all keybindings. Swap this out for different platforms.
+// Keymap holds all keybindings. Uses reverse lookup maps for
+// deterministic O(1) matching (no map iteration order dependency).
 type Keymap struct {
-	bindings map[Action][]KeyBinding
+	byType   map[tea.KeyType]Action
+	byString map[string]Action
 }
 
 // DefaultKeymap returns the macOS-first keymap.
 func DefaultKeymap() *Keymap {
 	km := &Keymap{
-		bindings: map[Action][]KeyBinding{
-			ActionQuit:          {{Type: tea.KeyCtrlQ}},
-			ActionSave:          {{Type: tea.KeyCtrlS}},
-			ActionUndo:          {{Type: tea.KeyCtrlZ}},
-			ActionRedo:          {{Type: tea.KeyCtrlY}},
-			ActionCopy:          {{Type: tea.KeyCtrlC}},
-			ActionCut:           {{Type: tea.KeyCtrlX}},
-			ActionPaste:         {{Type: tea.KeyCtrlV}},
-			ActionSelectAll:     {{Type: tea.KeyCtrlA}},
-			ActionAgentStart:    {{String: "ctrl+g"}},
-			ActionAgentApprove:  {{Type: tea.KeyCtrlO}}, // Ctrl+O = approve
-			ActionAgentReject:   {{Type: tea.KeyEscape}},
-			ActionAgentContinue: {{Type: tea.KeyCtrlN}},
+		byType: map[tea.KeyType]Action{
+			tea.KeyCtrlQ:  ActionQuit,
+			tea.KeyCtrlS:  ActionSave,
+			tea.KeyCtrlZ:  ActionUndo,
+			tea.KeyCtrlY:  ActionRedo,
+			tea.KeyCtrlC:  ActionCopy,
+			tea.KeyCtrlX:  ActionCut,
+			tea.KeyCtrlV:  ActionPaste,
+			tea.KeyCtrlA:  ActionSelectAll,
+			tea.KeyCtrlO:  ActionAgentApprove,
+			tea.KeyEscape: ActionAgentReject,
+			tea.KeyCtrlN:  ActionAgentContinue,
+		},
+		byString: map[string]Action{
+			"ctrl+g": ActionAgentStart,
 		},
 	}
 	return km
 }
 
-// Match returns the action for a key event, or ActionNone.
+// Match returns the action for a key event, or ActionNone. O(1) lookup.
 func (km *Keymap) Match(msg tea.KeyMsg) Action {
-	for action, bindings := range km.bindings {
-		for _, b := range bindings {
-			if b.String != "" && msg.String() == b.String {
-				return action
-			}
-			if b.String == "" && msg.Type == b.Type {
-				return action
-			}
+	// String-based match first (more specific)
+	if s := msg.String(); s != "" {
+		if action, ok := km.byString[s]; ok {
+			return action
 		}
+	}
+	// Type-based match
+	if action, ok := km.byType[msg.Type]; ok {
+		return action
 	}
 	return ActionNone
 }

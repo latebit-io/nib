@@ -6,16 +6,29 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
 )
 
+// TokenKind identifies the syntactic role of a token.
+// Frontends map these to their own styling (lipgloss, CSS, etc.).
+type TokenKind string
+
+const (
+	KindKeyword  TokenKind = "keyword"
+	KindString   TokenKind = "string"
+	KindComment  TokenKind = "comment"
+	KindNumber   TokenKind = "number"
+	KindType     TokenKind = "type"
+	KindOperator TokenKind = "operator"
+	KindNone     TokenKind = ""
+)
+
 // Token represents a highlighted range on a single line.
 type Token struct {
-	Col   int
-	Len   int
-	Style lipgloss.Style
+	Col  int
+	Len  int
+	Kind TokenKind
 }
 
 // Highlighter manages tree-sitter parsing and highlight queries for a file.
@@ -86,8 +99,8 @@ func (h *Highlighter) collectAllTokens(node *sitter.Node, lines []string) {
 		startCol := int(node.StartPosition().Column)
 		endCol := int(node.EndPosition().Column)
 
-		style := styleForNode(node.GrammarName())
-		if style.GetForeground() == nil {
+		kind := kindForNode(node.GrammarName())
+		if kind == KindNone {
 			return
 		}
 
@@ -121,9 +134,9 @@ func (h *Highlighter) collectAllTokens(node *sitter.Node, lines []string) {
 
 			if sc < ec {
 				h.cache[line] = append(h.cache[line], Token{
-					Col:   sc,
-					Len:   ec - sc,
-					Style: style,
+					Col:  sc,
+					Len:  ec - sc,
+					Kind: kind,
 				})
 			}
 		}
@@ -135,19 +148,7 @@ func (h *Highlighter) collectAllTokens(node *sitter.Node, lines []string) {
 	}
 }
 
-// Theme colors
-var (
-	keywordStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // magenta
-	stringStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
-	commentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray
-	numberStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
-	typeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
-
-	operatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("9")) // bright red
-	defaultStyle  = lipgloss.NewStyle()
-)
-
-func styleForNode(nodeType string) lipgloss.Style {
+func kindForNode(nodeType string) TokenKind {
 	switch nodeType {
 	// Keywords
 	case "func", "return", "if", "else", "for", "range", "switch", "case",
@@ -155,34 +156,34 @@ func styleForNode(nodeType string) lipgloss.Style {
 		"var", "const", "type", "struct", "interface", "map",
 		"chan", "go", "defer", "select", "package", "import",
 		"true", "false", "nil":
-		return keywordStyle
+		return KindKeyword
 
 	// Strings
 	case "interpreted_string_literal", "raw_string_literal", "rune_literal",
 		"string", "escape_sequence":
-		return stringStyle
+		return KindString
 
 	// Comments
 	case "comment", "line_comment", "block_comment":
-		return commentStyle
+		return KindComment
 
 	// Numbers
 	case "int_literal", "float_literal", "imaginary_literal",
 		"integer", "float":
-		return numberStyle
+		return KindNumber
 
 	// Types
 	case "type_identifier", "field_identifier":
-		return typeStyle
+		return KindType
 
 	// Operators
 	case ":=", "=", "==", "!=", "<", ">", "<=", ">=",
 		"+", "-", "*", "/", "%", "&", "|", "^",
 		"&&", "||", "!", "++", "--", "<<", ">>":
-		return operatorStyle
+		return KindOperator
 	}
 
-	return defaultStyle
+	return KindNone
 }
 
 func languageForExt(ext string) *sitter.Language {

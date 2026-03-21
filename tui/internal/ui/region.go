@@ -302,19 +302,8 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 	x := 0
 	allocatedExtra := 0
 	for i, r := range visible {
-		extra := 0
-		if remaining > 0 && totalRatio > 0 {
-			if i == len(visible)-1 {
-				extra = remaining - allocatedExtra
-			} else {
-				extra = int(float64(remaining) * (r.Ratio / totalRatio))
-			}
-			if extra < 0 {
-				extra = 0
-			}
-		}
+		extra := extraForIndex(i, len(visible), remaining, r.Ratio, totalRatio, &allocatedExtra)
 		w := MinPaneWidth + extra
-		allocatedExtra += extra
 
 		r.x = x
 		r.y = 0
@@ -327,6 +316,28 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 			x++ // divider
 		}
 	}
+}
+
+// extraForIndex distributes remaining space for pane at index i.
+// Falls back to even distribution when totalRatio is zero.
+func extraForIndex(i, n, remaining int, ratio, totalRatio float64, allocated *int) int {
+	if remaining <= 0 {
+		return 0
+	}
+	var extra int
+	if i == n-1 {
+		// Last pane gets whatever remains to avoid rounding gaps
+		extra = remaining - *allocated
+	} else if totalRatio > 0 {
+		extra = int(float64(remaining) * (ratio / totalRatio))
+	} else {
+		extra = remaining / n
+	}
+	if extra < 0 {
+		extra = 0
+	}
+	*allocated += extra
+	return extra
 }
 
 const minPaneHeight = 3
@@ -360,19 +371,8 @@ func (rm *RegionManager) recalcVertical(visible []*Region) {
 	y := 0
 	allocatedExtra := 0
 	for i, r := range visible {
-		extra := 0
-		if remaining > 0 && totalRatio > 0 {
-			if i == len(visible)-1 {
-				extra = remaining - allocatedExtra
-			} else {
-				extra = int(float64(remaining) * (r.Ratio / totalRatio))
-			}
-			if extra < 0 {
-				extra = 0
-			}
-		}
+		extra := extraForIndex(i, len(visible), remaining, r.Ratio, totalRatio, &allocatedExtra)
 		h := minPaneHeight + extra
-		allocatedExtra += extra
 
 		r.x = 0
 		r.y = y

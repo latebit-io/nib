@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/latebit-io/junto/tui/internal/agent"
+	"github.com/latebit-io/junto/engine/sanitize"
 )
 
 // InputHeight is the number of rows reserved for the input area (separator + input + status).
@@ -42,7 +42,7 @@ type AgentPaneModel struct {
 	Services *Services
 
 	// Stateful sanitizer for streamed text
-	sanitizer sanitizer
+	sanitizer sanitize.Sanitizer
 }
 
 // NewAgentPaneModel creates a new agent pane.
@@ -66,30 +66,10 @@ func (m *AgentPaneModel) SetSize(width, height int) {
 }
 
 // Update handles messages for the agent pane. Implements Pane.
+// Agent events (token, status, edit, error, done) are handled by AppModel
+// and delivered via direct method calls (AppendToken, AppendText, etc.).
 func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
-	case agent.TokenMsg:
-		m.AppendText(m.sanitizer.sanitize(msg.Text))
-		return nil
-
-	case agent.StatusMsg:
-		m.Status = msg.Status
-		return nil
-
-	case agent.EditProposedMsg:
-		m.Status = "waiting"
-		m.AppendText("\n--- Proposed: " + m.sanitizer.sanitize(msg.Edit.Reason) + " ---\n")
-		return nil
-
-	case agent.ErrorMsg:
-		m.AppendText("\nError: " + m.sanitizer.sanitize(msg.Err) + "\n")
-		return nil
-
-	case agent.DoneMsg:
-		m.Status = "idle"
-		m.AppendText("\n--- Done ---\n")
-		return nil
-
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 
@@ -100,6 +80,11 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 		return m.handleKey(msg)
 	}
 	return nil
+}
+
+// AppendToken sanitizes and appends streaming text from the agent.
+func (m *AgentPaneModel) AppendToken(text string) {
+	m.AppendText(m.sanitizer.Sanitize(text))
 }
 
 func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {

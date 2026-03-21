@@ -6,91 +6,85 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/latebit-io/junto/tui/internal/agent"
-	"github.com/latebit-io/junto/tui/internal/editor/buffer"
+	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/engine/session"
 )
 
+// agentEventMsg wraps an engine agent.Event for delivery through Bubble Tea.
+type agentEventMsg struct{ event agent.Event }
+
 // AppModel is the top-level Bubble Tea model.
-// It is a thin orchestrator: handles cross-pane actions
-// (approve/reject/continue) and delegates everything else
-// to the RegionManager and individual panes.
+// It is a thin presentation layer: maps input to engine Session methods,
+// reads Session state to render, and adapts agent events to tea.Msg.
 type AppModel struct {
-	// Typed references for cross-pane actions
+	// Engine session — owns all domain logic
+	Session *session.Session
+
+	// Typed references for rendering
 	Editor    *EditorModel
 	AgentPane *AgentPaneModel
 
 	// Layout and focus
 	Regions *RegionManager
 
-	// Agent loop (nil = editor-only mode)
-	AgentLoop *agent.Agent
-
-	// Intent — session-level contract between developer and agent
-	CurrentIntent string   // the active goal
-	IntentDone    bool     // true when intent was completed (not cleared)
-	IntentHistory []string // resolved intents archived in order
-
-	// Cross-pane state
-	PendingEdit *agent.PendingEdit
+	// TUI-only state
 	Dialog      DialogModel
 	recentMouse bool // tracks leaked CSI prefix from unparsed mouse events
-
-	// Shared
-	Services *Services
-	Keymap   *Keymap
-	Quit     bool
-	Width    int
-	Height   int
-	program  *tea.Program
+	Services    *Services
+	Keymap      *Keymap
+	Quit        bool
+	Width       int
+	Height      int
+	program     *tea.Program
 }
 
-// SetProgram sets the tea.Program reference for sending agent messages.
+// SetProgram sets the tea.Program reference.
 func (m *AppModel) SetProgram(p *tea.Program) {
 	m.program = p
 }
 
 // NewApp creates the application model.
-func NewApp(buf *buffer.Buffer, ag *agent.Agent) AppModel {
+func NewApp(sess *session.Session) AppModel {
 	km := DefaultKeymap()
 	svc := NewServices()
 
-	editor := NewEditorModel(buf, km, svc)
+	editorPane := NewEditorModel(sess.Editor, km, svc)
 	agentPane := NewAgentPaneModel(svc)
 
 	rm := NewRegionManager(Horizontal)
-	rm.Add("editor", editor, 0.7)
-	if ag != nil {
+	rm.Add("editor", editorPane, 0.7)
+	if sess.HasAgent() {
 		rm.Add("agent", agentPane, 0.3)
 	}
 
 	return AppModel{
-		Editor:    editor,
+		Session:   sess,
+		Editor:    editorPane,
 		AgentPane: agentPane,
 		Regions:   rm,
-		AgentLoop: ag,
 		Services:  svc,
 		Keymap:    km,
 	}
 }
 
-// ArchiveIntent marks the current intent as done.
-// The intent stays visible as completed until the developer starts a new one.
-func (m *AppModel) ArchiveIntent() {
-	if m.CurrentIntent != "" {
-		m.IntentDone = true
-		m.IntentHistory = append(m.IntentHistory, m.CurrentIntent)
-	}
-}
-
-// ClearIntent cancels the current intent without archiving.
-// Used when the developer explicitly escapes/deletes the intent.
-func (m *AppModel) ClearIntent() {
-	m.CurrentIntent = ""
-	m.IntentDone = false
-}
-
 func (m *AppModel) Init() tea.Cmd {
+	if m.Session.Events != nil {
+		return m.listenForAgentEvent()
+	}
 	return nil
+}
+
+// listenForAgentEvent returns a tea.Cmd that blocks on the engine event channel
+// and delivers the next event as a tea.Msg.
+func (m *AppModel) listenForAgentEvent() tea.Cmd {
+	ch := m.Session.Events
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return agentEventMsg{event: ev}
+	}
 }
 
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -113,39 +107,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Regions.SetSize(msg.Width, m.regionHeight())
 		return m, nil
 
-	// Agent messages — intercept EditProposedMsg (cross-cutting), delegate rest
-	case agent.EditProposedMsg:
-		m.PendingEdit = &msg.Edit
-		cmd := m.AgentPane.Update(msg)
-		return m, cmd
+	// Engine agent events — adapted from channel to tea.Msg
+	case agentEventMsg:
+		m.handleAgentEvent(msg.event)
+		// Keep listening for the next event
+		return m, m.listenForAgentEvent()
 
-	case agent.TokenMsg, agent.StatusMsg:
-		cmd := m.AgentPane.Update(msg)
-		return m, cmd
-
-	case agent.ErrorMsg:
-		m.PendingEdit = nil
-		cmd := m.AgentPane.Update(msg)
-		return m, cmd
-
-	case agent.DoneMsg:
-		m.PendingEdit = nil
-		m.ArchiveIntent()
-		cmd := m.AgentPane.Update(msg)
-		return m, cmd
-
-	// Goal submitted from agent pane — wire up the agent run
+	// Goal submitted from agent pane — delegate to session
 	case GoalSubmittedMsg:
-		if m.AgentLoop != nil {
-			// Archive previous intent if redirecting mid-run
-			if m.CurrentIntent != "" && !m.IntentDone {
-				m.ArchiveIntent()
-			}
-			m.CurrentIntent = msg.Goal
-			m.IntentDone = false
-			m.AgentPane.Clear()
-			m.AgentLoop.Run(m.program, m.Editor.Buf.Path, m.Editor.Buf.Content(), msg.Goal)
-		}
+		m.AgentPane.Clear()
+		m.Session.SubmitGoal(msg.Goal)
 		return m, nil
 
 	// Dialog result — handle the user's choice
@@ -170,6 +141,28 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleAgentEvent updates session state and renders the event in the agent pane.
+func (m *AppModel) handleAgentEvent(ev agent.Event) {
+	// Let session update domain state (intent, pending edit)
+	m.Session.HandleEvent(ev)
+
+	// Render in agent pane (presentation)
+	switch e := ev.(type) {
+	case agent.TokenEvent:
+		m.AgentPane.AppendToken(e.Text)
+	case agent.StatusEvent:
+		m.AgentPane.Status = e.Status
+	case agent.EditProposedEvent:
+		m.AgentPane.Status = "waiting"
+		m.AgentPane.AppendText("\n--- Proposed: " + m.AgentPane.sanitizer.Sanitize(e.Edit.Reason) + " ---\n")
+	case agent.ErrorEvent:
+		m.AgentPane.AppendText("\nError: " + m.AgentPane.sanitizer.Sanitize(e.Err) + "\n")
+	case agent.DoneEvent:
+		m.AgentPane.Status = "idle"
+		m.AgentPane.AppendText("\n--- Done ---\n")
+	}
+}
+
 // regionHeight returns the height available for the RegionManager
 // (total height minus the intent bar which is always present).
 func (m *AppModel) regionHeight() int {
@@ -182,9 +175,6 @@ func (m *AppModel) regionHeight() int {
 
 func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Drop leaked CSI prefix from unparsed mouse events.
-	// During rapid scrolling, Bubble Tea's parser occasionally fails to
-	// consume SGR mouse sequences. The \x1b[ is partially parsed and
-	// the [ leaks through as KeyRunes after successfully parsed mouse events.
 	if m.recentMouse && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == '[' {
 		m.recentMouse = false
 		return m, nil
@@ -198,7 +188,7 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Toggle focus
-	if msg.Type == tea.KeyCtrlBackslash && m.AgentLoop != nil {
+	if msg.Type == tea.KeyCtrlBackslash && m.Session.HasAgent() {
 		m.Regions.FocusNext()
 		return m, nil
 	}
@@ -212,43 +202,37 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case ActionAgentApprove:
-		slog.Debug("agent approve", "pending", m.PendingEdit != nil, "agent", m.AgentLoop != nil)
-		if m.PendingEdit != nil && m.AgentLoop != nil {
-			ok, reason := m.Editor.ApplyEdit(m.PendingEdit.Search, m.PendingEdit.Replace)
-			if ok {
-				m.AgentLoop.Approve()
-			} else {
+		slog.Debug("agent approve", "pending", m.Session.PendingEdit != nil, "agent", m.Session.HasAgent())
+		if m.Session.PendingEdit != nil {
+			ok, reason := m.Session.ApproveEdit()
+			if !ok {
 				slog.Warn("agent approve: edit rejected", "reason", reason)
 				m.AgentPane.AppendText("\n[" + reason + "]\n")
-				m.AgentLoop.Reject()
 			}
-			m.PendingEdit = nil
 		}
 		return m, nil
 
 	case ActionAgentReject:
-		if m.PendingEdit != nil && m.AgentLoop != nil {
-			m.PendingEdit = nil
-			m.AgentLoop.Reject()
+		if m.Session.PendingEdit != nil {
+			m.Session.RejectEdit()
 			return m, nil
 		}
-		// No pending edit — clear intent and cancel agent if active
-		if m.CurrentIntent != "" && m.AgentLoop != nil {
-			m.ClearIntent()
-			m.AgentLoop.Cancel()
+		// No pending edit — cancel agent if active
+		if m.Session.CurrentIntent != "" && m.Session.HasAgent() {
+			m.Session.CancelAgent()
 			m.AgentPane.Status = "idle"
 			return m, nil
 		}
 		// No intent either — fall through to focused pane
 
 	case ActionAgentContinue:
-		if m.AgentLoop != nil && m.AgentPane.Status == "editing" {
-			m.AgentLoop.Continue(m.Editor.Buf.Content())
+		if m.Session.HasAgent() && m.AgentPane.Status == "editing" {
+			m.Session.Continue()
 		}
 		return m, nil
 
 	case ActionAgentStart:
-		if m.AgentLoop != nil {
+		if m.Session.HasAgent() {
 			m.AgentPane.InputActive = true
 			m.AgentPane.InputBuffer = ""
 		}
@@ -266,7 +250,6 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {
 	// Placeholder — implement specific dialog responses as needed.
-	// Example: save-before-quit dialog would check msg.Choice here.
 	return m, nil
 }
 
@@ -299,14 +282,14 @@ func (m *AppModel) renderIntentBar() string {
 		Background(lipgloss.Color("236"))
 
 	switch {
-	case m.CurrentIntent == "":
+	case m.Session.CurrentIntent == "":
 		text = " Ctrl+G to set intent"
 		style = idleStyle
-	case m.IntentDone:
-		text = " done: " + m.CurrentIntent
+	case m.Session.IntentDone:
+		text = " done: " + m.Session.CurrentIntent
 		style = doneStyle
 	default:
-		text = " " + m.CurrentIntent
+		text = " " + m.Session.CurrentIntent
 		style = activeStyle
 	}
 

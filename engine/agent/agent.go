@@ -1,6 +1,6 @@
-// Package agent implements the multi-turn LLM loop for the TUI.
-// Instead of socket IPC, it communicates with the Bubble Tea event loop
-// through channels and tea.Cmd messages.
+// Package agent implements the multi-turn LLM loop.
+// It communicates with frontends through a typed event channel,
+// making it usable from any UI framework (TUI, GUI, web, etc.).
 package agent
 
 import (
@@ -11,11 +11,37 @@ import (
 	"strings"
 	"sync"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/latebit-io/junto/tui/internal/llm"
+	"github.com/latebit-io/junto/engine/llm"
 )
 
-// PendingEdit is a proposed edit from the LLM, sent to the TUI for approval.
+// Event is emitted by the agent loop. Frontends receive these on the Events channel.
+type Event interface {
+	agentEvent() // sealed marker
+}
+
+// TokenEvent delivers streaming text from the LLM.
+type TokenEvent struct{ Text string }
+
+// EditProposedEvent is sent when the LLM proposes an edit for approval.
+type EditProposedEvent struct{ Edit PendingEdit }
+
+// DoneEvent signals the agent loop has finished.
+// Success is true when the loop completed normally (not cancelled or errored).
+type DoneEvent struct{ Success bool }
+
+// ErrorEvent carries an error from the agent.
+type ErrorEvent struct{ Err string }
+
+// StatusEvent updates the agent status display.
+type StatusEvent struct{ Status string }
+
+func (TokenEvent) agentEvent()        {}
+func (EditProposedEvent) agentEvent() {}
+func (DoneEvent) agentEvent()         {}
+func (ErrorEvent) agentEvent()        {}
+func (StatusEvent) agentEvent()       {}
+
+// PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {
 	ID      string
 	Search  string
@@ -23,27 +49,10 @@ type PendingEdit struct {
 	Reason  string
 }
 
-// --- Bubble Tea messages ---
-
-// TokenMsg delivers streaming text to the agent pane.
-type TokenMsg struct{ Text string }
-
-// EditProposedMsg is sent when the LLM proposes an edit.
-type EditProposedMsg struct{ Edit PendingEdit }
-
-// DoneMsg signals the agent loop has finished.
-type DoneMsg struct{}
-
-// ErrorMsg carries an error from the agent.
-type ErrorMsg struct{ Err string }
-
-// StatusMsg updates the agent status display.
-type StatusMsg struct{ Status string }
-
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
 	Provider llm.Provider
-	Program  *tea.Program // for sending messages to the TUI
+	events   chan<- Event // frontend reads from this
 
 	mu          sync.Mutex
 	cancel      context.CancelFunc
@@ -59,19 +68,20 @@ type Agent struct {
 	maxSilentRetries int
 }
 
-// New creates a new agent with the given LLM provider.
-func New(provider llm.Provider) *Agent {
+// New creates a new agent with the given LLM provider and event channel.
+// The frontend must read from the events channel to receive agent updates.
+func New(provider llm.Provider, events chan<- Event) *Agent {
 	return &Agent{
 		Provider:         provider,
+		events:           events,
 		approveCh:        make(chan bool, 1),
 		continueCh:       make(chan string, 1),
 		maxSilentRetries: 3,
 	}
 }
 
-// Run starts the agent loop in a goroutine, using the given Program to send
-// messages to the Bubble Tea event loop.
-func (a *Agent) Run(p *tea.Program, fileName, fileContent, goal string) {
+// Run starts the agent loop in a goroutine.
+func (a *Agent) Run(fileName, fileContent, goal string) {
 	a.mu.Lock()
 	// Cancel any previous run
 	if a.cancel != nil {
@@ -83,7 +93,6 @@ func (a *Agent) Run(p *tea.Program, fileName, fileContent, goal string) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
-	a.Program = p
 	a.fileName = fileName
 	a.fileContent = fileContent
 	a.intent = goal
@@ -139,25 +148,21 @@ func (a *Agent) Cancel() {
 	a.mu.Unlock()
 }
 
-func (a *Agent) send(msg tea.Msg) {
-	a.mu.Lock()
-	p := a.Program
-	a.mu.Unlock()
-	if p != nil {
-		p.Send(msg)
-	}
+func (a *Agent) send(ev Event) {
+	a.events <- ev
 }
 
 func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
-	defer func() { a.send(DoneMsg{}) }()
+	success := false
+	defer func() { a.send(DoneEvent{Success: success}) }()
 
 	if goal == "" {
 		goal = "Review this code and suggest improvements, one step at a time."
 	}
 
 	messages := llm.BuildMessages(fileName, fileContent, goal)
-	a.send(TokenMsg{Text: "Thinking...\n\n"})
-	a.send(StatusMsg{Status: "thinking"})
+	a.send(TokenEvent{Text: "Thinking...\n\n"})
+	a.send(StatusEvent{Status: "thinking"})
 
 	thinkState := false
 
@@ -165,7 +170,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 		ch, err := a.Provider.Stream(ctx, messages)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
-			a.send(ErrorMsg{Err: fmt.Sprintf("LLM error: %v", err)})
+			a.send(ErrorEvent{Err: fmt.Sprintf("LLM error: %v", err)})
 			return
 		}
 
@@ -181,7 +186,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 			clean := llm.StripThinkTags(ev.Token, &thinkState)
 			if clean != "" {
 				contentBuf.WriteString(clean)
-				a.send(TokenMsg{Text: clean})
+				a.send(TokenEvent{Text: clean})
 			}
 		}
 
@@ -199,6 +204,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 		messages = append(messages, assistantMsg)
 
 		if len(toolCalls) == 0 {
+			success = true
 			break
 		}
 
@@ -301,9 +307,9 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 	a.silentRetries = 0
 	a.mu.Unlock()
 
-	// Send proposed edit to TUI
-	a.send(StatusMsg{Status: "waiting"})
-	a.send(EditProposedMsg{Edit: PendingEdit{
+	// Send proposed edit to frontend
+	a.send(StatusEvent{Status: "waiting"})
+	a.send(EditProposedEvent{Edit: PendingEdit{
 		ID:      tc.ID,
 		Search:  args.Search,
 		Replace: args.Replace,
@@ -316,8 +322,8 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 		return "Error: agent canceled"
 	case approved := <-a.approveCh:
 		if !approved {
-			a.send(StatusMsg{Status: "thinking"})
-			a.send(TokenMsg{Text: "\n[Edit rejected]\n\n"})
+			a.send(StatusEvent{Status: "thinking"})
+			a.send(TokenEvent{Text: "\n[Edit rejected]\n\n"})
 			a.mu.Lock()
 			content = a.fileContent
 			a.mu.Unlock()
@@ -326,8 +332,8 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 	}
 
 	// Approved — wait for user to finish editing and continue
-	a.send(StatusMsg{Status: "editing"})
-	a.send(TokenMsg{Text: "\n[Edit approved — waiting for continue]\n"})
+	a.send(StatusEvent{Status: "editing"})
+	a.send(TokenEvent{Text: "\n[Edit approved — waiting for continue]\n"})
 
 	select {
 	case <-ctx.Done():
@@ -336,8 +342,8 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 		a.mu.Lock()
 		a.fileContent = newContent
 		a.mu.Unlock()
-		a.send(StatusMsg{Status: "thinking"})
-		a.send(TokenMsg{Text: "\n"})
+		a.send(StatusEvent{Status: "thinking"})
+		a.send(TokenEvent{Text: "\n"})
 		return fmt.Sprintf("Edit applied successfully. The developer may have made additional changes.\n\nCurrent file:\n\n%s", newContent) + a.intentReminder()
 	}
 }

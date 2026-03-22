@@ -97,8 +97,8 @@ func (s *Session) CancelAgent() {
 // old editor so the caller can Close() it to free resources (e.g. tree-sitter).
 // Both the TUI (via palette) and the agent (via future open_file tool) call this.
 func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
-	if s.HasAgent() && s.CurrentIntent != "" {
-		s.CancelAgent()
+	if s.HasAgent() {
+		s.agent.Cancel()
 	}
 	s.PendingEdit = nil
 	s.editReviewed = false

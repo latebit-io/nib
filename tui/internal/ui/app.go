@@ -17,6 +17,9 @@ import (
 // agentEventMsg wraps an engine agent.Event for delivery through Bubble Tea.
 type agentEventMsg struct{ event agent.Event }
 
+// paletteFilesMsg delivers file listing results from async Walk.
+type paletteFilesMsg struct{ items []PaletteItem }
+
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
 // reads Session state to render, and adapts agent events to tea.Msg.
@@ -138,6 +141,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
+
+	// File listing completed — open the palette with results
+	case paletteFilesMsg:
+		m.Palette.Open(msg.items)
+		return m, nil
 
 	// Palette result — user selected a file or cancelled
 	case PaletteResultMsg:
@@ -360,20 +368,23 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case ActionOpenPalette:
 		if m.ProjectRoot != "" {
-			files, err := filelist.Walk(m.ProjectRoot)
-			if err != nil {
-				slog.Error("failed to list files", "err", err)
-				return m, nil
-			}
-			items := make([]PaletteItem, len(files))
-			for i, f := range files {
-				items[i] = PaletteItem{
-					Label:    f,
-					Category: "file",
-					Value:    filepath.Join(m.ProjectRoot, f),
+			root := m.ProjectRoot
+			return m, func() tea.Msg {
+				files, err := filelist.Walk(root)
+				if err != nil {
+					slog.Error("failed to list files", "err", err)
+					return nil
 				}
+				items := make([]PaletteItem, len(files))
+				for i, f := range files {
+					items[i] = PaletteItem{
+						Label:    f,
+						Category: "file",
+						Value:    filepath.Join(root, f),
+					}
+				}
+				return paletteFilesMsg{items: items}
 			}
-			m.Palette.Open(items)
 		}
 		return m, nil
 	}

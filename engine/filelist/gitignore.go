@@ -2,6 +2,7 @@ package filelist
 
 import (
 	"bufio"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,10 @@ import (
 // Patterns are evaluated in order; the last matching pattern wins.
 type matcher struct {
 	patterns []pattern
+	// baseDir is the directory containing the .gitignore, relative to the
+	// project root (empty string for root-level). Anchored patterns are
+	// matched against paths relative to this directory.
+	baseDir string
 }
 
 type pattern struct {
@@ -25,8 +30,10 @@ type pattern struct {
 }
 
 // loadGitignore reads a .gitignore file and returns a matcher.
-// Returns nil if the file doesn't exist or is empty.
-func loadGitignore(path string) *matcher {
+// relDir is the directory containing the .gitignore relative to the project
+// root (empty string for root-level). Returns nil if the file doesn't exist
+// or is empty.
+func loadGitignore(path, relDir string) *matcher {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -42,10 +49,14 @@ func loadGitignore(path string) *matcher {
 			patterns = append(patterns, p)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("failed to read .gitignore", "path", path, "err", err)
+		return nil
+	}
 	if len(patterns) == 0 {
 		return nil
 	}
-	return &matcher{patterns: patterns}
+	return &matcher{patterns: patterns, baseDir: relDir}
 }
 
 // parseLine parses a single gitignore line into a pattern.
@@ -101,6 +112,13 @@ func (m *matcher) match(relPath string, isDir bool) (matched bool, negated bool)
 		return false, false
 	}
 
+	// For anchored patterns, match against the path relative to this
+	// .gitignore's directory, not the project root.
+	localPath := relPath
+	if m.baseDir != "" && strings.HasPrefix(relPath, m.baseDir+"/") {
+		localPath = relPath[len(m.baseDir)+1:]
+	}
+
 	// Evaluate patterns in order — last match wins.
 	result := false
 	neg := false
@@ -108,7 +126,11 @@ func (m *matcher) match(relPath string, isDir bool) (matched bool, negated bool)
 		if p.dirOnly && !isDir {
 			continue
 		}
-		if matchPattern(p.glob, relPath, p.anchored) {
+		target := relPath
+		if p.anchored {
+			target = localPath
+		}
+		if matchPattern(p.glob, target, p.anchored) {
 			result = true
 			neg = p.negated
 		}

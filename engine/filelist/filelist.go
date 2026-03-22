@@ -36,7 +36,7 @@ func walk(absDir, relDir string, matchers []*matcher, files *[]string) error {
 	}
 
 	// Load .gitignore for this directory (if present).
-	gi := loadGitignore(filepath.Join(absDir, ".gitignore"))
+	gi := loadGitignore(filepath.Join(absDir, ".gitignore"), relDir)
 	if gi != nil {
 		matchers = append(matchers, gi)
 	}
@@ -83,7 +83,7 @@ func walk(absDir, relDir string, matchers []*matcher, files *[]string) error {
 }
 
 // ignored checks the matcher stack for a path. Returns true if the path
-// should be excluded. Evaluates matchers from innermost to outermost;
+// should be excluded. Evaluates matchers from outermost to innermost;
 // the last matching pattern across all matchers determines the result.
 func ignored(matchers []*matcher, relPath string, isDir bool) bool {
 	result := false

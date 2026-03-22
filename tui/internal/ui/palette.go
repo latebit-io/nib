@@ -39,7 +39,6 @@ type PaletteModel struct {
 
 // Palette rendering constants.
 const (
-	paletteWidthRatio   = 0.6 // 60% of terminal width
 	paletteMinWidth     = 40
 	paletteMaxVisible   = 15
 	paletteInputHeight  = 3 // border + input + border
@@ -196,24 +195,28 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 
 	// Full-width palette — no blank side gaps.
 	boxWidth := width - 2
-	if boxWidth < paletteMinWidth {
-		boxWidth = paletteMinWidth
-	}
+	boxWidth = max(boxWidth, paletteMinWidth)
+	boxWidth = min(boxWidth, width) // never exceed terminal width
 	innerWidth := boxWidth - 2 // border only
 	if innerWidth < 1 {
 		innerWidth = 1
 	}
 
-	// Input line with cursor.
-	queryDisplay := p.Query + " "
-	if len(queryDisplay) > innerWidth {
-		queryDisplay = queryDisplay[len(queryDisplay)-innerWidth:]
+	// Input line with cursor — all operations in rune space.
+	qRunes := []rune(p.Query)
+	// Append a space for the cursor position at the end.
+	displayRunes := append(qRunes, ' ')
+	cursorIdx := len(qRunes) // cursor is on the trailing space
+	// Truncate from the left if too wide, keeping the cursor visible.
+	if len(displayRunes) > innerWidth {
+		start := len(displayRunes) - innerWidth
+		displayRunes = displayRunes[start:]
+		cursorIdx = len(displayRunes) - 1
 	}
-	qRunes := []rune(queryDisplay)
 	var inputLine strings.Builder
-	for i, r := range qRunes {
+	for i, r := range displayRunes {
 		ch := string(r)
-		if i == len([]rune(p.Query)) {
+		if i == cursorIdx {
 			inputLine.WriteString(paletteCursorStyle.Render(ch))
 		} else {
 			inputLine.WriteString(paletteInputStyle.Render(ch))
@@ -288,16 +291,15 @@ func (p *PaletteModel) renderMatch(match fuzzy.Match, selected bool, maxWidth in
 		runes = runes[:textWidth]
 	}
 
-	// Build a set of matched positions for O(1) lookup.
-	posSet := make(map[int]bool, len(match.Positions))
-	for _, pos := range match.Positions {
-		posSet[pos] = true
-	}
-
+	// Walk positions slice in sync with runes — both are in ascending order.
+	posIdx := 0
 	var line strings.Builder
 	for i, r := range runes {
 		ch := string(r)
-		isMatch := posSet[i]
+		isMatch := posIdx < len(match.Positions) && match.Positions[posIdx] == i
+		if isMatch {
+			posIdx++
+		}
 		switch {
 		case selected && isMatch:
 			line.WriteString(paletteMatchSelectedStyle.Render(ch))

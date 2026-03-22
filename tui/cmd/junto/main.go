@@ -91,11 +91,16 @@ func main() {
 			startDir = filepath.Dir(absPath)
 		}
 	}
-	for dir := startDir; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+	for dir := startDir; ; {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			app.ProjectRoot = dir
 			break
 		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			break
+		}
+		dir = next
 	}
 	if app.ProjectRoot == "" {
 		app.ProjectRoot = startDir

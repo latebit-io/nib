@@ -429,7 +429,17 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 		"searchLen", len(plan.Search), "replaceLen", len(plan.Replace))
 
 	// Clear the overlay — we're taking over with direct buffer mutations.
+	// Neither clearEditorOverlay(true) nor (false) maps to our state here:
+	// the buffer hasn't been mutated yet but is about to be incrementally.
+	// Clear with false (no mutation), then reset scroll to the edit location
+	// so the user watches the animation from the right place.
 	m.clearEditorOverlay(false)
+	target := plan.Line - 3
+	if target < 0 {
+		target = 0
+	}
+	m.Editor.ScrollOffset = target
+	m.Editor.ClampScroll()
 
 	// Create animation context.
 	anim := newAnimationContext(plan.Line, plan.Col, plan.Replace, m.Editor.TypingWPM)
@@ -563,7 +573,8 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	return nil
 }
 
-// cancelAnimation aborts a running animation, closing the undo group.
+// cancelAnimation aborts a running animation, closing the undo group
+// and signaling the agent to reject (so it can try a different approach).
 // The partial edit remains in the buffer (undoable via Ctrl+Z).
 func (m *AppModel) cancelAnimation() {
 	anim := m.Editor.Anim
@@ -573,6 +584,12 @@ func (m *AppModel) cancelAnimation() {
 	if anim.groupOpen {
 		m.Editor.Buf.EndGroup()
 		anim.groupOpen = false
+	}
+	// Signal rejection so the agent isn't left blocked on approveCh.
+	// PrepareApproval already cleared PendingEdit, so RejectEdit won't
+	// work here — use AbortApproval which sends the reject directly.
+	if anim.state == animTyping {
+		m.Session.AbortApproval()
 	}
 	m.Editor.Anim = nil
 	m.AgentPane.Status = "idle"

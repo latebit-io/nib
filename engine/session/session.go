@@ -200,6 +200,16 @@ func (s *Session) CompleteApproval() {
 	}
 }
 
+// AbortApproval rejects a prepared approval that was never completed.
+// Use this when the user cancels an in-progress animation. The agent
+// receives a rejection and can try a different approach — unlike
+// CancelAgent which kills the entire run.
+func (s *Session) AbortApproval() {
+	if s.HasAgent() {
+		s.agent.Reject()
+	}
+}
+
 // RejectEdit rejects the pending edit and signals the agent.
 func (s *Session) RejectEdit() {
 	if s.PendingEdit == nil || !s.HasAgent() {

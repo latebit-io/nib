@@ -186,11 +186,10 @@ func TestPrepareApprovalDoesNotMutateBuffer(t *testing.T) {
 
 func TestCompleteApprovalSignalsAgent(t *testing.T) {
 	s := newTestSession("hello world")
-	// Pre-load the approve channel to verify CompleteApproval sends to it.
-	// Agent.Approve() sends true on approveCh (buffered size 1).
+	// Smoke test: CompleteApproval should be safe to call on a fresh session
+	// and must not panic or block. Agent.Approve uses a buffered channel, so
+	// this call is non-blocking even when there is no pending edit.
 	s.CompleteApproval()
-	// If this doesn't panic or block, the signal was sent successfully.
-	// We can't easily read the internal channel, but the method should not error.
 }
 
 func TestPrepareApprovalRejectsOnLocationFailure(t *testing.T) {

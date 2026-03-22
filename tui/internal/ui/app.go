@@ -50,12 +50,11 @@ func NewApp(sess *session.Session) AppModel {
 
 	editorPane := NewEditorModel(sess.Editor, km, svc)
 	agentPane := NewAgentPaneModel(svc)
+	agentPane.HasAgent = sess.HasAgent()
 
 	rm := NewRegionManager(Horizontal)
 	rm.Add("editor", editorPane, 0.7)
-	if sess.HasAgent() {
-		rm.Add("agent", agentPane, 0.3)
-	}
+	rm.Add("agent", agentPane, 0.3)
 
 	return AppModel{
 		Session:   sess,
@@ -155,12 +154,78 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 	case agent.EditProposedEvent:
 		m.AgentPane.Status = "waiting"
 		m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
+		// ReviewEdit computes the diff AND marks the edit as reviewed.
+		// ApproveEdit will fail if this step is skipped — the engine enforces
+		// that every frontend shows the developer what the agent proposes.
+		diff := m.Session.ReviewEdit()
+		if diff != nil {
+			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
+			m.Editor.Overlay = NewDiffOverlay(diff)
+			m.Editor.Overlay.Active = true
+			// Auto-scroll so the diff is visible with some context above.
+			target := diff.StartLine - 3
+			if target < 0 {
+				target = 0
+			}
+			m.Editor.ScrollOffset = target
+			m.Editor.syncExtraVisualLines()
+			m.Editor.ClampScroll()
+		} else {
+			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
+			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
+			m.Session.RejectEdit()
+		}
 	case agent.ErrorEvent:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
+		m.clearEditorOverlay(false)
 	case agent.DoneEvent:
 		m.AgentPane.Status = "idle"
 		m.AgentPane.AppendText("\n--- Done ---\n")
+		m.clearEditorOverlay(false)
 	}
+}
+
+// clearEditorOverlay converts ScrollOffset from visual-line space back to
+// buffer-line space and removes the overlay.
+//
+// bufferMutated should be true when called after a successful ApproveEdit
+// (the buffer already has the replacement content). When false (reject,
+// error, done), the buffer is unchanged and the conversion differs.
+func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
+	o := m.Editor.Overlay
+	if o == nil {
+		return
+	}
+	addedCount := o.LineCount()
+	addedEnd := o.EndLine + addedCount
+
+	if bufferMutated {
+		// After approve: removed lines are gone, added lines are now real
+		// buffer lines.
+		removedCount := o.EndLine - o.StartLine + 1
+		if m.Editor.ScrollOffset > addedEnd {
+			// Past the overlay: subtract removedCount (virtual removed lines gone).
+			m.Editor.ScrollOffset -= removedCount
+		} else if m.Editor.ScrollOffset > o.EndLine {
+			// In the added-lines zone: map to replacement position.
+			m.Editor.ScrollOffset = o.StartLine + (m.Editor.ScrollOffset - o.EndLine - 1)
+		} else if m.Editor.ScrollOffset >= o.StartLine {
+			// In the removed range: those lines no longer exist.
+			// Clamp to StartLine (start of the replacement content).
+			m.Editor.ScrollOffset = o.StartLine
+		}
+	} else {
+		// Reject/error/done: buffer unchanged. Subtract addedCount
+		// (the virtual overlay lines that are being removed).
+		if m.Editor.ScrollOffset > addedEnd {
+			m.Editor.ScrollOffset -= addedCount
+		} else if m.Editor.ScrollOffset > o.EndLine {
+			m.Editor.ScrollOffset = o.EndLine + 1
+		}
+	}
+
+	m.Editor.Overlay = nil
+	m.Editor.ExtraVisualLines = 0
 }
 
 // regionHeight returns the height available for the RegionManager
@@ -181,7 +246,8 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// silently drop legitimate typed/pasted text.
 	if m.recentMouse && msg.Type == tea.KeyRunes {
 		if (len(msg.Runes) == 1 && msg.Runes[0] == '[') || isLeakedMouseSequence(msg.Runes) {
-			m.recentMouse = false
+			// Keep recentMouse=true so consecutive leaked sequences from
+			// rapid scrolling are all caught, not just the first one.
 			return m, nil
 		}
 	}
@@ -209,9 +275,23 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit != nil, "agent", m.Session.HasAgent())
-		if m.Session.PendingEdit != nil {
-			ok, reason := m.Session.ApproveEdit()
-			if !ok {
+		if m.Session.PendingEdit != nil && m.Editor.Overlay != nil {
+			// Build the final search/replace from the overlay.
+			// The search is the full affected buffer lines; the replace is
+			// the overlay content (possibly modified by the developer).
+			o := m.Editor.Overlay
+			var oldLines []string
+			for i := o.StartLine; i <= o.EndLine; i++ {
+				oldLines = append(oldLines, m.Editor.Buf.LineText(i))
+			}
+			search := strings.Join(oldLines, "\n")
+			replace := o.Content()
+			ok, reason := m.Session.ApproveEdit(search, replace)
+			if ok {
+				slog.Debug("overlay cleared", "reason", "approve",
+					"searchLen", len(search), "replaceLen", len(replace))
+				m.clearEditorOverlay(true)
+			} else {
 				slog.Warn("agent approve: edit rejected", "reason", reason)
 				m.AgentPane.AppendText("\n[" + reason + "]\n")
 			}
@@ -220,6 +300,8 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case ActionAgentReject:
 		if m.Session.PendingEdit != nil {
+			slog.Debug("overlay cleared", "reason", "reject")
+			m.clearEditorOverlay(false)
 			m.Session.RejectEdit()
 			return m, nil
 		}

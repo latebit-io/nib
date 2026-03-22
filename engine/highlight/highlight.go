@@ -128,6 +128,13 @@ func (h *Highlighter) collectAllTokens(node *sitter.Node, lines []string) {
 				ecBytes = lineByteLen
 			}
 
+			// Defensive: ensure byte offsets are valid slice bounds.
+			// Tree-sitter incremental parsing can return stale positions
+			// when the source changes significantly between parses.
+			if scBytes < 0 || scBytes > lineByteLen || ecBytes < 0 || ecBytes > lineByteLen {
+				continue
+			}
+
 			// Convert byte offsets to rune offsets
 			sc := len([]rune(lineBytes[:scBytes]))
 			ec := len([]rune(lineBytes[:ecBytes]))

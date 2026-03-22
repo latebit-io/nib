@@ -12,7 +12,7 @@ import (
 // Frontends read its state to render and call its methods to drive the workflow.
 type Session struct {
 	Editor *editor.Editor
-	Agent  *agent.Agent
+	agent  *agent.Agent
 	Events <-chan agent.Event // frontend reads agent events from here
 
 	// Intent — session-level contract between developer and agent
@@ -22,20 +22,25 @@ type Session struct {
 
 	// PendingEdit is the edit currently awaiting approval (nil = none)
 	PendingEdit *agent.PendingEdit
+
+	// editReviewed is set by ReviewEdit. ApproveEdit requires it.
+	// This enforces the contract: every frontend must compute and present
+	// the diff before approving — no blind approvals.
+	editReviewed bool
 }
 
 // New creates a session. Pass nil agent and events for editor-only mode.
 func New(e *editor.Editor, ag *agent.Agent, events <-chan agent.Event) *Session {
 	return &Session{
 		Editor: e,
-		Agent:  ag,
+		agent:  ag,
 		Events: events,
 	}
 }
 
 // HasAgent returns true if the session has an active agent.
 func (s *Session) HasAgent() bool {
-	return s.Agent != nil
+	return s.agent != nil
 }
 
 // --- Intent Lifecycle ---
@@ -53,9 +58,10 @@ func (s *Session) SubmitGoal(goal string) {
 	// Clear stale pending edit from previous run — Agent.Run cancels the
 	// prior run internally, so any pending approval is no longer valid.
 	s.PendingEdit = nil
+	s.editReviewed = false
 	s.CurrentIntent = goal
 	s.IntentDone = false
-	s.Agent.Run(s.Editor.Buf.Path, s.Editor.Buf.Content(), goal)
+	s.agent.Run(s.Editor.Buf.Path, s.Editor.Buf.Content(), goal)
 }
 
 // ArchiveIntent marks the current intent as done.
@@ -78,28 +84,59 @@ func (s *Session) ClearIntent() {
 func (s *Session) CancelAgent() {
 	if s.HasAgent() {
 		s.ClearIntent()
-		s.Agent.Cancel()
+		s.agent.Cancel()
 		s.PendingEdit = nil
+		s.editReviewed = false
 	}
 }
 
 // --- Edit Approval Flow ---
+//
+// The engine enforces a two-step review contract:
+//
+//   1. ReviewEdit  — frontend computes and presents the diff to the developer.
+//   2. ApproveEdit — frontend passes the (possibly modified) replacement text.
+//
+// ApproveEdit fails if ReviewEdit was not called first. This guarantees that
+// every frontend — TUI, GUI, web — shows the developer what the agent proposes
+// before anything is applied. No blind approvals.
 
-// ApproveEdit applies the pending edit to the editor buffer.
+// ReviewEdit computes the diff for the pending edit and marks it as reviewed.
+// Frontends MUST call this and present the result before calling ApproveEdit.
+// Returns nil if there is no pending edit or the search text has no unique match.
+func (s *Session) ReviewEdit() *editor.DiffResult {
+	if s.PendingEdit == nil {
+		return nil
+	}
+	diff := s.Editor.ComputeDiff(s.PendingEdit.Search, s.PendingEdit.Replace)
+	if diff != nil {
+		s.editReviewed = true
+	}
+	return diff
+}
+
+// ApproveEdit applies the reviewed edit to the editor buffer.
+// The frontend must provide the final search and replace text — typically
+// the full affected lines from the diff, with the replacement possibly
+// modified by the developer.
+//
 // Returns (true, "") on success, or (false, reason) on failure.
-// On success, signals the agent that the edit was approved.
-// On failure, signals the agent that the edit was rejected.
-func (s *Session) ApproveEdit() (bool, string) {
+// Fails if ReviewEdit was not called first.
+func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	if s.PendingEdit == nil || !s.HasAgent() {
 		return false, "no pending edit"
 	}
-	ok, reason := s.Editor.ApplyEdit(s.PendingEdit.Search, s.PendingEdit.Replace)
+	if !s.editReviewed {
+		return false, "edit not reviewed — call ReviewEdit first"
+	}
+	ok, reason := s.Editor.ApplyEdit(search, replace)
 	if ok {
-		s.Agent.Approve()
+		s.agent.Approve()
 	} else {
-		s.Agent.Reject()
+		s.agent.Reject()
 	}
 	s.PendingEdit = nil
+	s.editReviewed = false
 	return ok, reason
 }
 
@@ -109,13 +146,14 @@ func (s *Session) RejectEdit() {
 		return
 	}
 	s.PendingEdit = nil
-	s.Agent.Reject()
+	s.editReviewed = false
+	s.agent.Reject()
 }
 
 // Continue signals the agent to proceed after the developer has finished editing.
 func (s *Session) Continue() {
 	if s.HasAgent() {
-		s.Agent.Continue(s.Editor.Buf.Content())
+		s.agent.Continue(s.Editor.Buf.Content())
 	}
 }
 
@@ -127,11 +165,14 @@ func (s *Session) HandleEvent(ev agent.Event) {
 	switch e := ev.(type) {
 	case agent.EditProposedEvent:
 		s.PendingEdit = &e.Edit
+		s.editReviewed = false
 	case agent.ErrorEvent:
 		s.PendingEdit = nil
+		s.editReviewed = false
 		_ = e // error text is in the event for the frontend to display
 	case agent.DoneEvent:
 		s.PendingEdit = nil
+		s.editReviewed = false
 		if e.Success {
 			s.ArchiveIntent()
 		}

@@ -1,10 +1,10 @@
-package llm
+package agent
 
 import "strings"
 
-// StripThinkTags removes <think>...</think> content from a string.
+// stripThinkTags removes <think>...</think> content from a string.
 // inThink tracks state across calls for multi-line think blocks.
-func StripThinkTags(s string, inThink *bool) string {
+func stripThinkTags(s string, inThink *bool) string {
 	var out strings.Builder
 	for len(s) > 0 {
 		if *inThink {

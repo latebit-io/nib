@@ -51,7 +51,7 @@ type PendingEdit struct {
 
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
-	Provider llm.Provider
+	provider llm.Provider
 	events   chan<- Event // frontend reads from this
 
 	mu          sync.Mutex
@@ -74,7 +74,7 @@ type Agent struct {
 // Use a buffered channel (e.g. 64) to absorb bursts.
 func New(provider llm.Provider, events chan<- Event) *Agent {
 	return &Agent{
-		Provider:         provider,
+		provider:         provider,
 		events:           events,
 		approveCh:        make(chan bool, 1),
 		continueCh:       make(chan string, 1),
@@ -162,14 +162,14 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 		goal = "Review this code and suggest improvements, one step at a time."
 	}
 
-	messages := llm.BuildMessages(fileName, fileContent, goal)
+	messages := buildMessages(fileName, fileContent, goal)
 	a.send(TokenEvent{Text: "Thinking...\n\n"})
 	a.send(StatusEvent{Status: "thinking"})
 
 	thinkState := false
 
 	for {
-		ch, err := a.Provider.Stream(ctx, messages)
+		ch, err := a.provider.Stream(ctx, messages)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
 			a.send(ErrorEvent{Err: fmt.Sprintf("LLM error: %v", err)})
@@ -185,7 +185,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 				break
 			}
 
-			clean := llm.StripThinkTags(ev.Token, &thinkState)
+			clean := stripThinkTags(ev.Token, &thinkState)
 			if clean != "" {
 				contentBuf.WriteString(clean)
 				a.send(TokenEvent{Text: clean})

@@ -15,18 +15,18 @@ import (
 
 // AgentAPI implements Provider using an OpenAI-compatible chat completions API.
 type AgentAPI struct {
-	APIKey  string
-	BaseURL string
-	Model   string
+	apiKey  string
+	baseURL string
+	model   string
 	client  *http.Client
 }
 
 // NewAgentAPI creates an AgentAPI provider with the given base URL, model, and API key.
 func NewAgentAPI(baseURL, model, apiKey string) *AgentAPI {
 	return &AgentAPI{
-		APIKey:  apiKey,
-		BaseURL: baseURL,
-		Model:   model,
+		apiKey:  apiKey,
+		baseURL: baseURL,
+		model:   model,
 		client: &http.Client{
 			Transport: agentTransport(),
 			// No client-level Timeout — would kill SSE streams mid-flight.
@@ -51,7 +51,7 @@ type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
 	Stream   bool      `json:"stream"`
-	Tools    []ToolDef `json:"tools,omitempty"`
+	Tools    []toolDef `json:"tools,omitempty"`
 }
 
 type sseChunk struct {
@@ -80,22 +80,22 @@ type sseDeltaCall struct {
 // Stream sends a chat completion request and returns a channel of streaming events.
 func (a *AgentAPI) Stream(ctx context.Context, messages []Message) (<-chan StreamEvent, error) {
 	body, err := json.Marshal(chatRequest{
-		Model:    a.Model,
+		Model:    a.model,
 		Messages: messages,
 		Stream:   true,
-		Tools:    DefaultTools,
+		Tools:    defaultTools,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	base := strings.TrimRight(a.BaseURL, "/")
+	base := strings.TrimRight(a.baseURL, "/")
 	req, err := http.NewRequestWithContext(ctx, "POST", base+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.APIKey)
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
 
 	resp, err := a.client.Do(req)
 	if err != nil {

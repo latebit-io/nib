@@ -177,43 +177,46 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 		}
 	case agent.ErrorEvent:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
-		m.clearEditorOverlay()
+		m.clearEditorOverlay(false)
 	case agent.DoneEvent:
 		m.AgentPane.Status = "idle"
 		m.AgentPane.AppendText("\n--- Done ---\n")
-		m.clearEditorOverlay()
+		m.clearEditorOverlay(false)
 	}
 }
 
 // clearEditorOverlay converts ScrollOffset from visual-line space back to
 // buffer-line space and removes the overlay.
 //
-// When called after ApproveEdit, the buffer is already mutated: the removed
-// lines (StartLine..EndLine) are replaced by the overlay content. The scroll
-// conversion must account for this — subtract removedCount (not addedCount)
-// because the visual overlay lines are now real buffer lines.
-func (m *AppModel) clearEditorOverlay() {
+// bufferMutated should be true when called after a successful ApproveEdit
+// (the buffer already has the replacement content). When false (reject,
+// error, done), the buffer is unchanged and the conversion differs.
+func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
 	o := m.Editor.Overlay
 	if o == nil {
 		return
 	}
 	addedCount := o.LineCount()
-	removedCount := o.EndLine - o.StartLine + 1
 	addedEnd := o.EndLine + addedCount
 
-	if m.Editor.ScrollOffset > addedEnd {
-		// Past the overlay: visual lines included both removed and added.
-		// After edit, removed lines are gone and added lines are real buffer
-		// lines. Net adjustment = removedCount (the visual removed lines that
-		// no longer exist as a separate visual category).
-		m.Editor.ScrollOffset -= removedCount
-	} else if m.Editor.ScrollOffset > o.EndLine {
-		// In the added-lines zone: map to the replacement content's position.
-		// Visual EndLine+1 → buffer StartLine, EndLine+2 → StartLine+1, etc.
-		m.Editor.ScrollOffset = o.StartLine + (m.Editor.ScrollOffset - o.EndLine - 1)
+	if bufferMutated {
+		// After approve: removed lines are gone, added lines are now real
+		// buffer lines. Subtract removedCount (the visual removed lines).
+		removedCount := o.EndLine - o.StartLine + 1
+		if m.Editor.ScrollOffset > addedEnd {
+			m.Editor.ScrollOffset -= removedCount
+		} else if m.Editor.ScrollOffset > o.EndLine {
+			m.Editor.ScrollOffset = o.StartLine + (m.Editor.ScrollOffset - o.EndLine - 1)
+		}
+	} else {
+		// Reject/error/done: buffer unchanged. Subtract addedCount
+		// (the virtual overlay lines that are being removed).
+		if m.Editor.ScrollOffset > addedEnd {
+			m.Editor.ScrollOffset -= addedCount
+		} else if m.Editor.ScrollOffset > o.EndLine {
+			m.Editor.ScrollOffset = o.EndLine + 1
+		}
 	}
-	// ScrollOffset <= EndLine (in removed range or before): no adjustment
-	// needed — those visual lines map 1:1 to buffer lines.
 
 	m.Editor.Overlay = nil
 	m.Editor.ExtraVisualLines = 0
@@ -281,7 +284,7 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if ok {
 				slog.Debug("overlay cleared", "reason", "approve",
 					"searchLen", len(search), "replaceLen", len(replace))
-				m.clearEditorOverlay()
+				m.clearEditorOverlay(true)
 			} else {
 				slog.Warn("agent approve: edit rejected", "reason", reason)
 				m.AgentPane.AppendText("\n[" + reason + "]\n")
@@ -292,7 +295,7 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ActionAgentReject:
 		if m.Session.PendingEdit != nil {
 			slog.Debug("overlay cleared", "reason", "reject")
-			m.clearEditorOverlay()
+			m.clearEditorOverlay(false)
 			m.Session.RejectEdit()
 			return m, nil
 		}

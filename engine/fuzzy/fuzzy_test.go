@@ -168,14 +168,20 @@ func TestFilter_RanksCorrectly(t *testing.T) {
 }
 
 func TestFilter_EmptyQuery(t *testing.T) {
-	candidates := []string{"b.go", "a.go", "c.go"}
+	candidates := []string{"longer_name.go", "b.go", "a.go"}
 	results := Filter("", candidates)
 	if len(results) != 3 {
 		t.Fatalf("empty query should return all candidates, got %d", len(results))
 	}
-	// Should be sorted alphabetically.
+	// Sorted by length then alphabetically.
 	if results[0].Text != "a.go" {
 		t.Errorf("first result = %q, want %q", results[0].Text, "a.go")
+	}
+	if results[1].Text != "b.go" {
+		t.Errorf("second result = %q, want %q", results[1].Text, "b.go")
+	}
+	if results[2].Text != "longer_name.go" {
+		t.Errorf("third result = %q, want %q", results[2].Text, "longer_name.go")
 	}
 }
 
@@ -219,5 +225,28 @@ func TestScore_Unicode(t *testing.T) {
 	m := Score("日", "日本語.txt")
 	if m.Score == 0 {
 		t.Fatal("unicode query should match")
+	}
+}
+
+func TestScore_UnicodeOffset(t *testing.T) {
+	// Match after multi-byte runes — positions must be rune indices.
+	m := Score("b", "a日b")
+	if m.Score == 0 {
+		t.Fatal("unicode offset query should match")
+	}
+	if len(m.Positions) != 1 || m.Positions[0] != 2 {
+		t.Errorf("positions = %v, want [2] (rune index after multi-byte rune)", m.Positions)
+	}
+}
+
+func TestScore_UnicodeSubstring(t *testing.T) {
+	// Substring match on multi-byte runes — positions must be rune indices,
+	// not byte offsets.
+	m := Score("語", "日本語.txt")
+	if m.Score == 0 {
+		t.Fatal("unicode substring should match")
+	}
+	if len(m.Positions) != 1 || m.Positions[0] != 2 {
+		t.Errorf("positions = %v, want [2] (rune index, not byte offset)", m.Positions)
 	}
 }

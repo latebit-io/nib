@@ -55,8 +55,10 @@ func Score(query, candidate string) Match {
 		return Match{Text: candidate, Score: 800 + lengthBonus(cRunes), Positions: positions}
 	}
 
-	// Strategy 3: Substring match — find the best substring position.
-	if idx := strings.Index(cLower, qLower); idx >= 0 {
+	// Strategy 3: Substring match — search over rune slices to avoid
+	// byte/rune offset mismatch on non-ASCII candidates.
+	cLowerRunes := []rune(cLower)
+	if idx := runeIndex(cLowerRunes, qRunes); idx >= 0 {
 		positions := make([]int, len(qRunes))
 		for i := range positions {
 			positions[i] = idx + i
@@ -70,7 +72,7 @@ func Score(query, candidate string) Match {
 	}
 
 	// Strategy 4: Fuzzy match — characters appear in order with gaps.
-	return fuzzyScore(qRunes, cRunes, candidate)
+	return fuzzyScore(qRunes, cRunes, cLowerRunes, candidate)
 }
 
 // Filter scores all candidates against the query and returns only matches
@@ -83,6 +85,9 @@ func Filter(query string, candidates []string) []Match {
 			results[i] = Match{Text: c, Score: 1}
 		}
 		sort.Slice(results, func(i, j int) bool {
+			if len(results[i].Text) != len(results[j].Text) {
+				return len(results[i].Text) < len(results[j].Text)
+			}
 			return results[i].Text < results[j].Text
 		})
 		return results
@@ -110,8 +115,8 @@ func Filter(query string, candidates []string) []Match {
 }
 
 // fuzzyScore implements the character-skip fuzzy matching with scoring.
-func fuzzyScore(query, candidate []rune, originalText string) Match {
-	cLower := []rune(strings.ToLower(string(candidate)))
+// cLower is the precomputed lowercase rune slice of candidate.
+func fuzzyScore(query, candidate, cLower []rune, originalText string) Match {
 	qi := 0
 	var positions []int
 	score := 0
@@ -169,4 +174,25 @@ func lengthBonus(candidate []rune) int {
 // isSeparator returns true for common path and word separators.
 func isSeparator(r rune) bool {
 	return r == '/' || r == '\\' || r == '.' || r == '_' || r == '-' || r == ' '
+}
+
+// runeIndex returns the index of the first occurrence of needle in haystack,
+// or -1 if not found. Operates on rune slices to avoid byte/rune mismatches.
+func runeIndex(haystack, needle []rune) int {
+	if len(needle) > len(haystack) {
+		return -1
+	}
+	for i := 0; i <= len(haystack)-len(needle); i++ {
+		match := true
+		for j := range needle {
+			if haystack[i+j] != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
 }

@@ -187,17 +187,34 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 
 // clearEditorOverlay converts ScrollOffset from visual-line space back to
 // buffer-line space and removes the overlay.
+//
+// When called after ApproveEdit, the buffer is already mutated: the removed
+// lines (StartLine..EndLine) are replaced by the overlay content. The scroll
+// conversion must account for this — subtract removedCount (not addedCount)
+// because the visual overlay lines are now real buffer lines.
 func (m *AppModel) clearEditorOverlay() {
 	o := m.Editor.Overlay
 	if o == nil {
 		return
 	}
 	addedCount := o.LineCount()
-	if m.Editor.ScrollOffset > o.EndLine+addedCount {
-		m.Editor.ScrollOffset -= addedCount
+	removedCount := o.EndLine - o.StartLine + 1
+	addedEnd := o.EndLine + addedCount
+
+	if m.Editor.ScrollOffset > addedEnd {
+		// Past the overlay: visual lines included both removed and added.
+		// After edit, removed lines are gone and added lines are real buffer
+		// lines. Net adjustment = removedCount (the visual removed lines that
+		// no longer exist as a separate visual category).
+		m.Editor.ScrollOffset -= removedCount
 	} else if m.Editor.ScrollOffset > o.EndLine {
-		m.Editor.ScrollOffset = o.EndLine + 1
+		// In the added-lines zone: map to the replacement content's position.
+		// Visual EndLine+1 → buffer StartLine, EndLine+2 → StartLine+1, etc.
+		m.Editor.ScrollOffset = o.StartLine + (m.Editor.ScrollOffset - o.EndLine - 1)
 	}
+	// ScrollOffset <= EndLine (in removed range or before): no adjustment
+	// needed — those visual lines map 1:1 to buffer lines.
+
 	m.Editor.Overlay = nil
 	m.Editor.ExtraVisualLines = 0
 }

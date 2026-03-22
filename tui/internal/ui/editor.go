@@ -584,6 +584,13 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		// Removed lines are real buffer lines — allow cursor positioning
 		// for navigation. Edits are blocked by overlapsRemovedRange().
 		m.handleNormalLineClick(entry.bufLine, displayCol, msg.Action)
+
+	case lineEmpty:
+		// Clicks past EOF: deactivate overlay and move cursor to last line.
+		if m.Overlay != nil && m.Overlay.Active {
+			m.Overlay.Active = false
+		}
+		m.handleNormalLineClick(m.Buf.LineCount(), displayCol, msg.Action)
 	}
 
 	return nil
@@ -676,7 +683,31 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
 	cmd := m.handleEditorKeyFor(keyMsg, m.Editor, readOnly)
 
 	m.adjustOverlayPosition(linesBefore)
+	m.redirectCursorFromRemovedLines()
 	return cmd
+}
+
+// redirectCursorFromRemovedLines activates the overlay when the buffer cursor
+// lands on a removed line (e.g., via arrow keys). Arrowing "behind" the overlay
+// is confusing UX — jump into the editable added lines instead.
+func (m *EditorModel) redirectCursorFromRemovedLines() {
+	o := m.Overlay
+	if o == nil || o.Active {
+		return
+	}
+	if m.CursorLine < o.StartLine || m.CursorLine > o.EndLine {
+		return
+	}
+	o.Active = true
+	oe := o.Editor
+	// Coming from above → first added line; from below → last added line.
+	if m.CursorLine <= (o.StartLine+o.EndLine)/2 {
+		oe.MoveCursorTo(0, 0)
+	} else {
+		lastLine := oe.Buf.LineCount() - 1
+		oe.MoveCursorTo(lastLine, oe.Buf.LineLen(lastLine))
+	}
+	m.ClearSelection()
 }
 
 // adjustOverlayPosition shifts the overlay's line range when lines are

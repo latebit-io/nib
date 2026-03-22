@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Strategy base scores — higher means stricter match.
@@ -109,7 +110,7 @@ func Filter(query string, candidates []string) []Match {
 			results[i] = Match{Text: c, Score: 1}
 		}
 		sort.Slice(results, func(i, j int) bool {
-			ri, rj := len([]rune(results[i].Text)), len([]rune(results[j].Text))
+			ri, rj := utf8.RuneCountInString(results[i].Text), utf8.RuneCountInString(results[j].Text)
 			if ri != rj {
 				return ri < rj
 			}
@@ -132,7 +133,7 @@ func Filter(query string, candidates []string) []Match {
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
 		}
-		ri, rj := len([]rune(results[i].Text)), len([]rune(results[j].Text))
+		ri, rj := utf8.RuneCountInString(results[i].Text), utf8.RuneCountInString(results[j].Text)
 		if ri != rj {
 			return ri < rj
 		}

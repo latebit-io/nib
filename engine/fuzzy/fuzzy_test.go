@@ -142,9 +142,13 @@ func TestScore_ShorterCandidatePreferred(t *testing.T) {
 }
 
 func TestScore_CamelCaseBonus(t *testing.T) {
-	m := Score("NE", "NewEditor")
-	if m.Score == 0 {
-		t.Fatal("camelCase match should have score > 0")
+	// Use a query that forces the fuzzy strategy (not a simple prefix)
+	// and compare camelCase vs flat — boundary should score higher.
+	camel := Score("nw", "NewWriter")
+	flat := Score("nw", "newwriter")
+	if camel.Score <= flat.Score {
+		t.Errorf("camelCase candidate (%d) should score higher than flat (%d)",
+			camel.Score, flat.Score)
 	}
 }
 

@@ -206,8 +206,10 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 	displayRunes := append(qRunes, ' ')
 	cursorIdx := len(qRunes) // cursor is on the trailing space
 	// Truncate from the left if too wide, keeping the cursor visible.
-	if len(displayRunes) > innerWidth {
-		start := len(displayRunes) - innerWidth
+	// Reserve 1 column for left padding (matching renderMatch).
+	maxInputWidth := max(1, innerWidth-1)
+	if len(displayRunes) > maxInputWidth {
+		start := len(displayRunes) - maxInputWidth
 		displayRunes = displayRunes[start:]
 		cursorIdx = len(displayRunes) - 1
 	}

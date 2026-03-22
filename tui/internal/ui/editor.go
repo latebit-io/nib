@@ -185,7 +185,7 @@ func (m *EditorModel) Render() string {
 		if anim.state == animTyping {
 			style = agentCursorTypingStyle
 		}
-		line, col := anim.position()
+		line, col := anim.edit.Position()
 		agentCursor = &agentCursorInfo{
 			line:  line,
 			col:   col,
@@ -652,7 +652,7 @@ func (m *EditorModel) renderStatusBar() string {
 	case m.Overlay != nil && m.Overlay.Active:
 		right = fmt.Sprintf(" +%d:%d ", m.Overlay.Editor.CursorLine+1, m.Overlay.Editor.CursorCol+1)
 	case m.Anim != nil && m.Anim.state == animTyping:
-		al, ac := m.Anim.position()
+		al, ac := m.Anim.edit.Position()
 		right = fmt.Sprintf(" %d:%d  agent:%d:%d ", m.CursorLine+1, m.CursorCol+1, al+1, ac+1)
 	default:
 		right = fmt.Sprintf(" %d:%d ", m.CursorLine+1, m.CursorCol+1)

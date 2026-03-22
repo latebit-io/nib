@@ -25,98 +25,54 @@ const (
 	animWaiting            // animation finished or yielded, waiting for dev
 )
 
-// animTickMsg is sent by tea.Tick to advance the animation by one character.
+// animTickMsg is sent by tea.Tick to advance the animation by one frame.
 type animTickMsg struct{}
 
 // animationContext holds TUI-only state for an in-progress animated edit.
-// Buffer mutations and undo group lifecycle are delegated to the engine's
-// IncrementalEdit — this struct owns only timing and visual state.
+// Buffer mutations, position tracking, and per-tick advancement are all
+// delegated to the engine's IncrementalEdit. This struct owns only the
+// tick scheduling and visual state.
 type animationContext struct {
 	state animState
 
 	// Engine-owned incremental edit — manages undo group, position tracking,
-	// and buffer mutations. Nil after Complete/Abort.
+	// buffer mutations, and per-tick char advancement.
 	edit *editor.IncrementalEdit
-
-	// The replacement text, as runes, and how far we've typed.
-	replaceRunes []rune
-	typed        int
-
-	// Timing
-	charDelay    time.Duration
-	newlineDelay time.Duration
 
 	// Whether the agent yielded due to cursor collision.
 	yielded bool
 }
 
 const (
-	defaultTypingWPM = 500
+	defaultTypingWPM = 800
 	avgCharsPerWord  = 5
+	// tickInterval is the target time between animation frames.
+	tickInterval = 16 * time.Millisecond // ~60fps
 )
 
-// newAnimationContext creates a context wrapping an engine IncrementalEdit.
 const (
 	minTypingWPM = 30
-	maxTypingWPM = 2000
-	minCharDelay = 5 * time.Millisecond
+	maxTypingWPM = 5000
 )
 
-func newAnimationContext(ie *editor.IncrementalEdit, replace string, wpm int) *animationContext {
+// charsPerTick computes how many characters to insert per tick to hit the
+// target WPM. This is called once at animation start.
+func charsPerTick(wpm int) int {
 	if wpm <= 0 {
 		wpm = defaultTypingWPM
 	}
 	wpm = max(minTypingWPM, min(wpm, maxTypingWPM))
-	charDelay := time.Minute / time.Duration(wpm*avgCharsPerWord)
-	charDelay = max(charDelay, minCharDelay)
-
-	return &animationContext{
-		state:        animTyping,
-		edit:         ie,
-		replaceRunes: []rune(replace),
-		charDelay:    charDelay,
-		newlineDelay: charDelay * 4,
+	charsPerSec := float64(wpm*avgCharsPerWord) / 60.0
+	cpt := int(charsPerSec * tickInterval.Seconds())
+	if cpt < 1 {
+		cpt = 1
 	}
-}
-
-// done returns true when all replacement characters have been typed.
-func (a *animationContext) done() bool {
-	return a.typed >= len(a.replaceRunes)
-}
-
-// nextChar returns the next character to type. Does not advance — call
-// edit.InsertChar separately so the engine owns the mutation.
-func (a *animationContext) nextChar() rune {
-	if a.done() {
-		return 0
-	}
-	r := a.replaceRunes[a.typed]
-	a.typed++
-	return r
-}
-
-// position returns the current agent cursor position from the engine.
-func (a *animationContext) position() (line, col int) {
-	return a.edit.Position()
-}
-
-// startPosition returns where the edit began (for collision detection).
-func (a *animationContext) startPosition() (line, col int) {
-	return a.edit.StartPosition()
-}
-
-// delayForChar returns the appropriate delay after inserting a character.
-// Newlines get a longer pause.
-func (a *animationContext) delayForChar(r rune) time.Duration {
-	if r == '\n' {
-		return a.newlineDelay
-	}
-	return a.charDelay
+	return cpt
 }
 
 // scheduleNextTick returns a tea.Cmd that schedules the next animation tick.
-func scheduleNextTick(delay time.Duration) tea.Cmd {
-	return tea.Tick(delay, func(_ time.Time) tea.Msg {
+func scheduleNextTick() tea.Cmd {
+	return tea.Tick(tickInterval, func(_ time.Time) tea.Msg {
 		return animTickMsg{}
 	})
 }

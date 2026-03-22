@@ -157,6 +157,10 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 	case agent.StatusEvent:
 		m.AgentPane.Status = e.Status
 	case agent.EditProposedEvent:
+		// Clean up any running animation before creating a new overlay.
+		m.cancelAnimation()
+		m.clearEditorOverlay(false)
+
 		m.AgentPane.Status = "waiting"
 		m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 		// ReviewEdit computes the diff AND marks the edit as reviewed.
@@ -282,6 +286,10 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit != nil, "agent", m.Session.HasAgent())
+		// Block approve during active animation.
+		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
+			return m, nil
+		}
 		if m.Session.PendingEdit != nil && m.Editor.Overlay != nil {
 			cmd := m.startAnimatedApproval()
 			return m, cmd
@@ -310,6 +318,10 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// No intent either — fall through to focused pane
 
 	case ActionAgentContinue:
+		// Block continue during active animation — wait for it to finish.
+		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
+			return m, nil
+		}
 		if m.Session.HasAgent() && m.AgentPane.Status == "editing" {
 			m.cancelAnimation()
 			m.Session.Continue()
@@ -441,23 +453,24 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	m.Editor.ScrollOffset = target
 	m.Editor.ClampScroll()
 
-	// Engine handles undo group + delete + position tracking.
+	// Engine handles undo group, deletion, position tracking, and per-tick
+	// advancement. TUI only owns the tick schedule and visual state.
 	searchRunes := len([]rune(plan.Search))
-	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes)
+	cpt := charsPerTick(m.Editor.TypingWPM)
+	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace)
 
-	// TUI wraps it with timing and visual state.
-	anim := newAnimationContext(ie, plan.Replace, m.Editor.TypingWPM)
-	m.Editor.Anim = anim
+	m.Editor.Anim = &animationContext{state: animTyping, edit: ie}
 	m.AgentPane.Status = "typing"
 
-	if anim.done() {
+	if ie.Remaining() == 0 {
 		return m.finishAnimation()
 	}
 
-	return scheduleNextTick(anim.charDelay)
+	return scheduleNextTick()
 }
 
-// handleAnimTick advances the animation by one character.
+// handleAnimTick advances the animation by one frame. The engine's
+// IncrementalEdit.Advance handles char insertion and pacing.
 func (m *AppModel) handleAnimTick() tea.Cmd {
 	anim := m.Editor.Anim
 	if anim == nil || anim.state != animTyping {
@@ -469,26 +482,22 @@ func (m *AppModel) handleAnimTick() tea.Cmd {
 		return m.yieldAnimation()
 	}
 
-	r := anim.nextChar()
-	if r == 0 {
-		return m.finishAnimation()
-	}
+	// Engine advances the edit by charsPerTick characters.
+	result := anim.edit.Advance()
 
-	// Delegate the buffer mutation to the engine.
-	anim.edit.InsertChar(r)
-
-	// Auto-scroll to keep agent cursor visible.
-	line, _ := anim.position()
+	// Scroll down to follow the agent cursor as it advances. Only scrolls
+	// downward — if the user scrolled past the agent, we don't pull them back.
+	line, _ := anim.edit.Position()
 	vis := m.Editor.VisibleLines()
 	if vis > 0 && line >= m.Editor.ScrollOffset+vis {
 		m.Editor.ScrollOffset = line - vis + 1
 	}
 
-	if anim.done() {
+	if result.Done {
 		return m.finishAnimation()
 	}
 
-	return scheduleNextTick(anim.delayForChar(r))
+	return scheduleNextTick()
 }
 
 // animCollision returns true if the dev cursor is within the span the agent
@@ -498,8 +507,8 @@ func (m *AppModel) animCollision() bool {
 	if anim == nil {
 		return false
 	}
-	startLine, startCol := anim.startPosition()
-	endLine, endCol := anim.position()
+	startLine, startCol := anim.edit.StartPosition()
+	endLine, endCol := anim.edit.Position()
 	return editor.CursorInRegion(
 		m.Editor.CursorLine, m.Editor.CursorCol,
 		startLine, startCol,
@@ -517,10 +526,7 @@ func (m *AppModel) yieldAnimation() tea.Cmd {
 	}
 
 	// Finish the current line via the engine (clean boundary).
-	remaining := anim.replaceRunes[anim.typed:]
-	consumed := anim.edit.FinishLine(remaining)
-	anim.typed += consumed
-
+	anim.edit.FinishLine()
 	anim.edit.Complete()
 	anim.state = animWaiting
 	anim.yielded = true
@@ -528,9 +534,9 @@ func (m *AppModel) yieldAnimation() tea.Cmd {
 	m.AgentPane.AppendText("\n[yielded — your line]\n")
 	m.Session.CompleteApproval()
 
-	line, col := anim.position()
-	slog.Debug("animation yielded", "line", line, "col", col,
-		"typed", anim.typed, "total", len(anim.replaceRunes))
+	line, col := anim.edit.Position()
+	remaining := anim.edit.Remaining()
+	slog.Debug("animation yielded", "line", line, "col", col, "remaining", remaining)
 	return nil
 }
 
@@ -546,7 +552,7 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	m.AgentPane.Status = "editing"
 	m.Session.CompleteApproval()
 
-	line, col := anim.position()
+	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)
 	return nil
 }
@@ -565,7 +571,7 @@ func (m *AppModel) cancelAnimation() {
 	if anim.state == animTyping {
 		anim.edit.Abort()
 		m.Session.AbortApproval()
+		m.AgentPane.Status = "idle"
 	}
 	m.Editor.Anim = nil
-	m.AgentPane.Status = "idle"
 }

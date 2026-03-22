@@ -28,7 +28,7 @@ type AgentPaneModel struct {
 	ScrollOffset int
 
 	// Status
-	Status string // "idle", "thinking", "editing", "waiting"
+	Status string // "idle", "thinking", "typing", "editing", "waiting"
 
 	// Selection
 	SelectionActive bool
@@ -670,6 +670,8 @@ func (m *AgentPaneModel) Render() string {
 			statusText = statusStyle.Render(m.padLine(" Ctrl+N to continue"))
 		case "waiting":
 			statusText = statusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
+		case "typing":
+			statusText = statusStyle.Render(m.padLine(" Agent typing... | Esc cancel"))
 		default:
 			statusText = m.padLine("")
 		}

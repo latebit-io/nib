@@ -260,11 +260,12 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			search := strings.Join(oldLines, "\n")
 			replace := o.Content()
-			slog.Debug("overlay cleared", "reason", "approve",
-				"searchLen", len(search), "replaceLen", len(replace))
-			m.clearEditorOverlay()
 			ok, reason := m.Session.ApproveEdit(search, replace)
-			if !ok {
+			if ok {
+				slog.Debug("overlay cleared", "reason", "approve",
+					"searchLen", len(search), "replaceLen", len(replace))
+				m.clearEditorOverlay()
+			} else {
 				slog.Warn("agent approve: edit rejected", "reason", reason)
 				m.AgentPane.AppendText("\n[" + reason + "]\n")
 			}

@@ -581,6 +581,9 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			slog.Debug("overlay deactivated", "reason", "click on removed line", "bufLine", entry.bufLine)
 			m.Overlay.Active = false
 		}
+		// Removed lines are real buffer lines — allow cursor positioning
+		// for navigation. Edits are blocked by overlapsRemovedRange().
+		m.handleNormalLineClick(entry.bufLine, displayCol, msg.Action)
 	}
 
 	return nil
@@ -621,21 +624,35 @@ func (m *EditorModel) handleNormalLineClick(bufLine, displayCol int, action tea.
 // --- Key Handling ---
 
 // overlapsRemovedRange returns true when the cursor or selection touches the
-// overlay's removed line range. Used to block edits that would desync the diff.
+// overlay's removed line range or its immediate boundary lines. The boundary
+// extension prevents newline-join operations (Backspace at col 0 of EndLine+1,
+// Delete at end of StartLine-1) from merging into removed lines.
 func (m *EditorModel) overlapsRemovedRange() bool {
 	if m.Overlay == nil || m.Overlay.Active {
 		return false
 	}
 	start, end := m.Overlay.StartLine, m.Overlay.EndLine
+
+	// Cursor on a removed line → read-only.
 	if m.CursorLine >= start && m.CursorLine <= end {
 		return true
 	}
+	// Cursor on the line just before the removed range, at end of line:
+	// Delete would join into StartLine.
+	if m.CursorLine == start-1 && m.CursorCol >= m.Buf.LineLen(m.CursorLine) {
+		return true
+	}
+	// Cursor on the line just after the removed range, at col 0:
+	// Backspace would join into EndLine.
+	if m.CursorLine == end+1 && m.CursorCol == 0 {
+		return true
+	}
+
 	if m.SelectionActive {
 		selStart, selEnd := m.SelectStartLine, m.CursorLine
 		if selStart > selEnd {
 			selStart, selEnd = selEnd, selStart
 		}
-		// Selection overlaps if it isn't entirely before or after the range.
 		if selStart <= end && selEnd >= start {
 			return true
 		}
@@ -861,12 +878,14 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 	case tea.KeyPgUp:
 		e.ClearSelection()
 		m.syncExtraVisualLines()
-		e.PageUp()
+		// Use the main viewport's visible height for page jumps, not the
+		// target editor's own Height (which may differ for the overlay editor).
+		e.MoveCursor(-m.VisibleLines(), 0)
 		return nil
 	case tea.KeyPgDown:
 		e.ClearSelection()
 		m.syncExtraVisualLines()
-		e.PageDown()
+		e.MoveCursor(m.VisibleLines(), 0)
 		return nil
 
 	// Word navigation

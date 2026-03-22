@@ -314,8 +314,9 @@ func (m *EditorModel) renderNormalLine(
 	}
 
 	// Selection: precompute inverse mapping display col → buffer col.
-	dispToBuf := make([]int, contentW)
+	var dispToBuf []int
 	if m.SelectionActive {
+		dispToBuf = make([]int, contentW)
 		bufCol := 0
 		for j := range contentW {
 			for bufCol+1 <= len(rawRunes) && bufToDisp[bufCol+1] <= j {
@@ -427,8 +428,9 @@ func (m *EditorModel) renderAddedLine(
 	}
 
 	// Precompute inverse mapping for selection: display col → rune col
-	dispToBuf := make([]int, contentW)
+	var dispToBuf []int
 	if oe.SelectionActive {
+		dispToBuf = make([]int, contentW)
 		bufCol := 0
 		for j := range contentW {
 			for bufCol+1 <= len(rawRunes) && bufToDisp[bufCol+1] <= j {
@@ -776,9 +778,9 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyMsg) tea.Cmd {
 		oe.ClearSelection()
 		o.Active = false
 		if o.StartLine > 0 {
-			m.MoveCursorTo(o.StartLine-1, m.CursorCol)
+			m.MoveCursorTo(o.StartLine-1, oe.CursorCol)
 		} else if o.EndLine+1 < m.Buf.LineCount() {
-			m.MoveCursorTo(o.EndLine+1, m.CursorCol)
+			m.MoveCursorTo(o.EndLine+1, oe.CursorCol)
 		}
 		return nil
 	}

@@ -754,37 +754,43 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyMsg) tea.Cmd {
 	o := m.Overlay
 	oe := o.Editor
 
-	// Escape — leave overlay, return cursor to buffer.
+	// Escape — leave overlay, move cursor to nearest non-removed line
+	// so subsequent navigation doesn't immediately re-enter the overlay.
 	if keyMsg.Type == tea.KeyEscape {
 		slog.Debug("overlay deactivated", "reason", "escape")
 		oe.ClearSelection()
 		o.Active = false
+		if o.StartLine > 0 {
+			m.MoveCursorTo(o.StartLine-1, m.CursorCol)
+		} else if o.EndLine+1 < m.Buf.LineCount() {
+			m.MoveCursorTo(o.EndLine+1, m.CursorCol)
+		}
 		return nil
 	}
 
-	// Up at top of overlay — exit upward
+	// Up at top of overlay — exit upward if there's a safe line above.
 	if keyMsg.Type == tea.KeyUp && oe.CursorLine == 0 {
+		if o.StartLine <= 0 {
+			// No buffer line above the overlay — stay in overlay.
+			return nil
+		}
 		slog.Debug("overlay deactivated", "reason", "arrow up past top", "target", o.StartLine-1)
 		oe.ClearSelection()
 		o.Active = false
-		target := o.StartLine - 1
-		if target < 0 {
-			target = 0
-		}
-		m.MoveCursorTo(target, oe.CursorCol)
+		m.MoveCursorTo(o.StartLine-1, oe.CursorCol)
 		return nil
 	}
 
-	// Down at bottom of overlay — exit downward
+	// Down at bottom of overlay — exit downward if there's a safe line below.
 	if keyMsg.Type == tea.KeyDown && oe.CursorLine >= oe.Buf.LineCount()-1 {
+		if o.EndLine+1 >= m.Buf.LineCount() {
+			// No buffer line below the overlay — stay in overlay.
+			return nil
+		}
 		slog.Debug("overlay deactivated", "reason", "arrow down past bottom", "target", o.EndLine+1)
 		oe.ClearSelection()
 		o.Active = false
-		target := o.EndLine + 1
-		if target >= m.Buf.LineCount() {
-			target = m.Buf.LineCount() - 1
-		}
-		m.MoveCursorTo(target, oe.CursorCol)
+		m.MoveCursorTo(o.EndLine+1, oe.CursorCol)
 		return nil
 	}
 

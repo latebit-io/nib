@@ -208,6 +208,46 @@ func TestPrepareApprovalRejectsOnLocationFailure(t *testing.T) {
 	}
 }
 
+func TestSwitchEditor(t *testing.T) {
+	s := newTestSession("old content")
+	s.CurrentIntent = "some goal"
+	s.PendingEdit = &agent.PendingEdit{Search: "old", Replace: "new"}
+	s.editReviewed = true
+
+	newBuf := buffer.New()
+	newBuf.Insert(0, 0, "new content")
+	newEditor := editor.New(newBuf)
+
+	old := s.SwitchEditor(newEditor)
+
+	// Old editor returned for cleanup.
+	if old == nil {
+		t.Fatal("expected old editor to be returned")
+	}
+	if old.Buf.Content() != "old content" {
+		t.Errorf("old editor content = %q, want %q", old.Buf.Content(), "old content")
+	}
+
+	// New editor is active.
+	if s.Editor.Buf.Content() != "new content" {
+		t.Errorf("new editor content = %q, want %q", s.Editor.Buf.Content(), "new content")
+	}
+
+	// All state cleared.
+	if s.PendingEdit != nil {
+		t.Error("PendingEdit should be nil after SwitchEditor")
+	}
+	if s.editReviewed {
+		t.Error("editReviewed should be false after SwitchEditor")
+	}
+	if s.CurrentIntent != "" {
+		t.Error("CurrentIntent should be cleared after SwitchEditor")
+	}
+	if s.IntentDone {
+		t.Error("IntentDone should be false after SwitchEditor")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && containsAt(s, substr)
 }

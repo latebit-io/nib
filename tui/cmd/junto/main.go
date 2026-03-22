@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -81,6 +82,29 @@ func main() {
 	sess := session.New(e, ag, agentEvents)
 
 	app := ui.NewApp(sess)
+
+	// Determine project root: walk up from file path (or cwd) to find .git.
+	// Falls back to cwd so Ctrl+P always works.
+	startDir, _ := os.Getwd()
+	if filePath != "" {
+		if absPath, err := filepath.Abs(filePath); err == nil {
+			startDir = filepath.Dir(absPath)
+		}
+	}
+	for dir := startDir; ; {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			app.ProjectRoot = dir
+			break
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			break
+		}
+		dir = next
+	}
+	if app.ProjectRoot == "" {
+		app.ProjectRoot = startDir
+	}
 
 	// Agent typing speed (words per minute)
 	if wpmStr := os.Getenv("JUNTO_TYPING_WPM"); wpmStr != "" {

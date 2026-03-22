@@ -1,18 +1,28 @@
 package ui
 
 import (
+	"errors"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/session"
 )
 
 // agentEventMsg wraps an engine agent.Event for delivery through Bubble Tea.
 type agentEventMsg struct{ event agent.Event }
+
+// paletteFilesMsg delivers file listing results from async Walk.
+type paletteFilesMsg struct{ items []PaletteItem }
+
+// paletteErrorMsg delivers a file listing error to the UI.
+type paletteErrorMsg struct{ err string }
 
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
@@ -30,6 +40,8 @@ type AppModel struct {
 
 	// TUI-only state
 	Dialog      DialogModel
+	Palette     PaletteModel
+	ProjectRoot string
 	recentMouse bool // tracks leaked CSI prefix from unparsed mouse events
 	Services    *Services
 	Keymap      *Keymap
@@ -88,6 +100,17 @@ func (m *AppModel) listenForAgentEvent() tea.Cmd {
 }
 
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Palette is modal — captures all input when active
+	if m.Palette.Active {
+		switch typed := msg.(type) {
+		case tea.KeyMsg:
+			cmd := m.Palette.Update(typed)
+			return m, cmd
+		case tea.MouseMsg:
+			return m, nil
+		}
+	}
+
 	// Dialog is modal — captures all input when active
 	if m.Dialog.Active {
 		switch typed := msg.(type) {
@@ -122,6 +145,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
+
+	// File listing error — surface in agent pane
+	case paletteErrorMsg:
+		slog.Error("failed to list files", "err", msg.err)
+		m.AgentPane.AppendMeta("\n[file listing failed: " + msg.err + "]\n")
+		return m, nil
+
+	// File listing completed — open the palette with results
+	case paletteFilesMsg:
+		m.Palette.Open(msg.items)
+		return m, nil
+
+	// Palette result — user selected a file or cancelled
+	case PaletteResultMsg:
+		if !msg.Cancelled && msg.Category == "file" {
+			return m.openFile(msg.Item.Value)
+		}
+		return m, nil
 
 	// Animation tick — advance the agent typing animation
 	case animTickMsg:
@@ -334,6 +375,27 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.AgentPane.InputBuffer = ""
 		}
 		return m, nil
+
+	case ActionOpenPalette:
+		if m.ProjectRoot != "" {
+			root := m.ProjectRoot
+			return m, func() tea.Msg {
+				files, err := filelist.Walk(root)
+				if err != nil && !errors.Is(err, filelist.ErrCapped) {
+					return paletteErrorMsg{err: err.Error()}
+				}
+				items := make([]PaletteItem, len(files))
+				for i, f := range files {
+					items[i] = PaletteItem{
+						Label:    f,
+						Category: "file",
+						Value:    filepath.Join(root, f),
+					}
+				}
+				return paletteFilesMsg{items: items}
+			}
+		}
+		return m, nil
 	}
 
 	// Delegate to focused pane
@@ -355,12 +417,56 @@ func (m *AppModel) View() string {
 		return "Initializing..."
 	}
 
-	// Replace view with dialog when active
+	// Replace view with dialog when active.
 	if m.Dialog.Active {
 		return m.Dialog.Render(m.Width, m.Height)
 	}
 
-	return m.renderIntentBar() + "\n" + m.Regions.Render()
+	base := m.renderIntentBar() + "\n" + m.Regions.Render()
+
+	// Palette floats on top of the editor — editor stays visible.
+	if m.Palette.Active {
+		return m.Palette.RenderOverlay(base, m.Width, m.Height)
+	}
+
+	return base
+}
+
+// openFile switches the editor to a new file. All domain logic is in the
+// engine (buffer.NewFromFile, editor.New, session.SwitchEditor). This method
+// is purely the TUI adapter — it rebuilds the EditorModel and updates the
+// region manager.
+func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
+	buf, err := buffer.NewFromFile(path)
+	if err != nil {
+		slog.Error("failed to open file", "path", path, "err", err)
+		m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
+		return m, nil
+	}
+
+	newEditor := editor.New(buf)
+
+	// Switch in session — cancels agent, clears state.
+	oldEditor := m.Session.SwitchEditor(newEditor)
+	oldEditor.Close()
+
+	// Cancel any running animation.
+	m.cancelAnimation()
+
+	// Rebuild EditorModel with the new engine editor.
+	wpm := m.Editor.TypingWPM
+	m.Editor = NewEditorModel(newEditor, m.Keymap, m.Services)
+	m.Editor.TypingWPM = wpm
+
+	// Update region manager's pane reference and apply size.
+	m.Regions.ReplacePane("editor", m.Editor)
+
+	// Clear agent pane — old conversation references the previous file.
+	m.AgentPane.Clear()
+	m.AgentPane.Status = "idle"
+
+	slog.Debug("file opened", "path", path)
+	return m, nil
 }
 
 func (m *AppModel) renderIntentBar() string {

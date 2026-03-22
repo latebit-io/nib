@@ -201,12 +201,18 @@ func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
 
 	if bufferMutated {
 		// After approve: removed lines are gone, added lines are now real
-		// buffer lines. Subtract removedCount (the visual removed lines).
+		// buffer lines.
 		removedCount := o.EndLine - o.StartLine + 1
 		if m.Editor.ScrollOffset > addedEnd {
+			// Past the overlay: subtract removedCount (virtual removed lines gone).
 			m.Editor.ScrollOffset -= removedCount
 		} else if m.Editor.ScrollOffset > o.EndLine {
+			// In the added-lines zone: map to replacement position.
 			m.Editor.ScrollOffset = o.StartLine + (m.Editor.ScrollOffset - o.EndLine - 1)
+		} else if m.Editor.ScrollOffset >= o.StartLine {
+			// In the removed range: those lines no longer exist.
+			// Clamp to StartLine (start of the replacement content).
+			m.Editor.ScrollOffset = o.StartLine
 		}
 	} else {
 		// Reject/error/done: buffer unchanged. Subtract addedCount

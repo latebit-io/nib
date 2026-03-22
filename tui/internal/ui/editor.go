@@ -688,6 +688,15 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
 		return m.handleOverlayKey(keyMsg)
 	}
 
+	// Intercept arrow keys that would cross into the removed range.
+	// Enter the overlay directly so the cursor doesn't land invisibly
+	// on a removed line behind the green overlay.
+	if m.Overlay != nil && !m.Overlay.Active {
+		if entered := m.interceptOverlayEntry(keyMsg); entered {
+			return nil
+		}
+	}
+
 	// Track line count so we can adjust overlay position if the user
 	// inserts/deletes lines above the diff.
 	linesBefore := m.Buf.LineCount()
@@ -696,31 +705,37 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
 	cmd := m.handleEditorKeyFor(keyMsg, m.Editor, readOnly)
 
 	m.adjustOverlayPosition(linesBefore)
-	m.redirectCursorFromRemovedLines()
 	return cmd
 }
 
-// redirectCursorFromRemovedLines activates the overlay when the buffer cursor
-// lands on a removed line (e.g., via arrow keys). Arrowing "behind" the overlay
-// is confusing UX — jump into the editable added lines instead.
-func (m *EditorModel) redirectCursorFromRemovedLines() {
+// interceptOverlayEntry checks if an arrow key would move the cursor into the
+// removed range and enters the overlay instead. Returns true if intercepted.
+func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyMsg) bool {
 	o := m.Overlay
-	if o == nil || o.Active {
-		return
+	if o == nil {
+		return false
 	}
-	if m.CursorLine < o.StartLine || m.CursorLine > o.EndLine {
-		return
+
+	switch keyMsg.Type {
+	case tea.KeyDown:
+		// Cursor just above removed range → enter overlay at first line.
+		if m.CursorLine == o.StartLine-1 {
+			o.Active = true
+			o.Editor.MoveCursorTo(0, m.CursorCol)
+			m.ClearSelection()
+			return true
+		}
+	case tea.KeyUp:
+		// Cursor just below removed range → enter overlay at last line.
+		if m.CursorLine == o.EndLine+1 {
+			o.Active = true
+			lastLine := o.Editor.Buf.LineCount() - 1
+			o.Editor.MoveCursorTo(lastLine, m.CursorCol)
+			m.ClearSelection()
+			return true
+		}
 	}
-	o.Active = true
-	oe := o.Editor
-	// Coming from above → first added line; from below → last added line.
-	if m.CursorLine <= (o.StartLine+o.EndLine)/2 {
-		oe.MoveCursorTo(0, 0)
-	} else {
-		lastLine := oe.Buf.LineCount() - 1
-		oe.MoveCursorTo(lastLine, oe.Buf.LineLen(lastLine))
-	}
-	m.ClearSelection()
+	return false
 }
 
 // adjustOverlayPosition shifts the overlay's line range when lines are

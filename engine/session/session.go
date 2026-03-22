@@ -4,6 +4,8 @@
 package session
 
 import (
+	"errors"
+
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/editor"
 )
@@ -138,6 +140,74 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	s.PendingEdit = nil
 	s.editReviewed = false
 	return ok, reason
+}
+
+// --- Animated Approval Flow ---
+//
+// For frontends that animate edits (character-by-character typing), the
+// approval is split into two steps:
+//
+//   1. PrepareApproval — validates and returns an AnimationPlan. Clears pending
+//      edit state but does NOT mutate the buffer or signal the agent.
+//   2. CompleteApproval — signals the agent that the edit was applied.
+//
+// Between these two calls, the frontend owns the buffer mutations (delete old
+// text, insert replacement char-by-char) and can animate at its own pace.
+
+// AnimationPlan describes the edit the frontend needs to animate.
+type AnimationPlan struct {
+	Line    int    // buffer line where the edit starts (0-indexed)
+	Col     int    // buffer col where the edit starts (0-indexed, rune)
+	Search  string // text to delete from the buffer
+	Replace string // text to type into the buffer
+}
+
+// PrepareApproval validates the reviewed edit and returns an AnimationPlan.
+// The frontend provides the final search/replace (possibly modified in the overlay).
+// Clears pending edit state but does NOT mutate the buffer or signal the agent.
+//
+// Returns an error if there is no pending edit, the edit was not reviewed,
+// or the search text cannot be uniquely located in the buffer.
+func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error) {
+	if s.PendingEdit == nil || !s.HasAgent() {
+		return nil, errors.New("no pending edit")
+	}
+	if !s.editReviewed {
+		return nil, errors.New("edit not reviewed — call ReviewEdit first")
+	}
+	loc, reason := s.Editor.LocateEdit(search)
+	if loc == nil {
+		s.agent.Reject()
+		s.PendingEdit = nil
+		s.editReviewed = false
+		return nil, errors.New(reason)
+	}
+	s.PendingEdit = nil
+	s.editReviewed = false
+	return &AnimationPlan{
+		Line:    loc.Line,
+		Col:     loc.Col,
+		Search:  search,
+		Replace: replace,
+	}, nil
+}
+
+// CompleteApproval signals the agent that the animated edit has been applied.
+// Call this after the animation finishes (or after a yield).
+func (s *Session) CompleteApproval() {
+	if s.HasAgent() {
+		s.agent.Approve()
+	}
+}
+
+// AbortApproval rejects a prepared approval that was never completed.
+// Use this when the user cancels an in-progress animation. The agent
+// receives a rejection and can try a different approach — unlike
+// CancelAgent which kills the entire run.
+func (s *Session) AbortApproval() {
+	if s.HasAgent() {
+		s.agent.Reject()
+	}
 }
 
 // RejectEdit rejects the pending edit and signals the agent.

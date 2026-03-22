@@ -26,6 +26,7 @@ const systemPrompt = `You are a pair-programming agent in a code editor. Make on
 - Do NOT repeat or summarize what you already said. Do NOT comment on the quality of previous edits.
 - After a rejection, try a different approach immediately. Do not explain why the previous attempt was wrong.
 - Stay focused on the developer's stated intent. Every edit must directly serve the task. Do not refactor, clean up, or "improve" unrelated code. When the intent is fulfilled, stop.
+- After an edit is approved, the developer may modify your code before continuing. Their changes signal intent — they are telling you what they want. Study what they changed and why. Recalibrate your approach to align with their direction. If they changed a variable name, use that name going forward. If they changed the logic, follow that logic. If you notice a syntax error or bug in their edit, point it out and ask before changing it — don't silently fix it. Adapt, don't ignore.
 `
 
 // buildMessages constructs the message list for an LLM request.

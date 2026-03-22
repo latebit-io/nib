@@ -12,6 +12,16 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
+// Agent cursor styles — reused across render frames to avoid per-frame allocation.
+var (
+	agentCursorTypingStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("213")).
+				Foreground(lipgloss.Color("0"))
+	agentCursorWaitingStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("243")).
+				Foreground(lipgloss.Color("0"))
+)
+
 // lineKind classifies a viewport row for mouse click routing.
 type lineKind int
 
@@ -161,17 +171,14 @@ func (m *EditorModel) Render() string {
 	// Compute agent cursor info for this render pass.
 	var agentCursor *agentCursorInfo
 	if anim := m.Anim; anim != nil && anim.state != animIdle {
-		style := lipgloss.NewStyle().
-			Background(lipgloss.Color("243")).
-			Foreground(lipgloss.Color("0"))
+		style := agentCursorWaitingStyle
 		if anim.state == animTyping {
-			style = lipgloss.NewStyle().
-				Background(lipgloss.Color("213")).
-				Foreground(lipgloss.Color("0"))
+			style = agentCursorTypingStyle
 		}
+		line, col := anim.position()
 		agentCursor = &agentCursorInfo{
-			line:  anim.line,
-			col:   anim.col,
+			line:  line,
+			col:   col,
 			style: style,
 		}
 	}
@@ -528,7 +535,8 @@ func (m *EditorModel) renderStatusBar() string {
 	case m.Overlay != nil && m.Overlay.Active:
 		right = fmt.Sprintf(" +%d:%d ", m.Overlay.Editor.CursorLine+1, m.Overlay.Editor.CursorCol+1)
 	case m.Anim != nil && m.Anim.state == animTyping:
-		right = fmt.Sprintf(" %d:%d  agent:%d:%d ", m.CursorLine+1, m.CursorCol+1, m.Anim.line+1, m.Anim.col+1)
+		al, ac := m.Anim.position()
+		right = fmt.Sprintf(" %d:%d  agent:%d:%d ", m.CursorLine+1, m.CursorCol+1, al+1, ac+1)
 	default:
 		right = fmt.Sprintf(" %d:%d ", m.CursorLine+1, m.CursorCol+1)
 	}

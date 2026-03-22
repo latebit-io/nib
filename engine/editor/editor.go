@@ -571,6 +571,31 @@ func (e *Editor) ApplyEdit(search, replace string) (bool, string) {
 	return true, ""
 }
 
+// --- Spatial Queries ---
+
+// CursorInRegion reports whether a cursor at (cursorLine, cursorCol) falls
+// within the region bounded by (startLine, startCol) to (endLine, endCol),
+// inclusive. This is a pure geometric check — frontends use it for collision
+// detection between the developer cursor and agent-active regions.
+func CursorInRegion(cursorLine, cursorCol, startLine, startCol, endLine, endCol int) bool {
+	if cursorLine < startLine || cursorLine > endLine {
+		return false
+	}
+	// Single-line region: both bounds on the same line.
+	if startLine == endLine {
+		return cursorCol >= startCol && cursorCol <= endCol
+	}
+	// Multi-line region: check boundary columns on first/last lines,
+	// interior lines are fully within.
+	if cursorLine == startLine {
+		return cursorCol >= startCol
+	}
+	if cursorLine == endLine {
+		return cursorCol <= endCol
+	}
+	return true
+}
+
 // --- Highlight ---
 
 // Token re-exports highlight.Token for frontends that need token data.

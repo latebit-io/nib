@@ -3,50 +3,49 @@ package ui
 import (
 	"testing"
 	"time"
+
+	"github.com/latebit-io/junto/engine/buffer"
+	"github.com/latebit-io/junto/engine/editor"
 )
+
+func newTestEditorForAnim(content string) *editor.Editor {
+	buf := buffer.New()
+	if content != "" {
+		buf.Insert(0, 0, content)
+	}
+	return editor.New(buf)
+}
 
 func TestNewAnimationContext(t *testing.T) {
 	tests := []struct {
 		name          string
 		wpm           int
-		replace       string
-		wantState     animState
 		wantCharDelay time.Duration
 	}{
 		{
 			name:          "default WPM",
 			wpm:           0,
-			replace:       "hello",
-			wantState:     animDeleting,
 			wantCharDelay: time.Minute / time.Duration(defaultTypingWPM*avgCharsPerWord),
 		},
 		{
 			name:          "custom WPM 600",
 			wpm:           600,
-			replace:       "hello",
-			wantState:     animDeleting,
 			wantCharDelay: time.Minute / time.Duration(600*avgCharsPerWord),
 		},
 		{
 			name:          "negative WPM uses default",
 			wpm:           -1,
-			replace:       "hello",
-			wantState:     animDeleting,
 			wantCharDelay: time.Minute / time.Duration(defaultTypingWPM*avgCharsPerWord),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ac := newAnimationContext(5, 10, tt.replace, tt.wpm)
-			if ac.state != tt.wantState {
-				t.Errorf("state = %d, want %d", ac.state, tt.wantState)
-			}
-			if ac.line != 5 {
-				t.Errorf("line = %d, want 5", ac.line)
-			}
-			if ac.col != 10 {
-				t.Errorf("col = %d, want 10", ac.col)
+			e := newTestEditorForAnim("hello world")
+			ie := e.BeginIncrementalEdit(0, 5, 6) // delete " world"
+			ac := newAnimationContext(ie, "earth", tt.wpm)
+			if ac.state != animTyping {
+				t.Errorf("state = %d, want %d", ac.state, animTyping)
 			}
 			if ac.charDelay != tt.wantCharDelay {
 				t.Errorf("charDelay = %v, want %v", ac.charDelay, tt.wantCharDelay)
@@ -54,12 +53,15 @@ func TestNewAnimationContext(t *testing.T) {
 			if ac.newlineDelay != tt.wantCharDelay*4 {
 				t.Errorf("newlineDelay = %v, want %v", ac.newlineDelay, tt.wantCharDelay*4)
 			}
+			ie.Abort()
 		})
 	}
 }
 
 func TestAnimationContextNextChar(t *testing.T) {
-	ac := newAnimationContext(0, 0, "ab", 300)
+	e := newTestEditorForAnim("xx")
+	ie := e.BeginIncrementalEdit(0, 0, 2)
+	ac := newAnimationContext(ie, "ab", 300)
 
 	if ac.done() {
 		t.Fatal("should not be done before typing")
@@ -68,9 +70,6 @@ func TestAnimationContextNextChar(t *testing.T) {
 	r1 := ac.nextChar()
 	if r1 != 'a' {
 		t.Errorf("first char = %c, want 'a'", r1)
-	}
-	if ac.typed != 1 {
-		t.Errorf("typed = %d, want 1", ac.typed)
 	}
 
 	r2 := ac.nextChar()
@@ -86,10 +85,14 @@ func TestAnimationContextNextChar(t *testing.T) {
 	if r3 != 0 {
 		t.Errorf("char after done = %c, want 0", r3)
 	}
+
+	ie.Abort()
 }
 
 func TestAnimationContextDelayForChar(t *testing.T) {
-	ac := newAnimationContext(0, 0, "a\n", 300)
+	e := newTestEditorForAnim("xx")
+	ie := e.BeginIncrementalEdit(0, 0, 2)
+	ac := newAnimationContext(ie, "a\n", 300)
 
 	normalDelay := ac.delayForChar('a')
 	newlineDelay := ac.delayForChar('\n')
@@ -97,11 +100,41 @@ func TestAnimationContextDelayForChar(t *testing.T) {
 	if newlineDelay != normalDelay*4 {
 		t.Errorf("newline delay = %v, want %v (4x normal)", newlineDelay, normalDelay*4)
 	}
+
+	ie.Abort()
 }
 
 func TestAnimationContextEmptyReplace(t *testing.T) {
-	ac := newAnimationContext(0, 0, "", 300)
+	e := newTestEditorForAnim("old")
+	ie := e.BeginIncrementalEdit(0, 0, 3)
+	ac := newAnimationContext(ie, "", 300)
 	if !ac.done() {
 		t.Error("empty replace should be done immediately")
 	}
+	ie.Complete()
+}
+
+func TestAnimationContextPosition(t *testing.T) {
+	e := newTestEditorForAnim("hello world")
+	ie := e.BeginIncrementalEdit(0, 6, 5) // delete "world"
+	ac := newAnimationContext(ie, "earth", 300)
+
+	// Position starts at the edit location.
+	line, col := ac.position()
+	if line != 0 || col != 6 {
+		t.Errorf("start position = %d:%d, want 0:6", line, col)
+	}
+
+	// Type "ea" and check position advances.
+	ac.nextChar() // 'e'
+	ie.InsertChar('e')
+	ac.nextChar() // 'a'
+	ie.InsertChar('a')
+
+	line, col = ac.position()
+	if line != 0 || col != 8 {
+		t.Errorf("after 2 chars position = %d:%d, want 0:8", line, col)
+	}
+
+	ie.Abort()
 }

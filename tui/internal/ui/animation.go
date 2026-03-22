@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/latebit-io/junto/engine/editor"
 )
 
 // agentCursorInfo holds per-render agent cursor state for the rendering pipeline.
@@ -27,18 +28,15 @@ const (
 // animTickMsg is sent by tea.Tick to advance the animation by one character.
 type animTickMsg struct{}
 
-// animationContext holds all state for an in-progress animated edit.
-// This is TUI-only state — the engine knows nothing about animation.
+// animationContext holds TUI-only state for an in-progress animated edit.
+// Buffer mutations and undo group lifecycle are delegated to the engine's
+// IncrementalEdit — this struct owns only timing and visual state.
 type animationContext struct {
 	state animState
 
-	// Agent cursor position (buffer coordinates, 0-indexed).
-	line int
-	col  int
-
-	// The region being animated — used for collision detection.
-	startLine int
-	startCol  int
+	// Engine-owned incremental edit — manages undo group, position tracking,
+	// and buffer mutations. Nil after Complete/Abort.
+	edit *editor.IncrementalEdit
 
 	// The replacement text, as runes, and how far we've typed.
 	replaceRunes []rune
@@ -48,32 +46,33 @@ type animationContext struct {
 	charDelay    time.Duration
 	newlineDelay time.Duration
 
-	// Undo group tracking — BeginGroup is called before delete,
-	// EndGroup after all chars are inserted (or on yield/cancel).
-	groupOpen bool
-
 	// Whether the agent yielded due to cursor collision.
 	yielded bool
 }
 
 const (
-	defaultTypingWPM = 300
+	defaultTypingWPM = 500
 	avgCharsPerWord  = 5
 )
 
-// newAnimationContext creates a context for animating an edit at the given position.
-func newAnimationContext(line, col int, replace string, wpm int) *animationContext {
+// newAnimationContext creates a context wrapping an engine IncrementalEdit.
+const (
+	minTypingWPM = 30
+	maxTypingWPM = 2000
+	minCharDelay = 5 * time.Millisecond
+)
+
+func newAnimationContext(ie *editor.IncrementalEdit, replace string, wpm int) *animationContext {
 	if wpm <= 0 {
 		wpm = defaultTypingWPM
 	}
+	wpm = max(minTypingWPM, min(wpm, maxTypingWPM))
 	charDelay := time.Minute / time.Duration(wpm*avgCharsPerWord)
+	charDelay = max(charDelay, minCharDelay)
 
 	return &animationContext{
-		state:        animDeleting,
-		line:         line,
-		col:          col,
-		startLine:    line,
-		startCol:     col,
+		state:        animTyping,
+		edit:         ie,
 		replaceRunes: []rune(replace),
 		charDelay:    charDelay,
 		newlineDelay: charDelay * 4,
@@ -85,7 +84,8 @@ func (a *animationContext) done() bool {
 	return a.typed >= len(a.replaceRunes)
 }
 
-// nextChar returns the next character to type and advances the cursor.
+// nextChar returns the next character to type. Does not advance — call
+// edit.InsertChar separately so the engine owns the mutation.
 func (a *animationContext) nextChar() rune {
 	if a.done() {
 		return 0
@@ -93,6 +93,16 @@ func (a *animationContext) nextChar() rune {
 	r := a.replaceRunes[a.typed]
 	a.typed++
 	return r
+}
+
+// position returns the current agent cursor position from the engine.
+func (a *animationContext) position() (line, col int) {
+	return a.edit.Position()
+}
+
+// startPosition returns where the edit began (for collision detection).
+func (a *animationContext) startPosition() (line, col int) {
+	return a.edit.StartPosition()
 }
 
 // delayForChar returns the appropriate delay after inserting a character.

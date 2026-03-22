@@ -67,7 +67,7 @@ func (t *WriteFileTool) Execute(_ context.Context, call llm.ToolCall) string {
 		return fmt.Sprintf("Error: %v", err)
 	}
 
-	t.cache.Set(args.Path, args.Content)
+	t.cache.Set(t.workspace.CanonPath(args.Path), args.Content)
 	t.send(FileCreatedEvent{Path: args.Path})
 
 	return fmt.Sprintf("File created: %s", args.Path)

@@ -26,6 +26,7 @@ type stubWorkspace struct{}
 func (stubWorkspace) ReadFile(_ string) (string, error) { return "", nil }
 func (stubWorkspace) ListFiles() ([]string, error)      { return nil, nil }
 func (stubWorkspace) WriteFile(_, _ string) error       { return nil }
+func (stubWorkspace) CanonPath(p string) string         { return p }
 
 // newTestSession creates a session with a buffer containing the given text
 // and a real agent (needed to test approval signaling).
@@ -371,12 +372,13 @@ func TestResolvePathTraversal(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := s.ReadFile(tt.path)
+			_, err := s.resolvePath(tt.path)
 			if tt.wantErr && err == nil {
 				t.Errorf("expected error for path %q, got nil", tt.path)
 			}
-			// Non-error cases may still fail (file doesn't exist) — that's fine,
-			// we're just testing that traversal is rejected before disk access.
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for path %q: %v", tt.path, err)
+			}
 		})
 	}
 }

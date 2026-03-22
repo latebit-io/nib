@@ -18,8 +18,7 @@ reviews:
   poem: false
   changed_files_summary: true
   labeling_instructions: []
-  path_filters:
-    - "!**/*_test.go"  # review test files too, don't exclude
+  path_filters: []
   path_instructions:
     - path: "engine/**"
       instructions: >

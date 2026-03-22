@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
@@ -18,6 +19,11 @@ import (
 
 // Session coordinates the interaction between the developer and agent.
 // Frontends read its state to render and call its methods to drive the workflow.
+//
+// Concurrency: the TUI goroutine calls most methods (SubmitGoal, SwitchTo,
+// ApproveEdit, etc.) while the agent goroutine calls Workspace methods
+// (ReadFile, WriteFile, ListFiles, CanonPath). The mu field guards the
+// editors map and activeFile so both goroutines can safely access them.
 type Session struct {
 	// Editor points to the active editor. Updated on file switch.
 	// Kept public for backward compatibility with frontends.
@@ -25,6 +31,10 @@ type Session struct {
 
 	agent  *agent.Agent
 	Events <-chan agent.Event // frontend reads agent events from here
+
+	// mu guards editors and activeFile for concurrent access from the
+	// TUI goroutine and agent goroutine (via Workspace interface).
+	mu sync.RWMutex
 
 	// Multi-buffer state
 	editors     map[string]*editor.Editor // path → editor
@@ -62,7 +72,7 @@ func New(e *editor.Editor, projectRoot string) *Session {
 		projectRoot: projectRoot,
 	}
 	if e != nil && e.Buf.Path != "" {
-		canon := s.canonPath(e.Buf.Path)
+		canon := s.CanonPath(e.Buf.Path)
 		s.activeFile = canon
 		s.editors[canon] = e
 	}
@@ -93,6 +103,8 @@ func (s *Session) ProjectRoot() string {
 
 // OpenFiles returns the paths of all open editors.
 func (s *Session) OpenFiles() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	files := make([]string, 0, len(s.editors))
 	for path := range s.editors {
 		files = append(files, path)
@@ -102,6 +114,8 @@ func (s *Session) OpenFiles() []string {
 
 // ModifiedFiles returns paths of editors with unsaved changes.
 func (s *Session) ModifiedFiles() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	var modified []string
 	for path, e := range s.editors {
 		if e.Buf.Modified {
@@ -113,30 +127,42 @@ func (s *Session) ModifiedFiles() []string {
 
 // EditorForPath returns the editor for a given path, or nil if not open.
 func (s *Session) EditorForPath(path string) *editor.Editor {
-	return s.editors[s.canonPath(path)]
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.editors[s.CanonPath(path)]
 }
 
 // --- Workspace Implementation ---
 // These methods satisfy the agent.Workspace interface, giving tools
 // access to open buffers and the filesystem.
 
-// ReadFile returns a file's content from disk. This method is called from
-// the agent goroutine (via Workspace interface), so it must not touch
-// session state (editors map, buffers) to avoid data races with the TUI
-// goroutine. The agent's FileCache handles in-flight content; this method
-// is only called for files not yet cached.
+// ReadFile returns a file's content. Checks open buffers first (which may
+// have unsaved changes), then falls back to disk. Called from the agent
+// goroutine via Workspace — uses mu to safely access the editors map.
 func (s *Session) ReadFile(path string) (string, error) {
 	absPath, err := s.resolvePath(path)
 	if err != nil {
 		return "", err
 	}
+
+	// Check open buffers first (may have unsaved changes).
+	canon := s.CanonPath(path)
+	s.mu.RLock()
+	e, ok := s.editors[canon]
+	s.mu.RUnlock()
+	if ok {
+		// Copy content under no lock — Buffer.Content() builds a new string
+		// from the line array, so this is a snapshot. In the current design
+		// only one goroutine mutates a given buffer at a time (the TUI owns
+		// the active buffer, the agent waits on approval channels).
+		return e.Buf.Content(), nil
+	}
+
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	// Normalize to match buffer.NewFromFile: trim a single trailing newline.
-	// Without this, search text copied from read_file output won't match
-	// once the file is opened in a buffer (which also trims).
 	content := strings.TrimSuffix(string(data), "\n")
 	return content, nil
 }
@@ -147,15 +173,12 @@ func (s *Session) ListFiles() ([]string, error) {
 }
 
 // WriteFile creates a new file on disk and opens it in the session.
+// Called from the agent goroutine via Workspace — uses mu for map access
+// and O_CREATE|O_EXCL for atomic existence check + create.
 func (s *Session) WriteFile(path, content string) error {
 	absPath, err := s.resolvePath(path)
 	if err != nil {
 		return err
-	}
-
-	// Check if already exists
-	if _, err := os.Stat(absPath); err == nil {
-		return fmt.Errorf("file already exists: %s", path)
 	}
 
 	// Create parent directories
@@ -164,9 +187,22 @@ func (s *Session) WriteFile(path, content string) error {
 		return fmt.Errorf("create directory %s: %w", dir, err)
 	}
 
-	// Write the file
-	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	// Atomic create — O_EXCL fails if the file already exists, avoiding
+	// the TOCTOU race between Stat and WriteFile.
+	f, err := os.OpenFile(absPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("file already exists: %s", path)
+		}
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	_, writeErr := f.WriteString(content)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return fmt.Errorf("write %s: %w", path, writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close %s: %w", path, closeErr)
 	}
 
 	// Open it in the session
@@ -175,7 +211,9 @@ func (s *Session) WriteFile(path, content string) error {
 		return fmt.Errorf("open after write %s: %w", path, err)
 	}
 	e := editor.New(buf)
+	s.mu.Lock()
 	s.editors[absPath] = e
+	s.mu.Unlock()
 
 	return nil
 }
@@ -183,20 +221,50 @@ func (s *Session) WriteFile(path, content string) error {
 // resolvePath converts a path to a cleaned absolute path within the project
 // root. Accepts both relative paths (resolved against root) and absolute paths
 // (validated to be within root). Returns an error if the resolved path
-// escapes the project root (e.g. via "../" traversal).
+// escapes the project root via lexical traversal ("../") or symlinks.
 func (s *Session) resolvePath(path string) (string, error) {
-	abs := s.canonPath(path)
+	abs := s.CanonPath(path)
 	root := filepath.Clean(s.projectRoot)
+
+	// Lexical check first (catches "../" before touching the filesystem).
 	if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes project root", path)
+	}
+
+	// Resolve symlinks to catch links that point outside the root.
+	// For new files that don't exist yet, evaluate the parent directory.
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve project root: %w", err)
+	}
+	realAbs, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// File may not exist yet (write_file). Check the parent instead.
+		parentDir := filepath.Dir(abs)
+		realParent, dirErr := filepath.EvalSymlinks(parentDir)
+		if dirErr != nil {
+			// Parent doesn't exist either — will fail at create time, allow it.
+			return abs, nil
+		}
+		realParent = filepath.Clean(realParent)
+		if realParent != realRoot && !strings.HasPrefix(realParent, realRoot+string(filepath.Separator)) {
+			return "", fmt.Errorf("path %q resolves outside project root via symlink", path)
+		}
+		return abs, nil
+	}
+	realAbs = filepath.Clean(realAbs)
+	realRoot = filepath.Clean(realRoot)
+	if realAbs != realRoot && !strings.HasPrefix(realAbs, realRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q resolves outside project root via symlink", path)
 	}
 	return abs, nil
 }
 
-// canonPath returns the cleaned absolute form of a path. Relative paths are
+// CanonPath returns the cleaned absolute form of a path. Relative paths are
 // resolved against the project root. This is the canonical key for the
-// editors map — ensures the same file is never stored under two keys.
-func (s *Session) canonPath(path string) string {
+// editors map and agent FileCache — ensures the same file is never stored
+// under two keys. Satisfies agent.Workspace.
+func (s *Session) CanonPath(path string) string {
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path)
 	}
@@ -255,7 +323,10 @@ func (s *Session) CancelAgent() {
 // the agent or clear intent — multi-file work continues across switches.
 // Returns an error if the file cannot be opened.
 func (s *Session) SwitchTo(path string) error {
-	canon := s.canonPath(path)
+	canon := s.CanonPath(path)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Already active
 	if canon == s.activeFile {
@@ -301,6 +372,7 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 	s.IntentDone = false
 
 	old := s.Editor
+	s.mu.Lock()
 	// Remove old editor from map
 	if s.activeFile != "" {
 		delete(s.editors, s.activeFile)
@@ -308,12 +380,13 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 	// Add new editor — only track in map if it has a path.
 	s.Editor = newEditor
 	if newEditor.Buf.Path != "" {
-		canon := s.canonPath(newEditor.Buf.Path)
+		canon := s.CanonPath(newEditor.Buf.Path)
 		s.editors[canon] = newEditor
 		s.activeFile = canon
 	} else {
 		s.activeFile = ""
 	}
+	s.mu.Unlock()
 	return old
 }
 
@@ -345,20 +418,22 @@ func (s *Session) ReviewEdit() (diff *editor.DiffResult, switched bool) {
 	if s.PendingEdit == nil {
 		return nil, false
 	}
-	// Auto-switch to the target file so the frontend shows the right buffer.
-	if s.PendingEdit.Path != "" {
-		canon := s.canonPath(s.PendingEdit.Path)
-		if canon != s.activeFile {
-			if e, ok := s.editors[canon]; ok {
-				s.Editor = e
-				s.activeFile = canon
-				switched = true
-			}
-		}
-	}
+	// editorForEdit may auto-open a file that isn't in the map yet.
 	e := s.editorForEdit()
 	if e == nil {
-		return nil, switched
+		return nil, false
+	}
+	// Auto-switch to the target file so the frontend shows the right buffer.
+	// Done after editorForEdit so auto-opened files are also switched to.
+	if s.PendingEdit.Path != "" {
+		canon := s.CanonPath(s.PendingEdit.Path)
+		s.mu.Lock()
+		if canon != s.activeFile {
+			s.Editor = e
+			s.activeFile = canon
+			switched = true
+		}
+		s.mu.Unlock()
 	}
 	diff = e.ComputeDiff(s.PendingEdit.Search, s.PendingEdit.Replace)
 	if diff != nil {
@@ -388,7 +463,7 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 		s.editReviewed = false
 		return false, "file not open"
 	}
-	editPath := s.canonPath(s.PendingEdit.Path)
+	editPath := s.CanonPath(s.PendingEdit.Path)
 	ok, reason := e.ApplyEdit(search, replace)
 	if ok {
 		s.lastEditedFile = editPath
@@ -448,7 +523,7 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 		s.editReviewed = false
 		return nil, errors.New(reason)
 	}
-	s.lastEditedFile = s.canonPath(s.PendingEdit.Path)
+	s.lastEditedFile = s.CanonPath(s.PendingEdit.Path)
 	s.PendingEdit = nil
 	s.editReviewed = false
 	return &AnimationPlan{
@@ -547,10 +622,15 @@ func (s *Session) editorForEdit() *editor.Editor {
 	if path == "" {
 		return s.Editor
 	}
-	canon := s.canonPath(path)
-	if e, ok := s.editors[canon]; ok {
+	canon := s.CanonPath(path)
+
+	s.mu.RLock()
+	e, ok := s.editors[canon]
+	s.mu.RUnlock()
+	if ok {
 		return e
 	}
+
 	// Auto-open: the agent proposed an edit to a file that isn't open yet.
 	absPath, err := s.resolvePath(path)
 	if err != nil {
@@ -560,7 +640,9 @@ func (s *Session) editorForEdit() *editor.Editor {
 	if err != nil {
 		return nil
 	}
-	e := editor.New(buf)
+	e = editor.New(buf)
+	s.mu.Lock()
 	s.editors[canon] = e
+	s.mu.Unlock()
 	return e
 }

@@ -26,9 +26,8 @@ type Resettable interface {
 // The session implements this interface, giving tools access to
 // open buffers (for modified-but-unsaved content) and the filesystem.
 type Workspace interface {
-	// ReadFile returns a file's content. If the file is open in a buffer,
-	// returns the buffer content (which may differ from disk). Otherwise
-	// reads from disk. Path is relative to the project root.
+	// ReadFile returns a file's content from disk.
+	// Path is relative to the project root.
 	ReadFile(path string) (string, error)
 
 	// ListFiles returns all project files (respects .gitignore).
@@ -38,6 +37,11 @@ type Workspace interface {
 	// WriteFile creates a new file on disk and opens it in the session.
 	// Returns an error if the file already exists.
 	WriteFile(path, content string) error
+
+	// CanonPath returns the canonical absolute form of a path.
+	// Used as a consistent cache key — ensures relative and absolute
+	// paths for the same file map to the same key.
+	CanonPath(path string) string
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

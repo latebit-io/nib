@@ -92,6 +92,24 @@ func (s *Session) CancelAgent() {
 	}
 }
 
+// SwitchEditor replaces the current editor with a new one. Cancels any
+// running agent, clears all pending state, and resets intent. Returns the
+// old editor so the caller can Close() it to free resources (e.g. tree-sitter).
+// Both the TUI (via palette) and the agent (via future open_file tool) call this.
+func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
+	if s.HasAgent() && s.CurrentIntent != "" {
+		s.CancelAgent()
+	}
+	s.PendingEdit = nil
+	s.editReviewed = false
+	s.CurrentIntent = ""
+	s.IntentDone = false
+
+	old := s.Editor
+	s.Editor = newEditor
+	return old
+}
+
 // --- Edit Approval Flow ---
 //
 // The engine enforces a two-step review contract:

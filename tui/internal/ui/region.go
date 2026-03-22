@@ -82,6 +82,17 @@ func (rm *RegionManager) Hide(name string) {
 	}
 }
 
+// ReplacePane swaps the pane for a named region and re-applies its size.
+func (rm *RegionManager) ReplacePane(name string, pane Pane) {
+	for _, r := range rm.Regions {
+		if r.Name == name {
+			r.Pane = pane
+			pane.SetSize(r.width, r.height)
+			return
+		}
+	}
+}
+
 // SetSize updates the total available size and recalculates all regions.
 func (rm *RegionManager) SetSize(w, h int) {
 	rm.Width = w

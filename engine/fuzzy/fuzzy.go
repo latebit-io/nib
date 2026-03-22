@@ -49,16 +49,19 @@ func Score(query, candidate string) Match {
 	if query == "" {
 		return Match{Text: candidate, Score: 1}
 	}
-	qLower := strings.ToLower(query)
-	qRunes := []rune(qLower)
+	qRunes := toLowerRunes([]rune(query))
+	qLower := string(qRunes)
 	return score(qLower, qRunes, candidate)
 }
 
 // score is the internal scorer that takes precomputed query data.
 // Filter calls this directly to avoid recomputing per candidate.
 func score(qLower string, qRunes []rune, candidate string) Match {
-	cLower := strings.ToLower(candidate)
 	cRunes := []rune(candidate)
+	// Per-rune lowercasing preserves slice length — safe for indexing back
+	// into cRunes even with Unicode special-casing (e.g., ß stays 1 rune).
+	cLowerRunes := toLowerRunes(cRunes)
+	cLower := string(cLowerRunes)
 
 	// Strategy 1: Exact match (case-insensitive).
 	if qLower == cLower {
@@ -78,9 +81,7 @@ func score(qLower string, qRunes []rune, candidate string) Match {
 		return Match{Text: candidate, Score: scorePrefix + lengthBonus(cRunes), Positions: positions}
 	}
 
-	// Strategy 3: Substring match — search over rune slices to avoid
-	// byte/rune offset mismatch on non-ASCII candidates.
-	cLowerRunes := []rune(cLower)
+	// Strategy 3: Substring match.
 	if idx := runeIndex(cLowerRunes, qRunes); idx >= 0 {
 		positions := make([]int, len(qRunes))
 		for i := range positions {
@@ -108,16 +109,17 @@ func Filter(query string, candidates []string) []Match {
 			results[i] = Match{Text: c, Score: 1}
 		}
 		sort.Slice(results, func(i, j int) bool {
-			if len(results[i].Text) != len(results[j].Text) {
-				return len(results[i].Text) < len(results[j].Text)
+			ri, rj := len([]rune(results[i].Text)), len([]rune(results[j].Text))
+			if ri != rj {
+				return ri < rj
 			}
 			return results[i].Text < results[j].Text
 		})
 		return results
 	}
 
-	qLower := strings.ToLower(query)
-	qRunes := []rune(qLower)
+	qRunes := toLowerRunes([]rune(query))
+	qLower := string(qRunes)
 	results := make([]Match, 0, len(candidates))
 	for _, c := range candidates {
 		m := score(qLower, qRunes, c)
@@ -130,8 +132,9 @@ func Filter(query string, candidates []string) []Match {
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
 		}
-		if len(results[i].Text) != len(results[j].Text) {
-			return len(results[i].Text) < len(results[j].Text)
+		ri, rj := len([]rune(results[i].Text)), len([]rune(results[j].Text))
+		if ri != rj {
+			return ri < rj
 		}
 		return results[i].Text < results[j].Text
 	})
@@ -200,7 +203,7 @@ func fuzzyScore(query, candidate, cLower []rune, originalText string) Match {
 		}
 
 		positions = append(positions, bestIdx)
-		matchScore := charBonus(candidate, bestIdx)
+		matchScore := bestBonus
 
 		// Consecutive match bonus — rewards runs of matching chars.
 		if prevMatchIdx == bestIdx-1 {
@@ -233,6 +236,17 @@ func lengthBonus(candidate []rune) int {
 // isSeparator returns true for common path and word separators.
 func isSeparator(r rune) bool {
 	return r == '/' || r == '\\' || r == '.' || r == '_' || r == '-' || r == ' '
+}
+
+// toLowerRunes lowercases each rune individually, preserving slice length.
+// Unlike strings.ToLower, this cannot change the rune count (e.g., ß stays
+// as one rune), keeping indices aligned with the original candidate.
+func toLowerRunes(runes []rune) []rune {
+	lower := make([]rune, len(runes))
+	for i, r := range runes {
+		lower[i] = unicode.ToLower(r)
+	}
+	return lower
 }
 
 // runeIndex returns the index of the first occurrence of needle in haystack,

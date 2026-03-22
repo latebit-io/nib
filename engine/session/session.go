@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
@@ -38,6 +39,11 @@ type Session struct {
 	// PendingEdit is the edit currently awaiting approval (nil = none)
 	PendingEdit *agent.PendingEdit
 
+	// lastEditedFile tracks which file was approved/being edited. Used by
+	// Continue to send the correct file's content even if the user switches
+	// to a different file before pressing Continue.
+	lastEditedFile string
+
 	// editReviewed is set by ReviewEdit. ApproveEdit requires it.
 	// This enforces the contract: every frontend must compute and present
 	// the diff before approving — no blind approvals.
@@ -50,17 +56,17 @@ type Session struct {
 // The projectRoot is used for file listing and resolving relative paths.
 func New(e *editor.Editor, projectRoot string) *Session {
 	editors := make(map[string]*editor.Editor)
-	var activeFile string
-	if e != nil && e.Buf.Path != "" {
-		activeFile = e.Buf.Path
-		editors[activeFile] = e
-	}
-	return &Session{
+	s := &Session{
 		Editor:      e,
 		editors:     editors,
-		activeFile:  activeFile,
 		projectRoot: projectRoot,
 	}
+	if e != nil && e.Buf.Path != "" {
+		canon := s.canonPath(e.Buf.Path)
+		s.activeFile = canon
+		s.editors[canon] = e
+	}
+	return s
 }
 
 // SetAgent wires an agent into the session. The agent is typically created
@@ -107,7 +113,7 @@ func (s *Session) ModifiedFiles() []string {
 
 // EditorForPath returns the editor for a given path, or nil if not open.
 func (s *Session) EditorForPath(path string) *editor.Editor {
-	return s.editors[path]
+	return s.editors[s.canonPath(path)]
 }
 
 // --- Workspace Implementation ---
@@ -117,16 +123,23 @@ func (s *Session) EditorForPath(path string) *editor.Editor {
 // ReadFile returns a file's content. Checks open buffers first, then disk.
 func (s *Session) ReadFile(path string) (string, error) {
 	// Check open buffers first (may have unsaved changes)
-	if e, ok := s.editors[path]; ok {
+	if e, ok := s.editors[s.canonPath(path)]; ok {
 		return e.Buf.Content(), nil
 	}
 	// Read from disk, resolving relative to project root
-	absPath := s.resolvePath(path)
+	absPath, err := s.resolvePath(path)
+	if err != nil {
+		return "", err
+	}
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
-	return string(data), nil
+	// Normalize to match buffer.NewFromFile: trim a single trailing newline.
+	// Without this, search text copied from read_file output won't match
+	// once the file is opened in a buffer (which also trims).
+	content := strings.TrimSuffix(string(data), "\n")
+	return content, nil
 }
 
 // ListFiles returns all project files (respects .gitignore).
@@ -136,7 +149,10 @@ func (s *Session) ListFiles() ([]string, error) {
 
 // WriteFile creates a new file on disk and opens it in the session.
 func (s *Session) WriteFile(path, content string) error {
-	absPath := s.resolvePath(path)
+	absPath, err := s.resolvePath(path)
+	if err != nil {
+		return err
+	}
 
 	// Check if already exists
 	if _, err := os.Stat(absPath); err == nil {
@@ -160,17 +176,32 @@ func (s *Session) WriteFile(path, content string) error {
 		return fmt.Errorf("open after write %s: %w", path, err)
 	}
 	e := editor.New(buf)
-	s.editors[path] = e
+	s.editors[absPath] = e
 
 	return nil
 }
 
-// resolvePath converts a relative path to absolute using the project root.
-func (s *Session) resolvePath(path string) string {
-	if filepath.IsAbs(path) {
-		return path
+// resolvePath converts a path to a cleaned absolute path within the project
+// root. Accepts both relative paths (resolved against root) and absolute paths
+// (validated to be within root). Returns an error if the resolved path
+// escapes the project root (e.g. via "../" traversal).
+func (s *Session) resolvePath(path string) (string, error) {
+	abs := s.canonPath(path)
+	root := filepath.Clean(s.projectRoot)
+	if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes project root", path)
 	}
-	return filepath.Join(s.projectRoot, path)
+	return abs, nil
+}
+
+// canonPath returns the cleaned absolute form of a path. Relative paths are
+// resolved against the project root. This is the canonical key for the
+// editors map — ensures the same file is never stored under two keys.
+func (s *Session) canonPath(path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(filepath.Join(s.projectRoot, path))
 }
 
 // --- Intent Lifecycle ---
@@ -225,28 +256,33 @@ func (s *Session) CancelAgent() {
 // the agent or clear intent — multi-file work continues across switches.
 // Returns an error if the file cannot be opened.
 func (s *Session) SwitchTo(path string) error {
+	canon := s.canonPath(path)
+
 	// Already active
-	if path == s.activeFile {
+	if canon == s.activeFile {
 		return nil
 	}
 
 	// Check if already open
-	if e, ok := s.editors[path]; ok {
+	if e, ok := s.editors[canon]; ok {
 		s.Editor = e
-		s.activeFile = path
+		s.activeFile = canon
 		return nil
 	}
 
 	// Open from disk
-	absPath := s.resolvePath(path)
+	absPath, err := s.resolvePath(path)
+	if err != nil {
+		return err
+	}
 	buf, err := buffer.NewFromFile(absPath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
 	e := editor.New(buf)
-	s.editors[path] = e
+	s.editors[canon] = e
 	s.Editor = e
-	s.activeFile = path
+	s.activeFile = canon
 	return nil
 }
 
@@ -270,11 +306,15 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 	if s.activeFile != "" {
 		delete(s.editors, s.activeFile)
 	}
-	// Add new editor
-	newPath := newEditor.Buf.Path
-	s.editors[newPath] = newEditor
+	// Add new editor — only track in map if it has a path.
 	s.Editor = newEditor
-	s.activeFile = newPath
+	if newEditor.Buf.Path != "" {
+		canon := s.canonPath(newEditor.Buf.Path)
+		s.editors[canon] = newEditor
+		s.activeFile = canon
+	} else {
+		s.activeFile = ""
+	}
 	return old
 }
 
@@ -298,20 +338,34 @@ func (s *Session) Close() {
 
 // ReviewEdit computes the diff for the pending edit and marks it as reviewed.
 // Frontends MUST call this and present the result before calling ApproveEdit.
+// If the pending edit targets a non-active file, the session auto-switches
+// to that file so the frontend renders the correct buffer.
 // Returns nil if there is no pending edit or the search text has no unique match.
-func (s *Session) ReviewEdit() *editor.DiffResult {
+// Returns true for switched if the active editor changed.
+func (s *Session) ReviewEdit() (diff *editor.DiffResult, switched bool) {
 	if s.PendingEdit == nil {
-		return nil
+		return nil, false
+	}
+	// Auto-switch to the target file so the frontend shows the right buffer.
+	if s.PendingEdit.Path != "" {
+		canon := s.canonPath(s.PendingEdit.Path)
+		if canon != s.activeFile {
+			if e, ok := s.editors[canon]; ok {
+				s.Editor = e
+				s.activeFile = canon
+				switched = true
+			}
+		}
 	}
 	e := s.editorForEdit()
 	if e == nil {
-		return nil
+		return nil, switched
 	}
-	diff := e.ComputeDiff(s.PendingEdit.Search, s.PendingEdit.Replace)
+	diff = e.ComputeDiff(s.PendingEdit.Search, s.PendingEdit.Replace)
 	if diff != nil {
 		s.editReviewed = true
 	}
-	return diff
+	return diff, switched
 }
 
 // ApproveEdit applies the reviewed edit to the editor buffer.
@@ -335,8 +389,10 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 		s.editReviewed = false
 		return false, "file not open"
 	}
+	editPath := s.canonPath(s.PendingEdit.Path)
 	ok, reason := e.ApplyEdit(search, replace)
 	if ok {
+		s.lastEditedFile = editPath
 		s.agent.Approve()
 	} else {
 		s.agent.Reject()
@@ -393,6 +449,7 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 		s.editReviewed = false
 		return nil, errors.New(reason)
 	}
+	s.lastEditedFile = s.canonPath(s.PendingEdit.Path)
 	s.PendingEdit = nil
 	s.editReviewed = false
 	return &AnimationPlan{
@@ -432,10 +489,22 @@ func (s *Session) RejectEdit() {
 }
 
 // Continue signals the agent to proceed after the developer has finished editing.
+// Sends the content of the file that was last edited (not necessarily the
+// currently active file, in case the user switched files after approving).
 func (s *Session) Continue() {
-	if s.HasAgent() {
-		s.agent.Continue(s.activeFile, s.Editor.Buf.Content())
+	if !s.HasAgent() {
+		return
 	}
+	path := s.lastEditedFile
+	if path == "" {
+		path = s.activeFile
+	}
+	e, ok := s.editors[path]
+	if !ok {
+		e = s.Editor
+		path = s.activeFile
+	}
+	s.agent.Continue(path, e.Buf.Content())
 }
 
 // --- Agent Event Handling ---
@@ -468,6 +537,9 @@ func (s *Session) HandleEvent(ev agent.Event) {
 
 // editorForEdit returns the editor targeted by the current pending edit.
 // Falls back to the active editor if no path is set (backward compat).
+// If the target file isn't open yet, auto-opens it from disk — the agent
+// may have read the file via read_file (which doesn't create a buffer)
+// and then proposed an edit_file on it.
 func (s *Session) editorForEdit() *editor.Editor {
 	if s.PendingEdit == nil {
 		return s.Editor
@@ -476,8 +548,20 @@ func (s *Session) editorForEdit() *editor.Editor {
 	if path == "" {
 		return s.Editor
 	}
-	if e, ok := s.editors[path]; ok {
+	canon := s.canonPath(path)
+	if e, ok := s.editors[canon]; ok {
 		return e
 	}
-	return nil
+	// Auto-open: the agent proposed an edit to a file that isn't open yet.
+	absPath, err := s.resolvePath(path)
+	if err != nil {
+		return nil
+	}
+	buf, err := buffer.NewFromFile(absPath)
+	if err != nil {
+		return nil
+	}
+	e := editor.New(buf)
+	s.editors[canon] = e
+	return e
 }

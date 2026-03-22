@@ -30,12 +30,17 @@ func (stubWorkspace) WriteFile(_, _ string) error       { return nil }
 // newTestSession creates a session with a buffer containing the given text
 // and a real agent (needed to test approval signaling).
 func newTestSession(content string) *Session {
+	return newTestSessionWithRoot(content, "")
+}
+
+// newTestSessionWithRoot creates a test session with a specific project root.
+func newTestSessionWithRoot(content, projectRoot string) *Session {
 	buf := buffer.New()
 	if content != "" {
 		buf.Insert(0, 0, content)
 	}
 	e := editor.New(buf)
-	sess := New(e, "")
+	sess := New(e, projectRoot)
 	events := make(chan agent.Event, 64)
 	ag := agent.New(stubProvider{}, stubWorkspace{}, events)
 	sess.SetAgent(ag, events)
@@ -219,10 +224,10 @@ func TestPrepareApprovalRejectsOnLocationFailure(t *testing.T) {
 }
 
 func TestSwitchTo(t *testing.T) {
-	s := newTestSession("old content")
+	dir := t.TempDir()
+	s := newTestSessionWithRoot("old content", dir)
 
 	// Write a temp file to switch to
-	dir := t.TempDir()
 	newPath := dir + "/new.txt"
 	if err := writeTestFile(newPath, "new content"); err != nil {
 		t.Fatal(err)
@@ -251,39 +256,84 @@ func TestSwitchTo(t *testing.T) {
 }
 
 func TestSwitchToExistingBuffer(t *testing.T) {
-	s := newTestSession("file A content")
-
-	// Write a temp file
 	dir := t.TempDir()
+
+	// Create two real files so both have paths.
+	pathA := dir + "/a.txt"
 	pathB := dir + "/b.txt"
+	if err := writeTestFile(pathA, "file A content"); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeTestFile(pathB, "file B content"); err != nil {
 		t.Fatal(err)
 	}
 
-	// Switch to B
+	// Start with file A.
+	bufA, err := buffer.NewFromFile(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eA := editor.New(bufA)
+	s := New(eA, dir)
+
+	// Switch to B — opens from disk.
 	if err := s.SwitchTo(pathB); err != nil {
 		t.Fatal(err)
 	}
-	// Switch back to original (empty path since buffer.New() has no path)
-	// This won't work for empty-path buffers, so test with a real file
+	if s.Editor.Buf.Content() != "file B content" {
+		t.Errorf("after switch to B: got %q", s.Editor.Buf.Content())
+	}
+
+	// Switch back to A — should reuse the existing buffer, not re-read disk.
+	eA.InsertChar('!') // modify buffer A while viewing B
+	if err := s.SwitchTo(pathA); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Editor.Buf.Content()
+	if got == "file A content" {
+		t.Error("expected modified buffer A, got original disk content — buffer was not reused")
+	}
 }
 
 func TestMultiBufferModifiedTracking(t *testing.T) {
-	s := newTestSession("original")
+	dir := t.TempDir()
+	pathA := dir + "/a.txt"
+	pathB := dir + "/b.txt"
+	if err := writeTestFile(pathA, "file A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(pathB, "file B"); err != nil {
+		t.Fatal(err)
+	}
 
-	// Modify the buffer
+	bufA, err := buffer.NewFromFile(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(editor.New(bufA), dir)
+
+	// Open second file.
+	if err := s.SwitchTo(pathB); err != nil {
+		t.Fatal(err)
+	}
+
+	// No modifications yet.
+	if len(s.ModifiedFiles()) != 0 {
+		t.Fatalf("expected no modified files, got %v", s.ModifiedFiles())
+	}
+
+	// Modify file B.
 	s.Editor.InsertChar('X')
-
 	modified := s.ModifiedFiles()
-	// Buffer has no path, so no modified files tracked
-	// (buffers without paths aren't in the editors map keyed by path)
-	_ = modified
+	if len(modified) != 1 {
+		t.Fatalf("expected 1 modified file, got %v", modified)
+	}
 }
 
 func TestEditorForPath(t *testing.T) {
-	s := newTestSession("content")
-
 	dir := t.TempDir()
+	s := newTestSessionWithRoot("content", dir)
+
 	path := dir + "/test.go"
 	if err := writeTestFile(path, "package main"); err != nil {
 		t.Fatal(err)
@@ -301,6 +351,33 @@ func TestEditorForPath(t *testing.T) {
 	e2 := s.EditorForPath("/nonexistent")
 	if e2 != nil {
 		t.Error("EditorForPath should return nil for unopened file")
+	}
+}
+
+func TestResolvePathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSessionWithRoot("content", dir)
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"relative inside root", "src/main.go", false},
+		{"traversal escapes root", "../../etc/passwd", true},
+		{"absolute inside root", dir + "/src/main.go", false},
+		{"absolute outside root", "/etc/passwd", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.ReadFile(tt.path)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for path %q, got nil", tt.path)
+			}
+			// Non-error cases may still fail (file doesn't exist) — that's fine,
+			// we're just testing that traversal is rejected before disk access.
+		})
 	}
 }
 

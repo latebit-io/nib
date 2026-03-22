@@ -204,9 +204,15 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 		m.AgentPane.Status = "waiting"
 		m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 		// ReviewEdit computes the diff AND marks the edit as reviewed.
-		// ApproveEdit will fail if this step is skipped — the engine enforces
-		// that every frontend shows the developer what the agent proposes.
-		diff := m.Session.ReviewEdit()
+		// If the edit targets a different file, the session auto-switches
+		// and we rebuild the EditorModel to render the correct buffer.
+		diff, switched := m.Session.ReviewEdit()
+		if switched {
+			wpm := m.Editor.TypingWPM
+			m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
+			m.Editor.TypingWPM = wpm
+			m.Regions.ReplacePane("editor", m.Editor)
+		}
 		if diff != nil {
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
 			m.Editor.Overlay = NewDiffOverlay(diff)
@@ -437,6 +443,12 @@ func (m *AppModel) View() string {
 // which keeps editors alive in the multi-buffer map. This method rebuilds
 // the EditorModel and updates the region manager.
 func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
+	// Block switching while an edit is pending — the agent is waiting for
+	// approval and switching would drop the diff overlay, stranding it.
+	if m.Session.PendingEdit != nil {
+		m.AgentPane.AppendMeta("[cannot switch files while an edit is pending]\n")
+		return m, nil
+	}
 	if err := m.Session.SwitchTo(path); err != nil {
 		slog.Error("failed to open file", "path", path, "err", err)
 		m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")

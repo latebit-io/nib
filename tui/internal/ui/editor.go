@@ -200,7 +200,7 @@ func (m *EditorModel) Render() string {
 
 		case vLine <= overlay.EndLine:
 			// Removed (red) line.
-			output[visualRow] = m.renderRemovedLine(vLine, gutterW, contentW, removedBg, removedBgColor, removedGutterSt)
+			output[visualRow] = m.renderRemovedLine(vLine, gutterW, contentW, removedBg, removedBgColor, removedGutterSt, cursorStyle, showBufferCursor)
 			m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineRemoved, bufLine: vLine})
 
 		case vLine >= addedStart && vLine <= addedEnd:
@@ -349,6 +349,8 @@ func (m *EditorModel) renderRemovedLine(
 	bgStyle lipgloss.Style,
 	bgColor lipgloss.Color,
 	gutterSt lipgloss.Style,
+	cursorStyle lipgloss.Style,
+	showBufferCursor bool,
 ) string {
 	var line strings.Builder
 
@@ -358,6 +360,15 @@ func (m *EditorModel) renderRemovedLine(
 	rawRunes := []rune(m.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
 	displayed := fillDisplay(expanded, contentW)
+
+	// Cursor position in display coords.
+	displayCursorCol := -1
+	if showBufferCursor && lineIdx == m.CursorLine && m.CursorCol >= 0 && m.CursorCol <= len(rawRunes) {
+		displayCursorCol = bufToDisp[m.CursorCol]
+		if displayCursorCol >= contentW && contentW > 0 {
+			displayCursorCol = contentW - 1
+		}
+	}
 
 	// Syntax highlighting on removed lines (they are real buffer lines).
 	charStyles := make([]lipgloss.Style, contentW)
@@ -381,7 +392,9 @@ func (m *EditorModel) renderRemovedLine(
 
 	for j := range contentW {
 		ch := string(displayed[j])
-		if charStyles[j].GetForeground() != nil {
+		if j == displayCursorCol {
+			line.WriteString(cursorStyle.Render(ch))
+		} else if charStyles[j].GetForeground() != nil {
 			line.WriteString(charStyles[j].Background(bgColor).Render(ch))
 		} else {
 			line.WriteString(bgStyle.Render(ch))

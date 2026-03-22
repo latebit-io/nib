@@ -1,8 +1,9 @@
 // Package fuzzy provides scored fuzzy matching for filtering and ranking
 // strings. It supports four matching strategies with decreasing strictness:
-// exact, prefix, substring, and fuzzy (character-skip). Each strategy
-// contributes to the final score, with bonuses for consecutive matches,
-// matches after path separators, and camelCase boundaries.
+// exact, prefix, substring, and fuzzy (character-skip). The first matching
+// strategy determines the base score; the fuzzy strategy additionally applies
+// per-character bonuses for consecutive matches, matches after path separators,
+// and camelCase boundaries.
 //
 // This is an engine-level package — no UI dependencies. Usable by any
 // frontend (command palette, file finder) and by the agent (file search).
@@ -39,6 +40,8 @@ type Match struct {
 	Text string
 	// Score is the match quality (higher is better). Zero means no match.
 	Score int
+	// RuneLen is the rune count of Text, cached to avoid recomputation during sorting.
+	RuneLen int
 	// Positions contains the indices of matched runes in Text (for highlighting).
 	Positions []int
 }
@@ -48,7 +51,7 @@ type Match struct {
 // Both query and candidate are compared case-insensitively.
 func Score(query, candidate string) Match {
 	if query == "" {
-		return Match{Text: candidate, Score: 1}
+		return Match{Text: candidate, Score: 1, RuneLen: utf8.RuneCountInString(candidate)}
 	}
 	qRunes := toLowerRunes([]rune(query))
 	qLower := string(qRunes)
@@ -70,7 +73,7 @@ func score(qLower string, qRunes []rune, candidate string) Match {
 		for i := range positions {
 			positions[i] = i
 		}
-		return Match{Text: candidate, Score: scoreExact + lengthBonus(cRunes), Positions: positions}
+		return Match{Text: candidate, Score: scoreExact + lengthBonus(cRunes), RuneLen: len(cRunes), Positions: positions}
 	}
 
 	// Strategy 2: Prefix match.
@@ -79,7 +82,7 @@ func score(qLower string, qRunes []rune, candidate string) Match {
 		for i := range positions {
 			positions[i] = i
 		}
-		return Match{Text: candidate, Score: scorePrefix + lengthBonus(cRunes), Positions: positions}
+		return Match{Text: candidate, Score: scorePrefix + lengthBonus(cRunes), RuneLen: len(cRunes), Positions: positions}
 	}
 
 	// Strategy 3: Substring match.
@@ -93,7 +96,7 @@ func score(qLower string, qRunes []rune, candidate string) Match {
 		if idx > 0 && isSeparator(cRunes[idx-1]) {
 			score += bonusSepSubstring
 		}
-		return Match{Text: candidate, Score: score, Positions: positions}
+		return Match{Text: candidate, Score: score, RuneLen: len(cRunes), Positions: positions}
 	}
 
 	// Strategy 4: Fuzzy match — characters appear in order with gaps.
@@ -107,12 +110,11 @@ func Filter(query string, candidates []string) []Match {
 	if query == "" {
 		results := make([]Match, len(candidates))
 		for i, c := range candidates {
-			results[i] = Match{Text: c, Score: 1}
+			results[i] = Match{Text: c, Score: 1, RuneLen: utf8.RuneCountInString(c)}
 		}
 		sort.Slice(results, func(i, j int) bool {
-			ri, rj := utf8.RuneCountInString(results[i].Text), utf8.RuneCountInString(results[j].Text)
-			if ri != rj {
-				return ri < rj
+			if results[i].RuneLen != results[j].RuneLen {
+				return results[i].RuneLen < results[j].RuneLen
 			}
 			return results[i].Text < results[j].Text
 		})
@@ -133,9 +135,8 @@ func Filter(query string, candidates []string) []Match {
 		if results[i].Score != results[j].Score {
 			return results[i].Score > results[j].Score
 		}
-		ri, rj := utf8.RuneCountInString(results[i].Text), utf8.RuneCountInString(results[j].Text)
-		if ri != rj {
-			return ri < rj
+		if results[i].RuneLen != results[j].RuneLen {
+			return results[i].RuneLen < results[j].RuneLen
 		}
 		return results[i].Text < results[j].Text
 	})
@@ -147,7 +148,7 @@ func Filter(query string, candidates []string) []Match {
 func charBonus(candidate []rune, idx int) int {
 	bonus := bonusCharBase
 
-	// Separator bonus — match right after /, ., _, -.
+	// Separator bonus — match right after /, \, ., _, -, or space.
 	if idx > 0 && isSeparator(candidate[idx-1]) {
 		bonus += bonusSeparator
 	}
@@ -222,11 +223,11 @@ func fuzzyScore(query, candidate, cLower []rune, originalText string) Match {
 
 	// All query chars must be matched.
 	if qi < len(query) {
-		return Match{Text: originalText, Score: 0}
+		return Match{Text: originalText, Score: 0, RuneLen: len(candidate)}
 	}
 
 	totalScore += lengthBonus(candidate)
-	return Match{Text: originalText, Score: totalScore, Positions: positions}
+	return Match{Text: originalText, Score: totalScore, RuneLen: len(candidate), Positions: positions}
 }
 
 // lengthBonus gives shorter candidates a small advantage — less noise.
@@ -240,8 +241,8 @@ func isSeparator(r rune) bool {
 }
 
 // toLowerRunes lowercases each rune individually, preserving slice length.
-// Unlike strings.ToLower, this cannot change the rune count (e.g., ß stays
-// as one rune), keeping indices aligned with the original candidate.
+// It operates directly on []rune so match positions stay in rune-slice
+// space, avoiding byte/rune index mismatches with the original candidate.
 func toLowerRunes(runes []rune) []rune {
 	lower := make([]rune, len(runes))
 	for i, r := range runes {

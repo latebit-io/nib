@@ -227,6 +227,11 @@ func fuzzyScore(query, candidate, cLower []rune, originalText string) Match {
 	}
 
 	totalScore += lengthBonus(candidate)
+	// Clamp fuzzy scores below the substring base so strategies maintain
+	// decreasing strictness (exact > prefix > substring > fuzzy).
+	if totalScore >= scoreSubstring {
+		totalScore = scoreSubstring - 1
+	}
 	return Match{Text: originalText, Score: totalScore, RuneLen: len(candidate), Positions: positions}
 }
 

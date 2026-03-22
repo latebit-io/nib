@@ -63,7 +63,7 @@ type EditorModel struct {
 	// Animated agent typing (nil when no animation is active)
 	Anim *animationContext
 
-	// TypingWPM controls the agent typing speed. 0 uses the default (500).
+	// TypingWPM controls the agent typing speed. 0 uses the default (800).
 	TypingWPM int
 
 	// cursorMoved is set when the cursor position changes and cleared after

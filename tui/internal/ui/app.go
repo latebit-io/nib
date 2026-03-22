@@ -123,7 +123,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
 
-	// Animation tick — advance agent typing by one character
+	// Animation tick — advance the agent typing animation
 	case animTickMsg:
 		return m, m.handleAnimTick()
 

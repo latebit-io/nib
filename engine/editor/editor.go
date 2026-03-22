@@ -417,9 +417,9 @@ func (e *Editor) InsertChar(ch rune) {
 func (e *Editor) InsertNewline() {
 	// Detect leading whitespace for auto-indent, capped at cursor column
 	// so that splitting a whitespace-only line doesn't accumulate spaces.
-	lineText := e.Buf.LineText(e.CursorLine)
+	runes := []rune(e.Buf.LineText(e.CursorLine))
 	indent := ""
-	for i, ch := range lineText {
+	for i, ch := range runes {
 		if i >= e.CursorCol {
 			break
 		}

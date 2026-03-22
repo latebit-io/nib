@@ -383,6 +383,7 @@ func (e *Editor) DeleteSelection() {
 	e.CursorLine = sl
 	e.CursorCol = sc
 	e.SelectionActive = false
+	e.MarkDirty()
 	e.EnsureCursorVisible()
 }
 

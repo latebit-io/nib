@@ -778,7 +778,6 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 				slog.Warn("system clipboard write failed", "err", err)
 			}
 			e.DeleteSelection()
-			e.MarkDirty()
 		}
 		return nil
 

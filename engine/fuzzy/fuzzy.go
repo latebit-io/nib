@@ -14,6 +14,24 @@ import (
 	"unicode"
 )
 
+// Strategy base scores — higher means stricter match.
+const (
+	scoreExact     = 1000
+	scorePrefix    = 800
+	scoreSubstring = 600
+)
+
+// Per-character bonuses in fuzzy matching.
+const (
+	bonusCharBase     = 10 // base score per matched character
+	bonusConsecutive  = 5  // cumulative bonus per consecutive match
+	bonusSeparator    = 30 // match right after /, ., _, -, \, space
+	bonusStartOfStr   = 20 // match at position 0
+	bonusCamelCase    = 20 // match at camelCase boundary
+	bonusSepSubstring = 50 // substring match right after a separator
+	bonusLengthMax    = 50 // max length bonus (shorter candidates preferred)
+)
+
 // Match represents a scored match of a query against a candidate string.
 type Match struct {
 	// Text is the original candidate string.
@@ -31,11 +49,16 @@ func Score(query, candidate string) Match {
 	if query == "" {
 		return Match{Text: candidate, Score: 1}
 	}
-
 	qLower := strings.ToLower(query)
+	qRunes := []rune(qLower)
+	return score(qLower, qRunes, candidate)
+}
+
+// score is the internal scorer that takes precomputed query data.
+// Filter calls this directly to avoid recomputing per candidate.
+func score(qLower string, qRunes []rune, candidate string) Match {
 	cLower := strings.ToLower(candidate)
 	cRunes := []rune(candidate)
-	qRunes := []rune(qLower)
 
 	// Strategy 1: Exact match (case-insensitive).
 	if qLower == cLower {
@@ -43,7 +66,7 @@ func Score(query, candidate string) Match {
 		for i := range positions {
 			positions[i] = i
 		}
-		return Match{Text: candidate, Score: 1000 + lengthBonus(cRunes), Positions: positions}
+		return Match{Text: candidate, Score: scoreExact + lengthBonus(cRunes), Positions: positions}
 	}
 
 	// Strategy 2: Prefix match.
@@ -52,7 +75,7 @@ func Score(query, candidate string) Match {
 		for i := range positions {
 			positions[i] = i
 		}
-		return Match{Text: candidate, Score: 800 + lengthBonus(cRunes), Positions: positions}
+		return Match{Text: candidate, Score: scorePrefix + lengthBonus(cRunes), Positions: positions}
 	}
 
 	// Strategy 3: Substring match — search over rune slices to avoid
@@ -63,10 +86,10 @@ func Score(query, candidate string) Match {
 		for i := range positions {
 			positions[i] = idx + i
 		}
-		score := 600 + lengthBonus(cRunes)
+		score := scoreSubstring + lengthBonus(cRunes)
 		// Bonus for matching right after a separator.
 		if idx > 0 && isSeparator(cRunes[idx-1]) {
-			score += 50
+			score += bonusSepSubstring
 		}
 		return Match{Text: candidate, Score: score, Positions: positions}
 	}
@@ -93,9 +116,11 @@ func Filter(query string, candidates []string) []Match {
 		return results
 	}
 
-	var results []Match
+	qLower := strings.ToLower(query)
+	qRunes := []rune(qLower)
+	results := make([]Match, 0, len(candidates))
 	for _, c := range candidates {
-		m := Score(query, c)
+		m := score(qLower, qRunes, c)
 		if m.Score > 0 {
 			results = append(results, m)
 		}
@@ -114,47 +139,81 @@ func Filter(query string, candidates []string) []Match {
 	return results
 }
 
+// charBonus computes the position-based bonus for matching at idx in candidate.
+func charBonus(candidate []rune, idx int) int {
+	bonus := bonusCharBase
+
+	// Separator bonus — match right after /, ., _, -.
+	if idx > 0 && isSeparator(candidate[idx-1]) {
+		bonus += bonusSeparator
+	}
+
+	// Start of string bonus.
+	if idx == 0 {
+		bonus += bonusStartOfStr
+	}
+
+	// CamelCase boundary bonus — lowercase followed by uppercase.
+	if idx > 0 && unicode.IsLower(candidate[idx-1]) && unicode.IsUpper(candidate[idx]) {
+		bonus += bonusCamelCase
+	}
+
+	return bonus
+}
+
 // fuzzyScore implements the character-skip fuzzy matching with scoring.
-// cLower is the precomputed lowercase rune slice of candidate.
+// Uses a lookahead strategy: for each query character, scans all feasible
+// positions and picks the one with the highest position bonus (separator,
+// camelCase, start-of-string). This avoids the greedy left-to-right problem
+// where an early match shadows a better boundary match.
 func fuzzyScore(query, candidate, cLower []rune, originalText string) Match {
 	qi := 0
+	ci := 0
 	var positions []int
-	score := 0
+	totalScore := 0
 	prevMatchIdx := -1
-	consecutiveBonus := 0
+	consecutiveCount := 0
 
-	for ci := 0; ci < len(cLower) && qi < len(query); ci++ {
-		if cLower[ci] == query[qi] {
-			positions = append(positions, ci)
-			matchScore := 10 // base score per matched char
+	for qi < len(query) && ci < len(cLower) {
+		remaining := len(query) - qi
+		bestIdx := -1
+		bestBonus := -1
 
-			// Consecutive match bonus — rewards runs of matching chars.
-			if prevMatchIdx == ci-1 {
-				consecutiveBonus++
-				matchScore += consecutiveBonus * 5
-			} else {
-				consecutiveBonus = 0
+		// Scan forward for the best position to match query[qi].
+		for idx := ci; idx < len(cLower); idx++ {
+			if cLower[idx] != query[qi] {
+				continue
 			}
-
-			// Separator bonus — match right after /, ., _, -.
-			if ci > 0 && isSeparator(candidate[ci-1]) {
-				matchScore += 30
+			// Ensure enough chars remain for the rest of the query.
+			if len(cLower)-idx < remaining {
+				break
 			}
-
-			// Start of string bonus.
-			if ci == 0 {
-				matchScore += 20
+			bonus := charBonus(candidate, idx)
+			if bonus > bestBonus {
+				bestBonus = bonus
+				bestIdx = idx
 			}
-
-			// CamelCase boundary bonus — lowercase followed by uppercase.
-			if ci > 0 && unicode.IsLower(candidate[ci-1]) && unicode.IsUpper(candidate[ci]) {
-				matchScore += 20
-			}
-
-			score += matchScore
-			prevMatchIdx = ci
-			qi++
 		}
+
+		if bestIdx == -1 {
+			break
+		}
+
+		positions = append(positions, bestIdx)
+		matchScore := charBonus(candidate, bestIdx)
+
+		// Consecutive match bonus — rewards runs of matching chars.
+		if prevMatchIdx == bestIdx-1 {
+			consecutiveCount++
+			matchScore += consecutiveCount * bonusConsecutive
+		} else {
+			consecutiveCount = 0
+		}
+
+		totalScore += matchScore
+		prevMatchIdx = bestIdx
+		qi++
+		ci = bestIdx + 1
 	}
 
 	// All query chars must be matched.
@@ -162,13 +221,13 @@ func fuzzyScore(query, candidate, cLower []rune, originalText string) Match {
 		return Match{Text: originalText, Score: 0}
 	}
 
-	score += lengthBonus(candidate)
-	return Match{Text: originalText, Score: score, Positions: positions}
+	totalScore += lengthBonus(candidate)
+	return Match{Text: originalText, Score: totalScore, Positions: positions}
 }
 
 // lengthBonus gives shorter candidates a small advantage — less noise.
 func lengthBonus(candidate []rune) int {
-	return max(50-len(candidate), 0)
+	return max(bonusLengthMax-len(candidate), 0)
 }
 
 // isSeparator returns true for common path and word separators.

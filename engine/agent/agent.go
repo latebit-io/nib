@@ -333,7 +333,10 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 		}
 	}
 
-	// Approved — wait for user to finish editing and continue
+	// Approved — wait for user to finish editing and continue.
+	// Build the expected file content so we can detect developer modifications.
+	expectedContent := strings.Replace(content, args.Search, args.Replace, 1)
+
 	a.send(StatusEvent{Status: "editing"})
 	a.send(TokenEvent{Text: "\n[Edit approved — waiting for continue]\n"})
 
@@ -346,6 +349,12 @@ func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
 		a.mu.Unlock()
 		a.send(StatusEvent{Status: "thinking"})
 		a.send(TokenEvent{Text: "\n"})
-		return fmt.Sprintf("Edit applied successfully. The developer may have made additional changes.\n\nCurrent file:\n\n%s", newContent) + a.intentReminder()
+
+		if newContent != expectedContent {
+			return fmt.Sprintf("Edit applied. The developer modified your code before continuing. "+
+				"Study what they changed — it signals their intent. Recalibrate your approach to align with their direction. "+
+				"If you notice a syntax error or bug in their edit, point it out and propose a fix — do not silently change it.\n\nCurrent file:\n\n%s", newContent) + a.intentReminder()
+		}
+		return fmt.Sprintf("Edit applied successfully.\n\nCurrent file:\n\n%s", newContent) + a.intentReminder()
 	}
 }

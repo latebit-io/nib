@@ -122,6 +122,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
 
+	// Animation tick — advance agent typing by one character
+	case animTickMsg:
+		return m, m.handleAnimTick()
+
 	case tea.MouseMsg:
 		// Only set recentMouse for scroll events — those are the ones that
 		// produce leaked CSI sequences during rapid scrolling.
@@ -177,10 +181,15 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 		}
 	case agent.ErrorEvent:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
+		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 	case agent.DoneEvent:
 		m.AgentPane.Status = "idle"
 		m.AgentPane.AppendText("\n--- Done ---\n")
+		// Clear animation waiting state if agent is done.
+		if m.Editor.Anim != nil {
+			m.Editor.Anim = nil
+		}
 		m.clearEditorOverlay(false)
 	}
 }
@@ -276,29 +285,18 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit != nil, "agent", m.Session.HasAgent())
 		if m.Session.PendingEdit != nil && m.Editor.Overlay != nil {
-			// Build the final search/replace from the overlay.
-			// The search is the full affected buffer lines; the replace is
-			// the overlay content (possibly modified by the developer).
-			o := m.Editor.Overlay
-			var oldLines []string
-			for i := o.StartLine; i <= o.EndLine; i++ {
-				oldLines = append(oldLines, m.Editor.Buf.LineText(i))
-			}
-			search := strings.Join(oldLines, "\n")
-			replace := o.Content()
-			ok, reason := m.Session.ApproveEdit(search, replace)
-			if ok {
-				slog.Debug("overlay cleared", "reason", "approve",
-					"searchLen", len(search), "replaceLen", len(replace))
-				m.clearEditorOverlay(true)
-			} else {
-				slog.Warn("agent approve: edit rejected", "reason", reason)
-				m.AgentPane.AppendText("\n[" + reason + "]\n")
-			}
+			cmd := m.startAnimatedApproval()
+			return m, cmd
 		}
 		return m, nil
 
 	case ActionAgentReject:
+		// Cancel running animation (partial edit stays, undoable)
+		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
+			slog.Debug("animation cancelled", "reason", "escape")
+			m.cancelAnimation()
+			return m, nil
+		}
 		if m.Session.PendingEdit != nil {
 			slog.Debug("overlay cleared", "reason", "reject")
 			m.clearEditorOverlay(false)
@@ -315,6 +313,10 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case ActionAgentContinue:
 		if m.Session.HasAgent() && m.AgentPane.Status == "editing" {
+			// Clear animation waiting state before continuing.
+			if m.Editor.Anim != nil {
+				m.Editor.Anim = nil
+			}
 			m.Session.Continue()
 		}
 		return m, nil
@@ -398,4 +400,180 @@ func (m *AppModel) renderIntentBar() string {
 	}
 
 	return style.Render(text)
+}
+
+// --- Animated Approval ---
+
+// startAnimatedApproval initiates the animated typing flow.
+// Validates via Session.PrepareApproval, clears the overlay, and starts
+// the delete+type animation.
+func (m *AppModel) startAnimatedApproval() tea.Cmd {
+	o := m.Editor.Overlay
+	var oldLines []string
+	for i := o.StartLine; i <= o.EndLine; i++ {
+		oldLines = append(oldLines, m.Editor.Buf.LineText(i))
+	}
+	search := strings.Join(oldLines, "\n")
+	replace := o.Content()
+
+	plan, err := m.Session.PrepareApproval(search, replace)
+	if err != nil {
+		slog.Warn("agent approve: preparation failed", "err", err)
+		m.AgentPane.AppendText("\n[" + err.Error() + "]\n")
+		m.clearEditorOverlay(false)
+		return nil
+	}
+
+	slog.Debug("animation starting",
+		"line", plan.Line, "col", plan.Col,
+		"searchLen", len(plan.Search), "replaceLen", len(plan.Replace))
+
+	// Clear the overlay — we're taking over with direct buffer mutations.
+	m.clearEditorOverlay(false)
+
+	// Create animation context.
+	anim := newAnimationContext(plan.Line, plan.Col, plan.Replace, m.Editor.TypingWPM)
+	m.Editor.Anim = anim
+
+	// Begin undo group and delete the old text.
+	m.Editor.Buf.BeginGroup()
+	anim.groupOpen = true
+	searchRunes := len([]rune(plan.Search))
+	m.Editor.Buf.Delete(plan.Line, plan.Col, searchRunes)
+	m.Editor.MarkDirty()
+
+	// Transition to typing.
+	anim.state = animTyping
+	m.AgentPane.Status = "typing"
+
+	// If there's nothing to type, finish immediately.
+	if anim.done() {
+		return m.finishAnimation()
+	}
+
+	// Schedule the first typing tick.
+	return scheduleNextTick(anim.charDelay)
+}
+
+// handleAnimTick advances the animation by one character.
+func (m *AppModel) handleAnimTick() tea.Cmd {
+	anim := m.Editor.Anim
+	if anim == nil || anim.state != animTyping {
+		return nil
+	}
+
+	// Collision check: dev cursor is sovereign.
+	if m.animCollision() {
+		return m.yieldAnimation()
+	}
+
+	r := anim.nextChar()
+	if r == 0 {
+		return m.finishAnimation()
+	}
+
+	// Insert the character at the agent cursor position.
+	if r == '\n' {
+		m.Editor.Buf.Insert(anim.line, anim.col, "\n")
+		anim.line++
+		anim.col = 0
+	} else {
+		m.Editor.Buf.Insert(anim.line, anim.col, string(r))
+		anim.col++
+	}
+	m.Editor.MarkDirty()
+
+	// Auto-scroll to keep agent cursor visible.
+	vis := m.Editor.VisibleLines()
+	if vis > 0 && anim.line >= m.Editor.ScrollOffset+vis {
+		m.Editor.ScrollOffset = anim.line - vis + 1
+	}
+
+	if anim.done() {
+		return m.finishAnimation()
+	}
+
+	return scheduleNextTick(anim.delayForChar(r))
+}
+
+// animCollision returns true if the dev cursor is in the agent's active region.
+func (m *AppModel) animCollision() bool {
+	anim := m.Editor.Anim
+	if anim == nil {
+		return false
+	}
+	devLine := m.Editor.CursorLine
+	return devLine >= anim.startLine && devLine <= anim.line
+}
+
+// yieldAnimation pauses the animation because the dev cursor entered the
+// agent's region. Finishes typing through the end of the current line
+// (clean boundary), then transitions to waiting.
+func (m *AppModel) yieldAnimation() tea.Cmd {
+	anim := m.Editor.Anim
+	if anim == nil {
+		return nil
+	}
+
+	// Type remaining chars on the current line (clean boundary).
+	for !anim.done() {
+		r := anim.replaceRunes[anim.typed]
+		if r == '\n' {
+			break // stop before the newline — current line is complete
+		}
+		anim.typed++
+		m.Editor.Buf.Insert(anim.line, anim.col, string(r))
+		anim.col++
+	}
+	m.Editor.MarkDirty()
+
+	if anim.groupOpen {
+		m.Editor.Buf.EndGroup()
+		anim.groupOpen = false
+	}
+
+	anim.state = animWaiting
+	anim.yielded = true
+	m.AgentPane.Status = "editing"
+	m.AgentPane.AppendText("\n[yielded — your line]\n")
+	m.Session.CompleteApproval()
+
+	slog.Debug("animation yielded", "line", anim.line, "col", anim.col,
+		"typed", anim.typed, "total", len(anim.replaceRunes))
+	return nil
+}
+
+// finishAnimation closes the undo group and signals the agent.
+func (m *AppModel) finishAnimation() tea.Cmd {
+	anim := m.Editor.Anim
+	if anim == nil {
+		return nil
+	}
+
+	if anim.groupOpen {
+		m.Editor.Buf.EndGroup()
+		anim.groupOpen = false
+	}
+
+	anim.state = animWaiting
+	m.AgentPane.Status = "editing"
+	m.Session.CompleteApproval()
+
+	slog.Debug("animation complete", "line", anim.line, "col", anim.col)
+	return nil
+}
+
+// cancelAnimation aborts a running animation, closing the undo group.
+// The partial edit remains in the buffer (undoable via Ctrl+Z).
+func (m *AppModel) cancelAnimation() {
+	anim := m.Editor.Anim
+	if anim == nil {
+		return
+	}
+	if anim.groupOpen {
+		m.Editor.Buf.EndGroup()
+		anim.groupOpen = false
+	}
+	m.Editor.Anim = nil
+	m.AgentPane.Status = "idle"
 }

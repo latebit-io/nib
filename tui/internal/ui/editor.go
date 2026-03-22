@@ -50,6 +50,12 @@ type EditorModel struct {
 	// Inline diff preview and editable replacement (nil when no edit is pending)
 	Overlay *DiffOverlay
 
+	// Animated agent typing (nil when no animation is active)
+	Anim *animationContext
+
+	// TypingWPM controls the agent typing speed. 0 uses the default (300).
+	TypingWPM int
+
 	// Viewport mapping rebuilt each Render() for mouse click resolution.
 	viewportMap []viewportEntry
 }
@@ -152,6 +158,24 @@ func (m *EditorModel) Render() string {
 	cursorStyle := lipgloss.NewStyle().Reverse(true)
 	selectionStyle := lipgloss.NewStyle().Background(lipgloss.Color("24"))
 
+	// Compute agent cursor info for this render pass.
+	var agentCursor *agentCursorInfo
+	if anim := m.Anim; anim != nil && anim.state != animIdle {
+		style := lipgloss.NewStyle().
+			Background(lipgloss.Color("243")).
+			Foreground(lipgloss.Color("0"))
+		if anim.state == animTyping {
+			style = lipgloss.NewStyle().
+				Background(lipgloss.Color("213")).
+				Foreground(lipgloss.Color("0"))
+		}
+		agentCursor = &agentCursorInfo{
+			line:  anim.line,
+			col:   anim.col,
+			style: style,
+		}
+	}
+
 	removedBgColor := lipgloss.Color("52") // dark red
 	removedBg := lipgloss.NewStyle().Background(removedBgColor)
 	removedGutterSt := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Background(removedBgColor)
@@ -182,7 +206,7 @@ func (m *EditorModel) Render() string {
 				output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
 			} else {
-				output[visualRow] = m.renderNormalLine(vLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor)
+				output[visualRow] = m.renderNormalLine(vLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor, agentCursor)
 				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineNormal, bufLine: vLine})
 			}
 			continue
@@ -195,7 +219,7 @@ func (m *EditorModel) Render() string {
 		switch {
 		case vLine < overlay.StartLine:
 			// Normal line before diff.
-			output[visualRow] = m.renderNormalLine(vLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor)
+			output[visualRow] = m.renderNormalLine(vLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor, agentCursor)
 			m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineNormal, bufLine: vLine})
 
 		case vLine <= overlay.EndLine:
@@ -216,7 +240,7 @@ func (m *EditorModel) Render() string {
 				output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
 			} else {
-				output[visualRow] = m.renderNormalLine(bufLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor)
+				output[visualRow] = m.renderNormalLine(bufLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor, agentCursor)
 				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineNormal, bufLine: bufLine})
 			}
 		}
@@ -274,6 +298,7 @@ func (m *EditorModel) renderNormalLine(
 	lineIdx, gutterW, contentW int,
 	gutterStyle, cursorStyle, selectionStyle lipgloss.Style,
 	showCursor bool,
+	agentCursor *agentCursorInfo,
 ) string {
 	var line strings.Builder
 
@@ -290,6 +315,22 @@ func (m *EditorModel) renderNormalLine(
 		displayCursorCol = bufToDisp[m.CursorCol]
 		if displayCursorCol >= contentW && contentW > 0 {
 			displayCursorCol = contentW - 1
+		}
+	}
+
+	// Agent cursor in display coords.
+	displayAgentCol := -1
+	var agentStyle lipgloss.Style
+	if agentCursor != nil && lineIdx == agentCursor.line {
+		agentStyle = agentCursor.style
+		if agentCursor.col >= 0 && agentCursor.col <= len(rawRunes) {
+			displayAgentCol = bufToDisp[agentCursor.col]
+		} else if agentCursor.col > len(rawRunes) {
+			// Past end of line — show at end
+			displayAgentCol = bufToDisp[len(rawRunes)]
+		}
+		if displayAgentCol >= contentW && contentW > 0 {
+			displayAgentCol = contentW - 1
 		}
 	}
 
@@ -329,10 +370,14 @@ func (m *EditorModel) renderNormalLine(
 	for j := range contentW {
 		ch := string(displayed[j])
 		isCursor := j == displayCursorCol
+		isAgent := j == displayAgentCol
 		isSel := m.SelectionActive && m.IsSelected(lineIdx, dispToBuf[j])
 
 		if isCursor {
+			// Dev cursor is sovereign — always takes visual priority.
 			line.WriteString(cursorStyle.Render(ch))
+		} else if isAgent {
+			line.WriteString(agentStyle.Render(ch))
 		} else if isSel {
 			line.WriteString(selectionStyle.Render(ch))
 		} else if charStyles[j].GetForeground() != nil {
@@ -477,11 +522,14 @@ func (m *EditorModel) renderStatusBar() string {
 		left += "  " + m.StatusMsg
 	}
 
-	// Show overlay cursor position when overlay is active.
+	// Show cursor position: overlay, agent animation, or buffer.
 	var right string
-	if m.Overlay != nil && m.Overlay.Active {
+	switch {
+	case m.Overlay != nil && m.Overlay.Active:
 		right = fmt.Sprintf(" +%d:%d ", m.Overlay.Editor.CursorLine+1, m.Overlay.Editor.CursorCol+1)
-	} else {
+	case m.Anim != nil && m.Anim.state == animTyping:
+		right = fmt.Sprintf(" %d:%d  agent:%d:%d ", m.CursorLine+1, m.CursorCol+1, m.Anim.line+1, m.Anim.col+1)
+	default:
 		right = fmt.Sprintf(" %d:%d ", m.CursorLine+1, m.CursorCol+1)
 	}
 

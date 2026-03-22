@@ -521,10 +521,15 @@ func (e *Editor) Save() error {
 	return e.Buf.Save()
 }
 
-// ApplyEdit applies a search-and-replace edit to the buffer.
-// Returns (true, "") on success, or (false, reason) on failure.
-// Edits are grouped for undo and the cursor is moved to the edit location.
-func (e *Editor) ApplyEdit(search, replace string) (bool, string) {
+// EditLocation describes where a search string was found in the buffer.
+type EditLocation struct {
+	Line int // 0-indexed line
+	Col  int // 0-indexed rune column
+}
+
+// LocateEdit finds the unique occurrence of search in the buffer.
+// Returns the location and "" on success, or nil and a reason on failure.
+func (e *Editor) LocateEdit(search string) (*EditLocation, string) {
 	content := e.Buf.Content()
 	count := strings.Count(content, search)
 	switch count {
@@ -539,20 +544,31 @@ func (e *Editor) ApplyEdit(search, replace string) (bool, string) {
 				col++
 			}
 		}
-		searchRunes := len([]rune(search))
-		e.Buf.BeginGroup()
-		e.Buf.Delete(line, col, searchRunes)
-		e.Buf.Insert(line, col, replace)
-		e.Buf.EndGroup()
-		e.ClearSelection()
-		e.MoveCursorTo(line, col)
-		e.MarkDirty()
-		return true, ""
+		return &EditLocation{Line: line, Col: col}, ""
 	case 0:
-		return false, "Edit could not be applied — text not found"
+		return nil, "Edit could not be applied — text not found"
 	default:
-		return false, fmt.Sprintf("Edit could not be applied — %d matches found, expected 1", count)
+		return nil, fmt.Sprintf("Edit could not be applied — %d matches found, expected 1", count)
 	}
+}
+
+// ApplyEdit applies a search-and-replace edit to the buffer.
+// Returns (true, "") on success, or (false, reason) on failure.
+// Edits are grouped for undo and the cursor is moved to the edit location.
+func (e *Editor) ApplyEdit(search, replace string) (bool, string) {
+	loc, reason := e.LocateEdit(search)
+	if loc == nil {
+		return false, reason
+	}
+	searchRunes := len([]rune(search))
+	e.Buf.BeginGroup()
+	e.Buf.Delete(loc.Line, loc.Col, searchRunes)
+	e.Buf.Insert(loc.Line, loc.Col, replace)
+	e.Buf.EndGroup()
+	e.ClearSelection()
+	e.MoveCursorTo(loc.Line, loc.Col)
+	e.MarkDirty()
+	return true, ""
 }
 
 // --- Highlight ---

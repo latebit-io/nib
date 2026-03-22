@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/latebit-io/junto/engine/agent"
@@ -80,6 +81,13 @@ func main() {
 	sess := session.New(e, ag, agentEvents)
 
 	app := ui.NewApp(sess)
+
+	// Agent typing speed (words per minute)
+	if wpmStr := os.Getenv("JUNTO_TYPING_WPM"); wpmStr != "" {
+		if wpm, err := strconv.Atoi(wpmStr); err == nil && wpm > 0 {
+			app.Editor.TypingWPM = wpm
+		}
+	}
 	p := tea.NewProgram(&app,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),

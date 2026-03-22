@@ -170,6 +170,10 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 			m.Editor.ScrollOffset = target
 			m.Editor.syncExtraVisualLines()
 			m.Editor.ClampScroll()
+		} else {
+			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
+			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
+			m.Session.RejectEdit()
 		}
 	case agent.ErrorEvent:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
@@ -245,24 +249,17 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit != nil, "agent", m.Session.HasAgent())
-		if m.Session.PendingEdit != nil {
+		if m.Session.PendingEdit != nil && m.Editor.Overlay != nil {
 			// Build the final search/replace from the overlay.
 			// The search is the full affected buffer lines; the replace is
 			// the overlay content (possibly modified by the developer).
-			var search, replace string
-			if m.Editor.Overlay != nil {
-				o := m.Editor.Overlay
-				var oldLines []string
-				for i := o.StartLine; i <= o.EndLine; i++ {
-					oldLines = append(oldLines, m.Editor.Buf.LineText(i))
-				}
-				search = strings.Join(oldLines, "\n")
-				replace = o.Content()
-			} else {
-				// No overlay (diff computation failed) — use original values.
-				search = m.Session.PendingEdit.Search
-				replace = m.Session.PendingEdit.Replace
+			o := m.Editor.Overlay
+			var oldLines []string
+			for i := o.StartLine; i <= o.EndLine; i++ {
+				oldLines = append(oldLines, m.Editor.Buf.LineText(i))
 			}
+			search := strings.Join(oldLines, "\n")
+			replace := o.Content()
 			slog.Debug("overlay cleared", "reason", "approve",
 				"searchLen", len(search), "replaceLen", len(replace))
 			m.clearEditorOverlay()

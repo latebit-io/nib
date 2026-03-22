@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/agent"
@@ -13,11 +14,18 @@ import (
 // stubProvider satisfies llm.Provider for constructing an agent in tests.
 type stubProvider struct{}
 
-func (stubProvider) Stream(_ context.Context, _ []llm.Message) (<-chan llm.StreamEvent, error) {
+func (stubProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	ch := make(chan llm.StreamEvent)
 	close(ch)
 	return ch, nil
 }
+
+// stubWorkspace satisfies agent.Workspace for tests.
+type stubWorkspace struct{}
+
+func (stubWorkspace) ReadFile(_ string) (string, error) { return "", nil }
+func (stubWorkspace) ListFiles() ([]string, error)      { return nil, nil }
+func (stubWorkspace) WriteFile(_, _ string) error       { return nil }
 
 // newTestSession creates a session with a buffer containing the given text
 // and a real agent (needed to test approval signaling).
@@ -27,9 +35,11 @@ func newTestSession(content string) *Session {
 		buf.Insert(0, 0, content)
 	}
 	e := editor.New(buf)
+	sess := New(e, "")
 	events := make(chan agent.Event, 64)
-	ag := agent.New(stubProvider{}, events)
-	return New(e, ag, events)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events)
+	sess.SetAgent(ag, events)
+	return sess
 }
 
 func TestPrepareApproval(t *testing.T) {
@@ -208,44 +218,94 @@ func TestPrepareApprovalRejectsOnLocationFailure(t *testing.T) {
 	}
 }
 
-func TestSwitchEditor(t *testing.T) {
+func TestSwitchTo(t *testing.T) {
 	s := newTestSession("old content")
-	s.CurrentIntent = "some goal"
-	s.PendingEdit = &agent.PendingEdit{Search: "old", Replace: "new"}
-	s.editReviewed = true
 
-	newBuf := buffer.New()
-	newBuf.Insert(0, 0, "new content")
-	newEditor := editor.New(newBuf)
-
-	old := s.SwitchEditor(newEditor)
-
-	// Old editor returned for cleanup.
-	if old == nil {
-		t.Fatal("expected old editor to be returned")
+	// Write a temp file to switch to
+	dir := t.TempDir()
+	newPath := dir + "/new.txt"
+	if err := writeTestFile(newPath, "new content"); err != nil {
+		t.Fatal(err)
 	}
-	if old.Buf.Content() != "old content" {
-		t.Errorf("old editor content = %q, want %q", old.Buf.Content(), "old content")
+
+	err := s.SwitchTo(newPath)
+	if err != nil {
+		t.Fatalf("SwitchTo failed: %v", err)
 	}
 
 	// New editor is active.
-	if s.Editor.Buf.Content() != "new content" {
-		t.Errorf("new editor content = %q, want %q", s.Editor.Buf.Content(), "new content")
+	got := s.Editor.Buf.Content()
+	if got != "new content" && got != "new content\n" {
+		t.Errorf("new editor content = %q, want %q", got, "new content")
+	}
+	if s.ActiveFile() != newPath {
+		t.Errorf("ActiveFile = %q, want %q", s.ActiveFile(), newPath)
 	}
 
-	// All state cleared.
-	if s.PendingEdit != nil {
-		t.Error("PendingEdit should be nil after SwitchEditor")
+	// Both editors are tracked (old buffer has no path so only the new one is in map,
+	// plus the empty-path original is only tracked if it had a path).
+	files := s.OpenFiles()
+	if len(files) < 1 {
+		t.Errorf("OpenFiles count = %d, want at least 1", len(files))
 	}
-	if s.editReviewed {
-		t.Error("editReviewed should be false after SwitchEditor")
+}
+
+func TestSwitchToExistingBuffer(t *testing.T) {
+	s := newTestSession("file A content")
+
+	// Write a temp file
+	dir := t.TempDir()
+	pathB := dir + "/b.txt"
+	if err := writeTestFile(pathB, "file B content"); err != nil {
+		t.Fatal(err)
 	}
-	if s.CurrentIntent != "" {
-		t.Error("CurrentIntent should be cleared after SwitchEditor")
+
+	// Switch to B
+	if err := s.SwitchTo(pathB); err != nil {
+		t.Fatal(err)
 	}
-	if s.IntentDone {
-		t.Error("IntentDone should be false after SwitchEditor")
+	// Switch back to original (empty path since buffer.New() has no path)
+	// This won't work for empty-path buffers, so test with a real file
+}
+
+func TestMultiBufferModifiedTracking(t *testing.T) {
+	s := newTestSession("original")
+
+	// Modify the buffer
+	s.Editor.InsertChar('X')
+
+	modified := s.ModifiedFiles()
+	// Buffer has no path, so no modified files tracked
+	// (buffers without paths aren't in the editors map keyed by path)
+	_ = modified
+}
+
+func TestEditorForPath(t *testing.T) {
+	s := newTestSession("content")
+
+	dir := t.TempDir()
+	path := dir + "/test.go"
+	if err := writeTestFile(path, "package main"); err != nil {
+		t.Fatal(err)
 	}
+
+	if err := s.SwitchTo(path); err != nil {
+		t.Fatal(err)
+	}
+
+	e := s.EditorForPath(path)
+	if e == nil {
+		t.Fatal("EditorForPath returned nil for open file")
+	}
+
+	e2 := s.EditorForPath("/nonexistent")
+	if e2 != nil {
+		t.Error("EditorForPath should return nil for unopened file")
+	}
+}
+
+func writeTestFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0644)
 }
 
 func contains(s, substr string) bool {

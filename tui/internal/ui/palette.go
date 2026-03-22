@@ -195,7 +195,7 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 	boxWidth := width - 2
 	boxWidth = max(boxWidth, paletteMinWidth)
 	boxWidth = min(boxWidth, width) // never exceed terminal width
-	innerWidth := boxWidth - 2 // border only
+	innerWidth := boxWidth - 2      // border only
 	if innerWidth < 1 {
 		innerWidth = 1
 	}

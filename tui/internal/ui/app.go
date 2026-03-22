@@ -9,7 +9,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/engine/agent"
-	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/session"
@@ -225,6 +224,8 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
 			m.Session.RejectEdit()
 		}
+	case agent.FileCreatedEvent:
+		m.AgentPane.AppendMeta("\n[Created: " + e.Path + "]\n")
 	case agent.ErrorEvent:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.cancelAnimation()
@@ -432,38 +433,26 @@ func (m *AppModel) View() string {
 	return base
 }
 
-// openFile switches the editor to a new file. All domain logic is in the
-// engine (buffer.NewFromFile, editor.New, session.SwitchEditor). This method
-// is purely the TUI adapter — it rebuilds the EditorModel and updates the
-// region manager.
+// openFile switches the editor to a different file. Uses session.SwitchTo
+// which keeps editors alive in the multi-buffer map. This method rebuilds
+// the EditorModel and updates the region manager.
 func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
-	buf, err := buffer.NewFromFile(path)
-	if err != nil {
+	if err := m.Session.SwitchTo(path); err != nil {
 		slog.Error("failed to open file", "path", path, "err", err)
 		m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
 		return m, nil
 	}
 
-	newEditor := editor.New(buf)
-
-	// Switch in session — cancels agent, clears state.
-	oldEditor := m.Session.SwitchEditor(newEditor)
-	oldEditor.Close()
-
 	// Cancel any running animation.
 	m.cancelAnimation()
 
-	// Rebuild EditorModel with the new engine editor.
+	// Rebuild EditorModel with the new active editor from session.
 	wpm := m.Editor.TypingWPM
-	m.Editor = NewEditorModel(newEditor, m.Keymap, m.Services)
+	m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
 	m.Editor.TypingWPM = wpm
 
 	// Update region manager's pane reference and apply size.
 	m.Regions.ReplacePane("editor", m.Editor)
-
-	// Clear agent pane — old conversation references the previous file.
-	m.AgentPane.Clear()
-	m.AgentPane.Status = "idle"
 
 	slog.Debug("file opened", "path", path)
 	return m, nil

@@ -51,7 +51,7 @@ type chatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
 	Stream   bool      `json:"stream"`
-	Tools    []toolDef `json:"tools,omitempty"`
+	Tools    []ToolDef `json:"tools,omitempty"`
 }
 
 type sseChunk struct {
@@ -78,12 +78,12 @@ type sseDeltaCall struct {
 }
 
 // Stream sends a chat completion request and returns a channel of streaming events.
-func (a *AgentAPI) Stream(ctx context.Context, messages []Message) (<-chan StreamEvent, error) {
+func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:    a.model,
 		Messages: messages,
 		Stream:   true,
-		Tools:    defaultTools,
+		Tools:    tools,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)

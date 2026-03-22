@@ -30,6 +30,7 @@ type PaletteModel struct {
 	Active       bool
 	Query        string
 	Items        []PaletteItem
+	labels       []string // cached labels for fuzzy filtering
 	Filtered     []fuzzy.Match
 	Selected     int
 	ScrollOffset int
@@ -78,18 +79,19 @@ func (p *PaletteModel) Open(items []PaletteItem) {
 	p.Selected = 0
 	p.ScrollOffset = 0
 
-	// Build labels for fuzzy filtering.
-	labels := make([]string, len(items))
+	// Cache labels for reuse across refilter calls.
+	p.labels = make([]string, len(items))
 	for i, item := range items {
-		labels[i] = item.Label
+		p.labels[i] = item.Label
 	}
-	p.Filtered = fuzzy.Filter("", labels)
+	p.Filtered = fuzzy.Filter("", p.labels)
 }
 
 // Close deactivates the palette.
 func (p *PaletteModel) Close() {
 	p.Active = false
 	p.Items = nil
+	p.labels = nil
 	p.Filtered = nil
 	p.Query = ""
 }
@@ -145,11 +147,7 @@ func (p *PaletteModel) Update(msg tea.KeyMsg) tea.Cmd {
 
 // refilter updates the filtered results based on the current query.
 func (p *PaletteModel) refilter() {
-	labels := make([]string, len(p.Items))
-	for i, item := range p.Items {
-		labels[i] = item.Label
-	}
-	p.Filtered = fuzzy.Filter(p.Query, labels)
+	p.Filtered = fuzzy.Filter(p.Query, p.labels)
 	p.Selected = 0
 	p.ScrollOffset = 0
 }

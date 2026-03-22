@@ -120,13 +120,12 @@ func (s *Session) EditorForPath(path string) *editor.Editor {
 // These methods satisfy the agent.Workspace interface, giving tools
 // access to open buffers and the filesystem.
 
-// ReadFile returns a file's content. Checks open buffers first, then disk.
+// ReadFile returns a file's content from disk. This method is called from
+// the agent goroutine (via Workspace interface), so it must not touch
+// session state (editors map, buffers) to avoid data races with the TUI
+// goroutine. The agent's FileCache handles in-flight content; this method
+// is only called for files not yet cached.
 func (s *Session) ReadFile(path string) (string, error) {
-	// Check open buffers first (may have unsaved changes)
-	if e, ok := s.editors[s.canonPath(path)]; ok {
-		return e.Buf.Content(), nil
-	}
-	// Read from disk, resolving relative to project root
 	absPath, err := s.resolvePath(path)
 	if err != nil {
 		return "", err

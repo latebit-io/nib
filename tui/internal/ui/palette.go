@@ -224,7 +224,7 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 
 	// Results list.
 	maxVis := p.maxVisible()
-	var resultLines []string
+	resultLines := make([]string, 0, maxVis)
 	end := p.ScrollOffset + maxVis
 	if end > len(p.Filtered) {
 		end = len(p.Filtered)
@@ -237,8 +237,9 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 		resultLines = append(resultLines, line)
 	}
 
+	blankLine := strings.Repeat(" ", innerWidth)
 	for len(resultLines) < maxVis {
-		resultLines = append(resultLines, strings.Repeat(" ", innerWidth))
+		resultLines = append(resultLines, blankLine)
 	}
 
 	footer := paletteDimStyle.Render(fmt.Sprintf(" %d / %d", len(p.Filtered), len(p.Items)))

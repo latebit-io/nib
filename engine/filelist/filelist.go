@@ -14,8 +14,12 @@ import (
 
 const maxFiles = 50000
 
-// errFileCap is a sentinel error used to stop traversal when the file cap is hit.
+// errFileCap is an internal sentinel used to stop traversal.
 var errFileCap = errors.New("file listing capped")
+
+// ErrCapped is returned by Walk when the file count exceeds the cap.
+// The returned file list is partial but usable.
+var ErrCapped = errors.New("file listing capped at 50000 files — results may be incomplete")
 
 // Walk returns all regular files under root, respecting .gitignore rules.
 // Paths are relative to root with forward slashes. The .git directory is
@@ -26,6 +30,8 @@ func Walk(root string) ([]string, error) {
 	err := walk(root, "", nil, &files)
 	if err == errFileCap {
 		slog.Warn("file listing capped", "max", maxFiles)
+		sort.Strings(files)
+		return files, ErrCapped
 	} else if err != nil {
 		return nil, err
 	}

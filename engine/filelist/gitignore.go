@@ -36,6 +36,9 @@ type pattern struct {
 func loadGitignore(path, relDir string) *matcher {
 	f, err := os.Open(path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("failed to open .gitignore", "path", path, "err", err)
+		}
 		return nil
 	}
 	defer func() { _ = f.Close() }()

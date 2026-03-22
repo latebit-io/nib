@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -380,7 +381,7 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			root := m.ProjectRoot
 			return m, func() tea.Msg {
 				files, err := filelist.Walk(root)
-				if err != nil {
+				if err != nil && !errors.Is(err, filelist.ErrCapped) {
 					return paletteErrorMsg{err: err.Error()}
 				}
 				items := make([]PaletteItem, len(files))

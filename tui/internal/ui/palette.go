@@ -42,7 +42,7 @@ type PaletteModel struct {
 const (
 	paletteMinWidth     = 40
 	paletteMaxVisible   = 15
-	paletteInputHeight  = 3 // border + input + border
+	paletteInputHeight  = 2 // input line + separator line (outer border is separate)
 	paletteFooterHeight = 1
 )
 
@@ -191,7 +191,7 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 	p.Width = width
 	p.Height = height
 
-	// Full-width palette — no blank side gaps.
+	// Near-full-width palette with 1-char margin on each side.
 	boxWidth := width - 2
 	boxWidth = max(boxWidth, paletteMinWidth)
 	boxWidth = min(boxWidth, width) // never exceed terminal width

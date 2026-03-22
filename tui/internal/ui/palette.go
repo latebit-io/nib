@@ -247,7 +247,7 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 	footer := paletteDimStyle.Render(fmt.Sprintf(" %d / %d", len(p.Filtered), len(p.Items)))
 
 	content := " " + inputRendered + "\n" +
-		strings.Repeat("─", innerWidth) + "\n" +
+		" " + strings.Repeat("─", max(0, innerWidth-1)) + "\n" +
 		strings.Join(resultLines, "\n") + "\n" +
 		" " + footer
 

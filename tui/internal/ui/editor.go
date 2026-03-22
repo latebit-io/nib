@@ -63,8 +63,13 @@ type EditorModel struct {
 	// Animated agent typing (nil when no animation is active)
 	Anim *animationContext
 
-	// TypingWPM controls the agent typing speed. 0 uses the default (300).
+	// TypingWPM controls the agent typing speed. 0 uses the default (500).
 	TypingWPM int
+
+	// cursorMoved is set when the cursor position changes and cleared after
+	// Render. Used to avoid snapping scroll on every frame — only snap when
+	// the cursor actually moved, allowing free scrolling during diff review.
+	cursorMoved bool
 
 	// Viewport mapping rebuilt each Render() for mouse click resolution.
 	viewportMap []viewportEntry
@@ -85,6 +90,8 @@ func (m *EditorModel) Update(msg tea.Msg) tea.Cmd {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
+		// Any key event may move the cursor — mark for scroll adjustment.
+		m.cursorMoved = true
 		return m.handleKey(msg)
 	}
 	return nil
@@ -156,7 +163,10 @@ func (m *EditorModel) syncExtraVisualLines() {
 //
 // When no overlay exists, visual space == buffer space.
 func (m *EditorModel) Render() string {
-	m.ensureCursorVisibleVisual()
+	if m.cursorMoved {
+		m.ensureCursorVisibleVisual()
+		m.cursorMoved = false
+	}
 	m.syncExtraVisualLines()
 	m.ClampScroll()
 
@@ -374,24 +384,70 @@ func (m *EditorModel) renderNormalLine(
 		}
 	}
 
+	// Span-based rendering: batch consecutive characters that share the same
+	// effective style into a single lipgloss.Render call. This reduces overhead
+	// from O(columns) to O(style-transitions) — typically 5-20x fewer calls.
+	//
+	// styleTag classifies each column. Cursors and selection get unique tags;
+	// syntax tokens share a tag when they have the same foreground color.
+	// Plain text (no style) is tag 0.
+	colTags := make([]int, contentW)
+	const (
+		tagPlain  = 0
+		tagCursor = -1
+		tagAgent  = -2
+		tagSel    = -3
+	)
+	// Syntax tokens get positive tags starting at 1, grouped by foreground color.
+	syntaxTagMap := make(map[lipgloss.TerminalColor]int)
+	nextTag := 1
 	for j := range contentW {
-		ch := string(displayed[j])
-		isCursor := j == displayCursorCol
-		isAgent := j == displayAgentCol
-		isSel := m.SelectionActive && m.IsSelected(lineIdx, dispToBuf[j])
-
-		if isCursor {
-			// Dev cursor is sovereign — always takes visual priority.
-			line.WriteString(cursorStyle.Render(ch))
-		} else if isAgent {
-			line.WriteString(agentStyle.Render(ch))
-		} else if isSel {
-			line.WriteString(selectionStyle.Render(ch))
-		} else if charStyles[j].GetForeground() != nil {
-			line.WriteString(charStyles[j].Render(ch))
-		} else {
-			line.WriteString(ch)
+		switch {
+		case j == displayCursorCol:
+			colTags[j] = tagCursor
+		case j == displayAgentCol:
+			colTags[j] = tagAgent
+		case m.SelectionActive && m.IsSelected(lineIdx, dispToBuf[j]):
+			colTags[j] = tagSel
+		case charStyles[j].GetForeground() != nil:
+			fg := charStyles[j].GetForeground()
+			tag, ok := syntaxTagMap[fg]
+			if !ok {
+				tag = nextTag
+				syntaxTagMap[fg] = tag
+				nextTag++
+			}
+			colTags[j] = tag
+		default:
+			colTags[j] = tagPlain
 		}
+	}
+
+	flushSpan := func(start, end int) {
+		text := string(displayed[start:end])
+		switch colTags[start] {
+		case tagCursor:
+			line.WriteString(cursorStyle.Render(text))
+		case tagAgent:
+			line.WriteString(agentStyle.Render(text))
+		case tagSel:
+			line.WriteString(selectionStyle.Render(text))
+		case tagPlain:
+			line.WriteString(text)
+		default:
+			line.WriteString(charStyles[start].Render(text))
+		}
+	}
+
+	if contentW > 0 {
+		spanStart := 0
+		for j := 1; j < contentW; j++ {
+			if colTags[j] != colTags[spanStart] {
+				flushSpan(spanStart, j)
+				spanStart = j
+			}
+		}
+		flushSpan(spanStart, contentW)
 	}
 
 	return line.String()
@@ -443,15 +499,51 @@ func (m *EditorModel) renderRemovedLine(
 		}
 	}
 
-	for j := range contentW {
-		ch := string(displayed[j])
-		if j == displayCursorCol {
-			line.WriteString(cursorStyle.Render(ch))
-		} else if charStyles[j].GetForeground() != nil {
-			line.WriteString(charStyles[j].Background(bgColor).Render(ch))
-		} else {
-			line.WriteString(bgStyle.Render(ch))
+	// Span-based rendering for removed lines.
+	if contentW > 0 {
+		const (
+			rTagBg     = 0
+			rTagCursor = -1
+		)
+		rColTags := make([]int, contentW)
+		rSyntaxMap := make(map[lipgloss.TerminalColor]int)
+		rNextTag := 1
+		for j := range contentW {
+			switch {
+			case j == displayCursorCol:
+				rColTags[j] = rTagCursor
+			case charStyles[j].GetForeground() != nil:
+				fg := charStyles[j].GetForeground()
+				tag, ok := rSyntaxMap[fg]
+				if !ok {
+					tag = rNextTag
+					rSyntaxMap[fg] = tag
+					rNextTag++
+				}
+				rColTags[j] = tag
+			default:
+				rColTags[j] = rTagBg
+			}
 		}
+		rFlush := func(start, end int) {
+			text := string(displayed[start:end])
+			switch rColTags[start] {
+			case rTagCursor:
+				line.WriteString(cursorStyle.Render(text))
+			case rTagBg:
+				line.WriteString(bgStyle.Render(text))
+			default:
+				line.WriteString(charStyles[start].Background(bgColor).Render(text))
+			}
+		}
+		spanStart := 0
+		for j := 1; j < contentW; j++ {
+			if rColTags[j] != rColTags[spanStart] {
+				rFlush(spanStart, j)
+				spanStart = j
+			}
+		}
+		rFlush(spanStart, contentW)
 	}
 
 	return line.String()
@@ -492,18 +584,43 @@ func (m *EditorModel) renderAddedLine(
 		}
 	}
 
-	for j := range contentW {
-		ch := string(displayed[j])
-		isCursor := j == displayCursorCol
-		isSel := oe.SelectionActive && oe.IsSelected(overlayIdx, dispToBuf[j])
-
-		if isCursor {
-			line.WriteString(cursorStyle.Render(ch))
-		} else if isSel {
-			line.WriteString(selectionStyle.Render(ch))
-		} else {
-			line.WriteString(bgStyle.Render(ch))
+	// Span-based rendering for added lines.
+	if contentW > 0 {
+		const (
+			aTagBg     = 0
+			aTagCursor = -1
+			aTagSel    = -2
+		)
+		aColTags := make([]int, contentW)
+		for j := range contentW {
+			switch {
+			case j == displayCursorCol:
+				aColTags[j] = aTagCursor
+			case oe.SelectionActive && oe.IsSelected(overlayIdx, dispToBuf[j]):
+				aColTags[j] = aTagSel
+			default:
+				aColTags[j] = aTagBg
+			}
 		}
+		aFlush := func(start, end int) {
+			text := string(displayed[start:end])
+			switch aColTags[start] {
+			case aTagCursor:
+				line.WriteString(cursorStyle.Render(text))
+			case aTagSel:
+				line.WriteString(selectionStyle.Render(text))
+			default:
+				line.WriteString(bgStyle.Render(text))
+			}
+		}
+		spanStart := 0
+		for j := 1; j < contentW; j++ {
+			if aColTags[j] != aColTags[spanStart] {
+				aFlush(spanStart, j)
+				spanStart = j
+			}
+		}
+		aFlush(spanStart, contentW)
 	}
 
 	return line.String()
@@ -574,6 +691,9 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	if msg.Button != tea.MouseButtonLeft || msg.Y >= m.VisibleLines() {
 		return nil
 	}
+
+	// Mouse click moves the cursor — mark for scroll adjustment.
+	m.cursorMoved = true
 
 	gutterW := m.GutterWidth()
 	displayCol := msg.X - gutterW

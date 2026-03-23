@@ -65,6 +65,13 @@ type Session struct {
 // session-as-workspace and agent-needing-workspace).
 // The projectRoot is used for file listing and resolving relative paths.
 func New(e *editor.Editor, projectRoot string) *Session {
+	// Normalize to absolute so CanonPath/resolvePath work regardless of
+	// whether the caller passes ".", a relative path, or an absolute path.
+	if absRoot, err := filepath.Abs(projectRoot); err == nil {
+		projectRoot = filepath.Clean(absRoot)
+	} else {
+		projectRoot = filepath.Clean(projectRoot)
+	}
 	editors := make(map[string]*editor.Editor)
 	s := &Session{
 		Editor:      e,
@@ -136,28 +143,16 @@ func (s *Session) EditorForPath(path string) *editor.Editor {
 // These methods satisfy the agent.Workspace interface, giving tools
 // access to open buffers and the filesystem.
 
-// ReadFile returns a file's content. Checks open buffers first (which may
-// have unsaved changes), then falls back to disk. Called from the agent
-// goroutine via Workspace — uses mu to safely access the editors map.
+// ReadFile returns a file's content from disk. Called from the agent goroutine
+// via Workspace — reads from disk only to avoid data races with TUI-side
+// buffer mutations. The agent's FileCache is the source of truth for
+// in-flight content (seeded by Run, updated by Continue). This method is
+// only called for files not yet in the cache.
 func (s *Session) ReadFile(path string) (string, error) {
 	absPath, err := s.resolvePath(path)
 	if err != nil {
 		return "", err
 	}
-
-	// Check open buffers first (may have unsaved changes).
-	canon := s.CanonPath(path)
-	s.mu.RLock()
-	e, ok := s.editors[canon]
-	s.mu.RUnlock()
-	if ok {
-		// Copy content under no lock — Buffer.Content() builds a new string
-		// from the line array, so this is a snapshot. In the current design
-		// only one goroutine mutates a given buffer at a time (the TUI owns
-		// the active buffer, the agent waits on approval channels).
-		return e.Buf.Content(), nil
-	}
-
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
@@ -465,7 +460,10 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 		s.editReviewed = false
 		return false, "file not open"
 	}
-	editPath := s.CanonPath(s.PendingEdit.Path)
+	editPath := s.activeFile
+	if s.PendingEdit.Path != "" {
+		editPath = s.CanonPath(s.PendingEdit.Path)
+	}
 	ok, reason := e.ApplyEdit(search, replace)
 	if ok {
 		s.lastEditedFile = editPath
@@ -525,7 +523,11 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 		s.editReviewed = false
 		return nil, errors.New(reason)
 	}
-	s.lastEditedFile = s.CanonPath(s.PendingEdit.Path)
+	if s.PendingEdit.Path != "" {
+		s.lastEditedFile = s.CanonPath(s.PendingEdit.Path)
+	} else {
+		s.lastEditedFile = s.activeFile
+	}
 	s.PendingEdit = nil
 	s.editReviewed = false
 	return &AnimationPlan{

@@ -1,5 +1,7 @@
 package editor
 
+import "github.com/latebit-io/junto/engine/buffer"
+
 // IncrementalEdit manages a character-by-character edit on a buffer.
 // It encapsulates the undo group lifecycle, position tracking, and
 // per-tick advancement so that frontends only need to call Advance on
@@ -24,6 +26,9 @@ type IncrementalEdit struct {
 	typed        int
 	charsPerTick int
 
+	// Origin to apply to affected lines on Complete. Nil means no origin change.
+	origin *buffer.Origin
+
 	groupOpen bool
 	completed bool
 }
@@ -39,7 +44,9 @@ type AdvanceResult struct {
 // BeginIncrementalEdit starts an incremental edit at (line, col).
 // It opens an undo group, deletes searchRunes runes, and prepares to insert
 // the replacement text at charsPerTick characters per Advance call.
-func (e *Editor) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, replace string) *IncrementalEdit {
+// If origin is non-nil, Complete will mark all affected lines with that origin
+// (inside the undo group, so it's atomic with the text changes).
+func (e *Editor) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, replace string, origin *buffer.Origin) *IncrementalEdit {
 	e.Buf.BeginGroup()
 	e.Buf.Delete(line, col, searchRunes)
 	e.MarkDirty()
@@ -56,6 +63,7 @@ func (e *Editor) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, 
 		startCol:     col,
 		replaceRunes: []rune(replace),
 		charsPerTick: charsPerTick,
+		origin:       origin,
 		groupOpen:    true,
 	}
 }
@@ -135,9 +143,17 @@ func (ie *IncrementalEdit) StartPosition() (line, col int) {
 }
 
 // Complete closes the undo group. The edit is final and undoable as one unit.
+// If an origin was provided, all lines in the edited range are marked with
+// that origin before the group closes (atomic with the text changes).
 func (ie *IncrementalEdit) Complete() {
 	if ie.completed {
 		return
+	}
+	// Set origin on all affected lines before closing the group
+	if ie.origin != nil && ie.groupOpen {
+		for i := ie.startLine; i <= ie.line && i < ie.editor.Buf.LineCount(); i++ {
+			ie.editor.Buf.SetLineOrigin(i, *ie.origin)
+		}
 	}
 	if ie.groupOpen {
 		ie.editor.Buf.EndGroup()
@@ -148,9 +164,15 @@ func (ie *IncrementalEdit) Complete() {
 
 // Abort closes the undo group without finishing. The partial edit remains
 // in the buffer and is undoable as one unit via Ctrl+Z.
+// Origin is still applied to lines that were touched before the abort.
 func (ie *IncrementalEdit) Abort() {
 	if ie.completed {
 		return
+	}
+	if ie.origin != nil && ie.groupOpen {
+		for i := ie.startLine; i <= ie.line && i < ie.editor.Buf.LineCount(); i++ {
+			ie.editor.Buf.SetLineOrigin(i, *ie.origin)
+		}
 	}
 	if ie.groupOpen {
 		ie.editor.Buf.EndGroup()

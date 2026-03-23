@@ -74,6 +74,10 @@ type Session struct {
 	// This enforces the contract: every frontend must compute and present
 	// the diff before approving — no blind approvals.
 	editReviewed bool
+
+	// modifiedFiles tracks files changed by agent edits this session.
+	// Canonical absolute paths as keys. Guarded by mu.
+	modifiedFiles map[string]bool
 }
 
 // New creates a session in editor-only mode. Call SetAgent to enable the
@@ -91,10 +95,11 @@ func New(e *editor.Editor, projectRoot string) *Session {
 	editors := make(map[string]*editor.Editor)
 	contextSet := make(map[string]bool)
 	s := &Session{
-		Editor:      e,
-		editors:     editors,
-		contextSet:  contextSet,
-		projectRoot: projectRoot,
+		Editor:        e,
+		editors:       editors,
+		contextSet:    contextSet,
+		modifiedFiles: make(map[string]bool),
+		projectRoot:   projectRoot,
 	}
 	if e != nil && e.Buf.Path != "" {
 		if _, err := s.resolvePath(e.Buf.Path); err != nil {
@@ -168,6 +173,35 @@ func (s *Session) EditorForPath(path string) *editor.Editor {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.editors[s.CanonPath(path)]
+}
+
+// --- Provenance ---
+
+// FileStatus returns the provenance status of a file.
+// inContext: the file is in the agent's context set (editable by agent).
+// agentModified: the file was modified by an agent edit this session.
+func (s *Session) FileStatus(path string) (inContext, agentModified bool) {
+	canon := s.CanonPath(path)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.contextSet[canon], s.modifiedFiles[canon]
+}
+
+// AgentModifiedFiles returns paths of files modified by agent edits this
+// session, as sorted relative paths.
+func (s *Session) AgentModifiedFiles() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	files := make([]string, 0, len(s.modifiedFiles))
+	for path := range s.modifiedFiles {
+		rel, err := filepath.Rel(s.projectRoot, path)
+		if err != nil {
+			rel = path
+		}
+		files = append(files, rel)
+	}
+	sort.Strings(files)
+	return files
 }
 
 // --- Context Set ---
@@ -652,9 +686,13 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	if s.PendingEdit.Path != "" {
 		editPath = s.CanonPath(s.PendingEdit.Path)
 	}
-	ok, reason := e.ApplyEdit(search, replace)
+	agentOrigin := buffer.OriginAgent
+	ok, reason := e.ApplyEdit(search, replace, &agentOrigin)
 	if ok {
 		s.lastEditedFile = editPath
+		s.mu.Lock()
+		s.modifiedFiles[editPath] = true
+		s.mu.Unlock()
 		s.agent.Approve()
 	} else {
 		s.agent.Reject()
@@ -732,6 +770,11 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 func (s *Session) CompleteApproval() {
 	if s.HasAgent() {
 		s.lastEditedFile = s.stagedEditFile
+		if s.stagedEditFile != "" {
+			s.mu.Lock()
+			s.modifiedFiles[s.stagedEditFile] = true
+			s.mu.Unlock()
+		}
 		s.stagedEditFile = ""
 		s.agent.Approve()
 	}

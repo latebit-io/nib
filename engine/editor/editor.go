@@ -380,6 +380,7 @@ func (e *Editor) DeleteSelection() {
 	text := e.SelectedText()
 	sl, sc, _, _ := e.SelectedRange()
 	e.Buf.Delete(sl, sc, len([]rune(text)))
+	e.Buf.ResetOriginToDeveloper(sl)
 	e.CursorLine = sl
 	e.CursorCol = sc
 	e.SelectionActive = false
@@ -410,6 +411,7 @@ func (e *Editor) IsSelected(line, col int) bool {
 // InsertChar inserts a character at the cursor position.
 func (e *Editor) InsertChar(ch rune) {
 	e.Buf.Insert(e.CursorLine, e.CursorCol, string(ch))
+	e.Buf.ResetOriginToDeveloper(e.CursorLine)
 	e.CursorCol++
 	e.MarkDirty()
 }
@@ -432,7 +434,9 @@ func (e *Editor) InsertNewline() {
 	}
 
 	e.Buf.Insert(e.CursorLine, e.CursorCol, "\n"+indent)
+	e.Buf.ResetOriginToDeveloper(e.CursorLine)
 	e.CursorLine++
+	e.Buf.ResetOriginToDeveloper(e.CursorLine)
 	e.CursorCol = len([]rune(indent))
 	e.MarkDirty()
 	e.EnsureCursorVisible()
@@ -441,6 +445,7 @@ func (e *Editor) InsertNewline() {
 // InsertTab inserts a tab (4 spaces) at the cursor.
 func (e *Editor) InsertTab() {
 	e.Buf.Insert(e.CursorLine, e.CursorCol, "    ")
+	e.Buf.ResetOriginToDeveloper(e.CursorLine)
 	e.CursorCol += 4
 	e.MarkDirty()
 }
@@ -449,12 +454,14 @@ func (e *Editor) InsertTab() {
 func (e *Editor) Backspace() {
 	if e.CursorCol > 0 {
 		e.Buf.Delete(e.CursorLine, e.CursorCol-1, 1)
+		e.Buf.ResetOriginToDeveloper(e.CursorLine)
 		e.CursorCol--
 		e.MarkDirty()
 	} else if e.CursorLine > 0 {
 		prevLen := e.Buf.LineLen(e.CursorLine - 1)
 		e.Buf.Delete(e.CursorLine-1, prevLen, 1)
 		e.CursorLine--
+		e.Buf.ResetOriginToDeveloper(e.CursorLine)
 		e.CursorCol = prevLen
 		e.MarkDirty()
 	}
@@ -466,9 +473,11 @@ func (e *Editor) DeleteChar() {
 	lineLen := e.Buf.LineLen(e.CursorLine)
 	if e.CursorCol < lineLen {
 		e.Buf.Delete(e.CursorLine, e.CursorCol, 1)
+		e.Buf.ResetOriginToDeveloper(e.CursorLine)
 		e.MarkDirty()
 	} else if e.CursorLine < e.Buf.LineCount()-1 {
 		e.Buf.Delete(e.CursorLine, e.CursorCol, 1)
+		e.Buf.ResetOriginToDeveloper(e.CursorLine)
 		e.MarkDirty()
 	}
 }
@@ -480,6 +489,7 @@ func (e *Editor) PasteText(text string) {
 	if e.SelectionActive {
 		e.DeleteSelection()
 	}
+	startLine := e.CursorLine
 	e.Buf.Insert(e.CursorLine, e.CursorCol, text)
 	cl, cc := e.CursorLine, e.CursorCol
 	for _, r := range text {
@@ -489,6 +499,10 @@ func (e *Editor) PasteText(text string) {
 		} else {
 			cc++
 		}
+	}
+	// All pasted lines become developer-owned
+	for i := startLine; i <= cl; i++ {
+		e.Buf.ResetOriginToDeveloper(i)
 	}
 	e.MoveCursorTo(cl, cc)
 	e.MarkDirty()
@@ -555,7 +569,9 @@ func (e *Editor) LocateEdit(search string) (*EditLocation, string) {
 // ApplyEdit applies a search-and-replace edit to the buffer.
 // Returns (true, "") on success, or (false, reason) on failure.
 // Edits are grouped for undo and the cursor is moved to the edit location.
-func (e *Editor) ApplyEdit(search, replace string) (bool, string) {
+// If origin is non-nil, all affected lines are marked with that origin
+// (atomically within the undo group).
+func (e *Editor) ApplyEdit(search, replace string, origin *buffer.Origin) (bool, string) {
 	loc, reason := e.LocateEdit(search)
 	if loc == nil {
 		return false, reason
@@ -563,7 +579,11 @@ func (e *Editor) ApplyEdit(search, replace string) (bool, string) {
 	searchRunes := len([]rune(search))
 	e.Buf.BeginGroup()
 	e.Buf.Delete(loc.Line, loc.Col, searchRunes)
-	e.Buf.Insert(loc.Line, loc.Col, replace)
+	if origin != nil {
+		e.Buf.InsertWithOrigin(loc.Line, loc.Col, replace, *origin)
+	} else {
+		e.Buf.Insert(loc.Line, loc.Col, replace)
+	}
 	e.Buf.EndGroup()
 	e.ClearSelection()
 	e.MoveCursorTo(loc.Line, loc.Col)

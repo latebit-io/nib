@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/session"
@@ -565,7 +566,8 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	searchRunes := len([]rune(plan.Search))
 	cpt := charsPerTick(m.Editor.TypingWPM)
 	devStartLine, devStartCol := m.Editor.CursorLine, m.Editor.CursorCol
-	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace)
+	agentOrigin := buffer.OriginAgent
+	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, &agentOrigin)
 
 	m.Editor.Anim = &animationContext{
 		state:        animTyping,

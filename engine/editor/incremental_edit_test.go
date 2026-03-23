@@ -18,7 +18,7 @@ func TestIncrementalEdit_BasicFlow(t *testing.T) {
 	e := newTestEditor("hello world")
 
 	// Replace "world" (starts at col 6, 5 runes) with "earth", 1 char/tick
-	ie := e.BeginIncrementalEdit(0, 6, 5, 1, "earth")
+	ie := e.BeginIncrementalEdit(0, 6, 5, 1, "earth", nil)
 
 	if got := e.Buf.Content(); got != "hello " {
 		t.Fatalf("after delete: %q, want %q", got, "hello ")
@@ -56,7 +56,7 @@ func TestIncrementalEdit_MultiCharPerTick(t *testing.T) {
 	e := newTestEditor("old")
 
 	// Replace "old" with "new text", 3 chars/tick
-	ie := e.BeginIncrementalEdit(0, 0, 3, 3, "new text")
+	ie := e.BeginIncrementalEdit(0, 0, 3, 3, "new text", nil)
 
 	// First tick: inserts "new"
 	r1 := ie.Advance()
@@ -89,7 +89,7 @@ func TestIncrementalEdit_NewlinePause(t *testing.T) {
 	e := newTestEditor("x")
 
 	// Replace "x" with "a\nb", 3 chars/tick — newline should stop the tick early
-	ie := e.BeginIncrementalEdit(0, 0, 1, 3, "a\nb")
+	ie := e.BeginIncrementalEdit(0, 0, 1, 3, "a\nb", nil)
 
 	// First tick: inserts "a\n" then stops (newline pause)
 	r1 := ie.Advance()
@@ -115,7 +115,7 @@ func TestIncrementalEdit_NewlinePause(t *testing.T) {
 func TestIncrementalEdit_MultilineInsert(t *testing.T) {
 	e := newTestEditor("func main() {}")
 
-	ie := e.BeginIncrementalEdit(0, 12, 2, 100, "{\n\treturn\n}")
+	ie := e.BeginIncrementalEdit(0, 12, 2, 100, "{\n\treturn\n}", nil)
 
 	// Single tick should insert everything (100 chars/tick > 11 runes)
 	// But newlines cause early stops, so multiple ticks needed.
@@ -146,7 +146,7 @@ func TestIncrementalEdit_MultilineInsert(t *testing.T) {
 func TestIncrementalEdit_Abort(t *testing.T) {
 	e := newTestEditor("abcdef")
 
-	ie := e.BeginIncrementalEdit(0, 2, 2, 1, "XYZ")
+	ie := e.BeginIncrementalEdit(0, 2, 2, 1, "XYZ", nil)
 	ie.Advance() // inserts "X"
 	ie.Abort()
 
@@ -162,7 +162,7 @@ func TestIncrementalEdit_Abort(t *testing.T) {
 
 func TestIncrementalEdit_DoubleComplete(t *testing.T) {
 	e := newTestEditor("test")
-	ie := e.BeginIncrementalEdit(0, 0, 4, 100, "done")
+	ie := e.BeginIncrementalEdit(0, 0, 4, 100, "done", nil)
 	ie.Advance()
 	ie.Complete()
 	ie.Complete() // second call should be safe
@@ -176,7 +176,7 @@ func TestIncrementalEdit_EmptyReplace(t *testing.T) {
 	e := newTestEditor("hello")
 
 	// Pure deletion — 0 replacement chars
-	ie := e.BeginIncrementalEdit(0, 3, 2, 1, "")
+	ie := e.BeginIncrementalEdit(0, 3, 2, 1, "", nil)
 
 	if ie.Remaining() != 0 {
 		t.Errorf("remaining = %d, want 0", ie.Remaining())
@@ -201,7 +201,7 @@ func TestIncrementalEdit_EmptyReplace(t *testing.T) {
 func TestIncrementalEdit_FinishLine(t *testing.T) {
 	e := newTestEditor("old")
 
-	ie := e.BeginIncrementalEdit(0, 0, 3, 1, "abc\ndef")
+	ie := e.BeginIncrementalEdit(0, 0, 3, 1, "abc\ndef", nil)
 	ie.Advance() // inserts "a"
 
 	// FinishLine should insert "bc" and stop before newline.
@@ -221,12 +221,120 @@ func TestIncrementalEdit_FinishLine(t *testing.T) {
 
 func TestIncrementalEdit_AdvanceAfterComplete(t *testing.T) {
 	e := newTestEditor("test")
-	ie := e.BeginIncrementalEdit(0, 0, 4, 1, "new")
+	ie := e.BeginIncrementalEdit(0, 0, 4, 1, "new", nil)
 	ie.Complete()
 
 	// Advance after Complete should report done.
 	result := ie.Advance()
 	if !result.Done {
 		t.Error("advance after complete should be done")
+	}
+}
+
+// --- Origin Tests ---
+
+func TestIncrementalEdit_AgentOrigin(t *testing.T) {
+	e := newTestEditor("old line")
+	agentOrigin := buffer.OriginAgent
+	ie := e.BeginIncrementalEdit(0, 0, 8, 100, "new line", &agentOrigin)
+	ie.Advance()
+	ie.Complete()
+
+	if got := e.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Errorf("origin = %d, want OriginAgent", got)
+	}
+}
+
+func TestIncrementalEdit_AgentOriginMultiLine(t *testing.T) {
+	e := newTestEditor("old")
+	agentOrigin := buffer.OriginAgent
+	ie := e.BeginIncrementalEdit(0, 0, 3, 100, "line1\nline2\nline3", &agentOrigin)
+	for {
+		result := ie.Advance()
+		if result.Done {
+			break
+		}
+	}
+	ie.Complete()
+
+	for i := range 3 {
+		if got := e.Buf.LineOrigin(i); got != buffer.OriginAgent {
+			t.Errorf("line %d: origin = %d, want OriginAgent", i, got)
+		}
+	}
+}
+
+func TestIncrementalEdit_AgentOriginUndoRestores(t *testing.T) {
+	e := newTestEditor("original")
+	agentOrigin := buffer.OriginAgent
+	ie := e.BeginIncrementalEdit(0, 0, 8, 100, "replaced", &agentOrigin)
+	ie.Advance()
+	ie.Complete()
+
+	if got := e.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Fatalf("before undo: origin = %d, want OriginAgent", got)
+	}
+
+	e.Undo()
+	if got := e.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("after undo: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestIncrementalEdit_NilOriginNoChange(t *testing.T) {
+	e := newTestEditor("hello")
+	e.Buf.SetLineOrigin(0, buffer.OriginAgent)
+	// nil origin = don't change origin
+	ie := e.BeginIncrementalEdit(0, 0, 5, 100, "world", nil)
+	ie.Advance()
+	ie.Complete()
+
+	// Origin should still be whatever doInsert propagated (Agent, since parent was Agent)
+	if got := e.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Errorf("origin = %d, want OriginAgent (inherited)", got)
+	}
+}
+
+func TestDeveloperTypingResetsOrigin(t *testing.T) {
+	e := newTestEditor("agent line")
+	e.Buf.SetLineOrigin(0, buffer.OriginAgent)
+
+	// Developer types a character on agent line
+	e.CursorLine = 0
+	e.CursorCol = 5
+	e.InsertChar('X')
+
+	if got := e.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("after InsertChar: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestDeveloperBackspaceResetsOrigin(t *testing.T) {
+	e := newTestEditor("agent line")
+	e.Buf.SetLineOrigin(0, buffer.OriginAgent)
+
+	e.CursorLine = 0
+	e.CursorCol = 5
+	e.Backspace()
+
+	if got := e.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("after Backspace: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestDeveloperNewlineResetsOrigin(t *testing.T) {
+	e := newTestEditor("agent line")
+	e.Buf.SetLineOrigin(0, buffer.OriginAgent)
+
+	e.CursorLine = 0
+	e.CursorCol = 5
+	e.InsertNewline()
+
+	// Both lines should be developer-owned
+	if got := e.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("line 0: origin = %d, want OriginDeveloper", got)
+	}
+	if got := e.Buf.LineOrigin(1); got != buffer.OriginDeveloper {
+		t.Errorf("line 1: origin = %d, want OriginDeveloper", got)
 	}
 }

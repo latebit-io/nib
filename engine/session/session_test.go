@@ -504,3 +504,147 @@ func TestContextSetAutoAddOnWriteFile(t *testing.T) {
 func writeTestFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
 }
+
+// --- Provenance Tests ---
+
+func TestApproveEditMarksAgentOrigin(t *testing.T) {
+	s := newTestSession("old text")
+
+	// Simulate agent proposing an edit
+	s.PendingEdit = &agent.PendingEdit{Search: "old text", Replace: "new text"}
+	s.ReviewEdit()
+
+	// Drain the approve signal in a goroutine (agent.Approve sends to channel)
+	ok, reason := s.ApproveEdit("old text", "new text")
+	if !ok {
+		t.Fatalf("ApproveEdit failed: %s", reason)
+	}
+
+	// Line should be marked as agent-written
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Errorf("line 0 origin = %d, want OriginAgent", got)
+	}
+}
+
+func TestApproveEditTracksModifiedFile(t *testing.T) {
+	root := t.TempDir()
+	filePath := root + "/test.go"
+	if err := writeTestFile(filePath, "old\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := buffer.NewFromFile(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := editor.New(buf)
+	s := New(e, root)
+	events := make(chan agent.Event, 64)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, root)
+	s.SetAgent(ag, events)
+
+	s.PendingEdit = &agent.PendingEdit{Search: "old", Replace: "new"}
+	s.ReviewEdit()
+	ok, _ := s.ApproveEdit("old", "new")
+	if !ok {
+		t.Fatal("ApproveEdit failed")
+	}
+
+	// File should be in agent-modified list
+	modified := s.AgentModifiedFiles()
+	if len(modified) != 1 {
+		t.Fatalf("AgentModifiedFiles: got %d files, want 1", len(modified))
+	}
+	if !strings.HasSuffix(modified[0], "test.go") {
+		t.Errorf("AgentModifiedFiles[0] = %q, want test.go", modified[0])
+	}
+}
+
+func TestFileStatus(t *testing.T) {
+	root := t.TempDir()
+	filePath := root + "/main.go"
+	if err := writeTestFile(filePath, "code\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := buffer.NewFromFile(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := editor.New(buf)
+	s := New(e, root)
+	events := make(chan agent.Event, 64)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, root)
+	s.SetAgent(ag, events)
+
+	// Initially: in context (auto-added), not modified
+	inCtx, agentMod := s.FileStatus(filePath)
+	if !inCtx {
+		t.Error("expected inContext=true for initial file")
+	}
+	if agentMod {
+		t.Error("expected agentModified=false before any agent edit")
+	}
+
+	// After agent edit: should be modified
+	s.PendingEdit = &agent.PendingEdit{Search: "code", Replace: "new code"}
+	s.ReviewEdit()
+	s.ApproveEdit("code", "new code")
+
+	inCtx, agentMod = s.FileStatus(filePath)
+	if !inCtx {
+		t.Error("expected inContext=true after edit")
+	}
+	if !agentMod {
+		t.Error("expected agentModified=true after agent edit")
+	}
+}
+
+func TestDeveloperEditResetsAgentOrigin(t *testing.T) {
+	s := newTestSession("agent line")
+
+	// Simulate agent writing a line
+	s.Editor.Buf.SetLineOrigin(0, buffer.OriginAgent)
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Fatalf("setup: origin = %d, want OriginAgent", got)
+	}
+
+	// Developer types on the agent line
+	s.Editor.CursorLine = 0
+	s.Editor.CursorCol = 5
+	s.Editor.InsertChar('X')
+
+	// Origin should flip to Developer
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("after developer edit: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestAgentOriginSurvivesUndoRedo(t *testing.T) {
+	s := newTestSession("original")
+
+	// Simulate a grouped agent edit with origin
+	s.Editor.Buf.BeginGroup()
+	s.Editor.Buf.Delete(0, 0, 8)
+	s.Editor.Buf.InsertWithOrigin(0, 0, "replaced", buffer.OriginAgent)
+	s.Editor.Buf.EndGroup()
+
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Fatalf("after edit: origin = %d, want OriginAgent", got)
+	}
+
+	// Undo should restore Developer origin
+	s.Editor.Undo()
+	if s.Editor.Buf.LineText(0) != "original" {
+		t.Fatalf("after undo: text = %q", s.Editor.Buf.LineText(0))
+	}
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("after undo: origin = %d, want OriginDeveloper", got)
+	}
+
+	// Redo should restore Agent origin
+	s.Editor.Redo()
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Errorf("after redo: origin = %d, want OriginAgent", got)
+	}
+}

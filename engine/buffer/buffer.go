@@ -7,9 +7,24 @@ import (
 	"strings"
 )
 
+// Origin identifies who wrote a line.
+type Origin uint8
+
+const (
+	OriginDeveloper Origin = iota // default — developer-written or loaded from disk
+	OriginAgent                   // written by the agent (set after approval)
+	OriginProposed                // proposed by the agent (pending approval)
+)
+
+// Line is a single line in the buffer, carrying both text and provenance.
+type Line struct {
+	Runes  []rune
+	Origin Origin
+}
+
 // Buffer is a line-array text buffer with undo/redo.
 type Buffer struct {
-	lines    [][]rune
+	lines    []Line
 	Path     string
 	Modified bool
 
@@ -26,6 +41,7 @@ type opKind int
 const (
 	opInsert opKind = iota
 	opDelete
+	opSetOrigin
 	opGroupStart
 	opGroupEnd
 )
@@ -35,12 +51,16 @@ type operation struct {
 	Line int
 	Col  int
 	Text []rune // for insert: what was inserted. for delete: what was deleted.
+
+	// Origin fields — used only by opSetOrigin.
+	NewOrigin  Origin
+	PrevOrigin Origin
 }
 
 // New creates an empty buffer.
 func New() *Buffer {
 	return &Buffer{
-		lines: [][]rune{{}},
+		lines: []Line{{Runes: []rune{}}},
 	}
 }
 
@@ -67,12 +87,12 @@ func (b *Buffer) loadString(s string) {
 	// Remove trailing newline to avoid empty final line
 	s = strings.TrimSuffix(s, "\n")
 	raw := strings.Split(s, "\n")
-	b.lines = make([][]rune, len(raw))
+	b.lines = make([]Line, len(raw))
 	for i, l := range raw {
-		b.lines[i] = []rune(l)
+		b.lines[i] = Line{Runes: []rune(l)}
 	}
 	if len(b.lines) == 0 {
-		b.lines = [][]rune{{}}
+		b.lines = []Line{{Runes: []rune{}}}
 	}
 	b.Modified = false
 }
@@ -87,7 +107,7 @@ func (b *Buffer) LineLen(line int) int {
 	if line < 0 || line >= len(b.lines) {
 		return 0
 	}
-	return len(b.lines[line])
+	return len(b.lines[line].Runes)
 }
 
 // LineText returns the string content of a line.
@@ -95,14 +115,62 @@ func (b *Buffer) LineText(line int) string {
 	if line < 0 || line >= len(b.lines) {
 		return ""
 	}
-	return string(b.lines[line])
+	return string(b.lines[line].Runes)
+}
+
+// LineOrigin returns the origin of a line.
+func (b *Buffer) LineOrigin(line int) Origin {
+	if line < 0 || line >= len(b.lines) {
+		return OriginDeveloper
+	}
+	return b.lines[line].Origin
+}
+
+// SetLineOrigin sets the origin of a single line. The change is tracked
+// in the undo system so it can be reversed (and participates in groups).
+func (b *Buffer) SetLineOrigin(line int, origin Origin) {
+	if line < 0 || line >= len(b.lines) {
+		return
+	}
+	prev := b.lines[line].Origin
+	if prev == origin {
+		return
+	}
+	b.pushUndo(operation{
+		Kind:       opSetOrigin,
+		Line:       line,
+		NewOrigin:  origin,
+		PrevOrigin: prev,
+	})
+	b.redo = nil
+	b.lines[line].Origin = origin
+}
+
+// SetLineOrigins sets the origin of a range of lines starting at startLine.
+// Each line change is tracked individually in the undo system.
+func (b *Buffer) SetLineOrigins(startLine, count int, origin Origin) {
+	for i := startLine; i < startLine+count && i < len(b.lines); i++ {
+		if i >= 0 {
+			b.SetLineOrigin(i, origin)
+		}
+	}
+}
+
+// ResetOriginToDeveloper flips a line's origin to Developer without tracking
+// the change in the undo system. Used by developer editing paths where
+// ownership transfer is one-way (developer always wins). This is intentionally
+// not undoable — the developer touched the line, so it's theirs.
+func (b *Buffer) ResetOriginToDeveloper(line int) {
+	if line >= 0 && line < len(b.lines) {
+		b.lines[line].Origin = OriginDeveloper
+	}
 }
 
 // Content returns the full buffer content as a string.
 func (b *Buffer) Content() string {
 	parts := make([]string, len(b.lines))
 	for i, l := range b.lines {
-		parts[i] = string(l)
+		parts[i] = string(l.Runes)
 	}
 	return strings.Join(parts, "\n")
 }
@@ -138,6 +206,32 @@ func (b *Buffer) Insert(line, col int, text string) {
 
 	b.doInsert(line, col, runes)
 	b.Modified = true
+}
+
+// InsertWithOrigin inserts text and sets the origin of all affected lines.
+// For multi-line inserts, the original line and all new lines receive the
+// given origin. This is atomic with undo — the text insert and origin
+// changes are tracked together (and inside any active group).
+func (b *Buffer) InsertWithOrigin(line, col int, text string, origin Origin) {
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return
+	}
+
+	line, col = b.clamp(line, col)
+
+	// Record text insert for undo
+	b.pushUndo(operation{Kind: opInsert, Line: line, Col: col, Text: runes})
+	b.redo = nil
+
+	b.doInsert(line, col, runes)
+	b.Modified = true
+
+	// Count the affected lines and set their origin
+	endLine, _ := b.endOfInsert(line, col, runes)
+	for i := line; i <= endLine && i < len(b.lines); i++ {
+		b.SetLineOrigin(i, origin)
+	}
 }
 
 // Delete deletes count runes starting at (line, col). Returns the deleted text.
@@ -275,8 +369,8 @@ func (b *Buffer) clamp(line, col int) (int, int) {
 	if col < 0 {
 		col = 0
 	}
-	if col > len(b.lines[line]) {
-		col = len(b.lines[line])
+	if col > len(b.lines[line].Runes) {
+		col = len(b.lines[line].Runes)
 	}
 	return line, col
 }
@@ -295,24 +389,28 @@ func (b *Buffer) doInsert(line, col int, runes []rune) {
 	parts := strings.Split(text, "\n")
 
 	if len(parts) == 1 {
-		// Single-line insert
-		b.lines[line] = insertRunes(b.lines[line], col, runes)
+		// Single-line insert — line retains its origin
+		b.lines[line].Runes = insertRunes(b.lines[line].Runes, col, runes)
 		return
 	}
 
-	// Multi-line insert
-	after := append([]rune{}, b.lines[line][col:]...)
-	b.lines[line] = append(b.lines[line][:col], []rune(parts[0])...)
+	// Multi-line insert — new lines inherit parent origin
+	parentOrigin := b.lines[line].Origin
+	after := append([]rune{}, b.lines[line].Runes[col:]...)
+	b.lines[line].Runes = append(b.lines[line].Runes[:col], []rune(parts[0])...)
 
 	// Insert middle lines
-	newLines := make([][]rune, len(parts)-1)
+	newLines := make([]Line, len(parts)-1)
 	for i := 1; i < len(parts)-1; i++ {
-		newLines[i-1] = []rune(parts[i])
+		newLines[i-1] = Line{Runes: []rune(parts[i]), Origin: parentOrigin}
 	}
 	// Last part + remainder of original line
-	newLines[len(newLines)-1] = append([]rune(parts[len(parts)-1]), after...)
+	newLines[len(newLines)-1] = Line{
+		Runes:  append([]rune(parts[len(parts)-1]), after...),
+		Origin: parentOrigin,
+	}
 
-	// Splice into Lines array
+	// Splice into lines array
 	b.lines = spliceLines(b.lines, line+1, 0, newLines)
 }
 
@@ -321,14 +419,14 @@ func (b *Buffer) doDelete(line, col int, runes []rune) {
 	curLine, curCol := line, col
 	for _, r := range runes {
 		if r == '\n' {
-			// Join current line with next line
+			// Join current line with next line — merged line retains first line's origin
 			if curLine+1 < len(b.lines) {
-				b.lines[curLine] = append(b.lines[curLine], b.lines[curLine+1]...)
+				b.lines[curLine].Runes = append(b.lines[curLine].Runes, b.lines[curLine+1].Runes...)
 				b.lines = spliceLines(b.lines, curLine+1, 1, nil)
 			}
 		} else {
-			if curLine < len(b.lines) && curCol < len(b.lines[curLine]) {
-				b.lines[curLine] = deleteRune(b.lines[curLine], curCol)
+			if curLine < len(b.lines) && curCol < len(b.lines[curLine].Runes) {
+				b.lines[curLine].Runes = deleteRune(b.lines[curLine].Runes, curCol)
 			}
 		}
 	}
@@ -344,6 +442,11 @@ func (b *Buffer) applyUndoOp(op operation) (int, int) {
 		b.doInsert(op.Line, op.Col, op.Text)
 		endLine, endCol := b.endOfInsert(op.Line, op.Col, op.Text)
 		return endLine, endCol
+	case opSetOrigin:
+		if op.Line >= 0 && op.Line < len(b.lines) {
+			b.lines[op.Line].Origin = op.PrevOrigin
+		}
+		return op.Line, 0
 	}
 	return 0, 0
 }
@@ -358,6 +461,11 @@ func (b *Buffer) applyRedoOp(op operation) (int, int) {
 	case opDelete:
 		b.doDelete(op.Line, op.Col, op.Text)
 		return op.Line, op.Col
+	case opSetOrigin:
+		if op.Line >= 0 && op.Line < len(b.lines) {
+			b.lines[op.Line].Origin = op.NewOrigin
+		}
+		return op.Line, 0
 	}
 	return 0, 0
 }
@@ -382,8 +490,8 @@ func (b *Buffer) collectRunes(line, col, count int) []rune {
 		if l >= len(b.lines) {
 			break
 		}
-		if c < len(b.lines[l]) {
-			result = append(result, b.lines[l][c])
+		if c < len(b.lines[l].Runes) {
+			result = append(result, b.lines[l].Runes[c])
 			c++
 		} else if l+1 < len(b.lines) {
 			// At end of line — the "character" here is the newline
@@ -414,8 +522,8 @@ func deleteRune(line []rune, col int) []rune {
 	return result
 }
 
-func spliceLines(lines [][]rune, index, deleteCount int, insert [][]rune) [][]rune {
-	result := make([][]rune, len(lines)-deleteCount+len(insert))
+func spliceLines(lines []Line, index, deleteCount int, insert []Line) []Line {
+	result := make([]Line, len(lines)-deleteCount+len(insert))
 	copy(result, lines[:index])
 	copy(result[index:], insert)
 	copy(result[index+len(insert):], lines[index+deleteCount:])

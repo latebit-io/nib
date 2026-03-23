@@ -91,7 +91,7 @@ func main() {
 		}
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
 		events := make(chan agent.Event, 64)
-		ag := agent.New(provider, sess, events)
+		ag := agent.New(provider, sess, events, projectRoot)
 		sess.SetAgent(ag, events)
 	}
 

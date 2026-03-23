@@ -16,12 +16,18 @@ var defaultPrompts embed.FS
 
 // UserPromptData holds the template variables for the user message.
 type UserPromptData struct {
-	FileName     string
-	FileContent  string // line-numbered content
-	Fence        string // code fence marker (``` or longer)
+	// FileName is the active file's relative path.
+	FileName string
+	// FileContent is the file content with 1-indexed line numbers prepended.
+	FileContent string
+	// Fence is the code fence marker (``` or longer if the content contains backticks).
+	Fence string
+	// ContextFiles lists relative paths the agent is allowed to edit.
 	ContextFiles []string
+	// OmittedCount is how many context files were truncated from the prompt.
 	OmittedCount int
-	Goal         string
+	// Goal is the developer's stated intent for this agent run.
+	Goal string
 }
 
 // PromptLoader resolves prompt files with project-level overrides.

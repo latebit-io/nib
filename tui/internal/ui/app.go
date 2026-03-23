@@ -564,13 +564,14 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	// advancement. TUI only owns the tick schedule and visual state.
 	searchRunes := len([]rune(plan.Search))
 	cpt := charsPerTick(m.Editor.TypingWPM)
+	devStartLine, devStartCol := m.Editor.CursorLine, m.Editor.CursorCol
 	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace)
 
 	m.Editor.Anim = &animationContext{
 		state:        animTyping,
 		edit:         ie,
-		devStartLine: m.Editor.CursorLine,
-		devStartCol:  m.Editor.CursorCol,
+		devStartLine: devStartLine,
+		devStartCol:  devStartCol,
 	}
 	m.AgentPane.Status = "typing"
 

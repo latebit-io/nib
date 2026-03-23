@@ -501,7 +501,7 @@ func (s *Session) SwitchTo(path string) error {
 		return nil
 	}
 
-	// Open from disk (resolvePath is safe to call under lock — no I/O on happy path)
+	// Open from disk
 	absPath, err := s.resolvePath(path)
 	if err != nil {
 		s.mu.Unlock()

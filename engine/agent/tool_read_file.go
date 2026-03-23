@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/latebit-io/junto/engine/llm"
 )
@@ -56,6 +57,7 @@ func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) string {
 
 	// Check cache first
 	if content, ok := t.cache.Get(canon); ok {
+		slog.Debug("read_file: cache hit", "path", args.Path, "content_len", len(content))
 		return content
 	}
 
@@ -65,6 +67,7 @@ func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) string {
 		return fmt.Sprintf("Error: %v", err)
 	}
 
+	slog.Debug("read_file: read from disk", "path", args.Path, "content_len", len(content))
 	t.cache.Set(canon, content)
 	return content
 }

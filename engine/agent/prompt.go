@@ -7,6 +7,10 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 )
 
+// maxContextInPrompt caps how many context files are listed in the prompt.
+// Prevents unbounded prompt growth in long-lived sessions.
+const maxContextInPrompt = 50
+
 const systemPrompt = `You are a pair-programming agent in a code editor. You can work across multiple files. Make one edit at a time.
 
 ## Workflow
@@ -24,11 +28,15 @@ const systemPrompt = `You are a pair-programming agent in a code editor. You can
 - Use write_file to create new files that do not exist yet.
 - Each edit_file call targets one file. You can edit different files in sequence.
 
+## Context Set
+
+The developer curates a context set — the files relevant to the current task. Files you edit or create are automatically added to the context set. The context set is shown below so you know what the developer considers in scope. Prefer working within context files, but you can edit any project file when the task requires it.
+
 ## Rules
 
 - ONE sentence of explanation, then immediately call the tool. Do not analyze, review, or discuss the code at length.
 - ONE edit_file call per step. Never batch multiple edits.
-- The search field must EXACTLY match text from the file. Copy it character-for-character from read_file output.
+- The search field must EXACTLY match text from the file. Copy it character-for-character from read_file output. For empty files, use an empty search string to insert content.
 - The file below is shown with line numbers for reference only. Line numbers (e.g., "   1 | ") are NOT part of the file. Never include them in search text. Use read_file to get the raw content.
 - Do NOT repeat or summarize what you already said. Do NOT comment on the quality of previous edits.
 - After a rejection, try a different approach immediately. Do not explain why the previous attempt was wrong.
@@ -38,7 +46,8 @@ const systemPrompt = `You are a pair-programming agent in a code editor. You can
 
 // buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
-func buildMessages(fileName, fileContent, goal string) []llm.Message {
+// contextFiles lists the files the agent is allowed to edit.
+func buildMessages(fileName, fileContent, goal string, contextFiles []string) []llm.Message {
 	// Number the lines for the LLM
 	lines := strings.Split(fileContent, "\n")
 	var numbered strings.Builder
@@ -51,10 +60,29 @@ func buildMessages(fileName, fileContent, goal string) []llm.Message {
 	for strings.Contains(numbered.String(), fence) {
 		fence += "`"
 	}
-	user := fmt.Sprintf("## File: %s\n\n%s\n%s%s\n\n## Task\n\n%s", fileName, fence, numbered.String(), fence, goal)
+
+	var user strings.Builder
+	fmt.Fprintf(&user, "## File: %s\n\n%s\n%s%s\n\n", fileName, fence, numbered.String(), fence)
+
+	if len(contextFiles) > 0 {
+		user.WriteString("## Context Set (files you can edit)\n\n")
+		shown := contextFiles
+		if len(shown) > maxContextInPrompt {
+			shown = shown[:maxContextInPrompt]
+		}
+		for _, f := range shown {
+			fmt.Fprintf(&user, "- %s\n", f)
+		}
+		if omitted := len(contextFiles) - len(shown); omitted > 0 {
+			fmt.Fprintf(&user, "- ... %d more files\n", omitted)
+		}
+		user.WriteString("\n")
+	}
+
+	fmt.Fprintf(&user, "## Task\n\n%s", goal)
 
 	return []llm.Message{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: user},
+		{Role: "user", Content: user.String()},
 	}
 }

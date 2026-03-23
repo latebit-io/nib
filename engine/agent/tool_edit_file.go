@@ -93,9 +93,6 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) string {
 	if args.Path == "" {
 		return "Error: path is required"
 	}
-	if args.Search == "" {
-		return "Error: search field cannot be empty"
-	}
 
 	// Get file content from cache or workspace
 	canon := t.workspace.CanonPath(args.Path)
@@ -107,6 +104,19 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) string {
 			return fmt.Sprintf("Error: cannot read %s: %v", args.Path, err)
 		}
 		t.cache.Set(canon, content)
+		slog.Debug("edit_file: read from disk", "path", args.Path, "content_len", len(content))
+	} else {
+		slog.Debug("edit_file: cache hit", "path", args.Path, "content_len", len(content))
+	}
+
+	// Empty search is only valid when the file is empty (insert into empty file).
+	// Otherwise the agent must provide text to match.
+	if args.Search == "" {
+		if content != "" {
+			return "Error: search field cannot be empty (file is not empty — copy existing text to anchor your edit)"
+		}
+		// Empty file, empty search → treat as full-file replacement (insert).
+		// Set search to content (empty string) so the replace logic works.
 	}
 
 	// Silent retry: validate search text before presenting to user.
@@ -168,7 +178,12 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) string {
 		}
 	}
 
-	// Approved — wait for user to finish editing and continue.
+	// Approved — auto-add to context now that the edit is validated and accepted.
+	if !t.workspace.InContext(args.Path) {
+		t.workspace.AddContext(args.Path)
+	}
+
+	// Wait for user to finish editing and continue.
 	expectedContent := strings.Replace(content, args.Search, args.Replace, 1)
 
 	t.send(StatusEvent{Status: "editing"})

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/agent"
@@ -27,6 +28,8 @@ func (stubWorkspace) ReadFile(_ string) (string, error) { return "", nil }
 func (stubWorkspace) ListFiles() ([]string, error)      { return nil, nil }
 func (stubWorkspace) WriteFile(_, _ string) error       { return nil }
 func (stubWorkspace) CanonPath(p string) string         { return p }
+func (stubWorkspace) InContext(_ string) bool           { return true }
+func (stubWorkspace) AddContext(_ string)               {}
 
 // newTestSession creates a session with a buffer containing the given text
 // and a real agent (needed to test approval signaling).
@@ -149,7 +152,7 @@ func TestPrepareApproval(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 				}
-				if !contains(err.Error(), tt.wantErr) {
+				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
 				}
 				return
@@ -383,19 +386,121 @@ func TestResolvePathTraversal(t *testing.T) {
 	}
 }
 
+func TestContextSetAddRemove(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSessionWithRoot("", dir)
+
+	s.AddContext("src/main.go")
+	if !s.InContext("src/main.go") {
+		t.Error("expected src/main.go in context after AddContext")
+	}
+
+	files := s.ContextFiles()
+	if len(files) != 1 || files[0] != "src/main.go" {
+		t.Errorf("ContextFiles = %v, want [src/main.go]", files)
+	}
+
+	s.RemoveContext("src/main.go")
+	if s.InContext("src/main.go") {
+		t.Error("expected src/main.go removed from context")
+	}
+	if len(s.ContextFiles()) != 0 {
+		t.Errorf("ContextFiles = %v, want empty", s.ContextFiles())
+	}
+}
+
+func TestContextSetAutoAddOnNew(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/test.go"
+	if err := writeTestFile(path, "package main"); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := buffer.NewFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(editor.New(buf), dir)
+	if !s.InContext(path) {
+		t.Error("initial file should be auto-added to context")
+	}
+}
+
+func TestContextSetAutoAddOnSwitchTo(t *testing.T) {
+	dir := t.TempDir()
+	pathA := dir + "/a.go"
+	pathB := dir + "/b.go"
+	if err := writeTestFile(pathA, "package a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(pathB, "package b"); err != nil {
+		t.Fatal(err)
+	}
+
+	bufA, err := buffer.NewFromFile(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(editor.New(bufA), dir)
+
+	if err := s.SwitchTo(pathB); err != nil {
+		t.Fatal(err)
+	}
+	if !s.InContext(pathB) {
+		t.Error("SwitchTo should auto-add file to context")
+	}
+
+	files := s.ContextFiles()
+	if len(files) != 2 {
+		t.Errorf("ContextFiles count = %d, want 2", len(files))
+	}
+}
+
+func TestContextSetPersistence(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create session, add context, verify file written
+	s1 := newTestSessionWithRoot("", dir)
+	s1.AddContext("src/main.go")
+	s1.AddContext("src/util.go")
+
+	contextFile := dir + "/.project/context.md"
+	data, err := os.ReadFile(contextFile)
+	if err != nil {
+		t.Fatalf("context.md not created: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "- src/main.go") {
+		t.Errorf("context.md missing src/main.go: %s", content)
+	}
+	if !strings.Contains(content, "- src/util.go") {
+		t.Errorf("context.md missing src/util.go: %s", content)
+	}
+
+	// Create new session from same root — should load persisted context
+	s2 := newTestSessionWithRoot("", dir)
+	if !s2.InContext("src/main.go") {
+		t.Error("src/main.go not loaded from persisted context")
+	}
+	if !s2.InContext("src/util.go") {
+		t.Error("src/util.go not loaded from persisted context")
+	}
+}
+
+func TestContextSetAutoAddOnWriteFile(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	newPath := dir + "/created.go"
+	if err := s.WriteFile("created.go", "package created"); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	if !s.InContext(newPath) {
+		t.Error("WriteFile should auto-add created file to context")
+	}
+}
+
 func writeTestFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && containsAt(s, substr)
-}
-
-func containsAt(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

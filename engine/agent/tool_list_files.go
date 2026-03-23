@@ -38,5 +38,12 @@ func (t *ListFilesTool) Execute(_ context.Context, _ llm.ToolCall) string {
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err)
 	}
-	return strings.Join(files, "\n")
+	// Filter out .project/ — project metadata, not source files.
+	filtered := files[:0]
+	for _, f := range files {
+		if !strings.HasPrefix(f, ".project/") && f != ".project" {
+			filtered = append(filtered, f)
+		}
+	}
+	return strings.Join(filtered, "\n")
 }

@@ -564,9 +564,15 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	// advancement. TUI only owns the tick schedule and visual state.
 	searchRunes := len([]rune(plan.Search))
 	cpt := charsPerTick(m.Editor.TypingWPM)
+	devStartLine, devStartCol := m.Editor.CursorLine, m.Editor.CursorCol
 	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace)
 
-	m.Editor.Anim = &animationContext{state: animTyping, edit: ie}
+	m.Editor.Anim = &animationContext{
+		state:        animTyping,
+		edit:         ie,
+		devStartLine: devStartLine,
+		devStartCol:  devStartCol,
+	}
 	m.AgentPane.Status = "typing"
 
 	if ie.Remaining() == 0 {
@@ -608,11 +614,22 @@ func (m *AppModel) handleAnimTick() tea.Cmd {
 }
 
 // animCollision returns true if the dev cursor is within the span the agent
-// is actively typing into.
+// is actively typing into. Only triggers after the dev has moved their cursor
+// at least once since animation started — a stationary cursor is passive.
+// The moved flag is sticky: once the dev moves, collision detection stays
+// active even if they return to the original position.
 func (m *AppModel) animCollision() bool {
 	anim := m.Editor.Anim
 	if anim == nil {
 		return false
+	}
+	// Detect first move — sticky once set.
+	if !anim.devMoved {
+		if m.Editor.CursorLine != anim.devStartLine || m.Editor.CursorCol != anim.devStartCol {
+			anim.devMoved = true
+		} else {
+			return false
+		}
 	}
 	startLine, startCol := anim.edit.StartPosition()
 	endLine, endCol := anim.edit.Position()

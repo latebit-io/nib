@@ -60,6 +60,7 @@ type Agent struct {
 	tools    map[string]Tool
 	toolDefs []llm.ToolDef
 	cache    *FileCache
+	prompts  *PromptLoader
 
 	mu         sync.Mutex
 	cancel     context.CancelFunc
@@ -72,10 +73,12 @@ type Agent struct {
 }
 
 // New creates a new agent with the given LLM provider, workspace, and event channel.
+// projectRoot is the absolute path to the project directory, used to resolve
+// prompt overrides from .project/prompts/.
 // The frontend must continuously drain the events channel. Sends block
 // if the channel is full, providing backpressure to the agent loop.
 // Use a buffered channel (e.g. 64) to absorb bursts.
-func New(provider llm.Provider, workspace Workspace, events chan<- Event) *Agent {
+func New(provider llm.Provider, workspace Workspace, events chan<- Event, projectRoot string) *Agent {
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)
 	cache := NewFileCache()
@@ -84,6 +87,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- Event) *Agent
 		provider:   provider,
 		events:     events,
 		cache:      cache,
+		prompts:    NewPromptLoader(projectRoot),
 		approveCh:  approveCh,
 		continueCh: continueCh,
 	}
@@ -194,7 +198,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		goal = "Review this code and suggest improvements, one step at a time."
 	}
 
-	messages := buildMessages(fileName, fileContent, goal, contextFiles)
+	messages := a.buildMessages(fileName, fileContent, goal, contextFiles)
 	a.send(TokenEvent{Text: "Thinking...\n\n"})
 	a.send(StatusEvent{Status: "thinking"})
 

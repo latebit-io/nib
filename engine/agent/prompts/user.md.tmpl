@@ -1,0 +1,15 @@
+## File: {{.FileName}}
+
+{{.Fence}}
+{{.FileContent}}{{.Fence}}
+{{- if .ContextFiles}}
+
+## Context Set (files you can edit)
+
+{{range .ContextFiles}}- {{.}}
+{{end}}{{- if gt .OmittedCount 0}}- ... {{.OmittedCount}} more files
+{{end}}{{- end}}
+
+## Task
+
+{{.Goal}}

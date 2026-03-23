@@ -46,7 +46,7 @@ func newTestSessionWithRoot(content, projectRoot string) *Session {
 	e := editor.New(buf)
 	sess := New(e, projectRoot)
 	events := make(chan agent.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, projectRoot)
 	sess.SetAgent(ag, events)
 	return sess
 }

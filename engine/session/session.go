@@ -97,11 +97,15 @@ func New(e *editor.Editor, projectRoot string) *Session {
 		projectRoot: projectRoot,
 	}
 	if e != nil && e.Buf.Path != "" {
-		canon := s.CanonPath(e.Buf.Path)
-		s.activeFile = canon
-		s.editors[canon] = e
-		if !s.isProjectMeta(canon) {
-			s.contextSet[canon] = true
+		if _, err := s.resolvePath(e.Buf.Path); err != nil {
+			slog.Warn("New: initial editor path rejected", "path", e.Buf.Path, "err", err)
+		} else {
+			canon := s.CanonPath(e.Buf.Path)
+			s.activeFile = canon
+			s.editors[canon] = e
+			if !s.isProjectMeta(canon) {
+				s.contextSet[canon] = true
+			}
 		}
 	}
 	// Load persisted context — adds to whatever was set above.
@@ -491,6 +495,9 @@ func (s *Session) SwitchTo(path string) error {
 	// Already active
 	if canon == s.activeFile {
 		s.mu.Unlock()
+		if !s.isProjectMeta(canon) && !s.InContext(canon) {
+			s.AddContext(canon)
+		}
 		return nil
 	}
 
@@ -499,6 +506,9 @@ func (s *Session) SwitchTo(path string) error {
 		s.Editor = e
 		s.activeFile = canon
 		s.mu.Unlock()
+		if !s.isProjectMeta(canon) && !s.InContext(canon) {
+			s.AddContext(canon)
+		}
 		return nil
 	}
 

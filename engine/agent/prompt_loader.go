@@ -14,6 +14,11 @@ import (
 //go:embed prompts/system.md prompts/user.md.tmpl
 var defaultPrompts embed.FS
 
+// maxPromptFileBytes is the size limit for project prompt overrides (1MB).
+// No sane prompt file should approach this; protects against accidental
+// large files in .project/prompts/.
+const maxPromptFileBytes = 1 << 20
+
 // UserPromptData holds the template variables for the user message.
 type UserPromptData struct {
 	// FileName is the active file's relative path.
@@ -72,13 +77,21 @@ func (l *PromptLoader) RenderUserMessage(data UserPromptData) (string, error) {
 func (l *PromptLoader) load(name string) (string, string) {
 	if l.projectRoot != "" {
 		path := filepath.Join(l.projectRoot, ".project", "prompts", name)
-		data, err := os.ReadFile(path)
+		info, err := os.Stat(path)
 		if err == nil {
-			return string(data), "project"
-		}
-		// Not found or unreadable — fall through to embedded.
-		if !os.IsNotExist(err) {
-			slog.Warn("prompt.load: project override unreadable",
+			if info.Size() > maxPromptFileBytes {
+				slog.Warn("prompt.load: project override too large, using default",
+					"path", path, "bytes", info.Size(), "limit", maxPromptFileBytes)
+			} else {
+				data, err := os.ReadFile(path)
+				if err == nil {
+					return string(data), "project"
+				}
+				slog.Warn("prompt.load: project override unreadable",
+					"path", path, "err", err)
+			}
+		} else if !os.IsNotExist(err) {
+			slog.Warn("prompt.load: project override stat failed",
 				"path", path, "err", err)
 		}
 	}

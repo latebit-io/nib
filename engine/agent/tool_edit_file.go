@@ -104,6 +104,9 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) string {
 			return fmt.Sprintf("Error: cannot read %s: %v", args.Path, err)
 		}
 		t.cache.Set(canon, content)
+		slog.Debug("edit_file: read from disk", "path", args.Path, "content_len", len(content))
+	} else {
+		slog.Debug("edit_file: cache hit", "path", args.Path, "content_len", len(content))
 	}
 
 	// Empty search is only valid when the file is empty (insert into empty file).

@@ -165,11 +165,20 @@ func (a *Agent) Reject() {
 // Continue signals the user is done editing and sends the current buffer content
 // for the file that was just edited.
 func (a *Agent) Continue(path, bufferContent string) {
+	slog.Debug("agent.Continue", "path", path, "content_len", len(bufferContent),
+		"content_preview", truncate(bufferContent, 200))
 	a.cache.Set(path, bufferContent)
 	select {
 	case a.continueCh <- bufferContent:
 	default:
 	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // Cancel stops the current agent run.

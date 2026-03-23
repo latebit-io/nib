@@ -365,13 +365,14 @@ func (s *Session) WriteFile(path, content string) error {
 	}
 	e := editor.New(buf)
 	canon := s.CanonPath(absPath)
+	addToContext := !s.isProjectMeta(canon)
 	s.mu.Lock()
 	s.editors[canon] = e
-	if !s.isProjectMeta(canon) {
+	if addToContext {
 		s.contextSet[canon] = true
 	}
 	s.mu.Unlock()
-	if !s.isProjectMeta(canon) {
+	if addToContext {
 		s.saveContext()
 	}
 

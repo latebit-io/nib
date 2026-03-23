@@ -392,6 +392,8 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 
 // Close frees resources for all open editors.
 func (s *Session) Close() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, e := range s.editors {
 		e.Close()
 	}
@@ -573,7 +575,9 @@ func (s *Session) Continue() {
 	if path == "" {
 		path = s.activeFile
 	}
+	s.mu.RLock()
 	e, ok := s.editors[path]
+	s.mu.RUnlock()
 	if !ok {
 		e = s.Editor
 		path = s.activeFile

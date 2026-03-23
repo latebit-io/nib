@@ -24,6 +24,10 @@ const systemPrompt = `You are a pair-programming agent in a code editor. You can
 - Use write_file to create new files that do not exist yet.
 - Each edit_file call targets one file. You can edit different files in sequence.
 
+## Context Set
+
+The developer curates a context set — the files relevant to the current task. Files you edit or create are automatically added to the context set. The context set is shown below so you know what the developer considers in scope. Prefer working within context files, but you can edit any project file when the task requires it.
+
 ## Rules
 
 - ONE sentence of explanation, then immediately call the tool. Do not analyze, review, or discuss the code at length.
@@ -38,7 +42,8 @@ const systemPrompt = `You are a pair-programming agent in a code editor. You can
 
 // buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
-func buildMessages(fileName, fileContent, goal string) []llm.Message {
+// contextFiles lists the files the agent is allowed to edit.
+func buildMessages(fileName, fileContent, goal string, contextFiles []string) []llm.Message {
 	// Number the lines for the LLM
 	lines := strings.Split(fileContent, "\n")
 	var numbered strings.Builder
@@ -51,10 +56,22 @@ func buildMessages(fileName, fileContent, goal string) []llm.Message {
 	for strings.Contains(numbered.String(), fence) {
 		fence += "`"
 	}
-	user := fmt.Sprintf("## File: %s\n\n%s\n%s%s\n\n## Task\n\n%s", fileName, fence, numbered.String(), fence, goal)
+
+	var user strings.Builder
+	fmt.Fprintf(&user, "## File: %s\n\n%s\n%s%s\n\n", fileName, fence, numbered.String(), fence)
+
+	if len(contextFiles) > 0 {
+		user.WriteString("## Context Set (files you can edit)\n\n")
+		for _, f := range contextFiles {
+			fmt.Fprintf(&user, "- %s\n", f)
+		}
+		user.WriteString("\n")
+	}
+
+	fmt.Fprintf(&user, "## Task\n\n%s", goal)
 
 	return []llm.Message{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: user},
+		{Role: "user", Content: user.String()},
 	}
 }

@@ -6,8 +6,10 @@ package session
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -40,6 +42,10 @@ type Session struct {
 	editors     map[string]*editor.Editor // path → editor
 	activeFile  string                    // path of the active editor
 	projectRoot string                    // root for file listing and path resolution
+
+	// Context set — files the agent is allowed to edit.
+	// Canonical absolute paths as keys. Guarded by mu.
+	contextSet map[string]bool
 
 	// Intent — session-level contract between developer and agent
 	CurrentIntent string   // the active goal
@@ -78,16 +84,21 @@ func New(e *editor.Editor, projectRoot string) *Session {
 		projectRoot = filepath.Clean(projectRoot)
 	}
 	editors := make(map[string]*editor.Editor)
+	contextSet := make(map[string]bool)
 	s := &Session{
 		Editor:      e,
 		editors:     editors,
+		contextSet:  contextSet,
 		projectRoot: projectRoot,
 	}
 	if e != nil && e.Buf.Path != "" {
 		canon := s.CanonPath(e.Buf.Path)
 		s.activeFile = canon
 		s.editors[canon] = e
+		s.contextSet[canon] = true
 	}
+	// Load persisted context — adds to whatever was set above.
+	s.loadContext()
 	return s
 }
 
@@ -142,6 +153,114 @@ func (s *Session) EditorForPath(path string) *editor.Editor {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.editors[s.CanonPath(path)]
+}
+
+// --- Context Set ---
+// The context set defines which files the agent is allowed to edit.
+// Files are auto-added when the developer opens them or when the agent
+// creates new files. The developer can also add/remove files explicitly.
+
+// AddContext adds a file to the context set. The path is canonicalized.
+func (s *Session) AddContext(path string) {
+	canon := s.CanonPath(path)
+	s.mu.Lock()
+	s.contextSet[canon] = true
+	s.mu.Unlock()
+	s.saveContext()
+}
+
+// RemoveContext removes a file from the context set.
+func (s *Session) RemoveContext(path string) {
+	canon := s.CanonPath(path)
+	s.mu.Lock()
+	delete(s.contextSet, canon)
+	s.mu.Unlock()
+	s.saveContext()
+}
+
+// InContext returns true if the path is in the context set.
+// Satisfies agent.Workspace.
+func (s *Session) InContext(path string) bool {
+	canon := s.CanonPath(path)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.contextSet[canon]
+}
+
+// ContextFiles returns the context set as sorted relative paths.
+func (s *Session) ContextFiles() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	files := make([]string, 0, len(s.contextSet))
+	for path := range s.contextSet {
+		rel, err := filepath.Rel(s.projectRoot, path)
+		if err != nil {
+			rel = path
+		}
+		files = append(files, rel)
+	}
+	sort.Strings(files)
+	return files
+}
+
+// contextPath returns the path to .project/context.md.
+func (s *Session) contextPath() string {
+	return filepath.Join(s.projectRoot, ".project", "context.md")
+}
+
+// loadContext reads .project/context.md and populates the context set.
+// Silently does nothing if the file doesn't exist.
+func (s *Session) loadContext() {
+	data, err := os.ReadFile(s.contextPath())
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("loadContext: read context.md", "err", err)
+		}
+		return
+	}
+	// Parse paths and canonicalize outside the lock (CanonPath is pure
+	// computation today, but keeping I/O-adjacent work outside locks
+	// avoids future deadlock risk if CanonPath ever changes).
+	var paths []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		rel := strings.TrimSpace(strings.TrimPrefix(line, "- "))
+		if rel != "" {
+			paths = append(paths, s.CanonPath(rel))
+		}
+	}
+	s.mu.Lock()
+	for _, p := range paths {
+		s.contextSet[p] = true
+	}
+	s.mu.Unlock()
+}
+
+// saveContext writes the context set to .project/context.md.
+func (s *Session) saveContext() {
+	if s.projectRoot == "" {
+		return
+	}
+
+	dir := filepath.Join(s.projectRoot, ".project")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("saveContext: create .project dir", "err", err)
+		return
+	}
+
+	files := s.ContextFiles()
+	var buf strings.Builder
+	buf.WriteString("# Context\n\n")
+	for _, f := range files {
+		fmt.Fprintf(&buf, "- %s\n", f)
+	}
+
+	if err := os.WriteFile(s.contextPath(), []byte(buf.String()), 0o644); err != nil {
+		slog.Warn("saveContext: write context.md", "err", err)
+	}
 }
 
 // --- Workspace Implementation ---
@@ -207,15 +326,18 @@ func (s *Session) WriteFile(path, content string) error {
 		return fmt.Errorf("close %s: %w", path, closeErr)
 	}
 
-	// Open it in the session
+	// Open it in the session and auto-add to context
 	buf, err := buffer.NewFromFile(absPath)
 	if err != nil {
 		return fmt.Errorf("open after write %s: %w", path, err)
 	}
 	e := editor.New(buf)
+	canon := s.CanonPath(absPath)
 	s.mu.Lock()
-	s.editors[absPath] = e
+	s.editors[canon] = e
+	s.contextSet[canon] = true
 	s.mu.Unlock()
+	s.saveContext()
 
 	return nil
 }
@@ -291,7 +413,7 @@ func (s *Session) SubmitGoal(goal string) {
 	s.editReviewed = false
 	s.CurrentIntent = goal
 	s.IntentDone = false
-	s.agent.Run(s.activeFile, s.Editor.Buf.Content(), goal)
+	s.agent.Run(s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles())
 }
 
 // ArchiveIntent marks the current intent as done.
@@ -328,10 +450,10 @@ func (s *Session) SwitchTo(path string) error {
 	canon := s.CanonPath(path)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Already active
 	if canon == s.activeFile {
+		s.mu.Unlock()
 		return nil
 	}
 
@@ -339,22 +461,29 @@ func (s *Session) SwitchTo(path string) error {
 	if e, ok := s.editors[canon]; ok {
 		s.Editor = e
 		s.activeFile = canon
+		s.mu.Unlock()
 		return nil
 	}
 
-	// Open from disk
+	// Open from disk (resolvePath is safe to call under lock — no I/O on happy path)
 	absPath, err := s.resolvePath(path)
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	buf, err := buffer.NewFromFile(absPath)
 	if err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("open %s: %w", path, err)
 	}
 	e := editor.New(buf)
 	s.editors[canon] = e
+	s.contextSet[canon] = true
 	s.Editor = e
 	s.activeFile = canon
+	s.mu.Unlock()
+
+	s.saveContext()
 	return nil
 }
 

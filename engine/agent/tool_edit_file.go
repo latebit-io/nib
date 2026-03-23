@@ -97,6 +97,13 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) string {
 		return "Error: search field cannot be empty"
 	}
 
+	// Auto-add to context — when the agent edits a file, it becomes part of
+	// the working set. The hard gate (reject if not in context) is deferred
+	// until the project view UI gives developers a way to manage context.
+	if !t.workspace.InContext(args.Path) {
+		t.workspace.AddContext(args.Path)
+	}
+
 	// Get file content from cache or workspace
 	canon := t.workspace.CanonPath(args.Path)
 	content, ok := t.cache.Get(canon)

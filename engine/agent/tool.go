@@ -42,6 +42,12 @@ type Workspace interface {
 	// Used as a consistent cache key — ensures relative and absolute
 	// paths for the same file map to the same key.
 	CanonPath(path string) string
+
+	// InContext returns true if the file is in the developer's context set.
+	InContext(path string) bool
+
+	// AddContext adds a file to the developer's context set.
+	AddContext(path string)
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

@@ -108,7 +108,8 @@ func New(provider llm.Provider, workspace Workspace, events chan<- Event) *Agent
 }
 
 // Run starts the agent loop in a goroutine.
-func (a *Agent) Run(fileName, fileContent, goal string) {
+// contextFiles lists the files the agent is allowed to edit.
+func (a *Agent) Run(fileName, fileContent, goal string, contextFiles []string) {
 	a.mu.Lock()
 	// Cancel any previous run
 	if a.cancel != nil {
@@ -132,7 +133,7 @@ func (a *Agent) Run(fileName, fileContent, goal string) {
 	}
 	a.mu.Unlock()
 
-	go a.run(ctx, fileName, fileContent, goal)
+	go a.run(ctx, fileName, fileContent, goal, contextFiles)
 }
 
 func drain[T any](ch chan T) {
@@ -184,7 +185,7 @@ func (a *Agent) send(ev Event) {
 	a.events <- ev
 }
 
-func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
+func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
 	success := false
 	defer func() { a.send(DoneEvent{Success: success}) }()
 
@@ -192,7 +193,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 		goal = "Review this code and suggest improvements, one step at a time."
 	}
 
-	messages := buildMessages(fileName, fileContent, goal)
+	messages := buildMessages(fileName, fileContent, goal, contextFiles)
 	a.send(TokenEvent{Text: "Thinking...\n\n"})
 	a.send(StatusEvent{Status: "thinking"})
 

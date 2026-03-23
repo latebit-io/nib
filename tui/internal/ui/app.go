@@ -613,17 +613,22 @@ func (m *AppModel) handleAnimTick() tea.Cmd {
 }
 
 // animCollision returns true if the dev cursor is within the span the agent
-// is actively typing into. Only triggers if the dev has moved their cursor
-// since the animation started — a stationary cursor is passive, not an
-// active intervention by the developer.
+// is actively typing into. Only triggers after the dev has moved their cursor
+// at least once since animation started — a stationary cursor is passive.
+// The moved flag is sticky: once the dev moves, collision detection stays
+// active even if they return to the original position.
 func (m *AppModel) animCollision() bool {
 	anim := m.Editor.Anim
 	if anim == nil {
 		return false
 	}
-	// Dev hasn't moved — no collision.
-	if m.Editor.CursorLine == anim.devStartLine && m.Editor.CursorCol == anim.devStartCol {
-		return false
+	// Detect first move — sticky once set.
+	if !anim.devMoved {
+		if m.Editor.CursorLine != anim.devStartLine || m.Editor.CursorCol != anim.devStartCol {
+			anim.devMoved = true
+		} else {
+			return false
+		}
 	}
 	startLine, startCol := anim.edit.StartPosition()
 	endLine, endCol := anim.edit.Position()

@@ -100,10 +100,16 @@ func New(e *editor.Editor, projectRoot string) *Session {
 		canon := s.CanonPath(e.Buf.Path)
 		s.activeFile = canon
 		s.editors[canon] = e
-		s.contextSet[canon] = true
+		if !s.isProjectMeta(canon) {
+			s.contextSet[canon] = true
+		}
 	}
 	// Load persisted context — adds to whatever was set above.
 	s.loadContext()
+	// Persist so the initial file appears in .project/context.md.
+	if len(s.contextSet) > 0 {
+		s.saveContext()
+	}
 	return s
 }
 
@@ -165,8 +171,13 @@ func (s *Session) EditorForPath(path string) *editor.Editor {
 // Files are auto-added when the developer opens them or when the agent
 // creates new files. The developer can also add/remove files explicitly.
 
-// AddContext adds a file to the context set. The path is canonicalized.
+// AddContext adds a file to the context set. The path is canonicalized
+// and validated to be within the project root.
 func (s *Session) AddContext(path string) {
+	if _, err := s.resolvePath(path); err != nil {
+		slog.Warn("AddContext: path rejected", "path", path, "err", err)
+		return
+	}
 	canon := s.CanonPath(path)
 	s.mu.Lock()
 	s.contextSet[canon] = true
@@ -233,15 +244,28 @@ func (s *Session) loadContext() {
 			continue
 		}
 		rel := strings.TrimSpace(strings.TrimPrefix(line, "- "))
-		if rel != "" {
-			paths = append(paths, s.CanonPath(rel))
+		if rel == "" {
+			continue
 		}
+		if _, err := s.resolvePath(rel); err != nil {
+			slog.Warn("loadContext: skipping invalid path", "path", rel, "err", err)
+			continue
+		}
+		paths = append(paths, s.CanonPath(rel))
 	}
 	s.mu.Lock()
 	for _, p := range paths {
 		s.contextSet[p] = true
 	}
 	s.mu.Unlock()
+}
+
+// isProjectMeta returns true if the canonical path is inside .project/.
+// These files are project metadata, not source — they should not be
+// auto-added to the context set.
+func (s *Session) isProjectMeta(canon string) bool {
+	prefix := filepath.Join(s.projectRoot, ".project") + string(filepath.Separator)
+	return strings.HasPrefix(canon, prefix)
 }
 
 // saveContext writes the context set to .project/context.md.
@@ -343,9 +367,13 @@ func (s *Session) WriteFile(path, content string) error {
 	canon := s.CanonPath(absPath)
 	s.mu.Lock()
 	s.editors[canon] = e
-	s.contextSet[canon] = true
+	if !s.isProjectMeta(canon) {
+		s.contextSet[canon] = true
+	}
 	s.mu.Unlock()
-	s.saveContext()
+	if !s.isProjectMeta(canon) {
+		s.saveContext()
+	}
 
 	return nil
 }
@@ -486,12 +514,17 @@ func (s *Session) SwitchTo(path string) error {
 	}
 	e := editor.New(buf)
 	s.editors[canon] = e
-	s.contextSet[canon] = true
+	addToContext := !s.isProjectMeta(canon)
+	if addToContext {
+		s.contextSet[canon] = true
+	}
 	s.Editor = e
 	s.activeFile = canon
 	s.mu.Unlock()
 
-	s.saveContext()
+	if addToContext {
+		s.saveContext()
+	}
 	return nil
 }
 

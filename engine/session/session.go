@@ -49,10 +49,15 @@ type Session struct {
 	// PendingEdit is the edit currently awaiting approval (nil = none)
 	PendingEdit *agent.PendingEdit
 
-	// lastEditedFile tracks which file was approved/being edited. Used by
+	// lastEditedFile tracks which file was successfully edited. Used by
 	// Continue to send the correct file's content even if the user switches
 	// to a different file before pressing Continue.
 	lastEditedFile string
+
+	// stagedEditFile is set by PrepareApproval and promoted to lastEditedFile
+	// by CompleteApproval. Cleared by AbortApproval. This ensures
+	// lastEditedFile only reflects edits that actually landed.
+	stagedEditFile string
 
 	// editReviewed is set by ReviewEdit. ApproveEdit requires it.
 	// This enforces the contract: every frontend must compute and present
@@ -194,9 +199,11 @@ func (s *Session) WriteFile(path, content string) error {
 	_, writeErr := f.WriteString(content)
 	closeErr := f.Close()
 	if writeErr != nil {
+		_ = os.Remove(absPath) // best-effort rollback so retry doesn't hit "already exists"
 		return fmt.Errorf("write %s: %w", path, writeErr)
 	}
 	if closeErr != nil {
+		_ = os.Remove(absPath) // best-effort rollback
 		return fmt.Errorf("close %s: %w", path, closeErr)
 	}
 
@@ -524,9 +531,9 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 		return nil, errors.New(reason)
 	}
 	if s.PendingEdit.Path != "" {
-		s.lastEditedFile = s.CanonPath(s.PendingEdit.Path)
+		s.stagedEditFile = s.CanonPath(s.PendingEdit.Path)
 	} else {
-		s.lastEditedFile = s.activeFile
+		s.stagedEditFile = s.activeFile
 	}
 	s.PendingEdit = nil
 	s.editReviewed = false
@@ -539,9 +546,12 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 }
 
 // CompleteApproval signals the agent that the animated edit has been applied.
-// Call this after the animation finishes (or after a yield).
+// Call this after the animation finishes (or after a yield). Promotes the
+// staged edit path to lastEditedFile so Continue sends the right content.
 func (s *Session) CompleteApproval() {
 	if s.HasAgent() {
+		s.lastEditedFile = s.stagedEditFile
+		s.stagedEditFile = ""
 		s.agent.Approve()
 	}
 }
@@ -552,6 +562,7 @@ func (s *Session) CompleteApproval() {
 // CancelAgent which kills the entire run.
 func (s *Session) AbortApproval() {
 	if s.HasAgent() {
+		s.stagedEditFile = ""
 		s.agent.Reject()
 	}
 }

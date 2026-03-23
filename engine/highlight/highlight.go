@@ -92,67 +92,72 @@ func (h *Highlighter) HighlightLine(lineNum int) []Token {
 // collectAllTokens walks the tree once and populates h.cache for every line.
 // Tree-sitter uses byte offsets; we convert to rune indices for the editor.
 func (h *Highlighter) collectAllTokens(node *sitter.Node, lines []string) {
-	childCount := node.ChildCount()
-	if childCount == 0 {
-		startRow := int(node.StartPosition().Row)
-		endRow := int(node.EndPosition().Row)
-		startCol := int(node.StartPosition().Column)
-		endCol := int(node.EndPosition().Column)
+	if node.ChildCount() == 0 {
+		h.addLeafTokens(node, lines)
+		return
+	}
+	for i := range node.ChildCount() {
+		h.collectAllTokens(node.Child(i), lines)
+	}
+}
 
-		kind := kindForNode(node.GrammarName())
-		if kind == KindNone {
-			return
-		}
-
-		for line := startRow; line <= endRow && line < len(h.cache); line++ {
-			if line >= len(lines) {
-				slog.Debug("highlight: line index out of range", "line", line, "len", len(lines))
-				continue
-			}
-			lineBytes := lines[line]
-			lineByteLen := len(lineBytes)
-
-			// Byte offsets for this line, clamped to line length
-			scBytes := 0
-			if line == startRow {
-				scBytes = startCol
-			}
-			if scBytes > lineByteLen {
-				scBytes = lineByteLen
-			}
-			ecBytes := lineByteLen
-			if line == endRow {
-				ecBytes = endCol
-			}
-			if ecBytes > lineByteLen {
-				ecBytes = lineByteLen
-			}
-
-			// Defensive: ensure byte offsets are valid slice bounds.
-			// Tree-sitter incremental parsing can return stale positions
-			// when the source changes significantly between parses.
-			if scBytes < 0 || scBytes > lineByteLen || ecBytes < 0 || ecBytes > lineByteLen {
-				continue
-			}
-
-			// Convert byte offsets to rune offsets
-			sc := len([]rune(lineBytes[:scBytes]))
-			ec := len([]rune(lineBytes[:ecBytes]))
-
-			if sc < ec {
-				h.cache[line] = append(h.cache[line], Token{
-					Col:  sc,
-					Len:  ec - sc,
-					Kind: kind,
-				})
-			}
-		}
+// addLeafTokens converts a leaf node's byte ranges to rune-based tokens
+// and appends them to the per-line cache.
+func (h *Highlighter) addLeafTokens(node *sitter.Node, lines []string) {
+	kind := kindForNode(node.GrammarName())
+	if kind == KindNone {
 		return
 	}
 
-	for i := range childCount {
-		h.collectAllTokens(node.Child(i), lines)
+	startRow := int(node.StartPosition().Row)
+	endRow := int(node.EndPosition().Row)
+	startCol := int(node.StartPosition().Column)
+	endCol := int(node.EndPosition().Column)
+
+	for line := startRow; line <= endRow && line < len(h.cache); line++ {
+		if line >= len(lines) {
+			slog.Debug("highlight: line index out of range", "line", line, "len", len(lines))
+			continue
+		}
+		tok, ok := h.byteRangeToToken(lines[line], line, startRow, endRow, startCol, endCol, kind)
+		if ok {
+			h.cache[line] = append(h.cache[line], tok)
+		}
 	}
+}
+
+// byteRangeToToken converts a node's byte-offset range on a single line to
+// a rune-based Token. Returns false if the range is empty or invalid.
+func (h *Highlighter) byteRangeToToken(lineText string, line, startRow, endRow, startCol, endCol int, kind TokenKind) (Token, bool) {
+	lineByteLen := len(lineText)
+
+	scBytes := 0
+	if line == startRow {
+		scBytes = startCol
+	}
+	if scBytes > lineByteLen {
+		scBytes = lineByteLen
+	}
+
+	ecBytes := lineByteLen
+	if line == endRow {
+		ecBytes = endCol
+	}
+	if ecBytes > lineByteLen {
+		ecBytes = lineByteLen
+	}
+
+	// Defensive: tree-sitter incremental parsing can return stale positions.
+	if scBytes < 0 || scBytes > lineByteLen || ecBytes < 0 || ecBytes > lineByteLen {
+		return Token{}, false
+	}
+
+	sc := len([]rune(lineText[:scBytes]))
+	ec := len([]rune(lineText[:ecBytes]))
+	if sc >= ec {
+		return Token{}, false
+	}
+	return Token{Col: sc, Len: ec - sc, Kind: kind}, true
 }
 
 func kindForNode(nodeType string) TokenKind {

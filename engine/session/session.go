@@ -716,10 +716,16 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 
 // AnimationPlan describes the edit the frontend needs to animate.
 type AnimationPlan struct {
-	Line    int    // buffer line where the edit starts (0-indexed)
-	Col     int    // buffer col where the edit starts (0-indexed, rune)
-	Search  string // text to delete from the buffer
-	Replace string // text to type into the buffer
+	// Line is the buffer line where the edit starts (0-indexed).
+	Line int
+	// Col is the buffer column where the edit starts (0-indexed, rune).
+	Col int
+	// Search is the text to delete from the buffer.
+	Search string
+	// Replace is the text to type into the buffer.
+	Replace string
+	// Origin is the provenance to apply to affected lines (e.g. OriginAgent).
+	Origin *buffer.Origin
 }
 
 // PrepareApproval validates the reviewed edit and returns an AnimationPlan.
@@ -756,11 +762,13 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 	}
 	s.PendingEdit = nil
 	s.editReviewed = false
+	agentOrigin := buffer.OriginAgent
 	return &AnimationPlan{
 		Line:    loc.Line,
 		Col:     loc.Col,
 		Search:  search,
 		Replace: replace,
+		Origin:  &agentOrigin,
 	}, nil
 }
 

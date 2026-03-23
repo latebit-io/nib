@@ -51,6 +51,7 @@ func newTestSessionWithRoot(content, projectRoot string) *Session {
 	return sess
 }
 
+//nolint:gocognit,funlen // table-driven test — complexity comes from test cases, not logic
 func TestPrepareApproval(t *testing.T) {
 	tests := []struct {
 		name     string

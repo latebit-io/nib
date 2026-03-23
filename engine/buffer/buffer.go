@@ -18,14 +18,18 @@ const (
 
 // Line is a single line in the buffer, carrying both text and provenance.
 type Line struct {
-	Runes  []rune
+	// Runes is the text content of the line.
+	Runes []rune
+	// Origin tracks who wrote this line (Developer, Agent, or Proposed).
 	Origin Origin
 }
 
 // Buffer is a line-array text buffer with undo/redo.
 type Buffer struct {
-	lines    []Line
-	Path     string
+	lines []Line
+	// Path is the file path associated with this buffer (empty for unsaved).
+	Path string
+	// Modified is true when the buffer has unsaved changes.
 	Modified bool
 
 	undo []operation
@@ -149,10 +153,8 @@ func (b *Buffer) SetLineOrigin(line int, origin Origin) {
 // SetLineOrigins sets the origin of a range of lines starting at startLine.
 // Each line change is tracked individually in the undo system.
 func (b *Buffer) SetLineOrigins(startLine, count int, origin Origin) {
-	for i := startLine; i < startLine+count && i < len(b.lines); i++ {
-		if i >= 0 {
-			b.SetLineOrigin(i, origin)
-		}
+	for i := startLine; i < startLine+count; i++ {
+		b.SetLineOrigin(i, origin)
 	}
 }
 
@@ -179,6 +181,7 @@ func (b *Buffer) Content() string {
 // ErrNoPath is returned when Save is called on a buffer with no file path.
 var ErrNoPath = errors.New("no file path")
 
+// Save writes the buffer content to its file path.
 func (b *Buffer) Save() error {
 	if b.Path == "" {
 		return ErrNoPath

@@ -1,0 +1,138 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - cyclop
+    - funlen
+    - gocognit
+    - interfacebloat
+
+  settings:
+    # --- SOLID: Single Responsibility proxies ---
+
+    # Functions that are too long likely do too much (SRP).
+    funlen:
+      lines: 80
+      statements: 50
+
+    # High cyclomatic complexity = too many branches = likely multiple responsibilities.
+    cyclop:
+      max-complexity: 15
+
+    # Cognitive complexity measures how hard a function is to understand.
+    gocognit:
+      min-complexity: 30
+
+    # --- SOLID: Interface Segregation ---
+
+    # Fat interfaces violate ISP. Keep interfaces small and focused.
+    interfacebloat:
+      max: 6
+
+    # --- SOLID: Dependency Inversion (hexagonal boundaries) ---
+
+    depguard:
+      rules:
+        # buffer is the lowest layer — stdlib only, no engine imports.
+        buffer-isolation:
+          files:
+            - "**/buffer/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/junto/engine/editor"
+              desc: "buffer must not import editor (dependency inversion)"
+            - pkg: "github.com/latebit-io/junto/engine/agent"
+              desc: "buffer must not import agent (dependency inversion)"
+            - pkg: "github.com/latebit-io/junto/engine/session"
+              desc: "buffer must not import session (dependency inversion)"
+            - pkg: "github.com/latebit-io/junto/engine/llm"
+              desc: "buffer must not import llm (dependency inversion)"
+            - pkg: "github.com/latebit-io/junto/engine/highlight"
+              desc: "buffer must not import highlight"
+            - pkg: "github.com/latebit-io/junto/engine/filelist"
+              desc: "buffer must not import filelist"
+            - pkg: "github.com/latebit-io/junto/engine/fuzzy"
+              desc: "buffer must not import fuzzy"
+            - pkg: "github.com/latebit-io/junto/tui"
+              desc: "engine must never import tui"
+
+        # editor depends on buffer + highlight only.
+        editor-isolation:
+          files:
+            - "**/editor/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/junto/engine/agent"
+              desc: "editor must not import agent (dependency inversion)"
+            - pkg: "github.com/latebit-io/junto/engine/session"
+              desc: "editor must not import session (dependency inversion)"
+            - pkg: "github.com/latebit-io/junto/engine/llm"
+              desc: "editor must not import llm"
+            - pkg: "github.com/latebit-io/junto/engine/filelist"
+              desc: "editor must not import filelist"
+            - pkg: "github.com/latebit-io/junto/engine/fuzzy"
+              desc: "editor must not import fuzzy"
+            - pkg: "github.com/latebit-io/junto/tui"
+              desc: "engine must never import tui"
+
+        # agent depends on llm only — not editor, session, or buffer.
+        agent-isolation:
+          files:
+            - "**/agent/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/junto/engine/editor"
+              desc: "agent must not import editor (dependency inversion)"
+            - pkg: "github.com/latebit-io/junto/engine/session"
+              desc: "agent must not import session (dependency inversion)"
+            - pkg: "github.com/latebit-io/junto/engine/buffer"
+              desc: "agent must not import buffer directly (uses Workspace interface)"
+            - pkg: "github.com/latebit-io/junto/engine/highlight"
+              desc: "agent must not import highlight"
+            - pkg: "github.com/latebit-io/junto/engine/filelist"
+              desc: "agent must not import filelist"
+            - pkg: "github.com/latebit-io/junto/engine/fuzzy"
+              desc: "agent must not import fuzzy"
+            - pkg: "github.com/latebit-io/junto/tui"
+              desc: "engine must never import tui"
+
+        # llm is a port — stdlib only, no engine imports.
+        llm-isolation:
+          files:
+            - "**/llm/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/junto/engine/buffer"
+              desc: "llm must not import buffer"
+            - pkg: "github.com/latebit-io/junto/engine/editor"
+              desc: "llm must not import editor"
+            - pkg: "github.com/latebit-io/junto/engine/agent"
+              desc: "llm must not import agent"
+            - pkg: "github.com/latebit-io/junto/engine/session"
+              desc: "llm must not import session"
+            - pkg: "github.com/latebit-io/junto/engine/highlight"
+              desc: "llm must not import highlight"
+            - pkg: "github.com/latebit-io/junto/engine/filelist"
+              desc: "llm must not import filelist"
+            - pkg: "github.com/latebit-io/junto/tui"
+              desc: "engine must never import tui"
+
+        # session is the top of the engine — can import agent, editor, buffer, filelist.
+        # Must not import tui or llm directly (uses Provider interface via agent).
+        # Test files excluded: tests need llm to construct mock providers.
+        session-isolation:
+          files:
+            - "**/session/*.go"
+            - "!**/*_test.go"
+          deny:
+            - pkg: "github.com/latebit-io/junto/engine/llm"
+              desc: "session must not import llm directly (uses agent which abstracts Provider)"
+            - pkg: "github.com/latebit-io/junto/engine/highlight"
+              desc: "session must not import highlight"
+            - pkg: "github.com/latebit-io/junto/engine/fuzzy"
+              desc: "session must not import fuzzy"
+            - pkg: "github.com/latebit-io/junto/tui"
+              desc: "engine must never import tui"
+
+        # No engine package may import tui.
+        engine-no-tui:
+          deny:
+            - pkg: "github.com/latebit-io/junto/tui"
+              desc: "engine must never import tui — dependencies point inward only"

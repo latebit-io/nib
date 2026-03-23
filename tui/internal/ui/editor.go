@@ -21,6 +21,9 @@ var (
 	agentCursorWaitingStyle = lipgloss.NewStyle().
 				Background(lipgloss.Color("243")).
 				Foreground(lipgloss.Color("0"))
+	// agentLineGutterStyle renders the gutter for agent-written lines.
+	agentLineGutterStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("34")) // green
 )
 
 // lineKind classifies a viewport row for mouse click routing.
@@ -325,7 +328,7 @@ func (m *EditorModel) renderNormalLine(
 	renderGutter := gutterStyle
 	if origin == buffer.OriginAgent {
 		gutterSuffix = "j"
-		renderGutter = lipgloss.NewStyle().Foreground(lipgloss.Color("34")) // green
+		renderGutter = agentLineGutterStyle
 	}
 	gutterText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1) + gutterSuffix
 	line.WriteString(renderGutter.Render(gutterText))

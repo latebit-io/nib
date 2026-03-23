@@ -566,7 +566,12 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	cpt := charsPerTick(m.Editor.TypingWPM)
 	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace)
 
-	m.Editor.Anim = &animationContext{state: animTyping, edit: ie}
+	m.Editor.Anim = &animationContext{
+		state:        animTyping,
+		edit:         ie,
+		devStartLine: m.Editor.CursorLine,
+		devStartCol:  m.Editor.CursorCol,
+	}
 	m.AgentPane.Status = "typing"
 
 	if ie.Remaining() == 0 {
@@ -608,10 +613,16 @@ func (m *AppModel) handleAnimTick() tea.Cmd {
 }
 
 // animCollision returns true if the dev cursor is within the span the agent
-// is actively typing into.
+// is actively typing into. Only triggers if the dev has moved their cursor
+// since the animation started — a stationary cursor is passive, not an
+// active intervention by the developer.
 func (m *AppModel) animCollision() bool {
 	anim := m.Editor.Anim
 	if anim == nil {
+		return false
+	}
+	// Dev hasn't moved — no collision.
+	if m.Editor.CursorLine == anim.devStartLine && m.Editor.CursorCol == anim.devStartCol {
 		return false
 	}
 	startLine, startCol := anim.edit.StartPosition()

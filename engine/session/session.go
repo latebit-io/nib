@@ -47,6 +47,11 @@ type Session struct {
 	// Canonical absolute paths as keys. Guarded by mu.
 	contextSet map[string]bool
 
+	// contextSaveMu serializes writes to .project/context.md.
+	// Separate from mu to avoid deadlock (saveContext calls ContextFiles
+	// which acquires mu.RLock).
+	contextSaveMu sync.Mutex
+
 	// Intent — session-level contract between developer and agent
 	CurrentIntent string   // the active goal
 	IntentDone    bool     // true when intent was completed (not cleared)
@@ -244,6 +249,9 @@ func (s *Session) saveContext() {
 	if s.projectRoot == "" {
 		return
 	}
+
+	s.contextSaveMu.Lock()
+	defer s.contextSaveMu.Unlock()
 
 	dir := filepath.Join(s.projectRoot, ".project")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

@@ -41,6 +41,11 @@ type animationContext struct {
 
 	// Whether the agent yielded due to cursor collision.
 	yielded bool
+
+	// Dev cursor position when animation started. Collision is only checked
+	// if the dev has moved since — a cursor that hasn't moved is passive,
+	// not an active intervention.
+	devStartLine, devStartCol int
 }
 
 const (

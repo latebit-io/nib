@@ -218,16 +218,12 @@ func (b *Buffer) InsertWithOrigin(line, col int, text string, origin Origin) {
 		return
 	}
 
+	// Insert handles undo push, redo clear, doInsert, and Modified flag.
 	line, col = b.clamp(line, col)
+	b.Insert(line, col, text)
 
-	// Record text insert for undo
-	b.pushUndo(operation{Kind: opInsert, Line: line, Col: col, Text: runes})
-	b.redo = nil
-
-	b.doInsert(line, col, runes)
-	b.Modified = true
-
-	// Count the affected lines and set their origin
+	// Mark affected lines with the given origin. SetLineOrigin pushes
+	// its own undo ops (participates in any active group).
 	endLine, _ := b.endOfInsert(line, col, runes)
 	for i := line; i <= endLine && i < len(b.lines); i++ {
 		b.SetLineOrigin(i, origin)

@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/mattn/go-runewidth"
 )
@@ -319,8 +320,15 @@ func (m *EditorModel) renderNormalLine(
 ) string {
 	var line strings.Builder
 
-	gutterText := fmt.Sprintf("%*d ", gutterW-1, lineIdx+1)
-	line.WriteString(gutterStyle.Render(gutterText))
+	origin := m.Buf.LineOrigin(lineIdx)
+	gutterSuffix := " "
+	renderGutter := gutterStyle
+	if origin == buffer.OriginAgent {
+		gutterSuffix = "j"
+		renderGutter = lipgloss.NewStyle().Foreground(lipgloss.Color("34")) // green
+	}
+	gutterText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1) + gutterSuffix
+	line.WriteString(renderGutter.Render(gutterText))
 
 	rawRunes := []rune(m.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)

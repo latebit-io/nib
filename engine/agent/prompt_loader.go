@@ -79,9 +79,8 @@ func (l *PromptLoader) load(name string) (string, string) {
 
 	data, err := defaultPrompts.ReadFile("prompts/" + name)
 	if err != nil {
-		// This should never happen — embedded files are compiled in.
-		slog.Error("prompt.load: embedded prompt missing", "name", name, "err", err)
-		return "", "embedded"
+		// Embedded files are compiled in — this means a corrupt binary.
+		panic(fmt.Sprintf("embedded prompt missing: %s: %v", name, err))
 	}
 	return string(data), "embedded"
 }

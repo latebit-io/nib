@@ -32,7 +32,8 @@ type StreamEvent struct {
 
 // Provider abstracts an LLM backend for streaming chat completions.
 type Provider interface {
-	// Stream sends messages and returns a channel of streaming events.
-	// The channel is closed when the response is complete or ctx is cancelled.
-	Stream(ctx context.Context, messages []Message) (<-chan StreamEvent, error)
+	// Stream sends messages with the given tool definitions and returns
+	// a channel of streaming events. The channel is closed when the
+	// response is complete or ctx is cancelled.
+	Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error)
 }

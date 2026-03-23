@@ -55,8 +55,30 @@ func main() {
 
 	e := editor.New(buf)
 
-	// Create LLM provider from environment
-	var provider llm.Provider
+	// Determine project root: walk up from file path (or cwd) to find .git.
+	startDir, _ := os.Getwd()
+	if filePath != "" {
+		if absPath, err := filepath.Abs(filePath); err == nil {
+			startDir = filepath.Dir(absPath)
+		}
+	}
+	projectRoot := startDir
+	for dir := startDir; ; {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			projectRoot = dir
+			break
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			break
+		}
+		dir = next
+	}
+
+	// Create session first (editor-only mode) — it serves as the agent's Workspace.
+	sess := session.New(e, projectRoot)
+
+	// Create LLM provider and agent from environment
 	apiKey := os.Getenv("LLM_API_KEY")
 	if apiKey != "" {
 		baseURL := os.Getenv("LLM_BASE_URL")
@@ -67,44 +89,14 @@ func main() {
 		if model == "" {
 			model = "google/gemini-2.5-flash"
 		}
-		provider = llm.NewAgentAPI(baseURL, model, apiKey)
-	}
-
-	// Create agent (nil provider = no agent, editor-only mode)
-	var ag *agent.Agent
-	var agentEvents <-chan agent.Event
-	if provider != nil {
+		provider := llm.NewAgentAPI(baseURL, model, apiKey)
 		events := make(chan agent.Event, 64)
-		agentEvents = events
-		ag = agent.New(provider, events)
+		ag := agent.New(provider, sess, events)
+		sess.SetAgent(ag, events)
 	}
-
-	sess := session.New(e, ag, agentEvents)
 
 	app := ui.NewApp(sess)
-
-	// Determine project root: walk up from file path (or cwd) to find .git.
-	// Falls back to cwd so Ctrl+P always works.
-	startDir, _ := os.Getwd()
-	if filePath != "" {
-		if absPath, err := filepath.Abs(filePath); err == nil {
-			startDir = filepath.Dir(absPath)
-		}
-	}
-	for dir := startDir; ; {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			app.ProjectRoot = dir
-			break
-		}
-		next := filepath.Dir(dir)
-		if next == dir {
-			break
-		}
-		dir = next
-	}
-	if app.ProjectRoot == "" {
-		app.ProjectRoot = startDir
-	}
+	app.ProjectRoot = projectRoot
 
 	// Agent typing speed (words per minute)
 	if wpmStr := os.Getenv("JUNTO_TYPING_WPM"); wpmStr != "" {
@@ -120,9 +112,9 @@ func main() {
 	app.SetProgram(p)
 
 	if _, err := p.Run(); err != nil {
-		app.Editor.Close()
+		sess.Close()
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	app.Editor.Close()
+	sess.Close()
 }

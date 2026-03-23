@@ -1,0 +1,42 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/latebit-io/junto/engine/llm"
+)
+
+// ListFilesTool lets the LLM see the project file structure.
+type ListFilesTool struct {
+	workspace Workspace
+}
+
+// NewListFilesTool creates a ListFilesTool with the given workspace.
+func NewListFilesTool(ws Workspace) *ListFilesTool {
+	return &ListFilesTool{workspace: ws}
+}
+
+func (t *ListFilesTool) Definition() llm.ToolDef {
+	return llm.ToolDef{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "list_files",
+			Description: "List all files in the project (respects .gitignore). Returns paths relative to the project root. Use this to discover files before reading or editing them.",
+			Parameters: llm.FunctionParams{
+				Type:       "object",
+				Properties: map[string]llm.FunctionParam{},
+				Required:   []string{},
+			},
+		},
+	}
+}
+
+func (t *ListFilesTool) Execute(_ context.Context, _ llm.ToolCall) string {
+	files, err := t.workspace.ListFiles()
+	if err != nil {
+		return fmt.Sprintf("Error: %v", err)
+	}
+	return strings.Join(files, "\n")
+}

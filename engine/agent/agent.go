@@ -5,7 +5,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -25,6 +24,9 @@ type TokenEvent struct{ Text string }
 // EditProposedEvent is sent when the LLM proposes an edit for approval.
 type EditProposedEvent struct{ Edit PendingEdit }
 
+// FileCreatedEvent is sent when the agent creates a new file.
+type FileCreatedEvent struct{ Path string }
+
 // DoneEvent signals the agent loop has finished.
 // Success is true when the loop completed normally (not cancelled or errored).
 type DoneEvent struct{ Success bool }
@@ -37,6 +39,7 @@ type StatusEvent struct{ Status string }
 
 func (TokenEvent) agentEvent()        {}
 func (EditProposedEvent) agentEvent() {}
+func (FileCreatedEvent) agentEvent()  {}
 func (DoneEvent) agentEvent()         {}
 func (ErrorEvent) agentEvent()        {}
 func (StatusEvent) agentEvent()       {}
@@ -44,6 +47,7 @@ func (StatusEvent) agentEvent()       {}
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {
 	ID      string
+	Path    string // which file this edit targets
 	Search  string
 	Replace string
 	Reason  string
@@ -53,33 +57,54 @@ type PendingEdit struct {
 type Agent struct {
 	provider llm.Provider
 	events   chan<- Event // frontend reads from this
+	tools    map[string]Tool
+	toolDefs []llm.ToolDef
+	cache    *FileCache
 
-	mu          sync.Mutex
-	cancel      context.CancelFunc
-	fileName    string
-	fileContent string
-	intent      string // current developer intent — included in every tool result
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	activeFile string
+	intent     string // current developer intent — included in every tool result
 
 	// Approval flow: agent blocks on these channels
 	approveCh  chan bool   // true = approved, false = rejected
 	continueCh chan string // buffer content after user edits
-
-	silentRetries    int
-	maxSilentRetries int
 }
 
-// New creates a new agent with the given LLM provider and event channel.
+// New creates a new agent with the given LLM provider, workspace, and event channel.
 // The frontend must continuously drain the events channel. Sends block
 // if the channel is full, providing backpressure to the agent loop.
 // Use a buffered channel (e.g. 64) to absorb bursts.
-func New(provider llm.Provider, events chan<- Event) *Agent {
-	return &Agent{
-		provider:         provider,
-		events:           events,
-		approveCh:        make(chan bool, 1),
-		continueCh:       make(chan string, 1),
-		maxSilentRetries: 3,
+func New(provider llm.Provider, workspace Workspace, events chan<- Event) *Agent {
+	approveCh := make(chan bool, 1)
+	continueCh := make(chan string, 1)
+	cache := NewFileCache()
+
+	a := &Agent{
+		provider:   provider,
+		events:     events,
+		cache:      cache,
+		approveCh:  approveCh,
+		continueCh: continueCh,
 	}
+
+	// Build tool registry — each tool gets exactly the dependencies it needs.
+	toolList := []Tool{
+		NewReadFileTool(workspace, cache),
+		NewEditFileTool(workspace, cache, approveCh, continueCh, a.send),
+		NewWriteFileTool(workspace, cache, a.send),
+		NewListFilesTool(workspace),
+	}
+
+	a.tools = make(map[string]Tool, len(toolList))
+	a.toolDefs = make([]llm.ToolDef, 0, len(toolList))
+	for _, t := range toolList {
+		def := t.Definition()
+		a.tools[def.Function.Name] = t
+		a.toolDefs = append(a.toolDefs, def)
+	}
+
+	return a
 }
 
 // Run starts the agent loop in a goroutine.
@@ -95,10 +120,16 @@ func (a *Agent) Run(fileName, fileContent, goal string) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
-	a.fileName = fileName
-	a.fileContent = fileContent
+	a.activeFile = fileName
+	a.cache.Reset(fileName, fileContent)
 	a.intent = goal
-	a.silentRetries = 0
+
+	// Reset tools with state
+	for _, t := range a.tools {
+		if r, ok := t.(Resettable); ok {
+			r.Reset()
+		}
+	}
 	a.mu.Unlock()
 
 	go a.run(ctx, fileName, fileContent, goal)
@@ -130,11 +161,10 @@ func (a *Agent) Reject() {
 	}
 }
 
-// Continue signals the user is done editing and sends the current buffer content.
-func (a *Agent) Continue(bufferContent string) {
-	a.mu.Lock()
-	a.fileContent = bufferContent
-	a.mu.Unlock()
+// Continue signals the user is done editing and sends the current buffer content
+// for the file that was just edited.
+func (a *Agent) Continue(path, bufferContent string) {
+	a.cache.Set(path, bufferContent)
 	select {
 	case a.continueCh <- bufferContent:
 	default:
@@ -169,7 +199,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 	thinkState := false
 
 	for {
-		ch, err := a.provider.Stream(ctx, messages)
+		ch, err := a.provider.Stream(ctx, messages, a.toolDefs)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
 			a.send(ErrorEvent{Err: fmt.Sprintf("LLM error: %v", err)})
@@ -212,7 +242,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 
 		for _, tc := range toolCalls {
 			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
-			result := a.handleToolCall(ctx, tc)
+			result := a.dispatchTool(ctx, tc)
 			if ctx.Err() != nil {
 				return
 			}
@@ -225,16 +255,14 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string) {
 	}
 }
 
-func (a *Agent) handleToolCall(ctx context.Context, tc llm.ToolCall) string {
+func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 	name := strings.ToLower(tc.Function.Name)
-	switch name {
-	case "read_file":
-		return a.handleReadFile()
-	case "edit_file":
-		return a.handleEditFile(ctx, tc)
-	default:
+	tool, ok := a.tools[name]
+	if !ok {
 		return fmt.Sprintf("Error: unknown tool %q", tc.Function.Name)
 	}
+	result := tool.Execute(ctx, tc)
+	return result + a.intentReminder()
 }
 
 // intentReminder returns a string reminding the LLM of the current intent.
@@ -247,114 +275,4 @@ func (a *Agent) intentReminder() string {
 		return ""
 	}
 	return "\n\nReminder — developer's intent: " + intent
-}
-
-func (a *Agent) handleReadFile() string {
-	a.mu.Lock()
-	content := a.fileContent
-	a.mu.Unlock()
-	return content + a.intentReminder()
-}
-
-type editArgs struct {
-	Search  string `json:"search"`
-	Replace string `json:"replace"`
-	Reason  string `json:"reason"`
-}
-
-func (a *Agent) handleEditFile(ctx context.Context, tc llm.ToolCall) string {
-	var args editArgs
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
-	}
-	if args.Search == "" {
-		return "Error: search field cannot be empty"
-	}
-
-	a.mu.Lock()
-	content := a.fileContent
-	retries := a.silentRetries
-	maxRetries := a.maxSilentRetries
-	a.mu.Unlock()
-
-	// Silent retry: validate search text before presenting to user.
-	// Check for exact match count — 0 means not found, >1 means ambiguous.
-	matchCount := strings.Count(content, args.Search)
-	if matchCount != 1 {
-		a.mu.Lock()
-		if retries < maxRetries {
-			a.silentRetries++
-			remaining := maxRetries - a.silentRetries
-			a.mu.Unlock()
-			var errMsg string
-			if matchCount == 0 {
-				errMsg = "search text not found in file"
-			} else {
-				errMsg = fmt.Sprintf("search text matches %d locations (expected exactly 1) — make the search text more specific", matchCount)
-			}
-			slog.Info("edit_file: silent retry", "reason", errMsg,
-				"attempt", retries+1, "search_len", len(args.Search))
-			return fmt.Sprintf("Error: %s. You have %d retries left. Read the file content carefully and copy the exact text.\n\nCurrent file:\n\n%s",
-				errMsg, remaining, content) + a.intentReminder()
-		}
-		a.silentRetries = 0
-		a.mu.Unlock()
-		slog.Warn("edit_file: validation failed after max retries",
-			"matches", matchCount, "search_len", len(args.Search))
-		return fmt.Sprintf("Error: search text validation failed after %d retries. Use read_file to re-read the file and copy the exact text.\n\nCurrent file:\n\n%s",
-			maxRetries, content) + a.intentReminder()
-	}
-
-	a.mu.Lock()
-	a.silentRetries = 0
-	a.mu.Unlock()
-
-	// Send proposed edit to frontend
-	a.send(StatusEvent{Status: "waiting"})
-	a.send(EditProposedEvent{Edit: PendingEdit{
-		ID:      tc.ID,
-		Search:  args.Search,
-		Replace: args.Replace,
-		Reason:  args.Reason,
-	}})
-
-	// Wait for approval or rejection
-	select {
-	case <-ctx.Done():
-		return "Error: agent canceled"
-	case approved := <-a.approveCh:
-		if !approved {
-			a.send(StatusEvent{Status: "thinking"})
-			a.send(TokenEvent{Text: "\n[Edit rejected]\n\n"})
-			a.mu.Lock()
-			content = a.fileContent
-			a.mu.Unlock()
-			return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file:\n\n%s", content) + a.intentReminder()
-		}
-	}
-
-	// Approved — wait for user to finish editing and continue.
-	// Build the expected file content so we can detect developer modifications.
-	expectedContent := strings.Replace(content, args.Search, args.Replace, 1)
-
-	a.send(StatusEvent{Status: "editing"})
-	a.send(TokenEvent{Text: "\n[Edit approved — waiting for continue]\n"})
-
-	select {
-	case <-ctx.Done():
-		return "Error: agent canceled"
-	case newContent := <-a.continueCh:
-		a.mu.Lock()
-		a.fileContent = newContent
-		a.mu.Unlock()
-		a.send(StatusEvent{Status: "thinking"})
-		a.send(TokenEvent{Text: "\n"})
-
-		if newContent != expectedContent {
-			return fmt.Sprintf("Edit applied. The applied edit differs from what you proposed. "+
-				"Study what changed — it signals the developer's intent. Recalibrate your approach to align with their direction. "+
-				"If you notice a syntax error or bug in their edit, point it out and propose a fix — do not silently change it.\n\nCurrent file:\n\n%s", newContent) + a.intentReminder()
-		}
-		return fmt.Sprintf("Edit applied successfully.\n\nCurrent file:\n\n%s", newContent) + a.intentReminder()
-	}
 }

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/agent"
@@ -13,23 +14,38 @@ import (
 // stubProvider satisfies llm.Provider for constructing an agent in tests.
 type stubProvider struct{}
 
-func (stubProvider) Stream(_ context.Context, _ []llm.Message) (<-chan llm.StreamEvent, error) {
+func (stubProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	ch := make(chan llm.StreamEvent)
 	close(ch)
 	return ch, nil
 }
 
+// stubWorkspace satisfies agent.Workspace for tests.
+type stubWorkspace struct{}
+
+func (stubWorkspace) ReadFile(_ string) (string, error) { return "", nil }
+func (stubWorkspace) ListFiles() ([]string, error)      { return nil, nil }
+func (stubWorkspace) WriteFile(_, _ string) error       { return nil }
+func (stubWorkspace) CanonPath(p string) string         { return p }
+
 // newTestSession creates a session with a buffer containing the given text
 // and a real agent (needed to test approval signaling).
 func newTestSession(content string) *Session {
+	return newTestSessionWithRoot(content, "")
+}
+
+// newTestSessionWithRoot creates a test session with a specific project root.
+func newTestSessionWithRoot(content, projectRoot string) *Session {
 	buf := buffer.New()
 	if content != "" {
 		buf.Insert(0, 0, content)
 	}
 	e := editor.New(buf)
+	sess := New(e, projectRoot)
 	events := make(chan agent.Event, 64)
-	ag := agent.New(stubProvider{}, events)
-	return New(e, ag, events)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events)
+	sess.SetAgent(ag, events)
+	return sess
 }
 
 func TestPrepareApproval(t *testing.T) {
@@ -208,44 +224,167 @@ func TestPrepareApprovalRejectsOnLocationFailure(t *testing.T) {
 	}
 }
 
-func TestSwitchEditor(t *testing.T) {
-	s := newTestSession("old content")
-	s.CurrentIntent = "some goal"
-	s.PendingEdit = &agent.PendingEdit{Search: "old", Replace: "new"}
-	s.editReviewed = true
+func TestSwitchTo(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSessionWithRoot("old content", dir)
 
-	newBuf := buffer.New()
-	newBuf.Insert(0, 0, "new content")
-	newEditor := editor.New(newBuf)
-
-	old := s.SwitchEditor(newEditor)
-
-	// Old editor returned for cleanup.
-	if old == nil {
-		t.Fatal("expected old editor to be returned")
+	// Write a temp file to switch to
+	newPath := dir + "/new.txt"
+	if err := writeTestFile(newPath, "new content"); err != nil {
+		t.Fatal(err)
 	}
-	if old.Buf.Content() != "old content" {
-		t.Errorf("old editor content = %q, want %q", old.Buf.Content(), "old content")
+
+	err := s.SwitchTo(newPath)
+	if err != nil {
+		t.Fatalf("SwitchTo failed: %v", err)
 	}
 
 	// New editor is active.
-	if s.Editor.Buf.Content() != "new content" {
-		t.Errorf("new editor content = %q, want %q", s.Editor.Buf.Content(), "new content")
+	got := s.Editor.Buf.Content()
+	if got != "new content" && got != "new content\n" {
+		t.Errorf("new editor content = %q, want %q", got, "new content")
+	}
+	if s.ActiveFile() != newPath {
+		t.Errorf("ActiveFile = %q, want %q", s.ActiveFile(), newPath)
 	}
 
-	// All state cleared.
-	if s.PendingEdit != nil {
-		t.Error("PendingEdit should be nil after SwitchEditor")
+	// Both editors are tracked (old buffer has no path so only the new one is in map,
+	// plus the empty-path original is only tracked if it had a path).
+	files := s.OpenFiles()
+	if len(files) < 1 {
+		t.Errorf("OpenFiles count = %d, want at least 1", len(files))
 	}
-	if s.editReviewed {
-		t.Error("editReviewed should be false after SwitchEditor")
+}
+
+func TestSwitchToExistingBuffer(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create two real files so both have paths.
+	pathA := dir + "/a.txt"
+	pathB := dir + "/b.txt"
+	if err := writeTestFile(pathA, "file A content"); err != nil {
+		t.Fatal(err)
 	}
-	if s.CurrentIntent != "" {
-		t.Error("CurrentIntent should be cleared after SwitchEditor")
+	if err := writeTestFile(pathB, "file B content"); err != nil {
+		t.Fatal(err)
 	}
-	if s.IntentDone {
-		t.Error("IntentDone should be false after SwitchEditor")
+
+	// Start with file A.
+	bufA, err := buffer.NewFromFile(pathA)
+	if err != nil {
+		t.Fatal(err)
 	}
+	eA := editor.New(bufA)
+	s := New(eA, dir)
+
+	// Switch to B — opens from disk.
+	if err := s.SwitchTo(pathB); err != nil {
+		t.Fatal(err)
+	}
+	if s.Editor.Buf.Content() != "file B content" {
+		t.Errorf("after switch to B: got %q", s.Editor.Buf.Content())
+	}
+
+	// Switch back to A — should reuse the existing buffer, not re-read disk.
+	eA.InsertChar('!') // modify buffer A while viewing B
+	if err := s.SwitchTo(pathA); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Editor.Buf.Content()
+	if got == "file A content" {
+		t.Error("expected modified buffer A, got original disk content — buffer was not reused")
+	}
+}
+
+func TestMultiBufferModifiedTracking(t *testing.T) {
+	dir := t.TempDir()
+	pathA := dir + "/a.txt"
+	pathB := dir + "/b.txt"
+	if err := writeTestFile(pathA, "file A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(pathB, "file B"); err != nil {
+		t.Fatal(err)
+	}
+
+	bufA, err := buffer.NewFromFile(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(editor.New(bufA), dir)
+
+	// Open second file.
+	if err := s.SwitchTo(pathB); err != nil {
+		t.Fatal(err)
+	}
+
+	// No modifications yet.
+	if len(s.ModifiedFiles()) != 0 {
+		t.Fatalf("expected no modified files, got %v", s.ModifiedFiles())
+	}
+
+	// Modify file B.
+	s.Editor.InsertChar('X')
+	modified := s.ModifiedFiles()
+	if len(modified) != 1 {
+		t.Fatalf("expected 1 modified file, got %v", modified)
+	}
+}
+
+func TestEditorForPath(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSessionWithRoot("content", dir)
+
+	path := dir + "/test.go"
+	if err := writeTestFile(path, "package main"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SwitchTo(path); err != nil {
+		t.Fatal(err)
+	}
+
+	e := s.EditorForPath(path)
+	if e == nil {
+		t.Fatal("EditorForPath returned nil for open file")
+	}
+
+	e2 := s.EditorForPath("/nonexistent")
+	if e2 != nil {
+		t.Error("EditorForPath should return nil for unopened file")
+	}
+}
+
+func TestResolvePathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSessionWithRoot("content", dir)
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"relative inside root", "src/main.go", false},
+		{"traversal escapes root", "../../etc/passwd", true},
+		{"absolute inside root", dir + "/src/main.go", false},
+		{"absolute outside root", "/etc/passwd", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.resolvePath(tt.path)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for path %q, got nil", tt.path)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for path %q: %v", tt.path, err)
+			}
+		})
+	}
+}
+
+func writeTestFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0644)
 }
 
 func contains(s, substr string) bool {

@@ -19,7 +19,7 @@ const (
 type Line struct {
 	// Runes is the text content of the line.
 	Runes []rune
-	// Origin tracks who wrote this line (Developer, Agent, or Proposed).
+	// Origin tracks who wrote this line (Developer or Agent).
 	Origin Origin
 }
 

@@ -206,7 +206,10 @@ func (t *EditFileTool) waitForApproval(ctx context.Context, canon, path string) 
 	select {
 	case <-ctx.Done():
 		return "", true
-	case approved := <-t.approveCh:
+	case approved, ok := <-t.approveCh:
+		if !ok {
+			return "Error: approval channel closed", true
+		}
 		if approved {
 			return "", false
 		}
@@ -233,7 +236,10 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 	select {
 	case <-ctx.Done():
 		return "Error: agent canceled"
-	case newContent := <-t.continueCh:
+	case newContent, ok := <-t.continueCh:
+		if !ok {
+			return "Error: continue channel closed"
+		}
 		t.cache.Set(canon, newContent)
 		t.send(StatusEvent{Status: "thinking"})
 		t.send(TokenEvent{Text: "\n"})

@@ -2,7 +2,6 @@
 package highlight
 
 import (
-	"log/slog"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -115,11 +114,8 @@ func (h *Highlighter) addLeafTokens(node *sitter.Node, lines []string) {
 	startCol := int(node.StartPosition().Column)
 	endCol := int(node.EndPosition().Column)
 
-	for line := startRow; line <= endRow && line < len(h.cache); line++ {
-		if line >= len(lines) {
-			slog.Debug("highlight: line index out of range", "line", line, "len", len(lines))
-			continue
-		}
+	upper := min(len(h.cache), len(lines))
+	for line := startRow; line <= endRow && line < upper; line++ {
 		tok, ok := h.byteRangeToToken(lines[line], line, startRow, endRow, startCol, endCol, kind)
 		if ok {
 			h.cache[line] = append(h.cache[line], tok)

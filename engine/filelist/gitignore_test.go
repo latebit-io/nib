@@ -68,6 +68,11 @@ func TestGlobMatch(t *testing.T) {
 		{"**/*.log", "dir/error.log", true},
 		{"**/*.log", "a/b/c/error.log", true},
 		{"**/*.log", "error.txt", false},
+		{"**/foo", "foo", true},
+		{"**/foo", "dir/foo", true},
+		{"**/foo", "a/b/foo", true},
+		{"**/foo", "barfoo", false},     // ** must match at segment boundaries
+		{"**/foo", "dir/barfoo", false}, // not mid-segment
 
 		// Question mark
 		{"?.txt", "a.txt", true},

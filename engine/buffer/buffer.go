@@ -58,6 +58,12 @@ type operation struct {
 	// Origin fields — used only by opSetOrigin.
 	NewOrigin  Origin
 	PrevOrigin Origin
+
+	// LineOrigins stores the origins of lines affected by opDelete.
+	// Captured before deletion so undo can restore per-line provenance
+	// when doInsert recreates split lines (which would otherwise inherit
+	// the parent's current origin, losing the original per-line data).
+	LineOrigins []Origin
 }
 
 // New creates an empty buffer.
@@ -212,8 +218,8 @@ func (b *Buffer) Insert(line, col int, text string) {
 
 // InsertWithOrigin inserts text and sets the origin of all affected lines.
 // For multi-line inserts, the original line and all new lines receive the
-// given origin. This is atomic with undo — the text insert and origin
-// changes are tracked together (and inside any active group).
+// given origin. The text insert and origin changes participate in any active
+// group; callers must wrap in BeginGroup/EndGroup if atomicity is required.
 func (b *Buffer) InsertWithOrigin(line, col int, text string, origin Origin) {
 	runes := []rune(text)
 	if len(runes) == 0 {
@@ -246,8 +252,26 @@ func (b *Buffer) Delete(line, col, count int) string {
 		return ""
 	}
 
+	// Capture origins of lines that will be merged/removed by this delete.
+	// Needed so undo can restore per-line provenance after doInsert recreates them.
+	var lineOrigins []Origin
+	newlineCount := 0
+	for _, r := range deleted {
+		if r == '\n' {
+			newlineCount++
+		}
+	}
+	if newlineCount > 0 {
+		lineOrigins = make([]Origin, newlineCount+1)
+		for i := range lineOrigins {
+			if line+i < len(b.lines) {
+				lineOrigins[i] = b.lines[line+i].Origin
+			}
+		}
+	}
+
 	// Record for undo
-	b.pushUndo(operation{Kind: opDelete, Line: line, Col: col, Text: deleted})
+	b.pushUndo(operation{Kind: opDelete, Line: line, Col: col, Text: deleted, LineOrigins: lineOrigins})
 	b.redo = nil
 
 	b.doDelete(line, col, deleted)
@@ -274,7 +298,12 @@ func (b *Buffer) Undo() (int, int, bool) {
 			if op.Kind == opGroupStart {
 				break
 			}
-			lastLine, lastCol = b.applyUndoOp(op)
+			l, c := b.applyUndoOp(op)
+			// Only update cursor from text ops — opSetOrigin returns (line, 0)
+			// which would overwrite the real cursor position.
+			if op.Kind != opSetOrigin {
+				lastLine, lastCol = l, c
+			}
 			ops = append(ops, op)
 		}
 		// ops were undone in reverse (LIFO). Push to redo so that
@@ -318,7 +347,12 @@ func (b *Buffer) Redo() (int, int, bool) {
 		var lastLine, lastCol int
 		b.undo = append(b.undo, operation{Kind: opGroupStart})
 		for _, o := range ops {
-			lastLine, lastCol = b.applyRedoOp(o)
+			l, c := b.applyRedoOp(o)
+			// Only update cursor from text ops — opSetOrigin returns (line, 0)
+			// which would overwrite the real cursor position.
+			if o.Kind != opSetOrigin {
+				lastLine, lastCol = l, c
+			}
 			b.undo = append(b.undo, o)
 		}
 		b.undo = append(b.undo, operation{Kind: opGroupEnd})
@@ -438,6 +472,15 @@ func (b *Buffer) applyUndoOp(op operation) (int, int) {
 		return op.Line, op.Col
 	case opDelete:
 		b.doInsert(op.Line, op.Col, op.Text)
+		// Restore per-line origins that were captured before the delete.
+		// doInsert makes new lines inherit the parent's origin, which loses
+		// the original per-line provenance for cross-line deletes.
+		for i, origin := range op.LineOrigins {
+			lineIdx := op.Line + i
+			if lineIdx >= 0 && lineIdx < len(b.lines) {
+				b.lines[lineIdx].Origin = origin
+			}
+		}
 		endLine, endCol := b.endOfInsert(op.Line, op.Col, op.Text)
 		return endLine, endCol
 	case opSetOrigin:

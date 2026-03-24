@@ -11,6 +11,18 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 )
 
+// maxContentPreview is the max bytes of file content included in error messages
+// sent back to the LLM. Prevents unbounded message sizes for large files.
+const maxContentPreview = 8 * 1024
+
+// truncateForPreview returns content truncated for LLM error messages.
+func truncateForPreview(content string) string {
+	if len(content) <= maxContentPreview {
+		return content
+	}
+	return content[:maxContentPreview] + "\n\n[... truncated — use read_file for full content]"
+}
+
 // EditFileTool lets the LLM propose search-and-replace edits to files.
 // It validates the search text, sends an approval event, and blocks
 // until the developer approves or rejects.
@@ -176,7 +188,7 @@ func (t *EditFileTool) validateSearchMatch(path, search, content string) string 
 		slog.Info("edit_file: silent retry", "reason", errMsg,
 			"attempt", attempt, "path", path, "search_len", len(search))
 		return fmt.Sprintf("Error: %s. You have %d retries left. Read the file content carefully and copy the exact text.\n\nCurrent file (%s):\n\n%s",
-			errMsg, remaining, path, content)
+			errMsg, remaining, path, truncateForPreview(content))
 	}
 
 	t.silentRetries = 0
@@ -184,7 +196,7 @@ func (t *EditFileTool) validateSearchMatch(path, search, content string) string 
 	slog.Warn("edit_file: validation failed after max retries",
 		"matches", matchCount, "path", path, "search_len", len(search))
 	return fmt.Sprintf("Error: search text validation failed after %d retries. Use read_file to re-read the file and copy the exact text.\n\nCurrent file (%s):\n\n%s",
-		t.maxSilentRetries, path, content)
+		t.maxSilentRetries, path, truncateForPreview(content))
 }
 
 // waitForApproval blocks until the developer approves or rejects the edit,
@@ -208,7 +220,7 @@ func (t *EditFileTool) waitForApproval(ctx context.Context, canon, path string) 
 		content = c
 	}
 	return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
-		path, content), false
+		path, truncateForPreview(content)), false
 }
 
 // waitForContinue blocks until the developer finishes editing and presses

@@ -189,15 +189,21 @@ func doGlob(pattern, name []rune) bool {
 }
 
 // globDoubleStar handles ** which matches any number of path segments.
+// It only tries suffixes at path-segment boundaries (start of string or after /).
 func globDoubleStar(pattern, name []rune) bool {
 	rest := pattern[2:]
 	if len(rest) > 0 && rest[0] == '/' {
 		rest = rest[1:]
 	}
-	// Try matching rest against every suffix of name.
+	if len(rest) == 0 {
+		return true
+	}
+	// Try matching rest at segment boundaries only.
 	for i := range len(name) + 1 {
-		if doGlob(rest, name[i:]) {
-			return true
+		if i == 0 || (i > 0 && name[i-1] == '/') {
+			if doGlob(rest, name[i:]) {
+				return true
+			}
 		}
 	}
 	return false

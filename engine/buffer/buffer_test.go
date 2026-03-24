@@ -453,3 +453,73 @@ func TestSetLineOriginNoOpSkipsUndo(t *testing.T) {
 		t.Error("expected no undo entry for no-op SetLineOrigin")
 	}
 }
+
+func TestUndoDeleteRestoresPerLineOrigins(t *testing.T) {
+	b := NewFromString("hello\nworld\nfoo")
+	b.SetLineOrigin(0, OriginDeveloper)
+	b.SetLineOrigin(1, OriginAgent)
+	b.SetLineOrigin(2, OriginDeveloper)
+
+	// Delete across newline: merges lines 0-2 into one
+	b.Delete(0, 5, 5) // deletes "\nworl"
+	if b.LineCount() != 2 {
+		t.Fatalf("after delete: %d lines, want 2", b.LineCount())
+	}
+
+	// Undo should restore all three lines with original origins
+	b.Undo()
+	if b.LineCount() != 3 {
+		t.Fatalf("after undo: %d lines, want 3", b.LineCount())
+	}
+	if got := b.LineOrigin(0); got != OriginDeveloper {
+		t.Errorf("line 0: origin = %d, want OriginDeveloper", got)
+	}
+	if got := b.LineOrigin(1); got != OriginAgent {
+		t.Errorf("line 1: origin = %d, want OriginAgent", got)
+	}
+	if got := b.LineOrigin(2); got != OriginDeveloper {
+		t.Errorf("line 2: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestGroupedRedoCursorNotCorruptedByOriginOps(t *testing.T) {
+	b := NewFromString("old text")
+
+	// Simulate an agent edit: grouped delete + insert + origin change
+	b.BeginGroup()
+	b.Delete(0, 0, 8)
+	b.Insert(0, 0, "new text")
+	b.SetLineOrigin(0, OriginAgent)
+	b.EndGroup()
+
+	// Undo the group
+	b.Undo()
+
+	// Redo — cursor should be at end of "new text" (0, 8), not (0, 0)
+	l, c, ok := b.Redo()
+	if !ok {
+		t.Fatal("redo failed")
+	}
+	if l != 0 || c != 8 {
+		t.Errorf("redo cursor: got (%d,%d), want (0,8)", l, c)
+	}
+}
+
+func TestGroupedUndoCursorNotCorruptedByOriginOps(t *testing.T) {
+	b := NewFromString("old text")
+
+	b.BeginGroup()
+	b.Delete(0, 0, 8)
+	b.Insert(0, 0, "new text")
+	b.SetLineOrigin(0, OriginAgent)
+	b.EndGroup()
+
+	// Undo — cursor should be at end of restored "old text" (0, 8), not (0, 0)
+	l, c, ok := b.Undo()
+	if !ok {
+		t.Fatal("undo failed")
+	}
+	if l != 0 || c != 8 {
+		t.Errorf("undo cursor: got (%d,%d), want (0,8)", l, c)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
@@ -152,8 +153,8 @@ func (h *Highlighter) byteRangeToToken(lineText string, line, startRow, endRow, 
 		return Token{}, false
 	}
 
-	sc := len([]rune(lineText[:scBytes]))
-	ec := len([]rune(lineText[:ecBytes]))
+	sc := utf8.RuneCountInString(lineText[:scBytes])
+	ec := utf8.RuneCountInString(lineText[:ecBytes])
 	if sc >= ec {
 		return Token{}, false
 	}

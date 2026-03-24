@@ -569,9 +569,10 @@ func (e *Editor) LocateEdit(search string) (*EditLocation, string) {
 // ApplyEdit applies a search-and-replace edit to the buffer.
 // Returns (true, "") on success, or (false, reason) on failure.
 // Edits are grouped for undo and the cursor is moved to the edit location.
-// If origin is non-nil, all affected lines are marked with that origin
-// (atomically within the undo group).
-func (e *Editor) ApplyEdit(search, replace string, origin *buffer.Origin) (bool, string) {
+// lineOrigins is a per-line origin slice for the replacement text (index 0 =
+// first replacement line). Nil slice means no origin changes. A nil entry
+// within the slice means "don't change this line's origin" (unchanged line).
+func (e *Editor) ApplyEdit(search, replace string, lineOrigins []*buffer.Origin) (bool, string) {
 	loc, reason := e.LocateEdit(search)
 	if loc == nil {
 		return false, reason
@@ -579,10 +580,11 @@ func (e *Editor) ApplyEdit(search, replace string, origin *buffer.Origin) (bool,
 	searchRunes := len([]rune(search))
 	e.Buf.BeginGroup()
 	e.Buf.Delete(loc.Line, loc.Col, searchRunes)
-	if origin != nil {
-		e.Buf.InsertWithOrigin(loc.Line, loc.Col, replace, *origin)
-	} else {
-		e.Buf.Insert(loc.Line, loc.Col, replace)
+	e.Buf.Insert(loc.Line, loc.Col, replace)
+	for i, origin := range lineOrigins {
+		if origin != nil {
+			e.Buf.SetLineOrigin(loc.Line+i, *origin)
+		}
 	}
 	e.Buf.EndGroup()
 	e.ClearSelection()

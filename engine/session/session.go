@@ -686,8 +686,8 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	if s.PendingEdit.Path != "" {
 		editPath = s.CanonPath(s.PendingEdit.Path)
 	}
-	agentOrigin := buffer.OriginAgent
-	ok, reason := e.ApplyEdit(search, replace, &agentOrigin)
+	lineOrigins := computeLineOrigins(search, s.PendingEdit.Replace, replace)
+	ok, reason := e.ApplyEdit(search, replace, lineOrigins)
 	if ok {
 		s.lastEditedFile = editPath
 		s.mu.Lock()
@@ -724,8 +724,11 @@ type AnimationPlan struct {
 	Search string
 	// Replace is the text to type into the buffer.
 	Replace string
-	// Origin is the provenance to apply to affected lines (e.g. OriginAgent).
-	Origin *buffer.Origin
+	// LineOrigins holds the provenance for each line of the replacement.
+	// Index 0 corresponds to the buffer line at Line, index 1 to Line+1, etc.
+	// A nil entry means "don't change this line's origin" (the line was
+	// unchanged from the search text — the agent just re-included it as context).
+	LineOrigins []*buffer.Origin
 }
 
 // PrepareApproval validates the reviewed edit and returns an AnimationPlan.
@@ -760,16 +763,45 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 	} else {
 		s.stagedEditFile = s.activeFile
 	}
+	lineOrigins := computeLineOrigins(search, s.PendingEdit.Replace, replace)
+
 	s.PendingEdit = nil
 	s.editReviewed = false
-	agentOrigin := buffer.OriginAgent
 	return &AnimationPlan{
-		Line:    loc.Line,
-		Col:     loc.Col,
-		Search:  search,
-		Replace: replace,
-		Origin:  &agentOrigin,
+		Line:        loc.Line,
+		Col:         loc.Col,
+		Search:      search,
+		Replace:     replace,
+		LineOrigins: lineOrigins,
 	}, nil
+}
+
+// computeLineOrigins determines per-line provenance for a replacement by
+// comparing three versions: the original search text, the agent's proposed
+// replacement, and the developer's final replacement (possibly modified in
+// the overlay). Returns a slice with one entry per line of finalReplace:
+//   - nil: line is identical in search and finalReplace — unchanged, keep current origin
+//   - OriginAgent: agent changed this line and developer didn't modify it
+//   - OriginDeveloper: developer modified this line in the overlay (or added it)
+func computeLineOrigins(search, originalReplace, finalReplace string) []*buffer.Origin {
+	searchLines := strings.Split(search, "\n")
+	origLines := strings.Split(originalReplace, "\n")
+	finalLines := strings.Split(finalReplace, "\n")
+
+	origins := make([]*buffer.Origin, len(finalLines))
+	for i := range finalLines {
+		// Line unchanged from search — agent re-included it as context, skip
+		if i < len(searchLines) && searchLines[i] == finalLines[i] {
+			continue
+		}
+		// Line was changed; determine who changed it
+		origin := buffer.OriginAgent
+		if i >= len(origLines) || origLines[i] != finalLines[i] {
+			origin = buffer.OriginDeveloper
+		}
+		origins[i] = &origin
+	}
+	return origins
 }
 
 // CompleteApproval signals the agent that the animated edit has been applied.

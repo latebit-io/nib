@@ -13,7 +13,6 @@ type Origin uint8
 const (
 	OriginDeveloper Origin = iota // default — developer-written or loaded from disk
 	OriginAgent                   // written by the agent (set after approval)
-	OriginProposed                // proposed by the agent (pending approval)
 )
 
 // Line is a single line in the buffer, carrying both text and provenance.

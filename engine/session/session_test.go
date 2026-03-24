@@ -649,3 +649,87 @@ func TestAgentOriginSurvivesUndoRedo(t *testing.T) {
 		t.Errorf("after redo: origin = %d, want OriginAgent", got)
 	}
 }
+
+func TestPrepareApprovalDevModifiedReplace(t *testing.T) {
+	s := newTestSession("hello world")
+
+	// Agent proposes replacing "world" with "earth"
+	s.PendingEdit = &agent.PendingEdit{
+		Search:  "world",
+		Replace: "earth",
+	}
+	s.ReviewEdit()
+
+	// Developer modifies the replacement in the overlay to "mars"
+	plan, err := s.PrepareApproval("world", "mars")
+	if err != nil {
+		t.Fatalf("PrepareApproval: %v", err)
+	}
+
+	// Single-line replacement: "world" != "mars" → Developer
+	if len(plan.LineOrigins) != 1 {
+		t.Fatalf("LineOrigins len = %d, want 1", len(plan.LineOrigins))
+	}
+	if plan.LineOrigins[0] == nil || *plan.LineOrigins[0] != buffer.OriginDeveloper {
+		t.Errorf("LineOrigins[0] = %v, want OriginDeveloper", plan.LineOrigins[0])
+	}
+}
+
+func TestPrepareApprovalUnmodifiedIsAgent(t *testing.T) {
+	s := newTestSession("hello world")
+
+	// Agent proposes replacing "world" with "earth"
+	s.PendingEdit = &agent.PendingEdit{
+		Search:  "world",
+		Replace: "earth",
+	}
+	s.ReviewEdit()
+
+	// Developer approves without modification
+	plan, err := s.PrepareApproval("world", "earth")
+	if err != nil {
+		t.Fatalf("PrepareApproval: %v", err)
+	}
+
+	// "world" != "earth" → Agent (line changed)
+	if len(plan.LineOrigins) != 1 {
+		t.Fatalf("LineOrigins len = %d, want 1", len(plan.LineOrigins))
+	}
+	if plan.LineOrigins[0] == nil || *plan.LineOrigins[0] != buffer.OriginAgent {
+		t.Errorf("LineOrigins[0] = %v, want OriginAgent", plan.LineOrigins[0])
+	}
+}
+
+func TestPrepareApprovalPerLineOrigins(t *testing.T) {
+	s := newTestSession("old\ncode\nhere")
+
+	// Agent proposes 3-line replacement, only changes line 0
+	s.PendingEdit = &agent.PendingEdit{
+		Search:  "old\ncode\nhere",
+		Replace: "new\ncode\nhere",
+	}
+	s.ReviewEdit()
+
+	// Developer also modifies line 1
+	plan, err := s.PrepareApproval("old\ncode\nhere", "new\nmodified\nhere")
+	if err != nil {
+		t.Fatalf("PrepareApproval: %v", err)
+	}
+
+	if len(plan.LineOrigins) != 3 {
+		t.Fatalf("LineOrigins len = %d, want 3", len(plan.LineOrigins))
+	}
+
+	// Line 0: search="old", final="new" → changed → agent original was "new", final is "new" → Agent
+	if plan.LineOrigins[0] == nil || *plan.LineOrigins[0] != buffer.OriginAgent {
+		t.Errorf("LineOrigins[0] = %v, want OriginAgent", plan.LineOrigins[0])
+	}
+	// Line 1: search="code", final="modified" → changed → agent original was "code", final is "modified" → Developer
+	if plan.LineOrigins[1] == nil || *plan.LineOrigins[1] != buffer.OriginDeveloper {
+		t.Errorf("LineOrigins[1] = %v, want OriginDeveloper", plan.LineOrigins[1])
+	}
+	// Line 2: search="here", final="here" → unchanged → nil (skip)
+	if plan.LineOrigins[2] != nil {
+		t.Errorf("LineOrigins[2] = %v, want nil (unchanged line)", plan.LineOrigins[2])
+	}
+}

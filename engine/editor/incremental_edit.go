@@ -26,8 +26,10 @@ type IncrementalEdit struct {
 	typed        int
 	charsPerTick int
 
-	// Origin to apply to affected lines on Complete. Nil means no origin change.
-	origin *buffer.Origin
+	// lineOrigins holds per-line provenance for the replacement text.
+	// Index 0 = startLine, index 1 = startLine+1, etc. Nil slice means
+	// no change. A nil entry within the slice means "keep current origin."
+	lineOrigins []*buffer.Origin
 
 	groupOpen bool
 	completed bool
@@ -44,9 +46,10 @@ type AdvanceResult struct {
 // BeginIncrementalEdit starts an incremental edit at (line, col).
 // It opens an undo group, deletes searchRunes runes, and prepares to insert
 // the replacement text at charsPerTick characters per Advance call.
-// If origin is non-nil, Complete will mark all affected lines with that origin
-// (inside the undo group, so it's atomic with the text changes).
-func (e *Editor) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, replace string, origin *buffer.Origin) *IncrementalEdit {
+// lineOrigins is a per-line origin slice for the replacement text (index 0 =
+// first replacement line). Nil slice means no origin changes on Complete.
+// A nil entry within the slice means "keep current origin" (unchanged line).
+func (e *Editor) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, replace string, lineOrigins []*buffer.Origin) *IncrementalEdit {
 	e.Buf.BeginGroup()
 	e.Buf.Delete(line, col, searchRunes)
 	e.MarkDirty()
@@ -63,7 +66,7 @@ func (e *Editor) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, 
 		startCol:     col,
 		replaceRunes: []rune(replace),
 		charsPerTick: charsPerTick,
-		origin:       origin,
+		lineOrigins:  lineOrigins,
 		groupOpen:    true,
 	}
 }
@@ -143,18 +146,13 @@ func (ie *IncrementalEdit) StartPosition() (line, col int) {
 }
 
 // Complete closes the undo group. The edit is final and undoable as one unit.
-// If an origin was provided, all lines in the edited range are marked with
-// that origin before the group closes (atomic with the text changes).
+// If lineOrigins was provided, each line in the edited range is marked with
+// its corresponding origin before the group closes (atomic with text changes).
 func (ie *IncrementalEdit) Complete() {
 	if ie.completed {
 		return
 	}
-	// Set origin on all affected lines before closing the group
-	if ie.origin != nil && ie.groupOpen {
-		for i := ie.startLine; i <= ie.line && i < ie.editor.Buf.LineCount(); i++ {
-			ie.editor.Buf.SetLineOrigin(i, *ie.origin)
-		}
-	}
+	ie.applyLineOrigins()
 	if ie.groupOpen {
 		ie.editor.Buf.EndGroup()
 		ie.groupOpen = false
@@ -164,21 +162,34 @@ func (ie *IncrementalEdit) Complete() {
 
 // Abort closes the undo group without finishing. The partial edit remains
 // in the buffer and is undoable as one unit via Ctrl+Z.
-// Origin is still applied to lines that were touched before the abort.
+// Origins are still applied to lines that were touched before the abort.
 func (ie *IncrementalEdit) Abort() {
 	if ie.completed {
 		return
 	}
-	if ie.origin != nil && ie.groupOpen {
-		for i := ie.startLine; i <= ie.line && i < ie.editor.Buf.LineCount(); i++ {
-			ie.editor.Buf.SetLineOrigin(i, *ie.origin)
-		}
-	}
+	ie.applyLineOrigins()
 	if ie.groupOpen {
 		ie.editor.Buf.EndGroup()
 		ie.groupOpen = false
 	}
 	ie.completed = true
+}
+
+// applyLineOrigins sets per-line origins on the affected buffer range.
+// Nil entries are skipped (unchanged lines keep their current origin).
+func (ie *IncrementalEdit) applyLineOrigins() {
+	if len(ie.lineOrigins) == 0 || !ie.groupOpen {
+		return
+	}
+	for i, origin := range ie.lineOrigins {
+		if origin == nil {
+			continue
+		}
+		bufLine := ie.startLine + i
+		if bufLine < ie.editor.Buf.LineCount() {
+			ie.editor.Buf.SetLineOrigin(bufLine, *origin)
+		}
+	}
 }
 
 // IsComplete returns true if Complete or Abort has been called.

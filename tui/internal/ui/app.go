@@ -565,7 +565,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	searchRunes := len([]rune(plan.Search))
 	cpt := charsPerTick(m.Editor.TypingWPM)
 	devStartLine, devStartCol := m.Editor.CursorLine, m.Editor.CursorCol
-	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.Origin)
+	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
 
 	m.Editor.Anim = &animationContext{
 		state:        animTyping,

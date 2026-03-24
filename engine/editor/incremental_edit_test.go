@@ -233,10 +233,13 @@ func TestIncrementalEdit_AdvanceAfterComplete(t *testing.T) {
 
 // --- Origin Tests ---
 
+// originPtr is a test helper that returns a pointer to an Origin value.
+func originPtr(o buffer.Origin) *buffer.Origin { return &o }
+
 func TestIncrementalEdit_AgentOrigin(t *testing.T) {
 	e := newTestEditor("old line")
-	agentOrigin := buffer.OriginAgent
-	ie := e.BeginIncrementalEdit(0, 0, 8, 100, "new line", &agentOrigin)
+	origins := []*buffer.Origin{originPtr(buffer.OriginAgent)}
+	ie := e.BeginIncrementalEdit(0, 0, 8, 100, "new line", origins)
 	ie.Advance()
 	ie.Complete()
 
@@ -247,8 +250,8 @@ func TestIncrementalEdit_AgentOrigin(t *testing.T) {
 
 func TestIncrementalEdit_AgentOriginMultiLine(t *testing.T) {
 	e := newTestEditor("old")
-	agentOrigin := buffer.OriginAgent
-	ie := e.BeginIncrementalEdit(0, 0, 3, 100, "line1\nline2\nline3", &agentOrigin)
+	origins := []*buffer.Origin{originPtr(buffer.OriginAgent), originPtr(buffer.OriginAgent), originPtr(buffer.OriginAgent)}
+	ie := e.BeginIncrementalEdit(0, 0, 3, 100, "line1\nline2\nline3", origins)
 	for {
 		result := ie.Advance()
 		if result.Done {
@@ -266,8 +269,8 @@ func TestIncrementalEdit_AgentOriginMultiLine(t *testing.T) {
 
 func TestIncrementalEdit_AgentOriginUndoRestores(t *testing.T) {
 	e := newTestEditor("original")
-	agentOrigin := buffer.OriginAgent
-	ie := e.BeginIncrementalEdit(0, 0, 8, 100, "replaced", &agentOrigin)
+	origins := []*buffer.Origin{originPtr(buffer.OriginAgent)}
+	ie := e.BeginIncrementalEdit(0, 0, 8, 100, "replaced", origins)
 	ie.Advance()
 	ie.Complete()
 
@@ -278,6 +281,53 @@ func TestIncrementalEdit_AgentOriginUndoRestores(t *testing.T) {
 	e.Undo()
 	if got := e.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
 		t.Errorf("after undo: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestIncrementalEdit_MixedOrigins(t *testing.T) {
+	e := newTestEditor("old")
+	// Simulate: agent wrote 3 lines, developer modified line 2 in overlay
+	origins := []*buffer.Origin{originPtr(buffer.OriginAgent), originPtr(buffer.OriginDeveloper), originPtr(buffer.OriginAgent)}
+	ie := e.BeginIncrementalEdit(0, 0, 3, 100, "line1\nline2\nline3", origins)
+	for {
+		result := ie.Advance()
+		if result.Done {
+			break
+		}
+	}
+	ie.Complete()
+
+	want := []buffer.Origin{buffer.OriginAgent, buffer.OriginDeveloper, buffer.OriginAgent}
+	for i, w := range want {
+		if got := e.Buf.LineOrigin(i); got != w {
+			t.Errorf("line %d: origin = %d, want %d", i, got, w)
+		}
+	}
+}
+
+func TestIncrementalEdit_NilEntrySkipsOrigin(t *testing.T) {
+	e := newTestEditor("line1\nline2\nline3")
+	// Agent re-includes line1 and line3 unchanged, only changes line2
+	// nil = don't touch origin, pointer = set origin
+	origins := []*buffer.Origin{nil, originPtr(buffer.OriginAgent), nil}
+	ie := e.BeginIncrementalEdit(0, 0, 17, 100, "line1\nnew2\nline3", origins)
+	for {
+		result := ie.Advance()
+		if result.Done {
+			break
+		}
+	}
+	ie.Complete()
+
+	// line1 and line3 should remain Developer (nil = skipped)
+	if got := e.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("line 0: origin = %d, want OriginDeveloper (unchanged)", got)
+	}
+	if got := e.Buf.LineOrigin(1); got != buffer.OriginAgent {
+		t.Errorf("line 1: origin = %d, want OriginAgent (changed)", got)
+	}
+	if got := e.Buf.LineOrigin(2); got != buffer.OriginDeveloper {
+		t.Errorf("line 2: origin = %d, want OriginDeveloper (unchanged)", got)
 	}
 }
 

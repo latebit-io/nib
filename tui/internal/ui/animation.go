@@ -30,14 +30,15 @@ type animTickMsg struct{}
 
 // animationContext holds TUI-only state for an in-progress animated edit.
 // Buffer mutations, position tracking, and per-tick advancement are all
-// delegated to the engine's IncrementalEdit. This struct owns only the
+// delegated to the engine's AnimatedEdit. This struct owns only the
 // tick scheduling and visual state.
 type animationContext struct {
 	state animState
 
-	// Engine-owned incremental edit — manages undo group, position tracking,
-	// buffer mutations, and per-tick char advancement.
-	edit *editor.IncrementalEdit
+	// Engine-owned animated edit — manages undo group, position tracking,
+	// buffer mutations, and per-tick char advancement. Either IncrementalEdit
+	// (monolithic) or narrowed IncrementalEdit (surgical, preserving unchanged lines).
+	edit editor.AnimatedEdit
 
 	// Whether the agent yielded due to cursor collision.
 	yielded bool
@@ -52,7 +53,7 @@ type animationContext struct {
 }
 
 const (
-	defaultTypingWPM = 800
+	defaultTypingWPM = 1600
 	avgCharsPerWord  = 5
 	// tickInterval is the target time between animation frames.
 	tickInterval = 16 * time.Millisecond // ~60fps

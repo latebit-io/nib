@@ -523,7 +523,11 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	// Clear with false (no mutation), then reset scroll to the edit location
 	// so the user watches the animation from the right place.
 	m.clearEditorOverlay(false)
-	target := plan.Line - 3
+	scrollTo := plan.Line
+	if plan.IsSurgical() {
+		scrollTo = plan.Narrowed.Line
+	}
+	target := scrollTo - 3
 	if target < 0 {
 		target = 0
 	}
@@ -532,20 +536,34 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 
 	// Engine handles undo group, deletion, position tracking, and per-tick
 	// advancement. TUI only owns the tick schedule and visual state.
-	searchRunes := len([]rune(plan.Search))
 	cpt := charsPerTick(m.Editor.TypingWPM)
 	devStartLine, devStartCol := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
-	ie := m.Editor.eng.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
+
+	// Surgical path: narrow the edit to only the changed lines.
+	// Unchanged prefix and suffix lines stay in the buffer — they never
+	// disappear, making the animation look like a real pair programmer.
+	var edit editor.AnimatedEdit
+	if plan.IsSurgical() {
+		ne := plan.Narrowed
+		searchRunes := len([]rune(ne.Search))
+		edit = m.Editor.eng.BeginIncrementalEdit(ne.Line, ne.Col, searchRunes, cpt, ne.Replace, ne.LineOrigins)
+		slog.Debug("surgical animation",
+			"prefix", ne.PrefixLines, "suffix", ne.SuffixLines,
+			"narrowSearch", len(ne.Search), "narrowReplace", len(ne.Replace))
+	} else {
+		searchRunes := len([]rune(plan.Search))
+		edit = m.Editor.eng.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
+	}
 
 	m.Editor.Anim = &animationContext{
 		state:        animTyping,
-		edit:         ie,
+		edit:         edit,
 		devStartLine: devStartLine,
 		devStartCol:  devStartCol,
 	}
 	m.AgentPane.Status = "typing"
 
-	if ie.Remaining() == 0 {
+	if edit.Remaining() == 0 {
 		return m.finishAnimation()
 	}
 

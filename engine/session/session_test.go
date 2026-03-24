@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -356,6 +357,53 @@ func TestEditorForPath(t *testing.T) {
 	e2 := s.EditorForPath("/nonexistent")
 	if e2 != nil {
 		t.Error("EditorForPath should return nil for unopened file")
+	}
+}
+
+func TestSwitchToBlockedByPendingEdit(t *testing.T) {
+	dir := t.TempDir()
+	pathA := dir + "/a.txt"
+	pathB := dir + "/b.txt"
+	if err := writeTestFile(pathA, "file A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(pathB, "file B"); err != nil {
+		t.Fatal(err)
+	}
+
+	bufA, err := buffer.NewFromFile(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(editor.New(bufA), dir)
+	events := make(chan agent.Event, 64)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, dir)
+	s.SetAgent(ag, events)
+
+	// With a pending edit, SwitchTo should return ErrEditPending.
+	s.PendingEdit = &agent.PendingEdit{Search: "file A", Replace: "changed"}
+	err = s.SwitchTo(pathB)
+	if !errors.Is(err, ErrEditPending) {
+		t.Fatalf("SwitchTo with PendingEdit: got %v, want ErrEditPending", err)
+	}
+
+	// Clear PendingEdit, simulate PrepareApproval state (stagedEditFile set).
+	s.PendingEdit = nil
+	s.editReviewed = false
+	s.stagedEditFile = pathA
+	err = s.SwitchTo(pathB)
+	if !errors.Is(err, ErrEditPending) {
+		t.Fatalf("SwitchTo with stagedEditFile: got %v, want ErrEditPending", err)
+	}
+
+	// Clear both — SwitchTo should succeed.
+	s.stagedEditFile = ""
+	err = s.SwitchTo(pathB)
+	if err != nil {
+		t.Fatalf("SwitchTo after clearing: unexpected error: %v", err)
+	}
+	if s.ActiveFile() != pathB {
+		t.Errorf("ActiveFile = %q, want %q", s.ActiveFile(), pathB)
 	}
 }
 

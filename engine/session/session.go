@@ -517,11 +517,23 @@ func (s *Session) CancelAgent() {
 	}
 }
 
+// ErrEditPending is returned by SwitchTo when a file switch is blocked
+// because an edit is pending approval or an animated edit is in progress.
+var ErrEditPending = errors.New("cannot switch files while an edit is pending")
+
 // SwitchTo switches the active editor to a different file. If the file is
 // already open, switches to it. If not, opens it from disk. Does NOT cancel
 // the agent or clear intent — multi-file work continues across switches.
+// Returns ErrEditPending if an edit is awaiting approval or mid-animation.
 // Returns an error if the file cannot be opened.
 func (s *Session) SwitchTo(path string) error {
+	// Block switching while an edit is pending approval or mid-animation.
+	// PendingEdit covers the review phase; stagedEditFile covers the
+	// animation phase (PrepareApproval clears PendingEdit but sets
+	// stagedEditFile until CompleteApproval/AbortApproval).
+	if s.PendingEdit != nil || s.stagedEditFile != "" {
+		return ErrEditPending
+	}
 	canon := s.CanonPath(path)
 
 	s.mu.Lock()

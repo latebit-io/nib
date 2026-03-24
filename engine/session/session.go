@@ -74,6 +74,10 @@ type Session struct {
 	// This enforces the contract: every frontend must compute and present
 	// the diff before approving — no blind approvals.
 	editReviewed bool
+
+	// modifiedFiles tracks files changed by agent edits this session.
+	// Canonical absolute paths as keys. Guarded by mu.
+	modifiedFiles map[string]bool
 }
 
 // New creates a session in editor-only mode. Call SetAgent to enable the
@@ -91,10 +95,11 @@ func New(e *editor.Editor, projectRoot string) *Session {
 	editors := make(map[string]*editor.Editor)
 	contextSet := make(map[string]bool)
 	s := &Session{
-		Editor:      e,
-		editors:     editors,
-		contextSet:  contextSet,
-		projectRoot: projectRoot,
+		Editor:        e,
+		editors:       editors,
+		contextSet:    contextSet,
+		modifiedFiles: make(map[string]bool),
+		projectRoot:   projectRoot,
 	}
 	if e != nil && e.Buf.Path != "" {
 		if _, err := s.resolvePath(e.Buf.Path); err != nil {
@@ -168,6 +173,35 @@ func (s *Session) EditorForPath(path string) *editor.Editor {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.editors[s.CanonPath(path)]
+}
+
+// --- Provenance ---
+
+// FileStatus returns the provenance status of a file.
+// inContext: the file is in the agent's context set (editable by agent).
+// agentModified: the file was modified by an agent edit this session.
+func (s *Session) FileStatus(path string) (inContext, agentModified bool) {
+	canon := s.CanonPath(path)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.contextSet[canon], s.modifiedFiles[canon]
+}
+
+// AgentModifiedFiles returns paths of files modified by agent edits this
+// session, as sorted relative paths.
+func (s *Session) AgentModifiedFiles() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	files := make([]string, 0, len(s.modifiedFiles))
+	for path := range s.modifiedFiles {
+		rel, err := filepath.Rel(s.projectRoot, path)
+		if err != nil {
+			rel = path
+		}
+		files = append(files, rel)
+	}
+	sort.Strings(files)
+	return files
 }
 
 // --- Context Set ---
@@ -652,9 +686,13 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	if s.PendingEdit.Path != "" {
 		editPath = s.CanonPath(s.PendingEdit.Path)
 	}
-	ok, reason := e.ApplyEdit(search, replace)
+	lineOrigins := computeLineOrigins(search, s.PendingEdit.Replace, replace)
+	ok, reason := e.ApplyEdit(search, replace, lineOrigins)
 	if ok {
 		s.lastEditedFile = editPath
+		s.mu.Lock()
+		s.modifiedFiles[editPath] = true
+		s.mu.Unlock()
 		s.agent.Approve()
 	} else {
 		s.agent.Reject()
@@ -678,10 +716,19 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 
 // AnimationPlan describes the edit the frontend needs to animate.
 type AnimationPlan struct {
-	Line    int    // buffer line where the edit starts (0-indexed)
-	Col     int    // buffer col where the edit starts (0-indexed, rune)
-	Search  string // text to delete from the buffer
-	Replace string // text to type into the buffer
+	// Line is the buffer line where the edit starts (0-indexed).
+	Line int
+	// Col is the buffer column where the edit starts (0-indexed, rune).
+	Col int
+	// Search is the text to delete from the buffer.
+	Search string
+	// Replace is the text to type into the buffer.
+	Replace string
+	// LineOrigins holds the provenance for each line of the replacement.
+	// Index 0 corresponds to the buffer line at Line, index 1 to Line+1, etc.
+	// A nil entry means "don't change this line's origin" (the line was
+	// unchanged from the search text — the agent just re-included it as context).
+	LineOrigins []*buffer.Origin
 }
 
 // PrepareApproval validates the reviewed edit and returns an AnimationPlan.
@@ -716,14 +763,45 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 	} else {
 		s.stagedEditFile = s.activeFile
 	}
+	lineOrigins := computeLineOrigins(search, s.PendingEdit.Replace, replace)
+
 	s.PendingEdit = nil
 	s.editReviewed = false
 	return &AnimationPlan{
-		Line:    loc.Line,
-		Col:     loc.Col,
-		Search:  search,
-		Replace: replace,
+		Line:        loc.Line,
+		Col:         loc.Col,
+		Search:      search,
+		Replace:     replace,
+		LineOrigins: lineOrigins,
 	}, nil
+}
+
+// computeLineOrigins determines per-line provenance for a replacement by
+// comparing three versions: the original search text, the agent's proposed
+// replacement, and the developer's final replacement (possibly modified in
+// the overlay). Returns a slice with one entry per line of finalReplace:
+//   - nil: line is identical in search and finalReplace — unchanged, keep current origin
+//   - OriginAgent: agent changed this line and developer didn't modify it
+//   - OriginDeveloper: developer modified this line in the overlay (or added it)
+func computeLineOrigins(search, originalReplace, finalReplace string) []*buffer.Origin {
+	searchLines := strings.Split(search, "\n")
+	origLines := strings.Split(originalReplace, "\n")
+	finalLines := strings.Split(finalReplace, "\n")
+
+	origins := make([]*buffer.Origin, len(finalLines))
+	for i := range finalLines {
+		// Line unchanged from search — agent re-included it as context, skip
+		if i < len(searchLines) && searchLines[i] == finalLines[i] {
+			continue
+		}
+		// Line was changed; determine who changed it
+		origin := buffer.OriginAgent
+		if i >= len(origLines) || origLines[i] != finalLines[i] {
+			origin = buffer.OriginDeveloper
+		}
+		origins[i] = &origin
+	}
+	return origins
 }
 
 // CompleteApproval signals the agent that the animated edit has been applied.
@@ -732,6 +810,11 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 func (s *Session) CompleteApproval() {
 	if s.HasAgent() {
 		s.lastEditedFile = s.stagedEditFile
+		if s.stagedEditFile != "" {
+			s.mu.Lock()
+			s.modifiedFiles[s.stagedEditFile] = true
+			s.mu.Unlock()
+		}
 		s.stagedEditFile = ""
 		s.agent.Approve()
 	}

@@ -237,3 +237,289 @@ func TestClampOutOfBounds(t *testing.T) {
 		t.Errorf("got %q", b.LineText(0))
 	}
 }
+
+// --- Origin Tests ---
+
+func TestOriginDefaultsDeveloper(t *testing.T) {
+	tests := []struct {
+		name string
+		buf  *Buffer
+	}{
+		{"New", New()},
+		{"NewFromString", NewFromString("hello\nworld")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for i := range tt.buf.LineCount() {
+				if got := tt.buf.LineOrigin(i); got != OriginDeveloper {
+					t.Errorf("line %d: origin = %d, want OriginDeveloper", i, got)
+				}
+			}
+		})
+	}
+}
+
+func TestOriginOutOfBounds(t *testing.T) {
+	b := NewFromString("hello")
+	if got := b.LineOrigin(-1); got != OriginDeveloper {
+		t.Errorf("negative index: got %d, want OriginDeveloper", got)
+	}
+	if got := b.LineOrigin(99); got != OriginDeveloper {
+		t.Errorf("past end: got %d, want OriginDeveloper", got)
+	}
+}
+
+func TestSetLineOrigin(t *testing.T) {
+	b := NewFromString("hello\nworld")
+	b.SetLineOrigin(1, OriginAgent)
+	if got := b.LineOrigin(0); got != OriginDeveloper {
+		t.Errorf("line 0: got %d, want OriginDeveloper", got)
+	}
+	if got := b.LineOrigin(1); got != OriginAgent {
+		t.Errorf("line 1: got %d, want OriginAgent", got)
+	}
+}
+
+func TestSetLineOrigins(t *testing.T) {
+	b := NewFromString("a\nb\nc\nd")
+	b.SetLineOrigins(1, 2, OriginAgent)
+	expected := []Origin{OriginDeveloper, OriginAgent, OriginAgent, OriginDeveloper}
+	for i, want := range expected {
+		if got := b.LineOrigin(i); got != want {
+			t.Errorf("line %d: got %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestInsertNewlineInheritsOrigin(t *testing.T) {
+	b := NewFromString("hello world")
+	b.SetLineOrigin(0, OriginAgent)
+	// Split the agent line
+	b.Insert(0, 5, "\n")
+	if got := b.LineOrigin(0); got != OriginAgent {
+		t.Errorf("line 0: got %d, want OriginAgent", got)
+	}
+	if got := b.LineOrigin(1); got != OriginAgent {
+		t.Errorf("line 1 (split): got %d, want OriginAgent", got)
+	}
+}
+
+func TestInsertMultiLineInheritsOrigin(t *testing.T) {
+	b := NewFromString("ab")
+	b.SetLineOrigin(0, OriginAgent)
+	b.Insert(0, 1, "X\nY\nZ")
+	// All 3 lines should be OriginAgent (parent was agent)
+	for i := range 3 {
+		if got := b.LineOrigin(i); got != OriginAgent {
+			t.Errorf("line %d: got %d, want OriginAgent", i, got)
+		}
+	}
+}
+
+func TestDeleteAcrossNewlinePreservesFirstOrigin(t *testing.T) {
+	b := NewFromString("hello\nworld")
+	b.SetLineOrigin(0, OriginAgent)
+	b.SetLineOrigin(1, OriginDeveloper)
+	// Join: delete newline at end of line 0
+	b.Delete(0, 5, 1)
+	if b.LineCount() != 1 {
+		t.Fatalf("expected 1 line, got %d", b.LineCount())
+	}
+	// Merged line should retain first line's origin (Agent)
+	if got := b.LineOrigin(0); got != OriginAgent {
+		t.Errorf("merged line: got %d, want OriginAgent", got)
+	}
+}
+
+func TestInsertSingleLinePreservesOrigin(t *testing.T) {
+	b := NewFromString("hello")
+	b.SetLineOrigin(0, OriginAgent)
+	b.Insert(0, 5, " world")
+	// Single-line insert doesn't change origin
+	if got := b.LineOrigin(0); got != OriginAgent {
+		t.Errorf("got %d, want OriginAgent", got)
+	}
+}
+
+func TestUndoSetLineOrigin(t *testing.T) {
+	b := NewFromString("hello")
+	b.SetLineOrigin(0, OriginAgent)
+	if got := b.LineOrigin(0); got != OriginAgent {
+		t.Fatalf("after set: got %d, want OriginAgent", got)
+	}
+	_, _, ok := b.Undo()
+	if !ok {
+		t.Fatal("undo failed")
+	}
+	if got := b.LineOrigin(0); got != OriginDeveloper {
+		t.Errorf("after undo: got %d, want OriginDeveloper", got)
+	}
+}
+
+func TestRedoSetLineOrigin(t *testing.T) {
+	b := NewFromString("hello")
+	b.SetLineOrigin(0, OriginAgent)
+	b.Undo()
+	_, _, ok := b.Redo()
+	if !ok {
+		t.Fatal("redo failed")
+	}
+	if got := b.LineOrigin(0); got != OriginAgent {
+		t.Errorf("after redo: got %d, want OriginAgent", got)
+	}
+}
+
+func TestGroupedOriginUndoRedo(t *testing.T) {
+	// Simulates an agent edit: grouped text change + origin change
+	b := NewFromString("old text")
+	b.BeginGroup()
+	b.Delete(0, 0, 8) // delete "old text"
+	b.Insert(0, 0, "new text")
+	b.SetLineOrigin(0, OriginAgent)
+	b.EndGroup()
+
+	if b.LineText(0) != "new text" {
+		t.Fatalf("after edit: got %q", b.LineText(0))
+	}
+	if got := b.LineOrigin(0); got != OriginAgent {
+		t.Fatalf("after edit: origin = %d, want OriginAgent", got)
+	}
+
+	// Undo the entire group — text AND origin should revert
+	_, _, ok := b.Undo()
+	if !ok {
+		t.Fatal("undo failed")
+	}
+	if b.LineText(0) != "old text" {
+		t.Errorf("after undo: got %q", b.LineText(0))
+	}
+	if got := b.LineOrigin(0); got != OriginDeveloper {
+		t.Errorf("after undo: origin = %d, want OriginDeveloper", got)
+	}
+
+	// Redo — text AND origin should come back
+	_, _, ok = b.Redo()
+	if !ok {
+		t.Fatal("redo failed")
+	}
+	if b.LineText(0) != "new text" {
+		t.Errorf("after redo: got %q", b.LineText(0))
+	}
+	if got := b.LineOrigin(0); got != OriginAgent {
+		t.Errorf("after redo: origin = %d, want OriginAgent", got)
+	}
+}
+
+func TestGroupedMultiLineOriginUndo(t *testing.T) {
+	// Agent inserts multiple lines, all marked as agent origin
+	b := NewFromString("before\nafter")
+	b.BeginGroup()
+	b.Insert(0, 6, "\nline1\nline2")
+	b.SetLineOrigins(1, 2, OriginAgent)
+	b.EndGroup()
+
+	if b.LineCount() != 4 {
+		t.Fatalf("after insert: %d lines, want 4", b.LineCount())
+	}
+	if got := b.LineOrigin(1); got != OriginAgent {
+		t.Fatalf("line 1: origin = %d, want OriginAgent", got)
+	}
+	if got := b.LineOrigin(2); got != OriginAgent {
+		t.Fatalf("line 2: origin = %d, want OriginAgent", got)
+	}
+
+	// Undo — lines removed, origins gone
+	_, _, ok := b.Undo()
+	if !ok {
+		t.Fatal("undo failed")
+	}
+	if b.LineCount() != 2 {
+		t.Errorf("after undo: %d lines, want 2", b.LineCount())
+	}
+	if got := b.LineOrigin(0); got != OriginDeveloper {
+		t.Errorf("line 0 after undo: origin = %d, want OriginDeveloper", got)
+	}
+	if got := b.LineOrigin(1); got != OriginDeveloper {
+		t.Errorf("line 1 after undo: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestSetLineOriginNoOpSkipsUndo(t *testing.T) {
+	b := NewFromString("hello")
+	// Setting to the same value should be a no-op
+	b.SetLineOrigin(0, OriginDeveloper)
+	_, _, ok := b.Undo()
+	if ok {
+		t.Error("expected no undo entry for no-op SetLineOrigin")
+	}
+}
+
+func TestUndoDeleteRestoresPerLineOrigins(t *testing.T) {
+	b := NewFromString("hello\nworld\nfoo")
+	b.SetLineOrigin(0, OriginDeveloper)
+	b.SetLineOrigin(1, OriginAgent)
+	b.SetLineOrigin(2, OriginDeveloper)
+
+	// Delete across newline: merges lines 0-2 into one
+	b.Delete(0, 5, 5) // deletes "\nworl"
+	if b.LineCount() != 2 {
+		t.Fatalf("after delete: %d lines, want 2", b.LineCount())
+	}
+
+	// Undo should restore all three lines with original origins
+	b.Undo()
+	if b.LineCount() != 3 {
+		t.Fatalf("after undo: %d lines, want 3", b.LineCount())
+	}
+	if got := b.LineOrigin(0); got != OriginDeveloper {
+		t.Errorf("line 0: origin = %d, want OriginDeveloper", got)
+	}
+	if got := b.LineOrigin(1); got != OriginAgent {
+		t.Errorf("line 1: origin = %d, want OriginAgent", got)
+	}
+	if got := b.LineOrigin(2); got != OriginDeveloper {
+		t.Errorf("line 2: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestGroupedRedoCursorNotCorruptedByOriginOps(t *testing.T) {
+	b := NewFromString("old text")
+
+	// Simulate an agent edit: grouped delete + insert + origin change
+	b.BeginGroup()
+	b.Delete(0, 0, 8)
+	b.Insert(0, 0, "new text")
+	b.SetLineOrigin(0, OriginAgent)
+	b.EndGroup()
+
+	// Undo the group
+	b.Undo()
+
+	// Redo — cursor should be at end of "new text" (0, 8), not (0, 0)
+	l, c, ok := b.Redo()
+	if !ok {
+		t.Fatal("redo failed")
+	}
+	if l != 0 || c != 8 {
+		t.Errorf("redo cursor: got (%d,%d), want (0,8)", l, c)
+	}
+}
+
+func TestGroupedUndoCursorNotCorruptedByOriginOps(t *testing.T) {
+	b := NewFromString("old text")
+
+	b.BeginGroup()
+	b.Delete(0, 0, 8)
+	b.Insert(0, 0, "new text")
+	b.SetLineOrigin(0, OriginAgent)
+	b.EndGroup()
+
+	// Undo — cursor should be at end of restored "old text" (0, 8), not (0, 0)
+	l, c, ok := b.Undo()
+	if !ok {
+		t.Fatal("undo failed")
+	}
+	if l != 0 || c != 8 {
+		t.Errorf("undo cursor: got (%d,%d), want (0,8)", l, c)
+	}
+}

@@ -51,6 +51,7 @@ func newTestSessionWithRoot(content, projectRoot string) *Session {
 	return sess
 }
 
+//nolint:gocognit,funlen // table-driven test — complexity comes from test cases, not logic
 func TestPrepareApproval(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -503,4 +504,232 @@ func TestContextSetAutoAddOnWriteFile(t *testing.T) {
 
 func writeTestFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// --- Provenance Tests ---
+
+func TestApproveEditMarksAgentOrigin(t *testing.T) {
+	s := newTestSession("old text")
+
+	// Simulate agent proposing an edit
+	s.PendingEdit = &agent.PendingEdit{Search: "old text", Replace: "new text"}
+	s.ReviewEdit()
+
+	// Drain the approve signal in a goroutine (agent.Approve sends to channel)
+	ok, reason := s.ApproveEdit("old text", "new text")
+	if !ok {
+		t.Fatalf("ApproveEdit failed: %s", reason)
+	}
+
+	// Line should be marked as agent-written
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Errorf("line 0 origin = %d, want OriginAgent", got)
+	}
+}
+
+func TestApproveEditTracksModifiedFile(t *testing.T) {
+	root := t.TempDir()
+	filePath := root + "/test.go"
+	if err := writeTestFile(filePath, "old\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := buffer.NewFromFile(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := editor.New(buf)
+	s := New(e, root)
+	events := make(chan agent.Event, 64)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, root)
+	s.SetAgent(ag, events)
+
+	s.PendingEdit = &agent.PendingEdit{Search: "old", Replace: "new"}
+	s.ReviewEdit()
+	ok, _ := s.ApproveEdit("old", "new")
+	if !ok {
+		t.Fatal("ApproveEdit failed")
+	}
+
+	// File should be in agent-modified list
+	modified := s.AgentModifiedFiles()
+	if len(modified) != 1 {
+		t.Fatalf("AgentModifiedFiles: got %d files, want 1", len(modified))
+	}
+	if !strings.HasSuffix(modified[0], "test.go") {
+		t.Errorf("AgentModifiedFiles[0] = %q, want test.go", modified[0])
+	}
+}
+
+func TestFileStatus(t *testing.T) {
+	root := t.TempDir()
+	filePath := root + "/main.go"
+	if err := writeTestFile(filePath, "code\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := buffer.NewFromFile(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := editor.New(buf)
+	s := New(e, root)
+	events := make(chan agent.Event, 64)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, root)
+	s.SetAgent(ag, events)
+
+	// Initially: in context (auto-added), not modified
+	inCtx, agentMod := s.FileStatus(filePath)
+	if !inCtx {
+		t.Error("expected inContext=true for initial file")
+	}
+	if agentMod {
+		t.Error("expected agentModified=false before any agent edit")
+	}
+
+	// After agent edit: should be modified
+	s.PendingEdit = &agent.PendingEdit{Search: "code", Replace: "new code"}
+	s.ReviewEdit()
+	s.ApproveEdit("code", "new code")
+
+	inCtx, agentMod = s.FileStatus(filePath)
+	if !inCtx {
+		t.Error("expected inContext=true after edit")
+	}
+	if !agentMod {
+		t.Error("expected agentModified=true after agent edit")
+	}
+}
+
+func TestDeveloperEditResetsAgentOrigin(t *testing.T) {
+	s := newTestSession("agent line")
+
+	// Simulate agent writing a line
+	s.Editor.Buf.SetLineOrigin(0, buffer.OriginAgent)
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Fatalf("setup: origin = %d, want OriginAgent", got)
+	}
+
+	// Developer types on the agent line
+	s.Editor.CursorLine = 0
+	s.Editor.CursorCol = 5
+	s.Editor.InsertChar('X')
+
+	// Origin should flip to Developer
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("after developer edit: origin = %d, want OriginDeveloper", got)
+	}
+}
+
+func TestAgentOriginSurvivesUndoRedo(t *testing.T) {
+	s := newTestSession("original")
+
+	// Simulate a grouped agent edit with origin
+	s.Editor.Buf.BeginGroup()
+	s.Editor.Buf.Delete(0, 0, 8)
+	s.Editor.Buf.InsertWithOrigin(0, 0, "replaced", buffer.OriginAgent)
+	s.Editor.Buf.EndGroup()
+
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Fatalf("after edit: origin = %d, want OriginAgent", got)
+	}
+
+	// Undo should restore Developer origin
+	s.Editor.Undo()
+	if s.Editor.Buf.LineText(0) != "original" {
+		t.Fatalf("after undo: text = %q", s.Editor.Buf.LineText(0))
+	}
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+		t.Errorf("after undo: origin = %d, want OriginDeveloper", got)
+	}
+
+	// Redo should restore Agent origin
+	s.Editor.Redo()
+	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+		t.Errorf("after redo: origin = %d, want OriginAgent", got)
+	}
+}
+
+func TestPrepareApprovalDevModifiedReplace(t *testing.T) {
+	s := newTestSession("hello world")
+
+	// Agent proposes replacing "world" with "earth"
+	s.PendingEdit = &agent.PendingEdit{
+		Search:  "world",
+		Replace: "earth",
+	}
+	s.ReviewEdit()
+
+	// Developer modifies the replacement in the overlay to "mars"
+	plan, err := s.PrepareApproval("world", "mars")
+	if err != nil {
+		t.Fatalf("PrepareApproval: %v", err)
+	}
+
+	// Single-line replacement: "world" != "mars" → Developer
+	if len(plan.LineOrigins) != 1 {
+		t.Fatalf("LineOrigins len = %d, want 1", len(plan.LineOrigins))
+	}
+	if plan.LineOrigins[0] == nil || *plan.LineOrigins[0] != buffer.OriginDeveloper {
+		t.Errorf("LineOrigins[0] = %v, want OriginDeveloper", plan.LineOrigins[0])
+	}
+}
+
+func TestPrepareApprovalUnmodifiedIsAgent(t *testing.T) {
+	s := newTestSession("hello world")
+
+	// Agent proposes replacing "world" with "earth"
+	s.PendingEdit = &agent.PendingEdit{
+		Search:  "world",
+		Replace: "earth",
+	}
+	s.ReviewEdit()
+
+	// Developer approves without modification
+	plan, err := s.PrepareApproval("world", "earth")
+	if err != nil {
+		t.Fatalf("PrepareApproval: %v", err)
+	}
+
+	// "world" != "earth" → Agent (line changed)
+	if len(plan.LineOrigins) != 1 {
+		t.Fatalf("LineOrigins len = %d, want 1", len(plan.LineOrigins))
+	}
+	if plan.LineOrigins[0] == nil || *plan.LineOrigins[0] != buffer.OriginAgent {
+		t.Errorf("LineOrigins[0] = %v, want OriginAgent", plan.LineOrigins[0])
+	}
+}
+
+func TestPrepareApprovalPerLineOrigins(t *testing.T) {
+	s := newTestSession("old\ncode\nhere")
+
+	// Agent proposes 3-line replacement, only changes line 0
+	s.PendingEdit = &agent.PendingEdit{
+		Search:  "old\ncode\nhere",
+		Replace: "new\ncode\nhere",
+	}
+	s.ReviewEdit()
+
+	// Developer also modifies line 1
+	plan, err := s.PrepareApproval("old\ncode\nhere", "new\nmodified\nhere")
+	if err != nil {
+		t.Fatalf("PrepareApproval: %v", err)
+	}
+
+	if len(plan.LineOrigins) != 3 {
+		t.Fatalf("LineOrigins len = %d, want 3", len(plan.LineOrigins))
+	}
+
+	// Line 0: search="old", final="new" → changed → agent original was "new", final is "new" → Agent
+	if plan.LineOrigins[0] == nil || *plan.LineOrigins[0] != buffer.OriginAgent {
+		t.Errorf("LineOrigins[0] = %v, want OriginAgent", plan.LineOrigins[0])
+	}
+	// Line 1: search="code", final="modified" → changed → agent original was "code", final is "modified" → Developer
+	if plan.LineOrigins[1] == nil || *plan.LineOrigins[1] != buffer.OriginDeveloper {
+		t.Errorf("LineOrigins[1] = %v, want OriginDeveloper", plan.LineOrigins[1])
+	}
+	// Line 2: search="here", final="here" → unchanged → nil (skip)
+	if plan.LineOrigins[2] != nil {
+		t.Errorf("LineOrigins[2] = %v, want nil (unchanged line)", plan.LineOrigins[2])
+	}
 }

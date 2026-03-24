@@ -6,6 +6,7 @@ import (
 	"github.com/latebit-io/junto/engine/buffer"
 )
 
+//nolint:funlen // table-driven test — length comes from test cases, not complexity
 func TestComputeDiff(t *testing.T) {
 	tests := []struct {
 		name      string

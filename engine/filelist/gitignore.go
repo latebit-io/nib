@@ -165,37 +165,10 @@ func doGlob(pattern, name []rune) bool {
 	for len(pattern) > 0 {
 		switch {
 		case len(pattern) >= 2 && pattern[0] == '*' && pattern[1] == '*':
-			// ** matches any number of path segments.
-			// Consume the ** and optional following /.
-			rest := pattern[2:]
-			if len(rest) > 0 && rest[0] == '/' {
-				rest = rest[1:]
-			}
-			// Try matching rest against every suffix of name.
-			if doGlob(rest, name) {
-				return true
-			}
-			if len(name) == 0 {
-				return false
-			}
-			name = name[1:]
-			continue
+			return globDoubleStar(pattern, name)
 
 		case pattern[0] == '*':
-			// * matches anything except /.
-			rest := pattern[1:]
-			// Find how far * can extend (up to next / or end of name).
-			limit := 0
-			for limit < len(name) && name[limit] != '/' {
-				limit++
-			}
-			// Try matching rest against each suffix within the limit.
-			for i := limit; i >= 0; i-- {
-				if doGlob(rest, name[i:]) {
-					return true
-				}
-			}
-			return false
+			return globSingleStar(pattern[1:], name)
 
 		case pattern[0] == '?':
 			if len(name) == 0 || name[0] == '/' {
@@ -213,4 +186,39 @@ func doGlob(pattern, name []rune) bool {
 		}
 	}
 	return len(name) == 0
+}
+
+// globDoubleStar handles ** which matches any number of path segments.
+// It only tries suffixes at path-segment boundaries (start of string or after /).
+func globDoubleStar(pattern, name []rune) bool {
+	rest := pattern[2:]
+	if len(rest) > 0 && rest[0] == '/' {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 {
+		return true
+	}
+	// Try matching rest at segment boundaries only.
+	for i := range len(name) + 1 {
+		if i == 0 || (i > 0 && name[i-1] == '/') {
+			if doGlob(rest, name[i:]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// globSingleStar handles * which matches anything except /.
+func globSingleStar(rest, name []rune) bool {
+	limit := 0
+	for limit < len(name) && name[limit] != '/' {
+		limit++
+	}
+	for i := limit; i >= 0; i-- {
+		if doGlob(rest, name[i:]) {
+			return true
+		}
+	}
+	return false
 }

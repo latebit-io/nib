@@ -741,6 +741,17 @@ type AnimationPlan struct {
 	// A nil entry means "don't change this line's origin" (the line was
 	// unchanged from the search text — the agent just re-included it as context).
 	LineOrigins []*buffer.Origin
+	// Narrowed contains the change region with unchanged prefix/suffix lines
+	// excluded. When IsSurgical() is true, the frontend should use these
+	// narrowed values instead of the full Search/Replace for animation —
+	// unchanged lines stay in place and are never deleted from the buffer.
+	Narrowed *editor.NarrowedEdit
+}
+
+// IsSurgical returns true if the edit has unchanged prefix or suffix lines
+// that can be preserved during animation.
+func (p *AnimationPlan) IsSurgical() bool {
+	return p.Narrowed != nil && (p.Narrowed.PrefixLines > 0 || p.Narrowed.SuffixLines > 0)
 }
 
 // PrepareApproval validates the reviewed edit and returns an AnimationPlan.
@@ -777,6 +788,17 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 	}
 	lineOrigins := computeLineOrigins(search, s.PendingEdit.Replace, replace)
 
+	// Compute hunks and narrowed edit for surgical animation.
+	searchLines := strings.Split(search, "\n")
+	replaceLines := strings.Split(replace, "\n")
+	hunks := editor.ComputeHunks(searchLines, replaceLines)
+
+	var narrowed *editor.NarrowedEdit
+	if editor.IsSurgical(hunks) {
+		ne := editor.NarrowEdit(loc.Line, loc.Col, search, replace, hunks, lineOrigins)
+		narrowed = &ne
+	}
+
 	s.PendingEdit = nil
 	s.editReviewed = false
 	return &AnimationPlan{
@@ -785,6 +807,7 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 		Search:      search,
 		Replace:     replace,
 		LineOrigins: lineOrigins,
+		Narrowed:    narrowed,
 	}, nil
 }
 

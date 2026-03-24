@@ -8,11 +8,11 @@ func TestCharsPerTick(t *testing.T) {
 		wpm  int
 		want int
 	}{
-		{"default", 0, 1},                // 800 WPM → ~1 char/tick
+		{"default", 0, 2},                // 1600 WPM → 1600*5/60*0.016 = 2.13 → 2
 		{"high WPM 3000", 3000, 4},       // 3000*5/60*0.016 = 4
 		{"low WPM clamps to min", 10, 1}, // clamped to 30 WPM → < 1 → 1
 		{"very high WPM 5000", 5000, 6},  // 5000*5/60*0.016 = 6.67 → 6
-		{"negative uses default", -1, 1}, // falls through to default
+		{"negative uses default", -1, 2}, // falls through to default (1600 WPM)
 		{"exceeds max clamps", 10000, 6}, // clamped to 5000
 	}
 

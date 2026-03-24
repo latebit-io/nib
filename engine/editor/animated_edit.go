@@ -1,10 +1,10 @@
 package editor
 
 // AnimatedEdit is the interface for engine-side animated edits.
-// Both IncrementalEdit (monolithic delete+retype) and SurgicalEdit
-// (hunk-by-hunk with unchanged lines preserved) implement it.
-// The TUI animation loop consumes this interface — it does not need
-// to know which implementation is behind it.
+// IncrementalEdit implements this interface. Surgical animation uses
+// the same IncrementalEdit but with narrowed search/replace spans
+// computed via NarrowEdit — unchanged prefix/suffix lines are excluded.
+// The TUI animation loop consumes this interface.
 //
 //nolint:interfacebloat // animation lifecycle requires all 8 methods — advance, position (2), lifecycle (3), progress, yield
 type AnimatedEdit interface {

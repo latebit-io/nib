@@ -1,7 +1,9 @@
 package editor
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/buffer"
 )
@@ -170,21 +172,9 @@ func TestNarrowEdit(t *testing.T) {
 	}
 }
 
-// splitLines splits text by newline, matching the behavior of strings.Split.
+// splitLines splits text by newline, matching strings.Split used in production.
 func splitLines(text string) []string {
-	if text == "" {
-		return []string{}
-	}
-	result := []string{}
-	start := 0
-	for i, r := range text {
-		if r == '\n' {
-			result = append(result, text[start:i])
-			start = i + 1
-		}
-	}
-	result = append(result, text[start:])
-	return result
+	return strings.Split(text, "\n")
 }
 
 func TestNarrowEditOrigins(t *testing.T) {
@@ -225,7 +215,7 @@ func TestNarrowEditIntegration(t *testing.T) {
 	ne := NarrowEdit(0, 0, search, replace, hunks, nil)
 
 	// Create IncrementalEdit with narrowed values.
-	searchRunes := len([]rune(ne.Search))
+	searchRunes := utf8.RuneCountInString(ne.Search)
 	ie := e.BeginIncrementalEdit(ne.Line, ne.Col, searchRunes, 100, ne.Replace, ne.LineOrigins)
 
 	// Drain the edit.

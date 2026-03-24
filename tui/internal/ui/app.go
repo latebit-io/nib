@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -478,7 +479,7 @@ func (m *AppModel) renderIntentBar() string {
 	}
 
 	// Pad to full width
-	padding := m.Width - len([]rune(text))
+	padding := m.Width - utf8.RuneCountInString(text)
 	if padding > 0 {
 		text += strings.Repeat(" ", padding)
 	}
@@ -545,13 +546,13 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	var edit editor.AnimatedEdit
 	if plan.IsSurgical() {
 		ne := plan.Narrowed
-		searchRunes := len([]rune(ne.Search))
+		searchRunes := utf8.RuneCountInString(ne.Search)
 		edit = m.Editor.eng.BeginIncrementalEdit(ne.Line, ne.Col, searchRunes, cpt, ne.Replace, ne.LineOrigins)
 		slog.Debug("surgical animation",
 			"prefix", ne.PrefixLines, "suffix", ne.SuffixLines,
 			"narrowSearch", len(ne.Search), "narrowReplace", len(ne.Replace))
 	} else {
-		searchRunes := len([]rune(plan.Search))
+		searchRunes := utf8.RuneCountInString(plan.Search)
 		edit = m.Editor.eng.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
 	}
 

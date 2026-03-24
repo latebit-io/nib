@@ -3,6 +3,7 @@ package ui
 import (
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -439,7 +440,7 @@ func (m *AgentPaneModel) SelectedText() string {
 	}
 	if el >= len(m.Lines) {
 		el = len(m.Lines) - 1
-		ec = len([]rune(m.Lines[el]))
+		ec = utf8.RuneCountInString(m.Lines[el])
 	}
 	if sl == el {
 		if sl >= len(m.Lines) {

@@ -6,6 +6,7 @@ package editor
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/highlight"
@@ -422,7 +423,7 @@ func (e *Editor) DeleteSelection() {
 	}
 	text := e.SelectedText()
 	sl, sc, _, _ := e.SelectedRange()
-	e.Buf.Delete(sl, sc, len([]rune(text)))
+	e.Buf.Delete(sl, sc, utf8.RuneCountInString(text))
 	e.Buf.ResetOriginToDeveloper(sl)
 	e.CursorLine = sl
 	e.CursorCol = sc
@@ -480,7 +481,7 @@ func (e *Editor) InsertNewline() {
 	e.Buf.ResetOriginToDeveloper(e.CursorLine)
 	e.CursorLine++
 	e.Buf.ResetOriginToDeveloper(e.CursorLine)
-	e.CursorCol = len([]rune(indent))
+	e.CursorCol = utf8.RuneCountInString(indent)
 	e.MarkDirty()
 	e.EnsureCursorVisible()
 }
@@ -620,7 +621,7 @@ func (e *Editor) ApplyEdit(search, replace string, lineOrigins []*buffer.Origin)
 	if loc == nil {
 		return false, reason
 	}
-	searchRunes := len([]rune(search))
+	searchRunes := utf8.RuneCountInString(search)
 	e.Buf.BeginGroup()
 	e.Buf.Delete(loc.Line, loc.Col, searchRunes)
 	e.Buf.Insert(loc.Line, loc.Col, replace)

@@ -222,9 +222,9 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 			if target < 0 {
 				target = 0
 			}
-			m.Editor.ScrollOffset = target
+			m.Editor.eng.ScrollOffset = target
 			m.Editor.syncExtraVisualLines()
-			m.Editor.ClampScroll()
+			m.Editor.eng.ClampScroll()
 		} else {
 			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
 			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
@@ -244,8 +244,8 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 	}
 }
 
-// clearEditorOverlay converts ScrollOffset from visual-line space back to
-// buffer-line space and removes the overlay.
+// clearEditorOverlay delegates scroll correction to the engine and clears
+// the TUI overlay state.
 //
 // bufferMutated should be true when called after a successful ApproveEdit
 // (the buffer already has the replacement content). When false (reject,
@@ -255,36 +255,8 @@ func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
 	if o == nil {
 		return
 	}
-	addedCount := o.LineCount()
-	addedEnd := o.EndLine + addedCount
-
-	if bufferMutated {
-		// After approve: removed lines are gone, added lines are now real
-		// buffer lines.
-		removedCount := o.EndLine - o.StartLine + 1
-		if m.Editor.ScrollOffset > addedEnd {
-			// Past the overlay: subtract removedCount (virtual removed lines gone).
-			m.Editor.ScrollOffset -= removedCount
-		} else if m.Editor.ScrollOffset > o.EndLine {
-			// In the added-lines zone: map to replacement position.
-			m.Editor.ScrollOffset = o.StartLine + (m.Editor.ScrollOffset - o.EndLine - 1)
-		} else if m.Editor.ScrollOffset >= o.StartLine {
-			// In the removed range: those lines no longer exist.
-			// Clamp to StartLine (start of the replacement content).
-			m.Editor.ScrollOffset = o.StartLine
-		}
-	} else {
-		// Reject/error/done: buffer unchanged. Subtract addedCount
-		// (the virtual overlay lines that are being removed).
-		if m.Editor.ScrollOffset > addedEnd {
-			m.Editor.ScrollOffset -= addedCount
-		} else if m.Editor.ScrollOffset > o.EndLine {
-			m.Editor.ScrollOffset = o.EndLine + 1
-		}
-	}
-
+	m.Editor.eng.CollapseOverlay(o.StartLine, o.EndLine, o.LineCount(), bufferMutated)
 	m.Editor.Overlay = nil
-	m.Editor.ExtraVisualLines = 0
 }
 
 // regionHeight returns the height available for the RegionManager
@@ -443,15 +415,13 @@ func (m *AppModel) View() string {
 // which keeps editors alive in the multi-buffer map. This method rebuilds
 // the EditorModel and updates the region manager.
 func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
-	// Block switching while an edit is pending — the agent is waiting for
-	// approval and switching would drop the diff overlay, stranding it.
-	if m.Session.PendingEdit != nil {
-		m.AgentPane.AppendMeta("[cannot switch files while an edit is pending]\n")
-		return m, nil
-	}
 	if err := m.Session.SwitchTo(path); err != nil {
-		slog.Error("failed to open file", "path", path, "err", err)
-		m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
+		if errors.Is(err, session.ErrEditPending) {
+			m.AgentPane.AppendMeta("[" + err.Error() + "]\n")
+		} else {
+			slog.Error("failed to open file", "path", path, "err", err)
+			m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
+		}
 		return m, nil
 	}
 
@@ -525,7 +495,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	o := m.Editor.Overlay
 	var oldLines []string
 	for i := o.StartLine; i <= o.EndLine; i++ {
-		oldLines = append(oldLines, m.Editor.Buf.LineText(i))
+		oldLines = append(oldLines, m.Editor.eng.Buf.LineText(i))
 	}
 	search := strings.Join(oldLines, "\n")
 	replace := o.Content()
@@ -557,15 +527,15 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	if target < 0 {
 		target = 0
 	}
-	m.Editor.ScrollOffset = target
-	m.Editor.ClampScroll()
+	m.Editor.eng.ScrollOffset = target
+	m.Editor.eng.ClampScroll()
 
 	// Engine handles undo group, deletion, position tracking, and per-tick
 	// advancement. TUI only owns the tick schedule and visual state.
 	searchRunes := len([]rune(plan.Search))
 	cpt := charsPerTick(m.Editor.TypingWPM)
-	devStartLine, devStartCol := m.Editor.CursorLine, m.Editor.CursorCol
-	ie := m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
+	devStartLine, devStartCol := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	ie := m.Editor.eng.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
 
 	m.Editor.Anim = &animationContext{
 		state:        animTyping,
@@ -601,9 +571,9 @@ func (m *AppModel) handleAnimTick() tea.Cmd {
 	// Scroll down to follow the agent cursor as it advances. Only scrolls
 	// downward — if the user scrolled past the agent, we don't pull them back.
 	line, _ := anim.edit.Position()
-	vis := m.Editor.VisibleLines()
-	if vis > 0 && line >= m.Editor.ScrollOffset+vis {
-		m.Editor.ScrollOffset = line - vis + 1
+	vis := m.Editor.eng.VisibleLines()
+	if vis > 0 && line >= m.Editor.eng.ScrollOffset+vis {
+		m.Editor.eng.ScrollOffset = line - vis + 1
 	}
 
 	if result.Done {
@@ -625,7 +595,7 @@ func (m *AppModel) animCollision() bool {
 	}
 	// Detect first move — sticky once set.
 	if !anim.devMoved {
-		if m.Editor.CursorLine != anim.devStartLine || m.Editor.CursorCol != anim.devStartCol {
+		if m.Editor.eng.CursorLine != anim.devStartLine || m.Editor.eng.CursorCol != anim.devStartCol {
 			anim.devMoved = true
 		} else {
 			return false
@@ -634,7 +604,7 @@ func (m *AppModel) animCollision() bool {
 	startLine, startCol := anim.edit.StartPosition()
 	endLine, endCol := anim.edit.Position()
 	return editor.CursorInRegion(
-		m.Editor.CursorLine, m.Editor.CursorCol,
+		m.Editor.eng.CursorLine, m.Editor.eng.CursorCol,
 		startLine, startCol,
 		endLine, endCol,
 	)

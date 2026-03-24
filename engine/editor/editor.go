@@ -117,6 +117,49 @@ func (e *Editor) ClampScroll() {
 	}
 }
 
+// CollapseOverlay adjusts ScrollOffset when an overlay (inline diff) is
+// removed from the viewport. The overlay injects virtual lines between
+// startLine and endLine; removing them requires converting from visual-line
+// space back to buffer-line space.
+//
+// Parameters:
+//   - startLine: first buffer line of the overlay's removed range
+//   - endLine: last buffer line of the overlay's removed range (inclusive)
+//   - addedCount: number of virtual lines the overlay injected
+//   - bufferMutated: true when the buffer already contains the replacement
+//     (approve path); false when the buffer is unchanged (reject/error/done)
+//
+// After calling this, the frontend should clear ExtraVisualLines to 0.
+func (e *Editor) CollapseOverlay(startLine, endLine, addedCount int, bufferMutated bool) {
+	addedEnd := endLine + addedCount
+
+	if bufferMutated {
+		// After approve: removed lines are gone, added lines are now real
+		// buffer lines.
+		removedCount := endLine - startLine + 1
+		if e.ScrollOffset > addedEnd {
+			// Past the overlay: subtract removedCount (virtual removed lines gone).
+			e.ScrollOffset -= removedCount
+		} else if e.ScrollOffset > endLine {
+			// In the added-lines zone: map to replacement position.
+			e.ScrollOffset = startLine + (e.ScrollOffset - endLine - 1)
+		} else if e.ScrollOffset >= startLine {
+			// In the removed range: those lines no longer exist.
+			// Clamp to startLine (start of the replacement content).
+			e.ScrollOffset = startLine
+		}
+	} else {
+		// Reject/error/done: buffer unchanged. Subtract addedCount
+		// (the virtual overlay lines that are being removed).
+		if e.ScrollOffset > addedEnd {
+			e.ScrollOffset -= addedCount
+		} else if e.ScrollOffset > endLine {
+			e.ScrollOffset = endLine + 1
+		}
+	}
+	e.ExtraVisualLines = 0
+}
+
 // EnsureCursorVisible scrolls the viewport to keep the cursor visible.
 func (e *Editor) EnsureCursorVisible() {
 	vis := e.VisibleLines()

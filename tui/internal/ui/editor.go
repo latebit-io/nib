@@ -46,8 +46,16 @@ type viewportEntry struct {
 // EditorModel is the Bubble Tea view for the code editor pane.
 // It wraps the engine's Editor (which owns all domain logic)
 // and adds only rendering + input mapping.
+//
+// The engine editor is a named field (not embedded) to prevent leaking
+// 30+ engine methods into the TUI surface. AppModel and other TUI code
+// access it via the Engine() accessor when direct engine interaction is
+// needed (e.g., BeginIncrementalEdit, cursor position for collision).
 type EditorModel struct {
-	*editor.Editor
+	// eng is the engine editor — all domain logic lives here.
+	// Named (not embedded) so engine methods aren't promoted into the TUI
+	// surface. Use Engine() for explicit access from outside this type.
+	eng *editor.Editor
 
 	// Transient status message (shown in status bar, cleared on next key)
 	StatusMsg string
@@ -82,10 +90,21 @@ type EditorModel struct {
 // NewEditorModel creates an editor model from an engine Editor.
 func NewEditorModel(e *editor.Editor, km *Keymap, svc *Services) *EditorModel {
 	return &EditorModel{
-		Editor:   e,
+		eng:      e,
 		Keymap:   km,
 		Services: svc,
 	}
+}
+
+// Engine returns the underlying engine editor. Use this for direct engine
+// access from AppModel (e.g., BeginIncrementalEdit, cursor queries).
+func (m *EditorModel) Engine() *editor.Editor {
+	return m.eng
+}
+
+// SetSize updates the editor dimensions. Implements Pane.
+func (m *EditorModel) SetSize(width, height int) {
+	m.eng.SetSize(width, height)
 }
 
 // Update handles key and mouse events for the editor pane. Implements Pane.
@@ -149,9 +168,9 @@ func displayColToBufCol(bufToDisp []int, displayCol int) int {
 // to match the overlay state so scroll methods work correctly.
 func (m *EditorModel) syncExtraVisualLines() {
 	if m.Overlay != nil {
-		m.ExtraVisualLines = m.Overlay.LineCount()
+		m.eng.ExtraVisualLines = m.Overlay.LineCount()
 	} else {
-		m.ExtraVisualLines = 0
+		m.eng.ExtraVisualLines = 0
 	}
 }
 
@@ -172,11 +191,11 @@ func (m *EditorModel) Render() string {
 		m.cursorMoved = false
 	}
 	m.syncExtraVisualLines()
-	m.ClampScroll()
+	m.eng.ClampScroll()
 
-	gutterW := m.GutterWidth()
-	contentW := m.ContentWidth()
-	vis := m.VisibleLines()
+	gutterW := m.eng.GutterWidth()
+	contentW := m.eng.ContentWidth()
+	vis := m.eng.VisibleLines()
 
 	gutterStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	cursorStyle := lipgloss.NewStyle().Reverse(true)
@@ -205,7 +224,7 @@ func (m *EditorModel) Render() string {
 	addedBg := lipgloss.NewStyle().Background(addedBgColor)
 	addedGutterSt := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Background(addedBgColor)
 
-	output := make([]string, m.Height)
+	output := make([]string, m.eng.Height)
 	m.viewportMap = m.viewportMap[:0]
 
 	overlay := m.Overlay
@@ -216,14 +235,14 @@ func (m *EditorModel) Render() string {
 	showBufferCursor := overlay == nil || !overlay.Active
 
 	for visualRow := range vis {
-		if visualRow >= m.Height-1 {
+		if visualRow >= m.eng.Height-1 {
 			break
 		}
-		vLine := m.ScrollOffset + visualRow
+		vLine := m.eng.ScrollOffset + visualRow
 
 		if overlay == nil {
 			// No overlay — visual line == buffer line.
-			if vLine >= m.Buf.LineCount() {
+			if vLine >= m.eng.Buf.LineCount() {
 				output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
 			} else {
@@ -257,7 +276,7 @@ func (m *EditorModel) Render() string {
 		default:
 			// Normal line after diff — subtract added lines to get buffer line.
 			bufLine := vLine - addedCount
-			if bufLine >= m.Buf.LineCount() {
+			if bufLine >= m.eng.Buf.LineCount() {
 				output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
 			} else {
@@ -268,14 +287,14 @@ func (m *EditorModel) Render() string {
 	}
 
 	// Fill remaining rows with tildes.
-	for visualRow := vis; visualRow < m.Height-1; visualRow++ {
+	for visualRow := vis; visualRow < m.eng.Height-1; visualRow++ {
 		output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 		m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
 	}
 
 	// Status bar (last row).
-	if m.Height > 0 {
-		output[m.Height-1] = m.renderStatusBar()
+	if m.eng.Height > 0 {
+		output[m.eng.Height-1] = m.renderStatusBar()
 	}
 
 	return strings.Join(output, "\n")
@@ -290,7 +309,7 @@ func (m *EditorModel) ensureCursorVisibleVisual() {
 		return
 	}
 	addedCount := overlay.LineCount()
-	vis := m.VisibleLines()
+	vis := m.eng.VisibleLines()
 	if vis <= 0 {
 		return
 	}
@@ -301,17 +320,17 @@ func (m *EditorModel) ensureCursorVisibleVisual() {
 		visualCursor = overlay.EndLine + 1 + overlay.Editor.CursorLine
 	} else {
 		// Buffer cursor: shift by addedCount if past the diff.
-		visualCursor = m.CursorLine
-		if m.CursorLine > overlay.EndLine {
-			visualCursor = m.CursorLine + addedCount
+		visualCursor = m.eng.CursorLine
+		if m.eng.CursorLine > overlay.EndLine {
+			visualCursor = m.eng.CursorLine + addedCount
 		}
 	}
 
-	if visualCursor < m.ScrollOffset {
-		m.ScrollOffset = visualCursor
+	if visualCursor < m.eng.ScrollOffset {
+		m.eng.ScrollOffset = visualCursor
 	}
-	if visualCursor >= m.ScrollOffset+vis {
-		m.ScrollOffset = visualCursor - vis + 1
+	if visualCursor >= m.eng.ScrollOffset+vis {
+		m.eng.ScrollOffset = visualCursor - vis + 1
 	}
 }
 
@@ -323,7 +342,7 @@ func (m *EditorModel) renderNormalLine(
 ) string {
 	var line strings.Builder
 
-	origin := m.Buf.LineOrigin(lineIdx)
+	origin := m.eng.Buf.LineOrigin(lineIdx)
 	gutterSuffix := " "
 	renderGutter := gutterStyle
 	if origin == buffer.OriginAgent {
@@ -333,14 +352,14 @@ func (m *EditorModel) renderNormalLine(
 	gutterText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1) + gutterSuffix
 	line.WriteString(renderGutter.Render(gutterText))
 
-	rawRunes := []rune(m.Buf.LineText(lineIdx))
+	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
 	displayed := fillDisplay(expanded, contentW)
 
 	// Cursor position in display coords.
 	displayCursorCol := -1
-	if showCursor && lineIdx == m.CursorLine && m.CursorCol >= 0 && m.CursorCol <= len(rawRunes) {
-		displayCursorCol = bufToDisp[m.CursorCol]
+	if showCursor && lineIdx == m.eng.CursorLine && m.eng.CursorCol >= 0 && m.eng.CursorCol <= len(rawRunes) {
+		displayCursorCol = bufToDisp[m.eng.CursorCol]
 		if displayCursorCol >= contentW && contentW > 0 {
 			displayCursorCol = contentW - 1
 		}
@@ -364,7 +383,7 @@ func (m *EditorModel) renderNormalLine(
 
 	// Syntax highlighting.
 	charStyles := make([]lipgloss.Style, contentW)
-	if tokens := m.HighlightLine(lineIdx); len(tokens) > 0 {
+	if tokens := m.eng.HighlightLine(lineIdx); len(tokens) > 0 {
 		for _, tok := range tokens {
 			dStart := 0
 			if tok.Col < len(bufToDisp) {
@@ -384,7 +403,7 @@ func (m *EditorModel) renderNormalLine(
 
 	// Selection: precompute inverse mapping display col → buffer col.
 	var dispToBuf []int
-	if m.SelectionActive {
+	if m.eng.SelectionActive {
 		dispToBuf = make([]int, contentW)
 		bufCol := 0
 		for j := range contentW {
@@ -418,7 +437,7 @@ func (m *EditorModel) renderNormalLine(
 			colTags[j] = tagCursor
 		case j == displayAgentCol:
 			colTags[j] = tagAgent
-		case m.SelectionActive && m.IsSelected(lineIdx, dispToBuf[j]):
+		case m.eng.SelectionActive && m.eng.IsSelected(lineIdx, dispToBuf[j]):
 			colTags[j] = tagSel
 		case charStyles[j].GetForeground() != nil:
 			fg := charStyles[j].GetForeground()
@@ -477,14 +496,14 @@ func (m *EditorModel) renderRemovedLine(
 	gutterText := fmt.Sprintf("%*d-", gutterW-1, lineIdx+1)
 	line.WriteString(gutterSt.Render(gutterText))
 
-	rawRunes := []rune(m.Buf.LineText(lineIdx))
+	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
 	displayed := fillDisplay(expanded, contentW)
 
 	// Cursor position in display coords.
 	displayCursorCol := -1
-	if showBufferCursor && lineIdx == m.CursorLine && m.CursorCol >= 0 && m.CursorCol <= len(rawRunes) {
-		displayCursorCol = bufToDisp[m.CursorCol]
+	if showBufferCursor && lineIdx == m.eng.CursorLine && m.eng.CursorCol >= 0 && m.eng.CursorCol <= len(rawRunes) {
+		displayCursorCol = bufToDisp[m.eng.CursorCol]
 		if displayCursorCol >= contentW && contentW > 0 {
 			displayCursorCol = contentW - 1
 		}
@@ -492,7 +511,7 @@ func (m *EditorModel) renderRemovedLine(
 
 	// Syntax highlighting on removed lines (they are real buffer lines).
 	charStyles := make([]lipgloss.Style, contentW)
-	if tokens := m.HighlightLine(lineIdx); len(tokens) > 0 {
+	if tokens := m.eng.HighlightLine(lineIdx); len(tokens) > 0 {
 		for _, tok := range tokens {
 			dStart := 0
 			if tok.Col < len(bufToDisp) {
@@ -643,12 +662,12 @@ func (m *EditorModel) renderStatusBar() string {
 		Foreground(lipgloss.Color("230")).
 		Bold(true)
 
-	name := m.Buf.Path
+	name := m.eng.Buf.Path
 	if name == "" {
 		name = "[new]"
 	}
 	modified := ""
-	if m.Buf.Modified {
+	if m.eng.Buf.Modified {
 		modified = " [+]"
 	}
 
@@ -664,20 +683,20 @@ func (m *EditorModel) renderStatusBar() string {
 		right = fmt.Sprintf(" +%d:%d ", m.Overlay.Editor.CursorLine+1, m.Overlay.Editor.CursorCol+1)
 	case m.Anim != nil && m.Anim.state == animTyping:
 		al, ac := m.Anim.edit.Position()
-		right = fmt.Sprintf(" %d:%d  agent:%d:%d ", m.CursorLine+1, m.CursorCol+1, al+1, ac+1)
+		right = fmt.Sprintf(" %d:%d  agent:%d:%d ", m.eng.CursorLine+1, m.eng.CursorCol+1, al+1, ac+1)
 	default:
-		right = fmt.Sprintf(" %d:%d ", m.CursorLine+1, m.CursorCol+1)
+		right = fmt.Sprintf(" %d:%d ", m.eng.CursorLine+1, m.eng.CursorCol+1)
 	}
 
 	leftW := runewidth.StringWidth(left)
 	rightW := runewidth.StringWidth(right)
-	padding := m.Width - leftW - rightW
+	padding := m.eng.Width - leftW - rightW
 	if padding < 0 {
 		padding = 0
 	}
 
 	bar := left + strings.Repeat(" ", padding) + right
-	bar = runewidth.Truncate(bar, m.Width, "")
+	bar = runewidth.Truncate(bar, m.eng.Width, "")
 
 	return statusStyle.Render(bar)
 }
@@ -690,23 +709,23 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 	switch {
 	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
 		m.syncExtraVisualLines()
-		m.ScrollUp(scrollLines)
+		m.eng.ScrollUp(scrollLines)
 		return nil
 
 	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
 		m.syncExtraVisualLines()
-		m.ScrollDown(scrollLines)
+		m.eng.ScrollDown(scrollLines)
 		return nil
 	}
 
-	if msg.Button != tea.MouseButtonLeft || msg.Y >= m.VisibleLines() {
+	if msg.Button != tea.MouseButtonLeft || msg.Y >= m.eng.VisibleLines() {
 		return nil
 	}
 
 	// Mouse click moves the cursor — mark for scroll adjustment.
 	m.cursorMoved = true
 
-	gutterW := m.GutterWidth()
+	gutterW := m.eng.GutterWidth()
 	displayCol := msg.X - gutterW
 	if displayCol < 0 {
 		displayCol = 0
@@ -770,7 +789,7 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 				slog.Debug("overlay click", "overlayLine", entry.overlayLine, "col", col)
 				m.Overlay.Active = true
 				oe.ClearSelection()
-				m.ClearSelection()
+				m.eng.ClearSelection()
 				oe.MoveCursorTo(entry.overlayLine, col)
 				oe.SelectionActive = true
 				oe.SelectStartLine = oe.CursorLine
@@ -792,7 +811,7 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		if m.Overlay != nil && m.Overlay.Active {
 			m.Overlay.Active = false
 		}
-		m.handleNormalLineClick(m.Buf.LineCount(), displayCol, msg.Action)
+		m.handleNormalLineClick(m.eng.Buf.LineCount(), displayCol, msg.Action)
 	}
 
 	return nil
@@ -800,32 +819,32 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 
 func (m *EditorModel) handleNormalLineClick(bufLine, displayCol int, action tea.MouseAction) {
 	var bufCol int
-	if bufLine >= m.Buf.LineCount() {
-		bufLine = m.Buf.LineCount() - 1
+	if bufLine >= m.eng.Buf.LineCount() {
+		bufLine = m.eng.Buf.LineCount() - 1
 		if bufLine < 0 {
 			bufLine = 0
 		}
-		bufCol = m.Buf.LineLen(bufLine)
+		bufCol = m.eng.Buf.LineLen(bufLine)
 	} else {
-		bufCol = m.DisplayColToBufferCol(bufLine, displayCol)
+		bufCol = m.eng.DisplayColToBufferCol(bufLine, displayCol)
 	}
 
 	switch action {
 	case tea.MouseActionPress:
-		m.ClearSelection()
-		m.MoveCursorTo(bufLine, bufCol)
-		m.SelectionActive = true
-		m.SelectStartLine = m.CursorLine
-		m.SelectStartCol = m.CursorCol
+		m.eng.ClearSelection()
+		m.eng.MoveCursorTo(bufLine, bufCol)
+		m.eng.SelectionActive = true
+		m.eng.SelectStartLine = m.eng.CursorLine
+		m.eng.SelectStartCol = m.eng.CursorCol
 	case tea.MouseActionMotion:
-		if m.SelectionActive {
-			m.MoveCursorTo(bufLine, bufCol)
+		if m.eng.SelectionActive {
+			m.eng.MoveCursorTo(bufLine, bufCol)
 		}
 	case tea.MouseActionRelease:
-		if m.SelectionActive &&
-			m.CursorLine == m.SelectStartLine &&
-			m.CursorCol == m.SelectStartCol {
-			m.ClearSelection()
+		if m.eng.SelectionActive &&
+			m.eng.CursorLine == m.eng.SelectStartLine &&
+			m.eng.CursorCol == m.eng.SelectStartCol {
+			m.eng.ClearSelection()
 		}
 	}
 }
@@ -843,22 +862,22 @@ func (m *EditorModel) overlapsRemovedRange() bool {
 	start, end := m.Overlay.StartLine, m.Overlay.EndLine
 
 	// Cursor on a removed line → read-only.
-	if m.CursorLine >= start && m.CursorLine <= end {
+	if m.eng.CursorLine >= start && m.eng.CursorLine <= end {
 		return true
 	}
 	// Cursor on the line just before the removed range, at end of line:
 	// Delete would join into StartLine.
-	if m.CursorLine == start-1 && m.CursorCol >= m.Buf.LineLen(m.CursorLine) {
+	if m.eng.CursorLine == start-1 && m.eng.CursorCol >= m.eng.Buf.LineLen(m.eng.CursorLine) {
 		return true
 	}
 	// Cursor on the line just after the removed range, at col 0:
 	// Backspace would join into EndLine.
-	if m.CursorLine == end+1 && m.CursorCol == 0 {
+	if m.eng.CursorLine == end+1 && m.eng.CursorCol == 0 {
 		return true
 	}
 
-	if m.SelectionActive {
-		selStart, selEnd := m.SelectStartLine, m.CursorLine
+	if m.eng.SelectionActive {
+		selStart, selEnd := m.eng.SelectStartLine, m.eng.CursorLine
 		if selStart > selEnd {
 			selStart, selEnd = selEnd, selStart
 		}
@@ -888,10 +907,10 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
 
 	// Track line count so we can adjust overlay position if the user
 	// inserts/deletes lines above the diff.
-	linesBefore := m.Buf.LineCount()
+	linesBefore := m.eng.Buf.LineCount()
 
 	readOnly := m.overlapsRemovedRange()
-	cmd := m.handleEditorKeyFor(keyMsg, m.Editor, readOnly)
+	cmd := m.handleEditorKeyFor(keyMsg, m.eng, readOnly)
 
 	m.adjustOverlayPosition(linesBefore)
 	return cmd
@@ -908,19 +927,19 @@ func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyMsg) bool {
 	switch keyMsg.Type {
 	case tea.KeyDown:
 		// Cursor just above removed range → enter overlay at first line.
-		if m.CursorLine == o.StartLine-1 {
+		if m.eng.CursorLine == o.StartLine-1 {
 			o.Active = true
-			o.Editor.MoveCursorTo(0, m.CursorCol)
-			m.ClearSelection()
+			o.Editor.MoveCursorTo(0, m.eng.CursorCol)
+			m.eng.ClearSelection()
 			return true
 		}
 	case tea.KeyUp:
 		// Cursor just below removed range → enter overlay at last line.
-		if m.CursorLine == o.EndLine+1 {
+		if m.eng.CursorLine == o.EndLine+1 {
 			o.Active = true
 			lastLine := o.Editor.Buf.LineCount() - 1
-			o.Editor.MoveCursorTo(lastLine, m.CursorCol)
-			m.ClearSelection()
+			o.Editor.MoveCursorTo(lastLine, m.eng.CursorCol)
+			m.eng.ClearSelection()
 			return true
 		}
 	}
@@ -933,12 +952,12 @@ func (m *EditorModel) adjustOverlayPosition(linesBefore int) {
 	if m.Overlay == nil {
 		return
 	}
-	delta := m.Buf.LineCount() - linesBefore
+	delta := m.eng.Buf.LineCount() - linesBefore
 	if delta == 0 {
 		return
 	}
 	// Edits happen at the cursor. Only adjust if the cursor is above the overlay.
-	if m.CursorLine <= m.Overlay.StartLine {
+	if m.eng.CursorLine <= m.Overlay.StartLine {
 		m.Overlay.StartLine += delta
 		m.Overlay.EndLine += delta
 		slog.Debug("overlay position adjusted", "delta", delta, "newStart", m.Overlay.StartLine, "newEnd", m.Overlay.EndLine)
@@ -946,7 +965,7 @@ func (m *EditorModel) adjustOverlayPosition(linesBefore int) {
 		if m.Overlay.StartLine < 0 || m.Overlay.EndLine < 0 {
 			slog.Debug("overlay removed", "reason", "shifted to invalid position")
 			m.Overlay = nil
-			m.ExtraVisualLines = 0
+			m.eng.ExtraVisualLines = 0
 		}
 	}
 }
@@ -965,9 +984,9 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyMsg) tea.Cmd {
 		oe.ClearSelection()
 		o.Active = false
 		if o.StartLine > 0 {
-			m.MoveCursorTo(o.StartLine-1, oe.CursorCol)
-		} else if o.EndLine+1 < m.Buf.LineCount() {
-			m.MoveCursorTo(o.EndLine+1, oe.CursorCol)
+			m.eng.MoveCursorTo(o.StartLine-1, oe.CursorCol)
+		} else if o.EndLine+1 < m.eng.Buf.LineCount() {
+			m.eng.MoveCursorTo(o.EndLine+1, oe.CursorCol)
 		}
 		return nil
 	}
@@ -981,20 +1000,20 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyMsg) tea.Cmd {
 		slog.Debug("overlay deactivated", "reason", "arrow up past top", "target", o.StartLine-1)
 		oe.ClearSelection()
 		o.Active = false
-		m.MoveCursorTo(o.StartLine-1, oe.CursorCol)
+		m.eng.MoveCursorTo(o.StartLine-1, oe.CursorCol)
 		return nil
 	}
 
 	// Down at bottom of overlay — exit downward if there's a safe line below.
 	if keyMsg.Type == tea.KeyDown && oe.CursorLine >= oe.Buf.LineCount()-1 {
-		if o.EndLine+1 >= m.Buf.LineCount() {
+		if o.EndLine+1 >= m.eng.Buf.LineCount() {
 			// No buffer line below the overlay — stay in overlay.
 			return nil
 		}
 		slog.Debug("overlay deactivated", "reason", "arrow down past bottom", "target", o.EndLine+1)
 		oe.ClearSelection()
 		o.Active = false
-		m.MoveCursorTo(o.EndLine+1, oe.CursorCol)
+		m.eng.MoveCursorTo(o.EndLine+1, oe.CursorCol)
 		return nil
 	}
 
@@ -1014,7 +1033,7 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 	switch action {
 	case ActionSave:
 		// Save always operates on the main buffer.
-		if err := m.Save(); err != nil {
+		if err := m.eng.Save(); err != nil {
 			m.StatusMsg = "Save failed: " + err.Error()
 		} else {
 			m.StatusMsg = "Saved"
@@ -1134,12 +1153,12 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 		m.syncExtraVisualLines()
 		// Use the main viewport's visible height for page jumps, not the
 		// target editor's own Height (which may differ for the overlay editor).
-		e.MoveCursor(-m.VisibleLines(), 0)
+		e.MoveCursor(-m.eng.VisibleLines(), 0)
 		return nil
 	case tea.KeyPgDown:
 		e.ClearSelection()
 		m.syncExtraVisualLines()
-		e.MoveCursor(m.VisibleLines(), 0)
+		e.MoveCursor(m.eng.VisibleLines(), 0)
 		return nil
 
 	// Word navigation

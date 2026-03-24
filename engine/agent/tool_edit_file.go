@@ -248,9 +248,9 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 			return fmt.Sprintf("Edit applied. The applied edit differs from what you proposed. "+
 				"Study what changed — it signals the developer's intent. Recalibrate your approach to align with their direction. "+
 				"If you notice a syntax error or bug in their edit, point it out and propose a fix — do not silently change it.\n\nCurrent file (%s):\n\n%s",
-				path, newContent)
+				path, truncateForPreview(newContent))
 		}
 		return fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-			path, newContent)
+			path, truncateForPreview(newContent))
 	}
 }

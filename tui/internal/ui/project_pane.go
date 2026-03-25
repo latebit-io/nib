@@ -140,8 +140,8 @@ func (p *ProjectPaneModel) rebuild() {
 	}
 	prevProjectExpanded := ExpandedPaths(p.projectTree)
 
-	contextFiles := p.session.ContextFiles()
-	modifiedFiles := p.session.AgentModifiedFiles()
+	contextFiles := normalizeSlashPaths(p.session.ContextFiles())
+	modifiedFiles := normalizeSlashPaths(p.session.AgentModifiedFiles())
 
 	// Build sets for badge lookup
 	ctxSet := toSet(contextFiles)
@@ -512,6 +512,16 @@ func expandAll(root *TreeNode) {
 			n.Collapsed = false
 		}
 	})
+}
+
+// normalizeSlashPaths converts OS-native path separators to forward slashes.
+// BuildTree splits on '/', so paths must be normalized on Windows.
+func normalizeSlashPaths(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = filepath.ToSlash(p)
+	}
+	return out
 }
 
 // toSet converts a string slice to a set map.

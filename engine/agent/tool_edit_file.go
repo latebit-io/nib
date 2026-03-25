@@ -115,14 +115,8 @@ type matchResult struct {
 // Limited lookahead to avoid O(n²) on large files.
 func findMatch(expected, actual []string, ei, ai int) matchResult {
 	const maxLookahead = 20
-	limitE := ei + maxLookahead
-	if limitE > len(expected) {
-		limitE = len(expected)
-	}
-	limitA := ai + maxLookahead
-	if limitA > len(actual) {
-		limitA = len(actual)
-	}
+	limitE := min(ei+maxLookahead, len(expected))
+	limitA := min(ai+maxLookahead, len(actual))
 
 	for de := 0; de < limitE-ei; de++ {
 		for da := 0; da < limitA-ai; da++ {

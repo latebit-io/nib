@@ -30,7 +30,14 @@ func truncateForPreview(content string) string {
 // simpleDiff produces a unified-diff-like comparison between expected and actual
 // content, showing only the lines that differ. Output is capped at maxDiffPreview
 // bytes to avoid blowing token budgets on large file changes.
+// maxDiffInputBytes caps the combined input size to simpleDiff.
+// Files beyond this threshold get a placeholder instead of a line-level diff.
+const maxDiffInputBytes = 10 * 1024 * 1024
+
 func simpleDiff(expected, actual string) string {
+	if len(expected)+len(actual) > maxDiffInputBytes {
+		return "(diff omitted: content too large)"
+	}
 	expectedLines := strings.Split(expected, "\n")
 	actualLines := strings.Split(actual, "\n")
 
@@ -54,6 +61,9 @@ func simpleDiff(expected, actual string) string {
 	}
 
 	result := b.buf.String()
+	if b.truncated && result == "" {
+		return "[... diff truncated]"
+	}
 	if result == "" {
 		return "(whitespace-only changes)"
 	}
@@ -168,7 +178,7 @@ func (t *EditFileTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "edit_file",
-			Description: "Search for exact text in a file and replace it. The search string must match the file content exactly (including whitespace and newlines). Keep search text as SHORT as possible — only include lines that actually change, plus minimal context to match uniquely. Do NOT rewrite entire functions when only a few lines change. To delete text, set replace to an empty string. To insert, include anchor text in search and repeat it in replace with the new code added.",
+			Description: "Search for exact text in a file and replace it. The search string must match the file content exactly (including whitespace and newlines). The replace string must be correctly formatted code with proper indentation matching the file's style — never collapse multiple lines onto one line. Keep search text as SHORT as possible — only include lines that actually change, plus minimal context to match uniquely. Do NOT rewrite entire functions when only a few lines change. To delete text, set replace to an empty string. To insert, include anchor text in search and repeat it in replace with the new code added.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -353,11 +363,11 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 			return fmt.Sprintf("Edit applied, but the developer modified your edit. "+
 				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
 				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
-				"Developer's changes (what they changed from your proposal):\n%s\n\n"+
+				"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
 				"Recalibrate: study the diff — it signals the developer's intent. "+
 				"Align your next steps with their direction. "+
 				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
-				"Current file (%s):\n\n%s",
+				"Current file (%s):\n```\n%s\n```",
 				diff, path, truncateForPreview(newContent))
 		}
 		return fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",

@@ -510,10 +510,17 @@ func (m *AppModel) renderIntentBar() string {
 	return style.Render(text)
 }
 
-// refreshProjectPane rebuilds the project pane if it exists and is visible.
+// refreshProjectPane rebuilds the project pane if visible, or marks it
+// dirty for deferred rebuild when the pane is next shown.
 func (m *AppModel) refreshProjectPane() {
-	if m.ProjectPane != nil {
+	if m.ProjectPane == nil {
+		return
+	}
+	r := m.Regions.regionByName("project")
+	if r != nil && r.Visible {
 		m.ProjectPane.rebuild()
+	} else {
+		m.ProjectPane.dirty = true
 	}
 }
 
@@ -526,8 +533,11 @@ func (m *AppModel) handleToggleProject() (tea.Model, tea.Cmd) {
 	}
 	focused := m.Regions.FocusedRegion()
 	if !r.Visible {
-		// Hidden → show + focus
-		m.ProjectPane.rebuild()
+		// Hidden → show + focus (rebuild if stale)
+		if m.ProjectPane.dirty {
+			m.ProjectPane.rebuild()
+			m.ProjectPane.dirty = false
+		}
 		m.Regions.Show("project")
 		m.Regions.FocusByName("project")
 	} else if focused == nil || focused.Name != "project" {

@@ -160,6 +160,32 @@ func walkTree(n *TreeNode, fn func(*TreeNode)) {
 	}
 }
 
+// ExpandedPaths returns the set of directory paths that are currently expanded.
+func ExpandedPaths(root *TreeNode) map[string]bool {
+	expanded := make(map[string]bool)
+	if root == nil {
+		return expanded
+	}
+	walkTree(root, func(n *TreeNode) {
+		if n.IsDir && !n.Collapsed {
+			expanded[n.Path] = true
+		}
+	})
+	return expanded
+}
+
+// RestoreExpanded expands directories whose paths are in the given set.
+func RestoreExpanded(root *TreeNode, expanded map[string]bool) {
+	if root == nil {
+		return
+	}
+	walkTree(root, func(n *TreeNode) {
+		if n.IsDir && expanded[n.Path] {
+			n.Collapsed = false
+		}
+	})
+}
+
 // FindNode returns the first node with the given relative path, or nil.
 func FindNode(root *TreeNode, relPath string) *TreeNode {
 	if root == nil {

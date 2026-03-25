@@ -65,6 +65,10 @@ type ProjectPaneModel struct {
 	// Cursor and scroll
 	cursorIdx    int
 	scrollOffset int
+
+	// dirty is set when state changes while the pane is hidden.
+	// rebuild() is deferred until the pane becomes visible.
+	dirty bool
 }
 
 // projectItem is a flattened display row in the project pane.
@@ -129,6 +133,13 @@ func (p *ProjectPaneModel) SetSize(width, height int) {
 
 // rebuild refreshes all tree data from the session.
 func (p *ProjectPaneModel) rebuild() {
+	// Capture state to restore after rebuild
+	var selectedPath string
+	if p.cursorIdx >= 0 && p.cursorIdx < len(p.items) && p.items[p.cursorIdx].node != nil {
+		selectedPath = p.items[p.cursorIdx].node.Path
+	}
+	prevProjectExpanded := ExpandedPaths(p.projectTree)
+
 	contextFiles := p.session.ContextFiles()
 	modifiedFiles := p.session.AgentModifiedFiles()
 
@@ -144,26 +155,41 @@ func (p *ProjectPaneModel) rebuild() {
 	p.modifiedTree = BuildTree(modifiedFiles)
 	expandAll(p.modifiedTree)
 
-	// Project section — full file tree, collapsed by default
+	// Project section — full file tree, collapsed by default then restore
 	projectFiles, err := p.session.ListFiles()
 	if err != nil && !errors.Is(err, filelist.ErrCapped) {
 		slog.Error("project pane: failed to list files", "err", err)
 		projectFiles = nil
 	}
 	p.projectTree = BuildTree(projectFiles)
+	RestoreExpanded(p.projectTree, prevProjectExpanded)
 	SetBadges(p.projectTree, ctxSet, modSet)
 
 	// Flatten into display items
 	p.flattenItems()
 
-	// Preserve cursor within bounds
+	// Restore cursor to the same node, or clamp to bounds
+	p.restoreCursor(selectedPath)
+	p.clampScroll()
+}
+
+// restoreCursor finds the item with the given path and moves the cursor to it.
+// Falls back to clamping within bounds if the path is not found.
+func (p *ProjectPaneModel) restoreCursor(path string) {
+	if path != "" {
+		for i, item := range p.items {
+			if item.node != nil && item.node.Path == path {
+				p.cursorIdx = i
+				return
+			}
+		}
+	}
 	if p.cursorIdx >= len(p.items) {
 		p.cursorIdx = len(p.items) - 1
 	}
 	if p.cursorIdx < 0 {
 		p.cursorIdx = 0
 	}
-	p.clampScroll()
 }
 
 // flattenItems builds the unified item list from all sections.
@@ -367,7 +393,7 @@ func (p *ProjectPaneModel) renderHeader(section string, selected bool) string {
 	text := projSectionStyle.Render(label)
 
 	// Pad to width
-	line := padToWidth(text, p.width)
+	line := clampToWidth(text, p.width)
 	if selected {
 		line = projCursorStyle.Render(line)
 	}
@@ -437,30 +463,43 @@ func (p *ProjectPaneModel) renderBadge(badge string) string {
 }
 
 // assembleLine combines left content and right badge, padding in between.
+// Truncates left content if it would exceed the pane width.
 func assembleLine(left, right string, width int) string {
-	// Use lipgloss width for ANSI-aware measurement
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
 
 	if right == "" {
-		return padToWidth(left, width)
+		return clampToWidth(left, width)
 	}
 
-	gap := width - leftW - rightW - 1 // 1 space before badge
+	// Truncate left to make room for badge
+	maxLeft := width - rightW - 2 // 1 space + at least 1 char gap
+	if maxLeft < 1 {
+		return clampToWidth(left, width)
+	}
+	if leftW > maxLeft {
+		left = lipgloss.NewStyle().MaxWidth(maxLeft).Render(left)
+		leftW = lipgloss.Width(left)
+	}
+
+	gap := width - leftW - rightW - 1
 	if gap < 1 {
-		// No room for badge — just show the name
-		return padToWidth(left, width)
+		return clampToWidth(left, width)
 	}
 	return fmt.Sprintf("%s%s %s", left, strings.Repeat(" ", gap), right)
 }
 
-// padToWidth pads a string to the given width using ANSI-aware measurement.
-func padToWidth(s string, width int) string {
+// clampToWidth truncates or pads a string to exactly the given width.
+// Uses ANSI-aware measurement so styled strings are handled correctly.
+func clampToWidth(s string, width int) string {
 	w := lipgloss.Width(s)
-	if w >= width {
-		return s
+	if w > width {
+		return lipgloss.NewStyle().MaxWidth(width).Render(s)
 	}
-	return s + strings.Repeat(" ", width-w)
+	if w < width {
+		return s + strings.Repeat(" ", width-w)
+	}
+	return s
 }
 
 // expandAll recursively expands all directory nodes.

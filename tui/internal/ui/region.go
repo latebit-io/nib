@@ -198,8 +198,8 @@ func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
 		}
 	}
 
-	// Check for divider click to start drag
-	if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+	// Check for divider click to start drag (reject clicks outside pane area)
+	if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y >= 0 && msg.Y < rm.Height {
 		if divIdx := rm.dividerAt(msg.X); divIdx >= 0 {
 			rm.startDividerDrag(divIdx, msg.X)
 			return nil

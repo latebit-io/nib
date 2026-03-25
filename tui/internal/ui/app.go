@@ -173,12 +173,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ProjectOpenFileMsg:
 		return m.openFile(msg.Path)
 
-	// Project pane — refresh tree data
-	case ProjectRefreshMsg:
-		p := m.ProjectPane
-		if p != nil {
-			p.Update(msg)
-		}
+	// Project pane — context set mutations (all session writes go through AppModel)
+	case ProjectAddContextMsg:
+		m.Session.AddContext(msg.Path)
+		m.refreshProjectPane()
+		return m, nil
+
+	case ProjectRemoveContextMsg:
+		m.Session.RemoveContext(msg.Path)
+		m.refreshProjectPane()
 		return m, nil
 
 	// Animation tick — advance the agent typing animation

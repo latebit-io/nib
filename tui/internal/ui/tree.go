@@ -2,6 +2,7 @@ package ui
 
 import (
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -36,12 +37,14 @@ func (n *TreeNode) Toggle() {
 }
 
 // BuildTree converts a sorted list of relative file paths into a tree.
-// All intermediate directories are created automatically.
+// All intermediate directories are created automatically. Paths are
+// normalized to forward slashes so OS-native separators are handled.
 // The returned root is a synthetic node (Name="", IsDir=true) whose
 // children are the top-level entries.
 func BuildTree(paths []string) *TreeNode {
 	root := &TreeNode{IsDir: true}
 	for _, p := range paths {
+		p = filepath.ToSlash(p)
 		parts := strings.Split(p, "/")
 		insertPath(root, parts, p)
 	}
@@ -186,8 +189,8 @@ func RestoreExpanded(root *TreeNode, expanded map[string]bool) {
 	})
 }
 
-// FindNode returns the first node with the given relative path, or nil.
-func FindNode(root *TreeNode, relPath string) *TreeNode {
+// findNode returns the first node with the given relative path, or nil.
+func findNode(root *TreeNode, relPath string) *TreeNode {
 	if root == nil {
 		return nil
 	}

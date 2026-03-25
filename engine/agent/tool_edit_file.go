@@ -27,13 +27,13 @@ func truncateForPreview(content string) string {
 	return content[:maxContentPreview] + "\n\n[... truncated — use read_file for full content]"
 }
 
-// simpleDiff produces a unified-diff-like comparison between expected and actual
-// content, showing only the lines that differ. Output is capped at maxDiffPreview
-// bytes to avoid blowing token budgets on large file changes.
 // maxDiffInputBytes caps the combined input size to simpleDiff.
 // Files beyond this threshold get a placeholder instead of a line-level diff.
 const maxDiffInputBytes = 10 * 1024 * 1024
 
+// simpleDiff produces a unified-diff-like comparison between expected and actual
+// content, showing only the lines that differ. Output is capped at maxDiffPreview
+// bytes to avoid blowing token budgets on large file changes.
 func simpleDiff(expected, actual string) string {
 	if len(expected)+len(actual) > maxDiffInputBytes {
 		return "(diff omitted: content too large)"

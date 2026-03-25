@@ -191,7 +191,7 @@ func TestSetBadges(t *testing.T) {
 	mod := map[string]bool{"auth/handler.go": true}
 	SetBadges(root, ctx, mod)
 
-	handler := FindNode(root, "auth/handler.go")
+	handler := findNode(root, "auth/handler.go")
 	if handler == nil {
 		t.Fatal("handler not found")
 	}
@@ -199,7 +199,7 @@ func TestSetBadges(t *testing.T) {
 		t.Errorf("handler badge = %q, want %q", handler.Badge, "ctx mod")
 	}
 
-	token := FindNode(root, "auth/token.go")
+	token := findNode(root, "auth/token.go")
 	if token == nil {
 		t.Fatal("token not found")
 	}
@@ -207,7 +207,7 @@ func TestSetBadges(t *testing.T) {
 		t.Errorf("token badge = %q, want empty", token.Badge)
 	}
 
-	main := FindNode(root, "main.go")
+	main := findNode(root, "main.go")
 	if main == nil {
 		t.Fatal("main not found")
 	}
@@ -216,7 +216,7 @@ func TestSetBadges(t *testing.T) {
 	}
 }
 
-func TestFindNode(t *testing.T) {
+func Test_findNode(t *testing.T) {
 	root := BuildTree([]string{"a/b/c.go", "d.go"})
 
 	tests := []struct {
@@ -231,9 +231,9 @@ func TestFindNode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			n := FindNode(root, tt.path)
+			n := findNode(root, tt.path)
 			if (n != nil) != tt.want {
-				t.Errorf("FindNode(%q) found=%v, want found=%v", tt.path, n != nil, tt.want)
+				t.Errorf("findNode(%q) found=%v, want found=%v", tt.path, n != nil, tt.want)
 			}
 		})
 	}

@@ -17,8 +17,12 @@ import (
 // AppModel catches this and opens the file in the editor.
 type ProjectOpenFileMsg struct{ Path string }
 
-// ProjectRefreshMsg triggers a rebuild of the project pane's tree data.
-type ProjectRefreshMsg struct{}
+// ProjectAddContextMsg is sent when the user adds a file to the context set.
+// AppModel handles this to keep all session mutations in one place.
+type ProjectAddContextMsg struct{ Path string }
+
+// ProjectRemoveContextMsg is sent when the user removes a file from the context set.
+type ProjectRemoveContextMsg struct{ Path string }
 
 // Package-level styles — allocated once, never in render paths.
 var (
@@ -90,9 +94,6 @@ func NewProjectPaneModel(sess *session.Session) *ProjectPaneModel {
 // Update handles input when the project pane has focus.
 func (p *ProjectPaneModel) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
-	case ProjectRefreshMsg:
-		p.rebuild()
-		return nil
 	case tea.KeyMsg:
 		return p.handleKey(msg)
 	case tea.MouseMsg:
@@ -140,12 +141,13 @@ func (p *ProjectPaneModel) rebuild() {
 	}
 	prevProjectExpanded := ExpandedPaths(p.projectTree)
 
-	contextFiles := normalizeSlashPaths(p.session.ContextFiles())
-	modifiedFiles := normalizeSlashPaths(p.session.AgentModifiedFiles())
+	contextFiles := p.session.ContextFiles()
+	modifiedFiles := p.session.AgentModifiedFiles()
 
-	// Build sets for badge lookup
-	ctxSet := toSet(contextFiles)
-	modSet := toSet(modifiedFiles)
+	// Build sets for badge lookup — normalize to forward slashes
+	// to match TreeNode.Path (BuildTree normalizes internally).
+	ctxSet := toSlashSet(contextFiles)
+	modSet := toSlashSet(modifiedFiles)
 
 	// Context section — flat list of context files
 	p.contextTree = BuildTree(contextFiles)
@@ -311,7 +313,8 @@ func (p *ProjectPaneModel) activateItem() tea.Cmd {
 	return func() tea.Msg { return ProjectOpenFileMsg{Path: absPath} }
 }
 
-// addContext adds the file under cursor to the agent context set.
+// addContext emits a message to add the file under cursor to the context set.
+// AppModel handles the actual session mutation.
 func (p *ProjectPaneModel) addContext() tea.Cmd {
 	if p.cursorIdx < 0 || p.cursorIdx >= len(p.items) {
 		return nil
@@ -321,12 +324,11 @@ func (p *ProjectPaneModel) addContext() tea.Cmd {
 		return nil
 	}
 	absPath := filepath.Join(p.session.ProjectRoot(), item.node.Path)
-	p.session.AddContext(absPath)
-	p.rebuild()
-	return nil
+	return func() tea.Msg { return ProjectAddContextMsg{Path: absPath} }
 }
 
-// removeContext removes the file under cursor from the agent context set.
+// removeContext emits a message to remove the file under cursor from the context set.
+// AppModel handles the actual session mutation.
 func (p *ProjectPaneModel) removeContext() tea.Cmd {
 	if p.cursorIdx < 0 || p.cursorIdx >= len(p.items) {
 		return nil
@@ -336,9 +338,7 @@ func (p *ProjectPaneModel) removeContext() tea.Cmd {
 		return nil
 	}
 	absPath := filepath.Join(p.session.ProjectRoot(), item.node.Path)
-	p.session.RemoveContext(absPath)
-	p.rebuild()
-	return nil
+	return func() tea.Msg { return ProjectRemoveContextMsg{Path: absPath} }
 }
 
 // visibleItems returns the items in the current scroll viewport.
@@ -514,21 +514,12 @@ func expandAll(root *TreeNode) {
 	})
 }
 
-// normalizeSlashPaths converts OS-native path separators to forward slashes.
-// BuildTree splits on '/', so paths must be normalized on Windows.
-func normalizeSlashPaths(paths []string) []string {
-	out := make([]string, len(paths))
-	for i, p := range paths {
-		out[i] = filepath.ToSlash(p)
-	}
-	return out
-}
-
-// toSet converts a string slice to a set map.
-func toSet(ss []string) map[string]bool {
+// toSlashSet converts a string slice to a set map, normalizing paths
+// to forward slashes so they match TreeNode.Path values.
+func toSlashSet(ss []string) map[string]bool {
 	m := make(map[string]bool, len(ss))
 	for _, s := range ss {
-		m[s] = true
+		m[filepath.ToSlash(s)] = true
 	}
 	return m
 }

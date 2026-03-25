@@ -23,6 +23,79 @@ func truncateForPreview(content string) string {
 	return content[:maxContentPreview] + "\n\n[... truncated — use read_file for full content]"
 }
 
+// simpleDiff produces a unified-diff-like comparison between expected and actual
+// content, showing only the lines that differ. This helps the LLM understand
+// exactly what the developer changed from the proposed edit.
+func simpleDiff(expected, actual string) string {
+	expectedLines := strings.Split(expected, "\n")
+	actualLines := strings.Split(actual, "\n")
+
+	var diff strings.Builder
+	ei, ai := 0, 0
+	for ei < len(expectedLines) || ai < len(actualLines) {
+		if ei < len(expectedLines) && ai < len(actualLines) && expectedLines[ei] == actualLines[ai] {
+			ei++
+			ai++
+			continue
+		}
+		// Find next matching line to resync
+		matchAhead := findMatch(expectedLines, actualLines, ei, ai)
+		if matchAhead.found {
+			for ; ei < matchAhead.ei; ei++ {
+				fmt.Fprintf(&diff, "- %s\n", expectedLines[ei])
+			}
+			for ; ai < matchAhead.ai; ai++ {
+				fmt.Fprintf(&diff, "+ %s\n", actualLines[ai])
+			}
+		} else {
+			// No resync — dump remaining as removed/added
+			for ; ei < len(expectedLines); ei++ {
+				fmt.Fprintf(&diff, "- %s\n", expectedLines[ei])
+			}
+			for ; ai < len(actualLines); ai++ {
+				fmt.Fprintf(&diff, "+ %s\n", actualLines[ai])
+			}
+		}
+	}
+
+	result := diff.String()
+	if result == "" {
+		return "(whitespace-only changes)"
+	}
+	return result
+}
+
+type matchResult struct {
+	found  bool
+	ei, ai int
+}
+
+// findMatch scans ahead to find the next line where expected and actual re-sync.
+// Limited lookahead to avoid O(n²) on large files.
+func findMatch(expected, actual []string, ei, ai int) matchResult {
+	const maxLookahead = 20
+	limitE := ei + maxLookahead
+	if limitE > len(expected) {
+		limitE = len(expected)
+	}
+	limitA := ai + maxLookahead
+	if limitA > len(actual) {
+		limitA = len(actual)
+	}
+
+	for de := 0; de < limitE-ei; de++ {
+		for da := 0; da < limitA-ai; da++ {
+			if de == 0 && da == 0 {
+				continue // skip current position
+			}
+			if expected[ei+de] == actual[ai+da] {
+				return matchResult{found: true, ei: ei + de, ai: ai + da}
+			}
+		}
+	}
+	return matchResult{}
+}
+
 // EditFileTool lets the LLM propose search-and-replace edits to files.
 // It validates the search text, sends an approval event, and blocks
 // until the developer approves or rejects.
@@ -245,10 +318,16 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 		t.send(TokenEvent{Text: "\n"})
 
 		if newContent != expectedContent {
-			return fmt.Sprintf("Edit applied. The applied edit differs from what you proposed. "+
-				"Study what changed — it signals the developer's intent. Recalibrate your approach to align with their direction. "+
-				"If you notice a syntax error or bug in their edit, point it out and propose a fix — do not silently change it.\n\nCurrent file (%s):\n\n%s",
-				path, truncateForPreview(newContent))
+			diff := simpleDiff(expectedContent, newContent)
+			return fmt.Sprintf("Edit applied, but the developer modified your edit. "+
+				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
+				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
+				"Developer's changes (what they changed from your proposal):\n%s\n\n"+
+				"Recalibrate: study the diff — it signals the developer's intent. "+
+				"Align your next steps with their direction. "+
+				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
+				"Current file (%s):\n\n%s",
+				diff, path, truncateForPreview(newContent))
 		}
 		return fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
 			path, truncateForPreview(newContent))

@@ -20,6 +20,7 @@ const (
 	ActionAgentReject
 	ActionAgentContinue
 	ActionOpenPalette
+	ActionToggleProject
 )
 
 // Keymap holds all keybindings. Uses reverse lookup maps for
@@ -48,6 +49,7 @@ func DefaultKeymap() *Keymap {
 		byString: map[string]Action{
 			"ctrl+g": ActionAgentStart,
 			"ctrl+p": ActionOpenPalette,
+			"ctrl+b": ActionToggleProject,
 		},
 	}
 	return km

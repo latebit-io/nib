@@ -263,7 +263,9 @@ func (rm *RegionManager) handleDividerDrag(currentX int) {
 	newLeftW := rm.dragStartW[left] + delta
 	newRightW := rm.dragStartW[right] - delta
 
-	// Enforce minimum widths
+	// Enforce minimum widths. Both panes being below minimum simultaneously
+	// is impossible — recalcHorizontal collapses panes that can't meet
+	// MinPaneWidth, so visible panes always have width >= MinPaneWidth.
 	if newLeftW < MinPaneWidth {
 		newLeftW = MinPaneWidth
 		newRightW = rm.dragStartW[left] + rm.dragStartW[right] - MinPaneWidth
@@ -299,15 +301,19 @@ func (rm *RegionManager) updateRatios(visible []*Region) {
 	if available <= 0 {
 		return
 	}
+	totalExtra := available - len(visible)*MinPaneWidth
+	if totalExtra <= 0 {
+		for _, r := range visible {
+			r.Ratio = 1.0 / float64(len(visible))
+		}
+		return
+	}
 	for _, r := range visible {
 		w := r.width - MinPaneWidth
 		if w < 0 {
 			w = 0
 		}
-		totalExtra := available - len(visible)*MinPaneWidth
-		if totalExtra > 0 {
-			r.Ratio = float64(w) / float64(totalExtra)
-		}
+		r.Ratio = float64(w) / float64(totalExtra)
 	}
 	// Normalize so ratios sum to 1.0
 	total := 0.0

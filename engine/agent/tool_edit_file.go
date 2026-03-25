@@ -15,6 +15,10 @@ import (
 // sent back to the LLM. Prevents unbounded message sizes for large files.
 const maxContentPreview = 8 * 1024
 
+// maxDiffPreview is the max bytes of diff output included in recalibration
+// messages. Caps the simpleDiff output to avoid blowing token budgets.
+const maxDiffPreview = 4 * 1024
+
 // truncateForPreview returns content truncated for LLM error messages.
 func truncateForPreview(content string) string {
 	if len(content) <= maxContentPreview {
@@ -24,13 +28,13 @@ func truncateForPreview(content string) string {
 }
 
 // simpleDiff produces a unified-diff-like comparison between expected and actual
-// content, showing only the lines that differ. This helps the LLM understand
-// exactly what the developer changed from the proposed edit.
+// content, showing only the lines that differ. Output is capped at maxDiffPreview
+// bytes to avoid blowing token budgets on large file changes.
 func simpleDiff(expected, actual string) string {
 	expectedLines := strings.Split(expected, "\n")
 	actualLines := strings.Split(actual, "\n")
 
-	var diff strings.Builder
+	var b diffBuilder
 	ei, ai := 0, 0
 	for ei < len(expectedLines) || ai < len(actualLines) {
 		if ei < len(expectedLines) && ai < len(actualLines) && expectedLines[ei] == actualLines[ai] {
@@ -38,31 +42,58 @@ func simpleDiff(expected, actual string) string {
 			ai++
 			continue
 		}
-		// Find next matching line to resync
 		matchAhead := findMatch(expectedLines, actualLines, ei, ai)
 		if matchAhead.found {
-			for ; ei < matchAhead.ei; ei++ {
-				fmt.Fprintf(&diff, "- %s\n", expectedLines[ei])
-			}
-			for ; ai < matchAhead.ai; ai++ {
-				fmt.Fprintf(&diff, "+ %s\n", actualLines[ai])
-			}
+			ei, ai = b.writeHunk(expectedLines, actualLines, ei, matchAhead.ei, ai, matchAhead.ai)
 		} else {
-			// No resync — dump remaining as removed/added
-			for ; ei < len(expectedLines); ei++ {
-				fmt.Fprintf(&diff, "- %s\n", expectedLines[ei])
-			}
-			for ; ai < len(actualLines); ai++ {
-				fmt.Fprintf(&diff, "+ %s\n", actualLines[ai])
-			}
+			ei, ai = b.writeHunk(expectedLines, actualLines, ei, len(expectedLines), ai, len(actualLines))
+		}
+		if b.truncated {
+			break
 		}
 	}
 
-	result := diff.String()
+	result := b.buf.String()
 	if result == "" {
 		return "(whitespace-only changes)"
 	}
+	if b.truncated {
+		result += "\n[... diff truncated]"
+	}
 	return result
+}
+
+// diffBuilder accumulates diff lines with a size cap.
+type diffBuilder struct {
+	buf       strings.Builder
+	truncated bool
+}
+
+// writeLine appends a diff line if under the cap. Returns false if truncated.
+func (d *diffBuilder) writeLine(prefix, line string) bool {
+	entry := prefix + " " + line + "\n"
+	if d.buf.Len()+len(entry) > maxDiffPreview {
+		d.truncated = true
+		return false
+	}
+	d.buf.WriteString(entry)
+	return true
+}
+
+// writeHunk writes removed lines [ei:endE) and added lines [ai:endA).
+// Returns the new ei, ai positions.
+func (d *diffBuilder) writeHunk(expected, actual []string, ei, endE, ai, endA int) (int, int) {
+	for ; ei < endE; ei++ {
+		if !d.writeLine("-", expected[ei]) {
+			return ei, ai
+		}
+	}
+	for ; ai < endA; ai++ {
+		if !d.writeLine("+", actual[ai]) {
+			return ei, ai
+		}
+	}
+	return ei, ai
 }
 
 type matchResult struct {

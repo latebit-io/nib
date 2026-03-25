@@ -517,7 +517,7 @@ func (m *AppModel) refreshProjectPane() {
 	}
 }
 
-// handleToggleProject implements the Ctrl+1 toggle:
+// handleToggleProject implements the Ctrl+B toggle:
 // hidden → show + focus, visible but not focused → focus, focused → hide.
 func (m *AppModel) handleToggleProject() (tea.Model, tea.Cmd) {
 	r := m.Regions.regionByName("project")

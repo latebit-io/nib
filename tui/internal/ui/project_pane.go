@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -280,7 +281,7 @@ func (p *ProjectPaneModel) activateItem() tea.Cmd {
 		return nil
 	}
 	// File — emit open message
-	absPath := p.session.ProjectRoot() + "/" + node.Path
+	absPath := filepath.Join(p.session.ProjectRoot(), node.Path)
 	return func() tea.Msg { return ProjectOpenFileMsg{Path: absPath} }
 }
 
@@ -293,7 +294,7 @@ func (p *ProjectPaneModel) addContext() tea.Cmd {
 	if item.isHeader || item.node == nil || item.node.IsDir {
 		return nil
 	}
-	absPath := p.session.ProjectRoot() + "/" + item.node.Path
+	absPath := filepath.Join(p.session.ProjectRoot(), item.node.Path)
 	p.session.AddContext(absPath)
 	p.rebuild()
 	return nil
@@ -308,7 +309,7 @@ func (p *ProjectPaneModel) removeContext() tea.Cmd {
 	if item.isHeader || item.node == nil || item.node.IsDir {
 		return nil
 	}
-	absPath := p.session.ProjectRoot() + "/" + item.node.Path
+	absPath := filepath.Join(p.session.ProjectRoot(), item.node.Path)
 	p.session.RemoveContext(absPath)
 	p.rebuild()
 	return nil

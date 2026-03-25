@@ -165,11 +165,17 @@ func FindNode(root *TreeNode, relPath string) *TreeNode {
 	if root == nil {
 		return nil
 	}
-	var found *TreeNode
-	walkTree(root, func(n *TreeNode) {
-		if found == nil && n.Path == relPath {
-			found = n
+	return findNodeRecursive(root, relPath)
+}
+
+func findNodeRecursive(n *TreeNode, relPath string) *TreeNode {
+	if n.Path == relPath {
+		return n
+	}
+	for _, c := range n.Children {
+		if found := findNodeRecursive(c, relPath); found != nil {
+			return found
 		}
-	})
-	return found
+	}
+	return nil
 }

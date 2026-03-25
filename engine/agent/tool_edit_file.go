@@ -15,12 +15,120 @@ import (
 // sent back to the LLM. Prevents unbounded message sizes for large files.
 const maxContentPreview = 8 * 1024
 
+// maxDiffPreview is the max bytes of diff output included in recalibration
+// messages. Caps the simpleDiff output to avoid blowing token budgets.
+const maxDiffPreview = 4 * 1024
+
 // truncateForPreview returns content truncated for LLM error messages.
 func truncateForPreview(content string) string {
 	if len(content) <= maxContentPreview {
 		return content
 	}
 	return content[:maxContentPreview] + "\n\n[... truncated — use read_file for full content]"
+}
+
+// simpleDiff produces a unified-diff-like comparison between expected and actual
+// content, showing only the lines that differ. Output is capped at maxDiffPreview
+// bytes to avoid blowing token budgets on large file changes.
+// maxDiffInputBytes caps the combined input size to simpleDiff.
+// Files beyond this threshold get a placeholder instead of a line-level diff.
+const maxDiffInputBytes = 10 * 1024 * 1024
+
+func simpleDiff(expected, actual string) string {
+	if len(expected)+len(actual) > maxDiffInputBytes {
+		return "(diff omitted: content too large)"
+	}
+	expectedLines := strings.Split(expected, "\n")
+	actualLines := strings.Split(actual, "\n")
+
+	var b diffBuilder
+	ei, ai := 0, 0
+	for ei < len(expectedLines) || ai < len(actualLines) {
+		if ei < len(expectedLines) && ai < len(actualLines) && expectedLines[ei] == actualLines[ai] {
+			ei++
+			ai++
+			continue
+		}
+		matchAhead := findMatch(expectedLines, actualLines, ei, ai)
+		if matchAhead.found {
+			ei, ai = b.writeHunk(expectedLines, actualLines, ei, matchAhead.ei, ai, matchAhead.ai)
+		} else {
+			ei, ai = b.writeHunk(expectedLines, actualLines, ei, len(expectedLines), ai, len(actualLines))
+		}
+		if b.truncated {
+			break
+		}
+	}
+
+	result := b.buf.String()
+	if b.truncated && result == "" {
+		return "[... diff truncated]"
+	}
+	if result == "" {
+		return "(whitespace-only changes)"
+	}
+	if b.truncated {
+		result += "\n[... diff truncated]"
+	}
+	return result
+}
+
+// diffBuilder accumulates diff lines with a size cap.
+type diffBuilder struct {
+	buf       strings.Builder
+	truncated bool
+}
+
+// writeLine appends a diff line if under the cap. Returns false if truncated.
+func (d *diffBuilder) writeLine(prefix, line string) bool {
+	entry := prefix + " " + line + "\n"
+	if d.buf.Len()+len(entry) > maxDiffPreview {
+		d.truncated = true
+		return false
+	}
+	d.buf.WriteString(entry)
+	return true
+}
+
+// writeHunk writes removed lines [ei:endE) and added lines [ai:endA).
+// Returns the new ei, ai positions.
+func (d *diffBuilder) writeHunk(expected, actual []string, ei, endE, ai, endA int) (int, int) {
+	for ; ei < endE; ei++ {
+		if !d.writeLine("-", expected[ei]) {
+			return ei, ai
+		}
+	}
+	for ; ai < endA; ai++ {
+		if !d.writeLine("+", actual[ai]) {
+			return ei, ai
+		}
+	}
+	return ei, ai
+}
+
+type matchResult struct {
+	found  bool
+	ei, ai int
+}
+
+// findMatch scans ahead to find the next line where expected and actual re-sync.
+// Limited lookahead to avoid O(n²) on large files.
+func findMatch(expected, actual []string, ei, ai int) matchResult {
+	const maxLookahead = 20
+	limitE := min(ei+maxLookahead, len(expected))
+	limitA := min(ai+maxLookahead, len(actual))
+
+	for de := 0; de < limitE-ei; de++ {
+		for da := 0; da < limitA-ai; da++ {
+			if de == 0 && da == 0 {
+				continue // skip current position
+			}
+			if expected[ei+de] == actual[ai+da] {
+				return matchResult{found: true, ei: ei + de, ai: ai + da}
+			}
+		}
+	}
+	return matchResult{}
 }
 
 // EditFileTool lets the LLM propose search-and-replace edits to files.
@@ -64,7 +172,7 @@ func (t *EditFileTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "edit_file",
-			Description: "Search for exact text in a file and replace it. The search string must match the file content exactly (including whitespace and newlines). Keep search text as SHORT as possible — only include lines that actually change, plus minimal context to match uniquely. Do NOT rewrite entire functions when only a few lines change. To delete text, set replace to an empty string. To insert, include anchor text in search and repeat it in replace with the new code added.",
+			Description: "Search for exact text in a file and replace it. The search string must match the file content exactly (including whitespace and newlines). The replace string must be correctly formatted code with proper indentation matching the file's style — never collapse multiple lines onto one line. Keep search text as SHORT as possible — only include lines that actually change, plus minimal context to match uniquely. Do NOT rewrite entire functions when only a few lines change. To delete text, set replace to an empty string. To insert, include anchor text in search and repeat it in replace with the new code added.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -245,10 +353,16 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 		t.send(TokenEvent{Text: "\n"})
 
 		if newContent != expectedContent {
-			return fmt.Sprintf("Edit applied. The applied edit differs from what you proposed. "+
-				"Study what changed — it signals the developer's intent. Recalibrate your approach to align with their direction. "+
-				"If you notice a syntax error or bug in their edit, point it out and propose a fix — do not silently change it.\n\nCurrent file (%s):\n\n%s",
-				path, truncateForPreview(newContent))
+			diff := simpleDiff(expectedContent, newContent)
+			return fmt.Sprintf("Edit applied, but the developer modified your edit. "+
+				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
+				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
+				"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
+				"Recalibrate: study the diff — it signals the developer's intent. "+
+				"Align your next steps with their direction. "+
+				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
+				"Current file (%s):\n```\n%s\n```",
+				diff, path, truncateForPreview(newContent))
 		}
 		return fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
 			path, truncateForPreview(newContent))

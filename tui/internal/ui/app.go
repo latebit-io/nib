@@ -32,8 +32,9 @@ type AppModel struct {
 	Session *session.Session
 
 	// Typed references for rendering
-	Editor    *EditorModel
-	AgentPane *AgentPaneModel
+	Editor      *EditorModel
+	AgentPane   *AgentPaneModel
+	ProjectPane *ProjectPaneModel
 
 	// Layout and focus
 	Regions *RegionManager
@@ -64,18 +65,22 @@ func NewApp(sess *session.Session) AppModel {
 	editorPane := NewEditorModel(sess.Editor, km, svc)
 	agentPane := NewAgentPaneModel(svc)
 	agentPane.HasAgent = sess.HasAgent()
+	projectPane := NewProjectPaneModel(sess)
 
 	rm := NewRegionManager(Horizontal)
-	rm.Add("editor", editorPane, 0.7)
+	rm.Add("project", projectPane, 0.2)
+	rm.Add("editor", editorPane, 0.5)
 	rm.Add("agent", agentPane, 0.3)
+	rm.Hide("project")
 
 	return AppModel{
-		Session:   sess,
-		Editor:    editorPane,
-		AgentPane: agentPane,
-		Regions:   rm,
-		Services:  svc,
-		Keymap:    km,
+		Session:     sess,
+		Editor:      editorPane,
+		AgentPane:   agentPane,
+		ProjectPane: projectPane,
+		Regions:     rm,
+		Services:    svc,
+		Keymap:      km,
 	}
 }
 
@@ -164,6 +169,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// Project pane — user selected a file to open
+	case ProjectOpenFileMsg:
+		return m.openFile(msg.Path)
+
+	// Project pane — refresh tree data
+	case ProjectRefreshMsg:
+		p := m.ProjectPane
+		if p != nil {
+			p.Update(msg)
+		}
+		return m, nil
+
 	// Animation tick — advance the agent typing animation
 	case animTickMsg:
 		return m, m.handleAnimTick()
@@ -233,6 +250,7 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 		}
 	case agent.FileCreatedEvent:
 		m.AgentPane.AppendMeta("\n[Created: " + e.Path + "]\n")
+		m.refreshProjectPane()
 	case agent.ErrorEvent:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.cancelAnimation()
@@ -242,6 +260,7 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 		m.AgentPane.AppendText("\n--- Done ---\n")
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
+		m.refreshProjectPane()
 	}
 }
 
@@ -291,8 +310,8 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Toggle focus
-	if msg.Type == tea.KeyCtrlBackslash && m.Session.HasAgent() {
+	// Toggle focus between visible panes
+	if msg.Type == tea.KeyCtrlBackslash {
 		m.Regions.FocusNext()
 		return m, nil
 	}
@@ -355,6 +374,9 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.AgentPane.InputBuffer = ""
 		}
 		return m, nil
+
+	case ActionToggleProject:
+		return m.handleToggleProject()
 
 	case ActionOpenPalette:
 		if m.ProjectRoot != "" {
@@ -438,6 +460,7 @@ func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
 	m.Regions.ReplacePane("editor", m.Editor)
 
 	slog.Debug("file opened", "path", path)
+	m.refreshProjectPane()
 	return m, nil
 }
 
@@ -485,6 +508,47 @@ func (m *AppModel) renderIntentBar() string {
 	}
 
 	return style.Render(text)
+}
+
+// refreshProjectPane rebuilds the project pane if visible, or marks it
+// dirty for deferred rebuild when the pane is next shown.
+func (m *AppModel) refreshProjectPane() {
+	if m.ProjectPane == nil {
+		return
+	}
+	r := m.Regions.regionByName("project")
+	if r != nil && r.Visible {
+		m.ProjectPane.rebuild()
+	} else {
+		m.ProjectPane.dirty = true
+	}
+}
+
+// handleToggleProject implements the Ctrl+B toggle:
+// hidden → show + focus, visible but not focused → focus, focused → hide.
+func (m *AppModel) handleToggleProject() (tea.Model, tea.Cmd) {
+	r := m.Regions.regionByName("project")
+	if r == nil {
+		return m, nil
+	}
+	focused := m.Regions.FocusedRegion()
+	if !r.Visible {
+		// Hidden → show + focus (rebuild if stale)
+		if m.ProjectPane.dirty {
+			m.ProjectPane.rebuild()
+			m.ProjectPane.dirty = false
+		}
+		m.Regions.Show("project")
+		m.Regions.FocusByName("project")
+	} else if focused == nil || focused.Name != "project" {
+		// Visible but not focused → focus
+		m.Regions.FocusByName("project")
+	} else {
+		// Focused → hide, move focus to editor
+		m.Regions.Hide("project")
+		m.Regions.FocusByName("editor")
+	}
+	return m, nil
 }
 
 // --- Animated Approval ---
@@ -664,6 +728,7 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	anim.state = animWaiting
 	m.AgentPane.Status = "editing"
 	m.Session.CompleteApproval()
+	m.refreshProjectPane()
 
 	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)

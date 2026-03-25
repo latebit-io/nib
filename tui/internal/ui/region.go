@@ -1,10 +1,22 @@
 package ui
 
 import (
+	"math"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+)
+
+// Package-level styles for dividers.
+var (
+	dividerDimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Background(lipgloss.Color("235"))
+
+	dividerFocusStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("2")).
+				Background(lipgloss.Color("235"))
 )
 
 // LayoutDirection determines how regions are arranged.
@@ -43,6 +55,12 @@ type RegionManager struct {
 	FocusIdx  int
 	Width     int
 	Height    int
+
+	// Drag state for divider resizing.
+	dragging    bool
+	dragDivider int   // index into visible regions: divider between [i] and [i+1]
+	dragStartX  int   // global X at drag start
+	dragStartW  []int // pane widths at drag start
 }
 
 // NewRegionManager creates a region manager with the given layout direction.
@@ -143,6 +161,16 @@ func (rm *RegionManager) FocusByName(name string) {
 	}
 }
 
+// regionByName returns the region with the given name, or nil.
+func (rm *RegionManager) regionByName(name string) *Region {
+	for _, r := range rm.Regions {
+		if r.Name == name {
+			return r
+		}
+	}
+	return nil
+}
+
 // RegionAt returns the region at global coordinates (x, y) and the
 // local offsets within that region. Returns nil if no region is hit.
 func (rm *RegionManager) RegionAt(x, y int) (*Region, int, int) {
@@ -156,7 +184,28 @@ func (rm *RegionManager) RegionAt(x, y int) (*Region, int, int) {
 
 // HandleMouse translates global mouse coordinates to pane-local coordinates,
 // sets focus on the clicked region, and forwards the event to the pane.
+// Also handles divider dragging for pane resizing.
 func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
+	// Handle drag continuation and release
+	if rm.dragging {
+		switch msg.Action {
+		case tea.MouseActionRelease:
+			rm.dragging = false
+			return nil
+		case tea.MouseActionMotion:
+			rm.handleDividerDrag(msg.X)
+			return nil
+		}
+	}
+
+	// Check for divider click to start drag (reject clicks outside pane area)
+	if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y >= 0 && msg.Y < rm.Height {
+		if divIdx := rm.dividerAt(msg.X); divIdx >= 0 {
+			rm.startDividerDrag(divIdx, msg.X)
+			return nil
+		}
+	}
+
 	region, localX, localY := rm.RegionAt(msg.X, msg.Y)
 	if region == nil {
 		return nil
@@ -170,6 +219,114 @@ func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
 	localMsg.X = localX
 	localMsg.Y = localY
 	return region.Pane.Update(localMsg)
+}
+
+// dividerAt returns the index of the divider at global X, or -1.
+// The divider between visible[i] and visible[i+1] is at x = visible[i].x + visible[i].width.
+func (rm *RegionManager) dividerAt(x int) int {
+	if rm.Direction != Horizontal {
+		return -1
+	}
+	visible := rm.visibleRegions()
+	for i := 0; i < len(visible)-1; i++ {
+		divX := visible[i].x + visible[i].width
+		if x == divX {
+			return i
+		}
+	}
+	return -1
+}
+
+// startDividerDrag begins a divider drag operation, capturing initial state.
+func (rm *RegionManager) startDividerDrag(divIdx, startX int) {
+	visible := rm.visibleRegions()
+	rm.dragging = true
+	rm.dragDivider = divIdx
+	rm.dragStartX = startX
+	rm.dragStartW = make([]int, len(visible))
+	for i, r := range visible {
+		rm.dragStartW[i] = r.width
+	}
+}
+
+// handleDividerDrag adjusts pane widths based on mouse position during drag.
+func (rm *RegionManager) handleDividerDrag(currentX int) {
+	visible := rm.visibleRegions()
+	if rm.dragDivider >= len(visible)-1 {
+		return
+	}
+
+	delta := currentX - rm.dragStartX
+	left := rm.dragDivider
+	right := rm.dragDivider + 1
+
+	newLeftW := rm.dragStartW[left] + delta
+	newRightW := rm.dragStartW[right] - delta
+
+	// Enforce minimum widths. Both panes being below minimum simultaneously
+	// is impossible — recalcHorizontal collapses panes that can't meet
+	// MinPaneWidth, so visible panes always have width >= MinPaneWidth.
+	if newLeftW < MinPaneWidth {
+		newLeftW = MinPaneWidth
+		newRightW = rm.dragStartW[left] + rm.dragStartW[right] - MinPaneWidth
+	}
+	if newRightW < MinPaneWidth {
+		newRightW = MinPaneWidth
+		newLeftW = rm.dragStartW[left] + rm.dragStartW[right] - MinPaneWidth
+	}
+
+	visible[left].width = newLeftW
+	visible[right].width = newRightW
+
+	// Update x positions for all panes from the left pane onward
+	x := visible[left].x
+	for i := left; i < len(visible); i++ {
+		visible[i].x = x
+		visible[i].Pane.SetSize(visible[i].width, visible[i].height)
+		x += visible[i].width
+		if i < len(visible)-1 {
+			x++ // divider
+		}
+	}
+
+	// Update ratios to reflect new proportions
+	rm.updateRatios(visible)
+}
+
+// updateRatios recalculates ratios from current widths so future
+// recalculations (e.g. terminal resize) preserve the user's layout.
+func (rm *RegionManager) updateRatios(visible []*Region) {
+	dividers := len(visible) - 1
+	available := rm.Width - dividers
+	if available <= 0 {
+		return
+	}
+	totalExtra := available - len(visible)*MinPaneWidth
+	if totalExtra <= 0 {
+		for _, r := range visible {
+			r.Ratio = 1.0 / float64(len(visible))
+		}
+		return
+	}
+	for _, r := range visible {
+		w := r.width - MinPaneWidth
+		if w < 0 {
+			w = 0
+		}
+		r.Ratio = float64(w) / float64(totalExtra)
+	}
+	// Normalize so ratios sum to 1.0
+	total := 0.0
+	for _, r := range visible {
+		total += r.Ratio
+	}
+	if total > 0 {
+		for _, r := range visible {
+			r.Ratio /= total
+			// Round to avoid floating point drift
+			r.Ratio = math.Round(r.Ratio*1000) / 1000
+		}
+	}
 }
 
 // Render composes all visible pane renders with dividers between them.
@@ -191,9 +348,8 @@ func (rm *RegionManager) Render() string {
 		return strings.Join(lines, "\n")
 	}
 
-	dividerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Background(lipgloss.Color("235"))
+	// Determine which dividers are adjacent to the focused pane
+	focusedRegion := rm.FocusedRegion()
 
 	// Render each pane and normalize to its allocated height
 	paneLines := make([][]string, len(visible))
@@ -210,12 +366,12 @@ func (rm *RegionManager) Render() string {
 	}
 
 	if rm.Direction == Vertical {
-		hDiv := dividerStyle.Render(strings.Repeat("─", rm.Width))
 		var lines []string
 		for i, pl := range paneLines {
 			lines = append(lines, pl...)
 			if i < len(paneLines)-1 {
-				lines = append(lines, hDiv)
+				style := rm.dividerStyleFor(visible, i, focusedRegion)
+				lines = append(lines, style.Render(strings.Repeat("─", rm.Width)))
 			}
 		}
 		for len(lines) < rm.Height {
@@ -228,13 +384,19 @@ func (rm *RegionManager) Render() string {
 	}
 
 	// Horizontal layout: panes side by side with vertical dividers
-	vDiv := dividerStyle.Render("│")
+	// Pre-compute divider styles (one per gap between panes)
+	dividers := make([]string, len(visible)-1)
+	for i := range dividers {
+		style := rm.dividerStyleFor(visible, i, focusedRegion)
+		dividers[i] = style.Render("│")
+	}
+
 	output := make([]string, rm.Height)
 	for row := range rm.Height {
 		var line strings.Builder
 		for i, pl := range paneLines {
 			if i > 0 {
-				line.WriteString(vDiv)
+				line.WriteString(dividers[i-1])
 			}
 			if row < len(pl) {
 				line.WriteString(pl[row])
@@ -244,6 +406,15 @@ func (rm *RegionManager) Render() string {
 	}
 
 	return strings.Join(output, "\n")
+}
+
+// dividerStyleFor returns the style for the divider between visible[i] and visible[i+1].
+// If the focused region is on either side, the divider is green.
+func (rm *RegionManager) dividerStyleFor(visible []*Region, i int, focused *Region) lipgloss.Style {
+	if focused != nil && (visible[i] == focused || visible[i+1] == focused) {
+		return dividerFocusStyle
+	}
+	return dividerDimStyle
 }
 
 // visibleRegions returns regions that are both user-visible and not collapsed by layout.

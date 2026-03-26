@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/mcp"
@@ -64,7 +65,8 @@ func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) string 
 		return fmt.Sprintf("Error: %v", err)
 	}
 	if len(result) > maxMCPResult {
-		result = result[:maxMCPResult] + "\n[... output truncated]"
+		// Truncate at valid UTF-8 boundary to avoid garbled output.
+		result = strings.ToValidUTF8(result[:maxMCPResult], "") + "\n[... output truncated]"
 	}
 	return result
 }

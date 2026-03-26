@@ -27,6 +27,7 @@ type Client struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	reader *bufio.Reader
+	done   chan struct{} // closed when readLoop exits
 
 	mu     sync.Mutex
 	nextID int
@@ -82,6 +83,7 @@ func NewStdioClient(command string, args []string, env []string) (*Client, error
 		cmd:     cmd,
 		stdin:   stdin,
 		reader:  bufio.NewReaderSize(stdout, 64*1024),
+		done:    make(chan struct{}),
 		pending: make(map[int]chan json.RawMessage),
 	}
 
@@ -95,6 +97,7 @@ const maxLineSize = 10 * 1024 * 1024
 
 // readLoop reads JSON-RPC responses from stdout and dispatches to pending requests.
 func (c *Client) readLoop() {
+	defer close(c.done)
 	scanner := bufio.NewScanner(c.reader)
 	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
 	for scanner.Scan() {
@@ -272,10 +275,13 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	return sb.String(), nil
 }
 
-// Close terminates the MCP server subprocess.
+// Close terminates the MCP server subprocess and waits for the
+// readLoop goroutine to finish its pending-channel cleanup.
 func (c *Client) Close() error {
 	if err := c.stdin.Close(); err != nil {
 		slog.Debug("mcp: close stdin", "err", err)
 	}
-	return c.cmd.Wait()
+	err := c.cmd.Wait()
+	<-c.done // wait for readLoop to exit and clean up pending channels
+	return err
 }

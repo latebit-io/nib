@@ -93,30 +93,38 @@ func New(provider llm.Provider, workspace Workspace, events chan<- Event, projec
 	}
 
 	// Build tool registry — each tool gets exactly the dependencies it needs.
-	toolList := []Tool{
+	// Built-in tools are registered first and cannot be overridden by extraTools.
+	builtins := []Tool{
 		NewReadFileTool(workspace, cache),
 		NewEditFileTool(workspace, cache, approveCh, continueCh, a.send),
 		NewWriteFileTool(workspace, cache, a.send),
 		NewListFilesTool(workspace),
 		NewBashTool(projectRoot),
 	}
-	toolList = append(toolList, extraTools...)
 
-	a.tools = make(map[string]Tool, len(toolList))
-	a.toolDefs = make([]llm.ToolDef, 0, len(toolList))
-	for _, t := range toolList {
+	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))
+	a.toolDefs = make([]llm.ToolDef, 0, len(builtins)+len(extraTools))
+
+	// Register built-ins.
+	builtinNames := make(map[string]bool, len(builtins))
+	for _, t := range builtins {
 		def := t.Definition()
 		key := strings.ToLower(def.Function.Name)
+		builtinNames[key] = true
+		a.tools[key] = t
+		a.toolDefs = append(a.toolDefs, def)
+	}
+
+	// Register extra tools (e.g. MCP), rejecting any that shadow built-ins.
+	for _, t := range extraTools {
+		def := t.Definition()
+		key := strings.ToLower(def.Function.Name)
+		if builtinNames[key] {
+			slog.Warn("extra tool rejected: shadows built-in", "name", def.Function.Name)
+			continue
+		}
 		if _, exists := a.tools[key]; exists {
-			slog.Warn("tool name collision, overwriting", "name", def.Function.Name)
-			// Replace the existing def in toolDefs to avoid duplicates.
-			for i, d := range a.toolDefs {
-				if strings.ToLower(d.Function.Name) == key {
-					a.toolDefs[i] = def
-					break
-				}
-			}
-			a.tools[key] = t
+			slog.Warn("extra tool collision, skipping duplicate", "name", def.Function.Name)
 			continue
 		}
 		a.tools[key] = t

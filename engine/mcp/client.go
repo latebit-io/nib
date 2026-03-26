@@ -76,8 +76,8 @@ func NewStdioClient(command string, args []string, env []string) (*Client, error
 	}
 
 	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()  // clean up pipes on start failure
-		_ = stdout.Close()
+		_ = stdin.Close()  // close error irrelevant — process never started
+		_ = stdout.Close() // close error irrelevant — process never started
 		return nil, fmt.Errorf("mcp: start %q: %w", command, err)
 	}
 

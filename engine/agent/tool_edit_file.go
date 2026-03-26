@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -139,7 +140,7 @@ type EditFileTool struct {
 	cache      *FileCache
 	approveCh  chan bool
 	continueCh chan string
-	send       func(Event)
+	send       func(event.Event)
 
 	mu               sync.Mutex
 	silentRetries    int
@@ -147,7 +148,7 @@ type EditFileTool struct {
 }
 
 // NewEditFileTool creates an EditFileTool with the given dependencies.
-func NewEditFileTool(ws Workspace, cache *FileCache, approveCh chan bool, continueCh chan string, send func(Event)) *EditFileTool {
+func NewEditFileTool(ws Workspace, cache *FileCache, approveCh chan bool, continueCh chan string, send func(event.Event)) *EditFileTool {
 	return &EditFileTool{
 		workspace:        ws,
 		cache:            cache,
@@ -229,8 +230,8 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) string {
 		return errMsg
 	}
 
-	t.send(StatusEvent{Status: "waiting"})
-	t.send(EditProposedEvent{Edit: PendingEdit{
+	t.send(event.AgentStatus{Status: "waiting"})
+	t.send(event.AgentEditProposed{Edit: event.PendingEdit{
 		ID:      call.ID,
 		Path:    args.Path,
 		Search:  args.Search,
@@ -323,8 +324,8 @@ func (t *EditFileTool) waitForApproval(ctx context.Context, canon, path string) 
 		}
 	}
 
-	t.send(StatusEvent{Status: "thinking"})
-	t.send(TokenEvent{Text: "\n[Edit rejected]\n\n"})
+	t.send(event.AgentStatus{Status: "thinking"})
+	t.send(event.AgentToken{Text: "\n[Edit rejected]\n\n"})
 
 	content := ""
 	if c, ok := t.cache.Get(canon); ok {
@@ -338,8 +339,8 @@ func (t *EditFileTool) waitForApproval(ctx context.Context, canon, path string) 
 // continue, or the context is canceled. Compares the new content against
 // the expected result to detect developer modifications.
 func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expectedContent string) string {
-	t.send(StatusEvent{Status: "editing"})
-	t.send(TokenEvent{Text: "\n[Edit approved — waiting for continue]\n"})
+	t.send(event.AgentStatus{Status: "editing"})
+	t.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
 
 	select {
 	case <-ctx.Done():
@@ -349,8 +350,8 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 			return "Error: continue channel closed"
 		}
 		t.cache.Set(canon, newContent)
-		t.send(StatusEvent{Status: "thinking"})
-		t.send(TokenEvent{Text: "\n"})
+		t.send(event.AgentStatus{Status: "thinking"})
+		t.send(event.AgentToken{Text: "\n"})
 
 		if newContent != expectedContent {
 			diff := simpleDiff(expectedContent, newContent)

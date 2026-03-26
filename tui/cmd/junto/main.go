@@ -16,6 +16,7 @@ import (
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/mcp"
 	"github.com/latebit-io/junto/engine/session"
@@ -99,7 +100,7 @@ func main() {
 			model = "google/gemini-2.5-flash"
 		}
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
-		events := make(chan agent.Event, 64)
+		events := make(chan event.Event, 64)
 		ag := agent.New(provider, sess, events, projectRoot, mcpTools...)
 		sess.SetAgent(ag, events)
 	}

@@ -9,14 +9,14 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/session"
 )
 
-// agentEventMsg wraps an engine agent.Event for delivery through Bubble Tea.
-type agentEventMsg struct{ event agent.Event }
+// engineEventMsg wraps an engine event.Event for delivery through Bubble Tea.
+type engineEventMsg struct{ event event.Event }
 
 // paletteFilesMsg delivers file listing results from async Walk.
 type paletteFilesMsg struct{ items []PaletteItem }
@@ -86,21 +86,21 @@ func NewApp(sess *session.Session) AppModel {
 
 func (m *AppModel) Init() tea.Cmd {
 	if m.Session.Events != nil {
-		return m.listenForAgentEvent()
+		return m.listenForEvents()
 	}
 	return nil
 }
 
-// listenForAgentEvent returns a tea.Cmd that blocks on the engine event channel
+// listenForEvents returns a tea.Cmd that blocks on the engine event channel
 // and delivers the next event as a tea.Msg.
-func (m *AppModel) listenForAgentEvent() tea.Cmd {
+func (m *AppModel) listenForEvents() tea.Cmd {
 	ch := m.Session.Events
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
 			return nil
 		}
-		return agentEventMsg{event: ev}
+		return engineEventMsg{event: ev}
 	}
 }
 
@@ -135,11 +135,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Regions.SetSize(msg.Width, m.regionHeight())
 		return m, nil
 
-	// Engine agent events — adapted from channel to tea.Msg
-	case agentEventMsg:
-		m.handleAgentEvent(msg.event)
+	// Engine events — adapted from channel to tea.Msg
+	case engineEventMsg:
+		m.handleEngineEvent(msg.event)
 		// Keep listening for the next event
-		return m, m.listenForAgentEvent()
+		return m, m.listenForEvents()
 
 	// Goal submitted from agent pane — delegate to session
 	case GoalSubmittedMsg:
@@ -206,18 +206,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleAgentEvent updates session state and renders the event in the agent pane.
-func (m *AppModel) handleAgentEvent(ev agent.Event) {
+// handleEngineEvent updates session state and renders the event.
+func (m *AppModel) handleEngineEvent(ev event.Event) {
 	// Let session update domain state (intent, pending edit)
 	m.Session.HandleEvent(ev)
 
 	// Render in agent pane (presentation)
 	switch e := ev.(type) {
-	case agent.TokenEvent:
+	case event.AgentToken:
 		m.AgentPane.AppendToken(e.Text)
-	case agent.StatusEvent:
+	case event.AgentStatus:
 		m.AgentPane.Status = e.Status
-	case agent.EditProposedEvent:
+	case event.AgentEditProposed:
 		// Clean up any running animation before creating a new overlay.
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
@@ -251,14 +251,14 @@ func (m *AppModel) handleAgentEvent(ev agent.Event) {
 			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
 			m.Session.RejectEdit()
 		}
-	case agent.FileCreatedEvent:
+	case event.AgentFileCreated:
 		m.AgentPane.AppendMeta("\n[Created: " + e.Path + "]\n")
 		m.refreshProjectPane()
-	case agent.ErrorEvent:
+	case event.AgentError:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
-	case agent.DoneEvent:
+	case event.AgentDone:
 		m.AgentPane.Status = "idle"
 		m.AgentPane.AppendText("\n--- Done ---\n")
 		m.cancelAnimation()

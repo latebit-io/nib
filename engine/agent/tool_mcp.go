@@ -8,11 +8,28 @@ import (
 	"strings"
 
 	"github.com/latebit-io/junto/engine/llm"
-	"github.com/latebit-io/junto/engine/mcp"
 )
 
 // maxMCPResult caps the response size returned to the LLM from MCP tools.
+// Higher than BashTool's 8KB cap because MCP tools return markdown documents
+// (architecture specs, patterns, roadmaps) that are legitimately larger than
+// typical bash output (build errors, test results).
 const maxMCPResult = 32 * 1024
+
+// MCPCaller is the interface the adapter needs from an MCP client.
+// Defined here so the agent package has no dependency on engine/mcp.
+type MCPCaller interface {
+	CallTool(ctx context.Context, name string, args map[string]any) (string, error)
+}
+
+// MCPToolInfo describes an MCP tool's schema. This is the agent package's
+// own representation — the caller maps from the transport-specific type
+// (e.g. mcp.ToolInfo) during wiring.
+type MCPToolInfo struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
 
 // MCPToolAdapter wraps a single MCP server tool as an agent.Tool.
 // The agent loop sees it as any other tool — it doesn't know about MCP.
@@ -22,14 +39,14 @@ const maxMCPResult = 32 * 1024
 // applied, same as file content from read_file. Size is capped to
 // prevent token blow-up from unexpectedly large responses.
 type MCPToolAdapter struct {
-	client  *mcp.Client
-	info    mcp.ToolInfo
-	toolDef llm.ToolDef
+	client   MCPCaller
+	toolName string
+	toolDef  llm.ToolDef
 }
 
 // NewMCPToolAdapter creates an adapter for one MCP tool.
-// It converts the MCP tool's JSON Schema into an OpenAI-compatible ToolDef.
-func NewMCPToolAdapter(client *mcp.Client, info mcp.ToolInfo) *MCPToolAdapter {
+// It converts the tool's JSON Schema into an OpenAI-compatible ToolDef.
+func NewMCPToolAdapter(client MCPCaller, info MCPToolInfo) *MCPToolAdapter {
 	toolDef := llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
@@ -39,9 +56,9 @@ func NewMCPToolAdapter(client *mcp.Client, info mcp.ToolInfo) *MCPToolAdapter {
 		},
 	}
 	return &MCPToolAdapter{
-		client:  client,
-		info:    info,
-		toolDef: toolDef,
+		client:   client,
+		toolName: info.Name,
+		toolDef:  toolDef,
 	}
 }
 
@@ -57,11 +74,11 @@ func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) string 
 		return fmt.Sprintf("Error: invalid arguments: %v", err)
 	}
 
-	slog.Debug("mcp tool call", "tool", t.info.Name, "args", args)
+	slog.Debug("mcp tool call", "tool", t.toolName, "args", args)
 
-	result, err := t.client.CallTool(ctx, t.info.Name, args)
+	result, err := t.client.CallTool(ctx, t.toolName, args)
 	if err != nil {
-		slog.Error("mcp tool error", "tool", t.info.Name, "err", err)
+		slog.Error("mcp tool error", "tool", t.toolName, "err", err)
 		return fmt.Sprintf("Error: %v", err)
 	}
 	if len(result) > maxMCPResult {
@@ -71,8 +88,14 @@ func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) string 
 	return result
 }
 
-// convertSchema converts an MCP JSON Schema (raw JSON) into the
-// OpenAI-compatible FunctionParams used by our tool definitions.
+// convertSchema converts a JSON Schema (raw JSON) into the OpenAI-compatible
+// FunctionParams used by our tool definitions.
+//
+// Limitation: only flat schemas are supported — top-level properties with
+// scalar types (string, integer, boolean, number). Nested objects, arrays,
+// anyOf, $ref, and other rich JSON Schema features are silently dropped.
+// Properties with unsupported types will have empty type/description fields
+// in the resulting ToolDef.
 func convertSchema(schema json.RawMessage) llm.FunctionParams {
 	if len(schema) == 0 {
 		return llm.FunctionParams{

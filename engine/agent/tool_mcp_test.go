@@ -3,8 +3,6 @@ package agent
 import (
 	"encoding/json"
 	"testing"
-
-	"github.com/latebit-io/junto/engine/mcp"
 )
 
 func TestConvertSchema(t *testing.T) {
@@ -53,7 +51,7 @@ func TestConvertSchema_Invalid(t *testing.T) {
 }
 
 func TestNewMCPToolAdapter_Definition(t *testing.T) {
-	info := mcp.ToolInfo{
+	info := MCPToolInfo{
 		Name:        "mark_fetch",
 		Description: "Fetch a document",
 		InputSchema: json.RawMessage(`{

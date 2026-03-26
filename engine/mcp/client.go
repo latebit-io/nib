@@ -76,6 +76,7 @@ func NewStdioClient(command string, args []string, env []string) (*Client, error
 	}
 
 	if err := cmd.Start(); err != nil {
+		_ = stdin.Close() // clean up pipe on start failure
 		return nil, fmt.Errorf("mcp: start %q: %w", command, err)
 	}
 
@@ -181,6 +182,8 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
+		// If readLoop already extracted ch before we deleted, it may still
+		// send/close. The buffered channel absorbs the orphaned send; GC cleans up.
 		return nil, ctx.Err()
 	case result, ok := <-ch:
 		if !ok {
@@ -265,10 +268,14 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 		return "", fmt.Errorf("mcp: unmarshal tool result: %w", err)
 	}
 
-	// Concatenate all text content blocks.
+	// Concatenate all text content blocks, capped at maxLineSize.
 	var sb strings.Builder
 	for _, block := range resp.Content {
 		if block.Type == "text" {
+			if sb.Len()+len(block.Text) > maxLineSize {
+				sb.WriteString("\n[... result truncated]")
+				break
+			}
 			sb.WriteString(block.Text)
 		}
 	}

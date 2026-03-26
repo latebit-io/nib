@@ -181,26 +181,22 @@ func discoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 			slog.Warn("mcp: failed to start server", "name", name, "err", err)
 			continue
 		}
-		clients = append(clients, client)
 
-		// Each server gets its own timeout so a slow server doesn't starve others.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-		if err := client.Initialize(ctx); err != nil {
-			cancel()
-			slog.Warn("mcp: failed to initialize server", "name", name, "err", err)
-			continue
-		}
-
-		serverTools, err := client.ListTools(ctx)
-		cancel()
+		serverTools, err := initMCPServer(client, name)
 		if err != nil {
-			slog.Warn("mcp: failed to list tools", "name", name, "err", err)
+			_ = client.Close() // terminate subprocess and readLoop goroutine
+			slog.Warn("mcp: server setup failed", "name", name, "err", err)
 			continue
 		}
+		clients = append(clients, client) // only track successfully initialized clients
 
 		for _, info := range serverTools {
-			tools = append(tools, agent.NewMCPToolAdapter(client, info))
+			adapted := agent.MCPToolInfo{
+				Name:        info.Name,
+				Description: info.Description,
+				InputSchema: info.InputSchema,
+			}
+			tools = append(tools, agent.NewMCPToolAdapter(client, adapted))
 			slog.Debug("mcp: registered tool", "server", name, "tool", info.Name)
 		}
 		slog.Info("mcp: connected", "server", name, "tools", len(serverTools))
@@ -209,7 +205,24 @@ func discoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 	return tools, cleanup
 }
 
-// loadMCPConfigs reads MCP server configurations from .project/mcp.json
+// initMCPServer performs the MCP handshake and tool discovery for a single server.
+// Returns the discovered tools or an error. The caller is responsible for
+// closing the client on failure.
+func initMCPServer(client *mcp.Client, name string) ([]mcp.ToolInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := client.Initialize(ctx); err != nil {
+		return nil, fmt.Errorf("initialize: %w", err)
+	}
+	tools, err := client.ListTools(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list tools: %w", err)
+	}
+	return tools, nil
+}
+
+// loadMCPConfigs reads MCP server configurations from .mcp.json
 // or the JUNTO_MCP environment variable.
 func loadMCPConfigs(projectRoot string) map[string]mcpServerConfig {
 	// Try .mcp.json at project root (same location as Claude Code).

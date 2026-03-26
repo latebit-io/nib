@@ -25,10 +25,17 @@ type Line struct {
 
 // ContentChange represents an incremental edit to a document.
 // Accumulated by Insert/Delete for consumers like LSP that need edit deltas.
+//
+// When FullContent is true, the change is a full-content sentinel: the Text
+// field contains the entire buffer content and the range fields are zero.
+// This occurs when the change cap (maxTrackedChanges) is exceeded during
+// long-running grouped operations. Consumers should treat this as a full
+// document sync.
 type ContentChange struct {
 	StartLine, StartCol int    // 0-indexed, rune-based
 	EndLine, EndCol     int    // 0-indexed, rune-based (position before the edit)
-	Text                string // replacement text
+	Text                string // replacement text (or full content when FullContent is true)
+	FullContent         bool   // true = Text is the entire buffer, range fields are zero
 }
 
 // Buffer is a line-array text buffer with undo/redo.
@@ -226,11 +233,30 @@ func (b *Buffer) fireOnChange() {
 	}
 }
 
+// maxTrackedChanges is the cap on accumulated ContentChange entries.
+// During long-running grouped operations (e.g., animated edits), changes
+// accumulate until EndGroup. If this cap is exceeded, all accumulated
+// changes are collapsed into a single full-content change so the LSP
+// consumer falls back to full-sync for that notification. The cap is
+// generous — a 500-character animated edit produces ~500 entries.
+const maxTrackedChanges = 4096
+
 // trackChange appends a ContentChange if change tracking is active
 // (OnChange is non-nil). Skips when OnChange is nil to prevent
-// unbounded growth of the changes slice.
+// unbounded growth of the changes slice. When the cap is exceeded,
+// collapses to a single full-content change.
 func (b *Buffer) trackChange(startLine, startCol, endLine, endCol int, text string) {
 	if b.OnChange == nil {
+		return
+	}
+	// If already collapsed to full-content sentinel, skip further tracking.
+	if len(b.changes) == 1 && b.changes[0].FullContent {
+		return
+	}
+	if len(b.changes) >= maxTrackedChanges {
+		// Collapse: replace all granular changes with a single full-content change.
+		// The LSP consumer treats this as full document sync for this notification.
+		b.changes = []ContentChange{{FullContent: true, Text: b.Content()}}
 		return
 	}
 	b.changes = append(b.changes, ContentChange{
@@ -587,12 +613,16 @@ func (b *Buffer) applyUndoOp(op operation) (int, int) {
 		// Undo an insert = delete the inserted text.
 		endLine, endCol := b.endOfInsert(op.Line, op.Col, op.Text)
 		b.doDelete(op.Line, op.Col, op.Text)
-		b.trackChange(op.Line, op.Col, endLine, endCol, "")
+		if b.OnChange != nil {
+			b.trackChange(op.Line, op.Col, endLine, endCol, "")
+		}
 		return op.Line, op.Col
 	case opDelete:
 		// Undo a delete = re-insert the deleted text.
 		b.doInsert(op.Line, op.Col, op.Text)
-		b.trackChange(op.Line, op.Col, op.Line, op.Col, string(op.Text))
+		if b.OnChange != nil {
+			b.trackChange(op.Line, op.Col, op.Line, op.Col, string(op.Text))
+		}
 		// Restore per-line origins that were captured before the delete.
 		// doInsert makes new lines inherit the parent's origin, which loses
 		// the original per-line provenance for cross-line deletes.
@@ -619,13 +649,17 @@ func (b *Buffer) applyRedoOp(op operation) (int, int) {
 	switch op.Kind {
 	case opInsert:
 		b.doInsert(op.Line, op.Col, op.Text)
-		b.trackChange(op.Line, op.Col, op.Line, op.Col, string(op.Text))
+		if b.OnChange != nil {
+			b.trackChange(op.Line, op.Col, op.Line, op.Col, string(op.Text))
+		}
 		endLine, endCol := b.endOfInsert(op.Line, op.Col, op.Text)
 		return endLine, endCol
 	case opDelete:
 		endLine, endCol := b.endOfInsert(op.Line, op.Col, op.Text)
 		b.doDelete(op.Line, op.Col, op.Text)
-		b.trackChange(op.Line, op.Col, endLine, endCol, "")
+		if b.OnChange != nil {
+			b.trackChange(op.Line, op.Col, endLine, endCol, "")
+		}
 		return op.Line, op.Col
 	case opSetOrigin:
 		if op.Line >= 0 && op.Line < len(b.lines) {

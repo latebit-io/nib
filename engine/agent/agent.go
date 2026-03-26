@@ -74,11 +74,11 @@ type Agent struct {
 
 // New creates a new agent with the given LLM provider, workspace, and event channel.
 // projectRoot is the absolute path to the project directory, used to resolve
-// prompt overrides from .project/prompts/.
+// prompt overrides from .project/prompts/ and as the working directory for bash.
 // The frontend must continuously drain the events channel. Sends block
 // if the channel is full, providing backpressure to the agent loop.
 // Use a buffered channel (e.g. 64) to absorb bursts.
-func New(provider llm.Provider, workspace Workspace, events chan<- Event, projectRoot string) *Agent {
+func New(provider llm.Provider, workspace Workspace, events chan<- Event, projectRoot string, extraTools ...Tool) *Agent {
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)
 	cache := NewFileCache()
@@ -98,7 +98,9 @@ func New(provider llm.Provider, workspace Workspace, events chan<- Event, projec
 		NewEditFileTool(workspace, cache, approveCh, continueCh, a.send),
 		NewWriteFileTool(workspace, cache, a.send),
 		NewListFilesTool(workspace),
+		NewBashTool(projectRoot),
 	}
+	toolList = append(toolList, extraTools...)
 
 	a.tools = make(map[string]Tool, len(toolList))
 	a.toolDefs = make([]llm.ToolDef, 0, len(toolList))

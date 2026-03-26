@@ -16,6 +16,10 @@ import (
 // typical bash output (build errors, test results).
 const maxMCPResult = 32 * 1024
 
+// maxMCPArgs caps the argument payload size from the LLM to prevent
+// excessive allocation from malformed tool calls.
+const maxMCPArgs = 64 * 1024
+
 // MCPCaller is the interface the adapter needs from an MCP client.
 // Defined here so the agent package has no dependency on engine/mcp.
 type MCPCaller interface {
@@ -69,6 +73,9 @@ func (t *MCPToolAdapter) Definition() llm.ToolDef {
 
 // Execute calls the MCP tool and returns the result string.
 func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) string {
+	if len(call.Function.Arguments) > maxMCPArgs {
+		return "Error: arguments too large"
+	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return fmt.Sprintf("Error: invalid arguments: %v", err)

@@ -291,12 +291,21 @@ func (b *Buffer) Insert(line, col int, text string) {
 
 // InsertWithOrigin inserts text and sets the origin of all affected lines.
 // For multi-line inserts, the original line and all new lines receive the
-// given origin. The text insert and origin changes participate in any active
-// group; callers must wrap in BeginGroup/EndGroup if atomicity is required.
+// given origin. The insert and origin changes are grouped atomically so
+// OnChange fires once after both the text and provenance are updated.
 func (b *Buffer) InsertWithOrigin(line, col int, text string, origin Origin) {
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return
+	}
+
+	// Ensure atomicity: suppress OnChange from Insert until origins are set.
+	// If the caller already has a group active, this is a no-op (the outer
+	// group's suppressDepth already suppresses OnChange).
+	ownGroup := !b.grouping
+	if ownGroup {
+		b.BeginGroup()
+		defer b.EndGroup()
 	}
 
 	// Insert handles undo push, redo clear, doInsert, and Modified flag.
@@ -304,7 +313,7 @@ func (b *Buffer) InsertWithOrigin(line, col int, text string, origin Origin) {
 	b.Insert(line, col, text)
 
 	// Mark affected lines with the given origin. SetLineOrigin pushes
-	// its own undo ops (participates in any active group).
+	// its own undo ops (participates in the active group).
 	endLine, _ := b.endOfInsert(line, col, runes)
 	for i := line; i <= endLine && i < len(b.lines); i++ {
 		b.SetLineOrigin(i, origin)

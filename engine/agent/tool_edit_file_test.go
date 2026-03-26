@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -51,7 +52,7 @@ func TestEditFileToolAutoAddsToContextOnApproval(t *testing.T) {
 	cache := NewFileCache()
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)
-	send := func(_ Event) {}
+	send := func(_ event.Event) {}
 
 	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send)
 
@@ -92,7 +93,7 @@ func TestEditFileToolNoContextAddOnRejection(t *testing.T) {
 	cache := NewFileCache()
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)
-	send := func(_ Event) {}
+	send := func(_ event.Event) {}
 
 	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send)
 
@@ -131,7 +132,7 @@ func TestEditFileToolSkipsAddWhenAlreadyInContext(t *testing.T) {
 	cache := NewFileCache()
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)
-	send := func(_ Event) {}
+	send := func(_ event.Event) {}
 
 	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send)
 

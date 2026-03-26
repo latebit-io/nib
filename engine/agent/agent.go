@@ -10,53 +10,18 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
-// Event is emitted by the agent loop. Frontends receive these on the Events channel.
-type Event interface {
-	agentEvent() // sealed marker
-}
-
-// TokenEvent delivers streaming text from the LLM.
-type TokenEvent struct{ Text string }
-
-// EditProposedEvent is sent when the LLM proposes an edit for approval.
-type EditProposedEvent struct{ Edit PendingEdit }
-
-// FileCreatedEvent is sent when the agent creates a new file.
-type FileCreatedEvent struct{ Path string }
-
-// DoneEvent signals the agent loop has finished.
-// Success is true when the loop completed normally (not cancelled or errored).
-type DoneEvent struct{ Success bool }
-
-// ErrorEvent carries an error from the agent.
-type ErrorEvent struct{ Err string }
-
-// StatusEvent updates the agent status display.
-type StatusEvent struct{ Status string }
-
-func (TokenEvent) agentEvent()        {}
-func (EditProposedEvent) agentEvent() {}
-func (FileCreatedEvent) agentEvent()  {}
-func (DoneEvent) agentEvent()         {}
-func (ErrorEvent) agentEvent()        {}
-func (StatusEvent) agentEvent()       {}
-
-// PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
-type PendingEdit struct {
-	ID      string
-	Path    string // which file this edit targets
-	Search  string
-	Replace string
-	Reason  string
-}
+// PendingEdit is an alias for event.PendingEdit.
+// Kept so that internal tools can reference it without importing event directly.
+type PendingEdit = event.PendingEdit
 
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
 	provider llm.Provider
-	events   chan<- Event // frontend reads from this
+	events   chan<- event.Event // frontend reads from this
 	tools    map[string]Tool
 	toolDefs []llm.ToolDef
 	cache    *FileCache
@@ -78,7 +43,7 @@ type Agent struct {
 // The frontend must continuously drain the events channel. Sends block
 // if the channel is full, providing backpressure to the agent loop.
 // Use a buffered channel (e.g. 64) to absorb bursts.
-func New(provider llm.Provider, workspace Workspace, events chan<- Event, projectRoot string, extraTools ...Tool) *Agent {
+func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, projectRoot string, extraTools ...Tool) *Agent {
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)
 	cache := NewFileCache()
@@ -209,21 +174,21 @@ func (a *Agent) Cancel() {
 	a.mu.Unlock()
 }
 
-func (a *Agent) send(ev Event) {
+func (a *Agent) send(ev event.Event) {
 	a.events <- ev
 }
 
 func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
 	success := false
-	defer func() { a.send(DoneEvent{Success: success}) }()
+	defer func() { a.send(event.AgentDone{Success: success}) }()
 
 	if goal == "" {
 		goal = "Review this code and suggest improvements, one step at a time."
 	}
 
 	messages := a.buildMessages(fileName, fileContent, goal, contextFiles)
-	a.send(TokenEvent{Text: "Thinking...\n\n"})
-	a.send(StatusEvent{Status: "thinking"})
+	a.send(event.AgentToken{Text: "Thinking...\n\n"})
+	a.send(event.AgentStatus{Status: "thinking"})
 
 	thinkState := false
 
@@ -231,7 +196,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		ch, err := a.provider.Stream(ctx, messages, a.toolDefs)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
-			a.send(ErrorEvent{Err: fmt.Sprintf("LLM error: %v", err)})
+			a.send(event.AgentError{Err: fmt.Sprintf("LLM error: %v", err)})
 			return
 		}
 
@@ -247,7 +212,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 			clean := stripThinkTags(ev.Token, &thinkState)
 			if clean != "" {
 				contentBuf.WriteString(clean)
-				a.send(TokenEvent{Text: clean})
+				a.send(event.AgentToken{Text: clean})
 			}
 		}
 

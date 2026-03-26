@@ -23,6 +23,14 @@ type Line struct {
 	Origin Origin
 }
 
+// ContentChange represents an incremental edit to a document.
+// Accumulated by Insert/Delete for consumers like LSP that need edit deltas.
+type ContentChange struct {
+	StartLine, StartCol int    // 0-indexed, rune-based
+	EndLine, EndCol     int    // 0-indexed, rune-based (position before the edit)
+	Text                string // replacement text
+}
+
 // Buffer is a line-array text buffer with undo/redo.
 type Buffer struct {
 	lines []Line
@@ -37,6 +45,19 @@ type Buffer struct {
 	// grouping: operations between BeginGroup/EndGroup are undone/redone together
 	grouping bool
 	groupOps []operation
+
+	// OnChange is called after a logical operation completes (Insert, Delete,
+	// Undo, Redo, EndGroup). Suppressed during grouped/undo/redo sub-operations
+	// so that one logical operation produces one callback. nil-safe.
+	OnChange func()
+
+	// changes accumulates ContentChange entries from Insert/Delete.
+	// Drained by DrainChanges — typically inside an OnChange callback.
+	changes []ContentChange
+
+	// suppressDepth > 0 suppresses OnChange callbacks (not change tracking).
+	// Used by BeginGroup/EndGroup and Undo/Redo to batch sub-operations.
+	suppressDepth int
 }
 
 type opKind int
@@ -173,6 +194,30 @@ func (b *Buffer) ResetOriginToDeveloper(line int) {
 	}
 }
 
+// DrainChanges returns accumulated content changes and clears the log.
+// Typically called inside an OnChange callback to get all changes from
+// the logical operation that just completed.
+func (b *Buffer) DrainChanges() []ContentChange {
+	if len(b.changes) == 0 {
+		return nil
+	}
+	out := b.changes
+	b.changes = nil
+	return out
+}
+
+// HasChanges reports whether there are undrained content changes.
+func (b *Buffer) HasChanges() bool {
+	return len(b.changes) > 0
+}
+
+// fireOnChange calls the OnChange callback if not suppressed.
+func (b *Buffer) fireOnChange() {
+	if b.suppressDepth == 0 && b.OnChange != nil {
+		b.OnChange()
+	}
+}
+
 // Content returns the full buffer content as a string.
 func (b *Buffer) Content() string {
 	parts := make([]string, len(b.lines))
@@ -200,6 +245,8 @@ func (b *Buffer) Save() error {
 }
 
 // Insert inserts text at the given position. Handles newlines.
+// INVARIANT: change is appended BEFORE fireOnChange so that DrainChanges
+// inside the callback always sees the latest change.
 func (b *Buffer) Insert(line, col int, text string) {
 	runes := []rune(text)
 	if len(runes) == 0 {
@@ -214,6 +261,14 @@ func (b *Buffer) Insert(line, col int, text string) {
 
 	b.doInsert(line, col, runes)
 	b.Modified = true
+
+	// Track change for LSP consumers — insert is an empty range + new text.
+	b.changes = append(b.changes, ContentChange{
+		StartLine: line, StartCol: col,
+		EndLine: line, EndCol: col,
+		Text: text,
+	})
+	b.fireOnChange()
 }
 
 // InsertWithOrigin inserts text and sets the origin of all affected lines.
@@ -274,12 +329,24 @@ func (b *Buffer) Delete(line, col, count int) string {
 	b.pushUndo(operation{Kind: opDelete, Line: line, Col: col, Text: deleted, LineOrigins: lineOrigins})
 	b.redo = nil
 
+	// Compute end position before deleting (for change tracking).
+	endLine, endCol := b.endOfInsert(line, col, deleted)
+
 	b.doDelete(line, col, deleted)
 	b.Modified = true
+
+	// Track change — delete is a range with empty replacement text.
+	b.changes = append(b.changes, ContentChange{
+		StartLine: line, StartCol: col,
+		EndLine: endLine, EndCol: endCol,
+		Text: "",
+	})
+	b.fireOnChange()
 	return string(deleted)
 }
 
 // Undo undoes the last operation or group.
+// OnChange is suppressed during grouped undo and fires once at the end.
 func (b *Buffer) Undo() (int, int, bool) {
 	if len(b.undo) == 0 {
 		return 0, 0, false
@@ -290,6 +357,7 @@ func (b *Buffer) Undo() (int, int, bool) {
 
 	// Group end = undo ops in reverse order, push to redo in forward order
 	if op.Kind == opGroupEnd {
+		b.suppressDepth++
 		var lastLine, lastCol int
 		var ops []operation
 		for len(b.undo) > 0 {
@@ -314,16 +382,20 @@ func (b *Buffer) Undo() (int, int, bool) {
 		b.redo = append(b.redo, ops...)
 		b.redo = append(b.redo, operation{Kind: opGroupEnd})
 		b.Modified = true
+		b.suppressDepth--
+		b.fireOnChange()
 		return lastLine, lastCol, true
 	}
 
 	l, c := b.applyUndoOp(op)
 	b.redo = append(b.redo, op)
 	b.Modified = true
+	b.fireOnChange()
 	return l, c, true
 }
 
 // Redo redoes the last undone operation or group.
+// OnChange is suppressed during grouped redo and fires once at the end.
 func (b *Buffer) Redo() (int, int, bool) {
 	if len(b.redo) == 0 {
 		return 0, 0, false
@@ -334,6 +406,7 @@ func (b *Buffer) Redo() (int, int, bool) {
 
 	// Group end = collect ops (popped in forward order), replay sequentially
 	if op.Kind == opGroupEnd {
+		b.suppressDepth++
 		var ops []operation
 		for len(b.redo) > 0 {
 			op = b.redo[len(b.redo)-1]
@@ -357,27 +430,34 @@ func (b *Buffer) Redo() (int, int, bool) {
 		}
 		b.undo = append(b.undo, operation{Kind: opGroupEnd})
 		b.Modified = true
+		b.suppressDepth--
+		b.fireOnChange()
 		return lastLine, lastCol, true
 	}
 
 	l, c := b.applyRedoOp(op)
 	b.undo = append(b.undo, op)
 	b.Modified = true
+	b.fireOnChange()
 	return l, c, true
 }
 
 // BeginGroup starts a group of operations that will be undone/redone together.
+// OnChange is suppressed until EndGroup — the group fires one callback.
 func (b *Buffer) BeginGroup() {
 	b.grouping = true
 	b.groupOps = nil
+	b.suppressDepth++
 }
 
 // EndGroup ends a group of operations.
+// Fires OnChange once for all operations in the group.
 func (b *Buffer) EndGroup() {
 	if !b.grouping {
 		return
 	}
 	b.grouping = false
+	b.suppressDepth--
 	if len(b.groupOps) == 0 {
 		return
 	}
@@ -387,6 +467,7 @@ func (b *Buffer) EndGroup() {
 	b.undo = append(b.undo, operation{Kind: opGroupEnd})
 	b.groupOps = nil
 	b.redo = nil
+	b.fireOnChange()
 }
 
 // --- internal ---

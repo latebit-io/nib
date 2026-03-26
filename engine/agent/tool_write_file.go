@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -12,11 +13,11 @@ import (
 type WriteFileTool struct {
 	workspace Workspace
 	cache     *FileCache
-	send      func(Event)
+	send      func(event.Event)
 }
 
 // NewWriteFileTool creates a WriteFileTool with the given dependencies.
-func NewWriteFileTool(ws Workspace, cache *FileCache, send func(Event)) *WriteFileTool {
+func NewWriteFileTool(ws Workspace, cache *FileCache, send func(event.Event)) *WriteFileTool {
 	return &WriteFileTool{workspace: ws, cache: cache, send: send}
 }
 
@@ -68,7 +69,7 @@ func (t *WriteFileTool) Execute(_ context.Context, call llm.ToolCall) string {
 	}
 
 	t.cache.Set(t.workspace.CanonPath(args.Path), args.Content)
-	t.send(FileCreatedEvent{Path: args.Path})
+	t.send(event.AgentFileCreated{Path: args.Path})
 
 	return fmt.Sprintf("File created: %s", args.Path)
 }

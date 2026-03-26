@@ -16,6 +16,7 @@ import (
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 )
 
@@ -32,7 +33,7 @@ type Session struct {
 	Editor *editor.Editor
 
 	agent  *agent.Agent
-	Events <-chan agent.Event // frontend reads agent events from here
+	Events <-chan event.Event // frontend reads engine events from here
 
 	// mu guards editors and activeFile for concurrent access from the
 	// TUI goroutine and agent goroutine (via Workspace interface).
@@ -58,7 +59,7 @@ type Session struct {
 	IntentHistory []string // resolved intents archived in order
 
 	// PendingEdit is the edit currently awaiting approval (nil = none)
-	PendingEdit *agent.PendingEdit
+	PendingEdit *event.PendingEdit
 
 	// lastEditedFile tracks which file was successfully edited. Used by
 	// Continue to send the correct file's content even if the user switches
@@ -124,7 +125,7 @@ func New(e *editor.Editor, projectRoot string) *Session {
 
 // SetAgent wires an agent into the session. The agent is typically created
 // with the session as its Workspace, so this must be called after New.
-func (s *Session) SetAgent(ag *agent.Agent, events <-chan agent.Event) {
+func (s *Session) SetAgent(ag *agent.Agent, events <-chan event.Event) {
 	s.agent = ag
 	s.Events = events
 }
@@ -899,28 +900,27 @@ func (s *Session) Continue() {
 
 // --- Agent Event Handling ---
 
-// HandleEvent processes an agent event and updates session state.
-// Returns the event for the frontend to render.
-func (s *Session) HandleEvent(ev agent.Event) {
+// HandleEvent processes an engine event and updates session state.
+func (s *Session) HandleEvent(ev event.Event) {
 	switch e := ev.(type) {
-	case agent.EditProposedEvent:
+	case event.AgentEditProposed:
 		s.PendingEdit = &e.Edit
 		s.editReviewed = false
-	case agent.ErrorEvent:
+	case event.AgentError:
 		s.PendingEdit = nil
 		s.editReviewed = false
 		_ = e // error text is in the event for the frontend to display
-	case agent.DoneEvent:
+	case event.AgentDone:
 		s.PendingEdit = nil
 		s.editReviewed = false
 		if e.Success {
 			s.ArchiveIntent()
 		}
-	case agent.FileCreatedEvent:
+	case event.AgentFileCreated:
 		// File is already opened by workspace.WriteFile — frontend can
 		// render it in the project view or switch to it.
 		_ = e
-	case agent.TokenEvent, agent.StatusEvent:
+	case event.AgentToken, event.AgentStatus:
 		// No session state changes — frontend renders these directly
 	}
 }

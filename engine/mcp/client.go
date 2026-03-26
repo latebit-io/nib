@@ -76,7 +76,8 @@ func NewStdioClient(command string, args []string, env []string) (*Client, error
 	}
 
 	if err := cmd.Start(); err != nil {
-		_ = stdin.Close() // clean up pipe on start failure
+		_ = stdin.Close()  // clean up pipes on start failure
+		_ = stdout.Close()
 		return nil, fmt.Errorf("mcp: start %q: %w", command, err)
 	}
 

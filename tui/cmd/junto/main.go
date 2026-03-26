@@ -167,7 +167,9 @@ func discoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 		program := cmdParts[0]
 		args := append(cmdParts[1:], cfg.Args...)
 
-		// Build environment.
+		// Build environment. Config vars are appended after the parent
+		// environment so they override existing values (subprocess uses
+		// the last occurrence of a duplicate key).
 		var env []string
 		if len(cfg.Env) > 0 {
 			env = os.Environ()
@@ -184,7 +186,7 @@ func discoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 
 		serverTools, err := initMCPServer(client, name)
 		if err != nil {
-			_ = client.Close() // terminate subprocess and readLoop goroutine
+			_ = client.Close() // best-effort — close error irrelevant when init already failed
 			slog.Warn("mcp: server setup failed", "name", name, "err", err)
 			continue
 		}

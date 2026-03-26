@@ -922,6 +922,8 @@ func (s *Session) HandleEvent(ev event.Event) {
 		_ = e
 	case event.AgentToken, event.AgentStatus:
 		// No session state changes — frontend renders these directly
+	default:
+		slog.Debug("HandleEvent: unhandled event type", "type", fmt.Sprintf("%T", ev))
 	}
 }
 

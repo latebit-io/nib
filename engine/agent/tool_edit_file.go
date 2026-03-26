@@ -231,7 +231,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) string {
 	}
 
 	t.send(event.AgentStatus{Status: "waiting"})
-	t.send(event.AgentEditProposed{Edit: PendingEdit{
+	t.send(event.AgentEditProposed{Edit: event.PendingEdit{
 		ID:      call.ID,
 		Path:    args.Path,
 		Search:  args.Search,

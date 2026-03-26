@@ -49,10 +49,17 @@ type Buffer struct {
 	// OnChange is called after a logical operation completes (Insert, Delete,
 	// Undo, Redo, EndGroup). Suppressed during grouped/undo/redo sub-operations
 	// so that one logical operation produces one callback. nil-safe.
+	//
+	// Threading contract: OnChange is invoked on the same goroutine that
+	// performed the mutation. For TUI-driven edits this is the main goroutine;
+	// for agent-driven edits via Workspace it may be the agent goroutine.
+	// Implementations must not mutate shared UI state directly — marshal
+	// updates to the main goroutine (e.g., by sending on a channel).
 	OnChange func()
 
-	// changes accumulates ContentChange entries from Insert/Delete.
+	// changes accumulates ContentChange entries from Insert/Delete/Undo/Redo.
 	// Drained by DrainChanges — typically inside an OnChange callback.
+	// Only accumulated when OnChange is non-nil to prevent unbounded growth.
 	changes []ContentChange
 
 	// suppressDepth > 0 suppresses OnChange callbacks (not change tracking).
@@ -218,6 +225,20 @@ func (b *Buffer) fireOnChange() {
 	}
 }
 
+// trackChange appends a ContentChange if change tracking is active
+// (OnChange is non-nil). Skips when OnChange is nil to prevent
+// unbounded growth of the changes slice.
+func (b *Buffer) trackChange(startLine, startCol, endLine, endCol int, text string) {
+	if b.OnChange == nil {
+		return
+	}
+	b.changes = append(b.changes, ContentChange{
+		StartLine: startLine, StartCol: startCol,
+		EndLine: endLine, EndCol: endCol,
+		Text: text,
+	})
+}
+
 // Content returns the full buffer content as a string.
 func (b *Buffer) Content() string {
 	parts := make([]string, len(b.lines))
@@ -263,11 +284,7 @@ func (b *Buffer) Insert(line, col int, text string) {
 	b.Modified = true
 
 	// Track change for LSP consumers — insert is an empty range + new text.
-	b.changes = append(b.changes, ContentChange{
-		StartLine: line, StartCol: col,
-		EndLine: line, EndCol: col,
-		Text: text,
-	})
+	b.trackChange(line, col, line, col, text)
 	b.fireOnChange()
 }
 
@@ -336,11 +353,7 @@ func (b *Buffer) Delete(line, col, count int) string {
 	b.Modified = true
 
 	// Track change — delete is a range with empty replacement text.
-	b.changes = append(b.changes, ContentChange{
-		StartLine: line, StartCol: col,
-		EndLine: endLine, EndCol: endCol,
-		Text: "",
-	})
+	b.trackChange(line, col, endLine, endCol, "")
 	b.fireOnChange()
 	return string(deleted)
 }
@@ -358,6 +371,10 @@ func (b *Buffer) Undo() (int, int, bool) {
 	// Group end = undo ops in reverse order, push to redo in forward order
 	if op.Kind == opGroupEnd {
 		b.suppressDepth++
+		defer func() {
+			b.suppressDepth--
+			b.fireOnChange()
+		}()
 		var lastLine, lastCol int
 		var ops []operation
 		for len(b.undo) > 0 {
@@ -382,8 +399,6 @@ func (b *Buffer) Undo() (int, int, bool) {
 		b.redo = append(b.redo, ops...)
 		b.redo = append(b.redo, operation{Kind: opGroupEnd})
 		b.Modified = true
-		b.suppressDepth--
-		b.fireOnChange()
 		return lastLine, lastCol, true
 	}
 
@@ -407,6 +422,10 @@ func (b *Buffer) Redo() (int, int, bool) {
 	// Group end = collect ops (popped in forward order), replay sequentially
 	if op.Kind == opGroupEnd {
 		b.suppressDepth++
+		defer func() {
+			b.suppressDepth--
+			b.fireOnChange()
+		}()
 		var ops []operation
 		for len(b.redo) > 0 {
 			op = b.redo[len(b.redo)-1]
@@ -430,8 +449,6 @@ func (b *Buffer) Redo() (int, int, bool) {
 		}
 		b.undo = append(b.undo, operation{Kind: opGroupEnd})
 		b.Modified = true
-		b.suppressDepth--
-		b.fireOnChange()
 		return lastLine, lastCol, true
 	}
 
@@ -444,7 +461,11 @@ func (b *Buffer) Redo() (int, int, bool) {
 
 // BeginGroup starts a group of operations that will be undone/redone together.
 // OnChange is suppressed until EndGroup — the group fires one callback.
+// Nested calls are no-ops — the first BeginGroup wins.
 func (b *Buffer) BeginGroup() {
+	if b.grouping {
+		return
+	}
 	b.grouping = true
 	b.groupOps = nil
 	b.suppressDepth++
@@ -546,13 +567,19 @@ func (b *Buffer) doDelete(line, col int, runes []rune) {
 }
 
 // applyUndoOp reverses a single operation. Does NOT push to redo stack.
+// Tracks content changes for LSP consumers via trackChange.
 func (b *Buffer) applyUndoOp(op operation) (int, int) {
 	switch op.Kind {
 	case opInsert:
+		// Undo an insert = delete the inserted text.
+		endLine, endCol := b.endOfInsert(op.Line, op.Col, op.Text)
 		b.doDelete(op.Line, op.Col, op.Text)
+		b.trackChange(op.Line, op.Col, endLine, endCol, "")
 		return op.Line, op.Col
 	case opDelete:
+		// Undo a delete = re-insert the deleted text.
 		b.doInsert(op.Line, op.Col, op.Text)
+		b.trackChange(op.Line, op.Col, op.Line, op.Col, string(op.Text))
 		// Restore per-line origins that were captured before the delete.
 		// doInsert makes new lines inherit the parent's origin, which loses
 		// the original per-line provenance for cross-line deletes.
@@ -574,14 +601,18 @@ func (b *Buffer) applyUndoOp(op operation) (int, int) {
 }
 
 // applyRedoOp replays a single operation. Does NOT push to undo stack.
+// Tracks content changes for LSP consumers via trackChange.
 func (b *Buffer) applyRedoOp(op operation) (int, int) {
 	switch op.Kind {
 	case opInsert:
 		b.doInsert(op.Line, op.Col, op.Text)
+		b.trackChange(op.Line, op.Col, op.Line, op.Col, string(op.Text))
 		endLine, endCol := b.endOfInsert(op.Line, op.Col, op.Text)
 		return endLine, endCol
 	case opDelete:
+		endLine, endCol := b.endOfInsert(op.Line, op.Col, op.Text)
 		b.doDelete(op.Line, op.Col, op.Text)
+		b.trackChange(op.Line, op.Col, endLine, endCol, "")
 		return op.Line, op.Col
 	case opSetOrigin:
 		if op.Line >= 0 && op.Line < len(b.lines) {

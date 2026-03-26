@@ -14,10 +14,6 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 )
 
-// PendingEdit is an alias for event.PendingEdit.
-// Kept so that internal tools can reference it without importing event directly.
-type PendingEdit = event.PendingEdit
-
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
 	provider llm.Provider

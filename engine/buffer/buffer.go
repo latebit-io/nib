@@ -3,7 +3,6 @@ package buffer
 
 import (
 	"errors"
-	"log/slog"
 	"os"
 	"strings"
 )
@@ -43,9 +42,10 @@ type Buffer struct {
 	undo []operation
 	redo []operation
 
-	// grouping: operations between BeginGroup/EndGroup are undone/redone together
-	grouping bool
-	groupOps []operation
+	// groupDepth tracks nested BeginGroup/EndGroup calls. Only the outermost
+	// EndGroup commits the group to the undo stack and fires OnChange.
+	groupDepth int
+	groupOps   []operation
 
 	// OnChange is called after a logical operation completes (Insert, Delete,
 	// Undo, Redo, EndGroup). Suppressed during grouped/undo/redo sub-operations
@@ -302,7 +302,7 @@ func (b *Buffer) InsertWithOrigin(line, col int, text string, origin Origin) {
 	// Ensure atomicity: suppress OnChange from Insert until origins are set.
 	// If the caller already has a group active, this is a no-op (the outer
 	// group's suppressDepth already suppresses OnChange).
-	ownGroup := !b.grouping
+	ownGroup := b.groupDepth == 0
 	if ownGroup {
 		b.BeginGroup()
 		defer b.EndGroup()
@@ -470,26 +470,28 @@ func (b *Buffer) Redo() (int, int, bool) {
 }
 
 // BeginGroup starts a group of operations that will be undone/redone together.
-// OnChange is suppressed until EndGroup — the group fires one callback.
-// Nested calls are no-ops — the first BeginGroup wins.
+// OnChange is suppressed until the outermost EndGroup fires one callback.
+// Nested calls increment the depth counter — all ops accumulate into the
+// outermost group.
 func (b *Buffer) BeginGroup() {
-	if b.grouping {
-		slog.Warn("BeginGroup called while already grouping — ignoring nested call")
-		return
+	if b.groupDepth == 0 {
+		b.groupOps = nil // reset ops only for outermost group
 	}
-	b.grouping = true
-	b.groupOps = nil
+	b.groupDepth++
 	b.suppressDepth++
 }
 
 // EndGroup ends a group of operations.
-// Fires OnChange once for all operations in the group.
+// Only the outermost EndGroup commits the group to the undo stack and fires OnChange.
 func (b *Buffer) EndGroup() {
-	if !b.grouping {
+	if b.groupDepth == 0 {
 		return
 	}
-	b.grouping = false
+	b.groupDepth--
 	b.suppressDepth--
+	if b.groupDepth > 0 {
+		return // not the outermost group yet
+	}
 	if len(b.groupOps) == 0 {
 		return
 	}
@@ -521,7 +523,7 @@ func (b *Buffer) clamp(line, col int) (int, int) {
 }
 
 func (b *Buffer) pushUndo(op operation) {
-	if b.grouping {
+	if b.groupDepth > 0 {
 		b.groupOps = append(b.groupOps, op)
 	} else {
 		b.undo = append(b.undo, op)

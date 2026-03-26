@@ -74,11 +74,11 @@ type Agent struct {
 
 // New creates a new agent with the given LLM provider, workspace, and event channel.
 // projectRoot is the absolute path to the project directory, used to resolve
-// prompt overrides from .project/prompts/.
+// prompt overrides from .project/prompts/ and as the working directory for bash.
 // The frontend must continuously drain the events channel. Sends block
 // if the channel is full, providing backpressure to the agent loop.
 // Use a buffered channel (e.g. 64) to absorb bursts.
-func New(provider llm.Provider, workspace Workspace, events chan<- Event, projectRoot string) *Agent {
+func New(provider llm.Provider, workspace Workspace, events chan<- Event, projectRoot string, extraTools ...Tool) *Agent {
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)
 	cache := NewFileCache()
@@ -93,18 +93,41 @@ func New(provider llm.Provider, workspace Workspace, events chan<- Event, projec
 	}
 
 	// Build tool registry — each tool gets exactly the dependencies it needs.
-	toolList := []Tool{
+	// Built-in tools are registered first and cannot be overridden by extraTools.
+	builtins := []Tool{
 		NewReadFileTool(workspace, cache),
 		NewEditFileTool(workspace, cache, approveCh, continueCh, a.send),
 		NewWriteFileTool(workspace, cache, a.send),
 		NewListFilesTool(workspace),
+		NewBashTool(projectRoot),
 	}
 
-	a.tools = make(map[string]Tool, len(toolList))
-	a.toolDefs = make([]llm.ToolDef, 0, len(toolList))
-	for _, t := range toolList {
+	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))
+	a.toolDefs = make([]llm.ToolDef, 0, len(builtins)+len(extraTools))
+
+	// Register built-ins.
+	builtinNames := make(map[string]bool, len(builtins))
+	for _, t := range builtins {
 		def := t.Definition()
-		a.tools[def.Function.Name] = t
+		key := strings.ToLower(def.Function.Name)
+		builtinNames[key] = true
+		a.tools[key] = t
+		a.toolDefs = append(a.toolDefs, def)
+	}
+
+	// Register extra tools (e.g. MCP), rejecting any that shadow built-ins.
+	for _, t := range extraTools {
+		def := t.Definition()
+		key := strings.ToLower(def.Function.Name)
+		if builtinNames[key] {
+			slog.Warn("extra tool rejected: shadows built-in", "name", def.Function.Name)
+			continue
+		}
+		if _, exists := a.tools[key]; exists {
+			slog.Warn("extra tool collision, skipping duplicate", "name", def.Function.Name)
+			continue
+		}
+		a.tools[key] = t
 		a.toolDefs = append(a.toolDefs, def)
 	}
 

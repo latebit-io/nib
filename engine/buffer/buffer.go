@@ -3,6 +3,7 @@ package buffer
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"strings"
 )
@@ -464,6 +465,7 @@ func (b *Buffer) Redo() (int, int, bool) {
 // Nested calls are no-ops — the first BeginGroup wins.
 func (b *Buffer) BeginGroup() {
 	if b.grouping {
+		slog.Warn("BeginGroup called while already grouping — ignoring nested call")
 		return
 	}
 	b.grouping = true

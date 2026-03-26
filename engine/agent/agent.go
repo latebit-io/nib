@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
@@ -170,8 +171,27 @@ func (a *Agent) Cancel() {
 	a.mu.Unlock()
 }
 
+// send delivers an event to the frontend. High-volume display events
+// (tokens, status) are best-effort: dropped with a warning if the channel
+// is full. Control-flow events (edit proposed, done, error) use a timeout
+// to prevent indefinite blocking if the frontend stops draining.
 func (a *Agent) send(ev event.Event) {
-	a.events <- ev
+	switch ev.(type) {
+	case event.AgentToken, event.AgentStatus:
+		select {
+		case a.events <- ev:
+		default:
+			slog.Warn("dropping agent event: channel full", "type", fmt.Sprintf("%T", ev))
+		}
+	default:
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case a.events <- ev:
+		case <-timer.C:
+			slog.Error("failed to deliver agent event: channel full", "type", fmt.Sprintf("%T", ev))
+		}
+	}
 }
 
 func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {

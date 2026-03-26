@@ -106,6 +106,9 @@ func New(provider llm.Provider, workspace Workspace, events chan<- Event, projec
 	a.toolDefs = make([]llm.ToolDef, 0, len(toolList))
 	for _, t := range toolList {
 		def := t.Definition()
+		if _, exists := a.tools[def.Function.Name]; exists {
+			slog.Warn("tool name collision, overwriting", "name", def.Function.Name)
+		}
 		a.tools[def.Function.Name] = t
 		a.toolDefs = append(a.toolDefs, def)
 	}

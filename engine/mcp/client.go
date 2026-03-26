@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 )
 
@@ -37,7 +38,7 @@ type Client struct {
 // jsonRPCRequest is the wire format for a JSON-RPC 2.0 request.
 type jsonRPCRequest struct {
 	JSONRPC string `json:"jsonrpc"`
-	ID      int    `json:"id"`
+	ID      *int   `json:"id,omitempty"`
 	Method  string `json:"method"`
 	Params  any    `json:"params,omitempty"`
 }
@@ -89,20 +90,15 @@ func NewStdioClient(command string, args []string, env []string) (*Client, error
 	return c, nil
 }
 
+// maxLineSize caps each JSON-RPC message from the MCP server (10MB, same as SSE scanner).
+const maxLineSize = 10 * 1024 * 1024
+
 // readLoop reads JSON-RPC responses from stdout and dispatches to pending requests.
 func (c *Client) readLoop() {
-	for {
-		line, err := c.reader.ReadBytes('\n')
-		if err != nil {
-			slog.Debug("mcp: read loop ended", "err", err)
-			c.mu.Lock()
-			for id, ch := range c.pending {
-				close(ch)
-				delete(c.pending, id)
-			}
-			c.mu.Unlock()
-			return
-		}
+	scanner := bufio.NewScanner(c.reader)
+	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
+	for scanner.Scan() {
+		line := scanner.Bytes()
 
 		var resp jsonRPCResponse
 		if err := json.Unmarshal(line, &resp); err != nil {
@@ -124,7 +120,7 @@ func (c *Client) readLoop() {
 
 		if ok {
 			if resp.Error != nil {
-				// Encode error as JSON so caller can distinguish.
+				// Marshal cannot fail: jsonRPCError contains only int and string.
 				errJSON, _ := json.Marshal(resp.Error)
 				ch <- errJSON
 			} else {
@@ -133,6 +129,20 @@ func (c *Client) readLoop() {
 			close(ch)
 		}
 	}
+
+	// Scanner stopped — EOF or error. Clean up pending requests.
+	err := scanner.Err()
+	if err != nil {
+		slog.Debug("mcp: read loop error", "err", err)
+	} else {
+		slog.Debug("mcp: read loop ended", "err", "EOF")
+	}
+	c.mu.Lock()
+	for id, ch := range c.pending {
+		close(ch)
+		delete(c.pending, id)
+	}
+	c.mu.Unlock()
 }
 
 // call sends a JSON-RPC request and waits for the response.
@@ -146,7 +156,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 
 	req := jsonRPCRequest{
 		JSONRPC: "2.0",
-		ID:      id,
+		ID:      &id,
 		Method:  method,
 		Params:  params,
 	}
@@ -202,6 +212,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 		JSONRPC: "2.0",
 		Method:  "notifications/initialized",
 	}
+	// Marshal cannot fail: notification contains only string fields.
 	data, _ := json.Marshal(notif)
 	data = append(data, '\n')
 	c.mu.Lock()
@@ -252,13 +263,13 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	}
 
 	// Concatenate all text content blocks.
-	var text string
-	for _, c := range resp.Content {
-		if c.Type == "text" {
-			text += c.Text
+	var sb strings.Builder
+	for _, block := range resp.Content {
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
 		}
 	}
-	return text, nil
+	return sb.String(), nil
 }
 
 // Close terminates the MCP server subprocess.

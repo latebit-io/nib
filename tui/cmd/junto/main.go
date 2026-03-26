@@ -157,9 +157,6 @@ func discoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 		return nil, cleanup
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	for name, cfg := range configs {
 		// Split command into program + args if needed.
 		cmdParts := strings.Fields(cfg.Command)
@@ -186,12 +183,17 @@ func discoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 		}
 		clients = append(clients, client)
 
+		// Each server gets its own timeout so a slow server doesn't starve others.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
 		if err := client.Initialize(ctx); err != nil {
+			cancel()
 			slog.Warn("mcp: failed to initialize server", "name", name, "err", err)
 			continue
 		}
 
 		serverTools, err := client.ListTools(ctx)
+		cancel()
 		if err != nil {
 			slog.Warn("mcp: failed to list tools", "name", name, "err", err)
 			continue

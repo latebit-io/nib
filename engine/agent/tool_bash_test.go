@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -9,11 +10,12 @@ import (
 )
 
 func bashCall(command string) llm.ToolCall {
+	args, _ := json.Marshal(map[string]string{"command": command})
 	return llm.ToolCall{
 		ID: "test-1",
 		Function: llm.FunctionCall{
 			Name:      "bash",
-			Arguments: `{"command":"` + command + `"}`,
+			Arguments: string(args),
 		},
 	}
 }

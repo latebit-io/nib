@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"time"
@@ -22,6 +23,13 @@ const maxBashTimeout = 120 * time.Second
 const maxBashOutput = 8 * 1024
 
 // BashTool lets the LLM execute shell commands in the project directory.
+//
+// Trust model: commands come from the LLM, which is instructed via the system
+// prompt not to run destructive operations. This is prompt-level guidance, not
+// enforcement. The developer can cancel the agent at any time (Esc), and the
+// timeout prevents runaway processes. Per-command approval and sandboxing are
+// planned follow-ups — for now, the developer controls scope via intent and
+// context set, same as with edit_file.
 type BashTool struct {
 	projectRoot string
 }
@@ -90,15 +98,18 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) string {
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", args.Command)
 	cmd.Dir = t.projectRoot
 
+	// Cap buffer during execution to prevent OOM from high-volume output.
+	// LimitedWriter stops accepting writes after maxBashOutput bytes.
 	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+	lw := &limitedWriter{w: &buf, remaining: maxBashOutput}
+	cmd.Stdout = lw
+	cmd.Stderr = lw
 
 	err := cmd.Run()
 
 	output := buf.String()
-	if len(output) > maxBashOutput {
-		output = output[:maxBashOutput] + "\n[... output truncated]"
+	if lw.truncated {
+		output += "\n[... output truncated]"
 	}
 
 	exitCode := 0
@@ -128,4 +139,33 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) string {
 		return "(no output)"
 	}
 	return output
+}
+
+// limitedWriter caps writes at a byte limit, discarding excess.
+// This prevents OOM from commands that produce unbounded output
+// (e.g. `yes` or verbose test runs) during the execution itself,
+// rather than only truncating after the command completes.
+type limitedWriter struct {
+	w         io.Writer
+	remaining int
+	truncated bool
+}
+
+func (lw *limitedWriter) Write(p []byte) (int, error) {
+	if lw.remaining <= 0 {
+		lw.truncated = true
+		return len(p), nil // discard but report success so the process doesn't stall
+	}
+	if len(p) > lw.remaining {
+		lw.truncated = true
+		n, err := lw.w.Write(p[:lw.remaining])
+		lw.remaining = 0
+		if err != nil {
+			return n, err
+		}
+		return len(p), nil // report full write to caller
+	}
+	n, err := lw.w.Write(p)
+	lw.remaining -= n
+	return n, err
 }

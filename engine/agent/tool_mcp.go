@@ -10,8 +10,16 @@ import (
 	"github.com/latebit-io/junto/engine/mcp"
 )
 
+// maxMCPResult caps the response size returned to the LLM from MCP tools.
+const maxMCPResult = 32 * 1024
+
 // MCPToolAdapter wraps a single MCP server tool as an agent.Tool.
 // The agent loop sees it as any other tool — it doesn't know about MCP.
+//
+// Trust model: MCP servers are developer-configured (via .mcp.json).
+// Their responses are treated as trusted content — no sanitization is
+// applied, same as file content from read_file. Size is capped to
+// prevent token blow-up from unexpectedly large responses.
 type MCPToolAdapter struct {
 	client  *mcp.Client
 	info    mcp.ToolInfo
@@ -54,6 +62,9 @@ func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) string 
 	if err != nil {
 		slog.Error("mcp tool error", "tool", t.info.Name, "err", err)
 		return fmt.Sprintf("Error: %v", err)
+	}
+	if len(result) > maxMCPResult {
+		result = result[:maxMCPResult] + "\n[... output truncated]"
 	}
 	return result
 }

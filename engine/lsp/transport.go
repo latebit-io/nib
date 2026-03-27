@@ -5,6 +5,7 @@ package lsp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,7 +38,7 @@ type Transport struct {
 
 	mu      sync.Mutex
 	nextID  int
-	pending map[int]chan json.RawMessage // request ID → response channel
+	pending map[int]chan pendingResponse // request ID → response channel
 
 	// notifyHandlers maps method → callback for server-initiated notifications.
 	notifyMu sync.RWMutex
@@ -56,7 +57,7 @@ func NewTransport(r io.Reader, w io.WriteCloser) *Transport {
 		reader:    bufio.NewReaderSize(r, 64*1024),
 		outbox:    make(chan []byte, outboxSize),
 		done:      make(chan struct{}),
-		pending:   make(map[int]chan json.RawMessage),
+		pending:   make(map[int]chan pendingResponse),
 		notify:    make(map[string]func(json.RawMessage)),
 		closed:    make(chan struct{}),
 	}
@@ -102,11 +103,29 @@ type incomingMessage struct {
 	Error  *jsonRPCError   `json:"error"`
 }
 
+// RPCError represents a JSON-RPC error response from the server.
+type RPCError struct {
+	Code    int
+	Message string
+}
+
+// Error implements the error interface.
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("JSON-RPC error %d: %s", e.Code, e.Message)
+}
+
+// pendingResponse carries either a result or an error from the server.
+type pendingResponse struct {
+	result json.RawMessage
+	err    error
+}
+
 // --- Public API ---
 
-// Request sends a JSON-RPC request and blocks until a response is received.
-// Returns the result payload or an error. Thread-safe.
-func (t *Transport) Request(method string, params any) (json.RawMessage, error) {
+// Request sends a JSON-RPC request and blocks until a response is received
+// or the context is cancelled. Returns the result payload or an error.
+// Thread-safe.
+func (t *Transport) Request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	paramBytes, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("marshal params: %w", err)
@@ -115,7 +134,7 @@ func (t *Transport) Request(method string, params any) (json.RawMessage, error) 
 	t.mu.Lock()
 	id := t.nextID
 	t.nextID++
-	ch := make(chan json.RawMessage, 1)
+	ch := make(chan pendingResponse, 1)
 	t.pending[id] = ch
 	t.mu.Unlock()
 
@@ -136,13 +155,16 @@ func (t *Transport) Request(method string, params any) (json.RawMessage, error) 
 		return nil, err
 	}
 
-	// Wait for response or transport close.
+	// Wait for response, context cancellation, or transport close.
 	select {
-	case result, ok := <-ch:
+	case resp, ok := <-ch:
 		if !ok {
 			return nil, errors.New("transport closed before response received")
 		}
-		return result, nil
+		return resp.result, resp.err
+	case <-ctx.Done():
+		t.removePending(id)
+		return nil, ctx.Err()
 	case <-t.closed:
 		t.removePending(id)
 		return nil, errors.New("transport closed before response received")
@@ -198,6 +220,9 @@ func (t *Transport) Close() error {
 
 // send enqueues a framed message to the async write queue. Non-blocking.
 func (t *Transport) send(body []byte) error {
+	if len(body) > maxMessageSize {
+		return fmt.Errorf("outbound message too large: %d bytes (max %d)", len(body), maxMessageSize)
+	}
 	framed := frame(body)
 	select {
 	case t.outbox <- framed:
@@ -270,11 +295,14 @@ func (t *Transport) readLoop() {
 			continue
 		}
 
-		if msg.ID != nil {
+		if msg.Method != "" && msg.ID != nil {
+			// Server-initiated request (has both method and id) — needs a response.
+			t.handleServerRequest(*msg.ID, msg.Method, msg.Params)
+		} else if msg.ID != nil {
 			// Response to a request we sent.
 			t.handleResponse(&msg)
 		} else if msg.Method != "" {
-			// Server-initiated notification.
+			// Server-initiated notification (method, no id).
 			t.handleNotification(msg.Method, msg.Params)
 		}
 	}
@@ -333,15 +361,32 @@ func (t *Transport) handleResponse(msg *incomingMessage) {
 	}
 
 	if msg.Error != nil {
-		// Encode the error as a JSON result so the caller can inspect it.
-		errJSON, _ := json.Marshal(msg.Error)
-		ch <- errJSON
+		ch <- pendingResponse{err: &RPCError{Code: msg.Error.Code, Message: msg.Error.Message}}
 		close(ch)
 		return
 	}
 
-	ch <- msg.Result
+	ch <- pendingResponse{result: msg.Result}
 	close(ch)
+}
+
+// handleServerRequest responds to server-initiated requests (method + id).
+// The server expects a response — without one, it stalls indefinitely.
+// We respond with "method not found" for unhandled methods.
+func (t *Transport) handleServerRequest(id int, method string, _ json.RawMessage) {
+	slog.Debug("lsp transport: server request (unhandled)", "method", method, "id", id)
+
+	// JSON-RPC error code -32601 = Method not found.
+	resp, _ := json.Marshal(struct {
+		JSONRPC string       `json:"jsonrpc"`
+		ID      int          `json:"id"`
+		Error   jsonRPCError `json:"error"`
+	}{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   jsonRPCError{Code: -32601, Message: "method not supported: " + method},
+	})
+	_ = t.send(frame(resp)) // best-effort; server may have already moved on
 }
 
 // handleNotification invokes the registered callback for a notification.

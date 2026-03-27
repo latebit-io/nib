@@ -83,10 +83,12 @@ type Session struct {
 
 	// langSyncer is the language service port (optional, nil when no LSP).
 	// Session depends on the interface, never on lsp.Manager directly (DIP).
+	// Set once via SetLanguageService before the TUI starts — effectively
+	// immutable after initialization. Read without lock is safe.
 	langSyncer lang.DocumentSyncer
 
-	// wiredEditors tracks which editors have had LSP sync wired (by path).
-	// Prevents duplicate DidOpen notifications.
+	// wiredEditors tracks which editors have had LSP sync wired (by canonical path).
+	// Prevents duplicate DidOpen notifications. Guarded by mu.
 	wiredEditors map[string]bool
 }
 
@@ -180,36 +182,43 @@ func (s *Session) NotifySaved() {
 	if s.langSyncer == nil {
 		return
 	}
-	s.langSyncer.DidSave(s.ActiveFile())
+	path := s.ActiveFile()
+	if path == "" {
+		return
+	}
+	s.langSyncer.DidSave(s.CanonPath(path))
 }
 
 // wireBufferSync sets up Buffer.OnChange for an editor to auto-sync
 // incremental changes with the language service. Also sends DidOpen.
 // Safe to call multiple times — no-op if the editor is already wired.
 // Composes with any existing OnChange handler (does not overwrite).
+// Uses canonical paths consistently to match the session's editor map.
 func (s *Session) wireBufferSync(e *editor.Editor) {
-	if s.langSyncer == nil || e == nil {
+	if s.langSyncer == nil || e == nil || e.Buf.Path == "" {
 		return
 	}
-	path := e.Buf.Path
-	if path == "" {
-		return
-	}
-	// Already wired for this path — don't send duplicate DidOpen.
-	if s.wiredEditors[path] {
-		return
-	}
-	languageID := lang.DetectLanguage(path)
+	canon := s.CanonPath(e.Buf.Path)
+	languageID := lang.DetectLanguage(canon)
 	if languageID == "" {
 		return
 	}
+
+	// Check/update wiredEditors under lock — may be called from
+	// TUI goroutine (SwitchTo) or agent goroutine (editorForEdit, WriteFile).
+	s.mu.Lock()
 	if s.wiredEditors == nil {
 		s.wiredEditors = make(map[string]bool)
 	}
-	s.wiredEditors[path] = true
+	if s.wiredEditors[canon] {
+		s.mu.Unlock()
+		return
+	}
+	s.wiredEditors[canon] = true
+	s.mu.Unlock()
 
 	// Open document in language service.
-	s.langSyncer.DidOpen(path, languageID, e.Buf.Content())
+	s.langSyncer.DidOpen(canon, languageID, e.Buf.Content())
 
 	// Compose with existing OnChange handler (if any) so we don't
 	// silently disconnect other observers. The previous handler runs first.
@@ -235,7 +244,27 @@ func (s *Session) wireBufferSync(e *editor.Editor) {
 				FullContent: c.FullContent,
 			}
 		}
-		s.langSyncer.DidChange(path, textChanges)
+		s.langSyncer.DidChange(canon, textChanges)
+	}
+}
+
+// unwireBufferSync sends DidClose and removes the wired state for an editor.
+// Used when an editor is removed from the session (e.g., SwitchEditor).
+func (s *Session) unwireBufferSync(e *editor.Editor) {
+	if s.langSyncer == nil || e == nil || e.Buf.Path == "" {
+		return
+	}
+	canon := s.CanonPath(e.Buf.Path)
+
+	s.mu.Lock()
+	wired := s.wiredEditors[canon]
+	if wired {
+		delete(s.wiredEditors, canon)
+	}
+	s.mu.Unlock()
+
+	if wired {
+		s.langSyncer.DidClose(canon)
 	}
 }
 
@@ -713,6 +742,10 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 	s.IntentDone = false
 
 	old := s.Editor
+
+	// Notify LSP that the old document is closing.
+	s.unwireBufferSync(old)
+
 	s.mu.Lock()
 	// Remove old editor from map
 	if s.activeFile != "" {
@@ -739,11 +772,12 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 func (s *Session) Close() {
 	// Notify language service of all document closes, then shut it down.
 	if s.langSyncer != nil {
-		s.mu.RLock()
-		for path := range s.editors {
+		s.mu.Lock()
+		for path := range s.wiredEditors {
 			s.langSyncer.DidClose(path)
 		}
-		s.mu.RUnlock()
+		s.wiredEditors = nil
+		s.mu.Unlock()
 		if err := s.langSyncer.Close(); err != nil {
 			slog.Warn("close language service", "err", err)
 		}

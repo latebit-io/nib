@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -89,7 +90,7 @@ func TestTransportRequestResponse(t *testing.T) {
 		}
 	}()
 
-	result, err := tr.Request("initialize", map[string]any{"processId": 1})
+	result, err := tr.Request(context.Background(), "initialize", map[string]any{"processId": 1})
 	if err != nil {
 		t.Fatalf("Request failed: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestTransportConcurrentRequests(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result, err := tr.Request("test", map[string]int{"i": i})
+			result, err := tr.Request(context.Background(), "test", map[string]int{"i": i})
 			if err != nil {
 				t.Errorf("request %d failed: %v", i, err)
 				return
@@ -208,7 +209,7 @@ func TestTransportCloseUnblocksPending(t *testing.T) {
 	// Start a request that will never get a response.
 	done := make(chan error, 1)
 	go func() {
-		_, err := tr.Request("test", nil)
+		_, err := tr.Request(context.Background(), "test", nil)
 		done <- err
 	}()
 

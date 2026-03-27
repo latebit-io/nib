@@ -171,7 +171,7 @@ func (m *Manager) Definition(ctx context.Context, path string, line, col int) (l
 		Position:     srv.toLSPPosition(line, col),
 	}
 
-	raw, err := srv.transport.Request("textDocument/definition", params)
+	raw, err := srv.transport.Request(ctx, "textDocument/definition", params)
 	if err != nil {
 		return lang.Location{}, fmt.Errorf("definition request: %w", err)
 	}
@@ -210,7 +210,7 @@ func (m *Manager) Hover(ctx context.Context, path string, line, col int) (string
 		Position:     srv.toLSPPosition(line, col),
 	}
 
-	raw, err := srv.transport.Request("textDocument/hover", params)
+	raw, err := srv.transport.Request(ctx, "textDocument/hover", params)
 	if err != nil {
 		return "", fmt.Errorf("hover request: %w", err)
 	}
@@ -239,7 +239,7 @@ func (m *Manager) Complete(ctx context.Context, path string, line, col int) (*la
 		Position:     srv.toLSPPosition(line, col),
 	}
 
-	raw, err := srv.transport.Request("textDocument/completion", params)
+	raw, err := srv.transport.Request(ctx, "textDocument/completion", params)
 	if err != nil {
 		return nil, fmt.Errorf("completion request: %w", err)
 	}

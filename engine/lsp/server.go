@@ -103,27 +103,13 @@ func (s *Server) initialize() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	type resultChan struct {
-		raw json.RawMessage
-		err error
+	raw, err := s.transport.Request(ctx, "initialize", params)
+	if err != nil {
+		return fmt.Errorf("initialize request: %w", err)
 	}
-	ch := make(chan resultChan, 1)
-	go func() {
-		raw, err := s.transport.Request("initialize", params)
-		ch <- resultChan{raw, err}
-	}()
-
 	var result lspInitializeResult
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("initialize timed out after 30s")
-	case rc := <-ch:
-		if rc.err != nil {
-			return rc.err
-		}
-		if err := json.Unmarshal(rc.raw, &result); err != nil {
-			return fmt.Errorf("unmarshal initialize result: %w", err)
-		}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("unmarshal initialize result: %w", err)
 	}
 
 	s.capabilities = result.Capabilities
@@ -258,22 +244,12 @@ func (s *Server) Close() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ch := make(chan error, 1)
-		go func() {
-			_, err := s.transport.Request("shutdown", nil)
-			ch <- err
-		}()
-
-		select {
-		case err := <-ch:
-			if err != nil {
-				slog.Debug("lsp server: shutdown request failed", "err", err)
-			} else {
-				// Send exit notification after shutdown response.
-				_ = s.transport.Notify("exit", nil) // best-effort; transport closing next
-			}
-		case <-ctx.Done():
-			slog.Debug("lsp server: shutdown timed out, killing process")
+		_, err := s.transport.Request(ctx, "shutdown", nil)
+		if err != nil {
+			slog.Debug("lsp server: shutdown request failed", "err", err)
+		} else {
+			// Send exit notification after shutdown response.
+			_ = s.transport.Notify("exit", nil) // best-effort; transport closing next
 		}
 	}
 

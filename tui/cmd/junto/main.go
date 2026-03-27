@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,13 +18,22 @@ import (
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/engine/lsp"
 	"github.com/latebit-io/junto/engine/mcp"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/tui/internal/ui"
 )
 
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	// Parse args: [--debug] [file]
 	args := os.Args[1:]
 	debug := false
@@ -52,8 +62,7 @@ func main() {
 		var err error
 		buf, err = buffer.NewFromFile(filePath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 	} else {
 		buf = buffer.New()
@@ -88,6 +97,16 @@ func main() {
 	mcpTools, mcpCleanup := discoverMCPTools(projectRoot)
 	defer mcpCleanup()
 
+	// Shared event channel — agent and LSP both write here, frontend reads one channel.
+	events := make(chan event.Event, 128)
+
+	// Start LSP servers for language intelligence.
+	lspMgr := initLSP(projectRoot, events)
+	if lspMgr != nil {
+		sess.SetLanguageService(lspMgr)
+		defer func() { _ = lspMgr.Close() }()
+	}
+
 	// Create LLM provider and agent from environment
 	apiKey := os.Getenv("LLM_API_KEY")
 	if apiKey != "" {
@@ -100,9 +119,11 @@ func main() {
 			model = "google/gemini-2.5-flash"
 		}
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
-		events := make(chan event.Event, 64)
 		ag := agent.New(provider, sess, events, projectRoot, mcpTools...)
 		sess.SetAgent(ag, events)
+	} else if lspMgr != nil {
+		// No agent, but LSP events still need to reach the frontend.
+		sess.Events = events
 	}
 
 	app := ui.NewApp(sess)
@@ -123,11 +144,85 @@ func main() {
 
 	if _, err := p.Run(); err != nil {
 		sess.Close()
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	sess.Close()
+	return nil
 }
+
+// --- LSP wiring ---
+
+// lspServerConfig describes one LSP server in .project/lsp.json.
+type lspServerConfig struct {
+	Command    string   `json:"command"`
+	Args       []string `json:"args"`
+	Env        []string `json:"env"`
+	LanguageID string   `json:"languageId"`
+}
+
+// initLSP creates an LSP Manager from config or auto-detection.
+// Returns nil if no language servers are configured or available.
+func initLSP(projectRoot string, events chan<- event.Event) *lsp.Manager {
+	configs := loadLSPConfigs(projectRoot)
+	if len(configs) == 0 {
+		configs = defaultLSPConfigs()
+	}
+	if len(configs) == 0 {
+		return nil
+	}
+	return lsp.NewManager(configs, projectRoot, events)
+}
+
+// loadLSPConfigs reads .project/lsp.json from the project root.
+func loadLSPConfigs(projectRoot string) []lsp.ServerConfig {
+	path := filepath.Join(projectRoot, ".project", "lsp.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var raw struct {
+		Servers map[string]lspServerConfig `json:"servers"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		slog.Warn("lsp: invalid .project/lsp.json", "err", err)
+		return nil
+	}
+
+	configs := make([]lsp.ServerConfig, 0, len(raw.Servers))
+	for name, cfg := range raw.Servers {
+		if _, err := exec.LookPath(cfg.Command); err != nil {
+			slog.Warn("lsp: configured server not found on PATH", "name", name, "command", cfg.Command)
+			continue
+		}
+		configs = append(configs, lsp.ServerConfig{
+			Command:    cfg.Command,
+			Args:       cfg.Args,
+			Env:        cfg.Env,
+			LanguageID: cfg.LanguageID,
+		})
+	}
+	return configs
+}
+
+// defaultLSPConfigs auto-detects common language servers on PATH.
+func defaultLSPConfigs() []lsp.ServerConfig {
+	var configs []lsp.ServerConfig
+
+	// gopls for Go
+	if path, err := exec.LookPath("gopls"); err == nil {
+		slog.Debug("lsp: auto-detected gopls", "path", path)
+		configs = append(configs, lsp.ServerConfig{
+			Command:    "gopls",
+			Args:       []string{"serve"},
+			LanguageID: lang.DetectLanguage("main.go"), // "go"
+		})
+	}
+
+	return configs
+}
+
+// --- MCP wiring ---
 
 // mcpServerConfig describes one MCP server in .project/mcp.json.
 type mcpServerConfig struct {

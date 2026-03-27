@@ -63,6 +63,7 @@ func NewApp(sess *session.Session) AppModel {
 	svc := NewServices()
 
 	editorPane := NewEditorModel(sess.Editor, km, svc)
+	editorPane.OnSave = func() { sess.NotifySaved() }
 	agentPane := NewAgentPaneModel(svc)
 	agentPane.HasAgent = sess.HasAgent()
 	projectPane := NewProjectPaneModel(sess)
@@ -232,6 +233,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 			wpm := m.Editor.TypingWPM
 			m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
 			m.Editor.TypingWPM = wpm
+			m.Editor.OnSave = func() { m.Session.NotifySaved() }
 			m.Regions.ReplacePane("editor", m.Editor)
 		}
 		if diff != nil {
@@ -458,6 +460,7 @@ func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
 	wpm := m.Editor.TypingWPM
 	m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
 	m.Editor.TypingWPM = wpm
+	m.Editor.OnSave = func() { m.Session.NotifySaved() }
 
 	// Update region manager's pane reference and apply size.
 	m.Regions.ReplacePane("editor", m.Editor)

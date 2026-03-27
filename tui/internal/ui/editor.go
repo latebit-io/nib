@@ -85,6 +85,10 @@ type EditorModel struct {
 
 	// Viewport mapping rebuilt each Render() for mouse click resolution.
 	viewportMap []viewportEntry
+
+	// OnSave is called after a successful buffer save. Used by AppModel
+	// to notify the session (and language service) of saves. nil-safe.
+	OnSave func()
 }
 
 // NewEditorModel creates an editor model from an engine Editor.
@@ -1037,6 +1041,9 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 			m.StatusMsg = "Save failed: " + err.Error()
 		} else {
 			m.StatusMsg = "Saved"
+			if m.OnSave != nil {
+				m.OnSave()
+			}
 		}
 		return nil
 

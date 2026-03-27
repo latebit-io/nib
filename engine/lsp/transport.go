@@ -406,7 +406,8 @@ func (t *Transport) handleServerRequest(id int, method string, _ json.RawMessage
 		ID:      id,
 		Error:   jsonRPCError{Code: -32601, Message: "method not supported: " + method},
 	})
-	_ = t.send(resp) // best-effort; send() handles framing
+	// Ignore send error: best-effort response — server may have moved on or closed.
+	_ = t.send(resp)
 }
 
 // handleNotification invokes the registered callback for a notification.

@@ -344,17 +344,14 @@ func (m *Manager) serverFor(languageID string) *Server {
 }
 
 // serverForPath returns the server for a file's language.
+// Uses the stored docLang from DidOpen for consistent routing.
 func (m *Manager) serverForPath(path string) (*Server, error) {
-	languageID := lang.DetectLanguage(path)
-	if languageID == "" {
-		return nil, fmt.Errorf("unsupported language for %s", path)
-	}
-
 	m.mu.RLock()
+	languageID := m.docLang[path]
 	srv, ok := m.servers[languageID]
 	m.mu.RUnlock()
-	if !ok || srv == nil {
-		return nil, fmt.Errorf("no LSP server running for language %q", languageID)
+	if languageID == "" || !ok || srv == nil {
+		return nil, fmt.Errorf("document not open or no LSP server for %s", path)
 	}
 	return srv, nil
 }

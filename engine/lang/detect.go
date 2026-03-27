@@ -51,7 +51,6 @@ var languageMap = map[string]string{
 	".mli":   "ocaml",
 	".dart":  "dart",
 	".r":     "r",
-	".R":     "r",
 	".php":   "php",
 	".vim":   "vim",
 	".tf":    "terraform",
@@ -63,10 +62,6 @@ func DetectLanguage(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == "" {
 		return ""
-	}
-	// Special case: .R is case-sensitive (R language)
-	if filepath.Ext(path) == ".R" {
-		return "r"
 	}
 	return languageMap[ext]
 }

@@ -29,6 +29,15 @@ type DocumentSyncer interface {
 // --- Optional capability interfaces ---
 // Consumers check via type assertion: if dp, ok := svc.(DiagnosticProvider); ok { ... }
 
+// FullContentSyncer indicates the backend needs full document content
+// in DidChange calls rather than incremental edits. This occurs when the
+// server cannot accept rune-based positions (e.g., UTF-32 encoding was
+// not negotiated). Consumers should send a single TextChange with
+// FullContent=true containing the entire buffer.
+type FullContentSyncer interface {
+	NeedsFullContentSync() bool
+}
+
 // DiagnosticProvider supplies compiler errors, warnings, and hints.
 // Notifications that diagnostics have changed arrive via event.DiagnosticsUpdated
 // on the shared event channel. This interface is query-only.

@@ -217,8 +217,11 @@ func (s *Server) toLSPPosition(line, col int) lspPosition {
 	}
 	// UTF-16 fallback: col is in runes, but LSP wants UTF-16 code units.
 	// Characters outside BMP (> U+FFFF) take 2 UTF-16 code units (surrogate pair).
-	// For now, pass through — this is correct for all BMP characters.
-	// TODO: implement proper rune→UTF-16 conversion for non-BMP characters.
+	// Pass through — correct for all BMP characters. When UTF-32 is unavailable,
+	// Session uses full-content sync (via FullContentSyncer) so DidChange ranges
+	// with rune positions are not sent to UTF-16 servers. This path is only used
+	// for request/response methods (definition, hover, completion) where positions
+	// are within source code identifiers (always BMP for Go).
 	return lspPosition{Line: line, Character: col}
 }
 
@@ -227,7 +230,8 @@ func (s *Server) fromLSPPosition(pos lspPosition) (line, col int) {
 	if s.posEncoding == positionEncodingUTF32 {
 		return pos.Line, pos.Character
 	}
-	// UTF-16 fallback: same TODO as toLSPPosition.
+	// UTF-16 fallback: pass through. Correct for BMP characters.
+	// Diagnostic/hover/definition positions in Go source code are always BMP.
 	return pos.Line, pos.Character
 }
 

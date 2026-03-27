@@ -377,6 +377,7 @@ func (t *Transport) handleServerRequest(id int, method string, _ json.RawMessage
 	slog.Debug("lsp transport: server request (unhandled)", "method", method, "id", id)
 
 	// JSON-RPC error code -32601 = Method not found.
+	// Marshal cannot fail: struct has only primitive fields with known types.
 	resp, _ := json.Marshal(struct {
 		JSONRPC string       `json:"jsonrpc"`
 		ID      int          `json:"id"`
@@ -386,7 +387,7 @@ func (t *Transport) handleServerRequest(id int, method string, _ json.RawMessage
 		ID:      id,
 		Error:   jsonRPCError{Code: -32601, Message: "method not supported: " + method},
 	})
-	_ = t.send(frame(resp)) // best-effort; server may have already moved on
+	_ = t.send(resp) // best-effort; send() handles framing
 }
 
 // handleNotification invokes the registered callback for a notification.

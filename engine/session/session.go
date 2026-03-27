@@ -220,17 +220,41 @@ func (s *Session) wireBufferSync(e *editor.Editor) {
 	// Open document in language service.
 	s.langSyncer.DidOpen(canon, languageID, e.Buf.Content())
 
+	// Check if the backend needs full document content instead of incremental
+	// changes (e.g., UTF-32 encoding not negotiated, so rune-based positions
+	// would be incorrect for non-BMP characters).
+	fullSync := false
+	if fcs, ok := s.langSyncer.(lang.FullContentSyncer); ok {
+		fullSync = fcs.NeedsFullContentSync()
+	}
+
 	// Compose with existing OnChange handler (if any) so we don't
 	// silently disconnect other observers. The previous handler runs first.
 	// Note: DrainChanges returns and clears — if a future observer also
 	// needs changes, Buffer should switch to a multi-subscriber model.
+	//
+	// Concurrency: this read-modify-write on e.Buf.OnChange is safe because
+	// wireBufferSync is only called on editors that were just created (no
+	// other goroutine has a reference yet) or during startup before the TUI
+	// and agent goroutines exist. The wiredEditors guard ensures at-most-once.
+	buf := e.Buf // capture for closure
 	prev := e.Buf.OnChange
 	e.Buf.OnChange = func() {
 		if prev != nil {
 			prev()
 		}
-		changes := e.Buf.DrainChanges()
+		// Drain changes even in full-sync mode to prevent unbounded growth.
+		changes := buf.DrainChanges()
 		if len(changes) == 0 {
+			return
+		}
+		if fullSync {
+			// Full-content fallback: send entire buffer instead of
+			// incremental changes with potentially incorrect positions.
+			s.langSyncer.DidChange(canon, []lang.TextChange{{
+				FullContent: true,
+				Text:        buf.Content(),
+			}})
 			return
 		}
 		textChanges := make([]lang.TextChange, len(changes))

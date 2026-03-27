@@ -22,6 +22,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	servers  map[string]*Server           // languageID → running server
 	versions map[string]int               // file path → document version
+	docLang  map[string]string            // file path → languageID (set at DidOpen)
 	diags    map[string][]lang.Diagnostic // file path → diagnostics
 }
 
@@ -43,6 +44,7 @@ func NewManager(configs []ServerConfig, projectRoot string, events chan<- event.
 		events:      events,
 		servers:     make(map[string]*Server),
 		versions:    make(map[string]int),
+		docLang:     make(map[string]string),
 		diags:       make(map[string][]lang.Diagnostic),
 	}
 }
@@ -51,6 +53,8 @@ func NewManager(configs []ServerConfig, projectRoot string, events chan<- event.
 
 // DidOpen notifies the language server that a document was opened.
 // Starts the server lazily if this is the first file for the language.
+// The languageID is stored and used for all subsequent lifecycle events
+// (DidChange, DidSave, DidClose) to ensure consistent server routing.
 func (m *Manager) DidOpen(path string, languageID string, content string) {
 	srv := m.serverFor(languageID)
 	if srv == nil {
@@ -59,22 +63,20 @@ func (m *Manager) DidOpen(path string, languageID string, content string) {
 
 	m.mu.Lock()
 	m.versions[path] = 1
+	m.docLang[path] = languageID
 	m.mu.Unlock()
 
 	srv.DidOpen(pathToURI(path), languageID, 1, content)
 }
 
 // DidChange sends incremental changes to the language server.
+// Routes to the server that handled DidOpen (not re-detected).
 func (m *Manager) DidChange(path string, changes []lang.TextChange) {
-	languageID := lang.DetectLanguage(path)
-	if languageID == "" {
-		return
-	}
-
 	m.mu.RLock()
+	languageID := m.docLang[path]
 	srv, ok := m.servers[languageID]
 	m.mu.RUnlock()
-	if !ok || srv == nil {
+	if languageID == "" || !ok || srv == nil {
 		return
 	}
 
@@ -87,16 +89,13 @@ func (m *Manager) DidChange(path string, changes []lang.TextChange) {
 }
 
 // DidSave notifies the language server that a document was saved.
+// Routes to the server that handled DidOpen (not re-detected).
 func (m *Manager) DidSave(path string) {
-	languageID := lang.DetectLanguage(path)
-	if languageID == "" {
-		return
-	}
-
 	m.mu.RLock()
+	languageID := m.docLang[path]
 	srv, ok := m.servers[languageID]
 	m.mu.RUnlock()
-	if !ok || srv == nil {
+	if languageID == "" || !ok || srv == nil {
 		return
 	}
 
@@ -104,16 +103,13 @@ func (m *Manager) DidSave(path string) {
 }
 
 // DidClose notifies the language server that a document was closed.
+// Routes to the server that handled DidOpen (not re-detected).
 func (m *Manager) DidClose(path string) {
-	languageID := lang.DetectLanguage(path)
-	if languageID == "" {
-		return
-	}
-
 	m.mu.RLock()
+	languageID := m.docLang[path]
 	srv, ok := m.servers[languageID]
 	m.mu.RUnlock()
-	if !ok || srv == nil {
+	if languageID == "" || !ok || srv == nil {
 		return
 	}
 
@@ -121,6 +117,7 @@ func (m *Manager) DidClose(path string) {
 
 	m.mu.Lock()
 	delete(m.versions, path)
+	delete(m.docLang, path)
 	delete(m.diags, path)
 	m.mu.Unlock()
 }
@@ -142,6 +139,23 @@ func (m *Manager) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// --- lang.FullContentSyncer ---
+
+// NeedsFullContentSync returns true if any running server uses UTF-16
+// position encoding (i.e., UTF-32 was not negotiated). In that case,
+// incremental changes with rune-based positions would be incorrect for
+// non-BMP characters. Callers should send full document content instead.
+func (m *Manager) NeedsFullContentSync() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, srv := range m.servers {
+		if srv.posEncoding != positionEncodingUTF32 {
+			return true
+		}
+	}
+	return false
 }
 
 // --- lang.DiagnosticProvider ---

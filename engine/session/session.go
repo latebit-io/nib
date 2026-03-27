@@ -18,6 +18,7 @@ import (
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
+	"github.com/latebit-io/junto/engine/lang"
 )
 
 // Session coordinates the interaction between the developer and agent.
@@ -79,6 +80,10 @@ type Session struct {
 	// modifiedFiles tracks files changed by agent edits this session.
 	// Canonical absolute paths as keys. Guarded by mu.
 	modifiedFiles map[string]bool
+
+	// langSyncer is the language service port (optional, nil when no LSP).
+	// Session depends on the interface, never on lsp.Manager directly (DIP).
+	langSyncer lang.DocumentSyncer
 }
 
 // New creates a session in editor-only mode. Call SetAgent to enable the
@@ -133,6 +138,72 @@ func (s *Session) SetAgent(ag *agent.Agent, events <-chan event.Event) {
 // HasAgent returns true if the session has an active agent.
 func (s *Session) HasAgent() bool {
 	return s.agent != nil
+}
+
+// SetLanguageService injects the language service port (e.g., lsp.Manager).
+// Session depends on the lang.DocumentSyncer interface, not any concrete type.
+// Wires Buffer.OnChange for the current editor to auto-sync with LSP.
+func (s *Session) SetLanguageService(syncer lang.DocumentSyncer) {
+	s.langSyncer = syncer
+	s.wireBufferSync(s.Editor)
+}
+
+// HasLanguageService reports whether a language service is available.
+func (s *Session) HasLanguageService() bool {
+	return s.langSyncer != nil
+}
+
+// LanguageService returns the language service port for capability checks.
+// Callers use type assertion to check optional interfaces:
+//
+//	if dp, ok := sess.LanguageService().(lang.DiagnosticProvider); ok { ... }
+func (s *Session) LanguageService() lang.DocumentSyncer {
+	return s.langSyncer
+}
+
+// NotifySaved notifies the language service that the current file was saved.
+// Called by the frontend after a successful buffer save.
+func (s *Session) NotifySaved() {
+	if s.langSyncer == nil {
+		return
+	}
+	s.langSyncer.DidSave(s.ActiveFile())
+}
+
+// wireBufferSync sets up Buffer.OnChange for an editor to auto-sync
+// incremental changes with the language service. Also sends DidOpen.
+func (s *Session) wireBufferSync(e *editor.Editor) {
+	if s.langSyncer == nil || e == nil {
+		return
+	}
+	path := e.Buf.Path
+	languageID := lang.DetectLanguage(path)
+	if languageID == "" {
+		return
+	}
+
+	// Open document in language service.
+	s.langSyncer.DidOpen(path, languageID, e.Buf.Content())
+
+	// Auto-sync: every buffer mutation drains changes and sends to LSP.
+	e.Buf.OnChange = func() {
+		changes := e.Buf.DrainChanges()
+		if len(changes) == 0 {
+			return
+		}
+		textChanges := make([]lang.TextChange, len(changes))
+		for i, c := range changes {
+			textChanges[i] = lang.TextChange{
+				StartLine:   c.StartLine,
+				StartCol:    c.StartCol,
+				EndLine:     c.EndLine,
+				EndCol:      c.EndCol,
+				Text:        c.Text,
+				FullContent: c.FullContent,
+			}
+		}
+		s.langSyncer.DidChange(path, textChanges)
+	}
 }
 
 // ActiveFile returns the path of the currently active file.
@@ -580,6 +651,9 @@ func (s *Session) SwitchTo(path string) error {
 	s.activeFile = canon
 	s.mu.Unlock()
 
+	// Wire LSP sync for the new editor.
+	s.wireBufferSync(e)
+
 	if addToContext {
 		s.saveContext()
 	}
@@ -622,6 +696,15 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 
 // Close frees resources for all open editors.
 func (s *Session) Close() {
+	// Notify language service of all document closes.
+	if s.langSyncer != nil {
+		s.mu.RLock()
+		for path := range s.editors {
+			s.langSyncer.DidClose(path)
+		}
+		s.mu.RUnlock()
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, e := range s.editors {

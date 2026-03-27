@@ -24,6 +24,10 @@ const outboxSize = 256
 // Prevents OOM from a buggy or malicious server sending a huge Content-Length.
 const maxMessageSize = 10 * 1024 * 1024
 
+// maxHeaderSize is the upper bound on total header bytes before the body.
+// Prevents unbounded allocation from endless header lines.
+const maxHeaderSize = 64 * 1024
+
 // Transport implements JSON-RPC 2.0 over Content-Length framed stdio.
 // Writes are async (non-blocking Send). Reads are dispatched in a background
 // goroutine that routes responses to pending requests and notifications to
@@ -126,9 +130,14 @@ type pendingResponse struct {
 // or the context is cancelled. Returns the result payload or an error.
 // Thread-safe.
 func (t *Transport) Request(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	paramBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("marshal params: %w", err)
+	// JSON-RPC 2.0: params must be omitted (not null) when absent.
+	var paramBytes json.RawMessage
+	if params != nil {
+		var err error
+		paramBytes, err = json.Marshal(params)
+		if err != nil {
+			return nil, fmt.Errorf("marshal params: %w", err)
+		}
 	}
 
 	t.mu.Lock()
@@ -173,9 +182,14 @@ func (t *Transport) Request(ctx context.Context, method string, params any) (jso
 
 // Notify sends a JSON-RPC notification (no response expected). Non-blocking.
 func (t *Transport) Notify(method string, params any) error {
-	paramBytes, err := json.Marshal(params)
-	if err != nil {
-		return fmt.Errorf("marshal params: %w", err)
+	// JSON-RPC 2.0: params must be omitted (not null) when absent.
+	var paramBytes json.RawMessage
+	if params != nil {
+		var err error
+		paramBytes, err = json.Marshal(params)
+		if err != nil {
+			return fmt.Errorf("marshal params: %w", err)
+		}
 	}
 
 	msg := jsonRPCNotification{
@@ -312,10 +326,15 @@ func (t *Transport) readLoop() {
 func (t *Transport) readMessage() ([]byte, error) {
 	// Read headers until empty line.
 	contentLength := -1
+	headerBytes := 0
 	for {
 		line, err := t.reader.ReadString('\n')
 		if err != nil {
 			return nil, err
+		}
+		headerBytes += len(line)
+		if headerBytes > maxHeaderSize {
+			return nil, fmt.Errorf("header size %d exceeds max %d", headerBytes, maxHeaderSize)
 		}
 		line = strings.TrimRight(line, "\r\n")
 		if line == "" {

@@ -88,8 +88,10 @@ type Session struct {
 	langSyncer lang.DocumentSyncer
 
 	// wiredEditors tracks which editors have had LSP sync wired (by canonical path).
-	// Prevents duplicate DidOpen notifications. Guarded by mu.
-	wiredEditors map[string]bool
+	// Maps to the previous OnChange handler that was installed before wiring,
+	// so unwireBufferSync can restore it. nil func() means no previous handler.
+	// Guarded by mu.
+	wiredEditors map[string]func()
 }
 
 // New creates a session in editor-only mode. Call SetAgent to enable the
@@ -208,13 +210,14 @@ func (s *Session) wireBufferSync(e *editor.Editor) {
 	// TUI goroutine (SwitchTo) or agent goroutine (editorForEdit, WriteFile).
 	s.mu.Lock()
 	if s.wiredEditors == nil {
-		s.wiredEditors = make(map[string]bool)
+		s.wiredEditors = make(map[string]func())
 	}
-	if s.wiredEditors[canon] {
+	if _, alreadyWired := s.wiredEditors[canon]; alreadyWired {
 		s.mu.Unlock()
 		return
 	}
-	s.wiredEditors[canon] = true
+	// Store the previous OnChange handler so unwireBufferSync can restore it.
+	s.wiredEditors[canon] = e.Buf.OnChange
 	s.mu.Unlock()
 
 	// Open document in language service.
@@ -281,13 +284,16 @@ func (s *Session) unwireBufferSync(e *editor.Editor) {
 	canon := s.CanonPath(e.Buf.Path)
 
 	s.mu.Lock()
-	wired := s.wiredEditors[canon]
+	prev, wired := s.wiredEditors[canon]
 	if wired {
 		delete(s.wiredEditors, canon)
 	}
 	s.mu.Unlock()
 
 	if wired {
+		// Restore the previous OnChange handler, removing the LSP closure.
+		// Prevents stale DidChange calls if the old editor is mutated after close.
+		e.Buf.OnChange = prev
 		s.langSyncer.DidClose(canon)
 	}
 }

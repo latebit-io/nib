@@ -55,6 +55,13 @@ func NewManager(configs []ServerConfig, projectRoot string, events chan<- event.
 // Starts the server lazily if this is the first file for the language.
 // The languageID is stored and used for all subsequent lifecycle events
 // (DidChange, DidSave, DidClose) to ensure consistent server routing.
+//
+// State is updated optimistically before the notification because LSP
+// notifications are fire-and-forget (no response). Rolling back on failure
+// creates worse bugs: DidChange would silently drop all changes for a
+// document with no docLang entry, and version gaps violate the LSP spec's
+// monotonic version requirement. Transport failures are handled by
+// server reconnection, not state rollback.
 func (m *Manager) DidOpen(path string, languageID string, content string) {
 	srv := m.serverFor(languageID)
 	if srv == nil {
@@ -258,9 +265,14 @@ func (m *Manager) Complete(ctx context.Context, path string, line, col int) (*la
 		return nil, fmt.Errorf("completion request: %w", err)
 	}
 
+	// LSP spec allows CompletionList or bare []CompletionItem.
 	var list lspCompletionList
 	if err := json.Unmarshal(raw, &list); err != nil {
-		return nil, fmt.Errorf("unmarshal completions: %w", err)
+		var items []lspCompletionItem
+		if err2 := json.Unmarshal(raw, &items); err2 != nil {
+			return nil, fmt.Errorf("unmarshal completions: %w", err)
+		}
+		list = lspCompletionList{Items: items}
 	}
 
 	items := make([]lang.CompletionItem, len(list.Items))

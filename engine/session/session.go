@@ -178,6 +178,18 @@ func (s *Session) LanguageService() lang.DocumentSyncer {
 	return s.langSyncer
 }
 
+// Diagnostics returns the current diagnostics for the given file path.
+// Returns nil if no language service is available or it doesn't support diagnostics.
+// This encapsulates the DiagnosticProvider capability check so frontends
+// don't need to perform type assertions on the language service.
+func (s *Session) Diagnostics(path string) []lang.Diagnostic {
+	dp, ok := s.langSyncer.(lang.DiagnosticProvider)
+	if !ok {
+		return nil
+	}
+	return dp.Diagnostics(path)
+}
+
 // NotifySaved notifies the language service that the current file was saved.
 // Called by the frontend after a successful buffer save.
 func (s *Session) NotifySaved() {

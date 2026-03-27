@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -24,6 +25,21 @@ var (
 	// agentLineGutterStyle renders the gutter for agent-written lines.
 	agentLineGutterStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("34")) // green
+)
+
+// Diagnostic gutter styles — severity-colored icons in the gutter margin.
+var (
+	diagErrorGutterStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
+	diagWarningGutterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
+	diagInfoGutterStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // blue
+	diagUnderlineStyle     = lipgloss.NewStyle().Underline(true)
+)
+
+// Diagnostic gutter icons by severity.
+const (
+	diagErrorIcon   = "✖"
+	diagWarningIcon = "▲"
+	diagInfoIcon    = "●"
 )
 
 // lineKind classifies a viewport row for mouse click routing.
@@ -89,6 +105,10 @@ type EditorModel struct {
 	// OnSave is called after a successful buffer save. Used by AppModel
 	// to notify the session (and language service) of saves. nil-safe.
 	OnSave func()
+
+	// Diagnostics holds the current set of diagnostics for this file.
+	// Set by AppModel when diagnostics update or file switches.
+	Diagnostics []lang.Diagnostic
 }
 
 // NewEditorModel creates an editor model from an engine Editor.
@@ -104,6 +124,21 @@ func NewEditorModel(e *editor.Editor, km *Keymap, svc *Services) *EditorModel {
 // access from AppModel (e.g., BeginIncrementalEdit, cursor queries).
 func (m *EditorModel) Engine() *editor.Editor {
 	return m.eng
+}
+
+// diagnosticForLine returns the highest-severity diagnostic touching the given line.
+// Returns nil if no diagnostic exists for the line.
+func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
+	var best *lang.Diagnostic
+	for i := range m.Diagnostics {
+		d := &m.Diagnostics[i]
+		if d.StartLine <= line && line <= d.EndLine {
+			if best == nil || d.Severity < best.Severity {
+				best = d
+			}
+		}
+	}
+	return best
 }
 
 // SetSize updates the editor dimensions. Implements Pane.
@@ -346,15 +381,26 @@ func (m *EditorModel) renderNormalLine(
 ) string {
 	var line strings.Builder
 
-	origin := m.eng.Buf.LineOrigin(lineIdx)
-	gutterSuffix := " "
-	renderGutter := gutterStyle
-	if origin == buffer.OriginAgent {
-		gutterSuffix = "j"
-		renderGutter = agentLineGutterStyle
+	numText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1)
+	if diag := m.diagnosticForLine(lineIdx); diag != nil {
+		// Diagnostic icon takes priority in the gutter suffix.
+		line.WriteString(gutterStyle.Render(numText))
+		var icon string
+		var iconStyle lipgloss.Style
+		switch diag.Severity {
+		case lang.SeverityError:
+			icon, iconStyle = diagErrorIcon, diagErrorGutterStyle
+		case lang.SeverityWarning:
+			icon, iconStyle = diagWarningIcon, diagWarningGutterStyle
+		default:
+			icon, iconStyle = diagInfoIcon, diagInfoGutterStyle
+		}
+		line.WriteString(iconStyle.Render(icon))
+	} else if m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent {
+		line.WriteString(agentLineGutterStyle.Render(numText + "j"))
+	} else {
+		line.WriteString(gutterStyle.Render(numText + " "))
 	}
-	gutterText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1) + gutterSuffix
-	line.WriteString(renderGutter.Render(gutterText))
 
 	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
@@ -418,6 +464,36 @@ func (m *EditorModel) renderNormalLine(
 		}
 	}
 
+	// Diagnostic underlines: mark display columns within diagnostic ranges.
+	diagUnderline := make([]bool, contentW)
+	for i := range m.Diagnostics {
+		d := &m.Diagnostics[i]
+		if d.StartLine > lineIdx || d.EndLine < lineIdx {
+			continue
+		}
+		startBufCol := 0
+		if lineIdx == d.StartLine {
+			startBufCol = d.StartCol
+		}
+		endBufCol := len(rawRunes)
+		if lineIdx == d.EndLine {
+			endBufCol = d.EndCol
+		}
+		if startBufCol > len(rawRunes) {
+			startBufCol = len(rawRunes)
+		}
+		if endBufCol > len(rawRunes) {
+			endBufCol = len(rawRunes)
+		}
+		if startBufCol < endBufCol {
+			startDisp := bufToDisp[startBufCol]
+			endDisp := bufToDisp[endBufCol]
+			for j := startDisp; j < endDisp && j < contentW; j++ {
+				diagUnderline[j] = true
+			}
+		}
+	}
+
 	// Span-based rendering: batch consecutive characters that share the same
 	// effective style into a single lipgloss.Render call. This reduces overhead
 	// from O(columns) to O(style-transitions) — typically 5-20x fewer calls.
@@ -459,6 +535,7 @@ func (m *EditorModel) renderNormalLine(
 
 	flushSpan := func(start, end int) {
 		text := string(displayed[start:end])
+		ul := diagUnderline[start]
 		switch colTags[start] {
 		case tagCursor:
 			line.WriteString(cursorStyle.Render(text))
@@ -467,16 +544,24 @@ func (m *EditorModel) renderNormalLine(
 		case tagSel:
 			line.WriteString(selectionStyle.Render(text))
 		case tagPlain:
-			line.WriteString(text)
+			if ul {
+				line.WriteString(diagUnderlineStyle.Render(text))
+			} else {
+				line.WriteString(text)
+			}
 		default:
-			line.WriteString(charStyles[start].Render(text))
+			s := charStyles[start]
+			if ul {
+				s = s.Underline(true)
+			}
+			line.WriteString(s.Render(text))
 		}
 	}
 
 	if contentW > 0 {
 		spanStart := 0
 		for j := 1; j < contentW; j++ {
-			if colTags[j] != colTags[spanStart] {
+			if colTags[j] != colTags[spanStart] || diagUnderline[j] != diagUnderline[spanStart] {
 				flushSpan(spanStart, j)
 				spanStart = j
 			}
@@ -678,6 +763,17 @@ func (m *EditorModel) renderStatusBar() string {
 	left := fmt.Sprintf(" %s%s", name, modified)
 	if m.StatusMsg != "" {
 		left += "  " + m.StatusMsg
+	} else if diag := m.diagnosticForLine(m.eng.CursorLine); diag != nil {
+		var prefix string
+		switch diag.Severity {
+		case lang.SeverityError:
+			prefix = "error"
+		case lang.SeverityWarning:
+			prefix = "warning"
+		default:
+			prefix = "info"
+		}
+		left += "  " + prefix + ": " + diag.Message
 	}
 
 	// Show cursor position: overlay, agent animation, or buffer.

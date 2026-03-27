@@ -235,6 +235,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 			m.Editor.TypingWPM = wpm
 			m.Editor.OnSave = func() { m.Session.NotifySaved() }
 			m.Regions.ReplacePane("editor", m.Editor)
+			m.refreshDiagnostics(m.Session.ActiveFile())
 		}
 		if diff != nil {
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
@@ -266,6 +267,8 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 		m.refreshProjectPane()
+	case event.DiagnosticsUpdated:
+		m.refreshDiagnostics(e.Path)
 	}
 }
 
@@ -466,6 +469,7 @@ func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
 	m.Regions.ReplacePane("editor", m.Editor)
 
 	slog.Debug("file opened", "path", path)
+	m.refreshDiagnostics(m.Session.ActiveFile())
 	m.refreshProjectPane()
 	return m, nil
 }
@@ -514,6 +518,18 @@ func (m *AppModel) renderIntentBar() string {
 	}
 
 	return style.Render(text)
+}
+
+// refreshDiagnostics queries the session for diagnostics on the given path
+// and updates the editor model. Only updates if path matches the active file.
+func (m *AppModel) refreshDiagnostics(path string) {
+	if !m.Session.HasLanguageService() {
+		return
+	}
+	if m.Session.ActiveFile() != path {
+		return
+	}
+	m.Editor.Diagnostics = m.Session.Diagnostics(path)
 }
 
 // refreshProjectPane rebuilds the project pane if visible, or marks it

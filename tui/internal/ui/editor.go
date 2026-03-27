@@ -106,9 +106,17 @@ type EditorModel struct {
 	// to notify the session (and language service) of saves. nil-safe.
 	OnSave func()
 
-	// Diagnostics holds the current set of diagnostics for this file.
-	// Set by AppModel when diagnostics update or file switches.
-	Diagnostics []lang.Diagnostic
+	// diagnostics holds the current set of diagnostics for this file.
+	// Set via SetDiagnostics which also builds the per-line lookup map.
+	diagnostics []lang.Diagnostic
+
+	// diagByLine maps line number → highest-severity diagnostic on that line.
+	// Precomputed by SetDiagnostics for O(1) lookup during rendering.
+	diagByLine map[int]*lang.Diagnostic
+
+	// diagUnderline is a reusable scratch buffer for underline computation
+	// in renderNormalLine. Avoids per-line per-frame allocation.
+	diagUnderline []bool
 }
 
 // NewEditorModel creates an editor model from an engine Editor.
@@ -126,19 +134,29 @@ func (m *EditorModel) Engine() *editor.Editor {
 	return m.eng
 }
 
-// diagnosticForLine returns the highest-severity diagnostic touching the given line.
-// Returns nil if no diagnostic exists for the line.
-func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
-	var best *lang.Diagnostic
-	for i := range m.Diagnostics {
-		d := &m.Diagnostics[i]
-		if d.StartLine <= line && line <= d.EndLine {
-			if best == nil || d.Severity < best.Severity {
-				best = d
+// SetDiagnostics updates the diagnostic list and precomputes the per-line
+// lookup map. Use this instead of assigning diagnostics directly.
+func (m *EditorModel) SetDiagnostics(diags []lang.Diagnostic) {
+	m.diagnostics = diags
+	if len(diags) == 0 {
+		m.diagByLine = nil
+		return
+	}
+	m.diagByLine = make(map[int]*lang.Diagnostic, len(diags))
+	for i := range m.diagnostics {
+		d := &m.diagnostics[i]
+		for line := d.StartLine; line <= d.EndLine; line++ {
+			if existing, ok := m.diagByLine[line]; !ok || d.Severity < existing.Severity {
+				m.diagByLine[line] = d
 			}
 		}
 	}
-	return best
+}
+
+// diagnosticForLine returns the highest-severity diagnostic touching the given line.
+// O(1) lookup from the precomputed map built by SetDiagnostics.
+func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
+	return m.diagByLine[line]
 }
 
 // SetSize updates the editor dimensions. Implements Pane.
@@ -465,9 +483,14 @@ func (m *EditorModel) renderNormalLine(
 	}
 
 	// Diagnostic underlines: mark display columns within diagnostic ranges.
-	diagUnderline := make([]bool, contentW)
-	for i := range m.Diagnostics {
-		d := &m.Diagnostics[i]
+	// Reuse scratch buffer to avoid per-line allocation.
+	if cap(m.diagUnderline) < contentW {
+		m.diagUnderline = make([]bool, contentW)
+	}
+	diagUnderline := m.diagUnderline[:contentW]
+	clear(diagUnderline)
+	for i := range m.diagnostics {
+		d := &m.diagnostics[i]
 		if d.StartLine > lineIdx || d.EndLine < lineIdx {
 			continue
 		}
@@ -485,12 +508,14 @@ func (m *EditorModel) renderNormalLine(
 		if endBufCol > len(rawRunes) {
 			endBufCol = len(rawRunes)
 		}
-		if startBufCol < endBufCol {
-			startDisp := bufToDisp[startBufCol]
-			endDisp := bufToDisp[endBufCol]
-			for j := startDisp; j < endDisp && j < contentW; j++ {
-				diagUnderline[j] = true
-			}
+		startDisp := bufToDisp[startBufCol]
+		endDisp := bufToDisp[endBufCol]
+		// Zero-width diagnostics (e.g., missing token) get at least one cell.
+		if endDisp <= startDisp && startDisp < contentW {
+			endDisp = startDisp + 1
+		}
+		for j := startDisp; j < endDisp && j < contentW; j++ {
+			diagUnderline[j] = true
 		}
 	}
 

@@ -526,10 +526,11 @@ func (m *AppModel) refreshDiagnostics(path string) {
 	if !m.Session.HasLanguageService() {
 		return
 	}
-	if m.Session.ActiveFile() != path {
+	canon := m.Session.CanonPath(path)
+	if m.Session.ActiveFile() != canon {
 		return
 	}
-	m.Editor.Diagnostics = m.Session.Diagnostics(path)
+	m.Editor.SetDiagnostics(m.Session.Diagnostics(canon))
 }
 
 // refreshProjectPane rebuilds the project pane if visible, or marks it

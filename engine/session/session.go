@@ -84,6 +84,10 @@ type Session struct {
 	// langSyncer is the language service port (optional, nil when no LSP).
 	// Session depends on the interface, never on lsp.Manager directly (DIP).
 	langSyncer lang.DocumentSyncer
+
+	// wiredEditors tracks which editors have had LSP sync wired (by path).
+	// Prevents duplicate DidOpen notifications.
+	wiredEditors map[string]bool
 }
 
 // New creates a session in editor-only mode. Call SetAgent to enable the
@@ -172,21 +176,41 @@ func (s *Session) NotifySaved() {
 
 // wireBufferSync sets up Buffer.OnChange for an editor to auto-sync
 // incremental changes with the language service. Also sends DidOpen.
+// Safe to call multiple times — no-op if the editor is already wired.
+// Composes with any existing OnChange handler (does not overwrite).
 func (s *Session) wireBufferSync(e *editor.Editor) {
 	if s.langSyncer == nil || e == nil {
 		return
 	}
 	path := e.Buf.Path
+	if path == "" {
+		return
+	}
+	// Already wired for this path — don't send duplicate DidOpen.
+	if s.wiredEditors[path] {
+		return
+	}
 	languageID := lang.DetectLanguage(path)
 	if languageID == "" {
 		return
 	}
+	if s.wiredEditors == nil {
+		s.wiredEditors = make(map[string]bool)
+	}
+	s.wiredEditors[path] = true
 
 	// Open document in language service.
 	s.langSyncer.DidOpen(path, languageID, e.Buf.Content())
 
-	// Auto-sync: every buffer mutation drains changes and sends to LSP.
+	// Compose with existing OnChange handler (if any) so we don't
+	// silently disconnect other observers. The previous handler runs first.
+	// Note: DrainChanges returns and clears — if a future observer also
+	// needs changes, Buffer should switch to a multi-subscriber model.
+	prev := e.Buf.OnChange
 	e.Buf.OnChange = func() {
+		if prev != nil {
+			prev()
+		}
 		changes := e.Buf.DrainChanges()
 		if len(changes) == 0 {
 			return
@@ -482,6 +506,10 @@ func (s *Session) WriteFile(path, content string) error {
 		s.contextSet[canon] = true
 	}
 	s.mu.Unlock()
+
+	// Wire LSP sync for the new editor.
+	s.wireBufferSync(e)
+
 	if addToContext {
 		s.saveContext()
 	}
@@ -691,18 +719,25 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 		s.activeFile = ""
 	}
 	s.mu.Unlock()
+
+	// Wire LSP sync for the new editor.
+	s.wireBufferSync(newEditor)
+
 	return old
 }
 
 // Close frees resources for all open editors.
 func (s *Session) Close() {
-	// Notify language service of all document closes.
+	// Notify language service of all document closes, then shut it down.
 	if s.langSyncer != nil {
 		s.mu.RLock()
 		for path := range s.editors {
 			s.langSyncer.DidClose(path)
 		}
 		s.mu.RUnlock()
+		if err := s.langSyncer.Close(); err != nil {
+			slog.Warn("close language service", "err", err)
+		}
 	}
 
 	s.mu.RLock()
@@ -1045,5 +1080,9 @@ func (s *Session) editorForEdit() *editor.Editor {
 	s.mu.Lock()
 	s.editors[canon] = e
 	s.mu.Unlock()
+
+	// Wire LSP sync for auto-opened editor.
+	s.wireBufferSync(e)
+
 	return e
 }

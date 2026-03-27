@@ -224,7 +224,12 @@ func (t *Transport) writeLoop() {
 				return
 			}
 			if _, err := t.writer.Write(msg); err != nil {
-				slog.Debug("lsp transport: write error", "err", err)
+				// Suppress expected write errors during shutdown.
+				select {
+				case <-t.closed:
+				default:
+					slog.Debug("lsp transport: write error", "err", err)
+				}
 				return
 			}
 		case <-t.closed:

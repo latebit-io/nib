@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -44,7 +45,9 @@ type ServerConfig struct {
 func newServer(cfg ServerConfig, rootURI string) (*Server, error) {
 	cmd := exec.Command(cfg.Command, cfg.Args...)
 	cmd.Env = append(os.Environ(), cfg.Env...)
-	cmd.Stderr = os.Stderr // pipe server errors to our stderr for debugging
+	// Discard stderr to avoid corrupting TUI alt-screen.
+	// Server errors are reported via JSON-RPC error responses.
+	cmd.Stderr = io.Discard
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -127,11 +130,14 @@ func (s *Server) initialize() error {
 
 	// Determine position encoding. Server responds with what it chose.
 	s.posEncoding = positionEncodingUTF16 // default per LSP spec
-	if result.Capabilities.PositionEncoding == positionEncodingUTF32 {
+	serverEncoding := result.Capabilities.PositionEncoding
+	slog.Debug("lsp server: initialize response", "positionEncoding", serverEncoding)
+	if serverEncoding == positionEncodingUTF32 {
 		s.posEncoding = positionEncodingUTF32
 		slog.Debug("lsp server: negotiated UTF-32 position encoding")
 	} else {
-		slog.Debug("lsp server: using UTF-16 position encoding (default)")
+		slog.Debug("lsp server: using UTF-16 position encoding (default)",
+			"serverReported", serverEncoding)
 	}
 
 	// Send initialized notification (no params).

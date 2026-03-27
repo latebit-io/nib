@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"log/slog"
 	"net/url"
 	"strings"
 )
@@ -20,6 +21,7 @@ func uriToPath(uri string) string {
 	}
 	u, err := url.Parse(uri)
 	if err != nil {
+		slog.Warn("lsp: failed to parse file URI", "uri", uri, "err", err)
 		return strings.TrimPrefix(uri, "file://")
 	}
 	return u.Path

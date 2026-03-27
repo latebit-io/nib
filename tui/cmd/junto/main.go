@@ -190,7 +190,11 @@ func loadLSPConfigs(projectRoot string) []lsp.ServerConfig {
 	}
 
 	configs := make([]lsp.ServerConfig, 0, len(raw.Servers))
-	for _, cfg := range raw.Servers {
+	for name, cfg := range raw.Servers {
+		if _, err := exec.LookPath(cfg.Command); err != nil {
+			slog.Warn("lsp: configured server not found on PATH", "name", name, "command", cfg.Command)
+			continue
+		}
 		configs = append(configs, lsp.ServerConfig{
 			Command:    cfg.Command,
 			Args:       cfg.Args,

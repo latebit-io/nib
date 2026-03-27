@@ -19,6 +19,10 @@ import (
 // Large enough to absorb bursts without blocking the caller.
 const outboxSize = 256
 
+// maxMessageSize is the upper bound on a single LSP message (10 MB).
+// Prevents OOM from a buggy or malicious server sending a huge Content-Length.
+const maxMessageSize = 10 * 1024 * 1024
+
 // Transport implements JSON-RPC 2.0 over Content-Length framed stdio.
 // Writes are async (non-blocking Send). Reads are dispatched in a background
 // goroutine that routes responses to pending requests and notifications to
@@ -302,6 +306,9 @@ func (t *Transport) readMessage() ([]byte, error) {
 
 	if contentLength < 0 {
 		return nil, errors.New("missing Content-Length header")
+	}
+	if contentLength > maxMessageSize {
+		return nil, fmt.Errorf("Content-Length %d exceeds max %d", contentLength, maxMessageSize)
 	}
 
 	body := make([]byte, contentLength)

@@ -149,7 +149,16 @@ func (s *Session) HasAgent() bool {
 // Wires Buffer.OnChange for the current editor to auto-sync with LSP.
 func (s *Session) SetLanguageService(syncer lang.DocumentSyncer) {
 	s.langSyncer = syncer
-	s.wireBufferSync(s.Editor)
+	// Wire all already-open editors, not just the active one.
+	s.mu.RLock()
+	editors := make([]*editor.Editor, 0, len(s.editors))
+	for _, e := range s.editors {
+		editors = append(editors, e)
+	}
+	s.mu.RUnlock()
+	for _, e := range editors {
+		s.wireBufferSync(e)
+	}
 }
 
 // HasLanguageService reports whether a language service is available.

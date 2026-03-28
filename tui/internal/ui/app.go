@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,6 +13,7 @@ import (
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/session"
 )
 
@@ -33,6 +35,23 @@ type goToDefResultMsg struct {
 	// Origin cursor for nav stack push.
 	originPath            string
 	originLine, originCol int
+}
+
+// completionResultMsg delivers completion results from an async LSP request.
+type completionResultMsg struct {
+	items        []lang.CompletionItem
+	isIncomplete bool
+	path         string
+	line, col    int
+}
+
+// completionTriggerMsg is emitted by the editor after typing a trigger character.
+type completionTriggerMsg struct{}
+
+// completionTickMsg fires after a debounce delay to trigger a completion request.
+type completionTickMsg struct {
+	path      string
+	line, col int
 }
 
 // hoverResultMsg delivers hover information from an async LSP request.
@@ -186,6 +205,23 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PaletteResultMsg:
 		if !msg.Cancelled && msg.Category == "file" {
 			return m.openFile(msg.Item.Value)
+		}
+		return m, nil
+
+	// Completion trigger — editor typed a trigger character, schedule debounced request.
+	case completionTriggerMsg:
+		return m, m.scheduleCompletion()
+
+	// Completion debounce tick — fire the actual request.
+	case completionTickMsg:
+		return m.handleCompletionTick(msg)
+
+	// Completion result — show popup if still relevant.
+	case completionResultMsg:
+		if msg.path == m.Session.ActiveFile() &&
+			msg.line == m.Editor.eng.CursorLine &&
+			len(msg.items) > 0 {
+			m.Editor.Completion.Show(msg.items, msg.line, msg.col)
 		}
 		return m, nil
 
@@ -675,6 +711,51 @@ func (m *AppModel) handleHover() (tea.Model, tea.Cmd) {
 			return hoverResultMsg{}
 		}
 		return hoverResultMsg{text: text, path: path, line: line, col: col}
+	}
+}
+
+// --- Autocomplete ---
+
+// completionDebounce is the delay before firing a completion request.
+const completionDebounce = 100 * time.Millisecond
+
+// scheduleCompletion starts a debounced completion request. Called after
+// typing a character. The tick carries a snapshot of path+cursor so stale
+// ticks are dropped.
+func (m *AppModel) scheduleCompletion() tea.Cmd {
+	if !m.Session.HasLanguageService() {
+		return nil
+	}
+	path := m.Session.ActiveFile()
+	line, col := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	return tea.Tick(completionDebounce, func(_ time.Time) tea.Msg {
+		return completionTickMsg{path: path, line: line, col: col}
+	})
+}
+
+// handleCompletionTick fires when the debounce timer expires.
+// Drops stale ticks (cursor moved since scheduling). Dispatches async request.
+func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.Cmd) {
+	// Drop if cursor moved since the tick was scheduled.
+	if msg.path != m.Session.ActiveFile() ||
+		msg.line != m.Editor.eng.CursorLine ||
+		msg.col != m.Editor.eng.CursorCol {
+		return m, nil
+	}
+	line, col := msg.line, msg.col
+	path := msg.path
+	return m, func() tea.Msg {
+		result, err := m.Session.RequestCompletion(line, col)
+		if err != nil || result == nil {
+			return completionResultMsg{}
+		}
+		return completionResultMsg{
+			items:        result.Items,
+			isIncomplete: result.IsIncomplete,
+			path:         path,
+			line:         line,
+			col:          col,
+		}
 	}
 }
 

@@ -136,6 +136,9 @@ type EditorModel struct {
 	// in renderNormalLine. Avoids per-line per-frame allocation.
 	diagUnderline []bool
 
+	// Completion holds the autocomplete popup state.
+	Completion CompletionPopup
+
 	// hoverText holds the content for the hover overlay (type info, docs).
 	// Empty string means no hover is active.
 	hoverText string
@@ -298,6 +301,50 @@ func (m *EditorModel) DismissHover() {
 	m.hoverText = ""
 }
 
+// acceptCompletion inserts the selected completion item's text into the buffer.
+// Scans backward from the cursor to find the start of the partial identifier,
+// then replaces it with the full completion text.
+func (m *EditorModel) acceptCompletion() tea.Cmd {
+	item := m.Completion.SelectedItem()
+	if item == nil {
+		m.Completion.Dismiss()
+		return nil
+	}
+
+	insertText := item.InsertText
+	if insertText == "" {
+		insertText = item.Label
+	}
+
+	// Find the start of the partial identifier by scanning backward.
+	line := m.eng.CursorLine
+	col := m.eng.CursorCol
+	lineText := []rune(m.eng.Buf.LineText(line))
+	identStart := col
+	for identStart > 0 && isIdentChar(lineText[identStart-1]) {
+		identStart--
+	}
+
+	// Delete the partial identifier.
+	if col > identStart {
+		m.eng.Buf.Delete(line, identStart, col-identStart)
+		m.eng.CursorCol = identStart
+	}
+
+	// Insert the completion text.
+	m.eng.Buf.Insert(line, m.eng.CursorCol, insertText)
+	m.eng.CursorCol += len([]rune(insertText))
+
+	m.Completion.Dismiss()
+	m.cursorMoved = true
+	return nil
+}
+
+// isIdentChar returns true for characters that are part of a Go identifier.
+func isIdentChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+}
+
 // SetSize updates the editor dimensions. Implements Pane.
 func (m *EditorModel) SetSize(width, height int) {
 	m.eng.SetSize(width, height)
@@ -311,6 +358,26 @@ func (m *EditorModel) Update(msg tea.Msg) tea.Cmd {
 	case tea.KeyMsg:
 		// Dismiss hover on any key — cursor is about to move.
 		m.DismissHover()
+
+		// Completion popup captures navigation keys when active.
+		if m.Completion.Active {
+			switch msg.Type {
+			case tea.KeyDown:
+				m.Completion.SelectNext()
+				return nil
+			case tea.KeyUp:
+				m.Completion.SelectPrev()
+				return nil
+			case tea.KeyTab, tea.KeyEnter:
+				return m.acceptCompletion()
+			case tea.KeyEscape:
+				m.Completion.Dismiss()
+				return nil
+			}
+			// Other keys dismiss completion and fall through to normal handling.
+			m.Completion.Dismiss()
+		}
+
 		// Any key event may move the cursor — mark for scroll adjustment.
 		m.cursorMoved = true
 		return m.handleKey(msg)
@@ -501,6 +568,15 @@ func (m *EditorModel) Render() string {
 			m.hoverText = ""
 		} else {
 			m.overlayHover(output, gutterW, contentW)
+		}
+	}
+
+	// Completion popup — auto-dismiss if cursor line changed.
+	if m.Completion.Active {
+		if m.eng.CursorLine != m.Completion.TriggerLine {
+			m.Completion.Dismiss()
+		} else {
+			m.overlayCompletion(output, gutterW, contentW)
 		}
 	}
 
@@ -957,6 +1033,29 @@ func (m *EditorModel) overlayHover(output []string, gutterW, contentW int) {
 
 	// Replace entire output rows with gutter padding + hover box line.
 	// This avoids ANSI escape sequence corruption from rune-level splicing.
+	gutterPad := strings.Repeat(" ", gutterW)
+	for i, bl := range boxLines {
+		row := visualRow + i
+		if row >= m.eng.Height-1 {
+			break
+		}
+		output[row] = gutterPad + bl
+	}
+}
+
+// overlayCompletion renders the completion popup below the cursor line.
+func (m *EditorModel) overlayCompletion(output []string, gutterW, contentW int) {
+	visualRow := m.Completion.TriggerLine - m.eng.ScrollOffset + 1
+	if visualRow < 0 || visualRow >= m.eng.Height-1 {
+		return
+	}
+
+	box := m.Completion.Render(contentW)
+	if box == "" {
+		return
+	}
+
+	boxLines := strings.Split(box, "\n")
 	gutterPad := strings.Repeat(" ", gutterW)
 	for i, bl := range boxLines {
 		row := visualRow + i
@@ -1589,6 +1688,13 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 			}
 			for _, r := range keyMsg.Runes {
 				e.InsertChar(r)
+			}
+		}
+		// Trigger completion after typing `.` or identifier characters.
+		if len(keyMsg.Runes) == 1 {
+			r := keyMsg.Runes[0]
+			if r == '.' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				return func() tea.Msg { return completionTriggerMsg{} }
 			}
 		}
 		return nil

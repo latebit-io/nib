@@ -262,6 +262,25 @@ func (s *Session) HoverInfo(line, col int) (string, error) {
 	return hp.Hover(ctx, path, line, col)
 }
 
+// RequestCompletion queries the language service for completions at the given position.
+// Safe to call from a background goroutine. Returns nil result if the
+// capability is unavailable.
+func (s *Session) RequestCompletion(line, col int) (*lang.CompletionResult, error) {
+	cp, ok := s.langSyncer.(lang.CompletionProvider)
+	if !ok {
+		return nil, errors.New("language service does not support completion")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	path := s.ActiveFile()
+	if path == "" {
+		return nil, errors.New("no active file")
+	}
+
+	return cp.Complete(ctx, path, line, col)
+}
+
 // NotifySaved notifies the language service that the current file was saved.
 // Called by the frontend after a successful buffer save.
 func (s *Session) NotifySaved() {

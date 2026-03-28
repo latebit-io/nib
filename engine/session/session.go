@@ -277,6 +277,10 @@ func (s *Session) RequestCompletion(path string, line, col int) (*lang.Completio
 	if path == "" {
 		return nil, errors.New("no active file")
 	}
+
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 

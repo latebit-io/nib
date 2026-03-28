@@ -60,3 +60,26 @@ func (o *DiffOverlay) LineText(i int) string {
 func (o *DiffOverlay) Content() string {
 	return o.Editor.Buf.Content()
 }
+
+// MergedContent returns the full file content as if the overlay were applied.
+// Combines buffer lines [0, StartLine) + overlay content + buffer lines [EndLine+1, end).
+func (o *DiffOverlay) MergedContent(mainBuf *buffer.Buffer) string {
+	var parts []string
+
+	// Lines before the overlay.
+	for i := 0; i < o.StartLine && i < mainBuf.LineCount(); i++ {
+		parts = append(parts, mainBuf.LineText(i))
+	}
+
+	// Overlay replacement lines.
+	for i := 0; i < o.Editor.Buf.LineCount(); i++ {
+		parts = append(parts, o.Editor.Buf.LineText(i))
+	}
+
+	// Lines after the overlay.
+	for i := o.EndLine + 1; i < mainBuf.LineCount(); i++ {
+		parts = append(parts, mainBuf.LineText(i))
+	}
+
+	return strings.Join(parts, "\n")
+}

@@ -141,9 +141,12 @@ func (c *CompletionPopup) Render(width int) string {
 		icon := completionKindIcon(item.Kind)
 
 		// Build: "icon label  detail" — all on one line, truncated.
-		text := icon + " " + item.Label
-		if item.Detail != "" {
-			text += " " + item.Detail
+		// Sanitize external text to prevent ANSI/control sequence injection.
+		label := sanitizeCompletionText(item.Label)
+		detail := sanitizeCompletionText(item.Detail)
+		text := icon + " " + label
+		if detail != "" {
+			text += " " + detail
 		}
 		text = runewidth.Truncate(text, contentW, "…")
 
@@ -162,6 +165,30 @@ func (c *CompletionPopup) Render(width int) string {
 
 	content := strings.Join(lines, "\n")
 	return completionBorderStyle.Width(contentW).Render(content)
+}
+
+// sanitizeCompletionText strips ANSI escapes and control characters from
+// language service text to prevent terminal injection.
+func sanitizeCompletionText(s string) string {
+	var b strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if inEscape {
+			if r >= 0x40 && r <= 0x7e {
+				inEscape = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if r < ' ' && r != '\t' {
+			continue // strip control chars except tab
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // completionKindIcon returns a single-char icon for a completion kind.

@@ -265,20 +265,49 @@ func (s *Session) HoverInfo(line, col int) (string, error) {
 // RequestCompletion queries the language service for completions at the given position.
 // Safe to call from a background goroutine. Returns nil result if the
 // capability is unavailable.
-func (s *Session) RequestCompletion(line, col int) (*lang.CompletionResult, error) {
+func (s *Session) RequestCompletion(path string, line, col int) (*lang.CompletionResult, error) {
 	cp, ok := s.langSyncer.(lang.CompletionProvider)
 	if !ok {
 		return nil, errors.New("language service does not support completion")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	path := s.ActiveFile()
 	if path == "" {
 		return nil, errors.New("no active file")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
 	return cp.Complete(ctx, path, line, col)
+}
+
+// SyncContentForCompletion temporarily updates the LSP's view of a file
+// with the given content. Used to sync overlay content before completion
+// requests. Call RevertContentSync after the request to restore the original.
+func (s *Session) SyncContentForCompletion(path, content string) {
+	if s.langSyncer == nil {
+		return
+	}
+	s.langSyncer.DidChange(path, []lang.TextChange{{
+		Text:        content,
+		FullContent: true,
+	}})
+}
+
+// RevertContentSync restores the LSP's view of a file to the actual buffer
+// content. Called after SyncContentForCompletion + completion request.
+func (s *Session) RevertContentSync(path string) {
+	if s.langSyncer == nil {
+		return
+	}
+	s.mu.RLock()
+	e, ok := s.editors[path]
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
+	s.langSyncer.DidChange(path, []lang.TextChange{{
+		Text:        e.Buf.Content(),
+		FullContent: true,
+	}})
 }
 
 // NotifySaved notifies the language service that the current file was saved.

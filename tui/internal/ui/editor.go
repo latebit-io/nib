@@ -301,7 +301,8 @@ func (m *EditorModel) DismissHover() {
 	m.hoverText = ""
 }
 
-// acceptCompletion inserts the selected completion item's text into the buffer.
+// acceptCompletion inserts the selected completion item's text.
+// Works in both the main buffer and the overlay editor.
 // Scans backward from the cursor to find the start of the partial identifier,
 // then replaces it with the full completion text.
 func (m *EditorModel) acceptCompletion() tea.Cmd {
@@ -316,10 +317,16 @@ func (m *EditorModel) acceptCompletion() tea.Cmd {
 		insertText = item.Label
 	}
 
+	// Determine which editor to operate on (main or overlay).
+	e := m.eng
+	if m.Overlay != nil && m.Overlay.Active {
+		e = m.Overlay.Editor
+	}
+
 	// Find the start of the partial identifier by scanning backward.
-	line := m.eng.CursorLine
-	col := m.eng.CursorCol
-	lineText := []rune(m.eng.Buf.LineText(line))
+	line := e.CursorLine
+	col := e.CursorCol
+	lineText := []rune(e.Buf.LineText(line))
 	identStart := col
 	for identStart > 0 && isIdentChar(lineText[identStart-1]) {
 		identStart--
@@ -327,13 +334,13 @@ func (m *EditorModel) acceptCompletion() tea.Cmd {
 
 	// Delete the partial identifier.
 	if col > identStart {
-		m.eng.Buf.Delete(line, identStart, col-identStart)
-		m.eng.CursorCol = identStart
+		e.Buf.Delete(line, identStart, col-identStart)
+		e.CursorCol = identStart
 	}
 
 	// Insert the completion text.
-	m.eng.Buf.Insert(line, m.eng.CursorCol, insertText)
-	m.eng.CursorCol += len([]rune(insertText))
+	e.Buf.Insert(line, e.CursorCol, insertText)
+	e.CursorCol += len([]rune(insertText))
 
 	m.Completion.Dismiss()
 	m.cursorMoved = true
@@ -573,7 +580,13 @@ func (m *EditorModel) Render() string {
 
 	// Completion popup — auto-dismiss if cursor line changed.
 	if m.Completion.Active {
-		if m.eng.CursorLine != m.Completion.TriggerLine {
+		var curLine int
+		if m.Overlay != nil && m.Overlay.Active {
+			curLine = m.Overlay.StartLine + m.Overlay.Editor.CursorLine
+		} else {
+			curLine = m.eng.CursorLine
+		}
+		if curLine != m.Completion.TriggerLine {
 			m.Completion.Dismiss()
 		} else {
 			m.overlayCompletion(output, gutterW, contentW)
@@ -1045,7 +1058,14 @@ func (m *EditorModel) overlayHover(output []string, gutterW, contentW int) {
 
 // overlayCompletion renders the completion popup below the cursor line.
 func (m *EditorModel) overlayCompletion(output []string, gutterW, contentW int) {
-	visualRow := m.Completion.TriggerLine - m.eng.ScrollOffset + 1
+	var visualRow int
+	if m.Overlay != nil && m.Overlay.Active {
+		// Overlay cursor: added lines start at visual EndLine+1.
+		oe := m.Overlay.Editor
+		visualRow = m.Overlay.EndLine + 1 + oe.CursorLine - m.eng.ScrollOffset + 1
+	} else {
+		visualRow = m.Completion.TriggerLine - m.eng.ScrollOffset + 1
+	}
 	if visualRow < 0 || visualRow >= m.eng.Height-1 {
 		return
 	}

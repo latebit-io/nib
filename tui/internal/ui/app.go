@@ -218,8 +218,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Completion result — show popup if still relevant.
 	case completionResultMsg:
+		var curLine, curCol int
+		if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
+			oe := m.Editor.Overlay.Editor
+			curLine = m.Editor.Overlay.StartLine + oe.CursorLine
+			curCol = oe.CursorCol
+		} else {
+			curLine = m.Editor.eng.CursorLine
+			curCol = m.Editor.eng.CursorCol
+		}
 		if msg.path == m.Session.ActiveFile() &&
-			msg.line == m.Editor.eng.CursorLine &&
+			msg.line == curLine &&
+			msg.col == curCol &&
 			len(msg.items) > 0 {
 			m.Editor.Completion.Show(msg.items, msg.line, msg.col)
 		}
@@ -414,6 +424,11 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ActionAgentReject:
+		// Completion popup gets priority — dismiss it first.
+		if m.Editor.Completion.Active {
+			m.Editor.Completion.Dismiss()
+			return m, nil
+		}
 		// Cancel running animation (partial edit stays, undoable)
 		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
 			slog.Debug("animation cancelled", "reason", "escape")
@@ -727,7 +742,17 @@ func (m *AppModel) scheduleCompletion() tea.Cmd {
 		return nil
 	}
 	path := m.Session.ActiveFile()
-	line, col := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	var line, col int
+	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
+		// Map overlay cursor to buffer position for the LSP request.
+		// The overlay replaces buffer lines StartLine..EndLine, so the
+		// overlay cursor line maps to StartLine + overlayCursorLine.
+		oe := m.Editor.Overlay.Editor
+		line = m.Editor.Overlay.StartLine + oe.CursorLine
+		col = oe.CursorCol
+	} else {
+		line, col = m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	}
 	return tea.Tick(completionDebounce, func(_ time.Time) tea.Msg {
 		return completionTickMsg{path: path, line: line, col: col}
 	})
@@ -737,16 +762,45 @@ func (m *AppModel) scheduleCompletion() tea.Cmd {
 // Drops stale ticks (cursor moved since scheduling). Dispatches async request.
 func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.Cmd) {
 	// Drop if cursor moved since the tick was scheduled.
+	// Compare against the right cursor (overlay or buffer).
+	var curLine, curCol int
+	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
+		oe := m.Editor.Overlay.Editor
+		curLine = m.Editor.Overlay.StartLine + oe.CursorLine
+		curCol = oe.CursorCol
+	} else {
+		curLine = m.Editor.eng.CursorLine
+		curCol = m.Editor.eng.CursorCol
+	}
 	if msg.path != m.Session.ActiveFile() ||
-		msg.line != m.Editor.eng.CursorLine ||
-		msg.col != m.Editor.eng.CursorCol {
+		msg.line != curLine ||
+		msg.col != curCol {
 		return m, nil
 	}
 	line, col := msg.line, msg.col
 	path := msg.path
+
+	// If editing in the overlay, temporarily sync merged content to the LSP
+	// so completions reflect the proposed code, not the original buffer.
+	var mergedContent string
+	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
+		mergedContent = m.Editor.Overlay.MergedContent(m.Editor.eng.Buf)
+		m.Session.SyncContentForCompletion(path, mergedContent)
+	}
+
 	return m, func() tea.Msg {
-		result, err := m.Session.RequestCompletion(line, col)
-		if err != nil || result == nil {
+		result, err := m.Session.RequestCompletion(path, line, col)
+
+		// Revert LSP content if we synced overlay content.
+		if mergedContent != "" {
+			m.Session.RevertContentSync(path)
+		}
+
+		if err != nil {
+			slog.Debug("completion request failed", "path", path, "line", line, "col", col, "err", err)
+			return completionResultMsg{}
+		}
+		if result == nil {
 			return completionResultMsg{}
 		}
 		return completionResultMsg{

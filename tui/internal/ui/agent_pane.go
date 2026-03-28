@@ -60,6 +60,11 @@ func NewAgentPaneModel(svc *Services) *AgentPaneModel {
 	}
 }
 
+// Title returns the pane title for display in the border. Implements Titled.
+func (m *AgentPaneModel) Title() string {
+	return "Junto"
+}
+
 // SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.
 // Re-wraps content when width changes so text reflows correctly.
 func (m *AgentPaneModel) SetSize(width, height int) {
@@ -125,9 +130,9 @@ func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
-	// Click/drag in content area only (skip header row 0, input area, and status)
-	if msg.Button == tea.MouseButtonLeft && msg.Y > 0 && msg.Y <= m.VisibleLines() {
-		line := m.ScrollOffset + msg.Y - 1 // -1 for header row
+	// Click/drag in content area only (skip input area and status)
+	if msg.Button == tea.MouseButtonLeft && msg.Y >= 0 && msg.Y < m.VisibleLines() {
+		line := m.ScrollOffset + msg.Y
 		if line < 0 {
 			line = 0
 		}
@@ -400,9 +405,9 @@ func (m *AgentPaneModel) Clear() {
 }
 
 // VisibleLines returns the number of content lines visible.
-// Layout: 1 header + content + InputHeight bottom area (separator + input + status).
+// Layout: content + InputHeight bottom area (separator + input + status).
 func (m *AgentPaneModel) VisibleLines() int {
-	h := m.Height - 1 - InputHeight // 1 header + InputHeight bottom
+	h := m.Height - InputHeight
 	if h < 1 {
 		h = 1
 	}
@@ -515,20 +520,12 @@ func (m *AgentPaneModel) Render() string {
 	output := make([]string, m.Height)
 	row := 0
 
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("230")).
-		Background(lipgloss.Color("62"))
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("24"))
 	inputActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("230"))
 	inputDimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	cursorStyle := lipgloss.NewStyle().Reverse(true)
-
-	// Row 0: Header
-	output[row] = headerStyle.Render(m.padLine(" Agent"))
-	row++
 
 	// No LLM configured — show message and fill remaining rows
 	if !m.HasAgent {

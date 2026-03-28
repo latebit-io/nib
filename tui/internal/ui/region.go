@@ -6,16 +6,20 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
-// Package-level styles for dividers.
+// Package-level styles and colors for borders and dividers.
 var (
+	dividerDimColor   = lipgloss.Color("240")
+	dividerFocusColor = lipgloss.Color("2")
+
 	dividerDimStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240")).
+			Foreground(dividerDimColor).
 			Background(lipgloss.Color("235"))
 
 	dividerFocusStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("2")).
+				Foreground(dividerFocusColor).
 				Background(lipgloss.Color("235"))
 )
 
@@ -222,15 +226,18 @@ func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
 }
 
 // dividerAt returns the index of the divider at global X, or -1.
-// The divider between visible[i] and visible[i+1] is at x = visible[i].x + visible[i].width.
+// In island layout, the draggable zone is the 2 border chars between
+// adjacent panes (right border of pane i + left border of pane i+1).
 func (rm *RegionManager) dividerAt(x int) int {
 	if rm.Direction != Horizontal {
 		return -1
 	}
 	visible := rm.visibleRegions()
 	for i := 0; i < len(visible)-1; i++ {
-		divX := visible[i].x + visible[i].width
-		if x == divX {
+		// Zone: right border of pane i to left border of pane i+1 (2 chars).
+		zoneStart := visible[i].x + visible[i].width // right border
+		zoneEnd := visible[i+1].x                    // left border (exclusive)
+		if x >= zoneStart && x < zoneEnd {
 			return i
 		}
 	}
@@ -278,15 +285,14 @@ func (rm *RegionManager) handleDividerDrag(currentX int) {
 	visible[left].width = newLeftW
 	visible[right].width = newRightW
 
-	// Update x positions for all panes from the left pane onward
+	// Update x positions for all panes from the left pane onward.
+	// Island layout: content x = border-start + 1 (left border char).
+	// Between panes: right border (1) + left border (1) = 2 chars.
 	x := visible[left].x
 	for i := left; i < len(visible); i++ {
 		visible[i].x = x
 		visible[i].Pane.SetSize(visible[i].width, visible[i].height)
-		x += visible[i].width
-		if i < len(visible)-1 {
-			x++ // divider
-		}
+		x += visible[i].width + 2 // +2 for right border + next left border
 	}
 
 	// Update ratios to reflect new proportions
@@ -296,8 +302,13 @@ func (rm *RegionManager) handleDividerDrag(currentX int) {
 // updateRatios recalculates ratios from current widths so future
 // recalculations (e.g. terminal resize) preserve the user's layout.
 func (rm *RegionManager) updateRatios(visible []*Region) {
-	dividers := len(visible) - 1
-	available := rm.Width - dividers
+	// Island layout: 2 border chars per pane, no gap.
+	n := len(visible)
+	overhead := 0
+	if n > 1 {
+		overhead = 2 * n
+	}
+	available := rm.Width - overhead
 	if available <= 0 {
 		return
 	}
@@ -383,29 +394,74 @@ func (rm *RegionManager) Render() string {
 		return strings.Join(lines, "\n")
 	}
 
-	// Horizontal layout: panes side by side with vertical dividers
-	// Pre-compute divider styles (one per gap between panes)
-	dividers := make([]string, len(visible)-1)
-	for i := range dividers {
-		style := rm.dividerStyleFor(visible, i, focusedRegion)
-		dividers[i] = style.Render("│")
-	}
+	// Horizontal layout: island style — each pane gets its own full rounded
+	// border with a 1-char gap between panes (like JetBrains IDE panels).
+	bordered := make([]string, len(visible))
+	for i := range visible {
+		content := strings.Join(paneLines[i], "\n")
 
-	output := make([]string, rm.Height)
-	for row := range rm.Height {
-		var line strings.Builder
-		for i, pl := range paneLines {
-			if i > 0 {
-				line.WriteString(dividers[i-1])
-			}
-			if row < len(pl) {
-				line.WriteString(pl[row])
+		borderColor := dividerDimColor
+		if visible[i] == focusedRegion {
+			borderColor = dividerFocusColor
+		}
+
+		rendered := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Width(visible[i].width).
+			Height(visible[i].height).
+			Render(content)
+
+		// Embed pane title in the top border if the pane implements Titled.
+		if titled, ok := visible[i].Pane.(Titled); ok {
+			if title := titled.Title(); title != "" {
+				rendered = embedBorderTitle(rendered, title, borderColor, visible[i].width)
 			}
 		}
-		output[row] = line.String()
+
+		bordered[i] = rendered
 	}
 
-	return strings.Join(output, "\n")
+	return lipgloss.JoinHorizontal(lipgloss.Top, bordered...)
+}
+
+// embedBorderTitle rebuilds the top border line with a title embedded.
+// Builds from scratch to avoid slicing into ANSI escape sequences.
+// Produces: ╭─ title ───────╮
+func embedBorderTitle(rendered string, title string, borderColor lipgloss.Color, contentWidth int) string {
+	lines := strings.SplitN(rendered, "\n", 2)
+	if len(lines) < 2 {
+		return rendered
+	}
+
+	totalWidth := contentWidth + 2 // content + left/right border chars
+	// Truncate title to fit within the border with padding.
+	maxTitleCells := totalWidth - 6 // ╭─ + space + space + ─╮
+	if maxTitleCells <= 0 {
+		return rendered
+	}
+	title = runewidth.Truncate(title, maxTitleCells, "…")
+	label := " " + title + " "
+	labelWidth := runewidth.StringWidth(label)
+
+	// Need at least: ╭(1) + ─(1) + label + ─(1) + ╮(1)
+	if totalWidth < labelWidth+4 {
+		return rendered
+	}
+
+	titleStyle := lipgloss.NewStyle().Foreground(borderColor).Bold(true)
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+
+	var top strings.Builder
+	top.WriteString(borderStyle.Render("╭─"))
+	top.WriteString(titleStyle.Render(label))
+	dashesAfter := totalWidth - 2 - labelWidth - 1 // after label, before ╮
+	if dashesAfter > 0 {
+		top.WriteString(borderStyle.Render(strings.Repeat("─", dashesAfter)))
+	}
+	top.WriteString(borderStyle.Render("╮"))
+
+	return top.String() + "\n" + lines[1]
 }
 
 // dividerStyleFor returns the style for the divider between visible[i] and visible[i+1].
@@ -415,6 +471,29 @@ func (rm *RegionManager) dividerStyleFor(visible []*Region, i int, focused *Regi
 		return dividerFocusStyle
 	}
 	return dividerDimStyle
+}
+
+// collapseToFocused collapses all visible panes except the focused one,
+// which gets the full available space. Falls back to the first pane if
+// focus index is out of range.
+func (rm *RegionManager) collapseToFocused(visible []*Region) {
+	keep := 0
+	if rm.FocusIdx >= 0 && rm.FocusIdx < len(visible) {
+		keep = rm.FocusIdx
+	}
+	for i, r := range visible {
+		if i == keep {
+			r.x = 0
+			r.y = 0
+			r.width = rm.Width
+			r.height = rm.Height
+			r.Pane.SetSize(rm.Width, rm.Height)
+		} else {
+			r.width = 0
+			r.height = 0
+			r.collapsed = true
+		}
+	}
 }
 
 // visibleRegions returns regions that are both user-visible and not collapsed by layout.
@@ -455,22 +534,28 @@ func (rm *RegionManager) recalculate() {
 }
 
 func (rm *RegionManager) recalcHorizontal(visible []*Region) {
-	dividers := len(visible) - 1
-	available := rm.Width - dividers
+	// Island layout: each pane has its own full border (2 cols), no gap.
+	// Total overhead: 2*n. Single pane: no borders (handled in Render).
+	n := len(visible)
+	borderCols := 0
+	borderRows := 0
+	if n > 1 {
+		borderCols = 2 * n // left + right border per pane
+		borderRows = 2     // top + bottom border rows
+	}
+
+	available := rm.Width - borderCols
+	paneHeight := rm.Height - borderRows
+
+	// Not enough height for borders + content — collapse to single pane.
+	if paneHeight < 1 {
+		rm.collapseToFocused(visible)
+		return
+	}
 
 	// Check if all panes fit at minimum width
 	if available < len(visible)*MinPaneWidth {
-		// Not enough space — collapse all but the first pane
-		visible[0].x = 0
-		visible[0].y = 0
-		visible[0].width = rm.Width
-		visible[0].height = rm.Height
-		visible[0].Pane.SetSize(rm.Width, rm.Height)
-		for _, r := range visible[1:] {
-			r.width = 0
-			r.height = 0
-			r.collapsed = true
-		}
+		rm.collapseToFocused(visible)
 		return
 	}
 
@@ -487,15 +572,21 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 		extra := extraForIndex(i, len(visible), remaining, r.Ratio, totalRatio, &allocatedExtra)
 		w := MinPaneWidth + extra
 
-		r.x = x
-		r.y = 0
+		// Content starts after left border (1 col) and top border (1 row).
+		if n > 1 {
+			r.x = x + 1 // +1 for left border char
+			r.y = 1     // top border row
+		} else {
+			r.x = x
+			r.y = 0
+		}
 		r.width = w
-		r.height = rm.Height
-		r.Pane.SetSize(w, rm.Height)
+		r.height = paneHeight
+		r.Pane.SetSize(w, paneHeight)
 
 		x += w
-		if i < len(visible)-1 {
-			x++ // divider
+		if n > 1 {
+			x += 2 // left + right border chars
 		}
 	}
 }

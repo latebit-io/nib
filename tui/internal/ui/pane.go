@@ -15,6 +15,12 @@ type Pane interface {
 	SetSize(width, height int)
 }
 
+// Titled is an optional interface a Pane can implement to display a title
+// embedded in its border. RegionManager checks for this via type assertion.
+type Titled interface {
+	Title() string
+}
+
 // GoalSubmittedMsg is emitted by the agent pane when the user submits a goal.
 // AppModel catches this and wires up the agent run with editor state.
 type GoalSubmittedMsg struct {

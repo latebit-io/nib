@@ -4,12 +4,14 @@ package ui
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -24,6 +26,21 @@ var (
 	// agentLineGutterStyle renders the gutter for agent-written lines.
 	agentLineGutterStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("34")) // green
+)
+
+// Diagnostic gutter styles — severity-colored icons in the gutter margin.
+var (
+	diagErrorGutterStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
+	diagWarningGutterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
+	diagInfoGutterStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // blue
+	diagUnderlineStyle     = lipgloss.NewStyle().Underline(true)
+)
+
+// Diagnostic gutter icons by severity.
+const (
+	diagErrorIcon   = "✖"
+	diagWarningIcon = "▲"
+	diagInfoIcon    = "●"
 )
 
 // lineKind classifies a viewport row for mouse click routing.
@@ -89,6 +106,18 @@ type EditorModel struct {
 	// OnSave is called after a successful buffer save. Used by AppModel
 	// to notify the session (and language service) of saves. nil-safe.
 	OnSave func()
+
+	// diagnostics holds the current set of diagnostics for this file.
+	// Set via SetDiagnostics which also builds the per-line lookup map.
+	diagnostics []lang.Diagnostic
+
+	// diagByLine maps line number → highest-severity diagnostic on that line.
+	// Precomputed by SetDiagnostics for O(1) lookup during rendering.
+	diagByLine map[int]*lang.Diagnostic
+
+	// diagUnderline is a reusable scratch buffer for underline computation
+	// in renderNormalLine. Avoids per-line per-frame allocation.
+	diagUnderline []bool
 }
 
 // NewEditorModel creates an editor model from an engine Editor.
@@ -104,6 +133,46 @@ func NewEditorModel(e *editor.Editor, km *Keymap, svc *Services) *EditorModel {
 // access from AppModel (e.g., BeginIncrementalEdit, cursor queries).
 func (m *EditorModel) Engine() *editor.Editor {
 	return m.eng
+}
+
+// SetDiagnostics updates the diagnostic list and precomputes the per-line
+// lookup map. Use this instead of assigning diagnostics directly.
+func (m *EditorModel) SetDiagnostics(diags []lang.Diagnostic) {
+	m.diagnostics = diags
+	if len(diags) == 0 {
+		m.diagByLine = nil
+		return
+	}
+	m.diagByLine = make(map[int]*lang.Diagnostic, len(diags))
+	lineCount := m.eng.Buf.LineCount()
+	for i := range m.diagnostics {
+		d := &m.diagnostics[i]
+		startLine := max(d.StartLine, 0)
+		endLine := min(d.EndLine, lineCount-1)
+		if startLine > endLine {
+			continue
+		}
+		for line := startLine; line <= endLine; line++ {
+			if existing, ok := m.diagByLine[line]; !ok || d.Severity < existing.Severity {
+				m.diagByLine[line] = d
+			}
+		}
+	}
+}
+
+// diagnosticForLine returns the highest-severity diagnostic touching the given line.
+// O(1) lookup from the precomputed map built by SetDiagnostics.
+func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
+	return m.diagByLine[line]
+}
+
+// Title returns the filename for display in the pane border. Implements Titled.
+func (m *EditorModel) Title() string {
+	name := m.eng.Buf.Path
+	if name == "" {
+		return "[new]"
+	}
+	return filepath.Base(name)
 }
 
 // SetSize updates the editor dimensions. Implements Pane.
@@ -346,15 +415,26 @@ func (m *EditorModel) renderNormalLine(
 ) string {
 	var line strings.Builder
 
-	origin := m.eng.Buf.LineOrigin(lineIdx)
-	gutterSuffix := " "
-	renderGutter := gutterStyle
-	if origin == buffer.OriginAgent {
-		gutterSuffix = "j"
-		renderGutter = agentLineGutterStyle
+	numText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1)
+	if diag := m.diagnosticForLine(lineIdx); diag != nil {
+		// Diagnostic icon takes priority in the gutter suffix.
+		line.WriteString(gutterStyle.Render(numText))
+		var icon string
+		var iconStyle lipgloss.Style
+		switch diag.Severity {
+		case lang.SeverityError:
+			icon, iconStyle = diagErrorIcon, diagErrorGutterStyle
+		case lang.SeverityWarning:
+			icon, iconStyle = diagWarningIcon, diagWarningGutterStyle
+		default:
+			icon, iconStyle = diagInfoIcon, diagInfoGutterStyle
+		}
+		line.WriteString(iconStyle.Render(icon))
+	} else if m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent {
+		line.WriteString(agentLineGutterStyle.Render(numText + "j"))
+	} else {
+		line.WriteString(gutterStyle.Render(numText + " "))
 	}
-	gutterText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1) + gutterSuffix
-	line.WriteString(renderGutter.Render(gutterText))
 
 	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
@@ -418,6 +498,39 @@ func (m *EditorModel) renderNormalLine(
 		}
 	}
 
+	// Diagnostic underlines: mark display columns within diagnostic ranges.
+	// Reuse scratch buffer to avoid per-line allocation.
+	if cap(m.diagUnderline) < contentW {
+		m.diagUnderline = make([]bool, contentW)
+	}
+	diagUnderline := m.diagUnderline[:contentW]
+	clear(diagUnderline)
+	for i := range m.diagnostics {
+		d := &m.diagnostics[i]
+		if d.StartLine > lineIdx || d.EndLine < lineIdx {
+			continue
+		}
+		startBufCol := 0
+		if lineIdx == d.StartLine {
+			startBufCol = d.StartCol
+		}
+		endBufCol := len(rawRunes)
+		if lineIdx == d.EndLine {
+			endBufCol = d.EndCol
+		}
+		startBufCol = min(max(startBufCol, 0), len(rawRunes))
+		endBufCol = min(max(endBufCol, 0), len(rawRunes))
+		startDisp := bufToDisp[startBufCol]
+		endDisp := bufToDisp[endBufCol]
+		// Zero-width diagnostics (e.g., missing token) get at least one cell.
+		if endDisp <= startDisp && startDisp < contentW {
+			endDisp = startDisp + 1
+		}
+		for j := startDisp; j < endDisp && j < contentW; j++ {
+			diagUnderline[j] = true
+		}
+	}
+
 	// Span-based rendering: batch consecutive characters that share the same
 	// effective style into a single lipgloss.Render call. This reduces overhead
 	// from O(columns) to O(style-transitions) — typically 5-20x fewer calls.
@@ -459,6 +572,7 @@ func (m *EditorModel) renderNormalLine(
 
 	flushSpan := func(start, end int) {
 		text := string(displayed[start:end])
+		ul := diagUnderline[start]
 		switch colTags[start] {
 		case tagCursor:
 			line.WriteString(cursorStyle.Render(text))
@@ -467,16 +581,24 @@ func (m *EditorModel) renderNormalLine(
 		case tagSel:
 			line.WriteString(selectionStyle.Render(text))
 		case tagPlain:
-			line.WriteString(text)
+			if ul {
+				line.WriteString(diagUnderlineStyle.Render(text))
+			} else {
+				line.WriteString(text)
+			}
 		default:
-			line.WriteString(charStyles[start].Render(text))
+			s := charStyles[start]
+			if ul {
+				s = s.Underline(true)
+			}
+			line.WriteString(s.Render(text))
 		}
 	}
 
 	if contentW > 0 {
 		spanStart := 0
 		for j := 1; j < contentW; j++ {
-			if colTags[j] != colTags[spanStart] {
+			if colTags[j] != colTags[spanStart] || diagUnderline[j] != diagUnderline[spanStart] {
 				flushSpan(spanStart, j)
 				spanStart = j
 			}
@@ -660,6 +782,35 @@ func (m *EditorModel) renderAddedLine(
 	return line.String()
 }
 
+// sanitizeStatusText strips ANSI escapes, collapses whitespace/newlines to
+// single spaces, and truncates to a safe length for the status bar.
+func sanitizeStatusText(s string) string {
+	const maxLen = 200
+	var b strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if inEscape {
+			if r >= 0x40 && r <= 0x7e {
+				inEscape = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if r == '\n' || r == '\r' || r == '\t' {
+			r = ' '
+		}
+		if b.Len() >= maxLen {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func (m *EditorModel) renderStatusBar() string {
 	statusStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("62")).
@@ -678,6 +829,17 @@ func (m *EditorModel) renderStatusBar() string {
 	left := fmt.Sprintf(" %s%s", name, modified)
 	if m.StatusMsg != "" {
 		left += "  " + m.StatusMsg
+	} else if diag := m.diagnosticForLine(m.eng.CursorLine); diag != nil {
+		var prefix string
+		switch diag.Severity {
+		case lang.SeverityError:
+			prefix = "error"
+		case lang.SeverityWarning:
+			prefix = "warning"
+		default:
+			prefix = "info"
+		}
+		left += "  " + prefix + ": " + sanitizeStatusText(diag.Message)
 	}
 
 	// Show cursor position: overlay, agent animation, or buffer.

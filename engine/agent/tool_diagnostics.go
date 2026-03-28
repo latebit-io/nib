@@ -36,9 +36,10 @@ func (t *DiagnosticsTool) Definition() llm.ToolDef {
 				Properties: map[string]llm.FunctionParam{
 					"path": {
 						Type:        "string",
-						Description: "File path relative to the project root. Leave empty to check the active file.",
+						Description: "File path (absolute or relative to the project root).",
 					},
 				},
+				Required: []string{"path"},
 			},
 		},
 	}
@@ -55,44 +56,71 @@ func (t *DiagnosticsTool) Execute(_ context.Context, call llm.ToolCall) string {
 	}
 
 	path := args.Path
+	displayPath := path // keep the user-provided (relative) path for display
 	if path != "" {
 		path = t.workspace.CanonPath(path)
 	}
 
-	return FormatDiagnostics(t.provider, path)
+	return FormatDiagnostics(t.provider, path, displayPath)
 }
 
 // FormatDiagnostics queries and formats diagnostics for a file path.
 // Exported so tool_edit_file can reuse it for auto-injection.
-// If path is empty, returns diagnostics for all known files (not implemented — returns empty).
-func FormatDiagnostics(provider lang.DiagnosticProvider, path string) string {
-	if path == "" {
+// lookupPath is the canonical path for the provider query.
+// displayPath is the project-relative path shown in output (avoids leaking absolute paths).
+func FormatDiagnostics(provider lang.DiagnosticProvider, lookupPath, displayPath string) string {
+	if lookupPath == "" {
 		return "No file specified."
 	}
+	if displayPath == "" {
+		displayPath = lookupPath
+	}
 
-	diags := provider.Diagnostics(path)
+	diags := provider.Diagnostics(lookupPath)
+	if diags == nil {
+		return "No diagnostics available yet — the file may not have been analyzed."
+	}
 	if len(diags) == 0 {
 		return "No diagnostics — code is clean."
 	}
 
+	const maxDiagBytes = 8192 // cap output to avoid drowning the LLM context
+
+	// Count totals first so the summary is accurate even if output is truncated.
+	totalErrors, totalWarnings := 0, 0
+	for _, d := range diags {
+		switch d.Severity {
+		case lang.SeverityError:
+			totalErrors++
+		case lang.SeverityWarning:
+			totalWarnings++
+		}
+	}
+
 	var sb strings.Builder
-	errors, warnings := 0, 0
+	truncated := false
 	for _, d := range diags {
 		var severity string
 		switch d.Severity {
 		case lang.SeverityError:
 			severity = "error"
-			errors++
 		case lang.SeverityWarning:
 			severity = "warning"
-			warnings++
 		default:
 			severity = "info"
 		}
-		sb.WriteString(fmt.Sprintf("  %s:%d:%d: %s: %s\n",
-			path, d.StartLine+1, d.StartCol+1, severity, d.Message))
+		line := fmt.Sprintf("  %s:%d:%d: %s: %s\n",
+			displayPath, d.StartLine+1, d.StartCol+1, severity, d.Message)
+		if sb.Len()+len(line) > maxDiagBytes {
+			truncated = true
+			break
+		}
+		sb.WriteString(line)
 	}
 
-	summary := fmt.Sprintf("%d error(s), %d warning(s)\n", errors, warnings)
+	summary := fmt.Sprintf("%d error(s), %d warning(s)\n", totalErrors, totalWarnings)
+	if truncated {
+		sb.WriteString("  ... diagnostics truncated\n")
+	}
 	return summary + sb.String()
 }

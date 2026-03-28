@@ -119,12 +119,11 @@ func run() error {
 			model = "google/gemini-2.5-flash"
 		}
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
-		ag := agent.New(provider, sess, events, projectRoot, mcpTools...)
-		// Wire diagnostics into the agent if LSP is available.
-		// lsp.Manager implements lang.DiagnosticProvider.
+		var opts *agent.NewOptions
 		if lspMgr != nil {
-			ag.SetDiagnosticProvider(lspMgr, sess)
+			opts = &agent.NewOptions{DiagProvider: lspMgr}
 		}
+		ag := agent.New(provider, sess, events, projectRoot, opts, mcpTools...)
 		sess.SetAgent(ag, events)
 	} else if lspMgr != nil {
 		// No agent, but LSP events still need to reach the frontend.
@@ -167,7 +166,14 @@ type lspServerConfig struct {
 
 // initLSP creates an LSP Manager from config or auto-detection.
 // Returns nil if no language servers are configured or available.
-func initLSP(projectRoot string, events chan<- event.Event) *lsp.Manager {
+// languageService is the narrowed interface returned by initLSP.
+// main.go uses this instead of *lsp.Manager to enforce the hexagonal boundary.
+type languageService interface {
+	lang.DocumentSyncer
+	lang.DiagnosticProvider
+}
+
+func initLSP(projectRoot string, events chan<- event.Event) languageService {
 	configs := loadLSPConfigs(projectRoot)
 	if len(configs) == 0 {
 		configs = defaultLSPConfigs()

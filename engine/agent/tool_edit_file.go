@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lang"
@@ -143,9 +144,11 @@ type EditFileTool struct {
 	continueCh chan string
 	send       func(event.Event)
 
-	// DiagProvider is optionally set to auto-inject diagnostics after edits.
-	// Nil when no language service is available.
-	DiagProvider lang.DiagnosticProvider
+	// diagProvider is optionally set to auto-inject diagnostics after edits.
+	// Nil when no language service is available. Set at construction, immutable.
+	diagProvider lang.DiagnosticProvider
+	// diagDelay is the wait time for gopls to push diagnostics after an edit.
+	diagDelay time.Duration
 
 	mu               sync.Mutex
 	silentRetries    int
@@ -153,13 +156,16 @@ type EditFileTool struct {
 }
 
 // NewEditFileTool creates an EditFileTool with the given dependencies.
-func NewEditFileTool(ws Workspace, cache *FileCache, approveCh chan bool, continueCh chan string, send func(event.Event)) *EditFileTool {
+// diagProvider is optional (nil when no language service is available).
+func NewEditFileTool(ws Workspace, cache *FileCache, approveCh chan bool, continueCh chan string, send func(event.Event), diagProvider lang.DiagnosticProvider) *EditFileTool {
 	return &EditFileTool{
 		workspace:        ws,
 		cache:            cache,
 		approveCh:        approveCh,
 		continueCh:       continueCh,
 		send:             send,
+		diagProvider:     diagProvider,
+		diagDelay:        500 * time.Millisecond,
 		maxSilentRetries: 3,
 	}
 }
@@ -376,8 +382,11 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 		}
 
 		// Auto-inject diagnostics so the agent can self-correct errors.
-		if t.DiagProvider != nil {
-			diagResult := FormatDiagnostics(t.DiagProvider, canon)
+		// Brief wait for gopls to re-analyze the edited file — diagnostics
+		// are pushed asynchronously after DidChange.
+		if t.diagProvider != nil {
+			time.Sleep(t.diagDelay)
+			diagResult := FormatDiagnostics(t.diagProvider, canon, path)
 			result += "\n\nDiagnostics after edit:\n" + diagResult
 		}
 

@@ -4,6 +4,7 @@ package ui
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -143,9 +144,15 @@ func (m *EditorModel) SetDiagnostics(diags []lang.Diagnostic) {
 		return
 	}
 	m.diagByLine = make(map[int]*lang.Diagnostic, len(diags))
+	lineCount := m.eng.Buf.LineCount()
 	for i := range m.diagnostics {
 		d := &m.diagnostics[i]
-		for line := d.StartLine; line <= d.EndLine; line++ {
+		startLine := max(d.StartLine, 0)
+		endLine := min(d.EndLine, lineCount-1)
+		if startLine > endLine {
+			continue
+		}
+		for line := startLine; line <= endLine; line++ {
 			if existing, ok := m.diagByLine[line]; !ok || d.Severity < existing.Severity {
 				m.diagByLine[line] = d
 			}
@@ -157,6 +164,15 @@ func (m *EditorModel) SetDiagnostics(diags []lang.Diagnostic) {
 // O(1) lookup from the precomputed map built by SetDiagnostics.
 func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
 	return m.diagByLine[line]
+}
+
+// Title returns the filename for display in the pane border. Implements Titled.
+func (m *EditorModel) Title() string {
+	name := m.eng.Buf.Path
+	if name == "" {
+		return "[new]"
+	}
+	return filepath.Base(name)
 }
 
 // SetSize updates the editor dimensions. Implements Pane.
@@ -502,12 +518,8 @@ func (m *EditorModel) renderNormalLine(
 		if lineIdx == d.EndLine {
 			endBufCol = d.EndCol
 		}
-		if startBufCol > len(rawRunes) {
-			startBufCol = len(rawRunes)
-		}
-		if endBufCol > len(rawRunes) {
-			endBufCol = len(rawRunes)
-		}
+		startBufCol = min(max(startBufCol, 0), len(rawRunes))
+		endBufCol = min(max(endBufCol, 0), len(rawRunes))
 		startDisp := bufToDisp[startBufCol]
 		endDisp := bufToDisp[endBufCol]
 		// Zero-width diagnostics (e.g., missing token) get at least one cell.
@@ -770,6 +782,35 @@ func (m *EditorModel) renderAddedLine(
 	return line.String()
 }
 
+// sanitizeStatusText strips ANSI escapes, collapses whitespace/newlines to
+// single spaces, and truncates to a safe length for the status bar.
+func sanitizeStatusText(s string) string {
+	const maxLen = 200
+	var b strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if inEscape {
+			if r >= 0x40 && r <= 0x7e {
+				inEscape = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if r == '\n' || r == '\r' || r == '\t' {
+			r = ' '
+		}
+		if b.Len() >= maxLen {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func (m *EditorModel) renderStatusBar() string {
 	statusStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("62")).
@@ -798,7 +839,7 @@ func (m *EditorModel) renderStatusBar() string {
 		default:
 			prefix = "info"
 		}
-		left += "  " + prefix + ": " + diag.Message
+		left += "  " + prefix + ": " + sanitizeStatusText(diag.Message)
 	}
 
 	// Show cursor position: overlay, agent animation, or buffer.

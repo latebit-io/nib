@@ -291,7 +291,7 @@ func (rm *RegionManager) handleDividerDrag(currentX int) {
 	for i := left; i < len(visible); i++ {
 		visible[i].x = x
 		visible[i].Pane.SetSize(visible[i].width, visible[i].height)
-		x += visible[i].width + 2 // content + right border + next left border
+		x += visible[i].width + 2 // +2 for right border + next left border
 	}
 
 	// Update ratios to reflect new proportions
@@ -404,15 +404,57 @@ func (rm *RegionManager) Render() string {
 			borderColor = dividerFocusColor
 		}
 
-		bordered[i] = lipgloss.NewStyle().
+		rendered := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(borderColor).
 			Width(visible[i].width).
 			Height(visible[i].height).
 			Render(content)
+
+		// Embed pane title in the top border if the pane implements Titled.
+		if titled, ok := visible[i].Pane.(Titled); ok {
+			if title := titled.Title(); title != "" {
+				rendered = embedBorderTitle(rendered, title, borderColor, visible[i].width)
+			}
+		}
+
+		bordered[i] = rendered
 	}
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, bordered...)
+}
+
+// embedBorderTitle rebuilds the top border line with a title embedded.
+// Builds from scratch to avoid slicing into ANSI escape sequences.
+// Produces: ╭─ title ───────╮
+func embedBorderTitle(rendered string, title string, borderColor lipgloss.Color, contentWidth int) string {
+	lines := strings.SplitN(rendered, "\n", 2)
+	if len(lines) < 2 {
+		return rendered
+	}
+
+	totalWidth := contentWidth + 2 // content + left/right border chars
+	label := " " + title + " "
+	labelLen := len([]rune(label))
+
+	// Need at least: ╭(1) + ─(1) + label + ─(1) + ╮(1)
+	if totalWidth < labelLen+4 {
+		return rendered
+	}
+
+	titleStyle := lipgloss.NewStyle().Foreground(borderColor).Bold(true)
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+
+	var top strings.Builder
+	top.WriteString(borderStyle.Render("╭─"))
+	top.WriteString(titleStyle.Render(label))
+	dashesAfter := totalWidth - 2 - labelLen - 1 // after label, before ╮
+	if dashesAfter > 0 {
+		top.WriteString(borderStyle.Render(strings.Repeat("─", dashesAfter)))
+	}
+	top.WriteString(borderStyle.Render("╮"))
+
+	return top.String() + "\n" + lines[1]
 }
 
 // dividerStyleFor returns the style for the divider between visible[i] and visible[i+1].

@@ -62,6 +62,11 @@ func NewAgentPaneModel(svc *Services) *AgentPaneModel {
 
 // SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.
 // Re-wraps content when width changes so text reflows correctly.
+// Title returns the pane title for display in the border. Implements Titled.
+func (m *AgentPaneModel) Title() string {
+	return "Agent"
+}
+
 func (m *AgentPaneModel) SetSize(width, height int) {
 	oldWidth := m.Width
 	m.Width = width
@@ -515,20 +520,12 @@ func (m *AgentPaneModel) Render() string {
 	output := make([]string, m.Height)
 	row := 0
 
-	headerStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("230")).
-		Background(lipgloss.Color("62"))
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("24"))
 	inputActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("230"))
 	inputDimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	cursorStyle := lipgloss.NewStyle().Reverse(true)
-
-	// Row 0: Header
-	output[row] = headerStyle.Render(m.padLine(" Agent"))
-	row++
 
 	// No LLM configured — show message and fill remaining rows
 	if !m.HasAgent {

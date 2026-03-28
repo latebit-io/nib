@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // Package-level styles and colors for borders and dividers.
@@ -434,11 +435,17 @@ func embedBorderTitle(rendered string, title string, borderColor lipgloss.Color,
 	}
 
 	totalWidth := contentWidth + 2 // content + left/right border chars
+	// Truncate title to fit within the border with padding.
+	maxTitleCells := totalWidth - 6 // ╭─ + space + space + ─╮
+	if maxTitleCells <= 0 {
+		return rendered
+	}
+	title = runewidth.Truncate(title, maxTitleCells, "…")
 	label := " " + title + " "
-	labelLen := len([]rune(label))
+	labelWidth := runewidth.StringWidth(label)
 
 	// Need at least: ╭(1) + ─(1) + label + ─(1) + ╮(1)
-	if totalWidth < labelLen+4 {
+	if totalWidth < labelWidth+4 {
 		return rendered
 	}
 
@@ -448,7 +455,7 @@ func embedBorderTitle(rendered string, title string, borderColor lipgloss.Color,
 	var top strings.Builder
 	top.WriteString(borderStyle.Render("╭─"))
 	top.WriteString(titleStyle.Render(label))
-	dashesAfter := totalWidth - 2 - labelLen - 1 // after label, before ╮
+	dashesAfter := totalWidth - 2 - labelWidth - 1 // after label, before ╮
 	if dashesAfter > 0 {
 		top.WriteString(borderStyle.Render(strings.Repeat("─", dashesAfter)))
 	}
@@ -516,6 +523,21 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 
 	available := rm.Width - borderCols
 	paneHeight := rm.Height - borderRows
+
+	// Not enough height for borders + content — collapse to single pane.
+	if paneHeight < 1 {
+		visible[0].x = 0
+		visible[0].y = 0
+		visible[0].width = rm.Width
+		visible[0].height = rm.Height
+		visible[0].Pane.SetSize(rm.Width, rm.Height)
+		for _, r := range visible[1:] {
+			r.width = 0
+			r.height = 0
+			r.collapsed = true
+		}
+		return
+	}
 
 	// Check if all panes fit at minimum width
 	if available < len(visible)*MinPaneWidth {

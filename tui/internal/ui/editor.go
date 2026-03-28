@@ -575,17 +575,33 @@ func (m *EditorModel) Render() string {
 		}
 	}
 
-	// Completion popup — auto-dismiss if cursor moved off line or before trigger.
+	// Completion popup — auto-dismiss if cursor moved off line, before trigger,
+	// or past the identifier being typed (e.g., mouse click, End key).
 	if m.Completion.Active {
 		var curLine, curCol int
+		var e *editor.Editor
 		if m.Overlay != nil && m.Overlay.Active {
-			curLine = m.Overlay.StartLine + m.Overlay.Editor.CursorLine
-			curCol = m.Overlay.Editor.CursorCol
+			e = m.Overlay.Editor
+			curLine = m.Overlay.StartLine + e.CursorLine
+			curCol = e.CursorCol
 		} else {
-			curLine = m.eng.CursorLine
-			curCol = m.eng.CursorCol
+			e = m.eng
+			curLine = e.CursorLine
+			curCol = e.CursorCol
 		}
-		if curLine != m.Completion.TriggerLine || curCol < m.Completion.TriggerCol {
+		dismiss := curLine != m.Completion.TriggerLine || curCol < m.Completion.TriggerCol
+		if !dismiss && curCol > m.Completion.TriggerCol {
+			// Verify text between trigger and cursor is all identifier chars.
+			// Dismisses on mouse click or End key past the identifier.
+			lineText := []rune(e.Buf.LineText(e.CursorLine))
+			for c := m.Completion.TriggerCol; c < curCol && c < len(lineText); c++ {
+				if !lang.IsIdentChar(lineText[c]) {
+					dismiss = true
+					break
+				}
+			}
+		}
+		if dismiss {
 			m.Completion.Dismiss()
 		} else {
 			m.overlayCompletion(output, gutterW, contentW)

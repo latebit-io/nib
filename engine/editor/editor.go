@@ -74,10 +74,10 @@ func (e *Editor) SetSize(width, height int) {
 
 // VisibleLines returns the number of content lines visible (reserving 1 for status bar).
 func (e *Editor) VisibleLines() int {
-	if e.Height <= 1 {
+	if e.Height <= 0 {
 		return 0
 	}
-	return e.Height - 1
+	return e.Height
 }
 
 // GutterWidth returns the width of the line number gutter.

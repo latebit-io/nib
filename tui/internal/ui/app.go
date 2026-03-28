@@ -367,9 +367,9 @@ func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
 }
 
 // regionHeight returns the height available for the RegionManager
-// (total height minus the intent bar which is always present).
+// (total height minus the intent bar and status bar).
 func (m *AppModel) regionHeight() int {
-	h := m.Height - 1 // 1 row for intent bar
+	h := m.Height - 2 // 1 intent bar + 1 status bar
 	if h < 1 {
 		h = 1
 	}
@@ -525,7 +525,7 @@ func (m *AppModel) View() string {
 		return m.Dialog.Render(m.Width, m.Height)
 	}
 
-	base := m.renderIntentBar() + "\n" + m.Regions.Render()
+	base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width)
 
 	// Palette floats on top of the editor — editor stays visible.
 	if m.Palette.Active {
@@ -782,18 +782,23 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 
 	// If editing in the overlay, temporarily sync merged content to the LSP
 	// so completions reflect the proposed code, not the original buffer.
-	var mergedContent string
+	// Capture the original content NOW (TUI goroutine) to avoid reading
+	// the buffer from the background goroutine (data race).
+	var overlaySync bool
+	var originalContent string
 	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
-		mergedContent = m.Editor.Overlay.MergedContent(m.Editor.eng.Buf)
-		m.Session.SyncContentForCompletion(path, mergedContent)
+		originalContent = m.Editor.eng.Buf.Content()
+		merged := m.Editor.Overlay.MergedContent(m.Editor.eng.Buf)
+		m.Session.SyncContentForCompletion(path, merged)
+		overlaySync = true
 	}
 
 	return m, func() tea.Msg {
 		result, err := m.Session.RequestCompletion(path, line, col)
 
-		// Revert LSP content if we synced overlay content.
-		if mergedContent != "" {
-			m.Session.RevertContentSync(path)
+		// Revert LSP content using the snapshot captured on the TUI goroutine.
+		if overlaySync {
+			m.Session.SyncContentForCompletion(path, originalContent)
 		}
 
 		if err != nil {

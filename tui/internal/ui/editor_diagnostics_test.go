@@ -113,17 +113,17 @@ func TestDiagnosticStatusBarMessage(t *testing.T) {
 	m.SetDiagnostics([]lang.Diagnostic{
 		{StartLine: 0, EndLine: 0, Severity: lang.SeverityError, Message: "undefined: foo"},
 	})
-	// Cursor is on line 0 by default.
-	output := m.Render()
-	if !strings.Contains(output, "error: undefined: foo") {
-		t.Errorf("status bar missing diagnostic message, got:\n%s", output)
+	// Cursor is on line 0 by default — status bar rendered separately.
+	bar := m.renderStatusBar(80)
+	if !strings.Contains(bar, "error: undefined: foo") {
+		t.Errorf("status bar missing diagnostic message, got: %s", bar)
 	}
 
 	// Move cursor to line 1 — should not show diagnostic.
 	m.eng.CursorLine = 1
 	m.eng.CursorCol = 0
-	output = m.Render()
-	if strings.Contains(output, "undefined: foo") {
+	bar = m.renderStatusBar(80)
+	if strings.Contains(bar, "undefined: foo") {
 		t.Errorf("status bar should not show diagnostic for line 1")
 	}
 }
@@ -134,11 +134,11 @@ func TestDiagnosticStatusBarNotShownWithStatusMsg(t *testing.T) {
 		{StartLine: 0, EndLine: 0, Severity: lang.SeverityError, Message: "undefined: foo"},
 	})
 	m.StatusMsg = "Saved!"
-	output := m.Render()
-	if strings.Contains(output, "undefined: foo") {
+	bar := m.renderStatusBar(80)
+	if strings.Contains(bar, "undefined: foo") {
 		t.Errorf("diagnostic should not show when StatusMsg is set")
 	}
-	if !strings.Contains(output, "Saved!") {
+	if !strings.Contains(bar, "Saved!") {
 		t.Errorf("StatusMsg should be shown")
 	}
 }

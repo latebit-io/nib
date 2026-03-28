@@ -281,31 +281,14 @@ func (s *Session) RequestCompletion(path string, line, col int) (*lang.Completio
 
 // SyncContentForCompletion temporarily updates the LSP's view of a file
 // with the given content. Used to sync overlay content before completion
-// requests. Call RevertContentSync after the request to restore the original.
+// requests and to revert afterward with the original content snapshot.
 func (s *Session) SyncContentForCompletion(path, content string) {
-	if s.langSyncer == nil {
+	if s.langSyncer == nil || path == "" {
 		return
 	}
+	path = s.CanonPath(path)
 	s.langSyncer.DidChange(path, []lang.TextChange{{
 		Text:        content,
-		FullContent: true,
-	}})
-}
-
-// RevertContentSync restores the LSP's view of a file to the actual buffer
-// content. Called after SyncContentForCompletion + completion request.
-func (s *Session) RevertContentSync(path string) {
-	if s.langSyncer == nil {
-		return
-	}
-	s.mu.RLock()
-	e, ok := s.editors[path]
-	s.mu.RUnlock()
-	if !ok {
-		return
-	}
-	s.langSyncer.DidChange(path, []lang.TextChange{{
-		Text:        e.Buf.Content(),
 		FullContent: true,
 	}})
 }

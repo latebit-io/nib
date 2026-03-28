@@ -45,6 +45,12 @@ var (
 			Bold(true)
 )
 
+// Status bar style — full-width bar at the bottom of the window.
+var statusBarStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("62")).
+	Foreground(lipgloss.Color("230")).
+	Bold(true)
+
 // Diagnostic gutter styles — severity-colored icons in the gutter margin.
 var (
 	diagErrorGutterStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
@@ -332,15 +338,15 @@ func (m *EditorModel) acceptCompletion() tea.Cmd {
 		identStart--
 	}
 
-	// Delete the partial identifier.
+	// Replace partial identifier with completion as one atomic undo group.
+	e.Buf.BeginGroup()
 	if col > identStart {
 		e.Buf.Delete(line, identStart, col-identStart)
 		e.CursorCol = identStart
 	}
-
-	// Insert the completion text.
 	e.Buf.Insert(line, e.CursorCol, insertText)
 	e.CursorCol += len([]rune(insertText))
+	e.Buf.EndGroup()
 
 	m.Completion.Dismiss()
 	m.cursorMoved = true
@@ -559,14 +565,9 @@ func (m *EditorModel) Render() string {
 	}
 
 	// Fill remaining rows with tildes.
-	for visualRow := vis; visualRow < m.eng.Height-1; visualRow++ {
+	for visualRow := vis; visualRow < m.eng.Height; visualRow++ {
 		output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 		m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
-	}
-
-	// Status bar (last row).
-	if m.eng.Height > 0 {
-		output[m.eng.Height-1] = m.renderStatusBar()
 	}
 
 	// Hover overlay — auto-dismiss if cursor moved from trigger position.
@@ -578,15 +579,17 @@ func (m *EditorModel) Render() string {
 		}
 	}
 
-	// Completion popup — auto-dismiss if cursor line changed.
+	// Completion popup — auto-dismiss if cursor moved off line or before trigger.
 	if m.Completion.Active {
-		var curLine int
+		var curLine, curCol int
 		if m.Overlay != nil && m.Overlay.Active {
 			curLine = m.Overlay.StartLine + m.Overlay.Editor.CursorLine
+			curCol = m.Overlay.Editor.CursorCol
 		} else {
 			curLine = m.eng.CursorLine
+			curCol = m.eng.CursorCol
 		}
-		if curLine != m.Completion.TriggerLine {
+		if curLine != m.Completion.TriggerLine || curCol < m.Completion.TriggerCol {
 			m.Completion.Dismiss()
 		} else {
 			m.overlayCompletion(output, gutterW, contentW)
@@ -1115,12 +1118,8 @@ func sanitizeStatusText(s string) string {
 	return b.String()
 }
 
-func (m *EditorModel) renderStatusBar() string {
-	statusStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("62")).
-		Foreground(lipgloss.Color("230")).
-		Bold(true)
-
+// renderStatusBar renders the full-width status bar. Called by AppModel.View().
+func (m *EditorModel) renderStatusBar(width int) string {
 	name := m.eng.Buf.Path
 	if name == "" {
 		name = "[new]"
@@ -1160,15 +1159,15 @@ func (m *EditorModel) renderStatusBar() string {
 
 	leftW := runewidth.StringWidth(left)
 	rightW := runewidth.StringWidth(right)
-	padding := m.eng.Width - leftW - rightW
+	padding := width - leftW - rightW
 	if padding < 0 {
 		padding = 0
 	}
 
 	bar := left + strings.Repeat(" ", padding) + right
-	bar = runewidth.Truncate(bar, m.eng.Width, "")
+	bar = runewidth.Truncate(bar, width, "")
 
-	return statusStyle.Render(bar)
+	return statusBarStyle.Render(bar)
 }
 
 // --- Mouse Handling ---

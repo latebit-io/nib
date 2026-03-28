@@ -28,6 +28,23 @@ var (
 				Foreground(lipgloss.Color("34")) // green
 )
 
+// Hover overlay styles — floating panel for type info and documentation.
+var (
+	hoverStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("237")).
+			Foreground(lipgloss.Color("252")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 1)
+	hoverCodeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("114")) // green for code/signatures
+	hoverDimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("245")) // dim for doc text
+	hoverBoldStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")).
+			Bold(true)
+)
+
 // Diagnostic gutter styles — severity-colored icons in the gutter margin.
 var (
 	diagErrorGutterStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
@@ -118,6 +135,13 @@ type EditorModel struct {
 	// diagUnderline is a reusable scratch buffer for underline computation
 	// in renderNormalLine. Avoids per-line per-frame allocation.
 	diagUnderline []bool
+
+	// hoverText holds the content for the hover overlay (type info, docs).
+	// Empty string means no hover is active.
+	hoverText string
+	// hoverLine/hoverCol record where the hover was triggered so the
+	// overlay dismisses when the cursor moves.
+	hoverLine, hoverCol int
 }
 
 // NewEditorModel creates an editor model from an engine Editor.
@@ -175,6 +199,105 @@ func (m *EditorModel) Title() string {
 	return filepath.Base(name)
 }
 
+// ShowHover displays a hover overlay with the given text at the current cursor.
+// Strips markdown formatting (code fences, horizontal rules) from LSP hover output.
+func (m *EditorModel) ShowHover(text string) {
+	m.hoverText = renderHoverMarkdown(text)
+	m.hoverLine = m.eng.CursorLine
+	m.hoverCol = m.eng.CursorCol
+}
+
+// renderHoverMarkdown converts gopls markdown hover output into styled
+// terminal text. Handles code fences (colored), horizontal rules (dim
+// separator), bold markers, and inline code spans.
+func renderHoverMarkdown(s string) string {
+	lines := strings.Split(s, "\n")
+	var out []string
+	inCode := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Code fence toggle.
+		if strings.HasPrefix(trimmed, "```") {
+			inCode = !inCode
+			continue
+		}
+
+		// Horizontal rule → dim separator.
+		if trimmed == "---" || trimmed == "___" || trimmed == "***" {
+			out = append(out, hoverDimStyle.Render("─────"))
+			continue
+		}
+
+		if inCode {
+			out = append(out, hoverCodeStyle.Render(line))
+		} else if trimmed == "" {
+			out = append(out, "")
+		} else {
+			// Render inline markdown: **bold** and `code`.
+			rendered := renderInlineMarkdown(line)
+			out = append(out, rendered)
+		}
+	}
+
+	// Trim leading/trailing blank lines.
+	for len(out) > 0 && strings.TrimSpace(out[0]) == "" {
+		out = out[1:]
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
+// renderInlineMarkdown handles **bold** and `code` spans in a single line.
+func renderInlineMarkdown(s string) string {
+	var b strings.Builder
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		// Bold: **text**
+		if i+1 < len(runes) && runes[i] == '*' && runes[i+1] == '*' {
+			end := -1
+			for j := i + 2; j+1 < len(runes); j++ {
+				if runes[j] == '*' && runes[j+1] == '*' {
+					end = j
+					break
+				}
+			}
+			if end >= 0 {
+				b.WriteString(hoverBoldStyle.Render(string(runes[i+2 : end])))
+				i = end + 2
+				continue
+			}
+		}
+		// Inline code: `text`
+		if runes[i] == '`' {
+			end := -1
+			for j := i + 1; j < len(runes); j++ {
+				if runes[j] == '`' {
+					end = j
+					break
+				}
+			}
+			if end >= 0 {
+				b.WriteString(hoverCodeStyle.Render(string(runes[i+1 : end])))
+				i = end + 1
+				continue
+			}
+		}
+		b.WriteRune(runes[i])
+		i++
+	}
+	return b.String()
+}
+
+// DismissHover clears the hover overlay.
+func (m *EditorModel) DismissHover() {
+	m.hoverText = ""
+}
+
 // SetSize updates the editor dimensions. Implements Pane.
 func (m *EditorModel) SetSize(width, height int) {
 	m.eng.SetSize(width, height)
@@ -186,6 +309,8 @@ func (m *EditorModel) Update(msg tea.Msg) tea.Cmd {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
+		// Dismiss hover on any key — cursor is about to move.
+		m.DismissHover()
 		// Any key event may move the cursor — mark for scroll adjustment.
 		m.cursorMoved = true
 		return m.handleKey(msg)
@@ -368,6 +493,15 @@ func (m *EditorModel) Render() string {
 	// Status bar (last row).
 	if m.eng.Height > 0 {
 		output[m.eng.Height-1] = m.renderStatusBar()
+	}
+
+	// Hover overlay — auto-dismiss if cursor moved from trigger position.
+	if m.hoverText != "" {
+		if m.eng.CursorLine != m.hoverLine || m.eng.CursorCol != m.hoverCol {
+			m.hoverText = ""
+		} else {
+			m.overlayHover(output, gutterW, contentW)
+		}
 	}
 
 	return strings.Join(output, "\n")
@@ -780,6 +914,57 @@ func (m *EditorModel) renderAddedLine(
 	}
 
 	return line.String()
+}
+
+// overlayHover renders a floating hover panel over the editor output lines.
+// Positioned below the hover trigger line, capped to not exceed the editor area.
+func (m *EditorModel) overlayHover(output []string, gutterW, contentW int) {
+	// Determine the visual row to place the overlay below.
+	visualRow := m.hoverLine - m.eng.ScrollOffset + 1
+	if visualRow < 0 || visualRow >= m.eng.Height-1 {
+		return // cursor scrolled off screen
+	}
+
+	// Wrap hover text to fit within the content area.
+	maxWidth := contentW
+	if maxWidth > 60 {
+		maxWidth = 60
+	}
+	if maxWidth < 10 {
+		return
+	}
+
+	// Split and truncate hover lines. Account for border (2 rows).
+	hoverLines := strings.Split(m.hoverText, "\n")
+	maxLines := m.eng.Height - 1 - visualRow - 2 // -2 for border rows
+	if maxLines > 10 {
+		maxLines = 10
+	}
+	if maxLines < 1 {
+		return
+	}
+	if len(hoverLines) > maxLines {
+		hoverLines = hoverLines[:maxLines]
+	}
+	if len(hoverLines) == 0 {
+		return
+	}
+
+	// Render the hover box via lipgloss with fixed width for consistent borders.
+	content := strings.Join(hoverLines, "\n")
+	box := hoverStyle.Width(maxWidth - 4).Render(content) // -4 for border+padding
+	boxLines := strings.Split(box, "\n")
+
+	// Replace entire output rows with gutter padding + hover box line.
+	// This avoids ANSI escape sequence corruption from rune-level splicing.
+	gutterPad := strings.Repeat(" ", gutterW)
+	for i, bl := range boxLines {
+		row := visualRow + i
+		if row >= m.eng.Height-1 {
+			break
+		}
+		output[row] = gutterPad + bl
+	}
 }
 
 // sanitizeStatusText strips ANSI escapes, collapses whitespace/newlines to

@@ -4,6 +4,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
@@ -92,6 +94,10 @@ type Session struct {
 	// so unwireBufferSync can restore it. nil func() means no previous handler.
 	// Guarded by mu.
 	wiredEditors map[string]func()
+
+	// navStack tracks cursor positions for go-back navigation after go-to-definition.
+	// Each entry records where the cursor was before the jump.
+	navStack []lang.Location
 }
 
 // New creates a session in editor-only mode. Call SetAgent to enable the
@@ -180,6 +186,85 @@ func (s *Session) Diagnostics(path string) []lang.Diagnostic {
 		return nil
 	}
 	return dp.Diagnostics(path)
+}
+
+// GoToDefinition navigates to the definition of the symbol at the given position.
+// Pushes the current location onto the navigation stack before jumping.
+// If the definition is in a different file, the session switches to it.
+// Returns the target location, or an error if the capability is unavailable.
+func (s *Session) GoToDefinition(line, col int) (*lang.Location, error) {
+	dp, ok := s.langSyncer.(lang.DefinitionProvider)
+	if !ok {
+		return nil, errors.New("language service does not support go-to-definition")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	path := s.ActiveFile()
+	if path == "" {
+		return nil, errors.New("no active file")
+	}
+
+	loc, err := dp.Definition(ctx, path, line, col)
+	if err != nil {
+		return nil, err
+	}
+
+	// Push current position onto nav stack before jumping.
+	s.navStack = append(s.navStack, lang.Location{
+		Path: path,
+		Line: s.Editor.CursorLine,
+		Col:  s.Editor.CursorCol,
+	})
+
+	// Switch file if the definition is in a different file.
+	if loc.Path != path {
+		if err := s.SwitchTo(loc.Path); err != nil {
+			// Pop the nav entry we just pushed — jump failed.
+			s.navStack = s.navStack[:len(s.navStack)-1]
+			return nil, fmt.Errorf("cannot open %s: %w", loc.Path, err)
+		}
+	}
+
+	s.Editor.MoveCursorTo(loc.Line, loc.Col)
+	return &loc, nil
+}
+
+// GoBack pops the navigation stack and returns to the previous location.
+// Returns the location jumped to, or nil if the stack is empty.
+func (s *Session) GoBack() *lang.Location {
+	if len(s.navStack) == 0 {
+		return nil
+	}
+	loc := s.navStack[len(s.navStack)-1]
+	s.navStack = s.navStack[:len(s.navStack)-1]
+
+	if loc.Path != s.ActiveFile() {
+		if err := s.SwitchTo(loc.Path); err != nil {
+			slog.Warn("GoBack: cannot switch file", "path", loc.Path, "err", err)
+			return nil
+		}
+	}
+	s.Editor.MoveCursorTo(loc.Line, loc.Col)
+	return &loc
+}
+
+// HoverInfo returns type/documentation information for the symbol at the given position.
+// Returns empty string if the capability is unavailable or no hover info exists.
+func (s *Session) HoverInfo(line, col int) (string, error) {
+	hp, ok := s.langSyncer.(lang.HoverProvider)
+	if !ok {
+		return "", errors.New("language service does not support hover")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	path := s.ActiveFile()
+	if path == "" {
+		return "", errors.New("no active file")
+	}
+
+	return hp.Hover(ctx, path, line, col)
 }
 
 // NotifySaved notifies the language service that the current file was saved.

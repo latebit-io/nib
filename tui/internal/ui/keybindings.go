@@ -21,6 +21,9 @@ const (
 	ActionAgentContinue
 	ActionOpenPalette
 	ActionToggleProject
+	ActionGoToDefinition
+	ActionGoBack
+	ActionHover
 )
 
 // Keymap holds all keybindings. Uses reverse lookup maps for
@@ -34,17 +37,20 @@ type Keymap struct {
 func DefaultKeymap() *Keymap {
 	km := &Keymap{
 		byType: map[tea.KeyType]Action{
-			tea.KeyCtrlQ:  ActionQuit,
-			tea.KeyCtrlS:  ActionSave,
-			tea.KeyCtrlZ:  ActionUndo,
-			tea.KeyCtrlY:  ActionRedo,
-			tea.KeyCtrlC:  ActionCopy,
-			tea.KeyCtrlX:  ActionCut,
-			tea.KeyCtrlV:  ActionPaste,
-			tea.KeyCtrlA:  ActionSelectAll,
-			tea.KeyCtrlO:  ActionAgentApprove,
-			tea.KeyEscape: ActionAgentReject,
-			tea.KeyCtrlN:  ActionAgentContinue,
+			tea.KeyCtrlQ:            ActionQuit,
+			tea.KeyCtrlS:            ActionSave,
+			tea.KeyCtrlZ:            ActionUndo,
+			tea.KeyCtrlY:            ActionRedo,
+			tea.KeyCtrlC:            ActionCopy,
+			tea.KeyCtrlX:            ActionCut,
+			tea.KeyCtrlV:            ActionPaste,
+			tea.KeyCtrlA:            ActionSelectAll,
+			tea.KeyCtrlO:            ActionAgentApprove,
+			tea.KeyEscape:           ActionAgentReject,
+			tea.KeyCtrlN:            ActionAgentContinue,
+			tea.KeyCtrlCloseBracket: ActionGoToDefinition,
+			tea.KeyCtrlT:            ActionGoBack,
+			tea.KeyCtrlK:            ActionHover,
 		},
 		byString: map[string]Action{
 			"ctrl+g": ActionAgentStart,

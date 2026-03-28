@@ -24,6 +24,9 @@ type paletteFilesMsg struct{ items []PaletteItem }
 // paletteErrorMsg delivers a file listing error to the UI.
 type paletteErrorMsg struct{ err string }
 
+// hoverResultMsg delivers hover information from an async LSP request.
+type hoverResultMsg struct{ text string }
+
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
 // reads Session state to render, and adapts agent events to tea.Msg.
@@ -167,6 +170,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PaletteResultMsg:
 		if !msg.Cancelled && msg.Category == "file" {
 			return m.openFile(msg.Item.Value)
+		}
+		return m, nil
+
+	// Hover result — display or dismiss
+	case hoverResultMsg:
+		if msg.text != "" {
+			m.Editor.ShowHover(msg.text)
 		}
 		return m, nil
 
@@ -406,6 +416,15 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case ActionGoToDefinition:
+		return m.handleGoToDefinition()
+
+	case ActionGoBack:
+		return m.handleGoBack()
+
+	case ActionHover:
+		return m.handleHover()
 	}
 
 	// Delegate to focused pane
@@ -531,6 +550,75 @@ func (m *AppModel) refreshDiagnostics(path string) {
 		return
 	}
 	m.Editor.SetDiagnostics(m.Session.Diagnostics(canon))
+}
+
+// --- Go-to-Definition / Hover / Go-Back ---
+
+// handleGoToDefinition navigates to the definition of the symbol under the cursor.
+func (m *AppModel) handleGoToDefinition() (tea.Model, tea.Cmd) {
+	if !m.Session.HasLanguageService() {
+		return m, nil
+	}
+	loc, err := m.Session.GoToDefinition(m.Editor.eng.CursorLine, m.Editor.eng.CursorCol)
+	if err != nil {
+		slog.Debug("go-to-definition failed", "err", err)
+		m.Editor.StatusMsg = err.Error()
+		return m, nil
+	}
+
+	// Session may have switched files — rebuild EditorModel if needed.
+	if m.Session.Editor != m.Editor.eng {
+		wpm := m.Editor.TypingWPM
+		m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
+		m.Editor.TypingWPM = wpm
+		m.Editor.OnSave = func() { m.Session.NotifySaved() }
+		m.Regions.ReplacePane("editor", m.Editor)
+		m.refreshDiagnostics(m.Session.ActiveFile())
+	}
+
+	slog.Debug("go-to-definition", "path", loc.Path, "line", loc.Line, "col", loc.Col)
+	return m, nil
+}
+
+// handleGoBack returns to the previous location in the navigation stack.
+func (m *AppModel) handleGoBack() (tea.Model, tea.Cmd) {
+	loc := m.Session.GoBack()
+	if loc == nil {
+		return m, nil
+	}
+
+	// Session may have switched files — rebuild EditorModel if needed.
+	if m.Session.Editor != m.Editor.eng {
+		wpm := m.Editor.TypingWPM
+		m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
+		m.Editor.TypingWPM = wpm
+		m.Editor.OnSave = func() { m.Session.NotifySaved() }
+		m.Regions.ReplacePane("editor", m.Editor)
+		m.refreshDiagnostics(m.Session.ActiveFile())
+	}
+
+	slog.Debug("go-back", "path", loc.Path, "line", loc.Line, "col", loc.Col)
+	return m, nil
+}
+
+// handleHover requests hover info for the symbol under the cursor.
+// The LSP request runs asynchronously via a tea.Cmd.
+func (m *AppModel) handleHover() (tea.Model, tea.Cmd) {
+	if !m.Session.HasLanguageService() {
+		return m, nil
+	}
+	// Dismiss any existing hover.
+	m.Editor.DismissHover()
+
+	line, col := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	return m, func() tea.Msg {
+		text, err := m.Session.HoverInfo(line, col)
+		if err != nil {
+			slog.Debug("hover failed", "err", err)
+			return hoverResultMsg{}
+		}
+		return hoverResultMsg{text: text}
+	}
 }
 
 // refreshProjectPane rebuilds the project pane if visible, or marks it

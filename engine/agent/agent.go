@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -40,10 +41,27 @@ type Agent struct {
 // The frontend must continuously drain the events channel. Sends block
 // if the channel is full, providing backpressure to the agent loop.
 // Use a buffered channel (e.g. 64) to absorb bursts.
-func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, projectRoot string, extraTools ...Tool) *Agent {
+// NewOptions holds optional dependencies for agent construction.
+type NewOptions struct {
+	// DiagProvider enables diagnostics tool and auto-injection after edits.
+	// Nil when no language service is available.
+	DiagProvider lang.DiagnosticProvider
+}
+
+// New creates an agent with the given provider, workspace, and tools.
+// The opts parameter is optional — pass nil for defaults.
+// The frontend must continuously drain the events channel. Sends block
+// if the channel is full, providing backpressure to the agent loop.
+// Use a buffered channel (e.g. 64) to absorb bursts.
+func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, projectRoot string, opts *NewOptions, extraTools ...Tool) *Agent {
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)
 	cache := NewFileCache()
+
+	var diagProvider lang.DiagnosticProvider
+	if opts != nil {
+		diagProvider = opts.DiagProvider
+	}
 
 	a := &Agent{
 		provider:   provider,
@@ -54,14 +72,21 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		continueCh: continueCh,
 	}
 
+	editTool := NewEditFileTool(workspace, cache, approveCh, continueCh, a.send, diagProvider)
+
 	// Build tool registry — each tool gets exactly the dependencies it needs.
 	// Built-in tools are registered first and cannot be overridden by extraTools.
 	builtins := []Tool{
 		NewReadFileTool(workspace, cache),
-		NewEditFileTool(workspace, cache, approveCh, continueCh, a.send),
+		editTool,
 		NewWriteFileTool(workspace, cache, a.send),
 		NewListFilesTool(workspace),
 		NewBashTool(projectRoot),
+	}
+
+	// Register diagnostics tool if provider is available.
+	if diagProvider != nil {
+		builtins = append(builtins, NewDiagnosticsTool(diagProvider, workspace))
 	}
 
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))

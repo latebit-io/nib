@@ -54,7 +54,7 @@ func TestEditFileToolAutoAddsToContextOnApproval(t *testing.T) {
 	continueCh := make(chan string, 1)
 	send := func(_ event.Event) {}
 
-	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send)
+	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send, nil)
 
 	args := mustMarshal(t, editArgs{
 		Path:    "src/main.go",
@@ -95,7 +95,7 @@ func TestEditFileToolNoContextAddOnRejection(t *testing.T) {
 	continueCh := make(chan string, 1)
 	send := func(_ event.Event) {}
 
-	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send)
+	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send, nil)
 
 	args := mustMarshal(t, editArgs{
 		Path:    "src/main.go",
@@ -134,7 +134,7 @@ func TestEditFileToolSkipsAddWhenAlreadyInContext(t *testing.T) {
 	continueCh := make(chan string, 1)
 	send := func(_ event.Event) {}
 
-	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send)
+	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send, nil)
 
 	args := mustMarshal(t, editArgs{
 		Path:    "src/main.go",

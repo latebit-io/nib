@@ -7,8 +7,10 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -142,19 +144,28 @@ type EditFileTool struct {
 	continueCh chan string
 	send       func(event.Event)
 
+	// diagProvider is optionally set to auto-inject diagnostics after edits.
+	// Nil when no language service is available. Set at construction, immutable.
+	diagProvider lang.DiagnosticProvider
+	// diagDelay is the wait time for gopls to push diagnostics after an edit.
+	diagDelay time.Duration
+
 	mu               sync.Mutex
 	silentRetries    int
 	maxSilentRetries int
 }
 
 // NewEditFileTool creates an EditFileTool with the given dependencies.
-func NewEditFileTool(ws Workspace, cache *FileCache, approveCh chan bool, continueCh chan string, send func(event.Event)) *EditFileTool {
+// diagProvider is optional (nil when no language service is available).
+func NewEditFileTool(ws Workspace, cache *FileCache, approveCh chan bool, continueCh chan string, send func(event.Event), diagProvider lang.DiagnosticProvider) *EditFileTool {
 	return &EditFileTool{
 		workspace:        ws,
 		cache:            cache,
 		approveCh:        approveCh,
 		continueCh:       continueCh,
 		send:             send,
+		diagProvider:     diagProvider,
+		diagDelay:        500 * time.Millisecond,
 		maxSilentRetries: 3,
 	}
 }
@@ -353,9 +364,10 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 		t.send(event.AgentStatus{Status: "thinking"})
 		t.send(event.AgentToken{Text: "\n"})
 
+		var result string
 		if newContent != expectedContent {
 			diff := simpleDiff(expectedContent, newContent)
-			return fmt.Sprintf("Edit applied, but the developer modified your edit. "+
+			result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
 				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
 				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
 				"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
@@ -364,8 +376,20 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
 				"Current file (%s):\n```\n%s\n```",
 				diff, path, truncateForPreview(newContent))
+		} else {
+			result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
+				path, truncateForPreview(newContent))
 		}
-		return fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-			path, truncateForPreview(newContent))
+
+		// Auto-inject diagnostics so the agent can self-correct errors.
+		// Brief wait for gopls to re-analyze the edited file — diagnostics
+		// are pushed asynchronously after DidChange.
+		if t.diagProvider != nil {
+			time.Sleep(t.diagDelay)
+			diagResult := FormatDiagnostics(t.diagProvider, canon, path)
+			result += "\n\nDiagnostics after edit:\n" + diagResult
+		}
+
+		return result
 	}
 }

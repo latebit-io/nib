@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,6 +13,7 @@ import (
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/session"
 )
 
@@ -33,6 +35,23 @@ type goToDefResultMsg struct {
 	// Origin cursor for nav stack push.
 	originPath            string
 	originLine, originCol int
+}
+
+// completionResultMsg delivers completion results from an async LSP request.
+type completionResultMsg struct {
+	items        []lang.CompletionItem
+	isIncomplete bool
+	path         string
+	line, col    int
+}
+
+// completionTriggerMsg is emitted by the editor after typing a trigger character.
+type completionTriggerMsg struct{}
+
+// completionTickMsg fires after a debounce delay to trigger a completion request.
+type completionTickMsg struct {
+	path      string
+	line, col int
 }
 
 // hoverResultMsg delivers hover information from an async LSP request.
@@ -189,6 +208,33 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// Completion trigger — editor typed a trigger character, schedule debounced request.
+	case completionTriggerMsg:
+		return m, m.scheduleCompletion()
+
+	// Completion debounce tick — fire the actual request.
+	case completionTickMsg:
+		return m.handleCompletionTick(msg)
+
+	// Completion result — show popup if still relevant.
+	case completionResultMsg:
+		var curLine, curCol int
+		if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
+			oe := m.Editor.Overlay.Editor
+			curLine = m.Editor.Overlay.StartLine + oe.CursorLine
+			curCol = oe.CursorCol
+		} else {
+			curLine = m.Editor.eng.CursorLine
+			curCol = m.Editor.eng.CursorCol
+		}
+		if msg.path == m.Session.ActiveFile() &&
+			msg.line == curLine &&
+			msg.col == curCol &&
+			len(msg.items) > 0 {
+			m.Editor.Completion.Show(msg.items, msg.line, msg.col)
+		}
+		return m, nil
+
 	// Go-to-definition result — apply navigation on the TUI goroutine.
 	case goToDefResultMsg:
 		return m.applyGoToDefinition(msg)
@@ -321,9 +367,9 @@ func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
 }
 
 // regionHeight returns the height available for the RegionManager
-// (total height minus the intent bar which is always present).
+// (total height minus the intent bar and status bar).
 func (m *AppModel) regionHeight() int {
-	h := m.Height - 1 // 1 row for intent bar
+	h := m.Height - 2 // 1 intent bar + 1 status bar
 	if h < 1 {
 		h = 1
 	}
@@ -378,6 +424,11 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ActionAgentReject:
+		// Completion popup gets priority — dismiss it first.
+		if m.Editor.Completion.Active {
+			m.Editor.Completion.Dismiss()
+			return m, nil
+		}
 		// Cancel running animation (partial edit stays, undoable)
 		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
 			slog.Debug("animation cancelled", "reason", "escape")
@@ -474,7 +525,7 @@ func (m *AppModel) View() string {
 		return m.Dialog.Render(m.Width, m.Height)
 	}
 
-	base := m.renderIntentBar() + "\n" + m.Regions.Render()
+	base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width)
 
 	// Palette floats on top of the editor — editor stays visible.
 	if m.Palette.Active {
@@ -675,6 +726,94 @@ func (m *AppModel) handleHover() (tea.Model, tea.Cmd) {
 			return hoverResultMsg{}
 		}
 		return hoverResultMsg{text: text, path: path, line: line, col: col}
+	}
+}
+
+// --- Autocomplete ---
+
+// completionDebounce is the delay before firing a completion request.
+const completionDebounce = 100 * time.Millisecond
+
+// scheduleCompletion starts a debounced completion request. Called after
+// typing a character. The tick carries a snapshot of path+cursor so stale
+// ticks are dropped.
+func (m *AppModel) scheduleCompletion() tea.Cmd {
+	if !m.Session.HasLanguageService() {
+		return nil
+	}
+	path := m.Session.ActiveFile()
+	var line, col int
+	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
+		// Map overlay cursor to buffer position for the LSP request.
+		// The overlay replaces buffer lines StartLine..EndLine, so the
+		// overlay cursor line maps to StartLine + overlayCursorLine.
+		oe := m.Editor.Overlay.Editor
+		line = m.Editor.Overlay.StartLine + oe.CursorLine
+		col = oe.CursorCol
+	} else {
+		line, col = m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	}
+	return tea.Tick(completionDebounce, func(_ time.Time) tea.Msg {
+		return completionTickMsg{path: path, line: line, col: col}
+	})
+}
+
+// handleCompletionTick fires when the debounce timer expires.
+// Drops stale ticks (cursor moved since scheduling). Dispatches async request.
+func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.Cmd) {
+	// Drop if cursor moved since the tick was scheduled.
+	// Compare against the right cursor (overlay or buffer).
+	var curLine, curCol int
+	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
+		oe := m.Editor.Overlay.Editor
+		curLine = m.Editor.Overlay.StartLine + oe.CursorLine
+		curCol = oe.CursorCol
+	} else {
+		curLine = m.Editor.eng.CursorLine
+		curCol = m.Editor.eng.CursorCol
+	}
+	if msg.path != m.Session.ActiveFile() ||
+		msg.line != curLine ||
+		msg.col != curCol {
+		return m, nil
+	}
+	line, col := msg.line, msg.col
+	path := msg.path
+
+	// Capture content snapshots on the TUI goroutine (no race).
+	// For overlay editing, session needs both merged and original content
+	// to temporarily sync the proposed code to LSP and revert afterward.
+	var tempContent, originalContent string
+	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
+		originalContent = m.Editor.eng.Buf.Content()
+		tempContent = m.Editor.Overlay.MergedContent(m.Editor.eng.Buf)
+	}
+
+	return m, func() tea.Msg {
+		var result *lang.CompletionResult
+		var err error
+
+		if tempContent != "" {
+			// Overlay: sync/query/revert atomically inside session.
+			result, err = m.Session.RequestCompletionInContext(path, tempContent, originalContent, line, col)
+		} else {
+			result, err = m.Session.RequestCompletion(path, line, col)
+		}
+
+		if err != nil {
+			slog.Debug("completion request failed", "path", path, "line", line, "col", col, "err", err)
+			return completionResultMsg{}
+		}
+		if result == nil {
+			return completionResultMsg{}
+		}
+		return completionResultMsg{
+			items:        result.Items,
+			isIncomplete: result.IsIncomplete,
+			path:         path,
+			line:         line,
+			col:          col,
+		}
 	}
 }
 

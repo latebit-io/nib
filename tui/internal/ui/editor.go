@@ -45,6 +45,12 @@ var (
 			Bold(true)
 )
 
+// Status bar style — full-width bar at the bottom of the window.
+var statusBarStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("62")).
+	Foreground(lipgloss.Color("230")).
+	Bold(true)
+
 // Diagnostic gutter styles — severity-colored icons in the gutter margin.
 var (
 	diagErrorGutterStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
@@ -135,6 +141,9 @@ type EditorModel struct {
 	// diagUnderline is a reusable scratch buffer for underline computation
 	// in renderNormalLine. Avoids per-line per-frame allocation.
 	diagUnderline []bool
+
+	// Completion holds the autocomplete popup state.
+	Completion CompletionPopup
 
 	// hoverText holds the content for the hover overlay (type info, docs).
 	// Empty string means no hover is active.
@@ -298,6 +307,53 @@ func (m *EditorModel) DismissHover() {
 	m.hoverText = ""
 }
 
+// acceptCompletion inserts the selected completion item's text.
+// Works in both the main buffer and the overlay editor.
+// Scans backward from the cursor to find the start of the partial identifier,
+// then replaces it with the full completion text.
+func (m *EditorModel) acceptCompletion() tea.Cmd {
+	item := m.Completion.SelectedItem()
+	if item == nil {
+		m.Completion.Dismiss()
+		return nil
+	}
+
+	insertText := item.InsertText
+	if insertText == "" {
+		insertText = item.Label
+	}
+
+	// Determine which editor to operate on (main or overlay).
+	e := m.eng
+	if m.Overlay != nil && m.Overlay.Active {
+		e = m.Overlay.Editor
+	}
+
+	// Find the start of the partial identifier by scanning backward.
+	line := e.CursorLine
+	col := e.CursorCol
+	lineText := []rune(e.Buf.LineText(line))
+	identStart := col
+	for identStart > 0 && lang.IsIdentChar(lineText[identStart-1]) {
+		identStart--
+	}
+
+	// Replace partial identifier with completion as one atomic undo group.
+	// Use editor methods for proper cursor positioning, origin tracking,
+	// and dirty state — handles multi-line insertions correctly.
+	e.Buf.BeginGroup()
+	if col > identStart {
+		e.Buf.Delete(line, identStart, col-identStart)
+		e.CursorCol = identStart
+	}
+	e.PasteText(insertText)
+	e.Buf.EndGroup()
+
+	m.Completion.Dismiss()
+	m.cursorMoved = true
+	return nil
+}
+
 // SetSize updates the editor dimensions. Implements Pane.
 func (m *EditorModel) SetSize(width, height int) {
 	m.eng.SetSize(width, height)
@@ -311,6 +367,26 @@ func (m *EditorModel) Update(msg tea.Msg) tea.Cmd {
 	case tea.KeyMsg:
 		// Dismiss hover on any key — cursor is about to move.
 		m.DismissHover()
+
+		// Completion popup captures navigation keys when active.
+		if m.Completion.Active {
+			switch msg.Type {
+			case tea.KeyDown:
+				m.Completion.SelectNext()
+				return nil
+			case tea.KeyUp:
+				m.Completion.SelectPrev()
+				return nil
+			case tea.KeyTab, tea.KeyEnter:
+				return m.acceptCompletion()
+			case tea.KeyEscape:
+				m.Completion.Dismiss()
+				return nil
+			}
+			// Other keys dismiss completion and fall through to normal handling.
+			m.Completion.Dismiss()
+		}
+
 		// Any key event may move the cursor — mark for scroll adjustment.
 		m.cursorMoved = true
 		return m.handleKey(msg)
@@ -433,7 +509,7 @@ func (m *EditorModel) Render() string {
 	showBufferCursor := overlay == nil || !overlay.Active
 
 	for visualRow := range vis {
-		if visualRow >= m.eng.Height-1 {
+		if visualRow >= m.eng.Height {
 			break
 		}
 		vLine := m.eng.ScrollOffset + visualRow
@@ -485,14 +561,9 @@ func (m *EditorModel) Render() string {
 	}
 
 	// Fill remaining rows with tildes.
-	for visualRow := vis; visualRow < m.eng.Height-1; visualRow++ {
+	for visualRow := vis; visualRow < m.eng.Height; visualRow++ {
 		output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 		m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
-	}
-
-	// Status bar (last row).
-	if m.eng.Height > 0 {
-		output[m.eng.Height-1] = m.renderStatusBar()
 	}
 
 	// Hover overlay — auto-dismiss if cursor moved from trigger position.
@@ -501,6 +572,39 @@ func (m *EditorModel) Render() string {
 			m.hoverText = ""
 		} else {
 			m.overlayHover(output, gutterW, contentW)
+		}
+	}
+
+	// Completion popup — auto-dismiss if cursor moved off line, before trigger,
+	// or past the identifier being typed (e.g., mouse click, End key).
+	if m.Completion.Active {
+		var curLine, curCol int
+		var e *editor.Editor
+		if m.Overlay != nil && m.Overlay.Active {
+			e = m.Overlay.Editor
+			curLine = m.Overlay.StartLine + e.CursorLine
+			curCol = e.CursorCol
+		} else {
+			e = m.eng
+			curLine = e.CursorLine
+			curCol = e.CursorCol
+		}
+		dismiss := curLine != m.Completion.TriggerLine || curCol < m.Completion.TriggerCol
+		if !dismiss && curCol > m.Completion.TriggerCol {
+			// Verify text between trigger and cursor is all identifier chars.
+			// Dismisses on mouse click or End key past the identifier.
+			lineText := []rune(e.Buf.LineText(e.CursorLine))
+			for c := m.Completion.TriggerCol; c < curCol && c < len(lineText); c++ {
+				if !lang.IsIdentChar(lineText[c]) {
+					dismiss = true
+					break
+				}
+			}
+		}
+		if dismiss {
+			m.Completion.Dismiss()
+		} else {
+			m.overlayCompletion(output, gutterW, contentW)
 		}
 	}
 
@@ -921,7 +1025,7 @@ func (m *EditorModel) renderAddedLine(
 func (m *EditorModel) overlayHover(output []string, gutterW, contentW int) {
 	// Determine the visual row to place the overlay below.
 	visualRow := m.hoverLine - m.eng.ScrollOffset + 1
-	if visualRow < 0 || visualRow >= m.eng.Height-1 {
+	if visualRow < 0 || visualRow >= m.eng.Height {
 		return // cursor scrolled off screen
 	}
 
@@ -960,7 +1064,37 @@ func (m *EditorModel) overlayHover(output []string, gutterW, contentW int) {
 	gutterPad := strings.Repeat(" ", gutterW)
 	for i, bl := range boxLines {
 		row := visualRow + i
-		if row >= m.eng.Height-1 {
+		if row >= m.eng.Height {
+			break
+		}
+		output[row] = gutterPad + bl
+	}
+}
+
+// overlayCompletion renders the completion popup below the cursor line.
+func (m *EditorModel) overlayCompletion(output []string, gutterW, contentW int) {
+	var visualRow int
+	if m.Overlay != nil && m.Overlay.Active {
+		// Overlay cursor: added lines start at visual EndLine+1.
+		oe := m.Overlay.Editor
+		visualRow = m.Overlay.EndLine + 1 + oe.CursorLine - m.eng.ScrollOffset + 1
+	} else {
+		visualRow = m.Completion.TriggerLine - m.eng.ScrollOffset + 1
+	}
+	if visualRow < 0 || visualRow >= m.eng.Height {
+		return
+	}
+
+	box := m.Completion.Render(contentW)
+	if box == "" {
+		return
+	}
+
+	boxLines := strings.Split(box, "\n")
+	gutterPad := strings.Repeat(" ", gutterW)
+	for i, bl := range boxLines {
+		row := visualRow + i
+		if row >= m.eng.Height {
 			break
 		}
 		output[row] = gutterPad + bl
@@ -996,12 +1130,8 @@ func sanitizeStatusText(s string) string {
 	return b.String()
 }
 
-func (m *EditorModel) renderStatusBar() string {
-	statusStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("62")).
-		Foreground(lipgloss.Color("230")).
-		Bold(true)
-
+// renderStatusBar renders the full-width status bar. Called by AppModel.View().
+func (m *EditorModel) renderStatusBar(width int) string {
 	name := m.eng.Buf.Path
 	if name == "" {
 		name = "[new]"
@@ -1041,15 +1171,15 @@ func (m *EditorModel) renderStatusBar() string {
 
 	leftW := runewidth.StringWidth(left)
 	rightW := runewidth.StringWidth(right)
-	padding := m.eng.Width - leftW - rightW
+	padding := width - leftW - rightW
 	if padding < 0 {
 		padding = 0
 	}
 
 	bar := left + strings.Repeat(" ", padding) + right
-	bar = runewidth.Truncate(bar, m.eng.Width, "")
+	bar = runewidth.Truncate(bar, width, "")
 
-	return statusStyle.Render(bar)
+	return statusBarStyle.Render(bar)
 }
 
 // --- Mouse Handling ---
@@ -1590,6 +1720,10 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 			for _, r := range keyMsg.Runes {
 				e.InsertChar(r)
 			}
+		}
+		// Trigger completion after typing trigger characters.
+		if len(keyMsg.Runes) == 1 && lang.IsCompletionTrigger(keyMsg.Runes[0]) {
+			return func() tea.Msg { return completionTriggerMsg{} }
 		}
 		return nil
 	}

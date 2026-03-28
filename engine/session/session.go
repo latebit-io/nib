@@ -98,6 +98,10 @@ type Session struct {
 	// navStack tracks cursor positions for go-back navigation after go-to-definition.
 	// Each entry records where the cursor was before the jump.
 	navStack []lang.Location
+
+	// completionMu serializes overlay completion requests to prevent
+	// DidChange interleaving when multiple requests race.
+	completionMu sync.Mutex
 }
 
 // New creates a session in editor-only mode. Call SetAgent to enable the
@@ -260,6 +264,60 @@ func (s *Session) HoverInfo(line, col int) (string, error) {
 	}
 
 	return hp.Hover(ctx, path, line, col)
+}
+
+// RequestCompletion queries the language service for completions at the given position.
+// Safe to call from a background goroutine. Returns nil result if the
+// capability is unavailable.
+func (s *Session) RequestCompletion(path string, line, col int) (*lang.CompletionResult, error) {
+	cp, ok := s.langSyncer.(lang.CompletionProvider)
+	if !ok {
+		return nil, errors.New("language service does not support completion")
+	}
+	if path == "" {
+		return nil, errors.New("no active file")
+	}
+	path = s.CanonPath(path)
+
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	return cp.Complete(ctx, path, line, col)
+}
+
+// RequestCompletionInContext queries completions against temporary file content.
+// Atomically syncs tempContent to the LSP, requests completion, then reverts
+// to originalContent. Safe to call from a background goroutine — all content
+// snapshots must be captured by the caller on the TUI goroutine before dispatch.
+// Used for completion inside diff overlays where the LSP hasn't seen the proposed code.
+func (s *Session) RequestCompletionInContext(path, tempContent, originalContent string, line, col int) (*lang.CompletionResult, error) {
+	cp, ok := s.langSyncer.(lang.CompletionProvider)
+	if !ok {
+		return nil, errors.New("language service does not support completion")
+	}
+	if path == "" {
+		return nil, errors.New("no active file")
+	}
+	path = s.CanonPath(path)
+
+	// Serialize overlay completions to prevent DidChange interleaving.
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+
+	// Sync temporary content so LSP sees the overlay code.
+	s.langSyncer.DidChange(path, []lang.TextChange{{Text: tempContent, FullContent: true}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := cp.Complete(ctx, path, line, col)
+
+	// Always revert to original content, even on error.
+	s.langSyncer.DidChange(path, []lang.TextChange{{Text: originalContent, FullContent: true}})
+
+	return result, err
 }
 
 // NotifySaved notifies the language service that the current file was saved.

@@ -120,6 +120,11 @@ func run() error {
 		}
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
 		ag := agent.New(provider, sess, events, projectRoot, mcpTools...)
+		// Wire diagnostics into the agent if LSP is available.
+		// lsp.Manager implements lang.DiagnosticProvider.
+		if lspMgr != nil {
+			ag.SetDiagnosticProvider(lspMgr, sess)
+		}
 		sess.SetAgent(ag, events)
 	} else if lspMgr != nil {
 		// No agent, but LSP events still need to reach the frontend.

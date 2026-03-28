@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -94,6 +95,24 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	}
 
 	return a
+}
+
+// SetDiagnosticProvider wires language diagnostics into the agent.
+// Registers a diagnostics tool and enables auto-injection of diagnostics
+// after approved edits. Call after New, before Run. Only call if the
+// language service supports lang.DiagnosticProvider (checked in main.go).
+func (a *Agent) SetDiagnosticProvider(dp lang.DiagnosticProvider, workspace Workspace) {
+	// Register diagnostics tool.
+	diagTool := NewDiagnosticsTool(dp, workspace)
+	def := diagTool.Definition()
+	key := strings.ToLower(def.Function.Name)
+	a.tools[key] = diagTool
+	a.toolDefs = append(a.toolDefs, def)
+
+	// Wire auto-injection into the edit tool.
+	if editTool, ok := a.tools["edit_file"].(*EditFileTool); ok {
+		editTool.DiagProvider = dp
+	}
 }
 
 // Run starts the agent loop in a goroutine.

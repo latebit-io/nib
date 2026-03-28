@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -141,6 +142,10 @@ type EditFileTool struct {
 	approveCh  chan bool
 	continueCh chan string
 	send       func(event.Event)
+
+	// DiagProvider is optionally set to auto-inject diagnostics after edits.
+	// Nil when no language service is available.
+	DiagProvider lang.DiagnosticProvider
 
 	mu               sync.Mutex
 	silentRetries    int
@@ -353,9 +358,10 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 		t.send(event.AgentStatus{Status: "thinking"})
 		t.send(event.AgentToken{Text: "\n"})
 
+		var result string
 		if newContent != expectedContent {
 			diff := simpleDiff(expectedContent, newContent)
-			return fmt.Sprintf("Edit applied, but the developer modified your edit. "+
+			result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
 				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
 				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
 				"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
@@ -364,8 +370,17 @@ func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expecte
 				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
 				"Current file (%s):\n```\n%s\n```",
 				diff, path, truncateForPreview(newContent))
+		} else {
+			result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
+				path, truncateForPreview(newContent))
 		}
-		return fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-			path, truncateForPreview(newContent))
+
+		// Auto-inject diagnostics so the agent can self-correct errors.
+		if t.DiagProvider != nil {
+			diagResult := FormatDiagnostics(t.DiagProvider, canon)
+			result += "\n\nDiagnostics after edit:\n" + diagResult
+		}
+
+		return result
 	}
 }

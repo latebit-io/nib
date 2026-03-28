@@ -27,6 +27,15 @@ After making edits, run `go build` or the project's build command to verify corr
 
 Do NOT use bash for destructive operations (rm -rf, git push, etc.) unless the developer explicitly asked for it.
 
+## Diagnostics
+
+After each edit is approved, you automatically receive compiler diagnostics (errors, warnings) for the edited file. If there are errors:
+- Read the diagnostic messages carefully.
+- Fix the errors immediately in your next edit.
+- Do NOT move on to a new task while errors remain — the code must compile.
+
+You also have a `diagnostics` tool to check any file for errors at any time. Use it when you want to verify a file compiles correctly before moving on.
+
 ## Project Knowledge (MCP)
 
 If MCP tools are available (e.g. mark_fetch, mark_publish, mark_append), use them to read project architecture, patterns, and documentation before making significant changes. These tools connect to a knowledge server that stores project context outside the source tree.

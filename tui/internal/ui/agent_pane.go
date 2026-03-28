@@ -62,7 +62,7 @@ func NewAgentPaneModel(svc *Services) *AgentPaneModel {
 
 // Title returns the pane title for display in the border. Implements Titled.
 func (m *AgentPaneModel) Title() string {
-	return "Agent"
+	return "Junto"
 }
 
 // SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.
@@ -130,9 +130,9 @@ func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
-	// Click/drag in content area only (skip header row 0, input area, and status)
-	if msg.Button == tea.MouseButtonLeft && msg.Y > 0 && msg.Y <= m.VisibleLines() {
-		line := m.ScrollOffset + msg.Y - 1 // -1 for header row
+	// Click/drag in content area only (skip input area and status)
+	if msg.Button == tea.MouseButtonLeft && msg.Y >= 0 && msg.Y < m.VisibleLines() {
+		line := m.ScrollOffset + msg.Y
 		if line < 0 {
 			line = 0
 		}
@@ -405,9 +405,9 @@ func (m *AgentPaneModel) Clear() {
 }
 
 // VisibleLines returns the number of content lines visible.
-// Layout: 1 header + content + InputHeight bottom area (separator + input + status).
+// Layout: content + InputHeight bottom area (separator + input + status).
 func (m *AgentPaneModel) VisibleLines() int {
-	h := m.Height - 1 - InputHeight // 1 header + InputHeight bottom
+	h := m.Height - InputHeight
 	if h < 1 {
 		h = 1
 	}

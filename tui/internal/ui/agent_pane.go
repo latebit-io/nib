@@ -60,13 +60,13 @@ func NewAgentPaneModel(svc *Services) *AgentPaneModel {
 	}
 }
 
-// SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.
-// Re-wraps content when width changes so text reflows correctly.
 // Title returns the pane title for display in the border. Implements Titled.
 func (m *AgentPaneModel) Title() string {
 	return "Agent"
 }
 
+// SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.
+// Re-wraps content when width changes so text reflows correctly.
 func (m *AgentPaneModel) SetSize(width, height int) {
 	oldWidth := m.Width
 	m.Width = width

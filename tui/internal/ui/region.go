@@ -473,6 +473,29 @@ func (rm *RegionManager) dividerStyleFor(visible []*Region, i int, focused *Regi
 	return dividerDimStyle
 }
 
+// collapseToFocused collapses all visible panes except the focused one,
+// which gets the full available space. Falls back to the first pane if
+// focus index is out of range.
+func (rm *RegionManager) collapseToFocused(visible []*Region) {
+	keep := 0
+	if rm.FocusIdx >= 0 && rm.FocusIdx < len(visible) {
+		keep = rm.FocusIdx
+	}
+	for i, r := range visible {
+		if i == keep {
+			r.x = 0
+			r.y = 0
+			r.width = rm.Width
+			r.height = rm.Height
+			r.Pane.SetSize(rm.Width, rm.Height)
+		} else {
+			r.width = 0
+			r.height = 0
+			r.collapsed = true
+		}
+	}
+}
+
 // visibleRegions returns regions that are both user-visible and not collapsed by layout.
 func (rm *RegionManager) visibleRegions() []*Region {
 	var result []*Region
@@ -526,32 +549,13 @@ func (rm *RegionManager) recalcHorizontal(visible []*Region) {
 
 	// Not enough height for borders + content — collapse to single pane.
 	if paneHeight < 1 {
-		visible[0].x = 0
-		visible[0].y = 0
-		visible[0].width = rm.Width
-		visible[0].height = rm.Height
-		visible[0].Pane.SetSize(rm.Width, rm.Height)
-		for _, r := range visible[1:] {
-			r.width = 0
-			r.height = 0
-			r.collapsed = true
-		}
+		rm.collapseToFocused(visible)
 		return
 	}
 
 	// Check if all panes fit at minimum width
 	if available < len(visible)*MinPaneWidth {
-		// Not enough space — collapse all but the first pane
-		visible[0].x = 0
-		visible[0].y = 0
-		visible[0].width = rm.Width
-		visible[0].height = rm.Height
-		visible[0].Pane.SetSize(rm.Width, rm.Height)
-		for _, r := range visible[1:] {
-			r.width = 0
-			r.height = 0
-			r.collapsed = true
-		}
+		rm.collapseToFocused(visible)
 		return
 	}
 

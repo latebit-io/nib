@@ -170,14 +170,6 @@ func (s *Session) HasLanguageService() bool {
 	return s.langSyncer != nil
 }
 
-// LanguageService returns the language service port for capability checks.
-// Callers use type assertion to check optional interfaces:
-//
-//	if dp, ok := sess.LanguageService().(lang.DiagnosticProvider); ok { ... }
-func (s *Session) LanguageService() lang.DocumentSyncer {
-	return s.langSyncer
-}
-
 // Diagnostics returns the current diagnostics for the given file path.
 // Returns nil if no language service is available or it doesn't support diagnostics.
 // This encapsulates the DiagnosticProvider capability check so frontends

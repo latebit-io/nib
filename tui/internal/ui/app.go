@@ -72,7 +72,7 @@ func NewApp(sess *session.Session) AppModel {
 	rm.Add("project", projectPane, 0.2)
 	rm.Add("editor", editorPane, 0.5)
 	rm.Add("agent", agentPane, 0.3)
-	// Project pane visible by default; Ctrl+B to toggle.
+	rm.FocusByName("editor")
 
 	return AppModel{
 		Session:     sess,

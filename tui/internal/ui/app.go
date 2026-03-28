@@ -24,8 +24,24 @@ type paletteFilesMsg struct{ items []PaletteItem }
 // paletteErrorMsg delivers a file listing error to the UI.
 type paletteErrorMsg struct{ err string }
 
+// goToDefResultMsg delivers go-to-definition results from an async LSP request.
+type goToDefResultMsg struct {
+	// Result from LSP — target location.
+	path      string
+	line, col int
+	err       error
+	// Origin cursor for nav stack push.
+	originPath            string
+	originLine, originCol int
+}
+
 // hoverResultMsg delivers hover information from an async LSP request.
-type hoverResultMsg struct{ text string }
+// Carries the origin path+cursor so stale results are dropped on mismatch.
+type hoverResultMsg struct {
+	text      string
+	path      string
+	line, col int
+}
 
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
@@ -173,9 +189,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// Hover result — display or dismiss
+	// Go-to-definition result — apply navigation on the TUI goroutine.
+	case goToDefResultMsg:
+		return m.applyGoToDefinition(msg)
+
+	// Hover result — display if still relevant, drop stale responses.
 	case hoverResultMsg:
-		if msg.text != "" {
+		if msg.text != "" &&
+			msg.path == m.Session.ActiveFile() &&
+			msg.line == m.Editor.eng.CursorLine &&
+			msg.col == m.Editor.eng.CursorCol {
 			m.Editor.ShowHover(msg.text)
 		}
 		return m, nil
@@ -554,19 +577,51 @@ func (m *AppModel) refreshDiagnostics(path string) {
 
 // --- Go-to-Definition / Hover / Go-Back ---
 
-// handleGoToDefinition navigates to the definition of the symbol under the cursor.
+// handleGoToDefinition dispatches an async definition lookup to avoid blocking the TUI.
 func (m *AppModel) handleGoToDefinition() (tea.Model, tea.Cmd) {
 	if !m.Session.HasLanguageService() {
 		return m, nil
 	}
-	loc, err := m.Session.GoToDefinition(m.Editor.eng.CursorLine, m.Editor.eng.CursorCol)
-	if err != nil {
-		slog.Debug("go-to-definition failed", "err", err)
-		m.Editor.StatusMsg = err.Error()
+	originPath := m.Session.ActiveFile()
+	originLine, originCol := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	return m, func() tea.Msg {
+		loc, err := m.Session.LookupDefinition(originLine, originCol)
+		if err != nil {
+			return goToDefResultMsg{err: err}
+		}
+		return goToDefResultMsg{
+			path:       loc.Path,
+			line:       loc.Line,
+			col:        loc.Col,
+			originPath: originPath,
+			originLine: originLine,
+			originCol:  originCol,
+		}
+	}
+}
+
+// applyGoToDefinition handles the async definition result on the TUI goroutine.
+// Pushes the nav stack, switches files if needed, and moves the cursor.
+func (m *AppModel) applyGoToDefinition(msg goToDefResultMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		slog.Debug("go-to-definition failed", "err", msg.err)
+		m.Editor.StatusMsg = msg.err.Error()
 		return m, nil
 	}
 
-	// Session may have switched files — rebuild EditorModel if needed.
+	// Push origin onto nav stack (primitives — no lang.Location in TUI).
+	m.Session.PushNav(msg.originPath, msg.originLine, msg.originCol)
+
+	// Switch file if the definition is in a different file.
+	if msg.path != m.Session.ActiveFile() {
+		if err := m.Session.SwitchTo(msg.path); err != nil {
+			m.Session.PopNav() // undo the push
+			m.Editor.StatusMsg = err.Error()
+			return m, nil
+		}
+	}
+
+	// Rebuild EditorModel if session switched files.
 	if m.Session.Editor != m.Editor.eng {
 		wpm := m.Editor.TypingWPM
 		m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
@@ -576,7 +631,8 @@ func (m *AppModel) handleGoToDefinition() (tea.Model, tea.Cmd) {
 		m.refreshDiagnostics(m.Session.ActiveFile())
 	}
 
-	slog.Debug("go-to-definition", "path", loc.Path, "line", loc.Line, "col", loc.Col)
+	m.Session.Editor.MoveCursorTo(msg.line, msg.col)
+	slog.Debug("go-to-definition", "path", msg.path, "line", msg.line, "col", msg.col)
 	return m, nil
 }
 
@@ -610,6 +666,7 @@ func (m *AppModel) handleHover() (tea.Model, tea.Cmd) {
 	// Dismiss any existing hover.
 	m.Editor.DismissHover()
 
+	path := m.Session.ActiveFile()
 	line, col := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
 	return m, func() tea.Msg {
 		text, err := m.Session.HoverInfo(line, col)
@@ -617,7 +674,7 @@ func (m *AppModel) handleHover() (tea.Model, tea.Cmd) {
 			slog.Debug("hover failed", "err", err)
 			return hoverResultMsg{}
 		}
-		return hoverResultMsg{text: text}
+		return hoverResultMsg{text: text, path: path, line: line, col: col}
 	}
 }
 

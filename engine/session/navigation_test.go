@@ -58,71 +58,76 @@ func newNavTestSession(t *testing.T, content string) *Session {
 	return New(e, dir)
 }
 
-func TestGoToDefinition(t *testing.T) {
-	t.Run("same file jump", func(t *testing.T) {
-		sess := newNavTestSession(t, "line0\nline1\nline2\n")
-		sess.Editor.MoveCursorTo(0, 0)
+// lookupAndNavigate mirrors the live TUI path: LookupDefinition + PushNav + MoveCursorTo.
+func lookupAndNavigate(t *testing.T, sess *Session, line, col int) *lang.Location {
+	t.Helper()
+	originPath := sess.ActiveFile()
+	originLine, originCol := sess.Editor.CursorLine, sess.Editor.CursorCol
 
+	loc, err := sess.LookupDefinition(line, col)
+	if err != nil {
+		t.Fatalf("LookupDefinition failed: %v", err)
+	}
+
+	sess.PushNav(originPath, originLine, originCol)
+
+	if loc.Path != sess.ActiveFile() {
+		if err := sess.SwitchTo(loc.Path); err != nil {
+			sess.PopNav()
+			t.Fatalf("SwitchTo failed: %v", err)
+		}
+	}
+	sess.Editor.MoveCursorTo(loc.Line, loc.Col)
+	return loc
+}
+
+func TestLookupDefinition(t *testing.T) {
+	t.Run("returns location", func(t *testing.T) {
+		sess := newNavTestSession(t, "line0\nline1\nline2\n")
 		mock := &mockDefinitionProvider{
 			loc: lang.Location{Path: sess.ActiveFile(), Line: 2, Col: 3},
 		}
 		sess.SetLanguageService(mock)
 
-		loc, err := sess.GoToDefinition(0, 0)
+		loc, err := sess.LookupDefinition(0, 0)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if loc.Line != 2 || loc.Col != 3 {
 			t.Errorf("got %d:%d, want 2:3", loc.Line, loc.Col)
 		}
-		if sess.Editor.CursorLine != 2 || sess.Editor.CursorCol != 3 {
-			t.Errorf("cursor at %d:%d, want 2:3", sess.Editor.CursorLine, sess.Editor.CursorCol)
-		}
 	})
 
 	t.Run("no language service", func(t *testing.T) {
 		sess := newNavTestSession(t, "hello\n")
-		_, err := sess.GoToDefinition(0, 0)
+		_, err := sess.LookupDefinition(0, 0)
 		if err == nil {
 			t.Fatal("expected error when no language service")
 		}
 	})
 
-	t.Run("definition error propagates", func(t *testing.T) {
+	t.Run("error propagates", func(t *testing.T) {
 		sess := newNavTestSession(t, "hello\n")
 		mock := &mockDefinitionProvider{err: errors.New("no definition")}
 		sess.SetLanguageService(mock)
 
-		_, err := sess.GoToDefinition(0, 0)
+		_, err := sess.LookupDefinition(0, 0)
 		if err == nil || err.Error() != "no definition" {
 			t.Fatalf("expected 'no definition' error, got: %v", err)
 		}
 	})
 }
 
-//nolint:cyclop // table-driven subtests — complexity from test cases, not logic
-func TestGoBack(t *testing.T) {
-	t.Run("empty stack returns nil", func(t *testing.T) {
-		sess := newNavTestSession(t, "hello\n")
-		loc := sess.GoBack()
-		if loc != nil {
-			t.Errorf("expected nil, got %+v", loc)
-		}
-	})
-
-	t.Run("returns to previous position after jump", func(t *testing.T) {
+func TestNavigateAndGoBack(t *testing.T) {
+	t.Run("same file jump and go-back", func(t *testing.T) {
 		sess := newNavTestSession(t, "line0\nline1\nline2\n")
 		sess.Editor.MoveCursorTo(1, 2)
-
 		mock := &mockDefinitionProvider{
 			loc: lang.Location{Path: sess.ActiveFile(), Line: 2, Col: 0},
 		}
 		sess.SetLanguageService(mock)
 
-		_, err := sess.GoToDefinition(1, 2)
-		if err != nil {
-			t.Fatalf("go-to-def failed: %v", err)
-		}
+		lookupAndNavigate(t, sess, 1, 2)
 		if sess.Editor.CursorLine != 2 {
 			t.Fatalf("cursor should be at line 2, got %d", sess.Editor.CursorLine)
 		}
@@ -139,31 +144,34 @@ func TestGoBack(t *testing.T) {
 		}
 	})
 
-	t.Run("stack pops in LIFO order", func(t *testing.T) {
+	t.Run("empty stack returns nil", func(t *testing.T) {
+		sess := newNavTestSession(t, "hello\n")
+		if sess.GoBack() != nil {
+			t.Error("expected nil from empty stack")
+		}
+	})
+
+	t.Run("LIFO order", func(t *testing.T) {
 		sess := newNavTestSession(t, "line0\nline1\nline2\nline3\n")
 		mock := &mockDefinitionProvider{}
 		sess.SetLanguageService(mock)
 
-		// Jump from 0:0 → 1:0
+		// Jump 0:0 → 1:0
 		sess.Editor.MoveCursorTo(0, 0)
 		mock.loc = lang.Location{Path: sess.ActiveFile(), Line: 1, Col: 0}
-		if _, err := sess.GoToDefinition(0, 0); err != nil {
-			t.Fatal(err)
-		}
+		lookupAndNavigate(t, sess, 0, 0)
 
-		// Jump from 1:0 → 3:0
+		// Jump 1:0 → 3:0
 		mock.loc = lang.Location{Path: sess.ActiveFile(), Line: 3, Col: 0}
-		if _, err := sess.GoToDefinition(1, 0); err != nil {
-			t.Fatal(err)
-		}
+		lookupAndNavigate(t, sess, 1, 0)
 
-		// First go-back: should return to 1:0
+		// First go-back → 1:0
 		loc := sess.GoBack()
 		if loc == nil || loc.Line != 1 {
 			t.Errorf("first go-back: want line 1, got %+v", loc)
 		}
 
-		// Second go-back: should return to 0:0
+		// Second go-back → 0:0
 		loc = sess.GoBack()
 		if loc == nil || loc.Line != 0 {
 			t.Errorf("second go-back: want line 0, got %+v", loc)
@@ -172,6 +180,15 @@ func TestGoBack(t *testing.T) {
 		// Stack empty
 		if sess.GoBack() != nil {
 			t.Error("stack should be empty")
+		}
+	})
+
+	t.Run("PopNav undoes PushNav", func(t *testing.T) {
+		sess := newNavTestSession(t, "hello\n")
+		sess.PushNav(sess.ActiveFile(), 5, 10)
+		sess.PopNav()
+		if sess.GoBack() != nil {
+			t.Error("stack should be empty after PopNav")
 		}
 	})
 }

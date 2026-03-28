@@ -188,11 +188,10 @@ func (s *Session) Diagnostics(path string) []lang.Diagnostic {
 	return dp.Diagnostics(path)
 }
 
-// GoToDefinition navigates to the definition of the symbol at the given position.
-// Pushes the current location onto the navigation stack before jumping.
-// If the definition is in a different file, the session switches to it.
-// Returns the target location, or an error if the capability is unavailable.
-func (s *Session) GoToDefinition(line, col int) (*lang.Location, error) {
+// LookupDefinition queries the language service for the definition location
+// without modifying session state. Safe to call from a background goroutine.
+// Use GoToDefinition for the full navigation flow (nav stack + file switch).
+func (s *Session) LookupDefinition(line, col int) (*lang.Location, error) {
 	dp, ok := s.langSyncer.(lang.DefinitionProvider)
 	if !ok {
 		return nil, errors.New("language service does not support go-to-definition")
@@ -209,25 +208,21 @@ func (s *Session) GoToDefinition(line, col int) (*lang.Location, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// Push current position onto nav stack before jumping.
-	s.navStack = append(s.navStack, lang.Location{
-		Path: path,
-		Line: s.Editor.CursorLine,
-		Col:  s.Editor.CursorCol,
-	})
-
-	// Switch file if the definition is in a different file.
-	if loc.Path != path {
-		if err := s.SwitchTo(loc.Path); err != nil {
-			// Pop the nav entry we just pushed — jump failed.
-			s.navStack = s.navStack[:len(s.navStack)-1]
-			return nil, fmt.Errorf("cannot open %s: %w", loc.Path, err)
-		}
-	}
-
-	s.Editor.MoveCursorTo(loc.Line, loc.Col)
 	return &loc, nil
+}
+
+// PushNav records a position on the navigation stack for go-back.
+// Accepts primitives so callers don't need to construct lang.Location.
+func (s *Session) PushNav(path string, line, col int) {
+	s.navStack = append(s.navStack, lang.Location{Path: path, Line: line, Col: col})
+}
+
+// PopNav removes the top entry from the navigation stack.
+// No-op if the stack is empty. Used to undo a PushNav on navigation failure.
+func (s *Session) PopNav() {
+	if len(s.navStack) > 0 {
+		s.navStack = s.navStack[:len(s.navStack)-1]
+	}
 }
 
 // GoBack pops the navigation stack and returns to the previous location.
@@ -237,7 +232,6 @@ func (s *Session) GoBack() *lang.Location {
 		return nil
 	}
 	loc := s.navStack[len(s.navStack)-1]
-	s.navStack = s.navStack[:len(s.navStack)-1]
 
 	if loc.Path != s.ActiveFile() {
 		if err := s.SwitchTo(loc.Path); err != nil {
@@ -246,6 +240,7 @@ func (s *Session) GoBack() *lang.Location {
 		}
 	}
 	s.Editor.MoveCursorTo(loc.Line, loc.Col)
+	s.navStack = s.navStack[:len(s.navStack)-1]
 	return &loc
 }
 

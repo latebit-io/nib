@@ -259,19 +259,31 @@ func renderInlineMarkdown(s string) string {
 	for i < len(runes) {
 		// Bold: **text**
 		if i+1 < len(runes) && runes[i] == '*' && runes[i+1] == '*' {
-			end := strings.Index(string(runes[i+2:]), "**")
+			end := -1
+			for j := i + 2; j+1 < len(runes); j++ {
+				if runes[j] == '*' && runes[j+1] == '*' {
+					end = j
+					break
+				}
+			}
 			if end >= 0 {
-				b.WriteString(hoverBoldStyle.Render(string(runes[i+2 : i+2+end])))
-				i += 2 + end + 2
+				b.WriteString(hoverBoldStyle.Render(string(runes[i+2 : end])))
+				i = end + 2
 				continue
 			}
 		}
 		// Inline code: `text`
 		if runes[i] == '`' {
-			end := strings.IndexRune(string(runes[i+1:]), '`')
+			end := -1
+			for j := i + 1; j < len(runes); j++ {
+				if runes[j] == '`' {
+					end = j
+					break
+				}
+			}
 			if end >= 0 {
-				b.WriteString(hoverCodeStyle.Render(string(runes[i+1 : i+1+end])))
-				i += 1 + end + 1
+				b.WriteString(hoverCodeStyle.Render(string(runes[i+1 : end])))
+				i = end + 1
 				continue
 			}
 		}
@@ -483,9 +495,13 @@ func (m *EditorModel) Render() string {
 		output[m.eng.Height-1] = m.renderStatusBar()
 	}
 
-	// Hover overlay — floating panel near the cursor.
+	// Hover overlay — auto-dismiss if cursor moved from trigger position.
 	if m.hoverText != "" {
-		m.overlayHover(output, gutterW, contentW)
+		if m.eng.CursorLine != m.hoverLine || m.eng.CursorCol != m.hoverCol {
+			m.hoverText = ""
+		} else {
+			m.overlayHover(output, gutterW, contentW)
+		}
 	}
 
 	return strings.Join(output, "\n")

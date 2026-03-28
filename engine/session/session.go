@@ -279,18 +279,32 @@ func (s *Session) RequestCompletion(path string, line, col int) (*lang.Completio
 	return cp.Complete(ctx, path, line, col)
 }
 
-// SyncContentForCompletion temporarily updates the LSP's view of a file
-// with the given content. Used to sync overlay content before completion
-// requests and to revert afterward with the original content snapshot.
-func (s *Session) SyncContentForCompletion(path, content string) {
-	if s.langSyncer == nil || path == "" {
-		return
+// RequestCompletionInContext queries completions against temporary file content.
+// Atomically syncs tempContent to the LSP, requests completion, then reverts
+// to originalContent. Safe to call from a background goroutine — all content
+// snapshots must be captured by the caller on the TUI goroutine before dispatch.
+// Used for completion inside diff overlays where the LSP hasn't seen the proposed code.
+func (s *Session) RequestCompletionInContext(path, tempContent, originalContent string, line, col int) (*lang.CompletionResult, error) {
+	cp, ok := s.langSyncer.(lang.CompletionProvider)
+	if !ok {
+		return nil, errors.New("language service does not support completion")
+	}
+	if path == "" {
+		return nil, errors.New("no active file")
 	}
 	path = s.CanonPath(path)
-	s.langSyncer.DidChange(path, []lang.TextChange{{
-		Text:        content,
-		FullContent: true,
-	}})
+
+	// Sync temporary content so LSP sees the overlay code.
+	s.langSyncer.DidChange(path, []lang.TextChange{{Text: tempContent, FullContent: true}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := cp.Complete(ctx, path, line, col)
+
+	// Always revert to original content, even on error.
+	s.langSyncer.DidChange(path, []lang.TextChange{{Text: originalContent, FullContent: true}})
+
+	return result, err
 }
 
 // NotifySaved notifies the language service that the current file was saved.

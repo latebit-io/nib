@@ -72,7 +72,7 @@ func (e *Editor) SetSize(width, height int) {
 	e.ClampScroll()
 }
 
-// VisibleLines returns the number of content lines visible (reserving 1 for status bar).
+// VisibleLines returns the number of content lines visible in the viewport.
 func (e *Editor) VisibleLines() int {
 	if e.Height <= 0 {
 		return 0

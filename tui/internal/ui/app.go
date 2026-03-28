@@ -780,25 +780,24 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 	line, col := msg.line, msg.col
 	path := msg.path
 
-	// If editing in the overlay, temporarily sync merged content to the LSP
-	// so completions reflect the proposed code, not the original buffer.
-	// Capture the original content NOW (TUI goroutine) to avoid reading
-	// the buffer from the background goroutine (data race).
-	var overlaySync bool
-	var originalContent string
+	// Capture content snapshots on the TUI goroutine (no race).
+	// For overlay editing, session needs both merged and original content
+	// to temporarily sync the proposed code to LSP and revert afterward.
+	var tempContent, originalContent string
 	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
 		originalContent = m.Editor.eng.Buf.Content()
-		merged := m.Editor.Overlay.MergedContent(m.Editor.eng.Buf)
-		m.Session.SyncContentForCompletion(path, merged)
-		overlaySync = true
+		tempContent = m.Editor.Overlay.MergedContent(m.Editor.eng.Buf)
 	}
 
 	return m, func() tea.Msg {
-		result, err := m.Session.RequestCompletion(path, line, col)
+		var result *lang.CompletionResult
+		var err error
 
-		// Revert LSP content using the snapshot captured on the TUI goroutine.
-		if overlaySync {
-			m.Session.SyncContentForCompletion(path, originalContent)
+		if tempContent != "" {
+			// Overlay: sync/query/revert atomically inside session.
+			result, err = m.Session.RequestCompletionInContext(path, tempContent, originalContent, line, col)
+		} else {
+			result, err = m.Session.RequestCompletion(path, line, col)
 		}
 
 		if err != nil {

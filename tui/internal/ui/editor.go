@@ -334,28 +334,24 @@ func (m *EditorModel) acceptCompletion() tea.Cmd {
 	col := e.CursorCol
 	lineText := []rune(e.Buf.LineText(line))
 	identStart := col
-	for identStart > 0 && isIdentChar(lineText[identStart-1]) {
+	for identStart > 0 && lang.IsIdentChar(lineText[identStart-1]) {
 		identStart--
 	}
 
 	// Replace partial identifier with completion as one atomic undo group.
+	// Use editor methods for proper cursor positioning, origin tracking,
+	// and dirty state — handles multi-line insertions correctly.
 	e.Buf.BeginGroup()
 	if col > identStart {
 		e.Buf.Delete(line, identStart, col-identStart)
 		e.CursorCol = identStart
 	}
-	e.Buf.Insert(line, e.CursorCol, insertText)
-	e.CursorCol += len([]rune(insertText))
+	e.PasteText(insertText)
 	e.Buf.EndGroup()
 
 	m.Completion.Dismiss()
 	m.cursorMoved = true
 	return nil
-}
-
-// isIdentChar returns true for characters that are part of a Go identifier.
-func isIdentChar(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
 }
 
 // SetSize updates the editor dimensions. Implements Pane.
@@ -513,7 +509,7 @@ func (m *EditorModel) Render() string {
 	showBufferCursor := overlay == nil || !overlay.Active
 
 	for visualRow := range vis {
-		if visualRow >= m.eng.Height-1 {
+		if visualRow >= m.eng.Height {
 			break
 		}
 		vLine := m.eng.ScrollOffset + visualRow
@@ -1013,7 +1009,7 @@ func (m *EditorModel) renderAddedLine(
 func (m *EditorModel) overlayHover(output []string, gutterW, contentW int) {
 	// Determine the visual row to place the overlay below.
 	visualRow := m.hoverLine - m.eng.ScrollOffset + 1
-	if visualRow < 0 || visualRow >= m.eng.Height-1 {
+	if visualRow < 0 || visualRow >= m.eng.Height {
 		return // cursor scrolled off screen
 	}
 
@@ -1052,7 +1048,7 @@ func (m *EditorModel) overlayHover(output []string, gutterW, contentW int) {
 	gutterPad := strings.Repeat(" ", gutterW)
 	for i, bl := range boxLines {
 		row := visualRow + i
-		if row >= m.eng.Height-1 {
+		if row >= m.eng.Height {
 			break
 		}
 		output[row] = gutterPad + bl
@@ -1069,7 +1065,7 @@ func (m *EditorModel) overlayCompletion(output []string, gutterW, contentW int) 
 	} else {
 		visualRow = m.Completion.TriggerLine - m.eng.ScrollOffset + 1
 	}
-	if visualRow < 0 || visualRow >= m.eng.Height-1 {
+	if visualRow < 0 || visualRow >= m.eng.Height {
 		return
 	}
 
@@ -1082,7 +1078,7 @@ func (m *EditorModel) overlayCompletion(output []string, gutterW, contentW int) 
 	gutterPad := strings.Repeat(" ", gutterW)
 	for i, bl := range boxLines {
 		row := visualRow + i
-		if row >= m.eng.Height-1 {
+		if row >= m.eng.Height {
 			break
 		}
 		output[row] = gutterPad + bl
@@ -1709,12 +1705,9 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 				e.InsertChar(r)
 			}
 		}
-		// Trigger completion after typing `.` or identifier characters.
-		if len(keyMsg.Runes) == 1 {
-			r := keyMsg.Runes[0]
-			if r == '.' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				return func() tea.Msg { return completionTriggerMsg{} }
-			}
+		// Trigger completion after typing trigger characters.
+		if len(keyMsg.Runes) == 1 && lang.IsCompletionTrigger(keyMsg.Runes[0]) {
+			return func() tea.Msg { return completionTriggerMsg{} }
 		}
 		return nil
 	}

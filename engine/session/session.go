@@ -98,6 +98,10 @@ type Session struct {
 	// navStack tracks cursor positions for go-back navigation after go-to-definition.
 	// Each entry records where the cursor was before the jump.
 	navStack []lang.Location
+
+	// completionMu serializes overlay completion requests to prevent
+	// DidChange interleaving when multiple requests race.
+	completionMu sync.Mutex
 }
 
 // New creates a session in editor-only mode. Call SetAgent to enable the
@@ -293,6 +297,10 @@ func (s *Session) RequestCompletionInContext(path, tempContent, originalContent 
 		return nil, errors.New("no active file")
 	}
 	path = s.CanonPath(path)
+
+	// Serialize overlay completions to prevent DidChange interleaving.
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
 
 	// Sync temporary content so LSP sees the overlay code.
 	s.langSyncer.DidChange(path, []lang.TextChange{{Text: tempContent, FullContent: true}})

@@ -4,7 +4,10 @@
 // at construction time via main.go.
 package lang
 
-import "context"
+import (
+	"context"
+	"unicode"
+)
 
 // DocumentSyncer is the mandatory base interface for any language backend.
 // Every language service must accept document lifecycle events so it can
@@ -146,8 +149,7 @@ const (
 // Used for scanning the start of partial identifiers during completion.
 // Covers Go, TypeScript, Python, Rust, and most C-family languages.
 func IsIdentChar(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-		(r >= '0' && r <= '9') || r == '_' || r == '$'
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$'
 }
 
 // IsCompletionTrigger reports whether r should trigger a completion request.

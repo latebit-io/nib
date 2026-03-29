@@ -285,7 +285,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
-		slog.Debug("key event", "string", msg.String())
+		if msg.Text == "" {
+			slog.Debug("key event", "string", msg.String())
+		}
 		return m.handleKey(msg)
 	}
 	return m, nil

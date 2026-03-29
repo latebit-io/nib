@@ -17,7 +17,7 @@ All project context — architecture, patterns, build commands, conventions, deb
 1. `mark_fetch` `/index.md` — get the hub page
 2. `mark_fetch` `/patterns.md` — build commands, code style, workflow
 3. Fetch other pages as needed: `/architecture.md`, `/debugging.md`, `/roadmap.md`
-4. If MCP is unavailable, stop and ask the user before proceeding
+4. If MCP is unavailable, stop and ask the developer before proceeding
 
 ### During Work
 

@@ -527,7 +527,18 @@ func (e *Editor) DeleteChar() {
 }
 
 // PasteText inserts text at the cursor, replacing any active selection.
+// MaxPasteBytes caps a single paste operation to prevent unbounded buffer
+// growth from large terminal pastes or clipboard content.
+const MaxPasteBytes = 10 << 20 // 10 MiB
+
 func (e *Editor) PasteText(text string) {
+	if len(text) > MaxPasteBytes {
+		// Truncate on a valid UTF-8 boundary.
+		text = text[:MaxPasteBytes]
+		for len(text) > 0 && !utf8.Valid([]byte(text)) {
+			text = text[:len(text)-1]
+		}
+	}
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	if e.SelectionActive {

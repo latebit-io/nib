@@ -218,8 +218,10 @@ func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
-	// Set focus to clicked region
-	rm.FocusByName(region.Name)
+	// Only clicks transfer keyboard focus.
+	if _, ok := msg.(tea.MouseClickMsg); ok {
+		rm.FocusByName(region.Name)
+	}
 
 	// Forward mouse with translated coordinates to the pane.
 	// Rebuild the concrete message type with local coords.

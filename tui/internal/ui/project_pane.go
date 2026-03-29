@@ -233,8 +233,8 @@ func (p *ProjectPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return p.activateItem()
 	}
 	// Single-character vim-style navigation
-	if msg.Text != "" && len([]rune(msg.Text)) == 1 {
-		switch []rune(msg.Text)[0] {
+	if rs := []rune(msg.Text); len(rs) == 1 {
+		switch rs[0] {
 		case 'k':
 			return p.moveCursor(-1)
 		case 'j':

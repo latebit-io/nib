@@ -139,12 +139,34 @@ func (p *PaletteModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 
 	// Printable text input
 	if msg.Text != "" {
-		p.Query += msg.Text
-		p.refilter()
+		if next, changed := appendPaletteQuery(p.Query, msg.Text); changed {
+			p.Query = next
+			p.refilter()
+		}
 		return nil
 	}
 
 	return nil
+}
+
+// paletteMaxQueryRunes caps the palette query to a reasonable length.
+const paletteMaxQueryRunes = 4096
+
+// appendPaletteQuery appends printable runes from src to dst, stripping
+// control characters and enforcing paletteMaxQueryRunes.
+func appendPaletteQuery(dst, src string) (string, bool) {
+	q := []rune(dst)
+	orig := len(q)
+	for _, r := range src {
+		if r < ' ' || r == 0x7f {
+			continue
+		}
+		if len(q) >= paletteMaxQueryRunes {
+			break
+		}
+		q = append(q, r)
+	}
+	return string(q), len(q) != orig
 }
 
 // refilter updates the filtered results based on the current query.

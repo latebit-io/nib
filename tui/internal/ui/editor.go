@@ -143,6 +143,10 @@ type EditorModel struct {
 	// in renderNormalLine. Avoids per-line per-frame allocation.
 	diagUnderline []bool
 
+	// syntaxTagMap is a reusable scratch map for span-based rendering.
+	// Avoids per-line per-frame map allocation.
+	syntaxTagMap map[color.Color]int
+
 	// Completion holds the autocomplete popup state.
 	Completion CompletionPopup
 
@@ -791,7 +795,11 @@ func (m *EditorModel) renderNormalLine(
 		tagSel    = -3
 	)
 	// Syntax tokens get positive tags starting at 1, grouped by foreground color.
-	syntaxTagMap := make(map[color.Color]int)
+	if m.syntaxTagMap == nil {
+		m.syntaxTagMap = make(map[color.Color]int)
+	}
+	syntaxTagMap := m.syntaxTagMap
+	clear(syntaxTagMap)
 	nextTag := 1
 	for j := range contentW {
 		switch {
@@ -907,7 +915,11 @@ func (m *EditorModel) renderRemovedLine(
 			rTagCursor = -1
 		)
 		rColTags := make([]int, contentW)
-		rSyntaxMap := make(map[color.Color]int)
+		if m.syntaxTagMap == nil {
+			m.syntaxTagMap = make(map[color.Color]int)
+		}
+		rSyntaxMap := m.syntaxTagMap
+		clear(rSyntaxMap)
 		rNextTag := 1
 		for j := range contentW {
 			switch {
@@ -1430,6 +1442,10 @@ func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyPressMsg) bool {
 		return false
 	}
 
+	if keyMsg.Mod != 0 {
+		return false // shift+arrow, ctrl+arrow, etc. — don't intercept
+	}
+
 	switch keyMsg.Code {
 	case tea.KeyDown:
 		// Cursor just above removed range → enter overlay at first line.
@@ -1440,9 +1456,6 @@ func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyPressMsg) bool {
 			return true
 		}
 	case tea.KeyUp:
-		if keyMsg.Mod != 0 {
-			return false // shift+up, ctrl+up, etc. — don't intercept
-		}
 		// Cursor just below removed range → enter overlay at last line.
 		if m.eng.CursorLine == o.EndLine+1 {
 			o.Active = true

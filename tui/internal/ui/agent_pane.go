@@ -14,6 +14,11 @@ import (
 // InputHeight is the number of rows reserved for the input area (separator + input + status).
 const InputHeight = 5
 
+// MaxInputBufferBytes caps the goal input buffer to prevent unbounded memory
+// growth from large pastes or rapid key input. 1 MiB is generous for any
+// reasonable prompt while still protecting against accidental megabyte pastes.
+const MaxInputBufferBytes = 1 << 20 // 1 MiB
+
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
 type AgentPaneModel struct {
 	Width  int
@@ -33,6 +38,7 @@ type AgentPaneModel struct {
 
 	// Selection
 	SelectionActive bool
+	SelectDragging  bool
 	SelectStartLine int
 	SelectStartCol  int
 	CursorLine      int
@@ -139,6 +145,7 @@ func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 	}
 	line, col := m.mouseToLineCol(msg.X, msg.Y)
 	m.SelectionActive = true
+	m.SelectDragging = true
 	m.SelectStartLine = line
 	m.SelectStartCol = col
 	m.CursorLine = line
@@ -147,7 +154,7 @@ func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 }
 
 func (m *AgentPaneModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
-	if !m.SelectionActive || msg.Y < 0 || msg.Y >= m.VisibleLines() {
+	if !m.SelectDragging || msg.Y < 0 || msg.Y >= m.VisibleLines() {
 		return nil
 	}
 	line, col := m.mouseToLineCol(msg.X, msg.Y)
@@ -157,8 +164,8 @@ func (m *AgentPaneModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 }
 
 func (m *AgentPaneModel) handleMouseRelease(_ tea.MouseReleaseMsg) tea.Cmd {
-	if m.SelectionActive &&
-		m.CursorLine == m.SelectStartLine &&
+	m.SelectDragging = false
+	if m.CursorLine == m.SelectStartLine &&
 		m.CursorCol == m.SelectStartCol {
 		m.SelectionActive = false
 	}
@@ -196,6 +203,24 @@ func (m *AgentPaneModel) mouseToLineCol(x, y int) (int, int) {
 	return line, col
 }
 
+// appendInput appends text to InputBuffer without exceeding MaxInputBufferBytes.
+// It truncates on a rune boundary so partial runes are never stored.
+func (m *AgentPaneModel) appendInput(text string) {
+	remaining := MaxInputBufferBytes - len(m.InputBuffer)
+	if remaining <= 0 {
+		return
+	}
+	if len(text) > remaining {
+		// Truncate to remaining bytes on a valid rune boundary.
+		text = text[:remaining]
+		for len(text) > 0 && !utf8.Valid([]byte(text)) {
+			text = text[:len(text)-1]
+		}
+		slog.Warn("goal input truncated to cap", "cap", MaxInputBufferBytes)
+	}
+	m.InputBuffer += text
+}
+
 func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	// Paste from system clipboard (Ctrl+V)
 	if msg.Code == 'v' && msg.Mod == tea.ModCtrl {
@@ -204,7 +229,7 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 			text = strings.ReplaceAll(text, "\r", " ")
 			text = strings.ReplaceAll(text, "\n", " ")
 			text = strings.ReplaceAll(text, "\t", " ")
-			m.InputBuffer += text
+			m.appendInput(text)
 		}
 		return nil
 	}
@@ -229,7 +254,7 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case tea.KeySpace:
-		m.InputBuffer += " "
+		m.appendInput(" ")
 		return nil
 	}
 
@@ -241,7 +266,7 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 		text = strings.ReplaceAll(text, "\n", " ")
 		text = strings.ReplaceAll(text, "\t", " ")
 		slog.Debug("goal input text", "text_len", len(text))
-		m.InputBuffer += text
+		m.appendInput(text)
 		return nil
 	}
 	return nil

@@ -30,6 +30,8 @@ const (
 	ActionOutdent        = keymap.ActionOutdent
 	ActionFileStart      = keymap.ActionFileStart
 	ActionFileEnd        = keymap.ActionFileEnd
+	ActionGoToLineStart  = keymap.ActionGoToLineStart
+	ActionGoToLineEnd    = keymap.ActionGoToLineEnd
 	ActionAgentStart     = keymap.ActionAgentStart
 	ActionAgentApprove   = keymap.ActionAgentApprove
 	ActionAgentReject    = keymap.ActionAgentReject
@@ -63,16 +65,19 @@ func DefaultKeymap() *Keymap {
 			{code: 'q', mod: tea.ModCtrl}: ActionQuit,
 			{code: 's', mod: tea.ModCtrl}: ActionSave,
 
-			// Editing
-			{code: 'z', mod: tea.ModCtrl}:        ActionUndo,
-			{code: 'y', mod: tea.ModCtrl}:        ActionRedo,
-			{code: 'c', mod: tea.ModCtrl}:        ActionCopy,
-			{code: 'x', mod: tea.ModCtrl}:        ActionCut,
-			{code: 'v', mod: tea.ModCtrl}:        ActionPaste,
-			{code: 'k', mod: tea.ModCtrl}:        ActionDeleteLine,
-			{code: 'd', mod: tea.ModAlt}:         ActionDuplicateLine,
-			{code: tea.KeyUp, mod: tea.ModAlt}:   ActionSwapLineUp,
-			{code: tea.KeyDown, mod: tea.ModAlt}: ActionSwapLineDown,
+			// Editing (VS Code compatible)
+			{code: 'z', mod: tea.ModCtrl}:                       ActionUndo,
+			{code: 'y', mod: tea.ModCtrl}:                       ActionRedo,
+			{code: 'z', mod: tea.ModCtrl | tea.ModShift}:        ActionRedo, // Ctrl+Shift+Z (VS Code)
+			{code: 'c', mod: tea.ModCtrl}:                       ActionCopy,
+			{code: 'x', mod: tea.ModCtrl}:                       ActionCut,
+			{code: 'v', mod: tea.ModCtrl}:                       ActionPaste,
+			{code: 'k', mod: tea.ModCtrl}:                       ActionDeleteLine,
+			{code: 'd', mod: tea.ModAlt}:                        ActionDuplicateLine,
+			{code: tea.KeyDown, mod: tea.ModAlt | tea.ModShift}: ActionDuplicateLine, // Shift+Alt+Down (VS Code)
+			{code: tea.KeyUp, mod: tea.ModAlt}:                  ActionSwapLineUp,    // Alt+Up (VS Code)
+			{code: tea.KeyDown, mod: tea.ModAlt}:                ActionSwapLineDown,  // Alt+Down (VS Code)
+			{code: ']', mod: tea.ModCtrl}:                       ActionIndent,        // Ctrl+] (VS Code indent)
 
 			// Selection
 			{code: 'a', mod: tea.ModCtrl}: ActionSelectAll,
@@ -82,10 +87,13 @@ func DefaultKeymap() *Keymap {
 			// Navigation
 			{code: tea.KeyHome, mod: tea.ModCtrl}:                 ActionFileStart,
 			{code: tea.KeyEnd, mod: tea.ModCtrl}:                  ActionFileEnd,
-			{code: tea.KeyUp, mod: tea.ModSuper}:                  ActionFileStart, // Cmd+Up (Kitty)
-			{code: tea.KeyDown, mod: tea.ModSuper}:                ActionFileEnd,   // Cmd+Down (Kitty)
-			{code: tea.KeyUp, mod: tea.ModSuper | tea.ModShift}:   ActionFileStart, // Cmd+Shift+Up (Kitty)
-			{code: tea.KeyDown, mod: tea.ModSuper | tea.ModShift}: ActionFileEnd,   // Cmd+Shift+Down (Kitty)
+			{code: tea.KeyUp, mod: tea.ModSuper}:                  ActionFileStart,     // Cmd+Up (Kitty)
+			{code: tea.KeyDown, mod: tea.ModSuper}:                ActionFileEnd,       // Cmd+Down (Kitty)
+			{code: tea.KeyUp, mod: tea.ModSuper | tea.ModShift}:   ActionFileStart,     // Cmd+Shift+Up (Kitty)
+			{code: tea.KeyDown, mod: tea.ModSuper | tea.ModShift}: ActionFileEnd,       // Cmd+Shift+Down (Kitty)
+			{code: tea.KeyLeft, mod: tea.ModSuper}:                ActionGoToLineStart, // Cmd+Left (Kitty)
+			{code: tea.KeyRight, mod: tea.ModSuper}:               ActionGoToLineEnd,   // Cmd+Right (Kitty)
+			{code: '-', mod: tea.ModCtrl}:                         ActionGoBack,        // Ctrl+- (VS Code)
 
 			// Agent
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
@@ -93,7 +101,6 @@ func DefaultKeymap() *Keymap {
 			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
 
 			// LSP
-			{code: ']', mod: tea.ModCtrl}: ActionGoToDefinition,
 			{code: 't', mod: tea.ModCtrl}: ActionGoBack,
 			{code: 'k', mod: tea.ModAlt}:  ActionHover,
 		},
@@ -104,6 +111,7 @@ func DefaultKeymap() *Keymap {
 			"ctrl+/": ActionToggleComment,
 			"ctrl+_": ActionToggleComment, // some terminals send Ctrl+/ as Ctrl+_
 			"f1":     ActionHelp,
+			"f12":    ActionGoToDefinition, // F12 (VS Code)
 		},
 	}
 	return km

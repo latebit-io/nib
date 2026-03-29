@@ -67,6 +67,7 @@ func DetectLanguage(path string) string {
 }
 
 // commentPrefixMap maps LSP language identifiers to their line comment prefix.
+// Read-only after init — never mutate at runtime.
 var commentPrefixMap = map[string]string{
 	"go":              "//",
 	"javascript":      "//",

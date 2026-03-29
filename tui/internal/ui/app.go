@@ -149,9 +149,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.Help.Active {
 		switch typed := msg.(type) {
 		case tea.KeyPressMsg:
-			if typed.Code == tea.KeyEscape {
-				m.Help.Active = false
-			}
+			m.Help.Update(typed, m.Height-2)
 			return m, nil
 		case tea.MouseMsg:
 			return m, nil
@@ -526,7 +524,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleHover()
 
 	case ActionHelp:
-		m.Help.Active = true
+		m.Help.Open()
 		return m, nil
 	}
 

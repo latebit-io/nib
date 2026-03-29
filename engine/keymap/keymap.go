@@ -12,6 +12,8 @@ const (
 	// Navigation
 	ActionFileStart
 	ActionFileEnd
+	ActionGoToLineStart
+	ActionGoToLineEnd
 
 	// Selection
 	ActionSelectAll
@@ -81,6 +83,8 @@ func DefaultBindings() []Binding {
 		// Navigation
 		{ActionFileStart, "Go to file start", []string{"Ctrl+Home"}, CatNavigation},
 		{ActionFileEnd, "Go to file end", []string{"Ctrl+End"}, CatNavigation},
+		{ActionGoToLineStart, "Go to line start", []string{"Home"}, CatNavigation},
+		{ActionGoToLineEnd, "Go to line end", []string{"End"}, CatNavigation},
 
 		// Selection
 		{ActionSelectAll, "Select all", []string{"Ctrl+A"}, CatSelection},
@@ -89,17 +93,17 @@ func DefaultBindings() []Binding {
 
 		// Editing
 		{ActionUndo, "Undo", []string{"Ctrl+Z"}, CatEditing},
-		{ActionRedo, "Redo", []string{"Ctrl+Y"}, CatEditing},
+		{ActionRedo, "Redo", []string{"Ctrl+Y", "Ctrl+Shift+Z"}, CatEditing},
 		{ActionCopy, "Copy", []string{"Ctrl+C"}, CatEditing},
 		{ActionCut, "Cut", []string{"Ctrl+X"}, CatEditing},
 		{ActionPaste, "Paste", []string{"Ctrl+V"}, CatEditing},
 		{ActionDeleteLine, "Delete line", []string{"Ctrl+K"}, CatEditing},
-		{ActionDuplicateLine, "Duplicate line", []string{"Alt+D"}, CatEditing},
+		{ActionDuplicateLine, "Duplicate line", []string{"Alt+D", "Shift+Alt+Down"}, CatEditing},
 		{ActionSwapLineUp, "Move line up", []string{"Alt+Up"}, CatEditing},
 		{ActionSwapLineDown, "Move line down", []string{"Alt+Down"}, CatEditing},
 		{ActionToggleComment, "Toggle comment", []string{"Ctrl+/"}, CatEditing},
-		{ActionIndent, "Indent selection", []string{"Tab"}, CatEditing},
-		{ActionOutdent, "Outdent selection", []string{"Shift+Tab"}, CatEditing},
+		{ActionIndent, "Indent", []string{"Tab", "Ctrl+]"}, CatEditing},
+		{ActionOutdent, "Outdent", []string{"Shift+Tab"}, CatEditing},
 
 		// File
 		{ActionSave, "Save", []string{"Ctrl+S"}, CatFile},
@@ -117,8 +121,8 @@ func DefaultBindings() []Binding {
 		{ActionHelp, "Show help", []string{"F1"}, CatView},
 
 		// Code Intelligence
-		{ActionGoToDefinition, "Go to definition", []string{"Ctrl+]"}, CatLSP},
-		{ActionGoBack, "Go back", []string{"Ctrl+T"}, CatLSP},
+		{ActionGoToDefinition, "Go to definition", []string{"F12"}, CatLSP},
+		{ActionGoBack, "Go back", []string{"Ctrl+-", "Ctrl+T"}, CatLSP},
 		{ActionHover, "Hover info", []string{"Alt+K"}, CatLSP},
 	}
 }

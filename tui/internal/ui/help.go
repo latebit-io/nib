@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/keymap"
 	"github.com/mattn/go-runewidth"
@@ -10,7 +11,9 @@ import (
 
 // HelpModel manages the help overlay state.
 type HelpModel struct {
-	Active bool
+	Active    bool
+	scrollOff int // scroll offset in lines
+	lines     []string
 }
 
 var (
@@ -20,21 +23,117 @@ var (
 	helpDescStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 )
 
+// Open activates the help overlay and rebuilds the content.
+func (h *HelpModel) Open() {
+	h.Active = true
+	h.scrollOff = 0
+	h.lines = buildHelpLines()
+}
+
+// Update handles key events while the help overlay is active.
+// Returns true if the event was consumed.
+func (h *HelpModel) Update(msg tea.KeyPressMsg, viewHeight int) bool {
+	switch msg.Code {
+	case tea.KeyEscape, tea.KeyEnter:
+		h.Active = false
+		return true
+	case tea.KeyUp:
+		if h.scrollOff > 0 {
+			h.scrollOff--
+		}
+		return true
+	case tea.KeyDown:
+		maxScroll := len(h.lines) - viewHeight
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if h.scrollOff < maxScroll {
+			h.scrollOff++
+		}
+		return true
+	case tea.KeyPgUp:
+		h.scrollOff -= viewHeight
+		if h.scrollOff < 0 {
+			h.scrollOff = 0
+		}
+		return true
+	case tea.KeyPgDown:
+		maxScroll := len(h.lines) - viewHeight
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		h.scrollOff += viewHeight
+		if h.scrollOff > maxScroll {
+			h.scrollOff = maxScroll
+		}
+		return true
+	}
+	// Also dismiss on 'q' or F1 toggle
+	if msg.Text == "q" || msg.String() == "f1" {
+		h.Active = false
+		return true
+	}
+	return true // consume all keys while help is open
+}
+
 // RenderOverlay renders the help screen on top of the base content.
 func (h *HelpModel) RenderOverlay(base string, width, height int) string {
 	if width <= 0 || height <= 2 {
 		return base
 	}
+
+	viewHeight := height - 2 // leave room for top/bottom margin
+	if viewHeight < 1 {
+		return base
+	}
+
+	// Apply scroll offset to get the visible window.
+	visible := h.lines
+	if h.scrollOff > 0 && h.scrollOff < len(visible) {
+		visible = visible[h.scrollOff:]
+	}
+	if len(visible) > viewHeight {
+		visible = visible[:viewHeight]
+	}
+
+	topPad := (height - len(visible)) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+
+	// Build full-screen output with the help content centered vertically.
+	baseLines := strings.Split(base, "\n")
+	for len(baseLines) < height {
+		baseLines = append(baseLines, "")
+	}
+
+	result := make([]string, height)
+	for i := range height {
+		if i >= topPad && i < topPad+len(visible) {
+			line := visible[i-topPad]
+			lineW := runewidth.StringWidth(line)
+			if lineW < width {
+				line += strings.Repeat(" ", width-lineW)
+			}
+			result[i] = line
+		} else {
+			result[i] = baseLines[i]
+		}
+	}
+
+	return strings.Join(result, "\n")
+}
+
+// buildHelpLines generates the formatted help text as a slice of lines.
+func buildHelpLines() []string {
 	bindings := keymap.DefaultBindings()
 	categories := keymap.CategoryOrder()
 
-	// Group bindings by category.
 	grouped := make(map[keymap.Category][]keymap.Binding)
 	for _, b := range bindings {
 		grouped[b.Category] = append(grouped[b.Category], b)
 	}
 
-	// Find the widest key string for alignment.
 	maxKeyWidth := 0
 	for _, b := range bindings {
 		w := runewidth.StringWidth(strings.Join(b.Keys, ", "))
@@ -66,43 +165,7 @@ func (h *HelpModel) RenderOverlay(base string, width, height int) string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("  Press Escape to close")
+	sb.WriteString("  Press Escape, Enter, or Q to close  |  Arrow keys to scroll")
 
-	helpText := sb.String()
-	helpLines := strings.Split(helpText, "\n")
-
-	// Center the help overlay.
-	overlayHeight := len(helpLines)
-	if overlayHeight > height-2 {
-		overlayHeight = height - 2
-		helpLines = helpLines[:overlayHeight]
-	}
-	topPad := (height - overlayHeight) / 2
-	if topPad < 0 {
-		topPad = 0
-	}
-
-	// Build full-screen output with the help content centered vertically.
-	baseLines := strings.Split(base, "\n")
-	for len(baseLines) < height {
-		baseLines = append(baseLines, "")
-	}
-
-	result := make([]string, height)
-	for i := range height {
-		if i >= topPad && i < topPad+overlayHeight {
-			helpIdx := i - topPad
-			// Pad help line to full width to cover the base.
-			line := helpLines[helpIdx]
-			lineW := runewidth.StringWidth(line)
-			if lineW < width {
-				line += strings.Repeat(" ", width-lineW)
-			}
-			result[i] = line
-		} else {
-			result[i] = baseLines[i]
-		}
-	}
-
-	return strings.Join(result, "\n")
+	return strings.Split(sb.String(), "\n")
 }

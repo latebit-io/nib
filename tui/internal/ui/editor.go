@@ -1324,14 +1324,21 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 			_, bufToDisp := expandTabs([]rune(oe.Buf.LineText(entry.overlayLine)))
 			col := displayColToBufCol(bufToDisp, displayCol)
 			oe.MoveCursorTo(entry.overlayLine, col)
-		default:
-			// Drag went outside the overlay — clamp to nearest boundary.
-			if entry.kind == lineNormal && entry.bufLine < m.Overlay.StartLine {
+		case lineNormal:
+			// Normal line — clamp to nearest overlay boundary.
+			if entry.bufLine < m.Overlay.StartLine {
 				oe.MoveCursorTo(0, 0)
 			} else {
 				lastLine := oe.Buf.LineCount() - 1
 				oe.MoveCursorTo(lastLine, oe.Buf.LineLen(lastLine))
 			}
+		case lineRemoved:
+			// Removed lines sit visually above the added lines — clamp to top.
+			oe.MoveCursorTo(0, 0)
+		case lineEmpty:
+			// Below all content — clamp to end.
+			lastLine := oe.Buf.LineCount() - 1
+			oe.MoveCursorTo(lastLine, oe.Buf.LineLen(lastLine))
 		}
 		return nil
 	}
@@ -1339,8 +1346,20 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 	// Normal drag — extend selection.
 	if m.mainDragging {
 		m.cursorMoved = true
-		bufLine, bufCol := m.resolveBufferPos(entry.bufLine, displayCol)
-		m.eng.MoveCursorTo(bufLine, bufCol)
+		switch entry.kind {
+		case lineNormal, lineRemoved:
+			bufLine, bufCol := m.resolveBufferPos(entry.bufLine, displayCol)
+			m.eng.MoveCursorTo(bufLine, bufCol)
+		case lineAdded:
+			// Dragged into overlay added lines — clamp to the line just
+			// after the overlay's removed range (overlay.EndLine + 1 in
+			// the original buffer doesn't exist visually, so use EndLine).
+			m.eng.MoveCursorTo(m.Overlay.EndLine, m.eng.Buf.LineLen(m.Overlay.EndLine))
+		case lineEmpty:
+			// Past end of buffer — clamp to last line.
+			lastLine := m.eng.Buf.LineCount() - 1
+			m.eng.MoveCursorTo(lastLine, m.eng.Buf.LineLen(lastLine))
+		}
 	}
 	return nil
 }

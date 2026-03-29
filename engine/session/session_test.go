@@ -32,6 +32,7 @@ func (stubWorkspace) WriteFile(_, _ string) error       { return nil }
 func (stubWorkspace) CanonPath(p string) string         { return p }
 func (stubWorkspace) InContext(_ string) bool           { return true }
 func (stubWorkspace) AddContext(_ string)               {}
+func (stubWorkspace) ProjectRoot() string               { return "" }
 
 // newTestSession creates a session with a buffer containing the given text
 // and a real agent (needed to test approval signaling).
@@ -48,7 +49,7 @@ func newTestSessionWithRoot(content, projectRoot string) *Session {
 	e := editor.New(buf)
 	sess := New(e, projectRoot)
 	events := make(chan event.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events, projectRoot, nil)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
 	sess.SetAgent(ag, events)
 	return sess
 }
@@ -378,7 +379,7 @@ func TestSwitchToBlockedByPendingEdit(t *testing.T) {
 	}
 	s := New(editor.New(bufA), dir)
 	events := make(chan event.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events, dir, nil)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
 	s.SetAgent(ag, events)
 
 	// With a pending edit, SwitchTo should return ErrEditPending.
@@ -590,7 +591,7 @@ func TestApproveEditTracksModifiedFile(t *testing.T) {
 	e := editor.New(buf)
 	s := New(e, root)
 	events := make(chan event.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events, root, nil)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
 	s.SetAgent(ag, events)
 
 	s.PendingEdit = &event.PendingEdit{Search: "old", Replace: "new"}
@@ -624,7 +625,7 @@ func TestFileStatus(t *testing.T) {
 	e := editor.New(buf)
 	s := New(e, root)
 	events := make(chan event.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events, root, nil)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
 	s.SetAgent(ag, events)
 
 	// Initially: in context (auto-added), not modified

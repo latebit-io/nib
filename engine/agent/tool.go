@@ -25,7 +25,12 @@ type Resettable interface {
 // Workspace provides file operations to agent tools.
 // The session implements this interface, giving tools access to
 // open buffers (for modified-but-unsaved content) and the filesystem.
+//
+//nolint:interfacebloat // ProjectRoot is a core workspace property; splitting it would add ceremony without value.
 type Workspace interface {
+	// ProjectRoot returns the absolute path to the project root directory.
+	ProjectRoot() string
+
 	// ReadFile returns a file's content from disk.
 	// Path is relative to the project root.
 	ReadFile(path string) (string, error)

@@ -80,7 +80,6 @@ type AppModel struct {
 	// TUI-only state
 	Dialog      DialogModel
 	Palette     PaletteModel
-	ProjectRoot string
 	recentMouse bool // tracks leaked CSI prefix from unparsed mouse events
 	Services    *Services
 	Keymap      *Keymap
@@ -478,8 +477,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleToggleProject()
 
 	case ActionOpenPalette:
-		if m.ProjectRoot != "" {
-			root := m.ProjectRoot
+		if root := m.Session.ProjectRoot(); root != "" {
 			return m, func() tea.Msg {
 				files, err := filelist.Walk(root)
 				if err != nil && !errors.Is(err, filelist.ErrCapped) {

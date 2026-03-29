@@ -33,6 +33,7 @@ func main() {
 	}
 }
 
+// run wires together the engine, optional agent/LSP services, and the TUI.
 func run() error {
 	// Parse args: [--debug] [file]
 	args := os.Args[1:]
@@ -57,38 +58,41 @@ func run() error {
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
+	// Determine whether the argument is a file or a directory.
 	var buf *buffer.Buffer
+	var projectRoot string
 	if filePath != "" {
-		var err error
-		buf, err = buffer.NewFromFile(filePath)
+		info, err := os.Stat(filePath)
 		if err != nil {
 			return err
 		}
+		if info.IsDir() {
+			// Directory argument: use it as the project root directly.
+			projectRoot, err = filepath.Abs(filePath)
+			if err != nil {
+				return err
+			}
+			buf = buffer.New()
+		} else {
+			// Absolutize so buffer.Path matches session.CanonPath.
+			absPath, err := filepath.Abs(filePath)
+			if err != nil {
+				return err
+			}
+			buf, err = buffer.NewFromFile(absPath)
+			if err != nil {
+				return err
+			}
+			// File argument: walk up from file's parent to find project root.
+			projectRoot = session.ResolveProjectRoot(filepath.Dir(absPath))
+		}
 	} else {
+		// No argument: use cwd as project root.
 		buf = buffer.New()
+		projectRoot, _ = os.Getwd() // safe: Session.New normalizes via filepath.Abs
 	}
 
 	e := editor.New(buf)
-
-	// Determine project root: walk up from file path (or cwd) to find .git.
-	startDir, _ := os.Getwd()
-	if filePath != "" {
-		if absPath, err := filepath.Abs(filePath); err == nil {
-			startDir = filepath.Dir(absPath)
-		}
-	}
-	projectRoot := startDir
-	for dir := startDir; ; {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			projectRoot = dir
-			break
-		}
-		next := filepath.Dir(dir)
-		if next == dir {
-			break
-		}
-		dir = next
-	}
 
 	// Create session first (editor-only mode) — it serves as the agent's Workspace.
 	sess := session.New(e, projectRoot)
@@ -123,7 +127,7 @@ func run() error {
 		if lspMgr != nil {
 			opts = &agent.NewOptions{DiagProvider: lspMgr}
 		}
-		ag := agent.New(provider, sess, events, projectRoot, opts, mcpTools...)
+		ag := agent.New(provider, sess, events, opts, mcpTools...)
 		sess.SetAgent(ag, events)
 	} else if lspMgr != nil {
 		// No agent, but LSP events still need to reach the frontend.
@@ -131,7 +135,6 @@ func run() error {
 	}
 
 	app := ui.NewApp(sess)
-	app.ProjectRoot = projectRoot
 
 	// Agent typing speed (words per minute)
 	if wpmStr := os.Getenv("JUNTO_TYPING_WPM"); wpmStr != "" {
@@ -162,16 +165,16 @@ type lspServerConfig struct {
 	LanguageID string   `json:"languageId"`
 }
 
-// initLSP creates an LSP Manager from config or auto-detection.
-// Returns nil if no language servers are configured or available.
-// languageService is the narrowed interface returned by initLSP.
-// main.go uses this instead of *lsp.Manager to enforce the hexagonal boundary.
-type languageService interface {
+// lspPort is composition-root glue — lets initLSP return a single value
+// that satisfies both lang interfaces the session needs.
+type lspPort interface {
 	lang.DocumentSyncer
 	lang.DiagnosticProvider
 }
 
-func initLSP(projectRoot string, events chan<- event.Event) languageService {
+// initLSP creates an LSP Manager from config or auto-detection.
+// Returns nil if no language servers are configured or available.
+func initLSP(projectRoot string, events chan<- event.Event) lspPort {
 	configs := loadLSPConfigs(projectRoot)
 	if len(configs) == 0 {
 		configs = defaultLSPConfigs()

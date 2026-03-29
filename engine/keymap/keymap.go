@@ -48,6 +48,9 @@ const (
 	ActionOpenPalette
 	ActionToggleProject
 	ActionHelp
+	ActionFocusProject
+	ActionFocusEditor
+	ActionFocusAgent
 
 	// LSP
 	ActionGoToDefinition
@@ -118,7 +121,10 @@ func DefaultBindings() []Binding {
 		// View
 		{ActionOpenPalette, "Open file palette", []string{"Ctrl+P"}, CatView},
 		{ActionToggleProject, "Toggle project pane", []string{"Ctrl+B"}, CatView},
-		{ActionHelp, "Show help", []string{"F1"}, CatView},
+		{ActionHelp, "Show help", []string{"Ctrl+?"}, CatView},
+		{ActionFocusProject, "Focus project pane", []string{"F1"}, CatView},
+		{ActionFocusEditor, "Focus editor", []string{"F2"}, CatView},
+		{ActionFocusAgent, "Focus agent pane", []string{"F3"}, CatView},
 
 		// Code Intelligence
 		{ActionGoToDefinition, "Go to definition", []string{"F12"}, CatLSP},

@@ -39,6 +39,9 @@ const (
 	ActionOpenPalette    = keymap.ActionOpenPalette
 	ActionToggleProject  = keymap.ActionToggleProject
 	ActionHelp           = keymap.ActionHelp
+	ActionFocusProject   = keymap.ActionFocusProject
+	ActionFocusEditor    = keymap.ActionFocusEditor
+	ActionFocusAgent     = keymap.ActionFocusAgent
 	ActionGoToDefinition = keymap.ActionGoToDefinition
 	ActionGoBack         = keymap.ActionGoBack
 	ActionHover          = keymap.ActionHover
@@ -110,7 +113,10 @@ func DefaultKeymap() *Keymap {
 			"ctrl+b": ActionToggleProject,
 			"ctrl+/": ActionToggleComment,
 			"ctrl+_": ActionToggleComment, // some terminals send Ctrl+/ as Ctrl+_
-			"f1":     ActionHelp,
+			"ctrl+?": ActionHelp,
+			"f1":     ActionFocusProject,
+			"f2":     ActionFocusEditor,
+			"f3":     ActionFocusAgent,
 			"f12":    ActionGoToDefinition, // F12 (VS Code)
 		},
 	}

@@ -529,6 +529,18 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionHelp:
 		m.Help.Open()
 		return m, nil
+
+	case ActionFocusProject:
+		m.Regions.FocusByName("project")
+		return m, nil
+
+	case ActionFocusEditor:
+		m.Regions.FocusByName("editor")
+		return m, nil
+
+	case ActionFocusAgent:
+		m.Regions.FocusByName("agent")
+		return m, nil
 	}
 
 	// Delegate to focused pane

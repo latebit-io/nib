@@ -78,7 +78,7 @@ func run() error {
 				return err
 			}
 			// File argument: walk up from file's parent to find project root.
-			startDir, _ := os.Getwd()
+			startDir, _ := os.Getwd() // fallback; overwritten below when Abs succeeds
 			if absPath, err := filepath.Abs(filePath); err == nil {
 				startDir = filepath.Dir(absPath)
 			}
@@ -87,7 +87,7 @@ func run() error {
 	} else {
 		// No argument: use cwd as project root.
 		buf = buffer.New()
-		projectRoot, _ = os.Getwd()
+		projectRoot, _ = os.Getwd() // safe: Session.New normalizes via filepath.Abs
 	}
 
 	e := editor.New(buf)

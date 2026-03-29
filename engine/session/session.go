@@ -36,7 +36,7 @@ type Session struct {
 	Editor *editor.Editor
 
 	agent  *agent.Agent
-	Events <-chan event.Event // frontend reads engine events from here
+	events <-chan event.Event // frontend reads engine events from here
 
 	// mu guards editors and activeFile for concurrent access from the
 	// TUI goroutine and agent goroutine (via Workspace interface).
@@ -171,7 +171,19 @@ func New(e *editor.Editor, projectRoot string) *Session {
 // with the session as its Workspace, so this must be called after New.
 func (s *Session) SetAgent(ag *agent.Agent, events <-chan event.Event) {
 	s.agent = ag
-	s.Events = events
+	s.events = events
+}
+
+// SetEvents sets the event channel for frontends to read.
+// Used when there is no agent but other event sources (e.g. LSP) need
+// to reach the frontend.
+func (s *Session) SetEvents(events <-chan event.Event) {
+	s.events = events
+}
+
+// Events returns the event channel for the frontend to read.
+func (s *Session) Events() <-chan event.Event {
+	return s.events
 }
 
 // HasAgent returns true if the session has an active agent.
@@ -858,16 +870,18 @@ var ErrEditPending = errors.New("cannot switch files while an edit is pending")
 // Returns ErrEditPending if an edit is awaiting approval or mid-animation.
 // Returns an error if the file cannot be opened.
 func (s *Session) SwitchTo(path string) error {
+	canon := s.CanonPath(path)
+
+	s.mu.Lock()
+
 	// Block switching while an edit is pending approval or mid-animation.
 	// PendingEdit covers the review phase; stagedEditFile covers the
 	// animation phase (PrepareApproval clears PendingEdit but sets
 	// stagedEditFile until CompleteApproval/AbortApproval).
 	if s.PendingEdit != nil || s.stagedEditFile != "" {
+		s.mu.Unlock()
 		return ErrEditPending
 	}
-	canon := s.CanonPath(path)
-
-	s.mu.Lock()
 
 	// Already active
 	if canon == s.activeFile {

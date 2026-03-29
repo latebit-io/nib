@@ -131,7 +131,7 @@ func run() error {
 		sess.SetAgent(ag, events)
 	} else if lspMgr != nil {
 		// No agent, but LSP events still need to reach the frontend.
-		sess.Events = events
+		sess.SetEvents(events)
 	}
 
 	app := ui.NewApp(sess)

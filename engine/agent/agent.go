@@ -86,6 +86,9 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		builtins = append(builtins, NewDiagnosticsTool(diagProvider, workspace))
 	}
 
+	// Navigation tool — always available, sends events to the frontend.
+	builtins = append(builtins, NewGoToLineTool(workspace, a.send))
+
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))
 	a.toolDefs = make([]llm.ToolDef, 0, len(builtins)+len(extraTools))
 

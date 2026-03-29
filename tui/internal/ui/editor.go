@@ -1664,11 +1664,164 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Edito
 	case ActionSelectAll:
 		e.SelectAll()
 		return nil
+
+	case ActionFileStart:
+		if isShift {
+			e.StartSelection()
+		} else {
+			e.ClearSelection()
+		}
+		e.FileStart()
+		return nil
+
+	case ActionFileEnd:
+		if isShift {
+			e.StartSelection()
+		} else {
+			e.ClearSelection()
+		}
+		e.FileEnd()
+		return nil
+
+	case ActionSelectLine:
+		e.SelectLine()
+		return nil
+
+	case ActionSelectNext:
+		e.SelectNextOccurrence()
+		return nil
+
+	case ActionDeleteLine:
+		if !readOnly {
+			e.DeleteLine()
+		}
+		return nil
+
+	case ActionDuplicateLine:
+		if !readOnly {
+			e.DuplicateLine()
+		}
+		return nil
+
+	case ActionSwapLineUp:
+		if !readOnly {
+			e.SwapLineUp()
+		}
+		return nil
+
+	case ActionSwapLineDown:
+		if !readOnly {
+			e.SwapLineDown()
+		}
+		return nil
+
+	case ActionToggleComment:
+		if !readOnly {
+			if prefix := lang.LineCommentPrefix(e.Buf.Path); prefix != "" {
+				e.ToggleLineComment(prefix)
+			}
+		}
+		return nil
+
+	case ActionGoToLineStart:
+		if isShift {
+			e.StartSelection()
+		} else {
+			e.ClearSelection()
+		}
+		e.Home()
+		return nil
+
+	case ActionGoToLineEnd:
+		if isShift {
+			e.StartSelection()
+		} else {
+			e.ClearSelection()
+		}
+		e.End()
+		return nil
+
+	case ActionIndent:
+		if !readOnly {
+			if e.SelectionActive {
+				e.IndentSelection("    ")
+			} else {
+				e.InsertTab()
+			}
+		}
+		return nil
+
+	case ActionOutdent:
+		if !readOnly && e.SelectionActive {
+			e.OutdentSelection("    ")
+		}
+		return nil
 	}
 
 	if keyMsg.Code == tea.KeyEscape {
 		e.ClearSelection()
 		return nil
+	}
+
+	// Ctrl+Shift+arrow: word selection (must be checked before plain Shift)
+	if keyMsg.Mod == tea.ModCtrl|tea.ModShift {
+		switch keyMsg.Code {
+		case tea.KeyRight:
+			e.StartSelection()
+			e.WordRight()
+			return nil
+		case tea.KeyLeft:
+			e.StartSelection()
+			e.WordLeft()
+			return nil
+		case tea.KeyHome:
+			e.StartSelection()
+			e.FileStart()
+			return nil
+		case tea.KeyEnd:
+			e.StartSelection()
+			e.FileEnd()
+			return nil
+		}
+	}
+
+	// Alt+Shift+arrow: word selection (macOS Option+Shift, works in most terminals)
+	// Also handle Alt+Shift+b/f for Terminal.app compatibility.
+	if keyMsg.Mod == tea.ModAlt|tea.ModShift {
+		switch keyMsg.Code {
+		case tea.KeyRight, 'f', 'F':
+			e.StartSelection()
+			e.WordRight()
+			return nil
+		case tea.KeyLeft, 'b', 'B':
+			e.StartSelection()
+			e.WordLeft()
+			return nil
+		}
+	}
+
+	// Alt+arrow: word navigation (macOS Option+Arrow, works in most terminals)
+	// Also handle Alt+b/f — Terminal.app sends ESC b / ESC f for Option+Left/Right
+	// which Bubble Tea parses as Alt+b / Alt+f.
+	if keyMsg.Mod == tea.ModAlt {
+		switch keyMsg.Code {
+		case tea.KeyRight:
+			e.ClearSelection()
+			e.WordRight()
+			return nil
+		case tea.KeyLeft:
+			e.ClearSelection()
+			e.WordLeft()
+			return nil
+		case 'f':
+			e.ClearSelection()
+			e.WordRight()
+			return nil
+		case 'b':
+			e.ClearSelection()
+			e.WordLeft()
+			return nil
+		}
 	}
 
 	// Shift+arrow selection navigation
@@ -1768,7 +1921,18 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Edito
 		if readOnly {
 			return nil
 		}
+		// Shift+Tab: outdent
+		if isShift && e.SelectionActive {
+			e.OutdentSelection("    ")
+			return nil
+		}
+		// Tab with multi-line selection: indent block
 		if e.SelectionActive {
+			sl, _, el, _ := e.SelectedRange()
+			if sl != el {
+				e.IndentSelection("    ")
+				return nil
+			}
 			e.DeleteSelection()
 		}
 		e.InsertTab()

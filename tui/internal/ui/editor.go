@@ -1744,13 +1744,7 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Edito
 	case ActionIndent:
 		if !readOnly {
 			if e.SelectionActive {
-				sl, _, el, _ := e.SelectedRange()
-				if sl != el {
-					e.IndentSelection("    ")
-				} else {
-					e.DeleteSelection()
-					e.InsertTab()
-				}
+				e.IndentSelection("    ")
 			} else {
 				e.InsertTab()
 			}

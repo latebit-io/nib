@@ -357,9 +357,12 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.refreshProjectPane()
 	case event.AgentNavigate:
 		m.openFile(e.Path)
-		m.Session.Editor.ClearSelection()
-		m.Session.Editor.MoveCursorTo(e.Line-1, 0)
-		m.Session.Editor.EnsureCursorVisible()
+		// Only navigate if we successfully switched to the target file.
+		if m.Session.ActiveFile() == m.Session.CanonPath(e.Path) {
+			m.Session.Editor.ClearSelection()
+			m.Session.Editor.MoveCursorTo(e.Line-1, 0)
+			m.Session.Editor.EnsureCursorVisible()
+		}
 	case event.AgentError:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.cancelAnimation()

@@ -386,8 +386,8 @@ func (m *AppModel) regionHeight() int {
 func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Drop leaked mouse escape sequence fragments.
 	// During rapid scrolling, Bubble Tea's parser can fail to consume full SGR
-	// sequences. The fragments leak as printable text — either a lone '[' (CSI prefix)
-	// or a full SGR body like '<65;14;32M'. Gate behind recentMouse so we never
+	// sequences. The fragments leak as printable text — a full SGR body like
+	// '<65;14;32M' or '[<65;14;32M'. Gate behind recentMouse so we never
 	// silently drop legitimate typed/pasted text.
 	if m.recentMouse && msg.Text != "" {
 		if isLeakedMouseSequence([]rune(msg.Text)) {

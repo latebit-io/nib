@@ -1246,7 +1246,7 @@ func (m *EditorModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 // mouseEntry returns the viewport entry and display column for a mouse event at (x, y).
 // Returns nil if the position is out of bounds.
 func (m *EditorModel) mouseEntry(x, y int) (*viewportEntry, int) {
-	if y >= m.eng.VisibleLines() || y >= len(m.viewportMap) {
+	if y < 0 || y >= len(m.viewportMap) {
 		return nil, 0
 	}
 	gutterW := m.eng.GutterWidth()

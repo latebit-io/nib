@@ -109,6 +109,19 @@ func TestDeleteLine_Undo(t *testing.T) {
 	}
 }
 
+func TestDeleteLine_AfterSelectLine(t *testing.T) {
+	// SelectLine places cursor at (nextLine, 0) — half-open selection.
+	// DeleteLine must only delete the selected line, not the next one.
+	e := newLineOpsEditor("aaa\nbbb\nccc")
+	e.CursorLine = 1
+	e.SelectLine() // selects "bbb", cursor now at (2, 0)
+	e.DeleteLine()
+	want := "aaa\nccc"
+	if got := bufText(e); got != want {
+		t.Errorf("DeleteLine after SelectLine: got %q, want %q", got, want)
+	}
+}
+
 // --- SwapLineUp / SwapLineDown ---
 
 func TestSwapLineUp(t *testing.T) {
@@ -282,13 +295,20 @@ func TestOutdentSelection_PartialSpaces(t *testing.T) {
 	e := newLineOpsEditor("  aaa\n  bbb")
 	e.SelectionActive = true
 	e.SelectStartLine = 0
-	e.SelectStartCol = 0
+	e.SelectStartCol = 4 // cursor at col 4 ("a")
 	e.CursorLine = 1
-	e.CursorCol = 5
+	e.CursorCol = 5 // cursor at col 5 ("b")
 	e.OutdentSelection("    ")
 	want := "aaa\nbbb"
 	if got := bufText(e); got != want {
 		t.Errorf("OutdentSelection partial: got %q, want %q", got, want)
+	}
+	// Only 2 spaces were removed per line, so columns should shift by 2, not 4.
+	if e.SelectStartCol != 2 {
+		t.Errorf("anchor col: got %d, want 2", e.SelectStartCol)
+	}
+	if e.CursorCol != 3 {
+		t.Errorf("cursor col: got %d, want 3", e.CursorCol)
 	}
 }
 

@@ -144,14 +144,18 @@ func (m *AppModel) listenForEvents() tea.Cmd {
 }
 
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Help overlay is modal — Escape dismisses.
+	// Help overlay is modal for user input only — non-input messages
+	// (engine events, window resize, ticks) must still be processed.
 	if m.Help.Active {
-		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
-			if keyMsg.Code == tea.KeyEscape {
+		switch typed := msg.(type) {
+		case tea.KeyPressMsg:
+			if typed.Code == tea.KeyEscape {
 				m.Help.Active = false
 			}
+			return m, nil
+		case tea.MouseMsg:
+			return m, nil
 		}
-		return m, nil
 	}
 
 	// Palette is modal — captures all input when active
@@ -353,6 +357,11 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 	case event.AgentFileCreated:
 		m.AgentPane.AppendMeta("\n[Created: " + e.Path + "]\n")
 		m.refreshProjectPane()
+	case event.AgentNavigate:
+		m.openFile(e.Path)
+		m.Session.Editor.ClearSelection()
+		m.Session.Editor.MoveCursorTo(e.Line-1, 0)
+		m.Session.Editor.EnsureCursorVisible()
 	case event.AgentError:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.cancelAnimation()

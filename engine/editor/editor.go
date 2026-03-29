@@ -348,12 +348,25 @@ func (e *Editor) FileEnd() {
 
 // --- Line Operations ---
 
+// selectedLineRange returns the inclusive line range for the active selection,
+// normalizing half-open selections. SelectLine() places the cursor at (nextLine, 0)
+// which makes SelectedRange() return endLine as the next line. When endCol is 0
+// and the selection spans multiple lines, the cursor is at the start of a line
+// it doesn't actually select — so we decrement endLine.
+func (e *Editor) selectedLineRange() (int, int) {
+	startLine, _, endLine, endCol := e.SelectedRange()
+	if endCol == 0 && endLine > startLine {
+		endLine--
+	}
+	return startLine, endLine
+}
+
 // DeleteLine deletes the current line (or all selected lines).
 // The operation is grouped for undo.
 func (e *Editor) DeleteLine() {
 	startLine, endLine := e.CursorLine, e.CursorLine
 	if e.SelectionActive {
-		startLine, _, endLine, _ = e.SelectedRange()
+		startLine, endLine = e.selectedLineRange()
 		e.SelectionActive = false
 	}
 
@@ -390,7 +403,7 @@ func (e *Editor) DeleteLine() {
 func (e *Editor) SwapLineUp() {
 	startLine, endLine := e.CursorLine, e.CursorLine
 	if e.SelectionActive {
-		startLine, _, endLine, _ = e.SelectedRange()
+		startLine, endLine = e.selectedLineRange()
 	}
 	if startLine == 0 {
 		return
@@ -420,7 +433,7 @@ func (e *Editor) SwapLineUp() {
 func (e *Editor) SwapLineDown() {
 	startLine, endLine := e.CursorLine, e.CursorLine
 	if e.SelectionActive {
-		startLine, _, endLine, _ = e.SelectedRange()
+		startLine, endLine = e.selectedLineRange()
 	}
 	if endLine >= e.Buf.LineCount()-1 {
 		return
@@ -448,7 +461,7 @@ func (e *Editor) SwapLineDown() {
 func (e *Editor) DuplicateLine() {
 	startLine, endLine := e.CursorLine, e.CursorLine
 	if e.SelectionActive {
-		startLine, _, endLine, _ = e.SelectedRange()
+		startLine, endLine = e.selectedLineRange()
 	}
 
 	var sb strings.Builder
@@ -479,7 +492,7 @@ func (e *Editor) DuplicateLine() {
 func (e *Editor) ToggleLineComment(prefix string) {
 	startLine, endLine := e.CursorLine, e.CursorLine
 	if e.SelectionActive {
-		startLine, _, endLine, _ = e.SelectedRange()
+		startLine, endLine = e.selectedLineRange()
 	}
 
 	prefixWithSpace := prefix + " "
@@ -527,7 +540,7 @@ func (e *Editor) IndentSelection(tabStr string) {
 	if !e.SelectionActive {
 		return
 	}
-	startLine, _, endLine, _ := e.SelectedRange()
+	startLine, endLine := e.selectedLineRange()
 	tabRunes := utf8.RuneCountInString(tabStr)
 
 	e.Buf.BeginGroup()
@@ -548,37 +561,49 @@ func (e *Editor) OutdentSelection(tabStr string) {
 	if !e.SelectionActive {
 		return
 	}
-	startLine, _, endLine, _ := e.SelectedRange()
+	startLine, endLine := e.selectedLineRange()
 	tabRunes := utf8.RuneCountInString(tabStr)
+
+	// Track actual columns removed for anchor and cursor lines
+	// so we shift their columns by the right amount.
+	anchorShift := 0
+	cursorShift := 0
 
 	e.Buf.BeginGroup()
 	for line := startLine; line <= endLine; line++ {
 		text := e.Buf.LineText(line)
+		removed := 0
 		if strings.HasPrefix(text, tabStr) {
 			e.Buf.Delete(line, 0, tabRunes)
+			removed = tabRunes
 		} else {
 			// Remove as many leading spaces as possible (up to tabRunes).
-			spaces := 0
 			for _, ch := range text {
-				if ch == ' ' && spaces < tabRunes {
-					spaces++
+				if ch == ' ' && removed < tabRunes {
+					removed++
 				} else {
 					break
 				}
 			}
-			if spaces > 0 {
-				e.Buf.Delete(line, 0, spaces)
+			if removed > 0 {
+				e.Buf.Delete(line, 0, removed)
 			}
+		}
+		if line == e.SelectStartLine {
+			anchorShift = removed
+		}
+		if line == e.CursorLine {
+			cursorShift = removed
 		}
 	}
 	e.Buf.EndGroup()
 
-	// Shift columns back, clamping to 0. Preserve selection direction.
-	e.SelectStartCol -= tabRunes
+	// Shift columns back by what was actually removed. Preserve selection direction.
+	e.SelectStartCol -= anchorShift
 	if e.SelectStartCol < 0 {
 		e.SelectStartCol = 0
 	}
-	e.CursorCol -= tabRunes
+	e.CursorCol -= cursorShift
 	if e.CursorCol < 0 {
 		e.CursorCol = 0
 	}

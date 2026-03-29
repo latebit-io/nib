@@ -30,9 +30,17 @@ type AgentError struct{ Err string }
 // AgentStatus updates the agent status display.
 type AgentStatus struct{ Status string }
 
+// AgentNavigate signals the agent wants to navigate the editor to a location.
+// The frontend handles the actual cursor movement on its own goroutine.
+type AgentNavigate struct {
+	Path string // file to navigate to
+	Line int    // 1-indexed line number
+}
+
 func (AgentToken) eventTag()        {}
 func (AgentEditProposed) eventTag() {}
 func (AgentFileCreated) eventTag()  {}
+func (AgentNavigate) eventTag()     {}
 func (AgentDone) eventTag()         {}
 func (AgentError) eventTag()        {}
 func (AgentStatus) eventTag()       {}

@@ -65,3 +65,45 @@ func DetectLanguage(path string) string {
 	}
 	return languageMap[ext]
 }
+
+// commentPrefixMap maps LSP language identifiers to their line comment prefix.
+var commentPrefixMap = map[string]string{
+	"go":              "//",
+	"javascript":      "//",
+	"javascriptreact": "//",
+	"typescript":      "//",
+	"typescriptreact": "//",
+	"rust":            "//",
+	"java":            "//",
+	"kotlin":          "//",
+	"c":               "//",
+	"cpp":             "//",
+	"csharp":          "//",
+	"swift":           "//",
+	"dart":            "//",
+	"zig":             "//",
+	"python":          "#",
+	"ruby":            "#",
+	"shellscript":     "#",
+	"yaml":            "#",
+	"toml":            "#",
+	"elixir":          "#",
+	"r":               "#",
+	"php":             "//",
+	"lua":             "--",
+	"haskell":         "--",
+	"sql":             "--",
+	"erlang":          "%",
+	"terraform":       "#",
+	"vim":             "\"",
+}
+
+// LineCommentPrefix returns the line comment prefix for a file path,
+// or empty string if the language has no line comment syntax (e.g. HTML, JSON).
+func LineCommentPrefix(path string) string {
+	lang := DetectLanguage(path)
+	if lang == "" {
+		return ""
+	}
+	return commentPrefixMap[lang]
+}

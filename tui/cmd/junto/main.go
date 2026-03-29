@@ -123,9 +123,9 @@ func run() error {
 			model = "google/gemini-2.5-flash"
 		}
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
-		opts := &agent.NewOptions{Navigator: sess}
+		var opts *agent.NewOptions
 		if lspMgr != nil {
-			opts.DiagProvider = lspMgr
+			opts = &agent.NewOptions{DiagProvider: lspMgr}
 		}
 		ag := agent.New(provider, sess, events, opts, mcpTools...)
 		sess.SetAgent(ag, events)

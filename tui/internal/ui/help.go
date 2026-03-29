@@ -22,6 +22,9 @@ var (
 
 // RenderOverlay renders the help screen on top of the base content.
 func (h *HelpModel) RenderOverlay(base string, width, height int) string {
+	if width <= 0 || height <= 2 {
+		return base
+	}
 	bindings := keymap.DefaultBindings()
 	categories := keymap.CategoryOrder()
 

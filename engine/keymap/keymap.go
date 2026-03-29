@@ -98,6 +98,8 @@ func DefaultBindings() []Binding {
 		{ActionSwapLineUp, "Move line up", []string{"Alt+Up"}, CatEditing},
 		{ActionSwapLineDown, "Move line down", []string{"Alt+Down"}, CatEditing},
 		{ActionToggleComment, "Toggle comment", []string{"Ctrl+/"}, CatEditing},
+		{ActionIndent, "Indent selection", []string{"Tab"}, CatEditing},
+		{ActionOutdent, "Outdent selection", []string{"Shift+Tab"}, CatEditing},
 
 		// File
 		{ActionSave, "Save", []string{"Ctrl+S"}, CatFile},

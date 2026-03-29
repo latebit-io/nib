@@ -5,19 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
 // GoToLineTool lets the agent navigate the developer's editor to a specific
 // line in a file. This is a non-mutating "pointing" gesture — the agent uses
 // it to direct attention while explaining code in the agent pane.
+// Navigation is handled by the frontend via an AgentNavigate event.
 type GoToLineTool struct {
-	nav Navigator
+	workspace Workspace
+	send      func(event.Event)
 }
 
-// NewGoToLineTool creates a GoToLineTool with the given navigator.
-func NewGoToLineTool(nav Navigator) *GoToLineTool {
-	return &GoToLineTool{nav: nav}
+// NewGoToLineTool creates a GoToLineTool with the given workspace and event sender.
+func NewGoToLineTool(ws Workspace, send func(event.Event)) *GoToLineTool {
+	return &GoToLineTool{workspace: ws, send: send}
 }
 
 type goToLineArgs struct {
@@ -52,7 +55,7 @@ func (t *GoToLineTool) Definition() llm.ToolDef {
 	}
 }
 
-// Execute navigates the editor to the specified line.
+// Execute sends a navigation event to the frontend for the specified file and line.
 func (t *GoToLineTool) Execute(ctx context.Context, call llm.ToolCall) string {
 	if ctx.Err() != nil {
 		return "Error: agent canceled"
@@ -67,8 +70,10 @@ func (t *GoToLineTool) Execute(ctx context.Context, call llm.ToolCall) string {
 	if args.Line < 1 {
 		return "Error: line must be >= 1"
 	}
-	if err := t.nav.GoToLine(args.Path, args.Line); err != nil {
+	// Validate file exists by attempting to read it.
+	if _, err := t.workspace.ReadFile(args.Path); err != nil {
 		return fmt.Sprintf("Error: %v", err)
 	}
+	t.send(event.AgentNavigate{Path: args.Path, Line: args.Line})
 	return fmt.Sprintf("Navigated to %s line %d.", args.Path, args.Line)
 }

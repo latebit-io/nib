@@ -1717,7 +1717,9 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Edito
 
 	case ActionToggleComment:
 		if !readOnly {
-			e.ToggleLineComment("//")
+			if prefix := lang.LineCommentPrefix(e.Buf.Path); prefix != "" {
+				e.ToggleLineComment(prefix)
+			}
 		}
 		return nil
 	}

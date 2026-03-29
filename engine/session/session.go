@@ -813,28 +813,6 @@ func (s *Session) CanonPath(path string) string {
 	return filepath.Clean(filepath.Join(s.projectRoot, path))
 }
 
-// --- Navigator Implementation ---
-
-// GoToLine navigates the editor to a specific line in a file.
-// Line is 1-indexed. Opens the file if not already open.
-func (s *Session) GoToLine(path string, line int) error {
-	if err := s.SwitchTo(path); err != nil {
-		return err
-	}
-	// Capture editor under lock — SwitchTo released mu, another goroutine
-	// could have reassigned s.Editor between SwitchTo and here.
-	s.mu.Lock()
-	e := s.editors[s.CanonPath(path)]
-	s.mu.Unlock()
-	if e == nil {
-		return fmt.Errorf("no editor for %s", path)
-	}
-	e.ClearSelection()
-	e.MoveCursorTo(line-1, 0)
-	e.EnsureCursorVisible()
-	return nil
-}
-
 // --- Intent Lifecycle ---
 
 // SubmitGoal starts the agent with a new goal.

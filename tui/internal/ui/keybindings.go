@@ -80,10 +80,12 @@ func DefaultKeymap() *Keymap {
 			{code: 'd', mod: tea.ModCtrl}: ActionSelectNext,
 
 			// Navigation
-			{code: tea.KeyHome, mod: tea.ModCtrl}:  ActionFileStart,
-			{code: tea.KeyEnd, mod: tea.ModCtrl}:   ActionFileEnd,
-			{code: tea.KeyUp, mod: tea.ModSuper}:   ActionFileStart, // Cmd+Up (Kitty)
-			{code: tea.KeyDown, mod: tea.ModSuper}: ActionFileEnd,   // Cmd+Down (Kitty)
+			{code: tea.KeyHome, mod: tea.ModCtrl}:                 ActionFileStart,
+			{code: tea.KeyEnd, mod: tea.ModCtrl}:                  ActionFileEnd,
+			{code: tea.KeyUp, mod: tea.ModSuper}:                  ActionFileStart, // Cmd+Up (Kitty)
+			{code: tea.KeyDown, mod: tea.ModSuper}:                ActionFileEnd,   // Cmd+Down (Kitty)
+			{code: tea.KeyUp, mod: tea.ModSuper | tea.ModShift}:   ActionFileStart, // Cmd+Shift+Up (Kitty)
+			{code: tea.KeyDown, mod: tea.ModSuper | tea.ModShift}: ActionFileEnd,   // Cmd+Shift+Down (Kitty)
 
 			// Agent
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,

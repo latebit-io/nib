@@ -124,6 +124,11 @@ type EditorModel struct {
 	// the cursor actually moved, allowing free scrolling during diff review.
 	cursorMoved bool
 
+	// Mouse drag state — separate from SelectionActive so hover motion
+	// doesn't extend a persisted selection after the button is released.
+	mainDragging    bool
+	overlayDragging bool
+
 	// Viewport mapping rebuilt each Render() for mouse click resolution.
 	viewportMap []viewportEntry
 
@@ -143,9 +148,12 @@ type EditorModel struct {
 	// in renderNormalLine. Avoids per-line per-frame allocation.
 	diagUnderline []bool
 
-	// syntaxTagMap is a reusable scratch map for span-based rendering.
-	// Avoids per-line per-frame map allocation.
+	// Reusable scratch buffers for span-based rendering.
+	// Avoids per-line per-frame allocation.
 	syntaxTagMap map[color.Color]int
+	charStyles   []lipgloss.Style
+	colTags      []int
+	dispToBuf    []int
 
 	// Completion holds the autocomplete popup state.
 	Completion CompletionPopup
@@ -714,8 +722,12 @@ func (m *EditorModel) renderNormalLine(
 		}
 	}
 
-	// Syntax highlighting.
-	charStyles := make([]lipgloss.Style, contentW)
+	// Syntax highlighting (reuse scratch buffer).
+	if cap(m.charStyles) < contentW {
+		m.charStyles = make([]lipgloss.Style, contentW)
+	}
+	charStyles := m.charStyles[:contentW]
+	clear(charStyles)
 	if tokens := m.eng.HighlightLine(lineIdx); len(tokens) > 0 {
 		for _, tok := range tokens {
 			dStart := 0
@@ -735,9 +747,12 @@ func (m *EditorModel) renderNormalLine(
 	}
 
 	// Selection: precompute inverse mapping display col → buffer col.
-	var dispToBuf []int
+	if cap(m.dispToBuf) < contentW {
+		m.dispToBuf = make([]int, contentW)
+	}
+	dispToBuf := m.dispToBuf[:contentW]
+	clear(dispToBuf)
 	if m.eng.SelectionActive {
-		dispToBuf = make([]int, contentW)
 		bufCol := 0
 		for j := range contentW {
 			for bufCol+1 <= len(rawRunes) && bufToDisp[bufCol+1] <= j {
@@ -787,7 +802,11 @@ func (m *EditorModel) renderNormalLine(
 	// styleTag classifies each column. Cursors and selection get unique tags;
 	// syntax tokens share a tag when they have the same foreground color.
 	// Plain text (no style) is tag 0.
-	colTags := make([]int, contentW)
+	if cap(m.colTags) < contentW {
+		m.colTags = make([]int, contentW)
+	}
+	colTags := m.colTags[:contentW]
+	clear(colTags)
 	const (
 		tagPlain  = 0
 		tagCursor = -1
@@ -888,8 +907,12 @@ func (m *EditorModel) renderRemovedLine(
 		}
 	}
 
-	// Syntax highlighting on removed lines (they are real buffer lines).
-	charStyles := make([]lipgloss.Style, contentW)
+	// Syntax highlighting on removed lines (reuse scratch buffer).
+	if cap(m.charStyles) < contentW {
+		m.charStyles = make([]lipgloss.Style, contentW)
+	}
+	charStyles := m.charStyles[:contentW]
+	clear(charStyles)
 	if tokens := m.eng.HighlightLine(lineIdx); len(tokens) > 0 {
 		for _, tok := range tokens {
 			dStart := 0
@@ -914,7 +937,11 @@ func (m *EditorModel) renderRemovedLine(
 			rTagBg     = 0
 			rTagCursor = -1
 		)
-		rColTags := make([]int, contentW)
+		if cap(m.colTags) < contentW {
+			m.colTags = make([]int, contentW)
+		}
+		rColTags := m.colTags[:contentW]
+		clear(rColTags)
 		if m.syntaxTagMap == nil {
 			m.syntaxTagMap = make(map[color.Color]int)
 		}
@@ -1261,6 +1288,8 @@ func (m *EditorModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 			oe.SelectionActive = true
 			oe.SelectStartLine = oe.CursorLine
 			oe.SelectStartCol = oe.CursorCol
+			m.overlayDragging = true
+			m.mainDragging = false
 		}
 
 	case lineRemoved:
@@ -1285,10 +1314,10 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 	if entry == nil {
 		return nil
 	}
-	m.cursorMoved = true
 
-	// Overlay active — keep selection within overlay during drag.
-	if m.Overlay != nil && m.Overlay.Active {
+	// Overlay drag — keep selection within overlay.
+	if m.overlayDragging && m.Overlay != nil {
+		m.cursorMoved = true
 		oe := m.Overlay.Editor
 		switch entry.kind {
 		case lineAdded:
@@ -1308,7 +1337,8 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 	}
 
 	// Normal drag — extend selection.
-	if m.eng.SelectionActive {
+	if m.mainDragging {
+		m.cursorMoved = true
 		bufLine, bufCol := m.resolveBufferPos(entry.bufLine, displayCol)
 		m.eng.MoveCursorTo(bufLine, bufCol)
 	}
@@ -1316,20 +1346,22 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 }
 
 func (m *EditorModel) handleMouseRelease(msg tea.MouseReleaseMsg) tea.Cmd {
+	wasDraggingOverlay := m.overlayDragging
+	m.mainDragging = false
+	m.overlayDragging = false
+
 	entry, displayCol := m.mouseEntry(msg.X, msg.Y)
 	if entry == nil {
 		return nil
 	}
 
-	// Overlay active — finalize overlay selection.
-	if m.Overlay != nil && m.Overlay.Active {
+	// Overlay — finalize overlay selection.
+	if wasDraggingOverlay && m.Overlay != nil {
 		oe := m.Overlay.Editor
-		if entry.kind == lineAdded {
-			if oe.SelectionActive &&
-				oe.CursorLine == oe.SelectStartLine &&
-				oe.CursorCol == oe.SelectStartCol {
-				oe.ClearSelection()
-			}
+		if oe.SelectionActive &&
+			oe.CursorLine == oe.SelectStartLine &&
+			oe.CursorCol == oe.SelectStartCol {
+			oe.ClearSelection()
 		}
 		return nil
 	}
@@ -1352,6 +1384,8 @@ func (m *EditorModel) normalLinePress(bufLine, displayCol int) {
 	m.eng.SelectionActive = true
 	m.eng.SelectStartLine = m.eng.CursorLine
 	m.eng.SelectStartCol = m.eng.CursorCol
+	m.mainDragging = true
+	m.overlayDragging = false
 }
 
 // resolveBufferPos converts a display position to a buffer position,

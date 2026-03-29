@@ -66,6 +66,10 @@ type RegionManager struct {
 	dragDivider int   // index into visible regions: divider between [i] and [i+1]
 	dragStartX  int   // global X at drag start
 	dragStartW  []int // pane widths at drag start
+
+	// Mouse capture: when a click starts in a pane, motion and release
+	// events are forwarded to that pane even if the pointer leaves its bounds.
+	capturedRegion *Region
 }
 
 // NewRegionManager creates a region manager with the given layout direction.
@@ -213,14 +217,28 @@ func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
 		}
 	}
 
+	// If a pane is captured (click started there), keep forwarding
+	// motion/release to it even if the pointer left its bounds.
+	if rm.capturedRegion != nil {
+		r := rm.capturedRegion
+		localX := max(0, min(m.X-r.x, r.width-1))
+		localY := max(0, min(m.Y-r.y, r.height-1))
+		if _, ok := msg.(tea.MouseReleaseMsg); ok {
+			rm.capturedRegion = nil
+		}
+		localMsg := rm.translateMouse(msg, localX, localY)
+		return r.Pane.Update(localMsg)
+	}
+
 	region, localX, localY := rm.RegionAt(m.X, m.Y)
 	if region == nil {
 		return nil
 	}
 
-	// Only clicks transfer keyboard focus.
+	// Only clicks transfer keyboard focus and start capture.
 	if _, ok := msg.(tea.MouseClickMsg); ok {
 		rm.FocusByName(region.Name)
+		rm.capturedRegion = region
 	}
 
 	// Forward mouse with translated coordinates to the pane.

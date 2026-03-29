@@ -390,8 +390,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// or a full SGR body like '<65;14;32M'. Gate behind recentMouse so we never
 	// silently drop legitimate typed/pasted text.
 	if m.recentMouse && msg.Text != "" {
-		runes := []rune(msg.Text)
-		if (len(runes) == 1 && runes[0] == '[') || isLeakedMouseSequence(runes) {
+		if isLeakedMouseSequence([]rune(msg.Text)) {
 			// Keep recentMouse=true so consecutive leaked sequences from
 			// rapid scrolling are all caught, not just the first one.
 			return m, nil

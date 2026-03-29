@@ -33,6 +33,9 @@ func main() {
 	}
 }
 
+// run initializes the editor session, optional language/agent services, and runs the terminal UI.
+// It parses an optional "--debug" flag and a single positional file or directory to determine logging behavior, the initial buffer, and the project root; discovers MCP tools; starts configured LSP servers; creates an LLM-backed agent when LLM_API_KEY is present; and launches the Bubble Tea program as the main event loop.
+// Returns an error if any initialization step or the TUI runtime fails.
 func run() error {
 	// Parse args: [--debug] [file]
 	args := os.Args[1:]
@@ -172,6 +175,15 @@ type lspPort interface {
 	lang.DiagnosticProvider
 }
 
+// initLSP loads language server configurations for the given project root and
+// returns a manager that coordinates those servers, or nil if no servers were
+// discovered.
+//
+// It first attempts to load user configs from the project (via loadLSPConfigs).
+// If none are found, it falls back to auto-detected defaults (via defaultLSPConfigs).
+// When one or more server configurations are available, it constructs and returns
+// an LSP manager configured with those servers, the provided projectRoot, and the
+// events channel. If no configurations are available, it returns nil.
 func initLSP(projectRoot string, events chan<- event.Event) lspPort {
 	configs := loadLSPConfigs(projectRoot)
 	if len(configs) == 0 {

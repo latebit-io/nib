@@ -104,6 +104,27 @@ type Session struct {
 	completionMu sync.Mutex
 }
 
+// ResolveProjectRoot walks up from startDir looking for a .git directory.
+// Returns the directory containing .git, or startDir itself if none is found.
+// The returned path is always absolute and clean.
+func ResolveProjectRoot(startDir string) string {
+	absDir, err := filepath.Abs(startDir)
+	if err != nil {
+		return filepath.Clean(startDir)
+	}
+	for dir := absDir; ; {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			break
+		}
+		dir = next
+	}
+	return absDir
+}
+
 // New creates a session in editor-only mode. Call SetAgent to enable the
 // agent after construction (this breaks the circular dependency between
 // session-as-workspace and agent-needing-workspace).

@@ -3,12 +3,13 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"log/slog"
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/lang"
@@ -362,15 +363,21 @@ func (m *EditorModel) SetSize(width, height int) {
 // Update handles key and mouse events for the editor pane. Implements Pane.
 func (m *EditorModel) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
-	case tea.MouseMsg:
-		return m.handleMouse(msg)
-	case tea.KeyMsg:
+	case tea.MouseClickMsg:
+		return m.handleMouseClick(msg)
+	case tea.MouseMotionMsg:
+		return m.handleMouseMotion(msg)
+	case tea.MouseReleaseMsg:
+		return m.handleMouseRelease(msg)
+	case tea.MouseWheelMsg:
+		return m.handleMouseWheel(msg)
+	case tea.KeyPressMsg:
 		// Dismiss hover on any key — cursor is about to move.
 		m.DismissHover()
 
 		// Completion popup captures navigation keys when active.
 		if m.Completion.Active {
-			switch msg.Type {
+			switch msg.Code {
 			case tea.KeyDown:
 				m.Completion.SelectNext()
 				return nil
@@ -784,7 +791,7 @@ func (m *EditorModel) renderNormalLine(
 		tagSel    = -3
 	)
 	// Syntax tokens get positive tags starting at 1, grouped by foreground color.
-	syntaxTagMap := make(map[lipgloss.TerminalColor]int)
+	syntaxTagMap := make(map[color.Color]int)
 	nextTag := 1
 	for j := range contentW {
 		switch {
@@ -850,7 +857,7 @@ func (m *EditorModel) renderNormalLine(
 func (m *EditorModel) renderRemovedLine(
 	lineIdx, gutterW, contentW int,
 	bgStyle lipgloss.Style,
-	bgColor lipgloss.Color,
+	bgColor color.Color,
 	gutterSt lipgloss.Style,
 	cursorStyle lipgloss.Style,
 	showBufferCursor bool,
@@ -900,7 +907,7 @@ func (m *EditorModel) renderRemovedLine(
 			rTagCursor = -1
 		)
 		rColTags := make([]int, contentW)
-		rSyntaxMap := make(map[lipgloss.TerminalColor]int)
+		rSyntaxMap := make(map[color.Color]int)
 		rNextTag := 1
 		for j := range contentW {
 			switch {
@@ -1184,73 +1191,42 @@ func (m *EditorModel) renderStatusBar(width int) string {
 
 // --- Mouse Handling ---
 
-func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
+func (m *EditorModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	scrollLines := 3
-
-	switch {
-	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
+	switch msg.Button {
+	case tea.MouseWheelUp:
 		m.syncExtraVisualLines()
 		m.eng.ScrollUp(scrollLines)
-		return nil
-
-	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
+	case tea.MouseWheelDown:
 		m.syncExtraVisualLines()
 		m.eng.ScrollDown(scrollLines)
-		return nil
 	}
+	return nil
+}
 
-	if msg.Button != tea.MouseButtonLeft || msg.Y >= m.eng.VisibleLines() {
-		return nil
+// mouseEntry returns the viewport entry and display column for a mouse event at (x, y).
+// Returns nil if the position is out of bounds.
+func (m *EditorModel) mouseEntry(x, y int) (*viewportEntry, int) {
+	if y >= m.eng.VisibleLines() || y >= len(m.viewportMap) {
+		return nil, 0
 	}
-
-	// Mouse click moves the cursor — mark for scroll adjustment.
-	m.cursorMoved = true
-
 	gutterW := m.eng.GutterWidth()
-	displayCol := msg.X - gutterW
+	displayCol := x - gutterW
 	if displayCol < 0 {
 		displayCol = 0
 	}
+	return &m.viewportMap[y], displayCol
+}
 
-	if msg.Y >= len(m.viewportMap) {
+func (m *EditorModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
+	if msg.Button != tea.MouseLeft {
 		return nil
 	}
-	entry := m.viewportMap[msg.Y]
-
-	// When the overlay is active and the user is dragging (motion/release),
-	// keep the selection within the overlay — don't deactivate or scroll away.
-	if m.Overlay != nil && m.Overlay.Active && msg.Action != tea.MouseActionPress {
-		oe := m.Overlay.Editor
-		switch entry.kind {
-		case lineAdded:
-			_, bufToDisp := expandTabs([]rune(oe.Buf.LineText(entry.overlayLine)))
-			col := displayColToBufCol(bufToDisp, displayCol)
-			switch msg.Action {
-			case tea.MouseActionMotion:
-				oe.MoveCursorTo(entry.overlayLine, col)
-			case tea.MouseActionRelease:
-				if oe.SelectionActive &&
-					oe.CursorLine == oe.SelectStartLine &&
-					oe.CursorCol == oe.SelectStartCol {
-					oe.ClearSelection()
-				}
-			}
-		default:
-			// Drag went outside the overlay — clamp to nearest boundary.
-			if msg.Action == tea.MouseActionMotion {
-				if entry.kind == lineNormal && entry.bufLine < m.Overlay.StartLine {
-					// Above the diff — clamp to first overlay line, col 0
-					oe.MoveCursorTo(0, 0)
-				} else {
-					// Below or on removed lines — clamp to last overlay line, end of line
-					lastLine := oe.Buf.LineCount() - 1
-					oe.MoveCursorTo(lastLine, oe.Buf.LineLen(lastLine))
-				}
-			}
-			// Release outside overlay — just finalize the selection, don't deactivate
-		}
+	entry, displayCol := m.mouseEntry(msg.X, msg.Y)
+	if entry == nil {
 		return nil
 	}
+	m.cursorMoved = true
 
 	switch entry.kind {
 	case lineNormal:
@@ -1258,24 +1234,21 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			slog.Debug("overlay deactivated", "reason", "click on normal line", "bufLine", entry.bufLine)
 			m.Overlay.Active = false
 		}
-		m.handleNormalLineClick(entry.bufLine, displayCol, msg.Action)
+		m.normalLinePress(entry.bufLine, displayCol)
 
 	case lineAdded:
 		if m.Overlay != nil {
 			oe := m.Overlay.Editor
 			_, bufToDisp := expandTabs([]rune(oe.Buf.LineText(entry.overlayLine)))
 			col := displayColToBufCol(bufToDisp, displayCol)
-			switch msg.Action {
-			case tea.MouseActionPress:
-				slog.Debug("overlay click", "overlayLine", entry.overlayLine, "col", col)
-				m.Overlay.Active = true
-				oe.ClearSelection()
-				m.eng.ClearSelection()
-				oe.MoveCursorTo(entry.overlayLine, col)
-				oe.SelectionActive = true
-				oe.SelectStartLine = oe.CursorLine
-				oe.SelectStartCol = oe.CursorCol
-			}
+			slog.Debug("overlay click", "overlayLine", entry.overlayLine, "col", col)
+			m.Overlay.Active = true
+			oe.ClearSelection()
+			m.eng.ClearSelection()
+			oe.MoveCursorTo(entry.overlayLine, col)
+			oe.SelectionActive = true
+			oe.SelectStartLine = oe.CursorLine
+			oe.SelectStartCol = oe.CursorCol
 		}
 
 	case lineRemoved:
@@ -1283,51 +1256,103 @@ func (m *EditorModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			slog.Debug("overlay deactivated", "reason", "click on removed line", "bufLine", entry.bufLine)
 			m.Overlay.Active = false
 		}
-		// Removed lines are real buffer lines — allow cursor positioning
-		// for navigation. Edits are blocked by overlapsRemovedRange().
-		m.handleNormalLineClick(entry.bufLine, displayCol, msg.Action)
+		m.normalLinePress(entry.bufLine, displayCol)
 
 	case lineEmpty:
-		// Clicks past EOF: deactivate overlay and move cursor to last line.
 		if m.Overlay != nil && m.Overlay.Active {
 			m.Overlay.Active = false
 		}
-		m.handleNormalLineClick(m.eng.Buf.LineCount(), displayCol, msg.Action)
+		m.normalLinePress(m.eng.Buf.LineCount(), displayCol)
 	}
 
 	return nil
 }
 
-func (m *EditorModel) handleNormalLineClick(bufLine, displayCol int, action tea.MouseAction) {
-	var bufCol int
+func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
+	entry, displayCol := m.mouseEntry(msg.X, msg.Y)
+	if entry == nil {
+		return nil
+	}
+	m.cursorMoved = true
+
+	// Overlay active — keep selection within overlay during drag.
+	if m.Overlay != nil && m.Overlay.Active {
+		oe := m.Overlay.Editor
+		switch entry.kind {
+		case lineAdded:
+			_, bufToDisp := expandTabs([]rune(oe.Buf.LineText(entry.overlayLine)))
+			col := displayColToBufCol(bufToDisp, displayCol)
+			oe.MoveCursorTo(entry.overlayLine, col)
+		default:
+			// Drag went outside the overlay — clamp to nearest boundary.
+			if entry.kind == lineNormal && entry.bufLine < m.Overlay.StartLine {
+				oe.MoveCursorTo(0, 0)
+			} else {
+				lastLine := oe.Buf.LineCount() - 1
+				oe.MoveCursorTo(lastLine, oe.Buf.LineLen(lastLine))
+			}
+		}
+		return nil
+	}
+
+	// Normal drag — extend selection.
+	if m.eng.SelectionActive {
+		bufLine, bufCol := m.resolveBufferPos(entry.bufLine, displayCol)
+		m.eng.MoveCursorTo(bufLine, bufCol)
+	}
+	return nil
+}
+
+func (m *EditorModel) handleMouseRelease(msg tea.MouseReleaseMsg) tea.Cmd {
+	entry, displayCol := m.mouseEntry(msg.X, msg.Y)
+	if entry == nil {
+		return nil
+	}
+
+	// Overlay active — finalize overlay selection.
+	if m.Overlay != nil && m.Overlay.Active {
+		oe := m.Overlay.Editor
+		if entry.kind == lineAdded {
+			if oe.SelectionActive &&
+				oe.CursorLine == oe.SelectStartLine &&
+				oe.CursorCol == oe.SelectStartCol {
+				oe.ClearSelection()
+			}
+		}
+		return nil
+	}
+
+	// Normal release — clear selection if click (no drag).
+	_ = displayCol // unused in release
+	if m.eng.SelectionActive &&
+		m.eng.CursorLine == m.eng.SelectStartLine &&
+		m.eng.CursorCol == m.eng.SelectStartCol {
+		m.eng.ClearSelection()
+	}
+	return nil
+}
+
+// normalLinePress handles a left-click press on a normal buffer line.
+func (m *EditorModel) normalLinePress(bufLine, displayCol int) {
+	bufLine, bufCol := m.resolveBufferPos(bufLine, displayCol)
+	m.eng.ClearSelection()
+	m.eng.MoveCursorTo(bufLine, bufCol)
+	m.eng.SelectionActive = true
+	m.eng.SelectStartLine = m.eng.CursorLine
+	m.eng.SelectStartCol = m.eng.CursorCol
+}
+
+// resolveBufferPos converts a display position to a buffer position,
+// clamping to valid bounds.
+func (m *EditorModel) resolveBufferPos(bufLine, displayCol int) (int, int) {
 	if bufLine >= m.eng.Buf.LineCount() {
 		bufLine = m.eng.Buf.LineCount() - 1
 		if bufLine < 0 {
 			bufLine = 0
 		}
-		bufCol = m.eng.Buf.LineLen(bufLine)
-	} else {
-		bufCol = m.eng.DisplayColToBufferCol(bufLine, displayCol)
+		return bufLine, m.eng.Buf.LineLen(bufLine)
 	}
-
-	switch action {
-	case tea.MouseActionPress:
-		m.eng.ClearSelection()
-		m.eng.MoveCursorTo(bufLine, bufCol)
-		m.eng.SelectionActive = true
-		m.eng.SelectStartLine = m.eng.CursorLine
-		m.eng.SelectStartCol = m.eng.CursorCol
-	case tea.MouseActionMotion:
-		if m.eng.SelectionActive {
-			m.eng.MoveCursorTo(bufLine, bufCol)
-		}
-	case tea.MouseActionRelease:
-		if m.eng.SelectionActive &&
-			m.eng.CursorLine == m.eng.SelectStartLine &&
-			m.eng.CursorCol == m.eng.SelectStartCol {
-			m.eng.ClearSelection()
-		}
-	}
+	return bufLine, m.eng.DisplayColToBufferCol(bufLine, displayCol)
 }
 
 // --- Key Handling ---
@@ -1369,7 +1394,7 @@ func (m *EditorModel) overlapsRemovedRange() bool {
 	return false
 }
 
-func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
+func (m *EditorModel) handleKey(keyMsg tea.KeyPressMsg) tea.Cmd {
 	m.StatusMsg = "" // clear transient status on any key
 
 	// Route to overlay when it owns the cursor.
@@ -1399,13 +1424,13 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyMsg) tea.Cmd {
 
 // interceptOverlayEntry checks if an arrow key would move the cursor into the
 // removed range and enters the overlay instead. Returns true if intercepted.
-func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyMsg) bool {
+func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyPressMsg) bool {
 	o := m.Overlay
 	if o == nil {
 		return false
 	}
 
-	switch keyMsg.Type {
+	switch keyMsg.Code {
 	case tea.KeyDown:
 		// Cursor just above removed range → enter overlay at first line.
 		if m.eng.CursorLine == o.StartLine-1 {
@@ -1415,6 +1440,9 @@ func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyMsg) bool {
 			return true
 		}
 	case tea.KeyUp:
+		if keyMsg.Mod != 0 {
+			return false // shift+up, ctrl+up, etc. — don't intercept
+		}
 		// Cursor just below removed range → enter overlay at last line.
 		if m.eng.CursorLine == o.EndLine+1 {
 			o.Active = true
@@ -1454,13 +1482,13 @@ func (m *EditorModel) adjustOverlayPosition(linesBefore int) {
 // handleOverlayKey handles keys when the overlay editor is active.
 // Overlay-specific: boundary exit (up/down past edges), escape to deactivate,
 // save always goes to main buffer. Everything else delegates to the shared handler.
-func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyMsg) tea.Cmd {
+func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyPressMsg) tea.Cmd {
 	o := m.Overlay
 	oe := o.Editor
 
 	// Escape — leave overlay, move cursor to nearest non-removed line
 	// so subsequent navigation doesn't immediately re-enter the overlay.
-	if keyMsg.Type == tea.KeyEscape {
+	if keyMsg.Code == tea.KeyEscape {
 		slog.Debug("overlay deactivated", "reason", "escape")
 		oe.ClearSelection()
 		o.Active = false
@@ -1473,7 +1501,7 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyMsg) tea.Cmd {
 	}
 
 	// Up at top of overlay — exit upward if there's a safe line above.
-	if keyMsg.Type == tea.KeyUp && oe.CursorLine == 0 {
+	if keyMsg.Code == tea.KeyUp && keyMsg.Mod == 0 && oe.CursorLine == 0 {
 		if o.StartLine <= 0 {
 			// No buffer line above the overlay — stay in overlay.
 			return nil
@@ -1486,7 +1514,7 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyMsg) tea.Cmd {
 	}
 
 	// Down at bottom of overlay — exit downward if there's a safe line below.
-	if keyMsg.Type == tea.KeyDown && oe.CursorLine >= oe.Buf.LineCount()-1 {
+	if keyMsg.Code == tea.KeyDown && keyMsg.Mod == 0 && oe.CursorLine >= oe.Buf.LineCount()-1 {
 		if o.EndLine+1 >= m.eng.Buf.LineCount() {
 			// No buffer line below the overlay — stay in overlay.
 			return nil
@@ -1504,10 +1532,8 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyMsg) tea.Cmd {
 
 // handleEditorKeyFor is the shared key handler that operates on any *editor.Editor.
 // Both the main editor and the overlay editor use this — no duplication.
-func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, readOnly bool) tea.Cmd {
-	isShift := keyMsg.Type == tea.KeyShiftUp || keyMsg.Type == tea.KeyShiftDown ||
-		keyMsg.Type == tea.KeyShiftLeft || keyMsg.Type == tea.KeyShiftRight ||
-		keyMsg.Type == tea.KeyShiftHome || keyMsg.Type == tea.KeyShiftEnd
+func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Editor, readOnly bool) tea.Cmd {
+	isShift := keyMsg.Mod&tea.ModShift != 0
 
 	action := m.Keymap.Match(keyMsg)
 
@@ -1574,39 +1600,56 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 		return nil
 	}
 
-	if keyMsg.Type == tea.KeyEscape {
+	if keyMsg.Code == tea.KeyEscape {
 		e.ClearSelection()
 		return nil
 	}
 
-	switch keyMsg.Type {
+	// Shift+arrow selection navigation
+	if isShift {
+		switch keyMsg.Code {
+		case tea.KeyUp:
+			e.StartSelection()
+			e.MoveCursor(-1, 0)
+			return nil
+		case tea.KeyDown:
+			e.StartSelection()
+			e.MoveCursor(1, 0)
+			return nil
+		case tea.KeyLeft:
+			e.StartSelection()
+			e.MoveCursor(0, -1)
+			return nil
+		case tea.KeyRight:
+			e.StartSelection()
+			e.MoveCursor(0, 1)
+			return nil
+		case tea.KeyHome:
+			e.StartSelection()
+			e.Home()
+			return nil
+		case tea.KeyEnd:
+			e.StartSelection()
+			e.End()
+			return nil
+		}
+	}
 
-	// Selection navigation
-	case tea.KeyShiftUp:
-		e.StartSelection()
-		e.MoveCursor(-1, 0)
-		return nil
-	case tea.KeyShiftDown:
-		e.StartSelection()
-		e.MoveCursor(1, 0)
-		return nil
-	case tea.KeyShiftLeft:
-		e.StartSelection()
-		e.MoveCursor(0, -1)
-		return nil
-	case tea.KeyShiftRight:
-		e.StartSelection()
-		e.MoveCursor(0, 1)
-		return nil
-	case tea.KeyShiftHome:
-		e.StartSelection()
-		e.Home()
-		return nil
-	case tea.KeyShiftEnd:
-		e.StartSelection()
-		e.End()
-		return nil
+	// Ctrl+arrow word navigation
+	if keyMsg.Mod&tea.ModCtrl != 0 {
+		switch keyMsg.Code {
+		case tea.KeyRight:
+			e.ClearSelection()
+			e.WordRight()
+			return nil
+		case tea.KeyLeft:
+			e.ClearSelection()
+			e.WordLeft()
+			return nil
+		}
+	}
 
+	switch keyMsg.Code {
 	// Navigation
 	case tea.KeyUp:
 		e.ClearSelection()
@@ -1643,16 +1686,6 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 		e.ClearSelection()
 		m.syncExtraVisualLines()
 		e.MoveCursor(m.eng.VisibleLines(), 0)
-		return nil
-
-	// Word navigation
-	case tea.KeyCtrlRight:
-		e.ClearSelection()
-		e.WordRight()
-		return nil
-	case tea.KeyCtrlLeft:
-		e.ClearSelection()
-		e.WordLeft()
 		return nil
 
 	// Editing
@@ -1703,26 +1736,29 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyMsg, e *editor.Editor, re
 			e.DeleteChar()
 		}
 		return nil
+	}
 
-	case tea.KeyRunes:
+	// Printable text input
+	if keyMsg.Text != "" {
 		if readOnly {
 			return nil
 		}
-		if len(keyMsg.Runes) > 1 {
+		runes := []rune(keyMsg.Text)
+		if len(runes) > 1 {
 			if e.SelectionActive {
 				e.DeleteSelection()
 			}
-			e.PasteText(string(keyMsg.Runes))
+			e.PasteText(keyMsg.Text)
 		} else {
 			if e.SelectionActive {
 				e.DeleteSelection()
 			}
-			for _, r := range keyMsg.Runes {
+			for _, r := range runes {
 				e.InsertChar(r)
 			}
 		}
 		// Trigger completion after typing trigger characters.
-		if len(keyMsg.Runes) == 1 && lang.IsCompletionTrigger(keyMsg.Runes[0]) {
+		if len(runes) == 1 && lang.IsCompletionTrigger(runes[0]) {
 			return func() tea.Msg { return completionTriggerMsg{} }
 		}
 		return nil

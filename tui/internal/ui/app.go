@@ -8,8 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
@@ -147,7 +147,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Palette is modal — captures all input when active
 	if m.Palette.Active {
 		switch typed := msg.(type) {
-		case tea.KeyMsg:
+		case tea.KeyPressMsg:
 			cmd := m.Palette.Update(typed)
 			return m, cmd
 		case tea.MouseMsg:
@@ -158,7 +158,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Dialog is modal — captures all input when active
 	if m.Dialog.Active {
 		switch typed := msg.(type) {
-		case tea.KeyMsg:
+		case tea.KeyPressMsg:
 			cmd := m.Dialog.Update(typed)
 			return m, cmd
 		case tea.MouseMsg:
@@ -268,19 +268,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case animTickMsg:
 		return m, m.handleAnimTick()
 
-	case tea.MouseMsg:
-		// Only set recentMouse for scroll events — those are the ones that
-		// produce leaked CSI sequences during rapid scrolling.
-		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
-			m.recentMouse = true
-		}
+	case tea.MouseWheelMsg:
+		m.recentMouse = true
 		// Translate Y for intent bar row
-		msg.Y -= 1
-		cmd := m.Regions.HandleMouse(msg)
+		translated := tea.Mouse(msg)
+		translated.Y -= 1
+		cmd := m.Regions.HandleMouse(tea.MouseWheelMsg(translated))
 		return m, cmd
 
-	case tea.KeyMsg:
-		slog.Debug("key event", "type", msg.Type, "string", msg.String(), "runes", msg.Runes)
+	case tea.MouseMsg:
+		// Translate Y for intent bar row
+		mouse := msg.Mouse()
+		mouse.Y -= 1
+		localMsg := translateMouseMsg(msg, mouse)
+		cmd := m.Regions.HandleMouse(localMsg)
+		return m, cmd
+
+	case tea.KeyPressMsg:
+		slog.Debug("key event", "string", msg.String())
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -376,14 +381,15 @@ func (m *AppModel) regionHeight() int {
 	return h
 }
 
-func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Drop leaked mouse escape sequence fragments.
 	// During rapid scrolling, Bubble Tea's parser can fail to consume full SGR
-	// sequences. The fragments leak as KeyRunes — either a lone '[' (CSI prefix)
+	// sequences. The fragments leak as printable text — either a lone '[' (CSI prefix)
 	// or a full SGR body like '<65;14;32M'. Gate behind recentMouse so we never
 	// silently drop legitimate typed/pasted text.
-	if m.recentMouse && msg.Type == tea.KeyRunes {
-		if (len(msg.Runes) == 1 && msg.Runes[0] == '[') || isLeakedMouseSequence(msg.Runes) {
+	if m.recentMouse && msg.Text != "" {
+		runes := []rune(msg.Text)
+		if (len(runes) == 1 && runes[0] == '[') || isLeakedMouseSequence(runes) {
 			// Keep recentMouse=true so consecutive leaked sequences from
 			// rapid scrolling are all caught, not just the first one.
 			return m, nil
@@ -398,7 +404,7 @@ func (m *AppModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Toggle focus between visible panes
-	if msg.Type == tea.KeyCtrlBackslash {
+	if msg.Code == '\\' && msg.Mod == tea.ModCtrl {
 		m.Regions.FocusNext()
 		return m, nil
 	}
@@ -515,24 +521,40 @@ func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *AppModel) View() string {
+func (m *AppModel) View() tea.View {
+	var content string
 	if m.Width == 0 || m.Height == 0 {
-		return "Initializing..."
+		content = "Initializing..."
+	} else if m.Dialog.Active {
+		content = m.Dialog.Render(m.Width, m.Height)
+	} else {
+		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width)
+		if m.Palette.Active {
+			content = m.Palette.RenderOverlay(base, m.Width, m.Height)
+		} else {
+			content = base
+		}
 	}
 
-	// Replace view with dialog when active.
-	if m.Dialog.Active {
-		return m.Dialog.Render(m.Width, m.Height)
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+// translateMouseMsg creates a new mouse message with translated coordinates.
+func translateMouseMsg(msg tea.MouseMsg, m tea.Mouse) tea.MouseMsg {
+	switch msg.(type) {
+	case tea.MouseClickMsg:
+		return tea.MouseClickMsg(m)
+	case tea.MouseReleaseMsg:
+		return tea.MouseReleaseMsg(m)
+	case tea.MouseMotionMsg:
+		return tea.MouseMotionMsg(m)
+	case tea.MouseWheelMsg:
+		return tea.MouseWheelMsg(m)
 	}
-
-	base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width)
-
-	// Palette floats on top of the editor — editor stays visible.
-	if m.Palette.Active {
-		return m.Palette.RenderOverlay(base, m.Width, m.Height)
-	}
-
-	return base
+	return msg
 }
 
 // openFile switches the editor to a different file. Uses session.SwitchTo

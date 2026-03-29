@@ -1,6 +1,6 @@
 package ui
 
-import tea "github.com/charmbracelet/bubbletea"
+import tea "charm.land/bubbletea/v2"
 
 // Pane is the interface for self-contained UI modules.
 // Each pane owns its own Update logic (keys, mouse, domain messages),

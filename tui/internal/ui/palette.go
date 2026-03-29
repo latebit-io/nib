@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/fuzzy"
 )
 
@@ -97,8 +97,8 @@ func (p *PaletteModel) Close() {
 }
 
 // Update handles key input when the palette is active.
-func (p *PaletteModel) Update(msg tea.KeyMsg) tea.Cmd {
-	switch msg.Type {
+func (p *PaletteModel) Update(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.Code {
 	case tea.KeyEscape:
 		p.Close()
 		return func() tea.Msg { return PaletteResultMsg{Cancelled: true} }
@@ -135,9 +135,11 @@ func (p *PaletteModel) Update(msg tea.KeyMsg) tea.Cmd {
 			p.refilter()
 		}
 		return nil
+	}
 
-	case tea.KeyRunes:
-		p.Query += string(msg.Runes)
+	// Printable text input
+	if msg.Text != "" {
+		p.Query += msg.Text
 		p.refilter()
 		return nil
 	}

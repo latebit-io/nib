@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/session"
 )
@@ -94,10 +94,12 @@ func NewProjectPaneModel(sess *session.Session) *ProjectPaneModel {
 // Update handles input when the project pane has focus.
 func (p *ProjectPaneModel) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return p.handleKey(msg)
-	case tea.MouseMsg:
-		return p.handleMouse(msg)
+	case tea.MouseClickMsg:
+		return p.handleMouseClick(msg)
+	case tea.MouseWheelMsg:
+		return p.handleMouseWheel(msg)
 	}
 	return nil
 }
@@ -221,51 +223,53 @@ func (p *ProjectPaneModel) flattenItems() {
 }
 
 // handleKey processes key events when the pane has focus.
-func (p *ProjectPaneModel) handleKey(msg tea.KeyMsg) tea.Cmd {
-	switch msg.Type {
+func (p *ProjectPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.Code {
 	case tea.KeyUp:
 		return p.moveCursor(-1)
 	case tea.KeyDown:
 		return p.moveCursor(1)
 	case tea.KeyEnter:
 		return p.activateItem()
-	case tea.KeyRunes:
-		if len(msg.Runes) == 1 {
-			switch msg.Runes[0] {
-			case 'k':
-				return p.moveCursor(-1)
-			case 'j':
-				return p.moveCursor(1)
-			case 'a':
-				return p.addContext()
-			case 'x':
-				return p.removeContext()
-			}
+	}
+	// Single-character vim-style navigation
+	if msg.Text != "" && len([]rune(msg.Text)) == 1 {
+		switch []rune(msg.Text)[0] {
+		case 'k':
+			return p.moveCursor(-1)
+		case 'j':
+			return p.moveCursor(1)
+		case 'a':
+			return p.addContext()
+		case 'x':
+			return p.removeContext()
 		}
 	}
 	return nil
 }
 
-// handleMouse processes mouse events.
-func (p *ProjectPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
+// handleMouseWheel processes mouse wheel events.
+func (p *ProjectPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	switch msg.Button {
-	case tea.MouseButtonWheelUp:
+	case tea.MouseWheelUp:
 		p.scrollOffset -= 3
 		p.clampScroll()
-		return nil
-	case tea.MouseButtonWheelDown:
+	case tea.MouseWheelDown:
 		p.scrollOffset += 3
 		p.clampScroll()
+	}
+	return nil
+}
+
+// handleMouseClick processes mouse click events.
+func (p *ProjectPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
+	if msg.Button != tea.MouseLeft {
 		return nil
-	case tea.MouseButtonLeft:
-		if msg.Action == tea.MouseActionRelease {
-			return nil
-		}
-		idx := p.scrollOffset + msg.Y
-		if idx >= 0 && idx < len(p.items) {
-			p.cursorIdx = idx
-			return p.activateItem()
-		}
+	}
+	idx := p.scrollOffset + msg.Y
+	if idx >= 0 && idx < len(p.items) {
+		p.cursorIdx = idx
+		return p.activateItem()
 	}
 	return nil
 }

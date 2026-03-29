@@ -28,6 +28,7 @@ type Manager struct {
 
 // Compile-time interface checks.
 var _ lang.DocumentSyncer = (*Manager)(nil)
+var _ lang.DiagnosticProvider = (*Manager)(nil)
 
 // NewManager creates a Manager that routes to LSP servers based on language.
 // Configs map language IDs to server configurations. The events channel

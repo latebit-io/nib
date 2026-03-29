@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func testItems() []PaletteItem {
@@ -13,6 +13,16 @@ func testItems() []PaletteItem {
 		{Label: "tui/internal/ui/app.go", Category: "file", Value: "/abs/tui/internal/ui/app.go"},
 		{Label: "main.go", Category: "file", Value: "/abs/main.go"},
 	}
+}
+
+// keyPress creates a KeyPressMsg for a printable character.
+func keyPress(r rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: r, Text: string(r)}
+}
+
+// specialKey creates a KeyPressMsg for a special key (no text).
+func specialKey(code rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code}
 }
 
 func TestPalette_Open(t *testing.T) {
@@ -38,7 +48,9 @@ func TestPalette_FilterOnType(t *testing.T) {
 	p.Open(testItems())
 
 	// Type "ses" — should match session.go.
-	p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ses")})
+	for _, r := range "ses" {
+		p.Update(keyPress(r))
+	}
 
 	if p.Query != "ses" {
 		t.Errorf("query = %q, want %q", p.Query, "ses")
@@ -55,8 +67,10 @@ func TestPalette_Backspace(t *testing.T) {
 	var p PaletteModel
 	p.Open(testItems())
 
-	p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ses")})
-	p.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	for _, r := range "ses" {
+		p.Update(keyPress(r))
+	}
+	p.Update(specialKey(tea.KeyBackspace))
 
 	if p.Query != "se" {
 		t.Errorf("query after backspace = %q, want %q", p.Query, "se")
@@ -68,7 +82,7 @@ func TestPalette_BackspaceEmpty(t *testing.T) {
 	p.Open(testItems())
 
 	// Backspace on empty query should not panic.
-	p.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	p.Update(specialKey(tea.KeyBackspace))
 	if p.Query != "" {
 		t.Errorf("query = %q, want empty", p.Query)
 	}
@@ -79,19 +93,19 @@ func TestPalette_Navigation(t *testing.T) {
 	p.Open(testItems())
 
 	// Down from 0.
-	p.Update(tea.KeyMsg{Type: tea.KeyDown})
+	p.Update(specialKey(tea.KeyDown))
 	if p.Selected != 1 {
 		t.Errorf("selected after down = %d, want 1", p.Selected)
 	}
 
 	// Up back to 0.
-	p.Update(tea.KeyMsg{Type: tea.KeyUp})
+	p.Update(specialKey(tea.KeyUp))
 	if p.Selected != 0 {
 		t.Errorf("selected after up = %d, want 0", p.Selected)
 	}
 
 	// Up at 0 should stay at 0 (no wrap).
-	p.Update(tea.KeyMsg{Type: tea.KeyUp})
+	p.Update(specialKey(tea.KeyUp))
 	if p.Selected != 0 {
 		t.Errorf("selected at top after up = %d, want 0", p.Selected)
 	}
@@ -101,7 +115,7 @@ func TestPalette_Enter(t *testing.T) {
 	var p PaletteModel
 	p.Open(testItems())
 
-	cmd := p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := p.Update(specialKey(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected cmd from Enter")
 	}
@@ -127,7 +141,7 @@ func TestPalette_Escape(t *testing.T) {
 	var p PaletteModel
 	p.Open(testItems())
 
-	cmd := p.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	cmd := p.Update(specialKey(tea.KeyEscape))
 	if cmd == nil {
 		t.Fatal("expected cmd from Escape")
 	}
@@ -163,14 +177,16 @@ func TestPalette_EmptyResults(t *testing.T) {
 	p.Open(testItems())
 
 	// Type something that matches nothing.
-	p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("zzzzz")})
+	for _, r := range "zzzzz" {
+		p.Update(keyPress(r))
+	}
 
 	if len(p.Filtered) != 0 {
 		t.Errorf("expected 0 results, got %d", len(p.Filtered))
 	}
 
 	// Enter with no results should be a no-op.
-	cmd := p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := p.Update(specialKey(tea.KeyEnter))
 	if cmd != nil {
 		t.Error("Enter with no results should return nil cmd")
 	}
@@ -181,13 +197,15 @@ func TestPalette_FilteredSelection(t *testing.T) {
 	p.Open(testItems())
 
 	// Type "app" to filter, then select with Enter.
-	p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("app")})
+	for _, r := range "app" {
+		p.Update(keyPress(r))
+	}
 
 	if len(p.Filtered) == 0 {
 		t.Fatal("expected matches for 'app'")
 	}
 
-	cmd := p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := p.Update(specialKey(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected cmd from Enter")
 	}

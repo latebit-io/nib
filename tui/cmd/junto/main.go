@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
@@ -140,8 +140,6 @@ func run() error {
 		}
 	}
 	p := tea.NewProgram(&app,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 		tea.WithoutSignalHandler(), // let Ctrl+C reach us as a key event
 	)
 	app.SetProgram(p)

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/fuzzy"
 )
 
@@ -97,8 +97,8 @@ func (p *PaletteModel) Close() {
 }
 
 // Update handles key input when the palette is active.
-func (p *PaletteModel) Update(msg tea.KeyMsg) tea.Cmd {
-	switch msg.Type {
+func (p *PaletteModel) Update(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.Code {
 	case tea.KeyEscape:
 		p.Close()
 		return func() tea.Msg { return PaletteResultMsg{Cancelled: true} }
@@ -135,14 +135,38 @@ func (p *PaletteModel) Update(msg tea.KeyMsg) tea.Cmd {
 			p.refilter()
 		}
 		return nil
+	}
 
-	case tea.KeyRunes:
-		p.Query += string(msg.Runes)
-		p.refilter()
+	// Printable text input
+	if msg.Text != "" {
+		if next, changed := appendPaletteQuery(p.Query, msg.Text); changed {
+			p.Query = next
+			p.refilter()
+		}
 		return nil
 	}
 
 	return nil
+}
+
+// paletteMaxQueryRunes caps the palette query to a reasonable length.
+const paletteMaxQueryRunes = 4096
+
+// appendPaletteQuery appends printable runes from src to dst, stripping
+// control characters and enforcing paletteMaxQueryRunes.
+func appendPaletteQuery(dst, src string) (string, bool) {
+	q := []rune(dst)
+	orig := len(q)
+	for _, r := range src {
+		if r < ' ' || r == 0x7f {
+			continue
+		}
+		if len(q) >= paletteMaxQueryRunes {
+			break
+		}
+		q = append(q, r)
+	}
+	return string(q), len(q) != orig
 }
 
 // refilter updates the filtered results based on the current query.

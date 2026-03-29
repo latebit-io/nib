@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // mockProjectSession provides the minimal session surface for testing.
@@ -70,25 +70,25 @@ func TestProjectPane_CursorMovement(t *testing.T) {
 	}
 
 	// Move down
-	p.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	p.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	if p.cursorIdx != 2 {
 		t.Errorf("expected cursor at 2 (b.go), got %d", p.cursorIdx)
 	}
 
 	// Move down — should skip header (index 3) and land on c.go (index 4)
-	p.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	p.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	if p.cursorIdx != 4 {
 		t.Errorf("expected cursor at 4 (c.go), got %d", p.cursorIdx)
 	}
 
 	// Move down at end — should stay
-	p.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	p.handleKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	if p.cursorIdx != 4 {
 		t.Errorf("expected cursor to stay at 4, got %d", p.cursorIdx)
 	}
 
 	// Move up back to b.go
-	p.handleKey(tea.KeyMsg{Type: tea.KeyUp})
+	p.handleKey(tea.KeyPressMsg{Code: tea.KeyUp})
 	if p.cursorIdx != 2 {
 		t.Errorf("expected cursor at 2 (b.go), got %d", p.cursorIdx)
 	}
@@ -110,7 +110,7 @@ func TestProjectPane_CursorSkipsHeaders(t *testing.T) {
 	}
 
 	// Move up — all above are headers, should stay
-	p.handleKey(tea.KeyMsg{Type: tea.KeyUp})
+	p.handleKey(tea.KeyPressMsg{Code: tea.KeyUp})
 	if p.cursorIdx != 3 {
 		t.Errorf("expected cursor to stay at 3, got %d", p.cursorIdx)
 	}
@@ -193,13 +193,13 @@ func TestProjectPane_VimKeys(t *testing.T) {
 	}
 
 	// j moves down
-	p.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	p.handleKey(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if p.cursorIdx != 2 {
 		t.Errorf("j: expected cursor at 2, got %d", p.cursorIdx)
 	}
 
 	// k moves up
-	p.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	p.handleKey(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if p.cursorIdx != 1 {
 		t.Errorf("k: expected cursor at 1, got %d", p.cursorIdx)
 	}

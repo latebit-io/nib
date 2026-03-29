@@ -3,7 +3,7 @@ package ui
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/mattn/go-runewidth"
 )

@@ -1,18 +1,19 @@
 package ui
 
 import (
+	"image/color"
 	"math"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/mattn/go-runewidth"
 )
 
 // Package-level styles and colors for borders and dividers.
 var (
-	dividerDimColor   = lipgloss.Color("240")
-	dividerFocusColor = lipgloss.Color("2")
+	dividerDimColor   color.Color = lipgloss.Color("240")
+	dividerFocusColor color.Color = lipgloss.Color("2")
 
 	dividerDimStyle = lipgloss.NewStyle().
 			Foreground(dividerDimColor).
@@ -65,6 +66,10 @@ type RegionManager struct {
 	dragDivider int   // index into visible regions: divider between [i] and [i+1]
 	dragStartX  int   // global X at drag start
 	dragStartW  []int // pane widths at drag start
+
+	// Mouse capture: when a click starts in a pane, motion and release
+	// events are forwarded to that pane even if the pointer leaves its bounds.
+	capturedRegion *Region
 }
 
 // NewRegionManager creates a region manager with the given layout direction.
@@ -190,39 +195,74 @@ func (rm *RegionManager) RegionAt(x, y int) (*Region, int, int) {
 // sets focus on the clicked region, and forwards the event to the pane.
 // Also handles divider dragging for pane resizing.
 func (rm *RegionManager) HandleMouse(msg tea.MouseMsg) tea.Cmd {
+	m := msg.Mouse()
+
 	// Handle drag continuation and release
 	if rm.dragging {
-		switch msg.Action {
-		case tea.MouseActionRelease:
+		switch msg.(type) {
+		case tea.MouseReleaseMsg:
 			rm.dragging = false
 			return nil
-		case tea.MouseActionMotion:
-			rm.handleDividerDrag(msg.X)
+		case tea.MouseMotionMsg:
+			rm.handleDividerDrag(m.X)
 			return nil
 		}
 	}
 
 	// Check for divider click to start drag (reject clicks outside pane area)
-	if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y >= 0 && msg.Y < rm.Height {
-		if divIdx := rm.dividerAt(msg.X); divIdx >= 0 {
-			rm.startDividerDrag(divIdx, msg.X)
+	if click, ok := msg.(tea.MouseClickMsg); ok && click.Button == tea.MouseLeft && m.Y >= 0 && m.Y < rm.Height {
+		if divIdx := rm.dividerAt(m.X); divIdx >= 0 {
+			rm.startDividerDrag(divIdx, m.X)
 			return nil
 		}
 	}
 
-	region, localX, localY := rm.RegionAt(msg.X, msg.Y)
+	// If a pane is captured (click started there), keep forwarding
+	// motion/release to it even if the pointer left its bounds.
+	if rm.capturedRegion != nil {
+		r := rm.capturedRegion
+		localX := max(0, min(m.X-r.x, r.width-1))
+		localY := max(0, min(m.Y-r.y, r.height-1))
+		if _, ok := msg.(tea.MouseReleaseMsg); ok {
+			rm.capturedRegion = nil
+		}
+		localMsg := rm.translateMouse(msg, localX, localY)
+		return r.Pane.Update(localMsg)
+	}
+
+	region, localX, localY := rm.RegionAt(m.X, m.Y)
 	if region == nil {
 		return nil
 	}
 
-	// Set focus to clicked region
-	rm.FocusByName(region.Name)
+	// Only clicks transfer keyboard focus and start capture.
+	if _, ok := msg.(tea.MouseClickMsg); ok {
+		rm.FocusByName(region.Name)
+		rm.capturedRegion = region
+	}
 
-	// Forward mouse with translated coordinates
-	localMsg := msg
-	localMsg.X = localX
-	localMsg.Y = localY
+	// Forward mouse with translated coordinates to the pane.
+	// Rebuild the concrete message type with local coords.
+	localMsg := rm.translateMouse(msg, localX, localY)
 	return region.Pane.Update(localMsg)
+}
+
+// translateMouse creates a new mouse message with translated coordinates.
+func (rm *RegionManager) translateMouse(msg tea.MouseMsg, localX, localY int) tea.Msg {
+	m := msg.Mouse()
+	m.X = localX
+	m.Y = localY
+	switch msg.(type) {
+	case tea.MouseClickMsg:
+		return tea.MouseClickMsg(m)
+	case tea.MouseReleaseMsg:
+		return tea.MouseReleaseMsg(m)
+	case tea.MouseMotionMsg:
+		return tea.MouseMotionMsg(m)
+	case tea.MouseWheelMsg:
+		return tea.MouseWheelMsg(m)
+	}
+	return msg
 }
 
 // dividerAt returns the index of the divider at global X, or -1.
@@ -408,8 +448,6 @@ func (rm *RegionManager) Render() string {
 		rendered := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(borderColor).
-			Width(visible[i].width).
-			Height(visible[i].height).
 			Render(content)
 
 		// Embed pane title in the top border if the pane implements Titled.
@@ -428,7 +466,7 @@ func (rm *RegionManager) Render() string {
 // embedBorderTitle rebuilds the top border line with a title embedded.
 // Builds from scratch to avoid slicing into ANSI escape sequences.
 // Produces: ╭─ title ───────╮
-func embedBorderTitle(rendered string, title string, borderColor lipgloss.Color, contentWidth int) string {
+func embedBorderTitle(rendered string, title string, borderColor color.Color, contentWidth int) string {
 	lines := strings.SplitN(rendered, "\n", 2)
 	if len(lines) < 2 {
 		return rendered

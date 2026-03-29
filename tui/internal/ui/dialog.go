@@ -3,8 +3,8 @@ package ui
 import (
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // DialogResultMsg is emitted when the user selects a dialog option.
@@ -36,8 +36,8 @@ func (d *DialogModel) Show(message string, options ...string) {
 
 // Update handles key input when the dialog is active.
 // Returns a DialogResultMsg when the user makes a choice.
-func (d *DialogModel) Update(msg tea.KeyMsg) tea.Cmd {
-	switch msg.Type {
+func (d *DialogModel) Update(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.Code {
 	case tea.KeyLeft:
 		if d.Selected > 0 {
 			d.Selected--

@@ -5,14 +5,19 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/mattn/go-runewidth"
 )
 
 // InputHeight is the number of rows reserved for the input area (separator + input + status).
 const InputHeight = 5
+
+// MaxInputBufferBytes caps the goal input buffer to prevent unbounded memory
+// growth from large pastes or rapid key input. 1 MiB is generous for any
+// reasonable prompt while still protecting against accidental megabyte pastes.
+const MaxInputBufferBytes = 1 << 20 // 1 MiB
 
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
 type AgentPaneModel struct {
@@ -33,6 +38,7 @@ type AgentPaneModel struct {
 
 	// Selection
 	SelectionActive bool
+	SelectDragging  bool
 	SelectStartLine int
 	SelectStartCol  int
 	CursorLine      int
@@ -82,10 +88,15 @@ func (m *AgentPaneModel) SetSize(width, height int) {
 // and delivered via direct method calls (AppendToken, AppendText, etc.).
 func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
-	case tea.MouseMsg:
-		return m.handleMouse(msg)
-
-	case tea.KeyMsg:
+	case tea.MouseClickMsg:
+		return m.handleMouseClick(msg)
+	case tea.MouseMotionMsg:
+		return m.handleMouseMotion(msg)
+	case tea.MouseReleaseMsg:
+		return m.handleMouseRelease(msg)
+	case tea.MouseWheelMsg:
+		return m.handleMouseWheel(msg)
+	case tea.KeyPressMsg:
 		if m.InputActive {
 			return m.handleInput(msg)
 		}
@@ -107,18 +118,15 @@ func (m *AgentPaneModel) AppendMeta(text string) {
 	m.AppendText(s.Sanitize(text))
 }
 
-func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
+func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	scrollLines := 3
-
-	switch {
-	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp:
+	switch msg.Button {
+	case tea.MouseWheelUp:
 		m.ScrollOffset -= scrollLines
 		if m.ScrollOffset < 0 {
 			m.ScrollOffset = 0
 		}
-		return nil
-
-	case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown:
+	case tea.MouseWheelDown:
 		maxScroll := len(m.Lines) - m.VisibleLines()
 		if maxScroll < 0 {
 			maxScroll = 0
@@ -127,77 +135,106 @@ func (m *AgentPaneModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		if m.ScrollOffset > maxScroll {
 			m.ScrollOffset = maxScroll
 		}
-		return nil
 	}
-
-	// Click/drag in content area only (skip input area and status)
-	if msg.Button == tea.MouseButtonLeft && msg.Y >= 0 && msg.Y < m.VisibleLines() {
-		line := m.ScrollOffset + msg.Y
-		if line < 0 {
-			line = 0
-		}
-		if line >= len(m.Lines) {
-			line = max(len(m.Lines)-1, 0)
-		}
-
-		// Convert cell X → rune index (handles wide characters)
-		col := 0
-		if line < len(m.Lines) {
-			cellX := msg.X
-			if cellX < 0 {
-				cellX = 0
-			}
-			runes := []rune(m.Lines[line])
-			cellsSeen := 0
-			col = len(runes) // default: past end of line
-			for ri, r := range runes {
-				w := runewidth.RuneWidth(r)
-				if cellsSeen+w > cellX {
-					col = ri
-					break
-				}
-				cellsSeen += w
-			}
-		}
-
-		switch msg.Action {
-		case tea.MouseActionPress:
-			m.SelectionActive = true
-			m.SelectStartLine = line
-			m.SelectStartCol = col
-			m.CursorLine = line
-			m.CursorCol = col
-		case tea.MouseActionMotion:
-			if m.SelectionActive {
-				m.CursorLine = line
-				m.CursorCol = col
-			}
-		case tea.MouseActionRelease:
-			if m.SelectionActive &&
-				m.CursorLine == m.SelectStartLine &&
-				m.CursorCol == m.SelectStartCol {
-				m.SelectionActive = false
-			}
-		}
-	}
-
 	return nil
 }
 
-func (m *AgentPaneModel) handleInput(msg tea.KeyMsg) tea.Cmd {
+func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
+	if msg.Button != tea.MouseLeft || msg.Y < 0 || msg.Y >= m.VisibleLines() {
+		return nil
+	}
+	line, col := m.mouseToLineCol(msg.X, msg.Y)
+	m.SelectionActive = true
+	m.SelectDragging = true
+	m.SelectStartLine = line
+	m.SelectStartCol = col
+	m.CursorLine = line
+	m.CursorCol = col
+	return nil
+}
+
+func (m *AgentPaneModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
+	if !m.SelectDragging || msg.Y < 0 || msg.Y >= m.VisibleLines() {
+		return nil
+	}
+	line, col := m.mouseToLineCol(msg.X, msg.Y)
+	m.CursorLine = line
+	m.CursorCol = col
+	return nil
+}
+
+func (m *AgentPaneModel) handleMouseRelease(_ tea.MouseReleaseMsg) tea.Cmd {
+	m.SelectDragging = false
+	if m.CursorLine == m.SelectStartLine &&
+		m.CursorCol == m.SelectStartCol {
+		m.SelectionActive = false
+	}
+	return nil
+}
+
+// mouseToLineCol converts mouse coordinates to line and column indices.
+func (m *AgentPaneModel) mouseToLineCol(x, y int) (int, int) {
+	line := m.ScrollOffset + y
+	if line < 0 {
+		line = 0
+	}
+	if line >= len(m.Lines) {
+		line = max(len(m.Lines)-1, 0)
+	}
+
+	col := 0
+	if line < len(m.Lines) {
+		cellX := x
+		if cellX < 0 {
+			cellX = 0
+		}
+		runes := []rune(m.Lines[line])
+		cellsSeen := 0
+		col = len(runes) // default: past end of line
+		for ri, r := range runes {
+			w := runewidth.RuneWidth(r)
+			if cellsSeen+w > cellX {
+				col = ri
+				break
+			}
+			cellsSeen += w
+		}
+	}
+	return line, col
+}
+
+// appendInput appends text to InputBuffer without exceeding MaxInputBufferBytes.
+// It truncates on a rune boundary so partial runes are never stored.
+func (m *AgentPaneModel) appendInput(text string) {
+	remaining := MaxInputBufferBytes - len(m.InputBuffer)
+	if remaining <= 0 {
+		return
+	}
+	if len(text) > remaining {
+		// Truncate to remaining bytes on a valid rune boundary.
+		text = text[:remaining]
+		for len(text) > 0 && !utf8.Valid([]byte(text)) {
+			text = text[:len(text)-1]
+		}
+		slog.Warn("goal input truncated to cap", "cap", MaxInputBufferBytes)
+	}
+	m.InputBuffer += text
+}
+
+func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	// Paste from system clipboard (Ctrl+V)
-	if msg.Type == tea.KeyCtrlV {
+	if msg.Code == 'v' && msg.Mod == tea.ModCtrl {
 		if text := m.Services.Clipboard.Read(); text != "" {
 			text = strings.ReplaceAll(text, "\r\n", " ")
 			text = strings.ReplaceAll(text, "\r", " ")
 			text = strings.ReplaceAll(text, "\n", " ")
 			text = strings.ReplaceAll(text, "\t", " ")
-			m.InputBuffer += text
+			m.appendInput(text)
 		}
 		return nil
 	}
 
-	switch msg.Type {
+	switch msg.Code {
 	case tea.KeyEnter:
 		goal := strings.TrimSpace(m.InputBuffer)
 		m.InputActive = false
@@ -217,23 +254,26 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	case tea.KeySpace:
-		m.InputBuffer += " "
+		m.appendInput(" ")
 		return nil
-	case tea.KeyRunes:
-		text := string(msg.Runes)
+	}
+
+	// Printable text
+	if msg.Text != "" {
+		text := msg.Text
 		text = strings.ReplaceAll(text, "\r\n", " ")
 		text = strings.ReplaceAll(text, "\r", " ")
 		text = strings.ReplaceAll(text, "\n", " ")
 		text = strings.ReplaceAll(text, "\t", " ")
-		slog.Debug("goal input runes", "len", len(msg.Runes), "text_len", len(text))
-		m.InputBuffer += text
+		slog.Debug("goal input text", "text_len", len(text))
+		m.appendInput(text)
 		return nil
 	}
 	return nil
 }
 
-func (m *AgentPaneModel) handleKey(msg tea.KeyMsg) tea.Cmd {
-	switch msg.Type {
+func (m *AgentPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.Code {
 	case tea.KeyUp:
 		if m.ScrollOffset > 0 {
 			m.ScrollOffset--
@@ -242,15 +282,17 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		if m.ScrollOffset < len(m.Lines)-m.VisibleLines() {
 			m.ScrollOffset++
 		}
-	case tea.KeyCtrlC:
-		if m.SelectionActive {
-			if err := m.Services.Clipboard.Write(m.SelectedText()); err != nil {
-				slog.Warn("system clipboard write failed", "err", err)
-			}
-			m.SelectionActive = false
-		} else {
-			if err := m.Services.Clipboard.Write(strings.Join(m.Lines, "\n")); err != nil {
-				slog.Warn("system clipboard write failed", "err", err)
+	case 'c':
+		if msg.Mod == tea.ModCtrl {
+			if m.SelectionActive {
+				if err := m.Services.Clipboard.Write(m.SelectedText()); err != nil {
+					slog.Warn("system clipboard write failed", "err", err)
+				}
+				m.SelectionActive = false
+			} else {
+				if err := m.Services.Clipboard.Write(strings.Join(m.Lines, "\n")); err != nil {
+					slog.Warn("system clipboard write failed", "err", err)
+				}
 			}
 		}
 	}

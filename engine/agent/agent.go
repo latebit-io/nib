@@ -40,6 +40,10 @@ type NewOptions struct {
 	// DiagProvider enables diagnostics tool and auto-injection after edits.
 	// Nil when no language service is available.
 	DiagProvider lang.DiagnosticProvider
+
+	// Navigator enables the go_to_line tool for pointing at code.
+	// Nil when no live editor is available (tests, headless).
+	Navigator Navigator
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -84,6 +88,11 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	// Register diagnostics tool if provider is available.
 	if diagProvider != nil {
 		builtins = append(builtins, NewDiagnosticsTool(diagProvider, workspace))
+	}
+
+	// Register navigation tool if a live editor is available.
+	if opts != nil && opts.Navigator != nil {
+		builtins = append(builtins, NewGoToLineTool(opts.Navigator))
 	}
 
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))

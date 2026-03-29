@@ -123,15 +123,15 @@ func run() error {
 			model = "google/gemini-2.5-flash"
 		}
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
-		var opts *agent.NewOptions
+		opts := &agent.NewOptions{Navigator: sess}
 		if lspMgr != nil {
-			opts = &agent.NewOptions{DiagProvider: lspMgr}
+			opts.DiagProvider = lspMgr
 		}
 		ag := agent.New(provider, sess, events, opts, mcpTools...)
 		sess.SetAgent(ag, events)
 	} else if lspMgr != nil {
 		// No agent, but LSP events still need to reach the frontend.
-		sess.Events = events
+		sess.SetEvents(events)
 	}
 
 	app := ui.NewApp(sess)

@@ -333,6 +333,372 @@ func (e *Editor) ScrollDown(lines int) {
 	e.ClampScroll()
 }
 
+// --- File Navigation ---
+
+// FileStart moves the cursor to the beginning of the file.
+func (e *Editor) FileStart() {
+	e.MoveCursorTo(0, 0)
+}
+
+// FileEnd moves the cursor to the end of the file.
+func (e *Editor) FileEnd() {
+	lastLine := e.Buf.LineCount() - 1
+	e.MoveCursorTo(lastLine, e.Buf.LineLen(lastLine))
+}
+
+// --- Line Operations ---
+
+// DeleteLine deletes the current line (or all selected lines).
+// The operation is grouped for undo.
+func (e *Editor) DeleteLine() {
+	startLine, endLine := e.CursorLine, e.CursorLine
+	if e.SelectionActive {
+		startLine, _, endLine, _ = e.SelectedRange()
+		e.SelectionActive = false
+	}
+
+	e.Buf.BeginGroup()
+	for line := endLine; line >= startLine; line-- {
+		lineText := e.Buf.LineText(line)
+		lineLen := utf8.RuneCountInString(lineText)
+		if line < e.Buf.LineCount()-1 {
+			// Not the last line: delete text + newline
+			e.Buf.Delete(line, 0, lineLen+1)
+		} else if line > 0 {
+			// Last line: delete newline from previous line + text
+			e.Buf.Delete(line-1, e.Buf.LineLen(line-1), lineLen+1)
+		} else {
+			// Only line: clear it
+			e.Buf.Delete(0, 0, lineLen)
+		}
+	}
+	e.Buf.EndGroup()
+
+	if startLine >= e.Buf.LineCount() {
+		startLine = e.Buf.LineCount() - 1
+	}
+	e.CursorLine = startLine
+	lineLen := e.Buf.LineLen(e.CursorLine)
+	if e.CursorCol > lineLen {
+		e.CursorCol = lineLen
+	}
+	e.MarkDirty()
+	e.EnsureCursorVisible()
+}
+
+// SwapLineUp swaps the current line (or selected lines) with the line above.
+func (e *Editor) SwapLineUp() {
+	startLine, endLine := e.CursorLine, e.CursorLine
+	if e.SelectionActive {
+		startLine, _, endLine, _ = e.SelectedRange()
+	}
+	if startLine == 0 {
+		return
+	}
+
+	aboveText := e.Buf.LineText(startLine - 1)
+	aboveLen := utf8.RuneCountInString(aboveText)
+
+	e.Buf.BeginGroup()
+	// Delete the line above (text + newline)
+	e.Buf.Delete(startLine-1, 0, aboveLen+1)
+	// Insert it after the (now shifted) block
+	insertLine := endLine - 1
+	insertCol := e.Buf.LineLen(insertLine)
+	e.Buf.Insert(insertLine, insertCol, "\n"+aboveText)
+	e.Buf.EndGroup()
+
+	e.CursorLine--
+	if e.SelectionActive {
+		e.SelectStartLine--
+	}
+	e.MarkDirty()
+	e.EnsureCursorVisible()
+}
+
+// SwapLineDown swaps the current line (or selected lines) with the line below.
+func (e *Editor) SwapLineDown() {
+	startLine, endLine := e.CursorLine, e.CursorLine
+	if e.SelectionActive {
+		startLine, _, endLine, _ = e.SelectedRange()
+	}
+	if endLine >= e.Buf.LineCount()-1 {
+		return
+	}
+
+	belowText := e.Buf.LineText(endLine + 1)
+	belowLen := utf8.RuneCountInString(belowText)
+
+	e.Buf.BeginGroup()
+	// Delete the line below (newline + text)
+	e.Buf.Delete(endLine, e.Buf.LineLen(endLine), belowLen+1)
+	// Insert it before the block
+	e.Buf.Insert(startLine, 0, belowText+"\n")
+	e.Buf.EndGroup()
+
+	e.CursorLine++
+	if e.SelectionActive {
+		e.SelectStartLine++
+	}
+	e.MarkDirty()
+	e.EnsureCursorVisible()
+}
+
+// DuplicateLine duplicates the current line (or selected lines) below.
+func (e *Editor) DuplicateLine() {
+	startLine, endLine := e.CursorLine, e.CursorLine
+	if e.SelectionActive {
+		startLine, _, endLine, _ = e.SelectedRange()
+	}
+
+	var sb strings.Builder
+	for line := startLine; line <= endLine; line++ {
+		sb.WriteString(e.Buf.LineText(line))
+		if line < endLine {
+			sb.WriteRune('\n')
+		}
+	}
+	dupText := sb.String()
+	lineCount := endLine - startLine + 1
+
+	e.Buf.BeginGroup()
+	endCol := e.Buf.LineLen(endLine)
+	e.Buf.Insert(endLine, endCol, "\n"+dupText)
+	e.Buf.EndGroup()
+
+	e.CursorLine += lineCount
+	if e.SelectionActive {
+		e.SelectStartLine += lineCount
+	}
+	e.MarkDirty()
+	e.EnsureCursorVisible()
+}
+
+// ToggleLineComment toggles a line comment prefix on the current line or selection.
+// If all lines in the range are commented, the prefix is removed; otherwise it is added.
+func (e *Editor) ToggleLineComment(prefix string) {
+	startLine, endLine := e.CursorLine, e.CursorLine
+	if e.SelectionActive {
+		startLine, _, endLine, _ = e.SelectedRange()
+	}
+
+	prefixWithSpace := prefix + " "
+
+	// Check if all lines are commented.
+	allCommented := true
+	for line := startLine; line <= endLine; line++ {
+		text := e.Buf.LineText(line)
+		trimmed := strings.TrimLeft(text, " \t")
+		if !strings.HasPrefix(trimmed, prefix) {
+			allCommented = false
+			break
+		}
+	}
+
+	e.Buf.BeginGroup()
+	if allCommented {
+		// Remove comment prefix from each line.
+		for line := startLine; line <= endLine; line++ {
+			text := e.Buf.LineText(line)
+			indent := len(text) - len(strings.TrimLeft(text, " \t"))
+			runeIndent := utf8.RuneCountInString(text[:indent])
+			if strings.HasPrefix(text[indent:], prefixWithSpace) {
+				e.Buf.Delete(line, runeIndent, utf8.RuneCountInString(prefixWithSpace))
+			} else if strings.HasPrefix(text[indent:], prefix) {
+				e.Buf.Delete(line, runeIndent, utf8.RuneCountInString(prefix))
+			}
+		}
+	} else {
+		// Add comment prefix to each line.
+		for line := endLine; line >= startLine; line-- {
+			text := e.Buf.LineText(line)
+			indent := len(text) - len(strings.TrimLeft(text, " \t"))
+			runeIndent := utf8.RuneCountInString(text[:indent])
+			e.Buf.Insert(line, runeIndent, prefixWithSpace)
+		}
+	}
+	e.Buf.EndGroup()
+
+	e.MarkDirty()
+}
+
+// IndentSelection indents all lines in the selection by inserting tabStr at column 0.
+func (e *Editor) IndentSelection(tabStr string) {
+	if !e.SelectionActive {
+		return
+	}
+	startLine, _, endLine, _ := e.SelectedRange()
+	tabRunes := utf8.RuneCountInString(tabStr)
+
+	e.Buf.BeginGroup()
+	for line := startLine; line <= endLine; line++ {
+		e.Buf.Insert(line, 0, tabStr)
+	}
+	e.Buf.EndGroup()
+
+	// Shift both anchor and cursor columns by the indent width,
+	// preserving the original selection direction.
+	e.SelectStartCol += tabRunes
+	e.CursorCol += tabRunes
+	e.MarkDirty()
+}
+
+// OutdentSelection removes one level of indentation from all selected lines.
+func (e *Editor) OutdentSelection(tabStr string) {
+	if !e.SelectionActive {
+		return
+	}
+	startLine, _, endLine, _ := e.SelectedRange()
+	tabRunes := utf8.RuneCountInString(tabStr)
+
+	e.Buf.BeginGroup()
+	for line := startLine; line <= endLine; line++ {
+		text := e.Buf.LineText(line)
+		if strings.HasPrefix(text, tabStr) {
+			e.Buf.Delete(line, 0, tabRunes)
+		} else {
+			// Remove as many leading spaces as possible (up to tabRunes).
+			spaces := 0
+			for _, ch := range text {
+				if ch == ' ' && spaces < tabRunes {
+					spaces++
+				} else {
+					break
+				}
+			}
+			if spaces > 0 {
+				e.Buf.Delete(line, 0, spaces)
+			}
+		}
+	}
+	e.Buf.EndGroup()
+
+	// Shift columns back, clamping to 0. Preserve selection direction.
+	e.SelectStartCol -= tabRunes
+	if e.SelectStartCol < 0 {
+		e.SelectStartCol = 0
+	}
+	e.CursorCol -= tabRunes
+	if e.CursorCol < 0 {
+		e.CursorCol = 0
+	}
+	e.MarkDirty()
+}
+
+// SelectLine selects the current line. Repeated calls extend the selection down.
+func (e *Editor) SelectLine() {
+	lastLine := e.Buf.LineCount() - 1
+
+	// If already selecting full lines and cursor is at col 0, extend down.
+	if e.SelectionActive && e.SelectStartCol == 0 &&
+		e.CursorCol == 0 && e.CursorLine > e.SelectStartLine {
+		if e.CursorLine <= lastLine {
+			if e.CursorLine < lastLine {
+				e.CursorLine++
+			} else {
+				e.CursorCol = e.Buf.LineLen(lastLine)
+			}
+		}
+		return
+	}
+
+	e.SelectionActive = true
+	e.SelectStartLine = e.CursorLine
+	e.SelectStartCol = 0
+	if e.CursorLine < lastLine {
+		e.CursorLine++
+		e.CursorCol = 0
+	} else {
+		e.CursorCol = e.Buf.LineLen(lastLine)
+	}
+}
+
+// SelectNextOccurrence selects the next occurrence of the current selection.
+// If nothing is selected, selects the word under the cursor.
+func (e *Editor) SelectNextOccurrence() {
+	if !e.SelectionActive {
+		e.selectWordUnderCursor()
+		return
+	}
+
+	needle := e.SelectedText()
+	if needle == "" {
+		return
+	}
+	needleRunes := utf8.RuneCountInString(needle)
+
+	_, _, endLine, endCol := e.SelectedRange()
+
+	// Search forward from end of current selection.
+	for line := endLine; line < e.Buf.LineCount(); line++ {
+		runes := []rune(e.Buf.LineText(line))
+		startCol := 0
+		if line == endLine {
+			startCol = endCol
+		}
+		for col := startCol; col <= len(runes)-needleRunes; col++ {
+			if string(runes[col:col+needleRunes]) == needle {
+				e.SelectStartLine = line
+				e.SelectStartCol = col
+				e.CursorLine = line
+				e.CursorCol = col + needleRunes
+				e.EnsureCursorVisible()
+				return
+			}
+		}
+	}
+
+	// Wrap: search from beginning up to original selection start.
+	sl, sc, _, _ := e.SelectedRange()
+	for line := 0; line <= sl; line++ {
+		runes := []rune(e.Buf.LineText(line))
+		maxCol := len(runes) - needleRunes
+		if line == sl {
+			maxCol = sc - 1
+		}
+		for col := 0; col <= maxCol; col++ {
+			if string(runes[col:col+needleRunes]) == needle {
+				e.SelectStartLine = line
+				e.SelectStartCol = col
+				e.CursorLine = line
+				e.CursorCol = col + needleRunes
+				e.EnsureCursorVisible()
+				return
+			}
+		}
+	}
+}
+
+// selectWordUnderCursor selects the word at the cursor position.
+func (e *Editor) selectWordUnderCursor() {
+	runes := []rune(e.Buf.LineText(e.CursorLine))
+	if len(runes) == 0 {
+		return
+	}
+	col := e.CursorCol
+	if col >= len(runes) {
+		col = len(runes) - 1
+	}
+	if IsWordSeparator(runes[col]) {
+		return
+	}
+
+	// Find word boundaries.
+	start := col
+	for start > 0 && !IsWordSeparator(runes[start-1]) {
+		start--
+	}
+	end := col
+	for end < len(runes) && !IsWordSeparator(runes[end]) {
+		end++
+	}
+
+	e.SelectionActive = true
+	e.SelectStartLine = e.CursorLine
+	e.SelectStartCol = start
+	e.CursorCol = end
+}
+
 // --- Selection ---
 
 // StartSelection begins a selection at the current cursor position.

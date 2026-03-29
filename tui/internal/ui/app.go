@@ -80,6 +80,7 @@ type AppModel struct {
 	// TUI-only state
 	Dialog      DialogModel
 	Palette     PaletteModel
+	Help        HelpModel
 	recentMouse bool // tracks leaked CSI prefix from unparsed mouse events
 	Services    *Services
 	Keymap      *Keymap
@@ -123,7 +124,7 @@ func NewApp(sess *session.Session) AppModel {
 }
 
 func (m *AppModel) Init() tea.Cmd {
-	if m.Session.Events != nil {
+	if m.Session.Events() != nil {
 		return m.listenForEvents()
 	}
 	return nil
@@ -132,7 +133,7 @@ func (m *AppModel) Init() tea.Cmd {
 // listenForEvents returns a tea.Cmd that blocks on the engine event channel
 // and delivers the next event as a tea.Msg.
 func (m *AppModel) listenForEvents() tea.Cmd {
-	ch := m.Session.Events
+	ch := m.Session.Events()
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
@@ -143,6 +144,16 @@ func (m *AppModel) listenForEvents() tea.Cmd {
 }
 
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Help overlay is modal — Escape dismisses.
+	if m.Help.Active {
+		if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+			if keyMsg.Code == tea.KeyEscape {
+				m.Help.Active = false
+			}
+		}
+		return m, nil
+	}
+
 	// Palette is modal — captures all input when active
 	if m.Palette.Active {
 		switch typed := msg.(type) {
@@ -504,6 +515,10 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionHover:
 		return m.handleHover()
+
+	case ActionHelp:
+		m.Help.Active = true
+		return m, nil
 	}
 
 	// Delegate to focused pane
@@ -528,7 +543,9 @@ func (m *AppModel) View() tea.View {
 		content = m.Dialog.Render(m.Width, m.Height)
 	} else {
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width)
-		if m.Palette.Active {
+		if m.Help.Active {
+			content = m.Help.RenderOverlay(base, m.Width, m.Height)
+		} else if m.Palette.Active {
 			content = m.Palette.RenderOverlay(base, m.Width, m.Height)
 		} else {
 			content = base

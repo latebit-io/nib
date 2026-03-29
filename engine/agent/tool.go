@@ -55,6 +55,15 @@ type Workspace interface {
 	AddContext(path string)
 }
 
+// Navigator lets the agent move the developer's cursor to a specific location.
+// The session implements this, giving the agent the ability to "point" at code
+// while explaining in the agent pane.
+type Navigator interface {
+	// GoToLine navigates the editor to a line in a file (1-indexed).
+	// Opens the file if not already open.
+	GoToLine(path string, line int) error
+}
+
 // FileCache is a concurrency-safe cache of file contents. The agent
 // maintains its own view of file state, updated only through explicit
 // channels (Run, Continue), to avoid races with user edits.

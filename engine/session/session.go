@@ -106,10 +106,7 @@ type Session struct {
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
 // Returns the directory containing .git, or startDir itself if none is found.
-// ResolveProjectRoot locates the nearest ancestor of startDir that contains a `.git` directory.
-// If such an ancestor is found, its absolute, cleaned path is returned; otherwise startDir
-// is returned as an absolute, cleaned path when possible (or cleaned as provided if it cannot
-// be made absolute). The returned path is always absolute and clean.
+// The result is absolute when filepath.Abs succeeds, otherwise cleaned as-is.
 func ResolveProjectRoot(startDir string) string {
 	absDir, err := filepath.Abs(startDir)
 	if err != nil {

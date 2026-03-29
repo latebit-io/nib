@@ -45,14 +45,10 @@ type NewOptions struct {
 // New creates an agent with the given provider, workspace, and tools.
 // The project root is derived from workspace.ProjectRoot().
 // The opts parameter is optional — pass nil for defaults.
-// The frontend must continuously drain the events channel. Sends block
-// if the channel is full, providing backpressure to the agent loop.
-// New creates and configures an Agent that drives multi‑turn LLM workflows connected to the
-// provided LLM provider and frontend event channel. It initializes the approval and continuation
-// channels (buffered), a FileCache, and a PromptLoader using workspace.ProjectRoot(); constructs
-// built-in tools (read, edit, write, list, bash and optional diagnostics), registers built-ins
-// first so they cannot be overridden, and then registers any extraTools unless they shadow or
-// duplicate a built-in. The configured *Agent is returned.
+// The frontend must continuously drain the events channel. Streaming events
+// (AgentToken, AgentStatus) are dropped when the channel is full; control-flow
+// events (EditProposed, Done, Error) block for up to 5 seconds before being
+// discarded with a log. Use a buffered channel (e.g. 64) to absorb bursts.
 func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, opts *NewOptions, extraTools ...Tool) *Agent {
 	approveCh := make(chan bool, 1)
 	continueCh := make(chan string, 1)

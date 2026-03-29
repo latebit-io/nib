@@ -33,9 +33,7 @@ func main() {
 	}
 }
 
-// run initializes the editor session, optional language/agent services, and runs the terminal UI.
-// It parses an optional "--debug" flag and a single positional file or directory to determine logging behavior, the initial buffer, and the project root; discovers MCP tools; starts configured LSP servers; creates an LLM-backed agent when LLM_API_KEY is present; and launches the Bubble Tea program as the main event loop.
-// Returns an error if any initialization step or the TUI runtime fails.
+// run wires together the engine, optional agent/LSP services, and the TUI.
 func run() error {
 	// Parse args: [--debug] [file]
 	args := os.Args[1:]
@@ -76,16 +74,17 @@ func run() error {
 			}
 			buf = buffer.New()
 		} else {
-			buf, err = buffer.NewFromFile(filePath)
+			// Absolutize so buffer.Path matches session.CanonPath.
+			absPath, err := filepath.Abs(filePath)
+			if err != nil {
+				return err
+			}
+			buf, err = buffer.NewFromFile(absPath)
 			if err != nil {
 				return err
 			}
 			// File argument: walk up from file's parent to find project root.
-			startDir, _ := os.Getwd() // fallback; overwritten below when Abs succeeds
-			if absPath, err := filepath.Abs(filePath); err == nil {
-				startDir = filepath.Dir(absPath)
-			}
-			projectRoot = session.ResolveProjectRoot(startDir)
+			projectRoot = session.ResolveProjectRoot(filepath.Dir(absPath))
 		}
 	} else {
 		// No argument: use cwd as project root.
@@ -166,8 +165,6 @@ type lspServerConfig struct {
 	LanguageID string   `json:"languageId"`
 }
 
-// initLSP creates an LSP Manager from config or auto-detection.
-// Returns nil if no language servers are configured or available.
 // lspPort is composition-root glue — lets initLSP return a single value
 // that satisfies both lang interfaces the session needs.
 type lspPort interface {
@@ -175,15 +172,8 @@ type lspPort interface {
 	lang.DiagnosticProvider
 }
 
-// initLSP loads language server configurations for the given project root and
-// returns a manager that coordinates those servers, or nil if no servers were
-// discovered.
-//
-// It first attempts to load user configs from the project (via loadLSPConfigs).
-// If none are found, it falls back to auto-detected defaults (via defaultLSPConfigs).
-// When one or more server configurations are available, it constructs and returns
-// an LSP manager configured with those servers, the provided projectRoot, and the
-// events channel. If no configurations are available, it returns nil.
+// initLSP creates an LSP Manager from config or auto-detection.
+// Returns nil if no language servers are configured or available.
 func initLSP(projectRoot string, events chan<- event.Event) lspPort {
 	configs := loadLSPConfigs(projectRoot)
 	if len(configs) == 0 {

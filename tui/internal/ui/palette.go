@@ -275,7 +275,7 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 		strings.Join(resultLines, "\n") + "\n" +
 		" " + footer
 
-	box := paletteBorderStyle.Width(innerWidth).Render(content)
+	box := paletteBorderStyle.Width(boxWidth).Render(content)
 
 	// Overlay the palette onto the background. The editor stays visible
 	// above and below the palette. Palette rows replace background rows

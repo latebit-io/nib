@@ -155,6 +155,12 @@ type EditorModel struct {
 	colTags      []int
 	dispToBuf    []int
 
+	// Find holds the find bar state.
+	Find FindBar
+
+	// findHighlight is a reusable scratch buffer for find match rendering.
+	findHighlight []byte
+
 	// Completion holds the autocomplete popup state.
 	Completion CompletionPopup
 
@@ -386,6 +392,16 @@ func (m *EditorModel) Update(msg tea.Msg) tea.Cmd {
 	case tea.KeyPressMsg:
 		// Dismiss hover on any key — cursor is about to move.
 		m.DismissHover()
+
+		// Find bar captures all keys when active.
+		if m.Find.Active {
+			cmd, consumed := m.Find.Update(msg)
+			if consumed {
+				// Cursor may have moved to a match — mark for scroll.
+				m.cursorMoved = true
+				return cmd
+			}
+		}
 
 		// Completion popup captures navigation keys when active.
 		if m.Completion.Active {
@@ -627,6 +643,17 @@ func (m *EditorModel) Render() string {
 		}
 	}
 
+	// Find bar — overwrite bottom row(s) of the output.
+	if m.Find.Active {
+		barLines := m.Find.Render(gutterW + contentW)
+		for i, barLine := range barLines {
+			row := m.eng.Height - len(barLines) + i
+			if row >= 0 && row < len(output) {
+				output[row] = barLine
+			}
+		}
+	}
+
 	return strings.Join(output, "\n")
 }
 
@@ -808,10 +835,12 @@ func (m *EditorModel) renderNormalLine(
 	colTags := m.colTags[:contentW]
 	clear(colTags)
 	const (
-		tagPlain  = 0
-		tagCursor = -1
-		tagAgent  = -2
-		tagSel    = -3
+		tagPlain       = 0
+		tagCursor      = -1
+		tagAgent       = -2
+		tagSel         = -3
+		tagFindMatch   = -4
+		tagFindCurrent = -5
 	)
 	// Syntax tokens get positive tags starting at 1, grouped by foreground color.
 	if m.syntaxTagMap == nil {
@@ -820,6 +849,37 @@ func (m *EditorModel) renderNormalLine(
 	syntaxTagMap := m.syntaxTagMap
 	clear(syntaxTagMap)
 	nextTag := 1
+	// Find match highlights: precompute per-display-column state.
+	// 0 = no match, 1 = match, 2 = current match.
+	if cap(m.findHighlight) < contentW {
+		m.findHighlight = make([]byte, contentW)
+	}
+	findHL := m.findHighlight[:contentW]
+	clear(findHL)
+	if m.Find.Active && len(m.Find.Matches) > 0 {
+		for i, match := range m.Find.Matches {
+			if match.Line != lineIdx {
+				if match.Line > lineIdx {
+					break
+				}
+				continue
+			}
+			hlVal := byte(1)
+			if i == m.Find.CurrentMatch {
+				hlVal = 2
+			}
+			startBuf := match.Col
+			endBuf := match.Col + match.Len
+			if startBuf < len(bufToDisp) && endBuf < len(bufToDisp) {
+				dStart := bufToDisp[startBuf]
+				dEnd := bufToDisp[endBuf]
+				for d := dStart; d < dEnd && d < contentW; d++ {
+					findHL[d] = hlVal
+				}
+			}
+		}
+	}
+
 	for j := range contentW {
 		switch {
 		case j == displayCursorCol:
@@ -828,6 +888,10 @@ func (m *EditorModel) renderNormalLine(
 			colTags[j] = tagAgent
 		case m.eng.SelectionActive && m.eng.IsSelected(lineIdx, dispToBuf[j]):
 			colTags[j] = tagSel
+		case findHL[j] == 2:
+			colTags[j] = tagFindCurrent
+		case findHL[j] == 1:
+			colTags[j] = tagFindMatch
 		case charStyles[j].GetForeground() != nil:
 			fg := charStyles[j].GetForeground()
 			tag, ok := syntaxTagMap[fg]
@@ -852,6 +916,10 @@ func (m *EditorModel) renderNormalLine(
 			line.WriteString(agentStyle.Render(text))
 		case tagSel:
 			line.WriteString(selectionStyle.Render(text))
+		case tagFindCurrent:
+			line.WriteString(findCurrentMatchStyle.Render(text))
+		case tagFindMatch:
+			line.WriteString(findMatchStyle.Render(text))
 		case tagPlain:
 			if ul {
 				line.WriteString(diagUnderlineStyle.Render(text))

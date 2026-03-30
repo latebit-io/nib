@@ -52,6 +52,10 @@ const (
 	ActionFocusEditor
 	ActionFocusAgent
 
+	// Find
+	ActionFind        // Open find bar
+	ActionFindReplace // Open find bar with replace mode
+
 	// LSP
 	ActionGoToDefinition
 	ActionGoBack
@@ -68,6 +72,7 @@ const (
 	CatFile       Category = "File"
 	CatAgent      Category = "Agent"
 	CatView       Category = "View"
+	CatFind       Category = "Find"
 	CatLSP        Category = "Code Intelligence"
 )
 
@@ -121,10 +126,14 @@ func DefaultBindings() []Binding {
 		// View
 		{ActionOpenPalette, "Open file palette", []string{"Ctrl+P"}, CatView},
 		{ActionToggleProject, "Toggle project pane", []string{"Ctrl+B"}, CatView},
-		{ActionHelp, "Show help", []string{"Ctrl+?"}, CatView},
+		{ActionHelp, "Show help", []string{"F4"}, CatView},
 		{ActionFocusProject, "Focus project pane", []string{"F1"}, CatView},
 		{ActionFocusEditor, "Focus editor", []string{"F2"}, CatView},
 		{ActionFocusAgent, "Focus agent pane", []string{"F3"}, CatView},
+
+		// Find
+		{ActionFind, "Find in file", []string{"Ctrl+F"}, CatFind},
+		{ActionFindReplace, "Find and replace", []string{"Ctrl+H"}, CatFind},
 
 		// Code Intelligence
 		{ActionGoToDefinition, "Go to definition", []string{"F12"}, CatLSP},
@@ -142,6 +151,7 @@ func CategoryOrder() []Category {
 		CatFile,
 		CatAgent,
 		CatView,
+		CatFind,
 		CatLSP,
 	}
 }

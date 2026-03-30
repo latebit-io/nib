@@ -526,6 +526,14 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionHover:
 		return m.handleHover()
 
+	case ActionFind:
+		m.Editor.Find.Open(m.Editor.eng, false)
+		return m, nil
+
+	case ActionFindReplace:
+		m.Editor.Find.Open(m.Editor.eng, true)
+		return m, nil
+
 	case ActionHelp:
 		m.Help.Open()
 		return m, nil

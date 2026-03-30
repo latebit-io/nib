@@ -4,12 +4,27 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/mattn/go-runewidth"
 )
+
+// stripControl removes control runes (tabs, newlines, etc.) from a rune slice.
+// The find bar is single-line; control characters would break rendering or
+// produce queries that can never match (FindAll searches one buffer line at a time).
+func stripControl(runes []rune) []rune {
+	n := 0
+	for _, r := range runes {
+		if !unicode.IsControl(r) {
+			runes[n] = r
+			n++
+		}
+	}
+	return runes[:n]
+}
 
 // Find bar styles — hoisted to package level to avoid per-frame allocation.
 var (
@@ -67,6 +82,16 @@ type FindBar struct {
 	savedCursorLine int
 	savedCursorCol  int
 	navigated       bool // set true when the user navigates to a match
+
+	// replacedZones tracks regions that were written by ReplaceCurrent,
+	// so subsequent replace operations skip matches inside prior replacements
+	// (e.g. replacing "todo" with "todos" must not re-match "todo" inside "todos").
+	replacedZones []replaceZone
+}
+
+// replaceZone marks a region that was produced by a replacement.
+type replaceZone struct {
+	line, col, endCol int
 }
 
 // Open activates the find bar with an optional initial query.
@@ -85,13 +110,14 @@ func (f *FindBar) Open(eng *editor.Editor, replace bool) {
 	f.CursorPos = 0
 	f.ReplaceQuery = f.ReplaceQuery[:0]
 	f.ReplaceCursor = 0
+	f.replacedZones = f.replacedZones[:0]
 
 	// Pre-fill from selection if available, respecting the query size cap.
 	if eng.SelectionActive {
 		sel := eng.SelectedText()
 		// Only single-line selections make sense as find queries.
 		if !strings.Contains(sel, "\n") {
-			r := []rune(sel)
+			r := stripControl([]rune(sel))
 			if len(r) > maxQueryRunes {
 				r = r[:maxQueryRunes]
 			}
@@ -123,10 +149,12 @@ func (f *FindBar) Close() {
 }
 
 // search runs the find query against the buffer and updates matches.
+// Clears replacement zones since a new search invalidates prior positions.
 func (f *FindBar) search() {
 	if f.eng == nil {
 		return
 	}
+	f.replacedZones = f.replacedZones[:0]
 	f.Matches = f.eng.FindAll(string(f.Query), f.CaseSensitive)
 	if len(f.Matches) == 0 {
 		f.CurrentMatch = -1
@@ -178,53 +206,77 @@ func (f *FindBar) jumpToCurrentMatch() {
 }
 
 // ReplaceCurrent replaces the current match with the replace query.
-// After replacing, advances to the next match that is not inside the
-// replacement text (e.g. replacing "todo" with "todos" must not
-// re-match the "todo" inside "todos").
+// After replacing, advances to the next match that is not inside any
+// replacement zone (current or prior). This prevents re-matching "todo"
+// inside "todos" when replacing "todo" with "todos".
 func (f *FindBar) ReplaceCurrent() {
 	if f.CurrentMatch < 0 || f.CurrentMatch >= len(f.Matches) || !f.ReplaceMode {
 		return
 	}
 	m := f.Matches[f.CurrentMatch]
+
+	// Check if current match is inside a prior replacement zone.
+	if f.inReplacedZone(m) {
+		return
+	}
+
 	replaceText := string(f.ReplaceQuery)
 	f.eng.ReplaceRange(m.Line, m.Col, m.Len, replaceText)
 	f.navigated = true
 
-	// Re-search and find the next match past the replacement zone.
+	// Record this replacement zone so future calls skip matches inside it.
 	replaceLen := len([]rune(replaceText))
-	skipLine := m.Line
-	skipEnd := m.Col + replaceLen // first col after the replacement
+	f.replacedZones = append(f.replacedZones, replaceZone{
+		line:   m.Line,
+		col:    m.Col,
+		endCol: m.Col + replaceLen,
+	})
 
+	// Re-search and advance to the next non-replaced match.
 	f.Matches = f.eng.FindAll(string(f.Query), f.CaseSensitive)
 	if len(f.Matches) == 0 {
 		f.CurrentMatch = -1
 		return
 	}
 
-	// Find first match at or after skipEnd on the same line, or any later line.
+	// Find first valid match after the replacement.
+	skipEnd := m.Col + replaceLen
 	f.CurrentMatch = -1
 	for i, match := range f.Matches {
-		if match.Line > skipLine || (match.Line == skipLine && match.Col >= skipEnd) {
+		if f.inReplacedZone(match) {
+			continue
+		}
+		if match.Line > m.Line || (match.Line == m.Line && match.Col >= skipEnd) {
 			f.CurrentMatch = i
 			break
 		}
 	}
 
-	// Wrap: pick the first match that is NOT inside the replacement zone.
+	// Wrap: pick the first valid match from the start.
 	if f.CurrentMatch == -1 {
 		for i, match := range f.Matches {
-			if match.Line != skipLine || match.Col < m.Col || match.Col >= skipEnd {
+			if !f.inReplacedZone(match) {
 				f.CurrentMatch = i
 				break
 			}
 		}
 	}
 
-	// All remaining matches are inside the replacement — just pick 0.
+	// All matches are inside replacement zones — nothing left to replace.
 	if f.CurrentMatch == -1 {
-		f.CurrentMatch = 0
+		f.CurrentMatch = 0 // keep highlight for display, but replace will no-op
 	}
 	f.jumpToCurrentMatch()
+}
+
+// inReplacedZone returns true if the match falls inside any prior replacement zone.
+func (f *FindBar) inReplacedZone(m editor.FindMatch) bool {
+	for _, z := range f.replacedZones {
+		if m.Line == z.line && m.Col >= z.col && m.Col < z.endCol {
+			return true
+		}
+	}
+	return false
 }
 
 // ReplaceAll replaces all matches with the replace query as a single undo step.
@@ -354,9 +406,12 @@ func (f *FindBar) Update(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return nil, true
 	}
 
-	// Printable input — cap at maxQueryRunes to prevent unbounded growth from paste.
+	// Printable input — strip control chars, cap at maxQueryRunes.
 	if msg.Text != "" {
-		runes := []rune(msg.Text)
+		runes := stripControl([]rune(msg.Text))
+		if len(runes) == 0 {
+			return nil, true
+		}
 		if f.ReplaceActive {
 			room := maxQueryRunes - len(f.ReplaceQuery)
 			if room <= 0 {

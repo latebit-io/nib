@@ -390,17 +390,11 @@ func TestFindBarReplaceDoesNotRematch(t *testing.T) {
 	}
 
 	// Pressing replace again should NOT create "todoss" — the only matches
-	// left are inside the replacements.
+	// left are inside the replacements, so text must stay unchanged.
 	fb.ReplaceCurrent()
 	got = eng.Buf.LineText(0)
-	if got != "todoss and todos" && got != "todos and todoss" {
-		// If it stayed "todos and todos" that's also acceptable (no valid match to replace).
-		// But it must NOT have created "todoss".
-		if got == "todos and todos" {
-			// Good — no re-replacement happened.
-		} else {
-			t.Fatalf("third replace corrupted text, got %q", got)
-		}
+	if got != "todos and todos" {
+		t.Fatalf("third replace should leave text unchanged, got %q", got)
 	}
 }
 

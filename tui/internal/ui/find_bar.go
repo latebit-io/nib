@@ -181,11 +181,13 @@ func (f *FindBar) ReplaceCurrent() {
 	f.search()
 }
 
-// ReplaceAll replaces all matches with the replace query.
+// ReplaceAll replaces all matches with the replace query as a single undo step.
 func (f *FindBar) ReplaceAll() {
 	if len(f.Matches) == 0 || !f.ReplaceMode {
 		return
 	}
+	f.eng.BeginUndoGroup()
+	defer f.eng.EndUndoGroup()
 	replaceText := string(f.ReplaceQuery)
 	// Replace from last match to first to preserve earlier positions.
 	for i := len(f.Matches) - 1; i >= 0; i-- {
@@ -298,13 +300,28 @@ func (f *FindBar) Update(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return nil, true
 	}
 
-	// Printable input
+	// Printable input — cap at maxQueryRunes to prevent unbounded growth from paste.
+	const maxQueryRunes = 1000
 	if msg.Text != "" {
 		runes := []rune(msg.Text)
 		if f.ReplaceActive {
+			room := maxQueryRunes - len(f.ReplaceQuery)
+			if room <= 0 {
+				return nil, true
+			}
+			if len(runes) > room {
+				runes = runes[:room]
+			}
 			f.ReplaceQuery = slices.Insert(f.ReplaceQuery, f.ReplaceCursor, runes...)
 			f.ReplaceCursor += len(runes)
 		} else {
+			room := maxQueryRunes - len(f.Query)
+			if room <= 0 {
+				return nil, true
+			}
+			if len(runes) > room {
+				runes = runes[:room]
+			}
 			f.Query = slices.Insert(f.Query, f.CursorPos, runes...)
 			f.CursorPos += len(runes)
 			f.search()

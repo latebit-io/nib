@@ -5,6 +5,13 @@ import (
 	"unicode/utf8"
 )
 
+// BeginUndoGroup starts a buffer undo group. Nested groups are supported.
+// Use this to batch multiple edits (e.g. replace-all) into a single undo step.
+func (e *Editor) BeginUndoGroup() { e.Buf.BeginGroup() }
+
+// EndUndoGroup ends a buffer undo group started by BeginUndoGroup.
+func (e *Editor) EndUndoGroup() { e.Buf.EndGroup() }
+
 // ReplaceRange selects the range [line, col .. line, col+length) and replaces
 // it with text. This is the atomic operation for find-and-replace — callers
 // do not need to manipulate selection state directly.

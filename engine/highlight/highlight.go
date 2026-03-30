@@ -61,7 +61,14 @@ func New(filename string) *Highlighter {
 
 // Parse parses the source and caches highlight tokens for every line.
 func (h *Highlighter) Parse(source string) {
-	h.tree = h.parser.Parse([]byte(source), h.tree)
+	// Always do a full parse (nil old tree). Incremental parsing requires
+	// Tree.Edit() calls describing every buffer mutation, which we don't
+	// track. Without Edit() calls, tree-sitter reuses stale AST nodes
+	// and produces wrong/missing tokens for modified regions.
+	if h.tree != nil {
+		h.tree.Close()
+	}
+	h.tree = h.parser.Parse([]byte(source), nil)
 	if h.tree == nil {
 		h.cache = nil
 		return

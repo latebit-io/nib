@@ -527,10 +527,12 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleHover()
 
 	case ActionFind:
+		m.Regions.FocusByName("editor")
 		m.Editor.Find.Open(m.Editor.eng, false)
 		return m, nil
 
 	case ActionFindReplace:
+		m.Regions.FocusByName("editor")
 		m.Editor.Find.Open(m.Editor.eng, true)
 		return m, nil
 

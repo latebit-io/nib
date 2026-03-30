@@ -1,7 +1,6 @@
 package editor
 
 import (
-	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -10,6 +9,8 @@ import (
 // it with text. This is the atomic operation for find-and-replace — callers
 // do not need to manipulate selection state directly.
 func (e *Editor) ReplaceRange(line, col, length int, text string) {
+	e.Buf.BeginGroup()
+	defer e.Buf.EndGroup()
 	e.SelectStartLine = line
 	e.SelectStartCol = col
 	e.SelectionActive = true
@@ -27,31 +28,28 @@ type FindMatch struct {
 }
 
 // FindAll returns all matches for query in the buffer.
-// When caseSensitive is false, both query and buffer text are lowercased
-// before comparison. Returns nil if query is empty.
+// When caseSensitive is false, strings.EqualFold is used for proper Unicode
+// case folding. Returns nil if query is empty.
 func (e *Editor) FindAll(query string, caseSensitive bool) []FindMatch {
 	if query == "" {
 		return nil
 	}
 
-	searchQuery := query
-	if !caseSensitive {
-		searchQuery = strings.ToLower(query)
-	}
-	needleLen := utf8.RuneCountInString(searchQuery)
-	needleRunes := []rune(searchQuery)
+	needleLen := utf8.RuneCountInString(query)
 
 	var matches []FindMatch
 	for line := 0; line < e.Buf.LineCount(); line++ {
 		lineText := e.Buf.LineText(line)
-		var runes []rune
-		if caseSensitive {
-			runes = []rune(lineText)
-		} else {
-			runes = []rune(strings.ToLower(lineText))
-		}
+		runes := []rune(lineText)
 		for col := 0; col <= len(runes)-needleLen; col++ {
-			if slices.Equal(runes[col:col+needleLen], needleRunes) {
+			candidate := string(runes[col : col+needleLen])
+			match := false
+			if caseSensitive {
+				match = candidate == query
+			} else {
+				match = strings.EqualFold(candidate, query)
+			}
+			if match {
 				matches = append(matches, FindMatch{
 					Line: line,
 					Col:  col,

@@ -37,10 +37,8 @@ var (
 				Background(lipgloss.Color("214")).
 				Foreground(lipgloss.Color("0"))
 
-	// Replace bar styles.
-	replaceInputStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("238")).
-				Foreground(lipgloss.Color("255"))
+	// Cursor style for the active input field.
+	findCursorStyle = lipgloss.NewStyle().Reverse(true)
 )
 
 // FindBar manages the find (and optional replace) overlay for the editor.
@@ -342,6 +340,63 @@ func (f *FindBar) Render(width int) []string {
 	return []string{findLine, replaceLine}
 }
 
+// renderInput renders a text input field with a visible cursor.
+// fieldWidth is in display columns (accounts for wide characters).
+// showCursor controls whether the cursor is drawn (only for the focused field).
+func renderInput(text []rune, cursorPos, fieldWidth int, showCursor bool) string {
+	// Append a trailing space so the cursor has somewhere to sit at the end.
+	display := append(text, ' ')
+
+	// Scroll the visible window so the cursor is always visible.
+	// Walk backwards from cursorPos to find the start index that fits fieldWidth columns.
+	start := 0
+	widthToCursor := 0
+	for i := 0; i <= cursorPos && i < len(display); i++ {
+		widthToCursor += runewidth.RuneWidth(display[i])
+	}
+	if widthToCursor > fieldWidth {
+		// Scroll forward until the cursor fits.
+		cols := 0
+		for i := 0; i < len(display); i++ {
+			cols += runewidth.RuneWidth(display[i])
+			if cols > widthToCursor-fieldWidth {
+				start = i + 1
+				break
+			}
+		}
+	}
+
+	// Render characters from start, tracking column width.
+	var b strings.Builder
+	usedCols := 0
+	cursorRendered := false
+	for i := start; i < len(display) && usedCols < fieldWidth; i++ {
+		ch := string(display[i])
+		w := runewidth.RuneWidth(display[i])
+		if usedCols+w > fieldWidth {
+			break // wide char would overflow
+		}
+		if showCursor && i == cursorPos {
+			b.WriteString(findCursorStyle.Render(ch))
+			cursorRendered = true
+		} else {
+			b.WriteString(findInputStyle.Render(ch))
+		}
+		usedCols += w
+	}
+	// Pad remaining columns.
+	for usedCols < fieldWidth {
+		if showCursor && !cursorRendered && usedCols == fieldWidth-1 {
+			b.WriteString(findCursorStyle.Render(" "))
+			cursorRendered = true
+		} else {
+			b.WriteString(findInputStyle.Render(" "))
+		}
+		usedCols++
+	}
+	return b.String()
+}
+
 // renderFindLine renders the main find bar.
 func (f *FindBar) renderFindLine(width int) string {
 	const labelText = " Find: "
@@ -366,16 +421,12 @@ func (f *FindBar) renderFindLine(width int) string {
 		inputW = 5
 	}
 
-	// Truncate displayed query if needed, keeping cursor visible.
-	displayQuery := string(f.Query)
-	if runewidth.StringWidth(displayQuery) > inputW {
-		displayQuery = string(f.Query[max(0, f.CursorPos-inputW+1):f.CursorPos]) +
-			string(f.Query[f.CursorPos:min(len(f.Query), f.CursorPos+1)])
-	}
+	// Cursor shows in find field when replace field is NOT focused.
+	showCursor := !f.ReplaceActive
+	inputField := renderInput(f.Query, f.CursorPos, inputW, showCursor)
 
 	// Render styled parts.
 	label := findLabelStyle.Render(labelText)
-	inputField := findInputStyle.Render(padRight(displayQuery, inputW))
 
 	var countStyled string
 	if len(f.Query) == 0 {
@@ -411,13 +462,8 @@ func (f *FindBar) renderReplaceLine(width int) string {
 		inputW = 5
 	}
 
-	displayQuery := string(f.ReplaceQuery)
-	if runewidth.StringWidth(displayQuery) > inputW {
-		displayQuery = runewidth.Truncate(displayQuery, inputW, "")
-	}
-
 	label := findLabelStyle.Render(labelText)
-	inputField := replaceInputStyle.Render(padRight(displayQuery, inputW))
+	inputField := renderInput(f.ReplaceQuery, f.ReplaceCursor, inputW, f.ReplaceActive)
 
 	bar := label + inputField
 	if pad := width - labelW - inputW; pad > 0 {
@@ -442,13 +488,4 @@ func (f *FindBar) IsMatchAt(line, bufCol int) (isMatch, isCurrent bool) {
 		}
 	}
 	return false, false
-}
-
-// padRight pads a string to the given width with spaces.
-func padRight(s string, width int) string {
-	sw := runewidth.StringWidth(s)
-	if sw >= width {
-		return runewidth.Truncate(s, width, "")
-	}
-	return s + strings.Repeat(" ", width-sw)
 }

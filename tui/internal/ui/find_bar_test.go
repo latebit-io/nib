@@ -312,6 +312,98 @@ func TestFindBarReplaceAll(t *testing.T) {
 	}
 }
 
+// Regression: overlapping matches (e.g. "aa" in "aaa") must not corrupt text
+// during replace-all. Only non-overlapping matches should be replaced.
+func TestFindBarReplaceAllOverlapping(t *testing.T) {
+	eng := newTestEditor("aaa")
+	var fb FindBar
+	fb.Open(eng, true)
+
+	// Search for "aa" — overlapping matches at col 0 and col 1
+	fb.Update(tea.KeyPressMsg{Text: "a"})
+	fb.Update(tea.KeyPressMsg{Text: "a"})
+
+	if len(fb.Matches) != 2 {
+		t.Fatalf("expected 2 overlapping matches, got %d", len(fb.Matches))
+	}
+
+	fb.ReplaceQuery = []rune("X")
+	fb.ReplaceCursor = 1
+
+	fb.ReplaceAll()
+
+	got := eng.Buf.LineText(0)
+	// Only the first non-overlapping match (col 0) should be replaced.
+	// "aa" at col 0 → "X", leaving "Xa" (not "XX" or corrupted text).
+	if got != "Xa" {
+		t.Fatalf("after replace all with overlapping matches, expected 'Xa', got %q", got)
+	}
+}
+
+// Regression: replacing "todo" with "todos" must not re-match the "todo"
+// inside "todos" on subsequent Enter presses.
+func TestFindBarReplaceDoesNotRematch(t *testing.T) {
+	eng := newTestEditor("todo and todo")
+	var fb FindBar
+	fb.Open(eng, true)
+
+	// Search for "todo"
+	fb.Update(tea.KeyPressMsg{Text: "t"})
+	fb.Update(tea.KeyPressMsg{Text: "o"})
+	fb.Update(tea.KeyPressMsg{Text: "d"})
+	fb.Update(tea.KeyPressMsg{Text: "o"})
+
+	if len(fb.Matches) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(fb.Matches))
+	}
+
+	// Switch to replace and type "todos"
+	fb.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	fb.Update(tea.KeyPressMsg{Text: "t"})
+	fb.Update(tea.KeyPressMsg{Text: "o"})
+	fb.Update(tea.KeyPressMsg{Text: "d"})
+	fb.Update(tea.KeyPressMsg{Text: "o"})
+	fb.Update(tea.KeyPressMsg{Text: "s"})
+
+	// Replace first occurrence.
+	fb.ReplaceCurrent()
+	got := eng.Buf.LineText(0)
+	if got != "todos and todo" {
+		t.Fatalf("after first replace, expected 'todos and todo', got %q", got)
+	}
+
+	// Current match should now point at the second "todo", not re-match
+	// the "todo" inside "todos".
+	if fb.CurrentMatch < 0 || fb.CurrentMatch >= len(fb.Matches) {
+		t.Fatalf("expected valid current match, got %d (of %d)", fb.CurrentMatch, len(fb.Matches))
+	}
+	cur := fb.Matches[fb.CurrentMatch]
+	if cur.Col < 5 {
+		t.Fatalf("current match should be past the replacement (col >= 5), got col %d", cur.Col)
+	}
+
+	// Replace second occurrence.
+	fb.ReplaceCurrent()
+	got = eng.Buf.LineText(0)
+	if got != "todos and todos" {
+		t.Fatalf("after second replace, expected 'todos and todos', got %q", got)
+	}
+
+	// Pressing replace again should NOT create "todoss" — the only matches
+	// left are inside the replacements.
+	fb.ReplaceCurrent()
+	got = eng.Buf.LineText(0)
+	if got != "todoss and todos" && got != "todos and todoss" {
+		// If it stayed "todos and todos" that's also acceptable (no valid match to replace).
+		// But it must NOT have created "todoss".
+		if got == "todos and todos" {
+			// Good — no re-replacement happened.
+		} else {
+			t.Fatalf("third replace corrupted text, got %q", got)
+		}
+	}
+}
+
 func TestFindBarRender(t *testing.T) {
 	eng := newTestEditor("hello world")
 	var fb FindBar

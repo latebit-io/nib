@@ -41,6 +41,9 @@ var (
 	findCursorStyle = lipgloss.NewStyle().Reverse(true)
 )
 
+// maxQueryRunes caps the length of find/replace query strings.
+const maxQueryRunes = 1000
+
 // FindBar manages the find (and optional replace) overlay for the editor.
 type FindBar struct {
 	Active    bool
@@ -83,12 +86,16 @@ func (f *FindBar) Open(eng *editor.Editor, replace bool) {
 	f.ReplaceQuery = f.ReplaceQuery[:0]
 	f.ReplaceCursor = 0
 
-	// Pre-fill from selection if available.
+	// Pre-fill from selection if available, respecting the query size cap.
 	if eng.SelectionActive {
 		sel := eng.SelectedText()
 		// Only single-line selections make sense as find queries.
 		if !strings.Contains(sel, "\n") {
-			f.Query = []rune(sel)
+			r := []rune(sel)
+			if len(r) > maxQueryRunes {
+				r = r[:maxQueryRunes]
+			}
+			f.Query = r
 			f.CursorPos = len(f.Query)
 		}
 	}
@@ -171,14 +178,53 @@ func (f *FindBar) jumpToCurrentMatch() {
 }
 
 // ReplaceCurrent replaces the current match with the replace query.
+// After replacing, advances to the next match that is not inside the
+// replacement text (e.g. replacing "todo" with "todos" must not
+// re-match the "todo" inside "todos").
 func (f *FindBar) ReplaceCurrent() {
 	if f.CurrentMatch < 0 || f.CurrentMatch >= len(f.Matches) || !f.ReplaceMode {
 		return
 	}
 	m := f.Matches[f.CurrentMatch]
-	f.eng.ReplaceRange(m.Line, m.Col, m.Len, string(f.ReplaceQuery))
+	replaceText := string(f.ReplaceQuery)
+	f.eng.ReplaceRange(m.Line, m.Col, m.Len, replaceText)
 	f.navigated = true
-	f.search()
+
+	// Re-search and find the next match past the replacement zone.
+	replaceLen := len([]rune(replaceText))
+	skipLine := m.Line
+	skipEnd := m.Col + replaceLen // first col after the replacement
+
+	f.Matches = f.eng.FindAll(string(f.Query), f.CaseSensitive)
+	if len(f.Matches) == 0 {
+		f.CurrentMatch = -1
+		return
+	}
+
+	// Find first match at or after skipEnd on the same line, or any later line.
+	f.CurrentMatch = -1
+	for i, match := range f.Matches {
+		if match.Line > skipLine || (match.Line == skipLine && match.Col >= skipEnd) {
+			f.CurrentMatch = i
+			break
+		}
+	}
+
+	// Wrap: pick the first match that is NOT inside the replacement zone.
+	if f.CurrentMatch == -1 {
+		for i, match := range f.Matches {
+			if match.Line != skipLine || match.Col < m.Col || match.Col >= skipEnd {
+				f.CurrentMatch = i
+				break
+			}
+		}
+	}
+
+	// All remaining matches are inside the replacement — just pick 0.
+	if f.CurrentMatch == -1 {
+		f.CurrentMatch = 0
+	}
+	f.jumpToCurrentMatch()
 }
 
 // ReplaceAll replaces all matches with the replace query as a single undo step.
@@ -189,9 +235,19 @@ func (f *FindBar) ReplaceAll() {
 	f.eng.BeginUndoGroup()
 	defer f.eng.EndUndoGroup()
 	replaceText := string(f.ReplaceQuery)
-	// Replace from last match to first to preserve earlier positions.
-	for i := len(f.Matches) - 1; i >= 0; i-- {
-		m := f.Matches[i]
+	// Filter to non-overlapping matches (left-to-right greedy).
+	replacements := make([]editor.FindMatch, 0, len(f.Matches))
+	lastLine, lastEnd := -1, -1
+	for _, m := range f.Matches {
+		if m.Line == lastLine && m.Col < lastEnd {
+			continue // overlaps with previous match on the same line
+		}
+		replacements = append(replacements, m)
+		lastLine, lastEnd = m.Line, m.Col+m.Len
+	}
+	// Replace from last to first to preserve earlier positions.
+	for i := len(replacements) - 1; i >= 0; i-- {
+		m := replacements[i]
 		f.eng.ReplaceRange(m.Line, m.Col, m.Len, replaceText)
 	}
 	f.navigated = true
@@ -207,16 +263,14 @@ func (f *FindBar) Update(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return nil, true
 
 	case tea.KeyEnter:
-		if f.ReplaceActive {
+		if msg.Mod&tea.ModCtrl != 0 && msg.Mod&tea.ModAlt != 0 {
+			// Ctrl+Alt+Enter: replace all (works in both fields).
+			f.ReplaceAll()
+		} else if f.ReplaceActive {
 			// Enter in replace field: replace current match.
 			f.ReplaceCurrent()
-			return nil, true
-		}
-		if msg.Mod&tea.ModShift != 0 {
+		} else if msg.Mod&tea.ModShift != 0 {
 			f.PrevMatch()
-		} else if msg.Mod&tea.ModCtrl != 0 && msg.Mod&tea.ModAlt != 0 {
-			// Ctrl+Alt+Enter: replace all
-			f.ReplaceAll()
 		} else {
 			f.NextMatch()
 		}
@@ -301,7 +355,6 @@ func (f *FindBar) Update(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	}
 
 	// Printable input — cap at maxQueryRunes to prevent unbounded growth from paste.
-	const maxQueryRunes = 1000
 	if msg.Text != "" {
 		runes := []rune(msg.Text)
 		if f.ReplaceActive {
@@ -417,8 +470,8 @@ func renderInput(text []rune, cursorPos, fieldWidth int, showCursor bool) string
 // renderFindLine renders the main find bar.
 func (f *FindBar) renderFindLine(width int) string {
 	const labelText = " Find: "
-	const caseText = " [Aa]"
 	labelW := runewidth.StringWidth(labelText)
+	caseText := " [Aa]"
 	caseW := runewidth.StringWidth(caseText)
 
 	// Compute count text (raw, before styling).
@@ -432,10 +485,22 @@ func (f *FindBar) renderFindLine(width int) string {
 	}
 	countW := runewidth.StringWidth(countText)
 
-	// Input field gets remaining space.
+	// Input field gets remaining space. Drop optional segments when tight.
 	inputW := width - labelW - countW - caseW
-	if inputW < 5 {
-		inputW = 5
+	if inputW < 1 {
+		// Drop case indicator first.
+		caseText = ""
+		caseW = 0
+		inputW = width - labelW - countW
+	}
+	if inputW < 1 {
+		// Drop count too.
+		countText = ""
+		countW = 0
+		inputW = width - labelW
+	}
+	if inputW < 1 {
+		inputW = 1
 	}
 
 	// Cursor shows in find field when replace field is NOT focused.
@@ -446,7 +511,7 @@ func (f *FindBar) renderFindLine(width int) string {
 	label := findLabelStyle.Render(labelText)
 
 	var countStyled string
-	if len(f.Query) == 0 {
+	if countText == "" {
 		countStyled = ""
 	} else if len(f.Matches) == 0 {
 		countStyled = findNoMatchStyle.Render(countText)
@@ -454,9 +519,13 @@ func (f *FindBar) renderFindLine(width int) string {
 		countStyled = findCountStyle.Render(countText)
 	}
 
-	caseStyled := findLabelStyle.Render(caseText)
-	if f.CaseSensitive {
+	var caseStyled string
+	if caseText == "" {
+		caseStyled = ""
+	} else if f.CaseSensitive {
 		caseStyled = findCountStyle.Render(caseText)
+	} else {
+		caseStyled = findLabelStyle.Render(caseText)
 	}
 
 	// Compute used width from raw texts, then pad.
@@ -475,8 +544,8 @@ func (f *FindBar) renderReplaceLine(width int) string {
 	labelW := runewidth.StringWidth(labelText)
 
 	inputW := width - labelW
-	if inputW < 5 {
-		inputW = 5
+	if inputW < 1 {
+		inputW = 1
 	}
 
 	label := findLabelStyle.Render(labelText)

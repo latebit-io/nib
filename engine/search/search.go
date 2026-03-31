@@ -191,7 +191,14 @@ func searchGoNative(root, pattern string, opts Options) ([]Result, error) {
 
 	for _, relPath := range files {
 		if opts.FileGlob != "" {
-			matched, matchErr := filepath.Match(opts.FileGlob, filepath.Base(relPath))
+			// Match against basename for simple patterns ("*.go") and
+			// full relative path for directory patterns ("dir/*.go"),
+			// matching ripgrep --glob semantics.
+			target := filepath.Base(relPath)
+			if strings.Contains(opts.FileGlob, "/") {
+				target = relPath
+			}
+			matched, matchErr := filepath.Match(opts.FileGlob, target)
 			if matchErr != nil {
 				return nil, fmt.Errorf("invalid file glob %q: %w", opts.FileGlob, matchErr)
 			}

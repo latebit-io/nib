@@ -333,8 +333,12 @@ func (m *Manager) References(ctx context.Context, path string, line, col int) ([
 		return nil, fmt.Errorf("references unmarshal: %w", err)
 	}
 
-	results := make([]lang.Location, 0, len(locs))
+	const maxReferences = 10000
+	results := make([]lang.Location, 0, min(len(locs), maxReferences))
 	for _, loc := range locs {
+		if len(results) >= maxReferences {
+			break
+		}
 		l, c := srv.fromLSPPosition(loc.Range.Start)
 		results = append(results, lang.Location{
 			Path: uriToPath(loc.URI),
@@ -371,11 +375,13 @@ func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]lang.Sy
 	for _, srv := range servers {
 		raw, err := srv.transport.Request(ctx, "workspace/symbol", params)
 		if err != nil {
+			slog.Debug("lsp: workspace/symbol request failed", "query", query, "err", err)
 			lastErr = err
 			continue
 		}
 		var symbols []lspSymbolInformation
 		if err := json.Unmarshal(raw, &symbols); err != nil {
+			slog.Debug("lsp: workspace/symbol unmarshal failed", "query", query, "err", err)
 			lastErr = err
 			continue
 		}

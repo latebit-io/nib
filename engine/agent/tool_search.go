@@ -73,7 +73,7 @@ func (t *SearchProjectTool) Execute(_ context.Context, call llm.ToolCall) string
 	results, err := search.Search(t.projectRoot, args.Pattern, search.Options{
 		CaseSensitive: args.CaseSensitive,
 		Regex:         args.Regex,
-		MaxResults:    200,
+		MaxResults:    search.DefaultMaxResults,
 		FileGlob:      args.FileGlob,
 	})
 	if err != nil {

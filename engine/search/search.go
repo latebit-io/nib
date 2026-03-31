@@ -46,11 +46,14 @@ type Options struct {
 	FileGlob string
 }
 
+// DefaultMaxResults is the default cap on search results when MaxResults is 0.
+const DefaultMaxResults = 200
+
 func (o Options) maxResults() int {
 	if o.MaxResults > 0 {
 		return o.MaxResults
 	}
-	return 1000
+	return DefaultMaxResults
 }
 
 // Search runs a text search across all files under root.
@@ -157,7 +160,8 @@ func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
 		if stoppedEarly {
 			return results, nil
 		}
-		if exitErr, ok := waitErr.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		var exitErr *exec.ExitError
+		if errors.As(waitErr, &exitErr) && exitErr.ExitCode() == 1 {
 			return results, nil
 		}
 		return nil, fmt.Errorf("rg: %w", waitErr)
@@ -208,6 +212,7 @@ func searchFile(root, relPath string, re *regexp.Regexp, max int, results *[]Res
 		slog.Debug("search: skip file", "path", relPath, "err", err)
 		return false
 	}
+	defer func() { _ = f.Close() }() // best-effort: file was only opened for reading
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxScanToken)
@@ -226,14 +231,12 @@ func searchFile(root, relPath string, re *regexp.Regexp, max int, results *[]Res
 			Text: line,
 		})
 		if len(*results) >= max {
-			_ = f.Close() // best-effort: returning results, close error irrelevant
 			return true
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
 		slog.Debug("search: scan error", "path", relPath, "err", scanErr)
 	}
-	_ = f.Close() // best-effort: file was only opened for reading
 	return false
 }
 

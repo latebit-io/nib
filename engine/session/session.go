@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/latebit-io/junto/engine/search"
 	"time"
 
 	"github.com/latebit-io/junto/engine/agent"
@@ -527,6 +529,11 @@ func (s *Session) FileStatus(path string) (inContext, agentModified bool) {
 }
 
 // AgentModifiedFiles returns paths of files modified by agent edits this
+// Search runs a project-wide text search from the project root.
+func (s *Session) Search(pattern string, opts search.Options) ([]search.Result, error) {
+	return search.Search(s.projectRoot, pattern, opts)
+}
+
 // session, as sorted relative paths.
 func (s *Session) AgentModifiedFiles() []string {
 	s.mu.RLock()
@@ -1288,7 +1295,7 @@ func (s *Session) HandleEvent(ev event.Event) {
 		// File is already opened by workspace.WriteFile — frontend can
 		// render it in the project view or switch to it.
 		_ = e
-	case event.AgentToken, event.AgentStatus:
+	case event.AgentToken, event.AgentStatus, event.AgentToolCall, event.AgentNavigate:
 		// No session state changes — frontend renders these directly
 	case event.DiagnosticsUpdated:
 		// Frontend-only notification; no session state to mutate.

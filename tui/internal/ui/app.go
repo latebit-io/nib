@@ -15,6 +15,7 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/engine/search"
 	"github.com/latebit-io/junto/engine/session"
 )
 
@@ -123,7 +124,9 @@ func NewApp(sess *session.Session) AppModel {
 		Services:    svc,
 		Keymap:      km,
 		SearchOverlay: SearchOverlayModel{
-			ProjectRoot: sess.ProjectRoot(),
+			SearchFunc: func(pattern string) ([]search.Result, error) {
+				return sess.Search(pattern, search.Options{})
+			},
 		},
 	}
 }

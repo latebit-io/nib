@@ -39,12 +39,13 @@ type SearchOverlayModel struct {
 	Width int
 	// Height is the terminal height (set during render).
 	Height int
-	// ProjectRoot is the absolute path to the project root for search.
-	ProjectRoot string
 	// Searching indicates an async search is in progress.
 	Searching bool
 	// ErrorMsg holds the error from the last failed search.
 	ErrorMsg string
+	// SearchFunc performs the actual search. Set by AppModel to route
+	// through session rather than calling engine/search directly.
+	SearchFunc func(pattern string) ([]search.Result, error)
 }
 
 // Search overlay constants.
@@ -161,11 +162,12 @@ func (s *SearchOverlayModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 func (s *SearchOverlayModel) runSearch() tea.Cmd {
 	s.Searching = true
 	query := s.Query
-	root := s.ProjectRoot
+	searchFn := s.SearchFunc
 	return func() tea.Msg {
-		results, err := search.Search(root, query, search.Options{
-			MaxResults: 200,
-		})
+		if searchFn == nil {
+			return searchResultMsg{err: fmt.Errorf("search not available")}
+		}
+		results, err := searchFn(query)
 		return searchResultMsg{results: results, err: err}
 	}
 }

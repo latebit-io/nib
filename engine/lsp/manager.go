@@ -351,17 +351,18 @@ func (m *Manager) References(ctx context.Context, path string, line, col int) ([
 
 // --- lang.SymbolProvider ---
 
-// WorkspaceSymbols queries all running language servers for symbols matching a query
-// and merges the results.
+// WorkspaceSymbols queries all configured language servers for symbols matching
+// a query and merges the results. Lazily starts servers that haven't been
+// started yet (e.g. when no file of that language has been opened).
 func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]lang.SymbolInfo, error) {
-	m.mu.RLock()
-	servers := make([]*Server, 0, len(m.servers))
-	for _, s := range m.servers {
-		servers = append(servers, s)
+	servers := make([]*Server, 0, len(m.configs))
+	for languageID := range m.configs {
+		if srv := m.serverFor(languageID); srv != nil {
+			servers = append(servers, srv)
+		}
 	}
-	m.mu.RUnlock()
 	if len(servers) == 0 {
-		return nil, fmt.Errorf("no LSP server available")
+		return nil, fmt.Errorf("no LSP server configured")
 	}
 
 	params := struct {

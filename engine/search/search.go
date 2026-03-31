@@ -18,6 +18,10 @@ import (
 	"github.com/latebit-io/junto/engine/filelist"
 )
 
+// maxScanToken is the maximum line length the scanner will handle (1MB).
+// Prevents "token too long" errors on minified files or long JSON lines.
+const maxScanToken = 1024 * 1024
+
 // Result represents a single search match.
 type Result struct {
 	// Path is the file path relative to the search root.
@@ -84,7 +88,7 @@ type rgJSON struct {
 func rgArgs(pattern string, opts Options) []string {
 	args := []string{
 		"--json",
-		"--hidden",    // include dotfiles for parity with Go fallback
+		"--hidden", // include dotfiles for parity with Go fallback
 		"--max-count", fmt.Sprintf("%d", opts.maxResults()),
 	}
 	if !opts.CaseSensitive {
@@ -113,7 +117,9 @@ func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
 	}
 
 	var results []Result
+	var stoppedEarly bool
 	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxScanToken)
 	for scanner.Scan() {
 		var entry rgJSON
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
@@ -134,22 +140,24 @@ func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
 			Text: strings.TrimRight(entry.Data.Lines.Text, "\n\r"),
 		})
 		if len(results) >= opts.maxResults() {
+			stoppedEarly = true
 			break
 		}
 	}
 
 	// Kill rg if we stopped early (maxResults reached before EOF).
-	// Then wait to reap the process — ignore exit errors from the kill.
-	_ = cmd.Process.Kill() // no-op if already exited
+	// Then wait to reap the process.
+	if stoppedEarly {
+		_ = cmd.Process.Kill() // intentional kill — exit error is expected
+	}
 	waitErr := cmd.Wait()
 
 	// rg exits 1 when no matches — that's not an error.
 	if waitErr != nil {
-		if exitErr, ok := waitErr.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		if stoppedEarly {
 			return results, nil
 		}
-		// Exit from our kill is also not an error.
-		if len(results) > 0 {
+		if exitErr, ok := waitErr.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 			return results, nil
 		}
 		return nil, fmt.Errorf("rg: %w", waitErr)
@@ -160,6 +168,75 @@ func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
 	return results, nil
 }
 
+// compilePattern builds a regexp from the search pattern and options.
+func compilePattern(pattern string, opts Options) (*regexp.Regexp, error) {
+	if opts.Regex {
+		p := pattern
+		if !opts.CaseSensitive {
+			p = "(?i)" + p
+		}
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid regex: %w", err)
+		}
+		return re, nil
+	}
+	escaped := regexp.QuoteMeta(pattern)
+	if !opts.CaseSensitive {
+		escaped = "(?i)" + escaped
+	}
+	return regexp.MustCompile(escaped), nil
+}
+
+// matchesGlob reports whether relPath matches the file glob filter.
+// Uses basename for simple patterns ("*.go") and full path for
+// directory patterns ("dir/*.go"), matching ripgrep --glob semantics.
+func matchesGlob(glob, relPath string) (bool, error) {
+	target := filepath.Base(relPath)
+	if strings.Contains(glob, "/") {
+		target = relPath
+	}
+	return filepath.Match(glob, target)
+}
+
+// searchFile scans a single file for regex matches, appending to results.
+// Returns true if the max result cap was reached.
+func searchFile(root, relPath string, re *regexp.Regexp, max int, results *[]Result) bool {
+	absPath := filepath.Join(root, relPath)
+	f, err := os.Open(absPath)
+	if err != nil {
+		slog.Debug("search: skip file", "path", relPath, "err", err)
+		return false
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxScanToken)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		loc := re.FindStringIndex(line)
+		if loc == nil {
+			continue
+		}
+		*results = append(*results, Result{
+			Path: relPath,
+			Line: lineNum,
+			Col:  loc[0],
+			Text: line,
+		})
+		if len(*results) >= max {
+			_ = f.Close() // best-effort: returning results, close error irrelevant
+			return true
+		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		slog.Debug("search: scan error", "path", relPath, "err", scanErr)
+	}
+	_ = f.Close() // best-effort: file was only opened for reading
+	return false
+}
+
 // searchGoNative walks the project and searches each file line by line.
 func searchGoNative(root, pattern string, opts Options) ([]Result, error) {
 	files, err := filelist.Walk(root)
@@ -167,23 +244,9 @@ func searchGoNative(root, pattern string, opts Options) ([]Result, error) {
 		return nil, fmt.Errorf("walk: %w", err)
 	}
 
-	var re *regexp.Regexp
-	if opts.Regex {
-		p := pattern
-		if !opts.CaseSensitive {
-			p = "(?i)" + p
-		}
-		var compileErr error
-		re, compileErr = regexp.Compile(p)
-		if compileErr != nil {
-			return nil, fmt.Errorf("invalid regex: %w", compileErr)
-		}
-	} else {
-		escaped := regexp.QuoteMeta(pattern)
-		if !opts.CaseSensitive {
-			escaped = "(?i)" + escaped
-		}
-		re = regexp.MustCompile(escaped)
+	re, err := compilePattern(pattern, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	max := opts.maxResults()
@@ -191,14 +254,7 @@ func searchGoNative(root, pattern string, opts Options) ([]Result, error) {
 
 	for _, relPath := range files {
 		if opts.FileGlob != "" {
-			// Match against basename for simple patterns ("*.go") and
-			// full relative path for directory patterns ("dir/*.go"),
-			// matching ripgrep --glob semantics.
-			target := filepath.Base(relPath)
-			if strings.Contains(opts.FileGlob, "/") {
-				target = relPath
-			}
-			matched, matchErr := filepath.Match(opts.FileGlob, target)
+			matched, matchErr := matchesGlob(opts.FileGlob, relPath)
 			if matchErr != nil {
 				return nil, fmt.Errorf("invalid file glob %q: %w", opts.FileGlob, matchErr)
 			}
@@ -206,38 +262,9 @@ func searchGoNative(root, pattern string, opts Options) ([]Result, error) {
 				continue
 			}
 		}
-
-		absPath := filepath.Join(root, relPath)
-		f, openErr := os.Open(absPath)
-		if openErr != nil {
-			slog.Debug("search: skip file", "path", relPath, "err", openErr)
-			continue
+		if searchFile(root, relPath, re, max, &results) {
+			break
 		}
-
-		scanner := bufio.NewScanner(f)
-		lineNum := 0
-		for scanner.Scan() {
-			lineNum++
-			line := scanner.Text()
-			loc := re.FindStringIndex(line)
-			if loc == nil {
-				continue
-			}
-			results = append(results, Result{
-				Path: relPath,
-				Line: lineNum,
-				Col:  loc[0],
-				Text: line,
-			})
-			if len(results) >= max {
-				_ = f.Close() // best-effort: returning results, close error irrelevant
-				return results, nil
-			}
-		}
-		if scanErr := scanner.Err(); scanErr != nil {
-			slog.Debug("search: scan error", "path", relPath, "err", scanErr)
-		}
-		_ = f.Close() // best-effort: file was only opened for reading
 	}
 	return results, nil
 }

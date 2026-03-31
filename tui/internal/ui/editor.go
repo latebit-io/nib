@@ -119,6 +119,10 @@ type EditorModel struct {
 	// TypingWPM controls the agent typing speed. 0 uses the default (800).
 	TypingWPM int
 
+	// InstantApply skips the character-by-character typing animation and
+	// applies agent edits in one shot. Set via JUNTO_INSTANT_APPLY=1.
+	InstantApply bool
+
 	// cursorMoved is set when the cursor position changes and cleared after
 	// Render. Used to avoid snapping scroll on every frame — only snap when
 	// the cursor actually moved, allowing free scrolling during diff review.

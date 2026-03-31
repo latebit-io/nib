@@ -30,6 +30,13 @@ type AgentError struct{ Err string }
 // AgentStatus updates the agent status display.
 type AgentStatus struct{ Status string }
 
+// AgentToolCall signals the agent is invoking a tool.
+// Emitted before execution so the frontend can show what the agent is doing.
+type AgentToolCall struct {
+	Name string // tool name (e.g. "search_project", "read_file")
+	Args string // raw JSON arguments
+}
+
 // AgentNavigate signals the agent wants to navigate the editor to a location.
 // The frontend handles the actual cursor movement on its own goroutine.
 type AgentNavigate struct {
@@ -40,6 +47,7 @@ type AgentNavigate struct {
 func (AgentToken) eventTag()        {}
 func (AgentEditProposed) eventTag() {}
 func (AgentFileCreated) eventTag()  {}
+func (AgentToolCall) eventTag()     {}
 func (AgentNavigate) eventTag()     {}
 func (AgentDone) eventTag()         {}
 func (AgentError) eventTag()        {}

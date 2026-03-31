@@ -29,6 +29,8 @@ type Manager struct {
 // Compile-time interface checks.
 var _ lang.DocumentSyncer = (*Manager)(nil)
 var _ lang.DiagnosticProvider = (*Manager)(nil)
+var _ lang.ReferenceProvider = (*Manager)(nil)
+var _ lang.SymbolProvider = (*Manager)(nil)
 
 // NewManager creates a Manager that routes to LSP servers based on language.
 // Configs map language IDs to server configurations. The events channel
@@ -299,6 +301,159 @@ func (m *Manager) Complete(ctx context.Context, path string, line, col int) (*la
 // CancelCompletion cancels an in-flight completion request.
 // TODO: implement $/cancelRequest when completion is async.
 func (m *Manager) CancelCompletion() {}
+
+// --- lang.ReferenceProvider ---
+
+// References finds all references to the symbol at the given position.
+func (m *Manager) References(ctx context.Context, path string, line, col int) ([]lang.Location, error) {
+	srv, err := m.serverForPath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	params := struct {
+		TextDocument lspTextDocumentIdentifier `json:"textDocument"`
+		Position     lspPosition               `json:"position"`
+		Context      struct {
+			IncludeDeclaration bool `json:"includeDeclaration"`
+		} `json:"context"`
+	}{
+		TextDocument: lspTextDocumentIdentifier{URI: pathToURI(path)},
+		Position:     srv.toLSPPosition(line, col),
+	}
+	params.Context.IncludeDeclaration = true
+
+	raw, err := srv.transport.Request(ctx, "textDocument/references", params)
+	if err != nil {
+		return nil, fmt.Errorf("references request: %w", err)
+	}
+
+	var locs []lspLocation
+	if err := json.Unmarshal(raw, &locs); err != nil {
+		return nil, fmt.Errorf("references unmarshal: %w", err)
+	}
+
+	const maxReferences = 10000
+	results := make([]lang.Location, 0, min(len(locs), maxReferences))
+	for _, loc := range locs {
+		if len(results) >= maxReferences {
+			break
+		}
+		l, c := srv.fromLSPPosition(loc.Range.Start)
+		results = append(results, lang.Location{
+			Path: uriToPath(loc.URI),
+			Line: l,
+			Col:  c,
+		})
+	}
+	return results, nil
+}
+
+// --- lang.SymbolProvider ---
+
+// WorkspaceSymbols queries all configured language servers for symbols matching
+// a query and merges the results. Lazily starts servers that haven't been
+// started yet (e.g. when no file of that language has been opened).
+func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]lang.SymbolInfo, error) {
+	servers := make([]*Server, 0, len(m.configs))
+	for languageID := range m.configs {
+		if srv := m.serverFor(languageID); srv != nil {
+			servers = append(servers, srv)
+		}
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no LSP server configured")
+	}
+
+	params := struct {
+		Query string `json:"query"`
+	}{Query: query}
+
+	const maxSymbols = 5000
+	results := make([]lang.SymbolInfo, 0, 256)
+	var lastErr error
+	var anySuccess bool
+	for _, srv := range servers {
+		raw, err := srv.transport.Request(ctx, "workspace/symbol", params)
+		if err != nil {
+			slog.Debug("lsp: workspace/symbol request failed", "query", query, "err", err)
+			lastErr = err
+			continue
+		}
+		var symbols []lspSymbolInformation
+		if err := json.Unmarshal(raw, &symbols); err != nil {
+			slog.Debug("lsp: workspace/symbol unmarshal failed", "query", query, "err", err)
+			lastErr = err
+			continue
+		}
+		anySuccess = true
+		for _, sym := range symbols {
+			if len(results) >= maxSymbols {
+				break
+			}
+			l, c := srv.fromLSPPosition(sym.Location.Range.Start)
+			results = append(results, lang.SymbolInfo{
+				Name: sym.Name,
+				Kind: symbolKindToString(sym.Kind),
+				Location: lang.Location{
+					Path: uriToPath(sym.Location.URI),
+					Line: l,
+					Col:  c,
+				},
+			})
+		}
+	}
+	if !anySuccess && lastErr != nil {
+		return nil, fmt.Errorf("workspace/symbol failed on all servers: %w", lastErr)
+	}
+	return results, nil
+}
+
+// lspSymbolInformation is the LSP SymbolInformation type.
+type lspSymbolInformation struct {
+	Name     string      `json:"name"`
+	Kind     int         `json:"kind"`
+	Location lspLocation `json:"location"`
+}
+
+// symbolKindNames maps LSP SymbolKind numbers to human-readable strings.
+// Values per LSP specification: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#symbolKind
+var symbolKindNames = map[int]string{
+	1:  "file",
+	2:  "module",
+	3:  "namespace",
+	4:  "package",
+	5:  "class",
+	6:  "method",
+	7:  "property",
+	8:  "field",
+	9:  "constructor",
+	10: "enum",
+	11: "interface",
+	12: "function",
+	13: "variable",
+	14: "constant",
+	15: "string",
+	16: "number",
+	17: "boolean",
+	18: "array",
+	19: "object",
+	20: "key",
+	21: "null",
+	22: "enum member",
+	23: "struct",
+	24: "event",
+	25: "operator",
+	26: "type parameter",
+}
+
+// symbolKindToString returns a human-readable name for an LSP SymbolKind.
+func symbolKindToString(kind int) string {
+	if name, ok := symbolKindNames[kind]; ok {
+		return name
+	}
+	return "symbol"
+}
 
 // --- Internal ---
 

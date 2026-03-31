@@ -47,6 +47,9 @@ const (
 	ActionGoToDefinition = keymap.ActionGoToDefinition
 	ActionGoBack         = keymap.ActionGoBack
 	ActionHover          = keymap.ActionHover
+	ActionNextBuffer     = keymap.ActionNextBuffer
+	ActionPrevBuffer     = keymap.ActionPrevBuffer
+	ActionFindInProject  = keymap.ActionFindInProject
 )
 
 // keyBinding represents a key combination mapped to an action.
@@ -106,8 +109,13 @@ func DefaultKeymap() *Keymap {
 			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
 
 			// Find
-			{code: 'f', mod: tea.ModCtrl}: ActionFind,
-			{code: 'h', mod: tea.ModCtrl}: ActionFindReplace,
+			{code: 'f', mod: tea.ModCtrl}:                ActionFind,
+			{code: 'h', mod: tea.ModCtrl}:                ActionFindReplace,
+			{code: 'f', mod: tea.ModCtrl | tea.ModShift}: ActionFindInProject,
+
+			// Buffers
+			{code: tea.KeyPgDown, mod: tea.ModCtrl}: ActionNextBuffer,
+			{code: tea.KeyPgUp, mod: tea.ModCtrl}:   ActionPrevBuffer,
 
 			// LSP
 			{code: 't', mod: tea.ModCtrl}: ActionGoBack,

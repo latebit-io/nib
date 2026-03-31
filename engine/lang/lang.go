@@ -64,6 +64,16 @@ type CompletionProvider interface {
 	CancelCompletion()
 }
 
+// ReferenceProvider finds all references to a symbol.
+type ReferenceProvider interface {
+	References(ctx context.Context, path string, line, col int) ([]Location, error)
+}
+
+// SymbolProvider queries workspace-level symbols by name.
+type SymbolProvider interface {
+	WorkspaceSymbols(ctx context.Context, query string) ([]SymbolInfo, error)
+}
+
 // --- Domain types ---
 
 // TextChange represents an incremental edit to a document.
@@ -144,6 +154,13 @@ const (
 	// CompletionSnippet represents a snippet completion.
 	CompletionSnippet
 )
+
+// SymbolInfo represents a workspace symbol (function, type, variable, etc.).
+type SymbolInfo struct {
+	Name string
+	Kind string // "function", "type", "variable", "constant", "method", "package"
+	Location
+}
 
 // IsIdentChar reports whether r is a valid identifier character.
 // Used for scanning the start of partial identifiers during completion.

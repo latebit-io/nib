@@ -330,8 +330,7 @@ func (m *Manager) References(ctx context.Context, path string, line, col int) ([
 
 	var locs []lspLocation
 	if err := json.Unmarshal(raw, &locs); err != nil {
-		slog.Debug("lsp: references unmarshal failed", "err", err)
-		return nil, nil
+		return nil, fmt.Errorf("references unmarshal: %w", err)
 	}
 
 	results := make([]lang.Location, 0, len(locs))
@@ -365,19 +364,26 @@ func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]lang.Sy
 		Query string `json:"query"`
 	}{Query: query}
 
-	var results []lang.SymbolInfo
+	const maxSymbols = 5000
+	results := make([]lang.SymbolInfo, 0, 256)
+	var lastErr error
+	var anySuccess bool
 	for _, srv := range servers {
 		raw, err := srv.transport.Request(ctx, "workspace/symbol", params)
 		if err != nil {
-			slog.Debug("lsp: workspace/symbol request failed", "err", err)
+			lastErr = err
 			continue
 		}
 		var symbols []lspSymbolInformation
 		if err := json.Unmarshal(raw, &symbols); err != nil {
-			slog.Debug("lsp: workspace/symbol unmarshal failed", "err", err)
+			lastErr = err
 			continue
 		}
+		anySuccess = true
 		for _, sym := range symbols {
+			if len(results) >= maxSymbols {
+				break
+			}
 			l, c := srv.fromLSPPosition(sym.Location.Range.Start)
 			results = append(results, lang.SymbolInfo{
 				Name: sym.Name,
@@ -390,6 +396,9 @@ func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]lang.Sy
 			})
 		}
 	}
+	if !anySuccess && lastErr != nil {
+		return nil, fmt.Errorf("workspace/symbol failed on all servers: %w", lastErr)
+	}
 	return results, nil
 }
 
@@ -401,12 +410,15 @@ type lspSymbolInformation struct {
 }
 
 // symbolKindNames maps LSP SymbolKind numbers to human-readable strings.
+// Values per LSP specification: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#symbolKind
 var symbolKindNames = map[int]string{
+	1:  "file",
 	2:  "module",
 	3:  "namespace",
 	4:  "package",
 	5:  "class",
 	6:  "method",
+	7:  "property",
 	8:  "field",
 	9:  "constructor",
 	10: "enum",
@@ -415,13 +427,17 @@ var symbolKindNames = map[int]string{
 	13: "variable",
 	14: "constant",
 	15: "string",
-	17: "array",
+	16: "number",
+	17: "boolean",
+	18: "array",
 	19: "object",
-	22: "struct",
-	23: "event",
-	24: "operator",
-	25: "type parameter",
-	26: "type",
+	20: "key",
+	21: "null",
+	22: "enum member",
+	23: "struct",
+	24: "event",
+	25: "operator",
+	26: "type parameter",
 }
 
 // symbolKindToString returns a human-readable name for an LSP SymbolKind.

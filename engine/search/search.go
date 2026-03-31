@@ -6,6 +6,7 @@ package search
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -162,7 +163,7 @@ func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
 // searchGoNative walks the project and searches each file line by line.
 func searchGoNative(root, pattern string, opts Options) ([]Result, error) {
 	files, err := filelist.Walk(root)
-	if err != nil && err != filelist.ErrCapped {
+	if err != nil && !errors.Is(err, filelist.ErrCapped) {
 		return nil, fmt.Errorf("walk: %w", err)
 	}
 
@@ -202,6 +203,7 @@ func searchGoNative(root, pattern string, opts Options) ([]Result, error) {
 		absPath := filepath.Join(root, relPath)
 		f, openErr := os.Open(absPath)
 		if openErr != nil {
+			slog.Debug("search: skip file", "path", relPath, "err", openErr)
 			continue
 		}
 

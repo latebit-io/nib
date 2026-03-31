@@ -290,6 +290,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 
 		for _, tc := range toolCalls {
 			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
+			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
 			result := a.dispatchTool(ctx, tc)
 			if ctx.Err() != nil {
 				return

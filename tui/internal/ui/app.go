@@ -360,6 +360,8 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 	switch e := ev.(type) {
 	case event.AgentToken:
 		m.AgentPane.AppendToken(e.Text)
+	case event.AgentToolCall:
+		m.AgentPane.AppendMeta("\n> " + e.Name + "\n")
 	case event.AgentStatus:
 		m.AgentPane.Status = e.Status
 	case event.AgentEditProposed:
@@ -374,11 +376,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		// and we rebuild the EditorModel to render the correct buffer.
 		diff, switched := m.Session.ReviewEdit()
 		if switched {
-			wpm := m.Editor.TypingWPM
-			m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
-			m.Editor.TypingWPM = wpm
-			m.Editor.OnSave = func() { m.Session.NotifySaved() }
-			m.Regions.ReplacePane("editor", m.Editor)
+			m.rebuildEditorModel()
 			m.refreshDiagnostics(m.Session.ActiveFile())
 		}
 		if diff != nil {
@@ -1060,6 +1058,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 			m.Session.AbortApproval()
 			return nil
 		}
+		m.AgentPane.AppendMeta("[applied]\n")
 		m.Session.CompleteApproval()
 		m.Session.Continue()
 		m.AgentPane.Status = "waiting"

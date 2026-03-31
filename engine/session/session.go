@@ -509,6 +509,47 @@ func (s *Session) ModifiedFiles() []string {
 	return modified
 }
 
+// SaveDirtyBuffers writes all modified (unsaved) buffers to disk and
+// notifies the language service of each save. Returns the canonical
+// paths of files that were successfully saved. Called by the agent
+// before tool execution so it always sees the developer's latest edits.
+func (s *Session) SaveDirtyBuffers() ([]string, error) {
+	s.mu.RLock()
+	// Snapshot dirty editors under read lock — Save() does I/O so we
+	// don't want to hold the lock through os.WriteFile.
+	type dirty struct {
+		canon string
+		ed    *editor.Editor
+	}
+	var toSave []dirty
+	for path, e := range s.editors {
+		if e.Buf.Modified {
+			toSave = append(toSave, dirty{canon: path, ed: e})
+		}
+	}
+	s.mu.RUnlock()
+
+	var saved []string
+	var firstErr error
+	for _, d := range toSave {
+		if err := d.ed.Save(); err != nil {
+			slog.Warn("autosave failed", "path", d.canon, "err", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		saved = append(saved, d.canon)
+		if s.langSyncer != nil {
+			s.langSyncer.DidSave(d.canon)
+		}
+	}
+	if len(saved) > 0 {
+		slog.Debug("autosaved dirty buffers", "count", len(saved), "paths", saved)
+	}
+	return saved, firstErr
+}
+
 // EditorForPath returns the editor for a given path, or nil if not open.
 func (s *Session) EditorForPath(path string) *editor.Editor {
 	s.mu.RLock()

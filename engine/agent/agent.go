@@ -18,12 +18,13 @@ import (
 
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
-	provider llm.Provider
-	events   chan<- event.Event // frontend reads from this
-	tools    map[string]Tool
-	toolDefs []llm.ToolDef
-	cache    *FileCache
-	prompts  *PromptLoader
+	provider  llm.Provider
+	events    chan<- event.Event // frontend reads from this
+	tools     map[string]Tool
+	toolDefs  []llm.ToolDef
+	cache     *FileCache
+	prompts   *PromptLoader
+	workspace Workspace
 
 	mu         sync.Mutex
 	cancel     context.CancelFunc
@@ -64,6 +65,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		provider:   provider,
 		events:     events,
 		cache:      cache,
+		workspace:  workspace,
 		prompts:    NewPromptLoader(projectRoot),
 		approveCh:  approveCh,
 		continueCh: continueCh,
@@ -288,6 +290,8 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 			break
 		}
 
+		a.flushDirtyBuffers()
+
 		for _, tc := range toolCalls {
 			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
 			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
@@ -301,6 +305,23 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 				Content:    result,
 			})
 		}
+	}
+}
+
+// flushDirtyBuffers saves any unsaved editor buffers to disk and
+// invalidates the corresponding cache entries so subsequent tool
+// reads see the developer's latest edits.
+func (a *Agent) flushDirtyBuffers() {
+	saver, ok := a.workspace.(BufferSaver)
+	if !ok {
+		return
+	}
+	saved, err := saver.SaveDirtyBuffers()
+	if err != nil {
+		slog.Warn("autosave before tool dispatch failed", "err", err)
+	}
+	for _, p := range saved {
+		a.cache.Invalidate(p)
 	}
 }
 

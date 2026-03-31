@@ -119,6 +119,10 @@ type EditorModel struct {
 	// TypingWPM controls the agent typing speed. 0 uses the default (800).
 	TypingWPM int
 
+	// InstantApply skips the character-by-character typing animation and
+	// applies agent edits in one shot. Set via JUNTO_INSTANT_APPLY=1.
+	InstantApply bool
+
 	// cursorMoved is set when the cursor position changes and cleared after
 	// Render. Used to avoid snapping scroll on every frame — only snap when
 	// the cursor actually moved, allowing free scrolling during diff review.
@@ -135,6 +139,11 @@ type EditorModel struct {
 	// OnSave is called after a successful buffer save. Used by AppModel
 	// to notify the session (and language service) of saves. nil-safe.
 	OnSave func()
+
+	// tabTitle is the pre-built tab bar string set by AppModel before render.
+	// Shows all open buffers: "main.go | session.go* | agent.go"
+	// Active file is marked with brackets, modified files get *.
+	tabTitle string
 
 	// diagnostics holds the current set of diagnostics for this file.
 	// Set via SetDiagnostics which also builds the per-line lookup map.
@@ -218,8 +227,12 @@ func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
 	return m.diagByLine[line]
 }
 
-// Title returns the filename for display in the pane border. Implements Titled.
+// Title returns the tab bar string for display in the pane border.
+// When multiple buffers are open, shows all tabs. Implements Titled.
 func (m *EditorModel) Title() string {
+	if m.tabTitle != "" {
+		return m.tabTitle
+	}
 	name := m.eng.Buf.Path
 	if name == "" {
 		return "[new]"

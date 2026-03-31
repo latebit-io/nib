@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -78,16 +79,18 @@ type AppModel struct {
 	Regions *RegionManager
 
 	// TUI-only state
-	Dialog      DialogModel
-	Palette     PaletteModel
-	Help        HelpModel
-	recentMouse bool // tracks leaked CSI prefix from unparsed mouse events
-	Services    *Services
-	Keymap      *Keymap
-	Quit        bool
-	Width       int
-	Height      int
-	program     *tea.Program
+	Dialog        DialogModel
+	Palette       PaletteModel
+	Help          HelpModel
+	SearchOverlay SearchOverlayModel
+	recentMouse   bool // tracks leaked CSI prefix from unparsed mouse events
+	tabTitleDirty bool // set when open files change; cleared after tab title rebuild
+	Services      *Services
+	Keymap        *Keymap
+	Quit          bool
+	Width         int
+	Height        int
+	program       *tea.Program
 }
 
 // SetProgram sets the tea.Program reference.
@@ -101,6 +104,9 @@ func NewApp(sess *session.Session) AppModel {
 	svc := NewServices()
 
 	editorPane := NewEditorModel(sess.Editor, km, svc)
+	// OnSave is rewired in rebuildEditorModel to include tabTitleDirty.
+	// This initial version is sufficient for the first editor before any
+	// file switches occur.
 	editorPane.OnSave = func() { sess.NotifySaved() }
 	agentPane := NewAgentPaneModel(svc)
 	agentPane.HasAgent = sess.HasAgent()
@@ -120,6 +126,10 @@ func NewApp(sess *session.Session) AppModel {
 		Regions:     rm,
 		Services:    svc,
 		Keymap:      km,
+		SearchOverlay: SearchOverlayModel{
+			ProjectRoot: sess.ProjectRoot(),
+		},
+		tabTitleDirty: true,
 	}
 }
 
@@ -162,6 +172,29 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPressMsg:
 			cmd := m.Palette.Update(typed)
 			return m, cmd
+		case tea.MouseMsg:
+			return m, nil
+		}
+	}
+
+	// Search overlay is modal — captures all input when active
+	if m.SearchOverlay.Active {
+		switch typed := msg.(type) {
+		case tea.KeyPressMsg:
+			cmd := m.SearchOverlay.Update(typed)
+			return m, cmd
+		case searchResultMsg:
+			cmd := m.SearchOverlay.Update(typed)
+			return m, cmd
+		case SearchOpenFileMsg:
+			m.SearchOverlay.Close()
+			model, cmd := m.openFile(filepath.Join(m.Session.ProjectRoot(), typed.Path))
+			if cmd == nil {
+				// Navigate to the specific line.
+				m.Editor.eng.MoveCursorTo(typed.Line-1, 0)
+				m.Editor.eng.EnsureCursorVisible()
+			}
+			return model, cmd
 		case tea.MouseMsg:
 			return m, nil
 		}
@@ -217,6 +250,24 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PaletteResultMsg:
 		if !msg.Cancelled && msg.Category == "file" {
 			return m.openFile(msg.Item.Value)
+		}
+		return m, nil
+
+	// Search result — user selected a file:line from project search.
+	// Reachable if the overlay closes before the message is delivered.
+	case SearchOpenFileMsg:
+		model, cmd := m.openFile(filepath.Join(m.Session.ProjectRoot(), msg.Path))
+		if cmd == nil {
+			m.Editor.eng.MoveCursorTo(msg.Line-1, 0)
+			m.Editor.eng.EnsureCursorVisible()
+		}
+		return model, cmd
+
+	// Async search results — forward to overlay if still active.
+	case searchResultMsg:
+		if m.SearchOverlay.Active {
+			cmd := m.SearchOverlay.Update(msg)
+			return m, cmd
 		}
 		return m, nil
 
@@ -497,6 +548,11 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionToggleProject:
 		return m.handleToggleProject()
 
+	case ActionNextBuffer:
+		return m.switchBuffer(1)
+	case ActionPrevBuffer:
+		return m.switchBuffer(-1)
+
 	case ActionOpenPalette:
 		if root := m.Session.ProjectRoot(); root != "" {
 			return m, func() tea.Msg {
@@ -525,6 +581,10 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionHover:
 		return m.handleHover()
+
+	case ActionFindInProject:
+		m.SearchOverlay.Open()
+		return m, nil
 
 	case ActionFind:
 		m.Regions.FocusByName("editor")
@@ -568,6 +628,8 @@ func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) View() tea.View {
+	m.updateTabTitle()
+
 	var content string
 	if m.Width == 0 || m.Height == 0 {
 		content = "Initializing..."
@@ -579,6 +641,8 @@ func (m *AppModel) View() tea.View {
 			content = m.Help.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Palette.Active {
 			content = m.Palette.RenderOverlay(base, m.Width, m.Height)
+		} else if m.SearchOverlay.Active {
+			content = m.SearchOverlay.RenderOverlay(base, m.Width, m.Height)
 		} else {
 			content = base
 		}
@@ -588,6 +652,80 @@ func (m *AppModel) View() tea.View {
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	return v
+}
+
+// updateTabTitle builds the tab bar string from the session's open files.
+// Only rebuilds when tabTitleDirty is set (after file open/close/save).
+// Format: "main.go | session.go* | agent.go" with the active file in brackets.
+func (m *AppModel) updateTabTitle() {
+	if !m.tabTitleDirty {
+		return
+	}
+	m.tabTitleDirty = false
+
+	openFiles := m.Session.OpenFiles()
+	if len(openFiles) <= 1 {
+		// Single file or no file — use the default Title() path.
+		m.Editor.tabTitle = ""
+		return
+	}
+
+	activeFile := m.Session.ActiveFile()
+	modifiedSet := make(map[string]bool)
+	for _, p := range m.Session.ModifiedFiles() {
+		modifiedSet[p] = true
+	}
+
+	// Sort for stable ordering.
+	sort.Strings(openFiles)
+
+	var parts []string
+	for _, path := range openFiles {
+		name := filepath.Base(path)
+		if modifiedSet[path] {
+			name += "*"
+		}
+		if path == activeFile {
+			name = "[" + name + "]"
+		}
+		parts = append(parts, name)
+	}
+	m.Editor.tabTitle = strings.Join(parts, " | ")
+}
+
+// rebuildEditorModel creates a new EditorModel from the session's active
+// editor, preserving TUI-specific settings (TypingWPM, InstantApply).
+func (m *AppModel) rebuildEditorModel() {
+	wpm := m.Editor.TypingWPM
+	instantApply := m.Editor.InstantApply
+	m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
+	m.Editor.TypingWPM = wpm
+	m.Editor.InstantApply = instantApply
+	m.Editor.OnSave = func() {
+		m.Session.NotifySaved()
+		m.tabTitleDirty = true
+	}
+	m.Regions.ReplacePane("editor", m.Editor)
+	m.tabTitleDirty = true
+}
+
+// switchBuffer cycles through open buffers by delta (+1 next, -1 prev).
+func (m *AppModel) switchBuffer(delta int) (tea.Model, tea.Cmd) {
+	files := m.Session.OpenFiles()
+	if len(files) <= 1 {
+		return m, nil
+	}
+	sort.Strings(files)
+	active := m.Session.ActiveFile()
+	idx := 0
+	for i, f := range files {
+		if f == active {
+			idx = i
+			break
+		}
+	}
+	next := (idx + delta + len(files)) % len(files)
+	return m.openFile(files[next])
 }
 
 // translateMouseMsg creates a new mouse message with translated coordinates.
@@ -623,13 +761,7 @@ func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
 	m.cancelAnimation()
 
 	// Rebuild EditorModel with the new active editor from session.
-	wpm := m.Editor.TypingWPM
-	m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
-	m.Editor.TypingWPM = wpm
-	m.Editor.OnSave = func() { m.Session.NotifySaved() }
-
-	// Update region manager's pane reference and apply size.
-	m.Regions.ReplacePane("editor", m.Editor)
+	m.rebuildEditorModel()
 
 	slog.Debug("file opened", "path", path)
 	m.refreshDiagnostics(m.Session.ActiveFile())
@@ -744,11 +876,7 @@ func (m *AppModel) applyGoToDefinition(msg goToDefResultMsg) (tea.Model, tea.Cmd
 
 	// Rebuild EditorModel if session switched files.
 	if m.Session.Editor != m.Editor.eng {
-		wpm := m.Editor.TypingWPM
-		m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
-		m.Editor.TypingWPM = wpm
-		m.Editor.OnSave = func() { m.Session.NotifySaved() }
-		m.Regions.ReplacePane("editor", m.Editor)
+		m.rebuildEditorModel()
 		m.refreshDiagnostics(m.Session.ActiveFile())
 	}
 
@@ -766,11 +894,7 @@ func (m *AppModel) handleGoBack() (tea.Model, tea.Cmd) {
 
 	// Session may have switched files — rebuild EditorModel if needed.
 	if m.Session.Editor != m.Editor.eng {
-		wpm := m.Editor.TypingWPM
-		m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
-		m.Editor.TypingWPM = wpm
-		m.Editor.OnSave = func() { m.Session.NotifySaved() }
-		m.Regions.ReplacePane("editor", m.Editor)
+		m.rebuildEditorModel()
 		m.refreshDiagnostics(m.Session.ActiveFile())
 	}
 
@@ -890,6 +1014,7 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 // refreshProjectPane rebuilds the project pane if visible, or marks it
 // dirty for deferred rebuild when the pane is next shown.
 func (m *AppModel) refreshProjectPane() {
+	m.tabTitleDirty = true
 	if m.ProjectPane == nil {
 		return
 	}
@@ -975,6 +1100,23 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	}
 	m.Editor.eng.ScrollOffset = target
 	m.Editor.eng.ClampScroll()
+
+	// Instant-apply: skip animation, apply the full edit atomically,
+	// and auto-continue so the agent proceeds without Ctrl+N.
+	if m.Editor.InstantApply {
+		ok, reason := m.Editor.eng.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
+		if !ok {
+			slog.Warn("instant apply failed", "reason", reason)
+			m.AgentPane.AppendText("\n[instant apply failed: " + reason + "]\n")
+			m.Session.AbortApproval()
+			return nil
+		}
+		m.Session.CompleteApproval()
+		m.Session.Continue()
+		m.AgentPane.Status = "waiting"
+		m.refreshProjectPane()
+		return nil
+	}
 
 	// Engine handles undo group, deletion, position tracking, and per-tick
 	// advancement. TUI only owns the tick schedule and visual state.
@@ -1095,6 +1237,8 @@ func (m *AppModel) yieldAnimation() tea.Cmd {
 }
 
 // finishAnimation closes the undo group and signals the agent.
+// When InstantApply is enabled, also auto-continues so the developer
+// doesn't need to press Ctrl+N after each edit.
 func (m *AppModel) finishAnimation() tea.Cmd {
 	anim := m.Editor.Anim
 	if anim == nil {
@@ -1102,10 +1246,17 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	}
 
 	anim.edit.Complete()
-	anim.state = animWaiting
-	m.AgentPane.Status = "editing"
 	m.Session.CompleteApproval()
 	m.refreshProjectPane()
+
+	if m.Editor.InstantApply {
+		m.Session.Continue()
+		m.Editor.Anim = nil
+		m.AgentPane.Status = "waiting"
+	} else {
+		anim.state = animWaiting
+		m.AgentPane.Status = "editing"
+	}
 
 	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)

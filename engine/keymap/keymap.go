@@ -53,8 +53,13 @@ const (
 	ActionFocusAgent
 
 	// Find
-	ActionFind        // Open find bar
-	ActionFindReplace // Open find bar with replace mode
+	ActionFind          // Open find bar
+	ActionFindReplace   // Open find bar with replace mode
+	ActionFindInProject // Open project-wide search (Ctrl+Shift+F)
+
+	// Buffers
+	ActionNextBuffer // Switch to the next open buffer
+	ActionPrevBuffer // Switch to the previous open buffer
 
 	// LSP
 	ActionGoToDefinition
@@ -73,6 +78,7 @@ const (
 	CatAgent      Category = "Agent"
 	CatView       Category = "View"
 	CatFind       Category = "Find"
+	CatBuffers    Category = "Buffers"
 	CatLSP        Category = "Code Intelligence"
 )
 
@@ -134,6 +140,11 @@ func DefaultBindings() []Binding {
 		// Find
 		{ActionFind, "Find in file", []string{"Ctrl+F"}, CatFind},
 		{ActionFindReplace, "Find and replace", []string{"Ctrl+H"}, CatFind},
+		{ActionFindInProject, "Find in project", []string{"Ctrl+Shift+F"}, CatFind},
+
+		// Buffers
+		{ActionNextBuffer, "Next buffer", []string{"Ctrl+PageDown"}, CatBuffers},
+		{ActionPrevBuffer, "Previous buffer", []string{"Ctrl+PageUp"}, CatBuffers},
 
 		// Code Intelligence
 		{ActionGoToDefinition, "Go to definition", []string{"F12"}, CatLSP},
@@ -151,6 +162,7 @@ func CategoryOrder() []Category {
 		CatFile,
 		CatAgent,
 		CatView,
+		CatBuffers,
 		CatFind,
 		CatLSP,
 	}

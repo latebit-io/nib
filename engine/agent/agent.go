@@ -89,6 +89,19 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	// Navigation tool — always available, sends events to the frontend.
 	builtins = append(builtins, NewGoToLineTool(workspace, a.send))
 
+	// Project-wide search — ripgrep with Go fallback.
+	builtins = append(builtins, NewSearchProjectTool(projectRoot))
+
+	// LSP-powered tools — conditionally registered via type assertion.
+	if diagProvider != nil {
+		if rp, ok := diagProvider.(lang.ReferenceProvider); ok {
+			builtins = append(builtins, NewFindReferencesTool(workspace, rp))
+		}
+		if sp, ok := diagProvider.(lang.SymbolProvider); ok {
+			builtins = append(builtins, NewWorkspaceSymbolsTool(workspace, sp))
+		}
+	}
+
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))
 	a.toolDefs = make([]llm.ToolDef, 0, len(builtins)+len(extraTools))
 

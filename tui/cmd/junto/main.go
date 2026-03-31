@@ -142,6 +142,10 @@ func run() error {
 			app.Editor.TypingWPM = wpm
 		}
 	}
+	// Instant-apply mode: skip typing animation, apply edits atomically.
+	if os.Getenv("JUNTO_INSTANT_APPLY") == "1" {
+		app.Editor.InstantApply = true
+	}
 	p := tea.NewProgram(&app,
 		tea.WithoutSignalHandler(), // let Ctrl+C reach us as a key event
 	)

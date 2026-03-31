@@ -400,36 +400,36 @@ type lspSymbolInformation struct {
 	Location lspLocation `json:"location"`
 }
 
-// symbolKindToString maps LSP SymbolKind numbers to human-readable strings.
+// symbolKindNames maps LSP SymbolKind numbers to human-readable strings.
+var symbolKindNames = map[int]string{
+	2:  "module",
+	3:  "namespace",
+	4:  "package",
+	5:  "class",
+	6:  "method",
+	8:  "field",
+	9:  "constructor",
+	10: "enum",
+	11: "interface",
+	12: "function",
+	13: "variable",
+	14: "constant",
+	15: "string",
+	17: "array",
+	19: "object",
+	22: "struct",
+	23: "event",
+	24: "operator",
+	25: "type parameter",
+	26: "type",
+}
+
+// symbolKindToString returns a human-readable name for an LSP SymbolKind.
 func symbolKindToString(kind int) string {
-	switch kind {
-	case 2:
-		return "module"
-	case 5:
-		return "class"
-	case 6:
-		return "method"
-	case 9:
-		return "constructor"
-	case 11:
-		return "interface"
-	case 12:
-		return "function"
-	case 13:
-		return "variable"
-	case 14:
-		return "constant"
-	case 15:
-		return "string"
-	case 22:
-		return "struct"
-	case 23:
-		return "event"
-	case 26:
-		return "type"
-	default:
-		return "symbol"
+	if name, ok := symbolKindNames[kind]; ok {
+		return name
 	}
+	return "symbol"
 }
 
 // --- Internal ---

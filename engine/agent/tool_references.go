@@ -91,5 +91,9 @@ func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) str
 		}
 		fmt.Fprintf(&sb, "%s:%d:%d\n", relPath, loc.Line+1, loc.Col)
 	}
-	return sb.String()
+	out := sb.String()
+	if len(out) > maxContentPreview {
+		out = out[:maxContentPreview] + "\n... (truncated)"
+	}
+	return out
 }

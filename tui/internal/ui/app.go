@@ -84,7 +84,6 @@ type AppModel struct {
 	Help          HelpModel
 	SearchOverlay SearchOverlayModel
 	recentMouse   bool // tracks leaked CSI prefix from unparsed mouse events
-	tabTitleDirty bool // set when open files change; cleared after tab title rebuild
 	Services      *Services
 	Keymap        *Keymap
 	Quit          bool
@@ -104,9 +103,6 @@ func NewApp(sess *session.Session) AppModel {
 	svc := NewServices()
 
 	editorPane := NewEditorModel(sess.Editor, km, svc)
-	// OnSave is rewired in rebuildEditorModel to include tabTitleDirty.
-	// This initial version is sufficient for the first editor before any
-	// file switches occur.
 	editorPane.OnSave = func() { sess.NotifySaved() }
 	agentPane := NewAgentPaneModel(svc)
 	agentPane.HasAgent = sess.HasAgent()
@@ -129,7 +125,6 @@ func NewApp(sess *session.Session) AppModel {
 		SearchOverlay: SearchOverlayModel{
 			ProjectRoot: sess.ProjectRoot(),
 		},
-		tabTitleDirty: true,
 	}
 }
 
@@ -628,8 +623,6 @@ func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) View() tea.View {
-	m.updateTabTitle()
-
 	var content string
 	if m.Width == 0 || m.Height == 0 {
 		content = "Initializing..."
@@ -654,45 +647,6 @@ func (m *AppModel) View() tea.View {
 	return v
 }
 
-// updateTabTitle builds the tab bar string from the session's open files.
-// Only rebuilds when tabTitleDirty is set (after file open/close/save).
-// Format: "main.go | session.go* | agent.go" with the active file in brackets.
-func (m *AppModel) updateTabTitle() {
-	if !m.tabTitleDirty {
-		return
-	}
-	m.tabTitleDirty = false
-
-	openFiles := m.Session.OpenFiles()
-	if len(openFiles) <= 1 {
-		// Single file or no file — use the default Title() path.
-		m.Editor.tabTitle = ""
-		return
-	}
-
-	activeFile := m.Session.ActiveFile()
-	modifiedSet := make(map[string]bool)
-	for _, p := range m.Session.ModifiedFiles() {
-		modifiedSet[p] = true
-	}
-
-	// Sort for stable ordering.
-	sort.Strings(openFiles)
-
-	var parts []string
-	for _, path := range openFiles {
-		name := filepath.Base(path)
-		if modifiedSet[path] {
-			name += "*"
-		}
-		if path == activeFile {
-			name = "[" + name + "]"
-		}
-		parts = append(parts, name)
-	}
-	m.Editor.tabTitle = strings.Join(parts, " | ")
-}
-
 // rebuildEditorModel creates a new EditorModel from the session's active
 // editor, preserving TUI-specific settings (TypingWPM, InstantApply).
 func (m *AppModel) rebuildEditorModel() {
@@ -701,12 +655,8 @@ func (m *AppModel) rebuildEditorModel() {
 	m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
 	m.Editor.TypingWPM = wpm
 	m.Editor.InstantApply = instantApply
-	m.Editor.OnSave = func() {
-		m.Session.NotifySaved()
-		m.tabTitleDirty = true
-	}
+	m.Editor.OnSave = func() { m.Session.NotifySaved() }
 	m.Regions.ReplacePane("editor", m.Editor)
-	m.tabTitleDirty = true
 }
 
 // switchBuffer cycles through open buffers by delta (+1 next, -1 prev).
@@ -1014,7 +964,6 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 // refreshProjectPane rebuilds the project pane if visible, or marks it
 // dirty for deferred rebuild when the pane is next shown.
 func (m *AppModel) refreshProjectPane() {
-	m.tabTitleDirty = true
 	if m.ProjectPane == nil {
 		return
 	}
@@ -1237,8 +1186,6 @@ func (m *AppModel) yieldAnimation() tea.Cmd {
 }
 
 // finishAnimation closes the undo group and signals the agent.
-// When InstantApply is enabled, also auto-continues so the developer
-// doesn't need to press Ctrl+N after each edit.
 func (m *AppModel) finishAnimation() tea.Cmd {
 	anim := m.Editor.Anim
 	if anim == nil {
@@ -1249,14 +1196,8 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	m.Session.CompleteApproval()
 	m.refreshProjectPane()
 
-	if m.Editor.InstantApply {
-		m.Session.Continue()
-		m.Editor.Anim = nil
-		m.AgentPane.Status = "waiting"
-	} else {
-		anim.state = animWaiting
-		m.AgentPane.Status = "editing"
-	}
+	anim.state = animWaiting
+	m.AgentPane.Status = "editing"
 
 	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)

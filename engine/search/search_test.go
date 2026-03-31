@@ -74,6 +74,14 @@ func TestSearch_GoNative_Regex(t *testing.T) {
 	}
 }
 
+func TestSearch_GoNative_InvalidRegex(t *testing.T) {
+	dir := setupTestDir(t)
+	_, err := searchGoNative(dir, "[invalid", Options{Regex: true})
+	if err == nil {
+		t.Error("expected error for invalid regex")
+	}
+}
+
 func TestSearch_GoNative_FileGlob(t *testing.T) {
 	dir := setupTestDir(t)
 

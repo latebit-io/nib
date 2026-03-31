@@ -140,11 +140,6 @@ type EditorModel struct {
 	// to notify the session (and language service) of saves. nil-safe.
 	OnSave func()
 
-	// tabTitle is the pre-built tab bar string set by AppModel before render.
-	// Shows all open buffers: "main.go | session.go* | agent.go"
-	// Active file is marked with brackets, modified files get *.
-	tabTitle string
-
 	// diagnostics holds the current set of diagnostics for this file.
 	// Set via SetDiagnostics which also builds the per-line lookup map.
 	diagnostics []lang.Diagnostic
@@ -227,12 +222,8 @@ func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
 	return m.diagByLine[line]
 }
 
-// Title returns the tab bar string for display in the pane border.
-// When multiple buffers are open, shows all tabs. Implements Titled.
+// Title returns the filename for display in the pane border. Implements Titled.
 func (m *EditorModel) Title() string {
-	if m.tabTitle != "" {
-		return m.tabTitle
-	}
 	name := m.eng.Buf.Path
 	if name == "" {
 		return "[new]"

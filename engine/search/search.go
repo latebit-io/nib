@@ -5,7 +5,6 @@ package search
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -80,8 +79,8 @@ type rgJSON struct {
 	} `json:"data"`
 }
 
-// searchRipgrep shells out to rg --json for structured results.
-func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
+// rgArgs builds the ripgrep command-line arguments for a search.
+func rgArgs(pattern string, opts Options) []string {
 	args := []string{
 		"--json",
 		"--max-count", fmt.Sprintf("%d", opts.maxResults()),
@@ -95,25 +94,28 @@ func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
 	if opts.FileGlob != "" {
 		args = append(args, "--glob", opts.FileGlob)
 	}
-	args = append(args, "--", pattern)
+	return append(args, "--", pattern)
+}
 
-	cmd := exec.Command("rg", args...)
+// searchRipgrep shells out to rg --json for structured results.
+func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
+	cmd := exec.Command("rg", rgArgs(pattern, opts)...)
 	cmd.Dir = root
 
-	out, err := cmd.Output()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		// rg exits 1 when no matches — that's not an error.
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("rg: %w", err)
+		return nil, fmt.Errorf("rg: stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("rg: start: %w", err)
 	}
 
 	var results []Result
-	scanner := bufio.NewScanner(bytes.NewReader(out))
+	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		var entry rgJSON
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			slog.Debug("search: rg json parse error", "err", err)
 			continue
 		}
 		if entry.Type != "match" {
@@ -132,6 +134,23 @@ func searchRipgrep(root, pattern string, opts Options) ([]Result, error) {
 		if len(results) >= opts.maxResults() {
 			break
 		}
+	}
+
+	// Kill rg if we stopped early (maxResults reached before EOF).
+	// Then wait to reap the process — ignore exit errors from the kill.
+	_ = cmd.Process.Kill() // no-op if already exited
+	waitErr := cmd.Wait()
+
+	// rg exits 1 when no matches — that's not an error.
+	if waitErr != nil {
+		if exitErr, ok := waitErr.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return results, nil
+		}
+		// Exit from our kill is also not an error.
+		if len(results) > 0 {
+			return results, nil
+		}
+		return nil, fmt.Errorf("rg: %w", waitErr)
 	}
 	if err := scanner.Err(); err != nil {
 		return results, fmt.Errorf("scan rg output: %w", err)
@@ -170,7 +189,10 @@ func searchGoNative(root, pattern string, opts Options) ([]Result, error) {
 
 	for _, relPath := range files {
 		if opts.FileGlob != "" {
-			matched, _ := filepath.Match(opts.FileGlob, filepath.Base(relPath))
+			matched, matchErr := filepath.Match(opts.FileGlob, filepath.Base(relPath))
+			if matchErr != nil {
+				return nil, fmt.Errorf("invalid file glob %q: %w", opts.FileGlob, matchErr)
+			}
 			if !matched {
 				continue
 			}

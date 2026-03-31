@@ -348,17 +348,16 @@ func (m *Manager) References(ctx context.Context, path string, line, col int) ([
 
 // --- lang.SymbolProvider ---
 
-// WorkspaceSymbols queries the language server for symbols matching a query.
+// WorkspaceSymbols queries all running language servers for symbols matching a query
+// and merges the results.
 func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]lang.SymbolInfo, error) {
-	// Use any available server — workspace/symbol is project-wide.
 	m.mu.RLock()
-	var srv *Server
+	servers := make([]*Server, 0, len(m.servers))
 	for _, s := range m.servers {
-		srv = s
-		break
+		servers = append(servers, s)
 	}
 	m.mu.RUnlock()
-	if srv == nil {
+	if len(servers) == 0 {
 		return nil, fmt.Errorf("no LSP server available")
 	}
 
@@ -366,29 +365,30 @@ func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]lang.Sy
 		Query string `json:"query"`
 	}{Query: query}
 
-	raw, err := srv.transport.Request(ctx, "workspace/symbol", params)
-	if err != nil {
-		return nil, fmt.Errorf("workspace/symbol request: %w", err)
-	}
-
-	var symbols []lspSymbolInformation
-	if err := json.Unmarshal(raw, &symbols); err != nil {
-		slog.Debug("lsp: workspace/symbol unmarshal failed", "err", err)
-		return nil, nil
-	}
-
-	results := make([]lang.SymbolInfo, 0, len(symbols))
-	for _, sym := range symbols {
-		l, c := srv.fromLSPPosition(sym.Location.Range.Start)
-		results = append(results, lang.SymbolInfo{
-			Name: sym.Name,
-			Kind: symbolKindToString(sym.Kind),
-			Location: lang.Location{
-				Path: uriToPath(sym.Location.URI),
-				Line: l,
-				Col:  c,
-			},
-		})
+	var results []lang.SymbolInfo
+	for _, srv := range servers {
+		raw, err := srv.transport.Request(ctx, "workspace/symbol", params)
+		if err != nil {
+			slog.Debug("lsp: workspace/symbol request failed", "err", err)
+			continue
+		}
+		var symbols []lspSymbolInformation
+		if err := json.Unmarshal(raw, &symbols); err != nil {
+			slog.Debug("lsp: workspace/symbol unmarshal failed", "err", err)
+			continue
+		}
+		for _, sym := range symbols {
+			l, c := srv.fromLSPPosition(sym.Location.Range.Start)
+			results = append(results, lang.SymbolInfo{
+				Name: sym.Name,
+				Kind: symbolKindToString(sym.Kind),
+				Location: lang.Location{
+					Path: uriToPath(sym.Location.URI),
+					Line: l,
+					Col:  c,
+				},
+			})
+		}
 	}
 	return results, nil
 }

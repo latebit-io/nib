@@ -83,6 +83,7 @@ type rgJSON struct {
 func rgArgs(pattern string, opts Options) []string {
 	args := []string{
 		"--json",
+		"--hidden",    // include dotfiles for parity with Go fallback
 		"--max-count", fmt.Sprintf("%d", opts.maxResults()),
 	}
 	if !opts.CaseSensitive {

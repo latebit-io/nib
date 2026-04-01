@@ -316,14 +316,22 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 // edit_file) may modify buffers that a later tool needs on disk.
 func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
 	resultCh := make(chan event.FlushResult, 1)
-	// Send directly on the channel — FlushBuffers is a blocking request
-	// that must not be dropped. a.send uses a fire-and-forget timeout
-	// which would leave us waiting on resultCh with no sender.
+
+	// Enqueue with a bounded timeout — if the frontend isn't draining
+	// events, fail visibly rather than blocking the agent indefinitely.
+	enqueueTimeout := time.NewTimer(5 * time.Second)
+	defer enqueueTimeout.Stop()
 	select {
 	case a.events <- event.FlushBuffers{Result: resultCh}:
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-enqueueTimeout.C:
+		return fmt.Errorf("autosave: event queue not draining")
 	}
+
+	// Wait for the frontend to complete the save.
+	responseTimeout := time.NewTimer(5 * time.Second)
+	defer responseTimeout.Stop()
 	select {
 	case res := <-resultCh:
 		for _, p := range res.Saved {
@@ -332,6 +340,8 @@ func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
 		return res.Err
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-responseTimeout.C:
+		return fmt.Errorf("autosave: frontend response timed out")
 	}
 }
 

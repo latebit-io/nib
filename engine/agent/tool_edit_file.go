@@ -7,10 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -135,20 +133,11 @@ func findMatch(expected, actual []string, ei, ai int) matchResult {
 }
 
 // EditFileTool lets the LLM propose search-and-replace edits to files.
-// It validates the search text, sends an approval event, and blocks
-// until the developer approves or rejects.
+// It validates the search text and returns an EditProposal for the agent
+// loop to handle (sending events, blocking on approval/continue).
 type EditFileTool struct {
-	workspace  Workspace
-	cache      *FileCache
-	approveCh  chan bool
-	continueCh chan string
-	send       func(event.Event)
-
-	// diagProvider is optionally set to auto-inject diagnostics after edits.
-	// Nil when no language service is available. Set at construction, immutable.
-	diagProvider lang.DiagnosticProvider
-	// diagDelay is the wait time for gopls to push diagnostics after an edit.
-	diagDelay time.Duration
+	workspace Workspace
+	cache     *FileCache
 
 	mu               sync.Mutex
 	silentRetries    int
@@ -156,16 +145,10 @@ type EditFileTool struct {
 }
 
 // NewEditFileTool creates an EditFileTool with the given dependencies.
-// diagProvider is optional (nil when no language service is available).
-func NewEditFileTool(ws Workspace, cache *FileCache, approveCh chan bool, continueCh chan string, send func(event.Event), diagProvider lang.DiagnosticProvider) *EditFileTool {
+func NewEditFileTool(ws Workspace, cache *FileCache) *EditFileTool {
 	return &EditFileTool{
 		workspace:        ws,
 		cache:            cache,
-		approveCh:        approveCh,
-		continueCh:       continueCh,
-		send:             send,
-		diagProvider:     diagProvider,
-		diagDelay:        500 * time.Millisecond,
 		maxSilentRetries: 3,
 	}
 }
@@ -218,50 +201,49 @@ type editArgs struct {
 	Reason  string `json:"reason"`
 }
 
-// Execute runs the edit_file tool: validate, propose, wait for approval, wait for continue.
-func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) string {
+// Execute validates the edit and returns an EditProposal for the agent loop.
+// The tool no longer blocks on channels or sends events — all orchestration
+// is handled by the agent loop via the EffectEditProposed effect.
+func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args editArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Path == "" {
-		return "Error: path is required"
+		return textResult("Error: path is required")
 	}
 
 	content, canon, err := t.resolveContent(args.Path)
 	if err != nil {
-		return fmt.Sprintf("Error: cannot read %s: %v", args.Path, err)
+		return textResult(fmt.Sprintf("Error: cannot read %s: %v", args.Path, err))
 	}
 
 	if args.Search == "" && content != "" {
-		return "Error: search field cannot be empty (file is not empty — copy existing text to anchor your edit)"
+		return textResult("Error: search field cannot be empty (file is not empty — copy existing text to anchor your edit)")
 	}
 
 	if errMsg := t.validateSearchMatch(args.Path, args.Search, content); errMsg != "" {
-		return errMsg
-	}
-
-	t.send(event.AgentStatus{Status: "waiting"})
-	t.send(event.AgentEditProposed{Edit: event.PendingEdit{
-		ID:      call.ID,
-		Path:    args.Path,
-		Search:  args.Search,
-		Replace: args.Replace,
-		Reason:  args.Reason,
-	}})
-
-	if msg, canceled := t.waitForApproval(ctx, canon, args.Path); canceled {
-		return "Error: agent canceled"
-	} else if msg != "" {
-		return msg
-	}
-
-	if !t.workspace.InContext(args.Path) {
-		t.workspace.AddContext(args.Path)
+		return textResult(errMsg)
 	}
 
 	expectedContent := strings.Replace(content, args.Search, args.Replace, 1)
-	return t.waitForContinue(ctx, canon, args.Path, expectedContent)
+
+	return ToolResult{
+		Content: "", // filled by the agent loop after approval/rejection
+		Effect:  EffectEditProposed,
+		Payload: EditProposal{
+			Edit: event.PendingEdit{
+				ID:      call.ID,
+				Path:    args.Path,
+				Search:  args.Search,
+				Replace: args.Replace,
+				Reason:  args.Reason,
+			},
+			Path:            args.Path,
+			CanonPath:       canon,
+			ExpectedContent: expectedContent,
+		},
+	}
 }
 
 // resolveContent returns the file content and canonical path, reading from
@@ -317,79 +299,4 @@ func (t *EditFileTool) validateSearchMatch(path, search, content string) string 
 		"matches", matchCount, "path", path, "search_len", len(search))
 	return fmt.Sprintf("Error: search text validation failed after %d retries. Use read_file to re-read the file and copy the exact text.\n\nCurrent file (%s):\n\n%s",
 		t.maxSilentRetries, path, truncateForPreview(content))
-}
-
-// waitForApproval blocks until the developer approves or rejects the edit,
-// or the context is canceled. Returns (rejectionMsg, false) on reject,
-// ("", true) on cancel, ("", false) on approve.
-func (t *EditFileTool) waitForApproval(ctx context.Context, canon, path string) (msg string, canceled bool) {
-	select {
-	case <-ctx.Done():
-		return "", true
-	case approved, ok := <-t.approveCh:
-		if !ok {
-			return "Error: approval channel closed", true
-		}
-		if approved {
-			return "", false
-		}
-	}
-
-	t.send(event.AgentStatus{Status: "thinking"})
-	t.send(event.AgentToken{Text: "\n[Edit rejected]\n\n"})
-
-	content := ""
-	if c, ok := t.cache.Get(canon); ok {
-		content = c
-	}
-	return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
-		path, truncateForPreview(content)), false
-}
-
-// waitForContinue blocks until the developer finishes editing and presses
-// continue, or the context is canceled. Compares the new content against
-// the expected result to detect developer modifications.
-func (t *EditFileTool) waitForContinue(ctx context.Context, canon, path, expectedContent string) string {
-	t.send(event.AgentStatus{Status: "editing"})
-	t.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
-
-	select {
-	case <-ctx.Done():
-		return "Error: agent canceled"
-	case newContent, ok := <-t.continueCh:
-		if !ok {
-			return "Error: continue channel closed"
-		}
-		t.cache.Set(canon, newContent)
-		t.send(event.AgentStatus{Status: "thinking"})
-		t.send(event.AgentToken{Text: "\n"})
-
-		var result string
-		if newContent != expectedContent {
-			diff := simpleDiff(expectedContent, newContent)
-			result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
-				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
-				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
-				"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
-				"Recalibrate: study the diff — it signals the developer's intent. "+
-				"Align your next steps with their direction. "+
-				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
-				"Current file (%s):\n```\n%s\n```",
-				diff, path, truncateForPreview(newContent))
-		} else {
-			result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-				path, truncateForPreview(newContent))
-		}
-
-		// Auto-inject diagnostics so the agent can self-correct errors.
-		// Brief wait for gopls to re-analyze the edited file — diagnostics
-		// are pushed asynchronously after DidChange.
-		if t.diagProvider != nil {
-			time.Sleep(t.diagDelay)
-			diagResult := FormatDiagnostics(t.diagProvider, canon, path)
-			result += "\n\nDiagnostics after edit:\n" + diagResult
-		}
-
-		return result
-	}
 }

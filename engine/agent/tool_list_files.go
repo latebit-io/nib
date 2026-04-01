@@ -18,6 +18,7 @@ func NewListFilesTool(ws Workspace) *ListFilesTool {
 	return &ListFilesTool{workspace: ws}
 }
 
+// Definition returns the tool schema for the LLM.
 func (t *ListFilesTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
@@ -33,10 +34,11 @@ func (t *ListFilesTool) Definition() llm.ToolDef {
 	}
 }
 
-func (t *ListFilesTool) Execute(_ context.Context, _ llm.ToolCall) string {
+// Execute lists all project files, filtering out .project/ metadata.
+func (t *ListFilesTool) Execute(_ context.Context, _ llm.ToolCall) ToolResult {
 	files, err := t.workspace.ListFiles()
 	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return textResult(fmt.Sprintf("Error: %v", err))
 	}
 	// Filter out .project/ — project metadata, not source files.
 	filtered := files[:0]
@@ -45,5 +47,5 @@ func (t *ListFilesTool) Execute(_ context.Context, _ llm.ToolCall) string {
 			filtered = append(filtered, f)
 		}
 	}
-	return strings.Join(filtered, "\n")
+	return textResult(strings.Join(filtered, "\n"))
 }

@@ -73,13 +73,13 @@ type bashArgs struct {
 }
 
 // Execute runs a shell command and returns the combined output and exit code.
-func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) string {
+func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	var args bashArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Command == "" {
-		return "Error: command is required"
+		return textResult("Error: command is required")
 	}
 
 	timeout := defaultBashTimeout
@@ -118,27 +118,27 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) string {
 		// on deadline, which produces an ExitError with code -1.
 		if cmdCtx.Err() == context.DeadlineExceeded {
 			slog.Warn("bash: command timed out", "command", args.Command, "timeout", timeout)
-			return fmt.Sprintf("Error: command timed out after %s\n\n%s", timeout, output)
+			return textResult(fmt.Sprintf("Error: command timed out after %s\n\n%s", timeout, output))
 		}
 		if ctx.Err() != nil {
-			return "Error: cancelled"
+			return textResult("Error: cancelled")
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			return fmt.Sprintf("Error: %v\n\n%s", err, output)
+			return textResult(fmt.Sprintf("Error: %v\n\n%s", err, output))
 		}
 	}
 
 	slog.Debug("bash: completed", "command", args.Command, "exit_code", exitCode, "output_len", len(output))
 
 	if exitCode != 0 {
-		return fmt.Sprintf("Exit code: %d\n\n%s", exitCode, output)
+		return textResult(fmt.Sprintf("Exit code: %d\n\n%s", exitCode, output))
 	}
 	if output == "" {
-		return "(no output)"
+		return textResult("(no output)")
 	}
-	return output
+	return textResult(output)
 }
 
 // limitedWriter caps writes at a byte limit, discarding excess.

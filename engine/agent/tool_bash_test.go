@@ -25,8 +25,8 @@ func TestBashTool_SimpleCommand(t *testing.T) {
 	tool := NewBashTool(dir)
 
 	result := tool.Execute(context.Background(), bashCall("echo hello"))
-	if !strings.Contains(result, "hello") {
-		t.Errorf("expected output to contain 'hello', got %q", result)
+	if !strings.Contains(result.Content, "hello") {
+		t.Errorf("expected output to contain 'hello', got %q", result.Content)
 	}
 }
 
@@ -35,8 +35,8 @@ func TestBashTool_ExitCode(t *testing.T) {
 	tool := NewBashTool(dir)
 
 	result := tool.Execute(context.Background(), bashCall("exit 1"))
-	if !strings.Contains(result, "Exit code: 1") {
-		t.Errorf("expected exit code 1, got %q", result)
+	if !strings.Contains(result.Content, "Exit code: 1") {
+		t.Errorf("expected exit code 1, got %q", result.Content)
 	}
 }
 
@@ -45,8 +45,8 @@ func TestBashTool_WorkingDirectory(t *testing.T) {
 	tool := NewBashTool(dir)
 
 	result := tool.Execute(context.Background(), bashCall("pwd"))
-	if !strings.Contains(result, dir) {
-		t.Errorf("expected working directory %q in output, got %q", dir, result)
+	if !strings.Contains(result.Content, dir) {
+		t.Errorf("expected working directory %q in output, got %q", dir, result.Content)
 	}
 }
 
@@ -61,8 +61,8 @@ func TestBashTool_EmptyCommand(t *testing.T) {
 			Arguments: `{"command":""}`,
 		},
 	})
-	if !strings.Contains(result, "Error: command is required") {
-		t.Errorf("expected error for empty command, got %q", result)
+	if !strings.Contains(result.Content, "Error: command is required") {
+		t.Errorf("expected error for empty command, got %q", result.Content)
 	}
 }
 
@@ -77,8 +77,8 @@ func TestBashTool_InvalidArgs(t *testing.T) {
 			Arguments: `{invalid`,
 		},
 	})
-	if !strings.Contains(result, "Error: invalid arguments") {
-		t.Errorf("expected invalid arguments error, got %q", result)
+	if !strings.Contains(result.Content, "Error: invalid arguments") {
+		t.Errorf("expected invalid arguments error, got %q", result.Content)
 	}
 }
 
@@ -89,8 +89,8 @@ func TestBashTool_OutputTruncation(t *testing.T) {
 	// Generate output larger than maxBashOutput (8KB).
 	// Use yes piped to head for a portable large output.
 	result := tool.Execute(context.Background(), bashCall("yes | head -c 16384"))
-	if !strings.Contains(result, "[... output truncated]") {
-		t.Errorf("expected truncation marker, got length %d", len(result))
+	if !strings.Contains(result.Content, "[... output truncated]") {
+		t.Errorf("expected truncation marker, got length %d", len(result.Content))
 	}
 }
 
@@ -102,8 +102,8 @@ func TestBashTool_ContextCancellation(t *testing.T) {
 	cancel() // cancel immediately
 
 	result := tool.Execute(ctx, bashCall("sleep 10"))
-	if !strings.Contains(result, "Error") {
-		t.Errorf("expected error on cancelled context, got %q", result)
+	if !strings.Contains(result.Content, "Error") {
+		t.Errorf("expected error on cancelled context, got %q", result.Content)
 	}
 }
 
@@ -119,8 +119,8 @@ func TestBashTool_Timeout(t *testing.T) {
 		},
 	}
 	result := tool.Execute(context.Background(), call)
-	if !strings.Contains(result, "timed out") {
-		t.Errorf("expected timeout error, got %q", result)
+	if !strings.Contains(result.Content, "timed out") {
+		t.Errorf("expected timeout error, got %q", result.Content)
 	}
 }
 
@@ -129,8 +129,8 @@ func TestBashTool_NoOutput(t *testing.T) {
 	tool := NewBashTool(dir)
 
 	result := tool.Execute(context.Background(), bashCall("true"))
-	if result != "(no output)" {
-		t.Errorf("expected '(no output)', got %q", result)
+	if result.Content != "(no output)" {
+		t.Errorf("expected '(no output)', got %q", result.Content)
 	}
 }
 
@@ -139,8 +139,8 @@ func TestBashTool_StderrCaptured(t *testing.T) {
 	tool := NewBashTool(dir)
 
 	result := tool.Execute(context.Background(), bashCall("echo error >&2"))
-	if !strings.Contains(result, "error") {
-		t.Errorf("expected stderr captured, got %q", result)
+	if !strings.Contains(result.Content, "error") {
+		t.Errorf("expected stderr captured, got %q", result.Content)
 	}
 }
 

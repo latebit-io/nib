@@ -20,6 +20,7 @@ func NewReadFileTool(ws Workspace, cache *FileCache) *ReadFileTool {
 	return &ReadFileTool{workspace: ws, cache: cache}
 }
 
+// Definition returns the tool schema for the LLM.
 func (t *ReadFileTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
@@ -44,13 +45,14 @@ type readArgs struct {
 	Path string `json:"path"`
 }
 
-func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) string {
+// Execute reads a file from cache or disk and returns its content.
+func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args readArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Path == "" {
-		return "Error: path is required"
+		return textResult("Error: path is required")
 	}
 
 	canon := t.workspace.CanonPath(args.Path)
@@ -58,16 +60,16 @@ func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) string {
 	// Check cache first
 	if content, ok := t.cache.Get(canon); ok {
 		slog.Debug("read_file: cache hit", "path", args.Path, "content_len", len(content))
-		return content
+		return textResult(content)
 	}
 
 	// Read from workspace (disk)
 	content, err := t.workspace.ReadFile(args.Path)
 	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return textResult(fmt.Sprintf("Error: %v", err))
 	}
 
 	slog.Debug("read_file: read from disk", "path", args.Path, "content_len", len(content))
 	t.cache.Set(canon, content)
-	return content
+	return textResult(content)
 }

@@ -32,11 +32,9 @@ func (m *mockNavWorkspace) ReadFile(path string) (string, error) {
 	return "", fmt.Errorf("file not found: %s", path)
 }
 
-func execGoToLine(t *testing.T, ws Workspace, args string) (string, []event.Event) {
+func execGoToLine(t *testing.T, ws Workspace, args string) ToolResult {
 	t.Helper()
-	var sentEvents []event.Event
-	send := func(ev event.Event) { sentEvents = append(sentEvents, ev) }
-	tool := NewGoToLineTool(ws, send)
+	tool := NewGoToLineTool(ws)
 	call := llm.ToolCall{
 		ID:   "test",
 		Type: "function",
@@ -45,58 +43,58 @@ func execGoToLine(t *testing.T, ws Workspace, args string) (string, []event.Even
 			Arguments: args,
 		},
 	}
-	return tool.Execute(context.Background(), call), sentEvents
+	return tool.Execute(context.Background(), call)
 }
 
 func TestGoToLine_ValidNavigation(t *testing.T) {
 	ws := &mockNavWorkspace{files: map[string]string{"main.go": "code"}}
-	result, events := execGoToLine(t, ws, `{"path":"main.go","line":42}`)
-	if result != "Navigated to main.go line 42." {
-		t.Errorf("got %q", result)
+	result := execGoToLine(t, ws, `{"path":"main.go","line":42}`)
+	if result.Content != "Navigated to main.go line 42." {
+		t.Errorf("got %q", result.Content)
 	}
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+	if result.Effect != EffectNavigate {
+		t.Errorf("expected EffectNavigate, got %d", result.Effect)
 	}
-	nav, ok := events[0].(event.AgentNavigate)
+	nav, ok := result.Payload.(event.AgentNavigate)
 	if !ok {
-		t.Fatalf("expected AgentNavigate, got %T", events[0])
+		t.Fatalf("expected AgentNavigate payload, got %T", result.Payload)
 	}
 	if nav.Path != "main.go" || nav.Line != 42 {
-		t.Errorf("event: got (%q, %d), want (main.go, 42)", nav.Path, nav.Line)
+		t.Errorf("payload: got (%q, %d), want (main.go, 42)", nav.Path, nav.Line)
 	}
 }
 
 func TestGoToLine_MissingPath(t *testing.T) {
 	ws := &mockNavWorkspace{}
-	result, _ := execGoToLine(t, ws, `{"line":10}`)
-	if !strings.Contains(result, "path is required") {
-		t.Errorf("got %q", result)
+	result := execGoToLine(t, ws, `{"line":10}`)
+	if !strings.Contains(result.Content, "path is required") {
+		t.Errorf("got %q", result.Content)
 	}
 }
 
 func TestGoToLine_LineBelowOne(t *testing.T) {
 	ws := &mockNavWorkspace{}
-	result, _ := execGoToLine(t, ws, `{"path":"main.go","line":0}`)
-	if !strings.Contains(result, "line must be >= 1") {
-		t.Errorf("got %q", result)
+	result := execGoToLine(t, ws, `{"path":"main.go","line":0}`)
+	if !strings.Contains(result.Content, "line must be >= 1") {
+		t.Errorf("got %q", result.Content)
 	}
 }
 
 func TestGoToLine_InvalidJSON(t *testing.T) {
 	ws := &mockNavWorkspace{}
-	result, _ := execGoToLine(t, ws, `not json`)
-	if !strings.HasPrefix(result, "Error: invalid arguments:") {
-		t.Errorf("got %q", result)
+	result := execGoToLine(t, ws, `not json`)
+	if !strings.HasPrefix(result.Content, "Error: invalid arguments:") {
+		t.Errorf("got %q", result.Content)
 	}
 }
 
 func TestGoToLine_FileNotFound(t *testing.T) {
 	ws := &mockNavWorkspace{files: map[string]string{}}
-	result, events := execGoToLine(t, ws, `{"path":"missing.go","line":1}`)
-	if !strings.HasPrefix(result, "Error:") {
-		t.Errorf("got %q, want error", result)
+	result := execGoToLine(t, ws, `{"path":"missing.go","line":1}`)
+	if !strings.HasPrefix(result.Content, "Error:") {
+		t.Errorf("got %q, want error", result.Content)
 	}
-	if len(events) > 0 {
-		t.Error("expected no events on error")
+	if result.Effect != EffectNone {
+		t.Errorf("expected EffectNone on error, got %d", result.Effect)
 	}
 }

@@ -72,13 +72,13 @@ func (t *MCPToolAdapter) Definition() llm.ToolDef {
 }
 
 // Execute calls the MCP tool and returns the result string.
-func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) string {
+func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	if len(call.Function.Arguments) > maxMCPArgs {
-		return "Error: arguments too large"
+		return textResult("Error: arguments too large")
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 
 	slog.Debug("mcp tool call", "tool", t.toolName, "args", args)
@@ -86,13 +86,13 @@ func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) string 
 	result, err := t.client.CallTool(ctx, t.toolName, args)
 	if err != nil {
 		slog.Error("mcp tool error", "tool", t.toolName, "err", err)
-		return fmt.Sprintf("Error: %v", err)
+		return textResult(fmt.Sprintf("Error: %v", err))
 	}
 	if len(result) > maxMCPResult {
 		// Truncate at valid UTF-8 boundary to avoid garbled output.
 		result = strings.ToValidUTF8(result[:maxMCPResult], "") + "\n[... output truncated]"
 	}
-	return result
+	return textResult(result)
 }
 
 // convertSchema converts a JSON Schema (raw JSON) into the OpenAI-compatible

@@ -49,13 +49,13 @@ type symbolArgs struct {
 }
 
 // Execute runs the workspace symbol search.
-func (t *WorkspaceSymbolsTool) Execute(ctx context.Context, call llm.ToolCall) string {
+func (t *WorkspaceSymbolsTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	var args symbolArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Query == "" {
-		return "Error: query is required"
+		return textResult("Error: query is required")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -63,10 +63,10 @@ func (t *WorkspaceSymbolsTool) Execute(ctx context.Context, call llm.ToolCall) s
 
 	symbols, err := t.provider.WorkspaceSymbols(ctx, args.Query)
 	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return textResult(fmt.Sprintf("Error: %v", err))
 	}
 	if len(symbols) == 0 {
-		return "No symbols found."
+		return textResult("No symbols found.")
 	}
 
 	projectRoot := t.workspace.ProjectRoot()
@@ -84,5 +84,5 @@ func (t *WorkspaceSymbolsTool) Execute(ctx context.Context, call llm.ToolCall) s
 	if len(out) > maxContentPreview {
 		out = out[:maxContentPreview] + "\n... (truncated)"
 	}
-	return out
+	return textResult(out)
 }

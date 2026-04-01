@@ -59,13 +59,13 @@ type refArgs struct {
 }
 
 // Execute runs the references lookup.
-func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) string {
+func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	var args refArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Path == "" {
-		return "Error: path is required"
+		return textResult("Error: path is required")
 	}
 
 	canon := t.workspace.CanonPath(args.Path)
@@ -75,10 +75,10 @@ func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) str
 
 	locs, err := t.provider.References(ctx, canon, args.Line-1, args.Col)
 	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return textResult(fmt.Sprintf("Error: %v", err))
 	}
 	if len(locs) == 0 {
-		return "No references found."
+		return textResult("No references found.")
 	}
 
 	projectRoot := t.workspace.ProjectRoot()
@@ -95,5 +95,5 @@ func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) str
 	if len(out) > maxContentPreview {
 		out = out[:maxContentPreview] + "\n... (truncated)"
 	}
-	return out
+	return textResult(out)
 }

@@ -61,13 +61,13 @@ type searchArgs struct {
 }
 
 // Execute runs the search and returns formatted results.
-func (t *SearchProjectTool) Execute(_ context.Context, call llm.ToolCall) string {
+func (t *SearchProjectTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args searchArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Pattern == "" {
-		return "Error: pattern is required"
+		return textResult("Error: pattern is required")
 	}
 
 	results, err := search.Search(t.projectRoot, args.Pattern, search.Options{
@@ -77,10 +77,10 @@ func (t *SearchProjectTool) Execute(_ context.Context, call llm.ToolCall) string
 		FileGlob:      args.FileGlob,
 	})
 	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return textResult(fmt.Sprintf("Error: %v", err))
 	}
 	if len(results) == 0 {
-		return "No matches found."
+		return textResult("No matches found.")
 	}
 
 	var sb strings.Builder
@@ -94,5 +94,5 @@ func (t *SearchProjectTool) Execute(_ context.Context, call llm.ToolCall) string
 	if len(out) > maxContentPreview {
 		out = out[:maxContentPreview] + "\n... (truncated)"
 	}
-	return out
+	return textResult(out)
 }

@@ -316,7 +316,14 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 // edit_file) may modify buffers that a later tool needs on disk.
 func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
 	resultCh := make(chan event.FlushResult, 1)
-	a.send(event.FlushBuffers{Result: resultCh})
+	// Send directly on the channel — FlushBuffers is a blocking request
+	// that must not be dropped. a.send uses a fire-and-forget timeout
+	// which would leave us waiting on resultCh with no sender.
+	select {
+	case a.events <- event.FlushBuffers{Result: resultCh}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	select {
 	case res := <-resultCh:
 		for _, p := range res.Saved {

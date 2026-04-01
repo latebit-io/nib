@@ -76,6 +76,13 @@ func (c *FileCache) Get(path string) (string, bool) {
 	return content, ok
 }
 
+// Invalidate removes a path from the cache so the next read hits disk.
+func (c *FileCache) Invalidate(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.files, path)
+}
+
 // Set updates the cached content for a path.
 func (c *FileCache) Set(path, content string) {
 	c.mu.Lock()

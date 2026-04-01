@@ -420,6 +420,9 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 		m.refreshProjectPane()
+	case event.FlushBuffers:
+		saved, err := m.Session.SaveDirtyBuffers()
+		e.Result <- event.FlushResult{Saved: saved, Err: err}
 	case event.DiagnosticsUpdated:
 		m.refreshDiagnostics(e.Path)
 	}

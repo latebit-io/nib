@@ -289,6 +289,10 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		}
 
 		for _, tc := range toolCalls {
+			if err := a.flushDirtyBuffers(ctx); err != nil {
+				a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
+				return
+			}
 			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
 			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
 			result := a.dispatchTool(ctx, tc)
@@ -301,6 +305,43 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 				Content:    result,
 			})
 		}
+	}
+}
+
+// flushDirtyBuffers asks the frontend to save all dirty buffers to disk,
+// then invalidates the corresponding cache entries. The actual I/O runs
+// on the frontend's goroutine (via FlushBuffers event) so we never touch
+// TUI-owned buffer state from the agent goroutine. Called before each
+// tool dispatch — not once per batch — because an earlier tool (e.g.
+// edit_file) may modify buffers that a later tool needs on disk.
+func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
+	resultCh := make(chan event.FlushResult, 1)
+
+	// Enqueue with a bounded timeout — if the frontend isn't draining
+	// events, fail visibly rather than blocking the agent indefinitely.
+	enqueueTimeout := time.NewTimer(5 * time.Second)
+	defer enqueueTimeout.Stop()
+	select {
+	case a.events <- event.FlushBuffers{Result: resultCh}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-enqueueTimeout.C:
+		return fmt.Errorf("autosave: event queue not draining")
+	}
+
+	// Wait for the frontend to complete the save.
+	responseTimeout := time.NewTimer(5 * time.Second)
+	defer responseTimeout.Stop()
+	select {
+	case res := <-resultCh:
+		for _, p := range res.Saved {
+			a.cache.Invalidate(p)
+		}
+		return res.Err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-responseTimeout.C:
+		return fmt.Errorf("autosave: frontend response timed out")
 	}
 }
 

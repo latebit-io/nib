@@ -62,6 +62,22 @@ type PendingEdit struct {
 	Reason  string
 }
 
+// FlushResult carries the outcome of a FlushBuffers request.
+type FlushResult struct {
+	Saved []string // canonical paths of files that were saved
+	Err   error    // first error encountered (nil on full success)
+}
+
+// FlushBuffers requests the frontend to save all dirty buffers to disk.
+// The agent blocks on Result until the frontend completes the save.
+// This routes the I/O through the buffer-owning goroutine (TUI main)
+// so that no cross-goroutine buffer access occurs.
+type FlushBuffers struct {
+	Result chan<- FlushResult
+}
+
+func (FlushBuffers) eventTag() {}
+
 // --- Language service events ---
 
 // DiagnosticsUpdated signals that diagnostics changed for a file.

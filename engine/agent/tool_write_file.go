@@ -19,6 +19,7 @@ func NewWriteFileTool(ws Workspace, cache *FileCache) *WriteFileTool {
 	return &WriteFileTool{workspace: ws, cache: cache}
 }
 
+// Definition returns the tool schema for the LLM.
 func (t *WriteFileTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
@@ -53,6 +54,7 @@ type writeArgs struct {
 	Reason  string `json:"reason"`
 }
 
+// Execute creates a new file and returns a file-created effect for the agent loop.
 func (t *WriteFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args writeArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {

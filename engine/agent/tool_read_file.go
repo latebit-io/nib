@@ -20,6 +20,7 @@ func NewReadFileTool(ws Workspace, cache *FileCache) *ReadFileTool {
 	return &ReadFileTool{workspace: ws, cache: cache}
 }
 
+// Definition returns the tool schema for the LLM.
 func (t *ReadFileTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
@@ -44,6 +45,7 @@ type readArgs struct {
 	Path string `json:"path"`
 }
 
+// Execute reads a file from cache or disk and returns its content.
 func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args readArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {

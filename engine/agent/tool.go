@@ -20,7 +20,7 @@ const (
 	EffectNavigate
 	// EffectFileCreated signals a new file was created. Payload: string (path).
 	EffectFileCreated
-	// EffectEditProposed proposes an edit for approval. Payload: event.PendingEdit.
+	// EffectEditProposed proposes an edit for approval. Payload: EditProposal.
 	// The agent loop handles sending the event and blocking on approval/continue.
 	EffectEditProposed
 )

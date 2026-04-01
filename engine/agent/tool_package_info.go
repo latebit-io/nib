@@ -141,6 +141,10 @@ func (t *PackageInfoTool) findGoModule(pkg string) (modDir, version string) {
 
 // searchGoMod reads a go.mod file and checks if pkg appears as a dependency.
 // Also matches if pkg is a subpackage of a required module.
+//
+// Parses go.mod structure semantically: only matches module paths inside
+// require directives (both single-line and block form). Ignores module,
+// go, replace, exclude, retract directives and comments.
 func (t *PackageInfoTool) searchGoMod(modFile, pkg string) (modDir, version string) {
 	content, err := os.ReadFile(modFile)
 	if err != nil {
@@ -148,28 +152,71 @@ func (t *PackageInfoTool) searchGoMod(modFile, pkg string) (modDir, version stri
 	}
 
 	dir := filepath.Dir(modFile)
+	inRequireBlock := false
 
 	for _, line := range strings.Split(string(content), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "//") {
+
+		// Skip comments and empty lines.
+		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
 
-		parts := strings.Fields(line)
-		for i, p := range parts {
-			// Exact module match or pkg is a subpackage of this module.
-			if p == pkg || strings.HasPrefix(pkg, p+"/") {
-				if i+1 < len(parts) && strings.HasPrefix(parts[i+1], "v") {
-					return dir, parts[i+1]
-				}
-				return dir, ""
+		// Track require block boundaries.
+		if line == ")" {
+			inRequireBlock = false
+			continue
+		}
+		if strings.HasPrefix(line, "require (") || line == "require (" {
+			inRequireBlock = true
+			continue
+		}
+
+		// Single-line require: "require module/path v1.2.3"
+		if strings.HasPrefix(line, "require ") && !strings.Contains(line, "(") {
+			line = strings.TrimPrefix(line, "require ")
+			line = strings.TrimSpace(line)
+			if mod, ver := matchRequireLine(line, pkg); mod != "" {
+				return dir, ver
+			}
+			continue
+		}
+
+		// Inside a require block: "module/path v1.2.3"
+		if inRequireBlock {
+			if mod, ver := matchRequireLine(line, pkg); mod != "" {
+				return dir, ver
 			}
 		}
 	}
 	return "", ""
 }
 
+// matchRequireLine checks if a require entry (e.g. "module/path v1.2.3")
+// matches the given package. Returns (module, version) on match, or ("", "").
+// Matches if the entry's module path equals pkg or pkg is a subpackage.
+func matchRequireLine(line, pkg string) (mod, version string) {
+	// Strip inline comments.
+	if idx := strings.Index(line, "//"); idx >= 0 {
+		line = line[:idx]
+	}
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return "", ""
+	}
+	mod, version = parts[0], parts[1]
+	if mod == pkg || strings.HasPrefix(pkg, mod+"/") {
+		return mod, version
+	}
+	return "", ""
+}
+
+// maxGoDocOutput caps the output from go doc to prevent unbounded memory use.
+// Matches maxBashOutput for consistency across subprocess-executing tools.
+const maxGoDocOutput = 8 * 1024
+
 // runGoDoc executes "go doc" and returns the output.
+// Uses limitedWriter to cap output during execution, consistent with BashTool.
 func (t *PackageInfoTool) runGoDoc(ctx context.Context, modDir, target string) string {
 	cmdCtx, cancel := context.WithTimeout(ctx, packageInfoTimeout)
 	defer cancel()
@@ -177,18 +224,25 @@ func (t *PackageInfoTool) runGoDoc(ctx context.Context, modDir, target string) s
 	cmd := exec.CommandContext(cmdCtx, "go", "doc", target)
 	cmd.Dir = modDir
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutLW := &limitedWriter{w: &stdoutBuf, remaining: maxGoDocOutput}
+	stderrLW := &limitedWriter{w: &stderrBuf, remaining: maxGoDocOutput}
+	cmd.Stdout = stdoutLW
+	cmd.Stderr = stderrLW
 
 	if err := cmd.Run(); err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
 			return "Error: go doc timed out"
 		}
-		if stderr.Len() > 0 {
-			return fmt.Sprintf("go doc error: %s", strings.TrimSpace(stderr.String()))
+		if stderrBuf.Len() > 0 {
+			return fmt.Sprintf("go doc error: %s", strings.TrimSpace(stderrBuf.String()))
 		}
 		return fmt.Sprintf("go doc error: %v", err)
 	}
-	return stdout.String()
+
+	output := stdoutBuf.String()
+	if stdoutLW.truncated {
+		output += "\n[... output truncated]"
+	}
+	return output
 }

@@ -247,6 +247,23 @@ func (a *Agent) send(ev event.Event) {
 	}
 }
 
+// sendCritical delivers an event that must reach the frontend for the agent
+// to make progress. Returns an error if the event cannot be enqueued within
+// the timeout. Use this for events that gate a blocking wait (e.g. edit
+// proposals) — dropping these silently would deadlock the agent.
+func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case a.events <- ev:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("failed to deliver %T: frontend not draining events", ev)
+	}
+}
+
 func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
 	success := false
 	defer func() { a.send(event.AgentDone{Success: success}) }()
@@ -376,19 +393,23 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 
 	switch result.Effect {
 	case EffectNavigate:
-		if nav, ok := result.Payload.(event.AgentNavigate); ok {
-			a.send(nav)
+		nav, ok := result.Payload.(event.AgentNavigate)
+		if !ok {
+			return fmt.Sprintf("Error: EffectNavigate with unexpected payload type %T", result.Payload) + a.intentReminder()
 		}
+		a.send(nav)
 
 	case EffectFileCreated:
-		if path, ok := result.Payload.(string); ok {
-			a.send(event.AgentFileCreated{Path: path})
+		path, ok := result.Payload.(string)
+		if !ok {
+			return fmt.Sprintf("Error: EffectFileCreated with unexpected payload type %T", result.Payload) + a.intentReminder()
 		}
+		a.send(event.AgentFileCreated{Path: path})
 
 	case EffectEditProposed:
 		proposal, ok := result.Payload.(EditProposal)
 		if !ok {
-			return "Error: invalid edit proposal" + a.intentReminder()
+			return fmt.Sprintf("Error: EffectEditProposed with unexpected payload type %T", result.Payload) + a.intentReminder()
 		}
 		content := a.handleEditProposal(ctx, proposal)
 		return content + a.intentReminder()
@@ -402,7 +423,13 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 // the tool is a pure computation and the channels stay private to Agent.
 func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) string {
 	a.send(event.AgentStatus{Status: "waiting"})
-	a.send(event.AgentEditProposed{Edit: proposal.Edit})
+
+	// The proposal event is critical — if the frontend never sees it,
+	// waitForApproval blocks forever with nothing for the user to approve.
+	if err := a.sendCritical(ctx, event.AgentEditProposed{Edit: proposal.Edit}); err != nil {
+		slog.Error("edit proposal delivery failed", "err", err)
+		return fmt.Sprintf("Error: could not deliver edit proposal to frontend: %v", err)
+	}
 
 	// Wait for approval or rejection.
 	msg, canceled := a.waitForApproval(ctx, proposal)

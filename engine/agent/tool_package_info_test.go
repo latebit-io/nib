@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/junto/engine/llm"
 )
@@ -125,6 +126,10 @@ require (
 		{"exact match other", "github.com/stretchr/testify", true, "v1.9.0"},
 		{"subpackage match", "charm.land/bubbletea/v2/tea", true, "v2.0.2"},
 		{"not found", "github.com/nonexistent/pkg", false, ""},
+		{"go directive not matched", "go", false, ""},
+		{"require keyword not matched", "require", false, ""},
+		{"module directive not matched", "module", false, ""},
+		{"module path not matched", "example.com/myproject", false, ""},
 	}
 
 	for _, tt := range tests {
@@ -140,6 +145,23 @@ require (
 				t.Errorf("expected version %q, got %q", tt.wantVer, ver)
 			}
 		})
+	}
+}
+
+func TestPackageInfoTool_FindGoModuleSingleLineRequire(t *testing.T) {
+	dir := t.TempDir()
+	gomod := "module example.com/proj\n\ngo 1.22\n\nrequire github.com/pkg/errors v0.9.1\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewPackageInfoTool(dir)
+	modDir, ver := tool.findGoModule("github.com/pkg/errors")
+	if modDir == "" {
+		t.Error("expected to find single-line require")
+	}
+	if ver != "v0.9.1" {
+		t.Errorf("expected v0.9.1, got %q", ver)
 	}
 }
 
@@ -217,10 +239,20 @@ func TestPackageInfoTool_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	result := tool.Execute(ctx, pkgInfoCall("fmt", ""))
-	// Should get an error of some kind — either go doc error or context error.
-	// The exact message depends on timing, just verify it doesn't hang.
-	if result.Content == "" {
-		t.Error("expected non-empty result on cancelled context")
+	// Run in a goroutine with a deadline so the test fails fast
+	// instead of hanging if runGoDoc ever stops honoring ctx.Done().
+	type execResult struct{ r ToolResult }
+	ch := make(chan execResult, 1)
+	go func() {
+		ch <- execResult{tool.Execute(ctx, pkgInfoCall("fmt", ""))}
+	}()
+
+	select {
+	case got := <-ch:
+		if got.r.Content == "" {
+			t.Error("expected non-empty result on cancelled context")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute did not return within 2s on a cancelled context")
 	}
 }

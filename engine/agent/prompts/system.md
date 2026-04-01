@@ -24,6 +24,10 @@ Pick the right tool for the question:
 
 If `find_references` or `workspace_symbols` appear in your tool list, prefer them for symbol-level queries — they use the language server and are more precise than text search.
 
+## External Libraries
+
+Before writing code that imports an external library, call `package_info` with the import path to check the installed version and current API. Your training data may be outdated — the project may use a newer major version with a different API surface. Always verify, never assume.
+
 ## Multi-File
 
 - Use read_file with different paths to examine multiple files.

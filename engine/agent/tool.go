@@ -4,16 +4,69 @@ import (
 	"context"
 	"sync"
 
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
+// ToolEffect classifies what the agent loop must do after a tool returns.
+// Pure tools return EffectNone; tools with side effects return a specific
+// effect so the agent loop handles all orchestration (events, approval flow).
+type ToolEffect int
+
+const (
+	// EffectNone means no side effect — the Content is the full LLM response.
+	EffectNone ToolEffect = iota
+	// EffectNavigate requests editor navigation. Payload: event.AgentNavigate.
+	EffectNavigate
+	// EffectFileCreated signals a new file was created. Payload: string (path).
+	EffectFileCreated
+	// EffectEditProposed proposes an edit for approval. Payload: event.PendingEdit.
+	// The agent loop handles sending the event and blocking on approval/continue.
+	EffectEditProposed
+)
+
+// ToolResult is what a tool returns to the agent loop.
+// Content is the string fed back to the LLM. Effect tells the loop what
+// additional work to do. Payload carries effect-specific data.
+type ToolResult struct {
+	// Content is the text returned to the LLM as the tool result.
+	Content string
+	// Effect tells the agent loop what side effect to perform.
+	Effect ToolEffect
+	// Payload carries effect-specific data. Type depends on Effect:
+	//   EffectNavigate:     event.AgentNavigate
+	//   EffectFileCreated:  string (file path)
+	//   EffectEditProposed: EditProposal
+	Payload any
+}
+
+// EditProposal is the payload for EffectEditProposed. Contains everything
+// the agent loop needs to manage the approval flow.
+type EditProposal struct {
+	// Edit is the proposed change sent to the frontend for approval.
+	Edit event.PendingEdit
+	// Path is the project-relative file path.
+	Path string
+	// CanonPath is the canonical absolute path (cache key).
+	CanonPath string
+	// ExpectedContent is what the file should contain after applying the edit.
+	ExpectedContent string
+}
+
+// textResult is a convenience constructor for a pure text result with no side effect.
+func textResult(content string) ToolResult {
+	return ToolResult{Content: content}
+}
+
 // Tool defines a capability the agent can invoke during its LLM loop.
 // Each tool provides its OpenAI-compatible schema and handles execution.
+// Tools must be pure computations — side effects are expressed via
+// ToolResult.Effect, and the agent loop handles all orchestration.
 type Tool interface {
 	// Definition returns the tool's function schema for the LLM.
 	Definition() llm.ToolDef
-	// Execute handles a tool call and returns the result string for the LLM.
-	Execute(ctx context.Context, call llm.ToolCall) string
+	// Execute handles a tool call and returns a structured result.
+	Execute(ctx context.Context, call llm.ToolCall) ToolResult
 }
 
 // Resettable is optionally implemented by tools that carry state between

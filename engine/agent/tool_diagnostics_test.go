@@ -21,7 +21,7 @@ func (m *mockDiagProvider) Diagnostics(path string) []lang.Diagnostic {
 func TestFormatDiagnostics(t *testing.T) {
 	t.Run("not analyzed yet", func(t *testing.T) {
 		p := &mockDiagProvider{diags: map[string][]lang.Diagnostic{}}
-		result := FormatDiagnostics(p, "/test.go", "test.go")
+		result := formatDiagnostics(p, "/test.go", "test.go")
 		if !strings.Contains(result, "not have been analyzed") {
 			t.Errorf("expected not-analyzed message, got: %s", result)
 		}
@@ -31,7 +31,7 @@ func TestFormatDiagnostics(t *testing.T) {
 		p := &mockDiagProvider{diags: map[string][]lang.Diagnostic{
 			"/test.go": {}, // explicitly empty = gopls checked and found nothing
 		}}
-		result := FormatDiagnostics(p, "/test.go", "test.go")
+		result := formatDiagnostics(p, "/test.go", "test.go")
 		if !strings.Contains(result, "clean") {
 			t.Errorf("expected clean message, got: %s", result)
 		}
@@ -44,7 +44,7 @@ func TestFormatDiagnostics(t *testing.T) {
 				{StartLine: 8, StartCol: 0, Severity: lang.SeverityWarning, Message: "unused var"},
 			},
 		}}
-		result := FormatDiagnostics(p, "/test.go", "test.go")
+		result := formatDiagnostics(p, "/test.go", "test.go")
 		if !strings.Contains(result, "1 error(s)") {
 			t.Errorf("expected error count, got: %s", result)
 		}
@@ -61,7 +61,7 @@ func TestFormatDiagnostics(t *testing.T) {
 
 	t.Run("empty path", func(t *testing.T) {
 		p := &mockDiagProvider{}
-		result := FormatDiagnostics(p, "", "")
+		result := formatDiagnostics(p, "", "")
 		if !strings.Contains(result, "No file") {
 			t.Errorf("expected no-file message, got: %s", result)
 		}
@@ -84,8 +84,8 @@ func TestDiagnosticsToolExecute(t *testing.T) {
 			},
 		}
 		result := tool.Execute(context.Background(), call)
-		if !strings.Contains(result, "syntax error") {
-			t.Errorf("expected diagnostic, got: %s", result)
+		if !strings.Contains(result.Content, "syntax error") {
+			t.Errorf("expected diagnostic, got: %s", result.Content)
 		}
 	})
 
@@ -96,8 +96,8 @@ func TestDiagnosticsToolExecute(t *testing.T) {
 			},
 		}
 		result := tool.Execute(context.Background(), call)
-		if !strings.Contains(result, "Error") {
-			t.Errorf("expected error, got: %s", result)
+		if !strings.Contains(result.Content, "Error") {
+			t.Errorf("expected error, got: %s", result.Content)
 		}
 	})
 }

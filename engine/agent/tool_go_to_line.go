@@ -15,12 +15,11 @@ import (
 // Navigation is handled by the frontend via an AgentNavigate event.
 type GoToLineTool struct {
 	workspace Workspace
-	send      func(event.Event)
 }
 
-// NewGoToLineTool creates a GoToLineTool with the given workspace and event sender.
-func NewGoToLineTool(ws Workspace, send func(event.Event)) *GoToLineTool {
-	return &GoToLineTool{workspace: ws, send: send}
+// NewGoToLineTool creates a GoToLineTool with the given workspace.
+func NewGoToLineTool(ws Workspace) *GoToLineTool {
+	return &GoToLineTool{workspace: ws}
 }
 
 type goToLineArgs struct {
@@ -55,25 +54,28 @@ func (t *GoToLineTool) Definition() llm.ToolDef {
 	}
 }
 
-// Execute sends a navigation event to the frontend for the specified file and line.
-func (t *GoToLineTool) Execute(ctx context.Context, call llm.ToolCall) string {
+// Execute validates the file exists and returns a navigation effect.
+func (t *GoToLineTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	if ctx.Err() != nil {
-		return "Error: agent canceled"
+		return textResult("Error: agent canceled")
 	}
 	var args goToLineArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Path == "" {
-		return "Error: path is required"
+		return textResult("Error: path is required")
 	}
 	if args.Line < 1 {
-		return "Error: line must be >= 1"
+		return textResult("Error: line must be >= 1")
 	}
 	// Validate file exists by attempting to read it.
 	if _, err := t.workspace.ReadFile(args.Path); err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return textResult(fmt.Sprintf("Error: %v", err))
 	}
-	t.send(event.AgentNavigate{Path: args.Path, Line: args.Line})
-	return fmt.Sprintf("Navigated to %s line %d.", args.Path, args.Line)
+	return ToolResult{
+		Content: fmt.Sprintf("Navigated to %s line %d.", args.Path, args.Line),
+		Effect:  EffectNavigate,
+		Payload: event.AgentNavigate{Path: args.Path, Line: args.Line},
+	}
 }

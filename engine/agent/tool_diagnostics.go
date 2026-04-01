@@ -46,13 +46,13 @@ func (t *DiagnosticsTool) Definition() llm.ToolDef {
 }
 
 // Execute queries diagnostics for the specified file.
-func (t *DiagnosticsTool) Execute(_ context.Context, call llm.ToolCall) string {
+func (t *DiagnosticsTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args struct {
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		slog.Debug("diagnostics: bad arguments", "err", err)
-		return "Error: invalid arguments"
+		return textResult("Error: invalid arguments")
 	}
 
 	path := args.Path
@@ -61,14 +61,13 @@ func (t *DiagnosticsTool) Execute(_ context.Context, call llm.ToolCall) string {
 		path = t.workspace.CanonPath(path)
 	}
 
-	return FormatDiagnostics(t.provider, path, displayPath)
+	return textResult(formatDiagnostics(t.provider, path, displayPath))
 }
 
-// FormatDiagnostics queries and formats diagnostics for a file path.
-// Exported so tool_edit_file can reuse it for auto-injection.
+// formatDiagnostics queries and formats diagnostics for a file path.
 // lookupPath is the canonical path for the provider query.
 // displayPath is the project-relative path shown in output (avoids leaking absolute paths).
-func FormatDiagnostics(provider lang.DiagnosticProvider, lookupPath, displayPath string) string {
+func formatDiagnostics(provider lang.DiagnosticProvider, lookupPath, displayPath string) string {
 	if lookupPath == "" {
 		return "No file specified."
 	}

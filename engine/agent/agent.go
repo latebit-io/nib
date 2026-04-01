@@ -30,9 +30,18 @@ type Agent struct {
 	activeFile string
 	intent     string // current developer intent — included in every tool result
 
-	// Approval flow: agent blocks on these channels
+	// Approval flow: agent blocks on these channels.
+	// These stay private to Agent — tools never see them.
 	approveCh  chan bool   // true = approved, false = rejected
 	continueCh chan string // buffer content after user edits
+
+	// diagProvider is optionally set to auto-inject diagnostics after edits.
+	diagProvider lang.DiagnosticProvider
+	// diagDelay is the wait time for the language server to push diagnostics after an edit.
+	diagDelay time.Duration
+
+	// workspace is used by the approval flow to manage context set.
+	workspace Workspace
 }
 
 // NewOptions holds optional dependencies for agent construction.
@@ -61,22 +70,25 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	}
 
 	a := &Agent{
-		provider:   provider,
-		events:     events,
-		cache:      cache,
-		prompts:    NewPromptLoader(projectRoot),
-		approveCh:  approveCh,
-		continueCh: continueCh,
+		provider:     provider,
+		events:       events,
+		cache:        cache,
+		prompts:      NewPromptLoader(projectRoot),
+		approveCh:    approveCh,
+		continueCh:   continueCh,
+		diagProvider: diagProvider,
+		diagDelay:    500 * time.Millisecond,
+		workspace:    workspace,
 	}
 
-	editTool := NewEditFileTool(workspace, cache, approveCh, continueCh, a.send, diagProvider)
+	editTool := NewEditFileTool(workspace, cache)
 
 	// Build tool registry — each tool gets exactly the dependencies it needs.
 	// Built-in tools are registered first and cannot be overridden by extraTools.
 	builtins := []Tool{
 		NewReadFileTool(workspace, cache),
 		editTool,
-		NewWriteFileTool(workspace, cache, a.send),
+		NewWriteFileTool(workspace, cache),
 		NewListFilesTool(workspace),
 		NewBashTool(projectRoot),
 	}
@@ -86,11 +98,14 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		builtins = append(builtins, NewDiagnosticsTool(diagProvider, workspace))
 	}
 
-	// Navigation tool — always available, sends events to the frontend.
-	builtins = append(builtins, NewGoToLineTool(workspace, a.send))
+	// Navigation tool — always available, effect handled by agent loop.
+	builtins = append(builtins, NewGoToLineTool(workspace))
 
 	// Project-wide search — ripgrep with Go fallback.
 	builtins = append(builtins, NewSearchProjectTool(projectRoot))
+
+	// Package info — version lookup and API docs from the project's package manager.
+	builtins = append(builtins, NewPackageInfoTool(projectRoot))
 
 	// LSP-powered tools — conditionally registered via type assertion.
 	if diagProvider != nil {
@@ -295,6 +310,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 			}
 			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
 			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
+
 			result := a.dispatchTool(ctx, tc)
 			if ctx.Err() != nil {
 				return
@@ -345,14 +361,138 @@ func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
 	}
 }
 
+// dispatchTool executes a tool call and handles any side effects.
+// Pure tools (EffectNone) just return their content. Tools with effects
+// (navigate, file created, edit proposed) are handled here so tools
+// never need access to the event channel or approval channels.
 func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 	name := strings.ToLower(tc.Function.Name)
 	tool, ok := a.tools[name]
 	if !ok {
-		return fmt.Sprintf("Error: unknown tool %q", tc.Function.Name)
+		return fmt.Sprintf("Error: unknown tool %q", tc.Function.Name) + a.intentReminder()
 	}
+
 	result := tool.Execute(ctx, tc)
-	return result + a.intentReminder()
+
+	switch result.Effect {
+	case EffectNavigate:
+		if nav, ok := result.Payload.(event.AgentNavigate); ok {
+			a.send(nav)
+		}
+
+	case EffectFileCreated:
+		if path, ok := result.Payload.(string); ok {
+			a.send(event.AgentFileCreated{Path: path})
+		}
+
+	case EffectEditProposed:
+		proposal, ok := result.Payload.(EditProposal)
+		if !ok {
+			return "Error: invalid edit proposal" + a.intentReminder()
+		}
+		content := a.handleEditProposal(ctx, proposal)
+		return content + a.intentReminder()
+	}
+
+	return result.Content + a.intentReminder()
+}
+
+// handleEditProposal manages the full approval flow for a proposed edit.
+// This logic was formerly inside EditFileTool — now it lives here so
+// the tool is a pure computation and the channels stay private to Agent.
+func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) string {
+	a.send(event.AgentStatus{Status: "waiting"})
+	a.send(event.AgentEditProposed{Edit: proposal.Edit})
+
+	// Wait for approval or rejection.
+	msg, canceled := a.waitForApproval(ctx, proposal)
+	if canceled {
+		return "Error: agent canceled"
+	}
+	if msg != "" {
+		return msg
+	}
+
+	// Approved — add to context set if not already there.
+	if !a.workspace.InContext(proposal.Path) {
+		a.workspace.AddContext(proposal.Path)
+	}
+
+	// Wait for the developer to continue with updated buffer content.
+	return a.waitForContinue(ctx, proposal)
+}
+
+// waitForApproval blocks until the developer approves or rejects the edit,
+// or the context is canceled. Returns (rejectionMsg, false) on reject,
+// ("", true) on cancel, ("", false) on approve.
+func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg string, canceled bool) {
+	select {
+	case <-ctx.Done():
+		return "", true
+	case approved, ok := <-a.approveCh:
+		if !ok {
+			return "Error: approval channel closed", true
+		}
+		if approved {
+			return "", false
+		}
+	}
+
+	a.send(event.AgentStatus{Status: "thinking"})
+	a.send(event.AgentToken{Text: "\n[Edit rejected]\n\n"})
+
+	content := ""
+	if c, ok := a.cache.Get(proposal.CanonPath); ok {
+		content = c
+	}
+	return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
+		proposal.Path, truncateForPreview(content)), false
+}
+
+// waitForContinue blocks until the developer finishes editing and presses
+// continue, or the context is canceled. Compares the new content against
+// the expected result to detect developer modifications.
+func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) string {
+	a.send(event.AgentStatus{Status: "editing"})
+	a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
+
+	select {
+	case <-ctx.Done():
+		return "Error: agent canceled"
+	case newContent, ok := <-a.continueCh:
+		if !ok {
+			return "Error: continue channel closed"
+		}
+		a.cache.Set(proposal.CanonPath, newContent)
+		a.send(event.AgentStatus{Status: "thinking"})
+		a.send(event.AgentToken{Text: "\n"})
+
+		var result string
+		if newContent != proposal.ExpectedContent {
+			diff := simpleDiff(proposal.ExpectedContent, newContent)
+			result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
+				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
+				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
+				"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
+				"Recalibrate: study the diff — it signals the developer's intent. "+
+				"Align your next steps with their direction. "+
+				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
+				"Current file (%s):\n```\n%s\n```",
+				diff, proposal.Path, truncateForPreview(newContent))
+		} else {
+			result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
+				proposal.Path, truncateForPreview(newContent))
+		}
+
+		// Auto-inject diagnostics so the agent can self-correct errors.
+		if a.diagProvider != nil {
+			time.Sleep(a.diagDelay)
+			diagResult := formatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
+			result += "\n\nDiagnostics after edit:\n" + diagResult
+		}
+
+		return result
+	}
 }
 
 // intentReminder returns a string reminding the LLM of the current intent.

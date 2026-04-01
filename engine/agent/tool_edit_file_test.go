@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/event"
@@ -46,17 +47,13 @@ func mustMarshal(t *testing.T, v any) []byte {
 	return b
 }
 
-func TestEditFileToolAutoAddsToContextOnApproval(t *testing.T) {
+func TestEditFileTool_ReturnsEditProposal(t *testing.T) {
 	ws := &testWorkspace{
 		files:     map[string]string{"src/main.go": "package main"},
 		inContext: map[string]bool{},
 	}
 	cache := NewFileCache()
-	approveCh := make(chan bool, 1)
-	continueCh := make(chan string, 1)
-	send := func(_ event.Event) {}
-
-	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send, nil)
+	tool := NewEditFileTool(ws, cache)
 
 	args := mustMarshal(t, editArgs{
 		Path:    "src/main.go",
@@ -69,74 +66,119 @@ func TestEditFileToolAutoAddsToContextOnApproval(t *testing.T) {
 		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	result := tool.Execute(context.Background(), call)
 
-	done := make(chan string, 1)
-	go func() {
-		done <- tool.Execute(ctx, call)
-	}()
+	if result.Effect != EffectEditProposed {
+		t.Fatalf("expected EffectEditProposed, got %d", result.Effect)
+	}
 
-	// Approve, then send continue with new content
-	approveCh <- true
-	continueCh <- "package foo"
-	<-done
+	proposal, ok := result.Payload.(EditProposal)
+	if !ok {
+		t.Fatalf("expected EditProposal payload, got %T", result.Payload)
+	}
 
-	if !ws.InContext("src/main.go") {
-		t.Error("edit_file should auto-add file to context after approval")
+	if proposal.Edit.Path != "src/main.go" {
+		t.Errorf("expected path src/main.go, got %q", proposal.Edit.Path)
+	}
+	if proposal.Edit.Search != "package main" {
+		t.Errorf("expected search 'package main', got %q", proposal.Edit.Search)
+	}
+	if proposal.Edit.Replace != "package foo" {
+		t.Errorf("expected replace 'package foo', got %q", proposal.Edit.Replace)
+	}
+	if proposal.ExpectedContent != "package foo" {
+		t.Errorf("expected content 'package foo', got %q", proposal.ExpectedContent)
 	}
 }
 
-func TestEditFileToolNoContextAddOnRejection(t *testing.T) {
+func TestEditFileTool_ValidationFailsNoMatch(t *testing.T) {
 	ws := &testWorkspace{
 		files:     map[string]string{"src/main.go": "package main"},
 		inContext: map[string]bool{},
 	}
 	cache := NewFileCache()
-	approveCh := make(chan bool, 1)
-	continueCh := make(chan string, 1)
-	send := func(_ event.Event) {}
-
-	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send, nil)
+	tool := NewEditFileTool(ws, cache)
 
 	args := mustMarshal(t, editArgs{
 		Path:    "src/main.go",
-		Search:  "package main",
-		Replace: "package foo",
-		Reason:  "rename",
+		Search:  "nonexistent text",
+		Replace: "replacement",
+		Reason:  "test",
 	})
 	call := llm.ToolCall{
 		ID:       "1",
 		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan string, 1)
-	go func() {
-		done <- tool.Execute(ctx, call)
-	}()
-
-	approveCh <- false
-	<-done
-
-	if ws.InContext("src/main.go") {
-		t.Error("edit_file should not add to context on rejection")
+	result := tool.Execute(context.Background(), call)
+	if result.Effect != EffectNone {
+		t.Errorf("expected EffectNone on validation failure, got %d", result.Effect)
+	}
+	if !strings.Contains(result.Content, "Error:") {
+		t.Errorf("expected error message, got %q", result.Content)
 	}
 }
 
-func TestEditFileToolSkipsAddWhenAlreadyInContext(t *testing.T) {
+func TestEditFileTool_ValidationFailsAmbiguous(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{"src/main.go": "package main"},
-		inContext: map[string]bool{"src/main.go": true},
+		files:     map[string]string{"src/main.go": "foo\nfoo\nbar"},
+		inContext: map[string]bool{},
 	}
 	cache := NewFileCache()
-	approveCh := make(chan bool, 1)
-	continueCh := make(chan string, 1)
-	send := func(_ event.Event) {}
+	tool := NewEditFileTool(ws, cache)
 
-	tool := NewEditFileTool(ws, cache, approveCh, continueCh, send, nil)
+	args := mustMarshal(t, editArgs{
+		Path:    "src/main.go",
+		Search:  "foo",
+		Replace: "baz",
+		Reason:  "test",
+	})
+	call := llm.ToolCall{
+		ID:       "1",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	}
+
+	result := tool.Execute(context.Background(), call)
+	if result.Effect != EffectNone {
+		t.Errorf("expected EffectNone on ambiguous match, got %d", result.Effect)
+	}
+	if !strings.Contains(result.Content, "matches 2 locations") {
+		t.Errorf("expected ambiguity error, got %q", result.Content)
+	}
+}
+
+func TestEditFileTool_EmptySearchOnNonEmptyFile(t *testing.T) {
+	ws := &testWorkspace{
+		files:     map[string]string{"src/main.go": "package main"},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	tool := NewEditFileTool(ws, cache)
+
+	args := mustMarshal(t, editArgs{
+		Path:    "src/main.go",
+		Search:  "",
+		Replace: "new content",
+		Reason:  "test",
+	})
+	call := llm.ToolCall{
+		ID:       "1",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	}
+
+	result := tool.Execute(context.Background(), call)
+	if !strings.Contains(result.Content, "search field cannot be empty") {
+		t.Errorf("expected empty search error, got %q", result.Content)
+	}
+}
+
+func TestEditFileTool_ProposalContainsCallID(t *testing.T) {
+	ws := &testWorkspace{
+		files:     map[string]string{"src/main.go": "package main"},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	tool := NewEditFileTool(ws, cache)
 
 	args := mustMarshal(t, editArgs{
 		Path:    "src/main.go",
@@ -145,22 +187,47 @@ func TestEditFileToolSkipsAddWhenAlreadyInContext(t *testing.T) {
 		Reason:  "rename",
 	})
 	call := llm.ToolCall{
+		ID:       "call-42",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	}
+
+	result := tool.Execute(context.Background(), call)
+	proposal := result.Payload.(EditProposal)
+	if proposal.Edit.ID != "call-42" {
+		t.Errorf("expected edit ID 'call-42', got %q", proposal.Edit.ID)
+	}
+}
+
+func TestEditFileTool_ProposalPendingEditFields(t *testing.T) {
+	ws := &testWorkspace{
+		files:     map[string]string{"main.go": "hello world"},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	tool := NewEditFileTool(ws, cache)
+
+	args := mustMarshal(t, editArgs{
+		Path:    "main.go",
+		Search:  "hello",
+		Replace: "goodbye",
+		Reason:  "farewell",
+	})
+	call := llm.ToolCall{
 		ID:       "1",
 		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	result := tool.Execute(context.Background(), call)
+	proposal := result.Payload.(EditProposal)
 
-	done := make(chan string, 1)
-	go func() {
-		done <- tool.Execute(ctx, call)
-	}()
-
-	approveCh <- false
-	<-done
-
-	if ws.addContextCalls != 0 {
-		t.Errorf("AddContext called %d times, want 0 (file already in context)", ws.addContextCalls)
+	want := event.PendingEdit{
+		ID:      "1",
+		Path:    "main.go",
+		Search:  "hello",
+		Replace: "goodbye",
+		Reason:  "farewell",
+	}
+	if proposal.Edit != want {
+		t.Errorf("PendingEdit mismatch:\n got  %+v\n want %+v", proposal.Edit, want)
 	}
 }

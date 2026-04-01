@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
@@ -13,12 +12,11 @@ import (
 type WriteFileTool struct {
 	workspace Workspace
 	cache     *FileCache
-	send      func(event.Event)
 }
 
 // NewWriteFileTool creates a WriteFileTool with the given dependencies.
-func NewWriteFileTool(ws Workspace, cache *FileCache, send func(event.Event)) *WriteFileTool {
-	return &WriteFileTool{workspace: ws, cache: cache, send: send}
+func NewWriteFileTool(ws Workspace, cache *FileCache) *WriteFileTool {
+	return &WriteFileTool{workspace: ws, cache: cache}
 }
 
 func (t *WriteFileTool) Definition() llm.ToolDef {
@@ -55,21 +53,24 @@ type writeArgs struct {
 	Reason  string `json:"reason"`
 }
 
-func (t *WriteFileTool) Execute(_ context.Context, call llm.ToolCall) string {
+func (t *WriteFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args writeArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return fmt.Sprintf("Error: invalid arguments: %v", err)
+		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Path == "" {
-		return "Error: path is required"
+		return textResult("Error: path is required")
 	}
 
 	if err := t.workspace.WriteFile(args.Path, args.Content); err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return textResult(fmt.Sprintf("Error: %v", err))
 	}
 
 	t.cache.Set(t.workspace.CanonPath(args.Path), args.Content)
-	t.send(event.AgentFileCreated{Path: args.Path})
 
-	return fmt.Sprintf("File created: %s", args.Path)
+	return ToolResult{
+		Content: fmt.Sprintf("File created: %s", args.Path),
+		Effect:  EffectFileCreated,
+		Payload: args.Path,
+	}
 }

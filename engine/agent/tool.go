@@ -55,16 +55,6 @@ type Workspace interface {
 	AddContext(path string)
 }
 
-// BufferSaver flushes unsaved editor buffers to disk before the agent
-// reads files or runs commands. The agent type-asserts its Workspace
-// for this capability — implementations that don't manage in-memory
-// buffers (e.g. test stubs) can omit it.
-type BufferSaver interface {
-	// SaveDirtyBuffers writes all modified buffers to disk.
-	// Returns the canonical paths of files that were saved.
-	SaveDirtyBuffers() ([]string, error)
-}
-
 // FileCache is a concurrency-safe cache of file contents. The agent
 // maintains its own view of file state, updated only through explicit
 // channels (Run, Continue), to avoid races with user edits.

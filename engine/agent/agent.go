@@ -18,13 +18,12 @@ import (
 
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
-	provider  llm.Provider
-	events    chan<- event.Event // frontend reads from this
-	tools     map[string]Tool
-	toolDefs  []llm.ToolDef
-	cache     *FileCache
-	prompts   *PromptLoader
-	workspace Workspace
+	provider llm.Provider
+	events   chan<- event.Event // frontend reads from this
+	tools    map[string]Tool
+	toolDefs []llm.ToolDef
+	cache    *FileCache
+	prompts  *PromptLoader
 
 	mu         sync.Mutex
 	cancel     context.CancelFunc
@@ -65,7 +64,6 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		provider:   provider,
 		events:     events,
 		cache:      cache,
-		workspace:  workspace,
 		prompts:    NewPromptLoader(projectRoot),
 		approveCh:  approveCh,
 		continueCh: continueCh,
@@ -290,9 +288,11 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 			break
 		}
 
-		a.flushDirtyBuffers()
-
 		for _, tc := range toolCalls {
+			if err := a.flushDirtyBuffers(ctx); err != nil {
+				a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
+				return
+			}
 			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
 			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
 			result := a.dispatchTool(ctx, tc)
@@ -308,20 +308,23 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 	}
 }
 
-// flushDirtyBuffers saves any unsaved editor buffers to disk and
-// invalidates the corresponding cache entries so subsequent tool
-// reads see the developer's latest edits.
-func (a *Agent) flushDirtyBuffers() {
-	saver, ok := a.workspace.(BufferSaver)
-	if !ok {
-		return
-	}
-	saved, err := saver.SaveDirtyBuffers()
-	if err != nil {
-		slog.Warn("autosave before tool dispatch failed", "err", err)
-	}
-	for _, p := range saved {
-		a.cache.Invalidate(p)
+// flushDirtyBuffers asks the frontend to save all dirty buffers to disk,
+// then invalidates the corresponding cache entries. The actual I/O runs
+// on the frontend's goroutine (via FlushBuffers event) so we never touch
+// TUI-owned buffer state from the agent goroutine. Called before each
+// tool dispatch — not once per batch — because an earlier tool (e.g.
+// edit_file) may modify buffers that a later tool needs on disk.
+func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
+	resultCh := make(chan event.FlushResult, 1)
+	a.send(event.FlushBuffers{Result: resultCh})
+	select {
+	case res := <-resultCh:
+		for _, p := range res.Saved {
+			a.cache.Invalidate(p)
+		}
+		return res.Err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

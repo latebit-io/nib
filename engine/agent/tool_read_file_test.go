@@ -2,11 +2,25 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/llm"
 )
+
+// errWorkspace returns an error for files not in its map, unlike testWorkspace
+// which returns ("", nil). This lets us test the error propagation path.
+type errWorkspace struct {
+	testWorkspace
+}
+
+func (w *errWorkspace) ReadFile(path string) (string, error) {
+	if c, ok := w.files[path]; ok {
+		return c, nil
+	}
+	return "", fmt.Errorf("no such file: %s", path)
+}
 
 func newReadTestWorkspace(files map[string]string) *testWorkspace {
 	return &testWorkspace{
@@ -187,4 +201,57 @@ func TestReadFileTool_EffectIsNone(t *testing.T) {
 	if result.Effect != EffectNone {
 		t.Errorf("expected EffectNone, got %d", result.Effect)
 	}
+}
+
+func TestReadFileTool_FileTooLarge(t *testing.T) {
+	huge := strings.Repeat("x", maxFileSize+1)
+	ws := newReadTestWorkspace(map[string]string{"big.bin": huge})
+	tool := NewReadFileTool(ws, NewFileCache())
+
+	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "big.bin"}))
+	if !strings.Contains(result.Content, "file too large") {
+		t.Errorf("expected size error, got %q", result.Content)
+	}
+}
+
+func TestReadFileTool_FileNotFound(t *testing.T) {
+	ws := &errWorkspace{testWorkspace{files: map[string]string{}, inContext: map[string]bool{}}}
+	tool := NewReadFileTool(ws, NewFileCache())
+
+	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "nonexistent.go"}))
+	if !strings.Contains(result.Content, "no such file") {
+		t.Errorf("expected file-not-found error, got %q", result.Content)
+	}
+}
+
+func TestReadFileTool_EdgeCases(t *testing.T) {
+	runReadTests(t, []readTestCase{
+		{
+			name:    "empty file sliced returns single empty line",
+			content: "",
+			args:    readArgs{Path: "empty.go", Offset: 1, Limit: 5},
+			// strings.Split("", "\n") → [""] → 1 line
+			wantContains: []string{"Lines 1–1 of 1", "   1\t"},
+		},
+		{
+			name:      "empty file full read returns empty string",
+			content:   "",
+			args:      readArgs{Path: "empty.go"},
+			wantExact: "",
+		},
+		{
+			name:    "trailing newline inflates line count",
+			content: "a\nb\n",
+			args:    readArgs{Path: "main.go", Offset: 1, Limit: 10},
+			// strings.Split("a\nb\n", "\n") → ["a", "b", ""] → 3 lines
+			wantContains: []string{"Lines 1–3 of 3", "   1\ta", "   2\tb", "   3\t\n"},
+		},
+		{
+			name:    "no trailing newline correct line count",
+			content: "a\nb",
+			args:    readArgs{Path: "main.go", Offset: 1, Limit: 10},
+			// strings.Split("a\nb", "\n") → ["a", "b"] → 2 lines
+			wantContains: []string{"Lines 1–2 of 2", "   1\ta", "   2\tb"},
+		},
+	})
 }

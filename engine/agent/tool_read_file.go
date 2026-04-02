@@ -83,6 +83,11 @@ func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 	return textResult(content)
 }
 
+// maxFileSize is the largest file we'll read and cache. Matches the
+// maxDiffInputBytes cap used by edit_file. Files beyond this are too
+// large for useful LLM context and risk unbounded memory growth.
+const maxFileSize = 10 * 1024 * 1024 // 10 MB
+
 // loadContent returns file content from cache or disk, populating the cache on miss.
 func (t *ReadFileTool) loadContent(path string) (string, error) {
 	canon := t.workspace.CanonPath(path)
@@ -95,6 +100,9 @@ func (t *ReadFileTool) loadContent(path string) (string, error) {
 	content, err := t.workspace.ReadFile(path)
 	if err != nil {
 		return "", err
+	}
+	if len(content) > maxFileSize {
+		return "", fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxFileSize)
 	}
 
 	slog.Debug("read_file: read from disk", "path", path, "content_len", len(content))

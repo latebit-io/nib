@@ -19,6 +19,7 @@ Pick the right tool for the question:
 | "What calls this function?" | `find_references` (if available) or `search_project` |
 | "What files exist?" | `list_files` |
 | "What does this file contain?" | `read_file` |
+| "What's on lines 50–100 of this file?" | `read_file` with `offset` and `limit` |
 
 **Always prefer `search_project` over `bash` with grep/find/rg.** The search tool is faster, returns structured file:line results, and respects gitignore. Only use bash for builds, tests, and commands — never for searching code.
 
@@ -30,6 +31,7 @@ Before writing code that imports an external library, call `package_info` with t
 
 ## Multi-File
 
+- For large files (500+ lines), use `offset` and `limit` to read specific sections instead of loading everything. Read the full file first to understand structure, then use line ranges for re-reads during editing.
 - Use read_file with different paths to examine multiple files.
 - Use write_file to create new files that do not exist yet.
 - Each edit_file call targets one file. You can edit different files in sequence.

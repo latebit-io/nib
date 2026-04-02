@@ -71,6 +71,9 @@ func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 	if args.Path == "" {
 		return textResult("Error: path is required")
 	}
+	if args.Offset < 0 || args.Limit < 0 {
+		return textResult("Error: offset and limit must be non-negative")
+	}
 
 	content, err := t.loadContent(args.Path)
 	if err != nil {
@@ -114,6 +117,7 @@ func (t *ReadFileTool) loadContent(path string) (string, error) {
 }
 
 // sliceLines extracts a line range from content and formats it with line numbers.
+// Output is capped at maxContentPreview bytes to stay consistent with other tools.
 // offset is 1-indexed (0 is treated as 1). limit is the number of lines to return.
 func sliceLines(content, path string, offset, limit int) string {
 	lines := strings.Split(content, "\n")
@@ -140,6 +144,10 @@ func sliceLines(content, path string, offset, limit int) string {
 	fmt.Fprintf(&b, "Lines %d–%d of %d in %s\n", start, endIdx, total, path)
 	for i := startIdx; i < endIdx; i++ {
 		fmt.Fprintf(&b, "%4d\t%s\n", i+1, lines[i])
+		if b.Len() > maxContentPreview {
+			fmt.Fprintf(&b, "\n... truncated at %d bytes (use a smaller range)\n", maxContentPreview)
+			break
+		}
 	}
 	return b.String()
 }

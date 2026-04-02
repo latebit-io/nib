@@ -103,6 +103,18 @@ func TestReadFileTool_FullFile(t *testing.T) {
 			args:    readArgs{Path: ""},
 			wantErr: "path is required",
 		},
+		{
+			name:    "negative offset returns error",
+			content: "content",
+			args:    readArgs{Path: "main.go", Offset: -1},
+			wantErr: "offset and limit must be non-negative",
+		},
+		{
+			name:    "negative limit returns error",
+			content: "content",
+			args:    readArgs{Path: "main.go", Limit: -5},
+			wantErr: "offset and limit must be non-negative",
+		},
 	})
 }
 
@@ -225,6 +237,26 @@ func TestReadFileTool_FileTooLargeCacheHit(t *testing.T) {
 	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "big.bin"}))
 	if !strings.Contains(result.Content, "file too large") {
 		t.Errorf("expected size error on cache hit, got %q", result.Content)
+	}
+}
+
+func TestReadFileTool_SliceTruncation(t *testing.T) {
+	// Build a file whose sliced output exceeds maxContentPreview.
+	var lines []string
+	for i := range 2000 {
+		lines = append(lines, fmt.Sprintf("line content that is fairly long to fill up the buffer quickly %d", i))
+	}
+	bigContent := strings.Join(lines, "\n")
+
+	ws := newReadTestWorkspace(map[string]string{"big.go": bigContent})
+	tool := NewReadFileTool(ws, NewFileCache())
+
+	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "big.go", Offset: 1, Limit: 2000}))
+	if !strings.Contains(result.Content, "truncated") {
+		t.Error("expected truncation notice in output")
+	}
+	if len(result.Content) > maxContentPreview+200 {
+		t.Errorf("output too large after truncation: %d bytes", len(result.Content))
 	}
 }
 

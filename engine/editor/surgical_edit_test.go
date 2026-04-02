@@ -81,11 +81,11 @@ func TestNarrowEdit(t *testing.T) {
 			replace:     "aaa\nbbb",
 			editLine:    3,
 			editCol:     0,
-			wantLine:    5,
+			wantLine:    4,
 			wantCol:     0,
-			wantSearch:  "",
-			wantReplace: "",
-			wantPrefix:  2,
+			wantSearch:  "bbb",
+			wantReplace: "bbb",
+			wantPrefix:  1,
 			wantSuffix:  0,
 		},
 		{
@@ -107,11 +107,11 @@ func TestNarrowEdit(t *testing.T) {
 			replace:     "aaa\nbbb\nccc",
 			editLine:    0,
 			editCol:     0,
-			wantLine:    1,
+			wantLine:    0,
 			wantCol:     0,
-			wantSearch:  "",
-			wantReplace: "bbb",
-			wantPrefix:  1,
+			wantSearch:  "aaa",
+			wantReplace: "aaa\nbbb",
+			wantPrefix:  0,
 			wantSuffix:  1,
 		},
 		{
@@ -241,6 +241,65 @@ func TestNarrowEditIntegration(t *testing.T) {
 	got = buf.Content()
 	if got != "aaa\nbbb\nccc\nddd" {
 		t.Errorf("after undo: %q, want original", got)
+	}
+}
+
+// TestNarrowEditIntegrationInsert verifies pure-insertion surgical edits.
+// When the narrowed search is empty (all search lines are in prefix/suffix),
+// the replacement must not concatenate with existing line content.
+func TestNarrowEditIntegrationInsert(t *testing.T) {
+	buf := buffer.New()
+	buf.Insert(0, 0, "aaa\nccc")
+	e := New(buf)
+
+	search := "aaa\nccc"
+	replace := "aaa\nbbb\nccc"
+	hunks := ComputeHunks(splitLines(search), splitLines(replace))
+	ne := NarrowEdit(0, 0, search, replace, hunks, nil)
+
+	searchRunes := utf8.RuneCountInString(ne.Search)
+	ie := e.BeginIncrementalEdit(ne.Line, ne.Col, searchRunes, 100, ne.Replace, ne.LineOrigins)
+
+	for range 1000 {
+		r := ie.Advance()
+		if r.Done {
+			break
+		}
+	}
+	ie.Complete()
+
+	got := buf.Content()
+	want := "aaa\nbbb\nccc"
+	if got != want {
+		t.Errorf("buffer = %q, want %q", got, want)
+	}
+}
+
+// TestNarrowEditIntegrationInsertMultiLine verifies multi-line pure insertion.
+func TestNarrowEditIntegrationInsertMultiLine(t *testing.T) {
+	buf := buffer.New()
+	buf.Insert(0, 0, "func main() {\n\tfmt.Println(\"done\")\n}")
+	e := New(buf)
+
+	search := "func main() {\n\tfmt.Println(\"done\")\n}"
+	replace := "func main() {\n\tx := 1\n\ty := 2\n\tfmt.Println(\"done\")\n}"
+	hunks := ComputeHunks(splitLines(search), splitLines(replace))
+	ne := NarrowEdit(0, 0, search, replace, hunks, nil)
+
+	searchRunes := utf8.RuneCountInString(ne.Search)
+	ie := e.BeginIncrementalEdit(ne.Line, ne.Col, searchRunes, 100, ne.Replace, ne.LineOrigins)
+
+	for range 1000 {
+		r := ie.Advance()
+		if r.Done {
+			break
+		}
+	}
+	ie.Complete()
+
+	got := buf.Content()
+	if got != replace {
+		t.Errorf("buffer = %q, want %q", got, replace)
 	}
 }
 

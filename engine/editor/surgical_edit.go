@@ -45,6 +45,18 @@ func NarrowEdit(
 	// Count unchanged prefix/suffix lines from hunks.
 	prefix, suffix := unchangedBounds(hunks, len(searchLines), len(replaceLines))
 
+	// A zero-length delete causes the replacement to be inserted into the
+	// existing line content at the insertion point rather than before it.
+	// Include one boundary line so BeginIncrementalEdit always has text to
+	// delete, keeping the animation result consistent with strings.Replace.
+	if prefix+suffix == len(searchLines) {
+		if prefix > 0 {
+			prefix--
+		} else if suffix > 0 {
+			suffix--
+		}
+	}
+
 	// Narrow the search text.
 	narrowSearch := strings.Join(searchLines[prefix:len(searchLines)-suffix], "\n")
 
@@ -54,10 +66,7 @@ func NarrowEdit(
 	// Narrow the line origins.
 	var narrowOrigins []*buffer.Origin
 	if len(lineOrigins) > 0 {
-		end := len(lineOrigins) - suffix
-		if end < 0 {
-			end = 0
-		}
+		end := max(len(lineOrigins)-suffix, 0)
 		if prefix < end {
 			narrowOrigins = lineOrigins[prefix:end]
 		}

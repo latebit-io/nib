@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/latebit-io/junto/engine/llm"
@@ -97,6 +98,18 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", args.Command)
 	cmd.Dir = t.projectRoot
+
+	// Run in its own process group so we can kill all children (not just
+	// the shell) when the context deadline fires. Without this, commands
+	// like `go run .` spawn child processes that outlive the shell and
+	// hold stdout/stderr pipes open, blocking cmd.Run() indefinitely.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// Grace period for pipe drain after process exit. Prevents cmd.Run()
+	// from hanging if a child process still holds a pipe fd.
+	cmd.WaitDelay = time.Second
 
 	// Cap buffer during execution to prevent OOM from high-volume output.
 	// LimitedWriter stops accepting writes after maxBashOutput bytes.

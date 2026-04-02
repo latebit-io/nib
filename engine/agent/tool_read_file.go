@@ -94,6 +94,9 @@ func (t *ReadFileTool) loadContent(path string) (string, error) {
 
 	if content, ok := t.cache.Get(canon); ok {
 		slog.Debug("read_file: cache hit", "path", path, "content_len", len(content))
+		if len(content) > maxFileSize {
+			return "", fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxFileSize)
+		}
 		return content, nil
 	}
 
@@ -134,7 +137,7 @@ func sliceLines(content, path string, offset, limit int) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Lines %d–%d of %d in %s\n", start, startIdx+(endIdx-startIdx), total, path)
+	fmt.Fprintf(&b, "Lines %d–%d of %d in %s\n", start, endIdx, total, path)
 	for i := startIdx; i < endIdx; i++ {
 		fmt.Fprintf(&b, "%4d\t%s\n", i+1, lines[i])
 	}

@@ -214,6 +214,20 @@ func TestReadFileTool_FileTooLarge(t *testing.T) {
 	}
 }
 
+func TestReadFileTool_FileTooLargeCacheHit(t *testing.T) {
+	// Oversized content can enter the cache via cache.Reset() (agent startup)
+	// or cache.Set() (edit_file post-apply). Verify the cache-hit path rejects it.
+	ws := newReadTestWorkspace(map[string]string{})
+	cache := NewFileCache()
+	cache.Set("big.bin", strings.Repeat("x", maxFileSize+1))
+	tool := NewReadFileTool(ws, cache)
+
+	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "big.bin"}))
+	if !strings.Contains(result.Content, "file too large") {
+		t.Errorf("expected size error on cache hit, got %q", result.Content)
+	}
+}
+
 func TestReadFileTool_FileNotFound(t *testing.T) {
 	ws := &errWorkspace{testWorkspace{files: map[string]string{}, inContext: map[string]bool{}}}
 	tool := NewReadFileTool(ws, NewFileCache())

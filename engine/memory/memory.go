@@ -2,7 +2,10 @@
 // Implementations execute operations against a Mark Protocol server.
 package memory
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 // Sentinel errors for memory operations.
 var (
@@ -31,18 +34,20 @@ type Document struct {
 
 // Store is the port interface for structured memory.
 // Implementations execute operations against a Mark Protocol server.
+// All methods accept a context for cancellation propagation — implementations
+// must respect ctx.Done() so agent cancellation can abort in-flight operations.
 type Store interface {
 	// Fetch retrieves a document by path.
-	Fetch(path string) (Document, error)
+	Fetch(ctx context.Context, path string) (Document, error)
 
 	// Publish creates or updates a document. Uses optimistic concurrency:
 	// expectedVersion=0 for create, >0 for update (must match current version).
-	Publish(path string, body string, expectedVersion int) (Document, error)
+	Publish(ctx context.Context, path string, body string, expectedVersion int) (Document, error)
 
 	// Append adds content to an existing document.
 	// expectedVersion must be >= 1 (document must exist).
-	Append(path string, body string, expectedVersion int) (Document, error)
+	Append(ctx context.Context, path string, body string, expectedVersion int) (Document, error)
 
 	// List returns document paths under a directory.
-	List(path string) ([]string, error)
+	List(ctx context.Context, path string) ([]string, error)
 }

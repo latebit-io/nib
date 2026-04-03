@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
@@ -23,7 +24,17 @@ const (
 	// Server release: demarkus-server, demarkus-token.
 	// Client release: demarkus.
 	requiredBins = "demarkus-server,demarkus-token,demarkus"
+
+	// httpTimeout bounds all GitHub API and download requests.
+	httpTimeout = 60 * time.Second
+	// maxDownloadBytes caps release asset downloads (100 MB).
+	maxDownloadBytes = 100 << 20
+	// maxAPIResponseBytes caps GitHub API JSON responses (2 MB).
+	maxAPIResponseBytes = 2 << 20
 )
+
+// httpClient is a dedicated client with a timeout for all install-time HTTP requests.
+var httpClient = &http.Client{Timeout: httpTimeout}
 
 // install downloads and installs the demarkus binaries into binDir.
 // version is the pinned version to install (empty means fetch latest).
@@ -115,7 +126,7 @@ func fetchLatestVersion(component string) (string, error) {
 		req.Header.Set("Authorization", "token "+token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("fetch releases: %w", err)
 	}
@@ -128,7 +139,7 @@ func fetchLatestVersion(component string) (string, error) {
 	var releases []struct {
 		TagName string `json:"tag_name"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseBytes)).Decode(&releases); err != nil {
 		return "", fmt.Errorf("decode releases: %w", err)
 	}
 
@@ -180,7 +191,7 @@ func downloadAsset(tag, filename string) ([]byte, error) {
 	encodedTag := strings.ReplaceAll(tag, "/", "%2F")
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", githubRepo, encodedTag, filename)
 
-	resp, err := http.Get(url)
+	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +200,7 @@ func downloadAsset(tag, filename string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, filename)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadBytes))
 }
 
 // downloadAssetViaAPI uses the GitHub releases API to download assets from private repos.
@@ -203,7 +214,7 @@ func downloadAssetViaAPI(tag, filename, token string) ([]byte, error) {
 	}
 	req.Header.Set("Authorization", "token "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +230,7 @@ func downloadAssetViaAPI(tag, filename, token string) ([]byte, error) {
 			URL  string `json:"url"`
 		} `json:"assets"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseBytes)).Decode(&release); err != nil {
 		return nil, fmt.Errorf("decode release: %w", err)
 	}
 
@@ -234,7 +245,7 @@ func downloadAssetViaAPI(tag, filename, token string) ([]byte, error) {
 		assetReq.Header.Set("Authorization", "token "+token)
 		assetReq.Header.Set("Accept", "application/octet-stream")
 
-		assetResp, err := http.DefaultClient.Do(assetReq)
+		assetResp, err := httpClient.Do(assetReq)
 		if err != nil {
 			return nil, err
 		}
@@ -243,7 +254,7 @@ func downloadAssetViaAPI(tag, filename, token string) ([]byte, error) {
 		if assetResp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("asset download returned %d", assetResp.StatusCode)
 		}
-		return io.ReadAll(assetResp.Body)
+		return io.ReadAll(io.LimitReader(assetResp.Body, maxDownloadBytes))
 	}
 	return nil, fmt.Errorf("asset %s not found in release %s", filename, tag)
 }

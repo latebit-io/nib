@@ -11,6 +11,10 @@ import (
 // Prevents unbounded prompt growth in long-lived sessions.
 const maxContextInPrompt = 50
 
+// maxMemorySummaryBytes caps the memory summary injected into the prompt.
+// The summary is external content from demarkus — must be bounded.
+const maxMemorySummaryBytes = 8000
+
 // buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
 // contextFiles lists the files the agent is allowed to edit.
@@ -36,6 +40,11 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		shown = shown[:maxContextInPrompt]
 	}
 
+	memorySummary := a.workspace.MemorySummary()
+	if len(memorySummary) > maxMemorySummaryBytes {
+		memorySummary = memorySummary[:maxMemorySummaryBytes] + "\n\n[truncated]"
+	}
+
 	userContent, err := a.prompts.RenderUserMessage(UserPromptData{
 		FileName:      fileName,
 		FileContent:   numbered.String(),
@@ -43,7 +52,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		ContextFiles:  shown,
 		OmittedCount:  omitted,
 		Goal:          goal,
-		MemorySummary: a.workspace.MemorySummary(),
+		MemorySummary: memorySummary,
 	})
 	if err != nil {
 		// Template execution failed — fall back to a minimal message.

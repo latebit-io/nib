@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -127,30 +128,41 @@ func (m *Manager) Stop() error {
 	// SIGTERM for graceful shutdown.
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		// Process already dead.
+		slog.Debug("memory server: SIGTERM failed (already dead)", "pid", pid, "err", err)
 		m.cleanupFiles()
 		return nil
 	}
 
-	// Wait up to 5s for graceful shutdown.
-	done := make(chan struct{})
-	go func() {
-		_, _ = proc.Wait()
-		close(done)
-	}()
+	// Poll for exit. We cannot use proc.Wait() because the server process
+	// was Release()'d after start (or discovered via PID file from a
+	// previous session), making it a non-child. Wait() returns immediately
+	// for non-children on Unix, which would skip the graceful window.
+	// Instead, poll with signal 0 — it fails with ESRCH when the process exits.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			// Process exited.
+			m.cleanupFiles()
+			m.process = nil
+			m.port = 0
+			slog.Info("memory server: stopped gracefully", "pid", pid)
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
-	select {
-	case <-done:
-		// Graceful shutdown succeeded.
-	case <-time.After(5 * time.Second):
-		// Force kill.
-		_ = proc.Signal(syscall.SIGKILL)
-		<-done
+	// Still alive after 5s — escalate to SIGKILL.
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		slog.Debug("memory server: SIGKILL failed (already dead)", "pid", pid, "err", err)
+	} else {
+		// Give the kernel a moment to reap.
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	m.cleanupFiles()
 	m.process = nil
 	m.port = 0
-	slog.Info("memory server: stopped", "pid", pid)
+	slog.Info("memory server: stopped (killed)", "pid", pid)
 	return nil
 }
 
@@ -274,6 +286,19 @@ func (m *Manager) reuseExisting() (int, error) {
 		return 0, err
 	}
 
+	// Probe the port to verify this is actually a demarkus server and not
+	// a recycled PID. Without this, a dead server whose PID was reused by
+	// an unrelated process would be silently adopted, and Stop() would
+	// later signal the wrong process.
+	clientBin := filepath.Join(m.binDir, "demarkus")
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer probeCancel()
+	probe := exec.CommandContext(probeCtx, clientBin, "-insecure", "-no-cache", fmt.Sprintf("mark://localhost:%d/", port))
+	if err := probe.Run(); err != nil {
+		m.cleanupFiles()
+		return 0, fmt.Errorf("PID %d alive but port %d not responding: %w", pid, port, err)
+	}
+
 	m.process = proc
 	return port, nil
 }
@@ -286,8 +311,11 @@ func (m *Manager) waitReady(port int) error {
 	deadline := time.Now().Add(5 * time.Second)
 
 	for time.Now().Before(deadline) {
-		cmd := exec.Command(clientBin, "-insecure", "-no-cache", url)
-		if err := cmd.Run(); err == nil {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		cmd := exec.CommandContext(probeCtx, clientBin, "-insecure", "-no-cache", url)
+		err := cmd.Run()
+		cancel()
+		if err == nil {
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)

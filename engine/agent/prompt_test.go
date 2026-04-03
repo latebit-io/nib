@@ -31,6 +31,7 @@ func testAgent() *Agent {
 	return &Agent{
 		prompts:   NewPromptLoader(""),
 		workspace: promptTestWorkspace{},
+		tools:     make(map[string]Tool),
 	}
 }
 
@@ -152,6 +153,14 @@ func TestPromptLoaderFallsBackToEmbedded(t *testing.T) {
 	system := loader.SystemPrompt()
 	if !strings.Contains(system, "pair-programming agent") {
 		t.Error("expected embedded default system prompt")
+	}
+}
+
+func TestSystemPromptIncludesMemorySection(t *testing.T) {
+	loader := NewPromptLoader("")
+	system := loader.SystemPrompt()
+	if !strings.Contains(system, "## Memory") {
+		t.Error("system prompt should include Memory section")
 	}
 }
 

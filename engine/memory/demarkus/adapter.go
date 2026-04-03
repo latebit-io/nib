@@ -12,6 +12,10 @@ import (
 	"github.com/latebit-io/junto/engine/memory"
 )
 
+// maxOutputBytes caps stdout and stderr from the demarkus CLI.
+// Prevents unbounded memory growth from large documents or noisy output.
+const maxOutputBytes = 10 << 20 // 10 MB
+
 // cmdTimeout is the maximum time a single demarkus CLI invocation may run.
 const cmdTimeout = 10 * time.Second
 
@@ -34,14 +38,14 @@ func New(binPath, serverURL, token string) *Adapter {
 }
 
 // Fetch retrieves a document by path.
-func (a *Adapter) Fetch(path string) (memory.Document, error) {
+func (a *Adapter) Fetch(ctx context.Context, path string) (memory.Document, error) {
 	args := []string{
 		"-v",
 		"-insecure",
 		"-no-cache",
 		a.serverURL + path,
 	}
-	stdout, stderr, cmdErr := a.run(args)
+	stdout, stderr, cmdErr := a.run(ctx, args)
 	if err := checkStatus(stderr, cmdErr); err != nil {
 		return memory.Document{}, err
 	}
@@ -55,7 +59,7 @@ func (a *Adapter) Fetch(path string) (memory.Document, error) {
 }
 
 // Publish creates or updates a document.
-func (a *Adapter) Publish(path string, body string, expectedVersion int) (memory.Document, error) {
+func (a *Adapter) Publish(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
 	args := []string{
 		"-v",
 		"-insecure",
@@ -69,7 +73,7 @@ func (a *Adapter) Publish(path string, body string, expectedVersion int) (memory
 	}
 	args = append(args, a.serverURL+path)
 
-	stdout, stderr, cmdErr := a.run(args)
+	stdout, stderr, cmdErr := a.run(ctx, args)
 	if err := checkStatus(stderr, cmdErr); err != nil {
 		return memory.Document{}, err
 	}
@@ -83,7 +87,7 @@ func (a *Adapter) Publish(path string, body string, expectedVersion int) (memory
 }
 
 // Append adds content to an existing document.
-func (a *Adapter) Append(path string, body string, expectedVersion int) (memory.Document, error) {
+func (a *Adapter) Append(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
 	args := []string{
 		"-v",
 		"-insecure",
@@ -97,7 +101,7 @@ func (a *Adapter) Append(path string, body string, expectedVersion int) (memory.
 	}
 	args = append(args, a.serverURL+path)
 
-	stdout, stderr, cmdErr := a.run(args)
+	stdout, stderr, cmdErr := a.run(ctx, args)
 	if err := checkStatus(stderr, cmdErr); err != nil {
 		return memory.Document{}, err
 	}
@@ -111,7 +115,7 @@ func (a *Adapter) Append(path string, body string, expectedVersion int) (memory.
 }
 
 // List returns document paths under a directory.
-func (a *Adapter) List(path string) ([]string, error) {
+func (a *Adapter) List(ctx context.Context, path string) ([]string, error) {
 	args := []string{
 		"-v",
 		"-insecure",
@@ -119,7 +123,7 @@ func (a *Adapter) List(path string) ([]string, error) {
 		"-X", "LIST",
 		a.serverURL + path,
 	}
-	stdout, stderr, cmdErr := a.run(args)
+	stdout, stderr, cmdErr := a.run(ctx, args)
 	if err := checkStatus(stderr, cmdErr); err != nil {
 		return nil, err
 	}
@@ -148,18 +152,55 @@ func (a *Adapter) List(path string) ([]string, error) {
 }
 
 // run executes the demarkus CLI with the given arguments and returns stdout, stderr, and error.
-func (a *Adapter) run(args []string) (stdout, stderr string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+// Output is capped at maxOutputBytes per stream to prevent unbounded memory growth.
+// The caller's context is used for cancellation; cmdTimeout is applied as an upper bound.
+func (a *Adapter) run(ctx context.Context, args []string) (stdout, stderr string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, cmdTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, a.binPath, args...)
 
-	var outBuf, errBuf strings.Builder
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
+	outBuf := &cappedBuffer{limit: maxOutputBytes}
+	errBuf := &cappedBuffer{limit: maxOutputBytes}
+	cmd.Stdout = outBuf
+	cmd.Stderr = errBuf
 
 	err = cmd.Run()
+
+	if outBuf.overflow || errBuf.overflow {
+		return outBuf.String(), errBuf.String(), fmt.Errorf("memory: CLI output exceeded %d bytes", maxOutputBytes)
+	}
 	return outBuf.String(), errBuf.String(), err
+}
+
+// cappedBuffer is a bytes.Buffer that stops accepting writes after limit bytes.
+// Excess data is silently discarded and the overflow flag is set.
+type cappedBuffer struct {
+	buf      strings.Builder
+	written  int
+	limit    int
+	overflow bool
+}
+
+// Write implements io.Writer. Writes beyond the limit are silently dropped.
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	remaining := c.limit - c.written
+	if remaining <= 0 {
+		c.overflow = true
+		return len(p), nil // pretend we consumed it so exec doesn't error
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+		c.overflow = true
+	}
+	n, err := c.buf.Write(p)
+	c.written += n
+	return len(p), err // report original len consumed
+}
+
+// String returns the captured output.
+func (c *cappedBuffer) String() string {
+	return c.buf.String()
 }
 
 // metadata holds parsed values from the verbose status line.

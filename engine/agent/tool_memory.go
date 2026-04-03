@@ -23,7 +23,8 @@ func NewMemoryFetchTool(store memory.Store) *MemoryFetchTool {
 }
 
 type memoryFetchArgs struct {
-	Path string `json:"path"`
+	Path    string `json:"path"`
+	Section string `json:"section"`
 }
 
 // Definition returns the tool schema for the LLM.
@@ -33,13 +34,21 @@ func (t *MemoryFetchTool) Definition() llm.ToolDef {
 		Function: llm.FunctionDef{
 			Name: "memory_fetch",
 			Description: "Fetch a memory document by path. Use this to retrieve project context, " +
-				"architecture decisions, session history, or any structured knowledge persisted across sessions.",
+				"architecture decisions, session history, or any structured knowledge persisted across sessions. " +
+				"Use the optional section parameter to fetch only a specific heading's content " +
+				"(e.g. section=\"Current State\" returns only that section). " +
+				"This reduces context size when you only need part of a large document.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
 					"path": {
 						Type:        "string",
 						Description: "Document path, e.g. /index.md, /architecture.md",
+					},
+					"section": {
+						Type: "string",
+						Description: "Optional heading name to extract a single section (e.g. \"Current State\"). " +
+							"Matches ## headings case-insensitively. Omit to fetch the full document.",
 					},
 				},
 				Required: []string{"path"},
@@ -61,11 +70,74 @@ func (t *MemoryFetchTool) Execute(ctx context.Context, call llm.ToolCall) ToolRe
 		return textResult("Error: path is required")
 	}
 
-	doc, err := t.store.Fetch(args.Path)
+	doc, err := t.store.Fetch(ctx, args.Path)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
-	return textResult(fmt.Sprintf("version=%d modified=%s\n\n%s", doc.Version, doc.Modified, doc.Body))
+
+	body := doc.Body
+	if args.Section != "" {
+		section, ok := extractSection(body, args.Section)
+		if !ok {
+			return textResult(fmt.Sprintf("version=%d modified=%s\n\nSection %q not found. Available sections:\n%s",
+				doc.Version, doc.Modified, args.Section, listSections(body)))
+		}
+		body = section
+	}
+
+	return textResult(fmt.Sprintf("version=%d modified=%s\n\n%s", doc.Version, doc.Modified, body))
+}
+
+// extractSection finds a markdown section by heading name (case-insensitive).
+// Matches ## headings (level 2). Returns the heading line and all content
+// up to the next heading of equal or higher level, or end of document.
+func extractSection(body, name string) (string, bool) {
+	target := strings.ToLower(strings.TrimSpace(name))
+	var result strings.Builder
+	found := false
+
+	for line := range strings.Lines(body) {
+		if isHeading(line) {
+			if found {
+				// Hit the next heading — stop collecting.
+				break
+			}
+			headingText := strings.TrimSpace(strings.TrimLeft(line, "#"))
+			if strings.ToLower(headingText) == target {
+				found = true
+				result.WriteString(line)
+				result.WriteByte('\n')
+			}
+			continue
+		}
+		if found {
+			result.WriteString(line)
+			result.WriteByte('\n')
+		}
+	}
+	return result.String(), found
+}
+
+// listSections returns the ## headings found in the document body.
+func listSections(body string) string {
+	var sections strings.Builder
+	for line := range strings.Lines(body) {
+		if isHeading(line) {
+			heading := strings.TrimSpace(strings.TrimLeft(line, "#"))
+			sections.WriteString("- ")
+			sections.WriteString(heading)
+			sections.WriteByte('\n')
+		}
+	}
+	if sections.Len() == 0 {
+		return "(no sections found)"
+	}
+	return sections.String()
+}
+
+// isHeading returns true if the line is a markdown heading (## level 2 or higher).
+func isHeading(line string) bool {
+	return strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "# ")
 }
 
 // --- memory_publish ---
@@ -132,8 +204,11 @@ func (t *MemoryPublishTool) Execute(ctx context.Context, call llm.ToolCall) Tool
 	if args.Body == "" {
 		return textResult("Error: body is required")
 	}
+	if args.ExpectedVersion < 0 {
+		return textResult("Error: expected_version must be >= 0 (0 = create, >0 = update)")
+	}
 
-	doc, err := t.store.Publish(args.Path, args.Body, args.ExpectedVersion)
+	doc, err := t.store.Publish(ctx, args.Path, args.Body, args.ExpectedVersion)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
@@ -207,7 +282,7 @@ func (t *MemoryAppendTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 		return textResult("Error: expected_version must be >= 1 (document must exist)")
 	}
 
-	doc, err := t.store.Append(args.Path, args.Body, args.ExpectedVersion)
+	doc, err := t.store.Append(ctx, args.Path, args.Body, args.ExpectedVersion)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
@@ -265,7 +340,7 @@ func (t *MemoryListTool) Execute(ctx context.Context, call llm.ToolCall) ToolRes
 		return textResult("Error: path is required")
 	}
 
-	paths, err := t.store.List(args.Path)
+	paths, err := t.store.List(ctx, args.Path)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}

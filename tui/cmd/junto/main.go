@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -114,9 +115,11 @@ func run() error {
 		defer func() { _ = lspMgr.Close() }()
 	}
 
-	// Start memory server (demarkus) — provides persistent, versioned memory.
-	memStore, memSummary, memCleanup := initMemory(projectRoot)
-	defer memCleanup()
+	// Ensure demarkus binaries are installed (idempotent, skips if present).
+	memMgr := memserver.New(projectRoot)
+	if err := memMgr.EnsureBinaries(); err != nil {
+		return fmt.Errorf("memory: install binaries: %w", err)
+	}
 
 	// Create LLM provider and agent from environment
 	apiKey := os.Getenv("LLM_API_KEY")
@@ -129,21 +132,24 @@ func run() error {
 		if model == "" {
 			model = "google/gemini-2.5-flash"
 		}
+
+		// Start memory server — only needed when agent is active.
+		memStore, memSummary, memCleanup, err := startMemory(memMgr, projectRoot)
+		if err != nil {
+			return fmt.Errorf("memory: %w", err)
+		}
+		defer memCleanup()
+		sess.SetMemorySummary(memSummary)
+
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
-		opts := &agent.NewOptions{}
+		opts := &agent.NewOptions{
+			MemoryStore: memStore,
+		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
 		}
-		if memStore != nil {
-			opts.MemoryStore = memStore
-		}
 		ag := agent.New(provider, sess, events, opts, mcpTools...)
 		sess.SetAgent(ag, events)
-
-		// If memory summary is available, store it on session for prompt injection.
-		if memSummary != "" {
-			sess.SetMemorySummary(memSummary)
-		}
 	} else if lspMgr != nil {
 		// No agent, but LSP events still need to reach the frontend.
 		sess.SetEvents(events)
@@ -391,49 +397,46 @@ func loadMCPConfigs(projectRoot string) map[string]mcpServerConfig {
 
 // --- Memory (demarkus) wiring ---
 
-// initMemory starts the demarkus memory server and returns the memory store,
-// the session summary (if available), and a cleanup function.
-// Returns (nil, "", noop) if memory initialization fails — memory is degraded, not fatal.
-func initMemory(projectRoot string) (memory.Store, string, func()) {
+// startMemory bootstraps auth, starts the demarkus server, seeds initial content,
+// and returns the memory store, session summary, cleanup function, and error.
+// Binaries must already be installed via EnsureBinaries.
+func startMemory(mgr *memserver.Manager, projectRoot string) (memory.Store, string, func(), error) {
 	noop := func() {}
 
-	mgr := memserver.New(projectRoot)
-
-	// Auto-install binaries if missing.
-	if err := mgr.EnsureBinaries(); err != nil {
-		slog.Warn("memory: install failed, continuing without memory", "err", err)
-		return nil, "", noop
-	}
-
-	// Bootstrap auth token.
 	token, err := mgr.EnsureToken()
 	if err != nil {
-		slog.Warn("memory: token bootstrap failed, continuing without memory", "err", err)
-		return nil, "", noop
+		return nil, "", noop, fmt.Errorf("bootstrap token: %w", err)
 	}
 
-	// Start the server.
 	port, err := mgr.Start()
 	if err != nil {
-		slog.Warn("memory: server start failed, continuing without memory", "err", err)
-		return nil, "", noop
+		return nil, "", noop, fmt.Errorf("start server: %w", err)
 	}
 
-	// Create the adapter.
 	store := demarkus.New(
 		filepath.Join(projectRoot, ".project", "bin", "demarkus"),
 		fmt.Sprintf("mark://localhost:%d", port),
 		token,
 	)
 
-	// Seed initial content if this is a fresh memory store.
-	seedMemory(store, projectRoot)
+	stopAndFail := func(reason string, err error) (memory.Store, string, func(), error) {
+		_ = mgr.Stop()
+		return nil, "", noop, fmt.Errorf("%s: %w", reason, err)
+	}
 
-	// Fetch session summary for prompt injection.
+	if err := seedMemory(store, projectRoot); err != nil {
+		return stopAndFail("seed", err)
+	}
+
 	var summary string
-	doc, err := store.Fetch("/summary.md")
-	if err == nil {
+	doc, err := store.Fetch(context.Background(), "/summary.md")
+	switch {
+	case err == nil:
 		summary = doc.Body
+	case errors.Is(err, memory.ErrNotFound):
+		// No summary yet — agent will create one.
+	default:
+		return stopAndFail("fetch summary", err)
 	}
 
 	cleanup := func() {
@@ -443,14 +446,18 @@ func initMemory(projectRoot string) (memory.Store, string, func()) {
 	}
 
 	slog.Info("memory: ready", "port", port)
-	return store, summary, cleanup
+	return store, summary, cleanup, nil
 }
 
 // seedMemory creates the initial index.md if the memory store is empty.
-func seedMemory(store memory.Store, projectRoot string) {
-	// Check if index already exists.
-	if _, err := store.Fetch("/index.md"); err == nil {
-		return // already seeded
+// Returns an error for backend failures (not-found is expected and handled).
+func seedMemory(store memory.Store, projectRoot string) error {
+	_, err := store.Fetch(context.Background(), "/index.md")
+	if err == nil {
+		return nil // already seeded
+	}
+	if !errors.Is(err, memory.ErrNotFound) {
+		return fmt.Errorf("check index: %w", err)
 	}
 
 	projectName := filepath.Base(projectRoot)
@@ -466,7 +473,8 @@ func seedMemory(store memory.Store, projectRoot string) {
 - [Debugging](/debugging.md) — lessons from investigations
 `, projectName)
 
-	if _, err := store.Publish("/index.md", seed, 0); err != nil {
-		slog.Warn("memory: failed to seed index.md", "err", err)
+	if _, err := store.Publish(context.Background(), "/index.md", seed, 0); err != nil {
+		return fmt.Errorf("publish index: %w", err)
 	}
+	return nil
 }

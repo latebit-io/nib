@@ -1,6 +1,7 @@
 package memory_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -125,7 +126,7 @@ func TestIntegrationCRUD(t *testing.T) {
 	env := setupIntegration(t)
 
 	// Create.
-	doc, err := env.store.Publish("/test.md", "# Hello World", 0)
+	doc, err := env.store.Publish(context.Background(), "/test.md", "# Hello World", 0)
 	if err != nil {
 		t.Fatalf("Publish create: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestIntegrationCRUD(t *testing.T) {
 	}
 
 	// Read.
-	doc, err = env.store.Fetch("/test.md")
+	doc, err = env.store.Fetch(context.Background(), "/test.md")
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestIntegrationCRUD(t *testing.T) {
 	}
 
 	// Update.
-	doc, err = env.store.Publish("/test.md", "# Updated", 1)
+	doc, err = env.store.Publish(context.Background(), "/test.md", "# Updated", 1)
 	if err != nil {
 		t.Fatalf("Publish update: %v", err)
 	}
@@ -152,14 +153,14 @@ func TestIntegrationCRUD(t *testing.T) {
 	}
 
 	// Append.
-	doc, err = env.store.Append("/test.md", "\n## Section 2\n", 2)
+	doc, err = env.store.Append(context.Background(), "/test.md", "\n## Section 2\n", 2)
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if doc.Version != 3 {
 		t.Errorf("append version: got %d, want 3", doc.Version)
 	}
-	fetched, err := env.store.Fetch("/test.md")
+	fetched, err := env.store.Fetch(context.Background(), "/test.md")
 	if err != nil {
 		t.Fatalf("Fetch after append: %v", err)
 	}
@@ -172,15 +173,15 @@ func TestIntegrationCRUD(t *testing.T) {
 func TestIntegrationConflict(t *testing.T) {
 	env := setupIntegration(t)
 
-	if _, err := env.store.Publish("/conflict.md", "v1", 0); err != nil {
+	if _, err := env.store.Publish(context.Background(), "/conflict.md", "v1", 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := env.store.Publish("/conflict.md", "v2", 1); err != nil {
+	if _, err := env.store.Publish(context.Background(), "/conflict.md", "v2", 1); err != nil {
 		t.Fatalf("update to v2: %v", err)
 	}
 
 	// Stale update with expected_version=1 (current is 2).
-	_, err := env.store.Publish("/conflict.md", "stale", 1)
+	_, err := env.store.Publish(context.Background(), "/conflict.md", "stale", 1)
 	if err == nil {
 		t.Fatal("expected conflict error")
 	}
@@ -193,7 +194,7 @@ func TestIntegrationConflict(t *testing.T) {
 func TestIntegrationNotFound(t *testing.T) {
 	env := setupIntegration(t)
 
-	_, err := env.store.Fetch("/nonexistent.md")
+	_, err := env.store.Fetch(context.Background(), "/nonexistent.md")
 	if err == nil {
 		t.Fatal("expected not-found error")
 	}
@@ -206,14 +207,14 @@ func TestIntegrationNotFound(t *testing.T) {
 func TestIntegrationList(t *testing.T) {
 	env := setupIntegration(t)
 
-	if _, err := env.store.Publish("/alpha.md", "# A", 0); err != nil {
+	if _, err := env.store.Publish(context.Background(), "/alpha.md", "# A", 0); err != nil {
 		t.Fatalf("create alpha: %v", err)
 	}
-	if _, err := env.store.Publish("/beta.md", "# B", 0); err != nil {
+	if _, err := env.store.Publish(context.Background(), "/beta.md", "# B", 0); err != nil {
 		t.Fatalf("create beta: %v", err)
 	}
 
-	paths, err := env.store.List("/")
+	paths, err := env.store.List(context.Background(), "/")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -235,7 +236,7 @@ func TestIntegrationUnauthenticated(t *testing.T) {
 	env := setupIntegration(t)
 
 	noAuth := demarkus.New(filepath.Join(env.binDir, "demarkus"), env.mgr.Address(), "")
-	_, err := noAuth.Publish("/unauth.md", "# Fail", 0)
+	_, err := noAuth.Publish(context.Background(), "/unauth.md", "# Fail", 0)
 	if err == nil {
 		t.Fatal("expected auth error")
 	}

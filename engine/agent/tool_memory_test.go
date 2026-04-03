@@ -35,26 +35,26 @@ type mockStore struct {
 	lastListPath    string
 }
 
-func (m *mockStore) Fetch(path string) (memory.Document, error) {
+func (m *mockStore) Fetch(_ context.Context, path string) (memory.Document, error) {
 	m.lastFetchPath = path
 	return m.fetchDoc, m.fetchErr
 }
 
-func (m *mockStore) Publish(path, body string, expectedVersion int) (memory.Document, error) {
+func (m *mockStore) Publish(_ context.Context, path, body string, expectedVersion int) (memory.Document, error) {
 	m.lastPublishPath = path
 	m.lastPublishBody = body
 	m.lastPublishVer = expectedVersion
 	return m.publishDoc, m.publishErr
 }
 
-func (m *mockStore) Append(path, body string, expectedVersion int) (memory.Document, error) {
+func (m *mockStore) Append(_ context.Context, path, body string, expectedVersion int) (memory.Document, error) {
 	m.lastAppendPath = path
 	m.lastAppendBody = body
 	m.lastAppendVer = expectedVersion
 	return m.appendDoc, m.appendErr
 }
 
-func (m *mockStore) List(path string) ([]string, error) {
+func (m *mockStore) List(_ context.Context, path string) ([]string, error) {
 	m.lastListPath = path
 	return m.listPaths, m.listErr
 }
@@ -102,6 +102,39 @@ func TestMemoryFetchTool(t *testing.T) {
 			store:      mockStore{fetchErr: memory.ErrNotFound},
 			wantSubstr: "Error: memory: document not found",
 		},
+		{
+			name: "section extraction",
+			args: `{"path": "/doc.md", "section": "Current State"}`,
+			store: mockStore{
+				fetchDoc: memory.Document{
+					Path: "/doc.md", Version: 2, Modified: "2026-04-01T00:00:00Z",
+					Body: "# Project\n\n## Current State\n\nBuilding memory.\n\n## Next Steps\n\nShip it.\n",
+				},
+			},
+			wantSubstr: "Building memory.",
+		},
+		{
+			name: "section not found lists available",
+			args: `{"path": "/doc.md", "section": "Nonexistent"}`,
+			store: mockStore{
+				fetchDoc: memory.Document{
+					Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z",
+					Body: "# Project\n\n## Alpha\n\nContent.\n\n## Beta\n\nMore.\n",
+				},
+			},
+			wantSubstr: "- Alpha",
+		},
+		{
+			name: "section case insensitive",
+			args: `{"path": "/doc.md", "section": "current state"}`,
+			store: mockStore{
+				fetchDoc: memory.Document{
+					Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z",
+					Body: "## Current State\n\nFound it.\n",
+				},
+			},
+			wantSubstr: "Found it.",
+		},
 	}
 
 	for _, tt := range tests {
@@ -147,6 +180,11 @@ func TestMemoryPublishTool(t *testing.T) {
 			name:       "missing body",
 			args:       `{"path": "/x.md", "expected_version": 0}`,
 			wantSubstr: "Error: body is required",
+		},
+		{
+			name:       "negative version rejected",
+			args:       `{"path": "/x.md", "body": "content", "expected_version": -1}`,
+			wantSubstr: "Error: expected_version must be >= 0",
 		},
 		{
 			name:       "conflict error",
@@ -281,6 +319,93 @@ func TestMemoryToolsCanceled(t *testing.T) {
 				t.Errorf("got %q, want agent canceled", result.Content)
 			}
 		})
+	}
+}
+
+func TestExtractSection(t *testing.T) {
+	doc := `# Project
+
+## Current State
+
+Building memory integration.
+All tests pass.
+
+## Next Steps
+
+Ship it.
+Release v1.
+
+## Done
+
+Nothing yet.
+`
+
+	tests := []struct {
+		name       string
+		section    string
+		wantFound  bool
+		wantSubstr string
+		wantAbsent string
+	}{
+		{
+			name:       "exact match",
+			section:    "Current State",
+			wantFound:  true,
+			wantSubstr: "Building memory",
+			wantAbsent: "Ship it",
+		},
+		{
+			name:       "case insensitive",
+			section:    "next steps",
+			wantFound:  true,
+			wantSubstr: "Release v1",
+			wantAbsent: "Building memory",
+		},
+		{
+			name:       "last section",
+			section:    "Done",
+			wantFound:  true,
+			wantSubstr: "Nothing yet",
+		},
+		{
+			name:      "not found",
+			section:   "Nonexistent",
+			wantFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			section, ok := extractSection(doc, tt.section)
+			if ok != tt.wantFound {
+				t.Fatalf("found=%v, want %v", ok, tt.wantFound)
+			}
+			if !ok {
+				return
+			}
+			if tt.wantSubstr != "" && !strings.Contains(section, tt.wantSubstr) {
+				t.Errorf("section should contain %q, got:\n%s", tt.wantSubstr, section)
+			}
+			if tt.wantAbsent != "" && strings.Contains(section, tt.wantAbsent) {
+				t.Errorf("section should not contain %q, got:\n%s", tt.wantAbsent, section)
+			}
+		})
+	}
+}
+
+func TestListSections(t *testing.T) {
+	doc := "# Title\n\n## Alpha\n\nContent.\n\n## Beta\n\nMore.\n"
+	result := listSections(doc)
+	if !strings.Contains(result, "- Alpha") {
+		t.Errorf("expected Alpha in sections, got:\n%s", result)
+	}
+	if !strings.Contains(result, "- Beta") {
+		t.Errorf("expected Beta in sections, got:\n%s", result)
+	}
+
+	empty := listSections("No headings here.")
+	if empty != "(no sections found)" {
+		t.Errorf("expected no sections message, got: %q", empty)
 	}
 }
 

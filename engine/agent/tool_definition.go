@@ -5,31 +5,37 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 )
 
-// FindReferencesTool lets the LLM find all references to a symbol.
-type FindReferencesTool struct {
+// GoToDefinitionTool lets the LLM jump to a symbol's definition via LSP.
+type GoToDefinitionTool struct {
 	workspace Workspace
-	provider  lang.ReferenceProvider
+	provider  lang.DefinitionProvider
 }
 
-// NewFindReferencesTool creates a FindReferencesTool.
-func NewFindReferencesTool(ws Workspace, provider lang.ReferenceProvider) *FindReferencesTool {
-	return &FindReferencesTool{workspace: ws, provider: provider}
+// NewGoToDefinitionTool creates a GoToDefinitionTool.
+func NewGoToDefinitionTool(ws Workspace, provider lang.DefinitionProvider) *GoToDefinitionTool {
+	return &GoToDefinitionTool{workspace: ws, provider: provider}
+}
+
+// defArgs holds the JSON-decoded arguments for go_to_definition.
+type defArgs struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Col  int    `json:"col"`
 }
 
 // Definition returns the tool schema for the LLM.
-func (t *FindReferencesTool) Definition() llm.ToolDef {
+func (t *GoToDefinitionTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name:        "find_references",
-			Description: "Find all references to the symbol at a specific position in a file. Returns file paths and line numbers of every usage. Use this to understand the impact of a change before editing.",
+			Name:        "go_to_definition",
+			Description: "Jump to the definition of a symbol at a specific position in a file. Returns the file path and line number where the symbol is defined. Use this to follow function calls, type references, or variable declarations to their source.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -52,15 +58,9 @@ func (t *FindReferencesTool) Definition() llm.ToolDef {
 	}
 }
 
-type refArgs struct {
-	Path string `json:"path"`
-	Line int    `json:"line"`
-	Col  int    `json:"col"`
-}
-
-// Execute runs the references lookup.
-func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
-	var args refArgs
+// Execute resolves the definition location for the symbol at the given position.
+func (t *GoToDefinitionTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+	var args defArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
@@ -82,27 +82,19 @@ func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) Too
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	locs, err := t.provider.References(ctx, canon, args.Line-1, args.Col)
+	loc, err := t.provider.Definition(ctx, canon, args.Line-1, args.Col)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
-	if len(locs) == 0 {
-		return textResult("No references found.")
+	if loc.Path == "" {
+		return textResult("No definition found.")
 	}
 
 	projectRoot := t.workspace.ProjectRoot()
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d reference(s) found:\n\n", len(locs))
-	for _, loc := range locs {
-		relPath, relErr := filepath.Rel(projectRoot, loc.Path)
-		if relErr != nil {
-			relPath = loc.Path
-		}
-		fmt.Fprintf(&sb, "%s:%d:%d\n", relPath, loc.Line+1, loc.Col)
+	relPath, relErr := filepath.Rel(projectRoot, loc.Path)
+	if relErr != nil {
+		relPath = loc.Path
 	}
-	out := sb.String()
-	if len(out) > maxContentPreview {
-		out = out[:maxContentPreview] + "\n... (truncated)"
-	}
-	return textResult(out)
+
+	return textResult(fmt.Sprintf("Definition: %s:%d:%d", relPath, loc.Line+1, loc.Col))
 }

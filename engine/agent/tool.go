@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/latebit-io/junto/engine/event"
@@ -56,6 +57,20 @@ type EditProposal struct {
 // textResult is a convenience constructor for a pure text result with no side effect.
 func textResult(content string) ToolResult {
 	return ToolResult{Content: content}
+}
+
+// inProject returns true if the canonicalized path is under the project root.
+// Guards against path traversal (e.g. "../../etc/passwd") and sibling-directory
+// prefix confusion (e.g. "/project-secrets" vs "/project") in tool inputs.
+func inProject(ws Workspace, canonPath string) bool {
+	root := ws.ProjectRoot()
+	if root == "" {
+		return true // no root configured — allow everything
+	}
+	// Ensure separator-aware comparison: "/project" must match "/project/..."
+	// but not "/project-secrets/...".
+	prefix := strings.TrimSuffix(root, "/") + "/"
+	return canonPath == root || strings.HasPrefix(canonPath, prefix)
 }
 
 // Tool defines a capability the agent can invoke during its LLM loop.

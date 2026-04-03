@@ -2,6 +2,7 @@ package ui
 
 import (
 	"log/slog"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -129,12 +130,22 @@ func (m *AgentPaneModel) AppendMeta(text string) {
 // and marks the raw lines so Render() can style them distinctly. Tracks raw
 // line indices (not wrapped) so styling survives rewrap on resize.
 func (m *AgentPaneModel) AppendUserMessage(text string) {
+	var s sanitize.Sanitizer
+	text = s.Sanitize(text)
+
 	firstRaw := len(m.RawLines)
 	m.AppendText("\n\nYou: " + text + "\n\n")
+	// Exclude the trailing empty raw line — AppendText reuses the last
+	// raw line for the first chunk of the next append, so marking it
+	// would misclassify the first agent token as a user message.
 	if m.userRawLines == nil {
 		m.userRawLines = make(map[int]bool)
 	}
-	for i := firstRaw; i < len(m.RawLines); i++ {
+	endRaw := len(m.RawLines)
+	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
+		endRaw--
+	}
+	for i := firstRaw; i < endRaw; i++ {
 		m.userRawLines[i] = true
 	}
 }
@@ -549,20 +560,19 @@ func (m *AgentPaneModel) SelectedText() string {
 }
 
 // isUserLine returns true if the wrapped line index corresponds to a user
-// message. Translates the wrapped index back to a raw line index via
-// wrappedIndex, which is stable across rewrap.
+// message. Uses binary search on wrappedIndex (which is sorted by construction)
+// so cost is O(log n) per call instead of O(n).
 func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
-	if len(m.userRawLines) == 0 {
+	if len(m.userRawLines) == 0 || len(m.wrappedIndex) == 0 {
 		return false
 	}
-	// wrappedIndex[i] is the first wrapped line for raw line i.
-	// Walk backward to find the raw line that owns this wrapped index.
-	for rawIdx := len(m.wrappedIndex) - 1; rawIdx >= 0; rawIdx-- {
-		if m.wrappedIndex[rawIdx] <= wrappedIdx {
-			return m.userRawLines[rawIdx]
-		}
+	// sort.SearchInts finds the first wrappedIndex entry > wrappedIdx.
+	// The owning raw line is one before that.
+	rawIdx := sort.SearchInts(m.wrappedIndex, wrappedIdx+1) - 1
+	if rawIdx < 0 {
+		return false
 	}
-	return false
+	return m.userRawLines[rawIdx]
 }
 
 func (m *AgentPaneModel) isSelected(line, col int) bool {

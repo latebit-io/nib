@@ -3,12 +3,31 @@ package agent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 )
+
+// defWorkspace is a Workspace stub with configurable root and realistic CanonPath.
+type defWorkspace struct {
+	root string
+}
+
+func (w *defWorkspace) ProjectRoot() string { return w.root }
+func (w *defWorkspace) CanonPath(p string) string {
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
+	}
+	return filepath.Clean(filepath.Join(w.root, p))
+}
+func (w *defWorkspace) ReadFile(_ string) (string, error) { return "", nil }
+func (w *defWorkspace) ListFiles() ([]string, error)      { return nil, nil }
+func (w *defWorkspace) WriteFile(_, _ string) error       { return nil }
+func (w *defWorkspace) InContext(_ string) bool           { return true }
+func (w *defWorkspace) AddContext(_ string)               {}
 
 // mockDefinitionProvider is a stub that returns a fixed location or error.
 type mockDefinitionProvider struct {
@@ -137,15 +156,10 @@ func TestGoToDefinitionTool_InvalidJSON(t *testing.T) {
 }
 
 func TestGoToDefinitionTool_PathTraversal(t *testing.T) {
-	ws := &mockNavWorkspace{
-		files: map[string]string{},
-	}
-	// mockNavWorkspace.ProjectRoot() returns "/test"
-	// mockNavWorkspace.CanonPath() returns the raw path,
-	// so "../../etc/passwd" won't start with "/test".
-
+	ws := &defWorkspace{root: "/project"}
 	provider := &mockDefinitionProvider{}
 	tool := NewGoToDefinitionTool(ws, provider)
+
 	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
 		Path: "../../etc/passwd",
 		Line: 1,
@@ -154,6 +168,24 @@ func TestGoToDefinitionTool_PathTraversal(t *testing.T) {
 
 	if !strings.Contains(result.Content, "outside the project root") {
 		t.Errorf("expected traversal rejection, got:\n%s", result.Content)
+	}
+}
+
+func TestGoToDefinitionTool_SiblingDirTraversal(t *testing.T) {
+	ws := &defWorkspace{root: "/project"}
+	provider := &mockDefinitionProvider{}
+	tool := NewGoToDefinitionTool(ws, provider)
+
+	// "/project-secrets/file.txt" shares the prefix "/project" but is
+	// a sibling directory — must be rejected.
+	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+		Path: "/project-secrets/file.txt",
+		Line: 1,
+		Col:  0,
+	}))
+
+	if !strings.Contains(result.Content, "outside the project root") {
+		t.Errorf("sibling directory should be rejected, got:\n%s", result.Content)
 	}
 }
 

@@ -26,6 +26,7 @@ func NewGlobTool(ws Workspace) *GlobTool {
 	return &GlobTool{workspace: ws}
 }
 
+// globArgs holds the JSON-decoded arguments for the glob tool.
 type globArgs struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path"`

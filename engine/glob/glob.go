@@ -12,6 +12,8 @@ func Match(pattern, name string) bool {
 	return doGlob([]rune(pattern), []rune(name))
 }
 
+// doGlob is the recursive core of Match. It consumes rune slices left-to-right,
+// dispatching to globDoubleStar or globSingleStar on wildcard tokens.
 func doGlob(pattern, name []rune) bool {
 	for len(pattern) > 0 {
 		switch {

@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -438,6 +439,10 @@ func (rm *RegionManager) Render() string {
 	// border with a 1-char gap between panes (like JetBrains IDE panels).
 	bordered := make([]string, len(visible))
 	for i := range visible {
+		// Pad each line to the allocated width so lipgloss produces a
+		// consistent border. Without this, styled lines with slightly
+		// different visible widths cause the right border to shift on scroll.
+		padLines(paneLines[i], visible[i].width)
 		content := strings.Join(paneLines[i], "\n")
 
 		borderColor := dividerDimColor
@@ -453,7 +458,7 @@ func (rm *RegionManager) Render() string {
 		// Embed pane title in the top border if the pane implements Titled.
 		if titled, ok := visible[i].Pane.(Titled); ok {
 			if title := titled.Title(); title != "" {
-				rendered = embedBorderTitle(rendered, title, borderColor, visible[i].width)
+				rendered = embedBorderTitle(rendered, title, borderColor)
 			}
 		}
 
@@ -466,13 +471,14 @@ func (rm *RegionManager) Render() string {
 // embedBorderTitle rebuilds the top border line with a title embedded.
 // Builds from scratch to avoid slicing into ANSI escape sequences.
 // Produces: ╭─ title ───────╮
-func embedBorderTitle(rendered string, title string, borderColor color.Color, contentWidth int) string {
+func embedBorderTitle(rendered string, title string, borderColor color.Color) string {
 	lines := strings.SplitN(rendered, "\n", 2)
 	if len(lines) < 2 {
 		return rendered
 	}
 
-	totalWidth := contentWidth + 2 // content + left/right border chars
+	// Measure the actual border width lipgloss produced, not an assumption.
+	totalWidth := lipgloss.Width(lines[0])
 	// Truncate title to fit within the border with padding.
 	maxTitleCells := totalWidth - 6 // ╭─ + space + space + ─╮
 	if maxTitleCells <= 0 {
@@ -500,6 +506,22 @@ func embedBorderTitle(rendered string, title string, borderColor color.Color, co
 	top.WriteString(borderStyle.Render("╮"))
 
 	return top.String() + "\n" + lines[1]
+}
+
+// padLines forces each line to exactly targetWidth visible cells.
+// Truncates lines that are too wide (ANSI-aware) and pads lines that
+// are too short. This ensures lipgloss produces a consistent border
+// width regardless of which lines are visible after scrolling.
+func padLines(lines []string, targetWidth int) {
+	for i, line := range lines {
+		w := lipgloss.Width(line)
+		switch {
+		case w > targetWidth:
+			lines[i] = ansi.Truncate(line, targetWidth, "")
+		case w < targetWidth:
+			lines[i] = line + strings.Repeat(" ", targetWidth-w)
+		}
+	}
 }
 
 // dividerStyleFor returns the style for the divider between visible[i] and visible[i+1].

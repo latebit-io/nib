@@ -441,10 +441,16 @@ func expandTabs(runes []rune) (expanded []rune, bufToDisp []int) {
 	dispCol := 0
 	for bi, r := range runes {
 		bufToDisp[bi] = dispCol
-		if r == '\t' {
+		switch r {
+		case '\t':
 			expanded = append(expanded, ' ', ' ', ' ', ' ')
 			dispCol += 4
-		} else {
+		case '\uFE0F':
+			// Variation Selector 16 would force emoji presentation (2 cells)
+			// but terminal width measurement disagrees. Skip it in the
+			// display buffer — the base character renders fine without it.
+			// bufToDisp still maps this rune so cursor navigation works.
+		default:
 			expanded = append(expanded, r)
 			dispCol++
 		}
@@ -453,15 +459,21 @@ func expandTabs(runes []rune) (expanded []rune, bufToDisp []int) {
 	return
 }
 
-// fillDisplay creates a rune buffer of the given width (space-filled) and
-// copies expanded runes into it.
-func fillDisplay(expanded []rune, w int) []rune {
+// fillDisplay creates a rune buffer of the given width (space-filled),
+// starting from scrollCol in the expanded rune slice. Content before
+// scrollCol is not included, enabling horizontal scrolling.
+func fillDisplay(expanded []rune, w, scrollCol int) []rune {
 	displayed := make([]rune, w)
 	for j := range displayed {
 		displayed[j] = ' '
 	}
-	for j := 0; j < len(expanded) && j < w; j++ {
-		displayed[j] = expanded[j]
+	start := scrollCol
+	if start > len(expanded) {
+		start = len(expanded)
+	}
+	visible := expanded[start:]
+	for j := 0; j < len(visible) && j < w; j++ {
+		displayed[j] = visible[j]
 	}
 	return displayed
 }
@@ -726,30 +738,30 @@ func (m *EditorModel) renderNormalLine(
 
 	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
-	displayed := fillDisplay(expanded, contentW)
+	scrollCol := m.eng.ScrollCol
+	displayed := fillDisplay(expanded, contentW, scrollCol)
 
-	// Cursor position in display coords.
+	// Cursor position in display coords, offset by horizontal scroll.
 	displayCursorCol := -1
 	if showCursor && lineIdx == m.eng.CursorLine && m.eng.CursorCol >= 0 && m.eng.CursorCol <= len(rawRunes) {
-		displayCursorCol = bufToDisp[m.eng.CursorCol]
-		if displayCursorCol >= contentW && contentW > 0 {
-			displayCursorCol = contentW - 1
+		displayCursorCol = bufToDisp[m.eng.CursorCol] - scrollCol
+		if displayCursorCol < 0 || displayCursorCol >= contentW {
+			displayCursorCol = -1 // off-screen
 		}
 	}
 
-	// Agent cursor in display coords.
+	// Agent cursor in display coords, offset by horizontal scroll.
 	displayAgentCol := -1
 	var agentStyle lipgloss.Style
 	if agentCursor != nil && lineIdx == agentCursor.line {
 		agentStyle = agentCursor.style
 		if agentCursor.col >= 0 && agentCursor.col <= len(rawRunes) {
-			displayAgentCol = bufToDisp[agentCursor.col]
+			displayAgentCol = bufToDisp[agentCursor.col] - scrollCol
 		} else if agentCursor.col > len(rawRunes) {
-			// Past end of line — show at end
-			displayAgentCol = bufToDisp[len(rawRunes)]
+			displayAgentCol = bufToDisp[len(rawRunes)] - scrollCol
 		}
-		if displayAgentCol >= contentW && contentW > 0 {
-			displayAgentCol = contentW - 1
+		if displayAgentCol < 0 || displayAgentCol >= contentW {
+			displayAgentCol = -1
 		}
 	}
 
@@ -770,6 +782,14 @@ func (m *EditorModel) renderNormalLine(
 			if tokEnd < len(bufToDisp) {
 				dEnd = bufToDisp[tokEnd]
 			}
+			dStart -= scrollCol
+			dEnd -= scrollCol
+			if dEnd <= 0 || dStart >= contentW {
+				continue
+			}
+			if dStart < 0 {
+				dStart = 0
+			}
 			style := styleForTokenKind(tok.Kind)
 			for j := dStart; j < dEnd && j < contentW; j++ {
 				charStyles[j] = style
@@ -777,7 +797,8 @@ func (m *EditorModel) renderNormalLine(
 		}
 	}
 
-	// Selection: precompute inverse mapping display col → buffer col.
+	// Selection: precompute inverse mapping viewport col → buffer col.
+	// Viewport col j corresponds to absolute display col j + scrollCol.
 	if cap(m.dispToBuf) < contentW {
 		m.dispToBuf = make([]int, contentW)
 	}
@@ -786,7 +807,8 @@ func (m *EditorModel) renderNormalLine(
 	if m.eng.SelectionActive {
 		bufCol := 0
 		for j := range contentW {
-			for bufCol+1 <= len(rawRunes) && bufToDisp[bufCol+1] <= j {
+			absDispCol := j + scrollCol
+			for bufCol+1 <= len(rawRunes) && bufToDisp[bufCol+1] <= absDispCol {
 				bufCol++
 			}
 			dispToBuf[j] = bufCol
@@ -815,11 +837,17 @@ func (m *EditorModel) renderNormalLine(
 		}
 		startBufCol = min(max(startBufCol, 0), len(rawRunes))
 		endBufCol = min(max(endBufCol, 0), len(rawRunes))
-		startDisp := bufToDisp[startBufCol]
-		endDisp := bufToDisp[endBufCol]
+		startDisp := bufToDisp[startBufCol] - scrollCol
+		endDisp := bufToDisp[endBufCol] - scrollCol
+		if endDisp <= 0 || startDisp >= contentW {
+			continue
+		}
 		// Zero-width diagnostics (e.g., missing token) get at least one cell.
 		if endDisp <= startDisp && startDisp < contentW {
 			endDisp = startDisp + 1
+		}
+		if startDisp < 0 {
+			startDisp = 0
 		}
 		for j := startDisp; j < endDisp && j < contentW; j++ {
 			diagUnderline[j] = true
@@ -875,8 +903,11 @@ func (m *EditorModel) renderNormalLine(
 			startBuf := match.Col
 			endBuf := match.Col + match.Len
 			if startBuf < len(bufToDisp) && endBuf < len(bufToDisp) {
-				dStart := bufToDisp[startBuf]
-				dEnd := bufToDisp[endBuf]
+				dStart := bufToDisp[startBuf] - scrollCol
+				dEnd := bufToDisp[endBuf] - scrollCol
+				if dStart < 0 {
+					dStart = 0
+				}
 				for d := dStart; d < dEnd && d < contentW; d++ {
 					findHL[d] = hlVal
 				}
@@ -968,14 +999,15 @@ func (m *EditorModel) renderRemovedLine(
 
 	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
-	displayed := fillDisplay(expanded, contentW)
+	scrollCol := m.eng.ScrollCol
+	displayed := fillDisplay(expanded, contentW, scrollCol)
 
-	// Cursor position in display coords.
+	// Cursor position in display coords, offset by horizontal scroll.
 	displayCursorCol := -1
 	if showBufferCursor && lineIdx == m.eng.CursorLine && m.eng.CursorCol >= 0 && m.eng.CursorCol <= len(rawRunes) {
-		displayCursorCol = bufToDisp[m.eng.CursorCol]
-		if displayCursorCol >= contentW && contentW > 0 {
-			displayCursorCol = contentW - 1
+		displayCursorCol = bufToDisp[m.eng.CursorCol] - scrollCol
+		if displayCursorCol < 0 || displayCursorCol >= contentW {
+			displayCursorCol = -1
 		}
 	}
 
@@ -995,6 +1027,14 @@ func (m *EditorModel) renderRemovedLine(
 			tokEnd := tok.Col + tok.Len
 			if tokEnd < len(bufToDisp) {
 				dEnd = bufToDisp[tokEnd]
+			}
+			dStart -= scrollCol
+			dEnd -= scrollCol
+			if dEnd <= 0 || dStart >= contentW {
+				continue
+			}
+			if dStart < 0 {
+				dStart = 0
 			}
 			style := styleForTokenKind(tok.Kind)
 			for j := dStart; j < dEnd && j < contentW; j++ {
@@ -1073,23 +1113,25 @@ func (m *EditorModel) renderAddedLine(
 	oe := m.Overlay.Editor
 	rawRunes := []rune(oe.Buf.LineText(overlayIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
-	displayed := fillDisplay(expanded, contentW)
+	scrollCol := m.eng.ScrollCol
+	displayed := fillDisplay(expanded, contentW, scrollCol)
 
 	displayCursorCol := -1
 	if m.Overlay.Active && overlayIdx == oe.CursorLine && oe.CursorCol >= 0 && oe.CursorCol <= len(rawRunes) {
-		displayCursorCol = bufToDisp[oe.CursorCol]
-		if displayCursorCol >= contentW && contentW > 0 {
-			displayCursorCol = contentW - 1
+		displayCursorCol = bufToDisp[oe.CursorCol] - scrollCol
+		if displayCursorCol < 0 || displayCursorCol >= contentW {
+			displayCursorCol = -1
 		}
 	}
 
-	// Precompute inverse mapping for selection: display col → rune col
+	// Precompute inverse mapping for selection: viewport col → buffer col.
 	var dispToBuf []int
 	if oe.SelectionActive {
 		dispToBuf = make([]int, contentW)
 		bufCol := 0
 		for j := range contentW {
-			for bufCol+1 <= len(rawRunes) && bufToDisp[bufCol+1] <= j {
+			absDispCol := j + scrollCol
+			for bufCol+1 <= len(rawRunes) && bufToDisp[bufCol+1] <= absDispCol {
 				bufCol++
 			}
 			dispToBuf[j] = bufCol
@@ -1316,13 +1358,14 @@ func (m *EditorModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 }
 
 // mouseEntry returns the viewport entry and display column for a mouse event at (x, y).
-// Returns nil if the position is out of bounds.
+// The returned display column is in absolute display-column space (accounts for
+// horizontal scroll), so callers can feed it directly to DisplayColToBufferCol.
 func (m *EditorModel) mouseEntry(x, y int) (*viewportEntry, int) {
 	if y < 0 || y >= len(m.viewportMap) {
 		return nil, 0
 	}
 	gutterW := m.eng.GutterWidth()
-	displayCol := x - gutterW
+	displayCol := x - gutterW + m.eng.ScrollCol
 	if displayCol < 0 {
 		displayCol = 0
 	}

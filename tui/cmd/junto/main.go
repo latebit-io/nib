@@ -414,7 +414,9 @@ func startMemory(mgr *memserver.Manager, projectRoot string) (memory.Store, stri
 	store := mgr.NewStore(token)
 
 	stopAndFail := func(reason string, err error) (memory.Store, string, func(), error) {
-		_ = mgr.Stop()
+		if stopErr := mgr.Stop(); stopErr != nil {
+			slog.Warn("memory: stop failed during rollback", "stopErr", stopErr)
+		}
 		return nil, "", noop, fmt.Errorf("%s: %w", reason, err)
 	}
 

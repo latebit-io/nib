@@ -58,13 +58,19 @@ func (m *Manager) Start() (int, error) {
 	}
 
 	// Check for existing server via PID file.
-	if port, err := m.reuseExisting(); err == nil {
+	port, reuseErr := m.reuseExisting()
+	if reuseErr == nil {
 		m.port = port
 		slog.Info("memory server: reusing existing", "port", port)
 		return port, nil
 	}
+	if !errors.Is(reuseErr, errNoExistingServer) {
+		// A live process was found but something else failed (port file, probe).
+		// Do not launch a second server against the same content root.
+		return 0, fmt.Errorf("memory server: existing server detected but unusable: %w", reuseErr)
+	}
 
-	// Find a free port.
+	// No existing server — find a free port.
 	port, err := freePort()
 	if err != nil {
 		return 0, fmt.Errorf("memory server: find free port: %w", err)
@@ -99,25 +105,33 @@ func (m *Manager) Start() (int, error) {
 	// Write PID and port files — these are required for reuse and stop.
 	// If either fails, kill the server to avoid orphaning it.
 	if err := os.WriteFile(m.pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
-		_ = cmd.Process.Kill()
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			slog.Warn("memory server: kill after PID write failure", "killErr", killErr)
+		}
 		return 0, fmt.Errorf("memory server: write PID file: %w", err)
 	}
 	if err := os.WriteFile(m.portFile, []byte(strconv.Itoa(port)), 0600); err != nil {
-		_ = cmd.Process.Kill()
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			slog.Warn("memory server: kill after port write failure", "killErr", killErr)
+		}
 		m.cleanupFiles()
 		return 0, fmt.Errorf("memory server: write port file: %w", err)
 	}
 
 	// Wait for server to become ready.
 	if err := m.waitReady(port); err != nil {
-		// Server failed to start — clean up.
-		_ = m.Stop()
+		if stopErr := m.Stop(); stopErr != nil {
+			slog.Warn("memory server: stop after readiness failure", "stopErr", stopErr)
+		}
 		return 0, fmt.Errorf("memory server: not ready: %w", err)
 	}
 
 	// Release the process so we don't leak a zombie if Junto exits without Stop().
-	// The PID file lets us find it again.
-	_ = cmd.Process.Release()
+	// The PID file lets us find it again. Release cannot meaningfully fail here —
+	// the process is alive and we just confirmed it's ready.
+	if err := cmd.Process.Release(); err != nil {
+		slog.Warn("memory server: process release", "err", err)
+	}
 
 	slog.Info("memory server: started", "port", port, "pid", cmd.Process.Pid)
 	return port, nil
@@ -269,37 +283,45 @@ func (m *Manager) NewStore(token string) memory.Store {
 	)
 }
 
+// errNoExistingServer indicates no running server was found (PID file absent,
+// corrupt, or process dead). Safe to launch a new one.
+var errNoExistingServer = errors.New("no existing server")
+
 // reuseExisting checks for a running server via the PID file.
-// Returns the port if the server is alive, or an error otherwise.
+// Returns the port if the server is alive and responding.
+// Returns errNoExistingServer when it's safe to start fresh.
+// Returns a different error when a live process exists but can't be reused
+// (port file broken, probe failed) — callers must NOT start a second server.
 func (m *Manager) reuseExisting() (int, error) {
 	pidData, err := os.ReadFile(m.pidFile)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: no PID file", errNoExistingServer)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
 	if err != nil {
-		return 0, err
+		m.cleanupFiles()
+		return 0, fmt.Errorf("%w: corrupt PID file", errNoExistingServer)
 	}
 
 	// Check if process is alive (signal 0 doesn't kill, just checks).
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %v", errNoExistingServer, err)
 	}
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		// Process is dead — clean up stale files.
 		m.cleanupFiles()
-		return 0, fmt.Errorf("stale PID %d", pid)
+		return 0, fmt.Errorf("%w: stale PID %d", errNoExistingServer, pid)
 	}
 
-	// Process is alive — read port.
+	// Process is alive from here — errors below are NOT safe to fall through.
 	portData, err := os.ReadFile(m.portFile)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("live PID %d but port file unreadable: %w", pid, err)
 	}
 	port, err := strconv.Atoi(strings.TrimSpace(string(portData)))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("live PID %d but port file corrupt: %w", pid, err)
 	}
 
 	// Probe the port to verify this is actually a demarkus server and not
@@ -372,10 +394,11 @@ type limitedBuffer struct {
 
 // Write implements io.Writer.
 func (b *limitedBuffer) Write(p []byte) (int, error) {
+	origLen := len(p)
 	remaining := b.limit - b.written
 	if remaining <= 0 {
 		b.overflow = true
-		return len(p), nil
+		return origLen, nil
 	}
 	if len(p) > remaining {
 		p = p[:remaining]
@@ -383,7 +406,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	}
 	n, err := b.buf.Write(p)
 	b.written += n
-	return len(p), err
+	return origLen, err
 }
 
 // String returns the captured output.

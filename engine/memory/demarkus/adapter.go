@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -91,13 +92,13 @@ func (a *Adapter) execDoc(ctx context.Context, path string, args []string) (memo
 }
 
 // List returns document paths under a directory.
-func (a *Adapter) List(ctx context.Context, path string) ([]string, error) {
+func (a *Adapter) List(ctx context.Context, dir string) ([]string, error) {
 	args := []string{
 		"-v",
 		"-insecure",
 		"-no-cache",
 		"-X", "LIST",
-		a.serverURL + path,
+		a.serverURL + dir,
 	}
 	stdout, stderr, cmdErr := a.run(ctx, args)
 	if err := checkStatus(stderr, cmdErr); err != nil {
@@ -120,9 +121,15 @@ func (a *Adapter) List(ctx context.Context, path string) ([]string, error) {
 			continue
 		}
 		p := rest[:end]
-		if p != "" {
-			paths = append(paths, p)
+		if p == "" {
+			continue
 		}
+		// Resolve relative targets against the requested directory
+		// so callers get absolute paths usable with memory_fetch.
+		if !strings.HasPrefix(p, "/") {
+			p = path.Join(dir, p)
+		}
+		paths = append(paths, p)
 	}
 	return paths, nil
 }
@@ -160,10 +167,11 @@ type cappedBuffer struct {
 
 // Write implements io.Writer. Writes beyond the limit are silently dropped.
 func (c *cappedBuffer) Write(p []byte) (int, error) {
+	origLen := len(p)
 	remaining := c.limit - c.written
 	if remaining <= 0 {
 		c.overflow = true
-		return len(p), nil // pretend we consumed it so exec doesn't error
+		return origLen, nil
 	}
 	if len(p) > remaining {
 		p = p[:remaining]
@@ -171,7 +179,7 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	}
 	n, err := c.buf.Write(p)
 	c.written += n
-	return len(p), err // report original len consumed
+	return origLen, err
 }
 
 // String returns the captured output.

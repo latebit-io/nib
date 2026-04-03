@@ -44,11 +44,10 @@ func TestVerifyChecksum(t *testing.T) {
 		}
 	})
 
-	t.Run("missing entry skips", func(t *testing.T) {
+	t.Run("missing entry fails", func(t *testing.T) {
 		checksums := "deadbeef  other.tar.gz\n"
-		// Should not error — just warns and skips.
-		if err := verifyChecksum(data, "archive.tar.gz", []byte(checksums)); err != nil {
-			t.Errorf("expected no error for missing entry, got: %v", err)
+		if err := verifyChecksum(data, "archive.tar.gz", []byte(checksums)); err == nil {
+			t.Error("expected error for missing checksum entry")
 		}
 	})
 }

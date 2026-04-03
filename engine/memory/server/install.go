@@ -276,8 +276,7 @@ func verifyChecksum(archiveData []byte, archiveName string, checksumsData []byte
 		}
 	}
 
-	slog.Warn("memory install: no checksum entry found, skipping verification", "file", archiveName)
-	return nil
+	return fmt.Errorf("checksum entry for %s not found in checksums file", archiveName)
 }
 
 // extractBinaries extracts named binaries from a tar.gz archive into binDir.
@@ -311,16 +310,32 @@ func extractBinaries(archiveData []byte, binDir string, wantBins []string) error
 		}
 
 		dst := filepath.Join(binDir, name)
-		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+
+		// Write to a temp file first, then rename into place.
+		// This avoids truncating an existing binary if the copy fails.
+		tmp, err := os.CreateTemp(binDir, name+".tmp.*")
 		if err != nil {
-			return fmt.Errorf("create %s: %w", name, err)
+			return fmt.Errorf("create temp for %s: %w", name, err)
 		}
-		if _, err := io.Copy(f, tr); err != nil {
-			_ = f.Close()
+		tmpPath := tmp.Name()
+
+		if _, err := io.Copy(tmp, tr); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
 			return fmt.Errorf("write %s: %w", name, err)
 		}
-		if err := f.Close(); err != nil {
+		if err := tmp.Chmod(0755); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("chmod %s: %w", name, err)
+		}
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmpPath)
 			return fmt.Errorf("close %s: %w", name, err)
+		}
+		if err := os.Rename(tmpPath, dst); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("rename %s: %w", name, err)
 		}
 		slog.Info("memory install: extracted", "binary", name, "path", dst)
 		found++

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -108,15 +109,15 @@ func TestProcessPID(t *testing.T) {
 }
 
 func TestReuseExisting(t *testing.T) {
-	t.Run("no PID file returns error", func(t *testing.T) {
+	t.Run("no PID file returns errNoExistingServer", func(t *testing.T) {
 		m := testManager(t)
 		_, err := m.reuseExisting()
-		if err == nil {
-			t.Error("expected error when PID file is missing")
+		if !errors.Is(err, errNoExistingServer) {
+			t.Errorf("expected errNoExistingServer, got: %v", err)
 		}
 	})
 
-	t.Run("stale PID returns error and cleans up", func(t *testing.T) {
+	t.Run("stale PID returns errNoExistingServer and cleans up", func(t *testing.T) {
 		m := testManager(t)
 		dot := filepath.Join(m.projectRoot, ".project")
 		if err := os.MkdirAll(dot, 0755); err != nil {
@@ -133,8 +134,8 @@ func TestReuseExisting(t *testing.T) {
 		}
 
 		_, err := m.reuseExisting()
-		if err == nil {
-			t.Error("expected error for stale PID")
+		if !errors.Is(err, errNoExistingServer) {
+			t.Errorf("expected errNoExistingServer, got: %v", err)
 		}
 
 		// Stale PID path should clean up files.

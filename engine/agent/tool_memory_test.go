@@ -100,6 +100,58 @@ func TestMemoryFetchTool(t *testing.T) {
 	}
 }
 
+func TestMemoryToolStoreInputs(t *testing.T) {
+	t.Run("fetch passes path", func(t *testing.T) {
+		s := &mockStore{fetchDoc: memory.Document{Path: "/x.md", Version: 1}}
+		tool := NewMemoryFetchTool(s)
+		tool.Execute(context.Background(), toolCall("memory_fetch", `{"path": "/x.md"}`))
+		if s.lastFetchPath != "/x.md" {
+			t.Errorf("fetch path: got %q, want /x.md", s.lastFetchPath)
+		}
+	})
+
+	t.Run("publish passes path, body, version", func(t *testing.T) {
+		s := &mockStore{publishDoc: memory.Document{Path: "/a.md", Version: 1}}
+		tool := NewMemoryPublishTool(s)
+		tool.Execute(context.Background(), toolCall("memory_publish",
+			`{"path": "/a.md", "body": "content", "expected_version": 3}`))
+		if s.lastPublishPath != "/a.md" {
+			t.Errorf("path: got %q", s.lastPublishPath)
+		}
+		if s.lastPublishBody != "content" {
+			t.Errorf("body: got %q", s.lastPublishBody)
+		}
+		if s.lastPublishVer != 3 {
+			t.Errorf("version: got %d", s.lastPublishVer)
+		}
+	})
+
+	t.Run("append passes path, body, version", func(t *testing.T) {
+		s := &mockStore{appendDoc: memory.Document{Path: "/j.md", Version: 2}}
+		tool := NewMemoryAppendTool(s)
+		tool.Execute(context.Background(), toolCall("memory_append",
+			`{"path": "/j.md", "body": "entry", "expected_version": 1}`))
+		if s.lastAppendPath != "/j.md" {
+			t.Errorf("path: got %q", s.lastAppendPath)
+		}
+		if s.lastAppendBody != "entry" {
+			t.Errorf("body: got %q", s.lastAppendBody)
+		}
+		if s.lastAppendVer != 1 {
+			t.Errorf("version: got %d", s.lastAppendVer)
+		}
+	})
+
+	t.Run("list passes path", func(t *testing.T) {
+		s := &mockStore{listPaths: []string{"a.md"}}
+		tool := NewMemoryListTool(s)
+		tool.Execute(context.Background(), toolCall("memory_list", `{"path": "/docs/"}`))
+		if s.lastListPath != "/docs/" {
+			t.Errorf("path: got %q", s.lastListPath)
+		}
+	})
+}
+
 func TestMemoryPublishTool(t *testing.T) {
 	tests := []struct {
 		name       string

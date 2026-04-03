@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // promptTestWorkspace is a minimal Workspace for prompt tests.
@@ -66,17 +67,35 @@ func TestBuildMessagesIncludesMemorySummary(t *testing.T) {
 }
 
 func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
-	a := testAgent()
-	a.memorySummary = strings.Repeat("x", maxMemorySummaryBytes+100)
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil)
+	t.Run("ascii", func(t *testing.T) {
+		a := testAgent()
+		a.memorySummary = strings.Repeat("x", maxMemorySummaryBytes+100)
+		msgs := a.buildMessages("main.go", "package main", "add tests", nil)
 
-	user := msgs[1].Content
-	if !strings.Contains(user, "[truncated]") {
-		t.Error("oversized summary should be truncated with [truncated] marker")
-	}
-	if strings.Contains(user, strings.Repeat("x", maxMemorySummaryBytes+1)) {
-		t.Error("full oversized summary should not appear in prompt")
-	}
+		user := msgs[1].Content
+		if !strings.Contains(user, "[truncated]") {
+			t.Error("oversized summary should be truncated with [truncated] marker")
+		}
+		if strings.Contains(user, strings.Repeat("x", maxMemorySummaryBytes+1)) {
+			t.Error("full oversized summary should not appear in prompt")
+		}
+	})
+
+	t.Run("multibyte rune boundary", func(t *testing.T) {
+		a := testAgent()
+		// U+4E16 (世) is 3 bytes in UTF-8. Fill past the limit so the cut
+		// point is likely mid-rune if not handled correctly.
+		a.memorySummary = strings.Repeat("世", maxMemorySummaryBytes)
+		msgs := a.buildMessages("main.go", "package main", "add tests", nil)
+
+		user := msgs[1].Content
+		if !strings.Contains(user, "[truncated]") {
+			t.Error("oversized multibyte summary should be truncated")
+		}
+		if !utf8.ValidString(user) {
+			t.Error("truncated prompt contains invalid UTF-8")
+		}
+	})
 }
 
 func TestBuildMessagesNoMemorySummary(t *testing.T) {

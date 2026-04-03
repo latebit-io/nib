@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,8 +19,13 @@ const defaultBashTimeout = 30 * time.Second
 // maxBashTimeout is the absolute maximum timeout the agent can request.
 const maxBashTimeout = 120 * time.Second
 
-// maxBashOutput caps the combined stdout+stderr returned to the LLM.
-const maxBashOutput = 8 * 1024
+// maxBashHead is the byte budget for the beginning of command output.
+// Captures initial context (command echo, early output).
+const maxBashHead = 4 * 1024
+
+// maxBashTail is the byte budget for the end of command output.
+// Captures the most recent output (error messages, test failures).
+const maxBashTail = 4 * 1024
 
 // BashTool lets the LLM execute shell commands in the project directory.
 //
@@ -111,19 +115,15 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	// from hanging if a child process still holds a pipe fd.
 	cmd.WaitDelay = time.Second
 
-	// Cap buffer during execution to prevent OOM from high-volume output.
-	// LimitedWriter stops accepting writes after maxBashOutput bytes.
-	var buf bytes.Buffer
-	lw := &limitedWriter{w: &buf, remaining: maxBashOutput}
-	cmd.Stdout = lw
-	cmd.Stderr = lw
+	// Capture head and tail of output to preserve both context and errors.
+	// Prevents OOM from high-volume output while keeping the useful parts.
+	htw := newHeadTailWriter(maxBashHead, maxBashTail)
+	cmd.Stdout = htw
+	cmd.Stderr = htw
 
 	err := cmd.Run()
 
-	output := buf.String()
-	if lw.truncated {
-		output += "\n[... output truncated]"
-	}
+	output := htw.String()
 
 	exitCode := 0
 	if err != nil {
@@ -154,20 +154,108 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	return textResult(output)
 }
 
+// headTailWriter captures the first headSize bytes and the last tailSize bytes
+// of a stream, discarding the middle. This preserves both the initial context
+// (command echo, early output) and the tail (error messages, test failures)
+// while bounding memory during execution.
+//
+// When total output fits within headSize, no truncation occurs and the tail
+// buffer is unused. Once head fills, subsequent writes go into a circular
+// ring buffer that always retains the most recent tailSize bytes.
+type headTailWriter struct {
+	head     []byte
+	headCap  int
+	tail     []byte // circular ring buffer
+	tailCap  int
+	tailPos  int // next write position in ring
+	tailFull bool
+	total    int // total bytes written (for collapse message)
+}
+
+// newHeadTailWriter creates a writer that keeps the first headSize bytes
+// and the last tailSize bytes of output.
+func newHeadTailWriter(headSize, tailSize int) *headTailWriter {
+	return &headTailWriter{
+		head:    make([]byte, 0, headSize),
+		headCap: headSize,
+		tail:    make([]byte, tailSize),
+		tailCap: tailSize,
+	}
+}
+
+// Write implements io.Writer. Always returns len(p), nil so the subprocess
+// never stalls on a blocked pipe.
+func (w *headTailWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	w.total += n
+
+	// Fill head first.
+	if len(w.head) < w.headCap {
+		room := w.headCap - len(w.head)
+		if room >= len(p) {
+			w.head = append(w.head, p...)
+			return n, nil
+		}
+		w.head = append(w.head, p[:room]...)
+		p = p[room:]
+	}
+
+	// Remainder goes into the circular tail buffer.
+	for len(p) > 0 {
+		chunk := w.tailCap - w.tailPos
+		if chunk > len(p) {
+			chunk = len(p)
+		}
+		copy(w.tail[w.tailPos:w.tailPos+chunk], p[:chunk])
+		w.tailPos += chunk
+		if w.tailPos >= w.tailCap {
+			w.tailPos = 0
+			w.tailFull = true
+		}
+		p = p[chunk:]
+	}
+
+	return n, nil
+}
+
+// String returns the captured output. If no truncation occurred, returns
+// the head buffer only. Otherwise returns head + collapse marker + tail.
+func (w *headTailWriter) String() string {
+	headStr := string(w.head)
+
+	// No overflow — everything fit in head.
+	if w.total <= w.headCap {
+		return headStr
+	}
+
+	// Reconstruct tail from the circular buffer.
+	var tailStr string
+	if w.tailFull {
+		// Ring wrapped: data is [tailPos..end] + [0..tailPos].
+		tailStr = string(w.tail[w.tailPos:]) + string(w.tail[:w.tailPos])
+	} else {
+		tailStr = string(w.tail[:w.tailPos])
+	}
+
+	dropped := w.total - len(w.head) - len(tailStr)
+	return fmt.Sprintf("%s\n\n[... %d bytes collapsed — showing first %d and last %d bytes ...]\n\n%s",
+		headStr, dropped, len(w.head), len(tailStr), tailStr)
+}
+
 // limitedWriter caps writes at a byte limit, discarding excess.
-// This prevents OOM from commands that produce unbounded output
-// (e.g. `yes` or verbose test runs) during the execution itself,
-// rather than only truncating after the command completes.
+// Used by tools that need simple end-truncation (e.g. PackageInfoTool).
 type limitedWriter struct {
 	w         io.Writer
 	remaining int
 	truncated bool
 }
 
+// Write implements io.Writer. Reports full write length to the caller so
+// the subprocess never stalls on a blocked pipe.
 func (lw *limitedWriter) Write(p []byte) (int, error) {
 	if lw.remaining <= 0 {
 		lw.truncated = true
-		return len(p), nil // discard but report success so the process doesn't stall
+		return len(p), nil
 	}
 	if len(p) > lw.remaining {
 		lw.truncated = true
@@ -176,7 +264,7 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		return len(p), nil // report full write to caller
+		return len(p), nil
 	}
 	n, err := lw.w.Write(p)
 	lw.remaining -= n

@@ -149,6 +149,7 @@ func run() error {
 		}
 		ag := agent.New(provider, sess, events, opts, mcpTools...)
 		sess.SetAgent(ag, events)
+		sess.SetMemoryStore(memStore)
 	} else if lspMgr != nil {
 		// No agent, but LSP events still need to reach the frontend.
 		sess.SetEvents(events)

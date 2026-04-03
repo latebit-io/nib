@@ -23,6 +23,7 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/engine/project"
 )
 
 // Session coordinates the interaction between the developer and agent.
@@ -104,6 +105,13 @@ type Session struct {
 	// completionMu serializes overlay completion requests to prevent
 	// DidChange interleaving when multiple requests race.
 	completionMu sync.Mutex
+
+	// Work tree — structured project hierarchy loaded from demarkus memory.
+	// See work.go for loading, querying, and persistence.
+	memoryStore   memoryStore   // optional demarkus store (nil when not configured)
+	workTree      *project.Tree // parsed work hierarchy (nil when not loaded)
+	workTreeVer   int           // demarkus version for optimistic concurrency
+	workTreeDirty bool          // true when in-memory changes need persisting
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.

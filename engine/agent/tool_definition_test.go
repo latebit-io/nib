@@ -28,7 +28,6 @@ func (w *defWorkspace) ListFiles() ([]string, error)      { return nil, nil }
 func (w *defWorkspace) WriteFile(_, _ string) error       { return nil }
 func (w *defWorkspace) InContext(_ string) bool           { return true }
 func (w *defWorkspace) AddContext(_ string)               {}
-func (w *defWorkspace) MemorySummary() string             { return "" }
 
 // mockDefinitionProvider is a stub that returns a fixed location or error.
 type mockDefinitionProvider struct {

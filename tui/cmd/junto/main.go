@@ -24,7 +24,6 @@ import (
 	"github.com/latebit-io/junto/engine/lsp"
 	"github.com/latebit-io/junto/engine/mcp"
 	"github.com/latebit-io/junto/engine/memory"
-	"github.com/latebit-io/junto/engine/memory/demarkus"
 	memserver "github.com/latebit-io/junto/engine/memory/server"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/tui/internal/ui"
@@ -139,11 +138,11 @@ func run() error {
 			return fmt.Errorf("memory: %w", err)
 		}
 		defer memCleanup()
-		sess.SetMemorySummary(memSummary)
 
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
 		opts := &agent.NewOptions{
-			MemoryStore: memStore,
+			MemoryStore:   memStore,
+			MemorySummary: memSummary,
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
@@ -408,16 +407,11 @@ func startMemory(mgr *memserver.Manager, projectRoot string) (memory.Store, stri
 		return nil, "", noop, fmt.Errorf("bootstrap token: %w", err)
 	}
 
-	port, err := mgr.Start()
-	if err != nil {
+	if _, err := mgr.Start(); err != nil {
 		return nil, "", noop, fmt.Errorf("start server: %w", err)
 	}
 
-	store := demarkus.New(
-		filepath.Join(projectRoot, ".project", "bin", "demarkus"),
-		fmt.Sprintf("mark://localhost:%d", port),
-		token,
-	)
+	store := mgr.NewStore(token)
 
 	stopAndFail := func(reason string, err error) (memory.Store, string, func(), error) {
 		_ = mgr.Stop()
@@ -433,6 +427,12 @@ func startMemory(mgr *memserver.Manager, projectRoot string) (memory.Store, stri
 	switch {
 	case err == nil:
 		summary = doc.Body
+		// Cap here to avoid carrying a large string through the stack.
+		// The prompt layer also caps at 8KB before template rendering.
+		const maxSummaryBytes = 8000
+		if len(summary) > maxSummaryBytes {
+			summary = summary[:maxSummaryBytes]
+		}
 	case errors.Is(err, memory.ErrNotFound):
 		// No summary yet — agent will create one.
 	default:
@@ -445,7 +445,7 @@ func startMemory(mgr *memserver.Manager, projectRoot string) (memory.Store, stri
 		}
 	}
 
-	slog.Info("memory: ready", "port", port)
+	slog.Info("memory: ready", "port", mgr.Port())
 	return store, summary, cleanup, nil
 }
 

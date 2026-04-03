@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/llm"
 )
@@ -40,9 +41,14 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		shown = shown[:maxContextInPrompt]
 	}
 
-	memorySummary := a.workspace.MemorySummary()
+	memorySummary := a.memorySummary
 	if len(memorySummary) > maxMemorySummaryBytes {
-		memorySummary = memorySummary[:maxMemorySummaryBytes] + "\n\n[truncated]"
+		// Truncate at a rune boundary to avoid splitting multi-byte UTF-8.
+		cut := maxMemorySummaryBytes
+		for cut > 0 && !utf8.RuneStart(memorySummary[cut]) {
+			cut--
+		}
+		memorySummary = memorySummary[:cut] + "\n\n[truncated]"
 	}
 
 	userContent, err := a.prompts.RenderUserMessage(UserPromptData{

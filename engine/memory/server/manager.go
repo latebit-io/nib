@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/junto/engine/memory/demarkus"
 )
 
 // Manager manages the demarkus-server child process.
@@ -68,12 +72,15 @@ func (m *Manager) Start() (int, error) {
 
 	serverBin := filepath.Join(m.binDir, "demarkus-server")
 
+	// Tokens file must exist — EnsureToken must be called before Start.
+	if _, err := os.Stat(m.tokensFile); err != nil {
+		return 0, fmt.Errorf("memory server: tokens file missing (call EnsureToken first): %w", err)
+	}
+
 	args := []string{
 		"-root", m.contentDir,
 		"-port", strconv.Itoa(port),
-	}
-	if _, err := os.Stat(m.tokensFile); err == nil {
-		args = append(args, "-tokens", m.tokensFile)
+		"-tokens", m.tokensFile,
 	}
 
 	cmd := exec.Command(serverBin, args...)
@@ -89,12 +96,16 @@ func (m *Manager) Start() (int, error) {
 	m.process = cmd.Process
 	m.port = port
 
-	// Write PID and port files.
+	// Write PID and port files — these are required for reuse and stop.
+	// If either fails, kill the server to avoid orphaning it.
 	if err := os.WriteFile(m.pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
-		slog.Warn("memory server: write PID file", "err", err)
+		_ = cmd.Process.Kill()
+		return 0, fmt.Errorf("memory server: write PID file: %w", err)
 	}
 	if err := os.WriteFile(m.portFile, []byte(strconv.Itoa(port)), 0600); err != nil {
-		slog.Warn("memory server: write port file", "err", err)
+		_ = cmd.Process.Kill()
+		m.cleanupFiles()
+		return 0, fmt.Errorf("memory server: write port file: %w", err)
 	}
 
 	// Wait for server to become ready.
@@ -122,6 +133,8 @@ func (m *Manager) Stop() error {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		m.cleanupFiles()
+		m.process = nil
+		m.port = 0
 		return nil
 	}
 
@@ -130,6 +143,8 @@ func (m *Manager) Stop() error {
 		// Process already dead.
 		slog.Debug("memory server: SIGTERM failed (already dead)", "pid", pid, "err", err)
 		m.cleanupFiles()
+		m.process = nil
+		m.port = 0
 		return nil
 	}
 
@@ -190,13 +205,20 @@ func (m *Manager) EnsureBinaries() error {
 }
 
 // EnsureToken generates an auth token if one doesn't exist.
-// Returns the raw token string.
+// Both the raw token file (.memory-token) and the hashed token registry
+// (.memory-tokens.toml) must exist — if either is missing, the pair is
+// regenerated. This prevents a state where the raw token is cached but
+// the server has no registry to validate it against.
 func (m *Manager) EnsureToken() (string, error) {
-	// Check for existing token.
-	if data, err := os.ReadFile(m.tokenFile); err == nil {
-		token := strings.TrimSpace(string(data))
-		if token != "" {
-			return token, nil
+	// Only reuse cached token if both files are present.
+	_, rawErr := os.Stat(m.tokenFile)
+	_, regErr := os.Stat(m.tokensFile)
+	if rawErr == nil && regErr == nil {
+		if data, err := os.ReadFile(m.tokenFile); err == nil {
+			token := strings.TrimSpace(string(data))
+			if token != "" {
+				return token, nil
+			}
 		}
 	}
 
@@ -210,12 +232,16 @@ func (m *Manager) EnsureToken() (string, error) {
 		"-tokens", m.tokensFile,
 	)
 
-	var outBuf strings.Builder
-	cmd.Stdout = &outBuf
+	// Token output is tiny (hex string) — cap at 1KB to guard against a noisy binary.
+	outBuf := &limitedBuffer{limit: 1024}
+	cmd.Stdout = outBuf
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("memory server: generate token: %w", err)
+	}
+	if outBuf.overflow {
+		return "", errors.New("memory server: token output exceeded 1KB")
 	}
 
 	// Raw token is printed to stdout.
@@ -232,25 +258,15 @@ func (m *Manager) EnsureToken() (string, error) {
 	return rawToken, nil
 }
 
-// CheckUpgrade queries GitHub for the latest release and compares to .memory-version.
-// Returns (newVersion, needsUpgrade, error).
-func (m *Manager) CheckUpgrade() (string, bool, error) {
-	versionFile := filepath.Join(m.projectRoot, ".project", ".memory-version")
-	current, err := os.ReadFile(versionFile)
-	if err != nil {
-		// No version file — can't check.
-		return "", false, nil
-	}
-	currentVersion := strings.TrimSpace(string(current))
-	if currentVersion == "" {
-		return "", false, nil
-	}
-
-	// Shell out to the install script with a dry-run style check.
-	// For now, we skip the upgrade check to keep things simple —
-	// the install script handles version pinning. The upgrade prompt
-	// can be implemented in a future iteration.
-	return "", false, nil
+// NewStore creates a memory.Store backed by the running demarkus server.
+// Must be called after Start and EnsureToken. The returned store uses the
+// demarkus CLI adapter — callers only see the memory.Store interface.
+func (m *Manager) NewStore(token string) memory.Store {
+	return demarkus.New(
+		filepath.Join(m.binDir, "demarkus"),
+		m.Address(),
+		token,
+	)
 }
 
 // reuseExisting checks for a running server via the PID file.
@@ -294,6 +310,8 @@ func (m *Manager) reuseExisting() (int, error) {
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer probeCancel()
 	probe := exec.CommandContext(probeCtx, clientBin, "-insecure", "-no-cache", fmt.Sprintf("mark://localhost:%d/", port))
+	probe.Stdout = io.Discard
+	probe.Stderr = io.Discard
 	if err := probe.Run(); err != nil {
 		m.cleanupFiles()
 		return 0, fmt.Errorf("PID %d alive but port %d not responding: %w", pid, port, err)
@@ -313,6 +331,8 @@ func (m *Manager) waitReady(port int) error {
 	for time.Now().Before(deadline) {
 		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		cmd := exec.CommandContext(probeCtx, clientBin, "-insecure", "-no-cache", url)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
 		err := cmd.Run()
 		cancel()
 		if err == nil {
@@ -341,6 +361,33 @@ func (m *Manager) cleanupFiles() {
 	_ = os.Remove(m.pidFile)
 	_ = os.Remove(m.portFile)
 }
+
+// limitedBuffer captures output up to a limit, silently discarding excess.
+type limitedBuffer struct {
+	buf      strings.Builder
+	written  int
+	limit    int
+	overflow bool
+}
+
+// Write implements io.Writer.
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	remaining := b.limit - b.written
+	if remaining <= 0 {
+		b.overflow = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+		b.overflow = true
+	}
+	n, err := b.buf.Write(p)
+	b.written += n
+	return len(p), err
+}
+
+// String returns the captured output.
+func (b *limitedBuffer) String() string { return b.buf.String() }
 
 // freePort finds an available port by binding to :0 and reading the assigned port.
 func freePort() (int, error) {

@@ -39,60 +39,32 @@ func New(binPath, serverURL, token string) *Adapter {
 
 // Fetch retrieves a document by path.
 func (a *Adapter) Fetch(ctx context.Context, path string) (memory.Document, error) {
-	args := []string{
-		"-v",
-		"-insecure",
-		"-no-cache",
-		a.serverURL + path,
-	}
-	stdout, stderr, cmdErr := a.run(ctx, args)
-	if err := checkStatus(stderr, cmdErr); err != nil {
-		return memory.Document{}, err
-	}
-	meta := parseStatusLine(stderr)
-	return memory.Document{
-		Path:     path,
-		Body:     stdout,
-		Version:  meta.version,
-		Modified: meta.modified,
-	}, nil
+	args := a.baseArgs(path)
+	return a.execDoc(ctx, path, args)
 }
 
 // Publish creates or updates a document.
 func (a *Adapter) Publish(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
-	args := []string{
-		"-v",
-		"-insecure",
-		"-no-cache",
-		"-X", "PUBLISH",
-		"-body", body,
-		"-expected-version", strconv.Itoa(expectedVersion),
-	}
-	if a.token != "" {
-		args = append(args, "-auth", a.token)
-	}
-	args = append(args, a.serverURL+path)
-
-	stdout, stderr, cmdErr := a.run(ctx, args)
-	if err := checkStatus(stderr, cmdErr); err != nil {
-		return memory.Document{}, err
-	}
-	meta := parseStatusLine(stderr)
-	return memory.Document{
-		Path:     path,
-		Body:     stdout,
-		Version:  meta.version,
-		Modified: meta.modified,
-	}, nil
+	args := a.writeArgs("PUBLISH", path, body, expectedVersion)
+	return a.execDoc(ctx, path, args)
 }
 
 // Append adds content to an existing document.
 func (a *Adapter) Append(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
+	args := a.writeArgs("APPEND", path, body, expectedVersion)
+	return a.execDoc(ctx, path, args)
+}
+
+// baseArgs returns the common flags for a read-only request.
+func (a *Adapter) baseArgs(path string) []string {
+	return []string{"-v", "-insecure", "-no-cache", a.serverURL + path}
+}
+
+// writeArgs returns the flags for a PUBLISH or APPEND request.
+func (a *Adapter) writeArgs(method, path, body string, expectedVersion int) []string {
 	args := []string{
-		"-v",
-		"-insecure",
-		"-no-cache",
-		"-X", "APPEND",
+		"-v", "-insecure", "-no-cache",
+		"-X", method,
 		"-body", body,
 		"-expected-version", strconv.Itoa(expectedVersion),
 	}
@@ -100,7 +72,11 @@ func (a *Adapter) Append(ctx context.Context, path string, body string, expected
 		args = append(args, "-auth", a.token)
 	}
 	args = append(args, a.serverURL+path)
+	return args
+}
 
+// execDoc runs the CLI and parses the response into a Document.
+func (a *Adapter) execDoc(ctx context.Context, path string, args []string) (memory.Document, error) {
 	stdout, stderr, cmdErr := a.run(ctx, args)
 	if err := checkStatus(stderr, cmdErr); err != nil {
 		return memory.Document{}, err
@@ -208,6 +184,7 @@ type metadata struct {
 	status   string
 	version  int
 	modified string
+	parseErr error // non-nil if a key=value field was malformed
 }
 
 // parseStatusLine parses the verbose stderr header from demarkus -v.
@@ -239,7 +216,11 @@ func parseStatusLine(stderr string) metadata {
 		}
 		switch key {
 		case "version":
-			m.version, _ = strconv.Atoi(val)
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				m.parseErr = fmt.Errorf("parse version %q: %w", val, err)
+			}
+			m.version = v
 		case "modified":
 			m.modified = val
 		}
@@ -250,13 +231,11 @@ func parseStatusLine(stderr string) metadata {
 // checkStatus inspects the verbose status line and returns an error for
 // non-ok statuses. Demarkus exits 0 even on logical errors (not-found,
 // conflict, unauthorized) — the status line is the source of truth.
-// If cmdErr is non-nil (process crash, timeout), it takes precedence
-// when the status line is absent.
 func checkStatus(stderr string, cmdErr error) error {
 	meta := parseStatusLine(stderr)
+
+	// Map protocol-level error statuses to sentinel errors.
 	switch meta.status {
-	case "ok":
-		return nil
 	case "not-found":
 		return fmt.Errorf("%w: %s", memory.ErrNotFound, strings.TrimSpace(stderr))
 	case "conflict":
@@ -265,15 +244,27 @@ func checkStatus(stderr string, cmdErr error) error {
 		return fmt.Errorf("%w: %s", memory.ErrAuth, strings.TrimSpace(stderr))
 	case "error", "server-error":
 		return fmt.Errorf("%w: %s", memory.ErrServer, strings.TrimSpace(stderr))
-	default:
-		// No status line parsed — fall back to the command error.
-		if cmdErr != nil {
-			msg := strings.TrimSpace(stderr)
-			if msg == "" {
-				return fmt.Errorf("memory: demarkus command failed: %w", cmdErr)
-			}
-			return fmt.Errorf("memory: demarkus command failed: %s: %w", msg, cmdErr)
-		}
-		return nil
 	}
+
+	// For "ok" or missing status, the process must have exited cleanly.
+	if cmdErr != nil {
+		msg := strings.TrimSpace(stderr)
+		if msg == "" {
+			return fmt.Errorf("memory: demarkus command failed: %w", cmdErr)
+		}
+		return fmt.Errorf("memory: demarkus command failed: %s: %w", msg, cmdErr)
+	}
+
+	// Require an explicit [ok] status — missing status line means
+	// the CLI output format changed or was truncated.
+	if meta.status != "ok" {
+		return fmt.Errorf("memory: unexpected response (no status line): %s", strings.TrimSpace(stderr))
+	}
+
+	// Reject malformed metadata on success responses.
+	if meta.parseErr != nil {
+		return fmt.Errorf("memory: malformed response: %w", meta.parseErr)
+	}
+
+	return nil
 }

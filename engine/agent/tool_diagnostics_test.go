@@ -112,4 +112,3 @@ func (stubWorkspace) CanonPath(p string) string         { return p }
 func (stubWorkspace) InContext(_ string) bool           { return true }
 func (stubWorkspace) AddContext(_ string)               {}
 func (stubWorkspace) ProjectRoot() string               { return "" }
-func (stubWorkspace) MemorySummary() string             { return "" }

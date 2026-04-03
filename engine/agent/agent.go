@@ -43,6 +43,9 @@ type Agent struct {
 
 	// workspace is used by the approval flow to manage context set.
 	workspace Workspace
+
+	// memorySummary is injected into the first prompt for session context.
+	memorySummary string
 }
 
 // NewOptions holds optional dependencies for agent construction.
@@ -53,6 +56,9 @@ type NewOptions struct {
 	// MemoryStore enables memory tools (fetch, publish, append, list).
 	// Nil when demarkus is not configured.
 	MemoryStore memory.Store
+	// MemorySummary is the project memory snapshot injected into the first prompt.
+	// Empty string when memory is not configured or no summary exists yet.
+	MemorySummary string
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -70,21 +76,24 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 
 	var diagProvider lang.DiagnosticProvider
 	var memStore memory.Store
+	var memorySummary string
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
+		memorySummary = opts.MemorySummary
 	}
 
 	a := &Agent{
-		provider:     provider,
-		events:       events,
-		cache:        cache,
-		prompts:      NewPromptLoader(projectRoot),
-		approveCh:    approveCh,
-		continueCh:   continueCh,
-		diagProvider: diagProvider,
-		diagDelay:    500 * time.Millisecond,
-		workspace:    workspace,
+		provider:      provider,
+		events:        events,
+		cache:         cache,
+		prompts:       NewPromptLoader(projectRoot),
+		approveCh:     approveCh,
+		continueCh:    continueCh,
+		diagProvider:  diagProvider,
+		memorySummary: memorySummary,
+		diagDelay:     500 * time.Millisecond,
+		workspace:     workspace,
 	}
 
 	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)

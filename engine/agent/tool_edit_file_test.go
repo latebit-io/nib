@@ -36,8 +36,7 @@ func (w *testWorkspace) AddContext(path string) {
 	w.inContext[w.CanonPath(path)] = true
 }
 
-func (w *testWorkspace) ProjectRoot() string   { return "" }
-func (w *testWorkspace) MemorySummary() string { return "" }
+func (w *testWorkspace) ProjectRoot() string { return "" }
 
 func mustMarshal(t *testing.T, v any) []byte {
 	t.Helper()

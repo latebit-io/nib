@@ -72,65 +72,38 @@ func TestParseStatusLine(t *testing.T) {
 	}
 }
 
-func TestCheckStatus(t *testing.T) {
-	baseErr := errors.New("exit status 1")
-
-	tests := []struct {
-		name    string
-		stderr  string
-		cmdErr  error
-		wantErr error // nil means expect no error
+var (
+	errTestExit      = errors.New("exit status 1")
+	checkStatusTests = []struct {
+		name       string
+		stderr     string
+		cmdErr     error
+		wantErr    error
+		wantNonNil bool
 	}{
-		{
-			name:   "ok status returns nil",
-			stderr: "[ok] version=1 modified=2026-04-01T00:00:00Z",
-		},
-		{
-			name:    "not-found maps to ErrNotFound",
-			stderr:  "[not-found] version=0",
-			wantErr: memory.ErrNotFound,
-		},
-		{
-			name:    "conflict maps to ErrConflict",
-			stderr:  "[conflict] version=3",
-			wantErr: memory.ErrConflict,
-		},
-		{
-			name:    "unauthorized maps to ErrAuth",
-			stderr:  "[unauthorized]",
-			wantErr: memory.ErrAuth,
-		},
-		{
-			name:    "error maps to ErrServer",
-			stderr:  "[error] something broke",
-			wantErr: memory.ErrServer,
-		},
-		{
-			name:    "server-error maps to ErrServer",
-			stderr:  "[server-error] disk full",
-			wantErr: memory.ErrServer,
-		},
-		{
-			name:    "unknown status with cmdErr wraps it",
-			stderr:  "connection refused",
-			cmdErr:  baseErr,
-			wantErr: baseErr,
-		},
-		{
-			name:    "empty stderr with cmdErr wraps it",
-			stderr:  "",
-			cmdErr:  baseErr,
-			wantErr: baseErr,
-		},
-		{
-			name:   "no status no cmdErr returns nil",
-			stderr: "",
-		},
+		{"ok status returns nil", "[ok] version=1 modified=2026-04-01T00:00:00Z", nil, nil, false},
+		{"not-found", "[not-found] version=0", nil, memory.ErrNotFound, false},
+		{"conflict", "[conflict] version=3", nil, memory.ErrConflict, false},
+		{"unauthorized", "[unauthorized]", nil, memory.ErrAuth, false},
+		{"error", "[error] something broke", nil, memory.ErrServer, false},
+		{"server-error", "[server-error] disk full", nil, memory.ErrServer, false},
+		{"unknown status with cmdErr", "connection refused", errTestExit, errTestExit, false},
+		{"empty stderr with cmdErr", "", errTestExit, errTestExit, false},
+		{"no status line without cmdErr", "", nil, nil, true},
+		{"ok with cmdErr", "[ok] version=1", errTestExit, nil, true},
 	}
+)
 
-	for _, tt := range tests {
+func TestCheckStatus(t *testing.T) {
+	for _, tt := range checkStatusTests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := checkStatus(tt.stderr, tt.cmdErr)
+			if tt.wantNonNil {
+				if got == nil {
+					t.Error("expected an error, got nil")
+				}
+				return
+			}
 			if tt.wantErr == nil {
 				if got != nil {
 					t.Errorf("expected nil, got %v", got)

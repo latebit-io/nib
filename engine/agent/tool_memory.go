@@ -10,6 +10,21 @@ import (
 	"github.com/latebit-io/junto/engine/memory"
 )
 
+// validateMemoryPath trims whitespace and requires a leading slash.
+// Returns the cleaned path or an error result.
+func validateMemoryPath(raw string) (string, *ToolResult) {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		r := textResult("Error: path is required")
+		return "", &r
+	}
+	if p[0] != '/' {
+		r := textResult("Error: path must be absolute (start with /)")
+		return "", &r
+	}
+	return p, nil
+}
+
 // --- memory_fetch ---
 
 // MemoryFetchTool retrieves a memory document by path.
@@ -48,7 +63,9 @@ func (t *MemoryFetchTool) Definition() llm.ToolDef {
 					"section": {
 						Type: "string",
 						Description: "Optional heading name to extract a single section (e.g. \"Current State\"). " +
-							"Matches ## headings case-insensitively. Omit to fetch the full document.",
+							"Matches any heading level (#, ##, ###, etc.) case-insensitively. " +
+							"Returns the heading and all content up to the next heading of equal or higher level. " +
+							"Omit to fetch the full document.",
 					},
 				},
 				Required: []string{"path"},
@@ -66,11 +83,12 @@ func (t *MemoryFetchTool) Execute(ctx context.Context, call llm.ToolCall) ToolRe
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
-	if args.Path == "" {
-		return textResult("Error: path is required")
+	path, errResult := validateMemoryPath(args.Path)
+	if errResult != nil {
+		return *errResult
 	}
 
-	doc, err := t.store.Fetch(ctx, args.Path)
+	doc, err := t.store.Fetch(ctx, path)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
@@ -89,26 +107,29 @@ func (t *MemoryFetchTool) Execute(ctx context.Context, call llm.ToolCall) ToolRe
 }
 
 // extractSection finds a markdown section by heading name (case-insensitive).
-// Matches ## headings (level 2). Returns the heading line and all content
-// up to the next heading of equal or higher level, or end of document.
+// Works at any heading level (#, ##, ###, etc.). Returns the heading line and
+// all content up to the next heading of equal or higher level (fewer #'s),
+// or end of document. Subsections are included in the result.
 func extractSection(body, name string) (string, bool) {
 	target := strings.ToLower(strings.TrimSpace(name))
 	var result strings.Builder
 	found := false
+	matchLevel := 0
 
 	for line := range strings.Lines(body) {
-		if isHeading(line) {
-			if found {
-				// Hit the next heading — stop collecting.
+		level := headingLevel(line)
+		if level > 0 {
+			if found && level <= matchLevel {
+				// Hit a heading at same or higher level — stop collecting.
 				break
 			}
-			headingText := strings.TrimSpace(strings.TrimLeft(line, "#"))
-			if strings.ToLower(headingText) == target {
-				found = true
-				result.WriteString(line)
-				result.WriteByte('\n')
+			if !found {
+				headingText := strings.TrimSpace(strings.TrimLeft(line, "#"))
+				if strings.ToLower(headingText) == target {
+					found = true
+					matchLevel = level
+				}
 			}
-			continue
 		}
 		if found {
 			result.WriteString(line)
@@ -118,16 +139,23 @@ func extractSection(body, name string) (string, bool) {
 	return result.String(), found
 }
 
-// listSections returns the ## headings found in the document body.
+// listSections returns all markdown headings found in the document body,
+// indented by level to show hierarchy.
 func listSections(body string) string {
 	var sections strings.Builder
 	for line := range strings.Lines(body) {
-		if isHeading(line) {
-			heading := strings.TrimSpace(strings.TrimLeft(line, "#"))
-			sections.WriteString("- ")
-			sections.WriteString(heading)
-			sections.WriteByte('\n')
+		level := headingLevel(line)
+		if level == 0 {
+			continue
 		}
+		heading := strings.TrimSpace(strings.TrimLeft(line, "#"))
+		// Indent subsections: # = no indent, ## = 2 spaces, ### = 4 spaces, etc.
+		for range level - 1 {
+			sections.WriteString("  ")
+		}
+		sections.WriteString("- ")
+		sections.WriteString(heading)
+		sections.WriteByte('\n')
 	}
 	if sections.Len() == 0 {
 		return "(no sections found)"
@@ -135,9 +163,22 @@ func listSections(body string) string {
 	return sections.String()
 }
 
-// isHeading returns true if the line is a markdown heading (## level 2 or higher).
-func isHeading(line string) bool {
-	return strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "# ")
+// headingLevel returns the markdown heading level (1 for #, 2 for ##, etc.)
+// or 0 if the line is not a heading.
+func headingLevel(line string) int {
+	level := 0
+	for _, c := range line {
+		if c == '#' {
+			level++
+		} else {
+			break
+		}
+	}
+	// Must have at least one # followed by a space.
+	if level > 0 && len(line) > level && line[level] == ' ' {
+		return level
+	}
+	return 0
 }
 
 // --- memory_publish ---
@@ -198,8 +239,9 @@ func (t *MemoryPublishTool) Execute(ctx context.Context, call llm.ToolCall) Tool
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
-	if args.Path == "" {
-		return textResult("Error: path is required")
+	path, errResult := validateMemoryPath(args.Path)
+	if errResult != nil {
+		return *errResult
 	}
 	if args.Body == "" {
 		return textResult("Error: body is required")
@@ -208,7 +250,7 @@ func (t *MemoryPublishTool) Execute(ctx context.Context, call llm.ToolCall) Tool
 		return textResult("Error: expected_version must be >= 0 (0 = create, >0 = update)")
 	}
 
-	doc, err := t.store.Publish(ctx, args.Path, args.Body, args.ExpectedVersion)
+	doc, err := t.store.Publish(ctx, path, args.Body, args.ExpectedVersion)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
@@ -272,8 +314,9 @@ func (t *MemoryAppendTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
-	if args.Path == "" {
-		return textResult("Error: path is required")
+	path, errResult := validateMemoryPath(args.Path)
+	if errResult != nil {
+		return *errResult
 	}
 	if args.Body == "" {
 		return textResult("Error: body is required")
@@ -282,7 +325,7 @@ func (t *MemoryAppendTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 		return textResult("Error: expected_version must be >= 1 (document must exist)")
 	}
 
-	doc, err := t.store.Append(ctx, args.Path, args.Body, args.ExpectedVersion)
+	doc, err := t.store.Append(ctx, path, args.Body, args.ExpectedVersion)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
@@ -336,11 +379,12 @@ func (t *MemoryListTool) Execute(ctx context.Context, call llm.ToolCall) ToolRes
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
-	if args.Path == "" {
-		return textResult("Error: path is required")
+	path, errResult := validateMemoryPath(args.Path)
+	if errResult != nil {
+		return *errResult
 	}
 
-	paths, err := t.store.List(ctx, args.Path)
+	paths, err := t.store.List(ctx, path)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}

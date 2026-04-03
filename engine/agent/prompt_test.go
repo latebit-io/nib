@@ -16,15 +16,6 @@ func (promptTestWorkspace) WriteFile(_, _ string) error       { return nil }
 func (promptTestWorkspace) CanonPath(p string) string         { return p }
 func (promptTestWorkspace) InContext(_ string) bool           { return true }
 func (promptTestWorkspace) AddContext(_ string)               {}
-func (promptTestWorkspace) MemorySummary() string             { return "" }
-
-// promptTestWorkspaceWithMemory is a Workspace that returns a configurable memory summary.
-type promptTestWorkspaceWithMemory struct {
-	promptTestWorkspace
-	summary string
-}
-
-func (w promptTestWorkspaceWithMemory) MemorySummary() string { return w.summary }
 
 // testAgent returns a minimal agent with embedded prompts (no project overrides).
 func testAgent() *Agent {
@@ -57,10 +48,8 @@ func TestBuildMessagesIncludesContextSet(t *testing.T) {
 }
 
 func TestBuildMessagesIncludesMemorySummary(t *testing.T) {
-	a := &Agent{
-		prompts:   NewPromptLoader(""),
-		workspace: promptTestWorkspaceWithMemory{summary: "Key decision: use hexagonal arch."},
-	}
+	a := testAgent()
+	a.memorySummary = "Key decision: use hexagonal arch."
 	msgs := a.buildMessages("main.go", "package main", "add tests", nil)
 
 	if len(msgs) != 2 {
@@ -73,6 +62,20 @@ func TestBuildMessagesIncludesMemorySummary(t *testing.T) {
 	}
 	if !strings.Contains(user, "Key decision: use hexagonal arch.") {
 		t.Error("user message should contain the summary text")
+	}
+}
+
+func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
+	a := testAgent()
+	a.memorySummary = strings.Repeat("x", maxMemorySummaryBytes+100)
+	msgs := a.buildMessages("main.go", "package main", "add tests", nil)
+
+	user := msgs[1].Content
+	if !strings.Contains(user, "[truncated]") {
+		t.Error("oversized summary should be truncated with [truncated] marker")
+	}
+	if strings.Contains(user, strings.Repeat("x", maxMemorySummaryBytes+1)) {
+		t.Error("full oversized summary should not appear in prompt")
 	}
 }
 

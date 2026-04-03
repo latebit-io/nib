@@ -69,75 +69,27 @@ func toolCall(name, args string) llm.ToolCall {
 	}
 }
 
-func TestMemoryFetchTool(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       string
-		store      mockStore
-		wantSubstr string
-	}{
-		{
-			name: "success",
-			args: `{"path": "/index.md"}`,
-			store: mockStore{
-				fetchDoc: memory.Document{
-					Path: "/index.md", Body: "# Hello", Version: 3, Modified: "2026-04-01T00:00:00Z",
-				},
-			},
-			wantSubstr: "version=3",
-		},
-		{
-			name:       "missing path",
-			args:       `{}`,
-			wantSubstr: "Error: path is required",
-		},
-		{
-			name:       "invalid json",
-			args:       `{bad`,
-			wantSubstr: "Error: invalid arguments",
-		},
-		{
-			name:       "not found",
-			args:       `{"path": "/nope.md"}`,
-			store:      mockStore{fetchErr: memory.ErrNotFound},
-			wantSubstr: "Error: memory: document not found",
-		},
-		{
-			name: "section extraction",
-			args: `{"path": "/doc.md", "section": "Current State"}`,
-			store: mockStore{
-				fetchDoc: memory.Document{
-					Path: "/doc.md", Version: 2, Modified: "2026-04-01T00:00:00Z",
-					Body: "# Project\n\n## Current State\n\nBuilding memory.\n\n## Next Steps\n\nShip it.\n",
-				},
-			},
-			wantSubstr: "Building memory.",
-		},
-		{
-			name: "section not found lists available",
-			args: `{"path": "/doc.md", "section": "Nonexistent"}`,
-			store: mockStore{
-				fetchDoc: memory.Document{
-					Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z",
-					Body: "# Project\n\n## Alpha\n\nContent.\n\n## Beta\n\nMore.\n",
-				},
-			},
-			wantSubstr: "- Alpha",
-		},
-		{
-			name: "section case insensitive",
-			args: `{"path": "/doc.md", "section": "current state"}`,
-			store: mockStore{
-				fetchDoc: memory.Document{
-					Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z",
-					Body: "## Current State\n\nFound it.\n",
-				},
-			},
-			wantSubstr: "Found it.",
-		},
-	}
+var fetchToolTests = []struct {
+	name       string
+	args       string
+	store      mockStore
+	wantSubstr string
+}{
+	{"success", `{"path": "/index.md"}`, mockStore{fetchDoc: memory.Document{Path: "/index.md", Body: "# Hello", Version: 3, Modified: "2026-04-01T00:00:00Z"}}, "version=3"},
+	{"missing path", `{}`, mockStore{}, "Error: path is required"},
+	{"invalid json", `{bad`, mockStore{}, "Error: invalid arguments"},
+	{"not found", `{"path": "/nope.md"}`, mockStore{fetchErr: memory.ErrNotFound}, "Error: memory: document not found"},
+	{"relative path rejected", `{"path": "summary.md"}`, mockStore{}, "Error: path must be absolute"},
+	{"section extraction", `{"path": "/doc.md", "section": "Current State"}`,
+		mockStore{fetchDoc: memory.Document{Path: "/doc.md", Version: 2, Modified: "2026-04-01T00:00:00Z", Body: "# Project\n\n## Current State\n\nBuilding memory.\n\n## Next Steps\n\nShip it.\n"}}, "Building memory."},
+	{"section not found lists available", `{"path": "/doc.md", "section": "Nonexistent"}`,
+		mockStore{fetchDoc: memory.Document{Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z", Body: "# Project\n\n## Alpha\n\nContent.\n\n## Beta\n\nMore.\n"}}, "- Alpha"},
+	{"section case insensitive", `{"path": "/doc.md", "section": "current state"}`,
+		mockStore{fetchDoc: memory.Document{Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z", Body: "## Current State\n\nFound it.\n"}}, "Found it."},
+}
 
-	for _, tt := range tests {
+func TestMemoryFetchTool(t *testing.T) {
+	for _, tt := range fetchToolTests {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewMemoryFetchTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_fetch", tt.args))
@@ -322,8 +274,7 @@ func TestMemoryToolsCanceled(t *testing.T) {
 	}
 }
 
-func TestExtractSection(t *testing.T) {
-	doc := `# Project
+var sectionTestDoc = `# Project
 
 ## Current State
 
@@ -340,43 +291,40 @@ Release v1.
 Nothing yet.
 `
 
-	tests := []struct {
-		name       string
-		section    string
-		wantFound  bool
-		wantSubstr string
-		wantAbsent string
-	}{
-		{
-			name:       "exact match",
-			section:    "Current State",
-			wantFound:  true,
-			wantSubstr: "Building memory",
-			wantAbsent: "Ship it",
-		},
-		{
-			name:       "case insensitive",
-			section:    "next steps",
-			wantFound:  true,
-			wantSubstr: "Release v1",
-			wantAbsent: "Building memory",
-		},
-		{
-			name:       "last section",
-			section:    "Done",
-			wantFound:  true,
-			wantSubstr: "Nothing yet",
-		},
-		{
-			name:      "not found",
-			section:   "Nonexistent",
-			wantFound: false,
-		},
-	}
+var sectionTestHierarchical = `# Phase 1: Core
+## Goal: Editor
+### Plan: Buffer
+#### Task: Line array
+#### Task: Undo/redo
+### Plan: Cursor
+## Goal: Rendering
+# Phase 2: Agent
+## Goal: LLM Loop
+`
 
-	for _, tt := range tests {
+var extractSectionTests = []struct {
+	name       string
+	doc        string
+	section    string
+	wantFound  bool
+	wantSubstr string
+	wantAbsent string
+}{
+	{"exact match level 2", sectionTestDoc, "Current State", true, "Building memory", "Ship it"},
+	{"case insensitive", sectionTestDoc, "next steps", true, "Release v1", "Building memory"},
+	{"last section", sectionTestDoc, "Done", true, "Nothing yet", ""},
+	{"not found", sectionTestDoc, "Nonexistent", false, "", ""},
+	{"level 1 includes subsections", sectionTestHierarchical, "Phase 1: Core", true, "Task: Undo/redo", "Phase 2"},
+	{"level 2 includes level 3+4", sectionTestHierarchical, "Goal: Editor", true, "Task: Line array", "Goal: Rendering"},
+	{"level 3 includes level 4", sectionTestHierarchical, "Plan: Buffer", true, "Task: Undo/redo", "Plan: Cursor"},
+	{"level 4 leaf", sectionTestHierarchical, "Task: Line array", true, "Task: Line array", "Task: Undo"},
+	{"stops at same level", sectionTestHierarchical, "Goal: Rendering", true, "Goal: Rendering", "LLM Loop"},
+}
+
+func TestExtractSection(t *testing.T) {
+	for _, tt := range extractSectionTests {
 		t.Run(tt.name, func(t *testing.T) {
-			section, ok := extractSection(doc, tt.section)
+			section, ok := extractSection(tt.doc, tt.section)
 			if ok != tt.wantFound {
 				t.Fatalf("found=%v, want %v", ok, tt.wantFound)
 			}
@@ -394,19 +342,43 @@ Nothing yet.
 }
 
 func TestListSections(t *testing.T) {
-	doc := "# Title\n\n## Alpha\n\nContent.\n\n## Beta\n\nMore.\n"
-	result := listSections(doc)
-	if !strings.Contains(result, "- Alpha") {
-		t.Errorf("expected Alpha in sections, got:\n%s", result)
-	}
-	if !strings.Contains(result, "- Beta") {
-		t.Errorf("expected Beta in sections, got:\n%s", result)
-	}
+	t.Run("flat", func(t *testing.T) {
+		doc := "# Title\n\n## Alpha\n\nContent.\n\n## Beta\n\nMore.\n"
+		result := listSections(doc)
+		if !strings.Contains(result, "- Title") {
+			t.Errorf("expected Title, got:\n%s", result)
+		}
+		if !strings.Contains(result, "  - Alpha") {
+			t.Errorf("expected indented Alpha, got:\n%s", result)
+		}
+		if !strings.Contains(result, "  - Beta") {
+			t.Errorf("expected indented Beta, got:\n%s", result)
+		}
+	})
 
-	empty := listSections("No headings here.")
-	if empty != "(no sections found)" {
-		t.Errorf("expected no sections message, got: %q", empty)
-	}
+	t.Run("hierarchical indent", func(t *testing.T) {
+		doc := "# Phase 1\n## Goal: Editor\n### Plan: Buffer\n#### Task: Undo\n"
+		result := listSections(doc)
+		if !strings.Contains(result, "- Phase 1\n") {
+			t.Errorf("level 1 should have no indent, got:\n%s", result)
+		}
+		if !strings.Contains(result, "  - Goal: Editor\n") {
+			t.Errorf("level 2 should have 2-space indent, got:\n%s", result)
+		}
+		if !strings.Contains(result, "    - Plan: Buffer\n") {
+			t.Errorf("level 3 should have 4-space indent, got:\n%s", result)
+		}
+		if !strings.Contains(result, "      - Task: Undo\n") {
+			t.Errorf("level 4 should have 6-space indent, got:\n%s", result)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		result := listSections("No headings here.")
+		if result != "(no sections found)" {
+			t.Errorf("expected no sections message, got: %q", result)
+		}
+	})
 }
 
 func TestMemoryToolDefinitions(t *testing.T) {

@@ -2,7 +2,7 @@ package ui
 
 import (
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -566,9 +566,10 @@ func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
 	if len(m.userRawLines) == 0 || len(m.wrappedIndex) == 0 {
 		return false
 	}
-	// sort.SearchInts finds the first wrappedIndex entry > wrappedIdx.
+	// BinarySearch finds the insertion point for wrappedIdx+1.
 	// The owning raw line is one before that.
-	rawIdx := sort.SearchInts(m.wrappedIndex, wrappedIdx+1) - 1
+	rawIdx, _ := slices.BinarySearch(m.wrappedIndex, wrappedIdx+1)
+	rawIdx--
 	if rawIdx < 0 {
 		return false
 	}

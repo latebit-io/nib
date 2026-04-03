@@ -59,6 +59,13 @@ func (m *mockStore) List(_ context.Context, path string) ([]string, error) {
 	return m.listPaths, m.listErr
 }
 
+func assertContains(t *testing.T, got, want string) {
+	t.Helper()
+	if !strings.Contains(got, want) {
+		t.Errorf("got %q, want substring %q", got, want)
+	}
+}
+
 func toolCall(name, args string) llm.ToolCall {
 	return llm.ToolCall{
 		ID: "test-id",
@@ -93,9 +100,7 @@ func TestMemoryFetchTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewMemoryFetchTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_fetch", tt.args))
-			if !strings.Contains(result.Content, tt.wantSubstr) {
-				t.Errorf("got %q, want substring %q", result.Content, tt.wantSubstr)
-			}
+			assertContains(t, result.Content, tt.wantSubstr)
 		})
 	}
 }
@@ -202,9 +207,7 @@ func TestMemoryPublishTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewMemoryPublishTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_publish", tt.args))
-			if !strings.Contains(result.Content, tt.wantSubstr) {
-				t.Errorf("got %q, want substring %q", result.Content, tt.wantSubstr)
-			}
+			assertContains(t, result.Content, tt.wantSubstr)
 		})
 	}
 }
@@ -251,9 +254,7 @@ func TestMemoryAppendTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewMemoryAppendTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_append", tt.args))
-			if !strings.Contains(result.Content, tt.wantSubstr) {
-				t.Errorf("got %q, want substring %q", result.Content, tt.wantSubstr)
-			}
+			assertContains(t, result.Content, tt.wantSubstr)
 		})
 	}
 }
@@ -294,9 +295,7 @@ func TestMemoryListTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewMemoryListTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_list", tt.args))
-			if !strings.Contains(result.Content, tt.wantSubstr) {
-				t.Errorf("got %q, want substring %q", result.Content, tt.wantSubstr)
-			}
+			assertContains(t, result.Content, tt.wantSubstr)
 		})
 	}
 }

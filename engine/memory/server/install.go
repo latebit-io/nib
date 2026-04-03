@@ -102,13 +102,17 @@ func resolveVersion(versionFile string) (string, error) {
 	if v := os.Getenv("MEMORY_VERSION"); v != "" {
 		return v, nil
 	}
-	// Check pinned version file.
-	if data, err := os.ReadFile(versionFile); err == nil {
+	// Check pinned version file. Only fall back to latest if the file
+	// doesn't exist — permission or I/O errors must abort, not silently upgrade.
+	data, err := os.ReadFile(versionFile)
+	if err == nil {
 		v := strings.TrimSpace(string(data))
 		if v != "" {
 			slog.Info("memory install: using pinned version", "version", v)
 			return v, nil
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read pinned version: %w", err)
 	}
 	// Fetch latest.
 	return fetchLatestVersion("server")
@@ -293,7 +297,7 @@ func extractBinaries(archiveData []byte, binDir string, wantBins []string) error
 	defer func() { _ = gr.Close() }()
 
 	tr := tar.NewReader(gr)
-	found := 0
+	extracted := make(map[string]bool, len(wantBins))
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -305,7 +309,7 @@ func extractBinaries(archiveData []byte, binDir string, wantBins []string) error
 
 		// Strip any directory prefix — we only care about the filename.
 		name := filepath.Base(hdr.Name)
-		if !want[name] {
+		if !want[name] || extracted[name] {
 			continue
 		}
 
@@ -338,11 +342,11 @@ func extractBinaries(archiveData []byte, binDir string, wantBins []string) error
 			return fmt.Errorf("rename %s: %w", name, err)
 		}
 		slog.Info("memory install: extracted", "binary", name, "path", dst)
-		found++
+		extracted[name] = true
 	}
 
-	if found < len(wantBins) {
-		return fmt.Errorf("expected %d binaries, found %d in archive", len(wantBins), found)
+	if len(extracted) < len(wantBins) {
+		return fmt.Errorf("expected %d binaries, found %d in archive", len(wantBins), len(extracted))
 	}
 	return nil
 }

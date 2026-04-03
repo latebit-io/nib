@@ -14,6 +14,7 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/engine/memory"
 )
 
 // Agent drives the multi-turn LLM loop.
@@ -42,6 +43,9 @@ type Agent struct {
 
 	// workspace is used by the approval flow to manage context set.
 	workspace Workspace
+
+	// memorySummary is injected into the first prompt for session context.
+	memorySummary string
 }
 
 // NewOptions holds optional dependencies for agent construction.
@@ -49,6 +53,12 @@ type NewOptions struct {
 	// DiagProvider enables diagnostics tool and auto-injection after edits.
 	// Nil when no language service is available.
 	DiagProvider lang.DiagnosticProvider
+	// MemoryStore enables memory tools (fetch, publish, append, list).
+	// Nil when demarkus is not configured.
+	MemoryStore memory.Store
+	// MemorySummary is the project memory snapshot injected into the first prompt.
+	// Empty string when memory is not configured or no summary exists yet.
+	MemorySummary string
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -65,30 +75,35 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	projectRoot := workspace.ProjectRoot()
 
 	var diagProvider lang.DiagnosticProvider
+	var memStore memory.Store
+	var memorySummary string
 	if opts != nil {
 		diagProvider = opts.DiagProvider
+		memStore = opts.MemoryStore
+		memorySummary = opts.MemorySummary
 	}
 
 	a := &Agent{
-		provider:     provider,
-		events:       events,
-		cache:        cache,
-		prompts:      NewPromptLoader(projectRoot),
-		approveCh:    approveCh,
-		continueCh:   continueCh,
-		diagProvider: diagProvider,
-		diagDelay:    500 * time.Millisecond,
-		workspace:    workspace,
+		provider:      provider,
+		events:        events,
+		cache:         cache,
+		prompts:       NewPromptLoader(projectRoot),
+		approveCh:     approveCh,
+		continueCh:    continueCh,
+		diagProvider:  diagProvider,
+		memorySummary: memorySummary,
+		diagDelay:     500 * time.Millisecond,
+		workspace:     workspace,
 	}
 
-	a.registerTools(workspace, cache, projectRoot, diagProvider, extraTools)
+	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
 
 	return a
 }
 
 // registerTools builds the tool registry. Built-in tools are registered first
 // and cannot be overridden by extraTools (e.g. MCP).
-func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, extraTools []Tool) {
+func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, memStore memory.Store, extraTools []Tool) {
 	editTool := NewEditFileTool(workspace, cache)
 
 	builtins := []Tool{
@@ -119,6 +134,16 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		if sp, ok := diagProvider.(lang.SymbolProvider); ok {
 			builtins = append(builtins, NewWorkspaceSymbolsTool(workspace, sp))
 		}
+	}
+
+	// Memory tools — conditionally registered when demarkus is configured.
+	if memStore != nil {
+		builtins = append(builtins,
+			NewMemoryFetchTool(memStore),
+			NewMemoryPublishTool(memStore),
+			NewMemoryAppendTool(memStore),
+			NewMemoryListTool(memStore),
+		)
 	}
 
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))

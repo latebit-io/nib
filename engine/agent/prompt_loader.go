@@ -33,6 +33,9 @@ type UserPromptData struct {
 	OmittedCount int
 	// Goal is the developer's stated intent for this agent run.
 	Goal string
+	// MemorySummary is the project memory summary injected on session start.
+	// Empty string if memory is not configured.
+	MemorySummary string
 }
 
 // PromptLoader resolves prompt files with project-level overrides.

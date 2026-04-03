@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,6 +23,8 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/lsp"
 	"github.com/latebit-io/junto/engine/mcp"
+	"github.com/latebit-io/junto/engine/memory"
+	memserver "github.com/latebit-io/junto/engine/memory/server"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/tui/internal/ui"
 )
@@ -111,6 +114,12 @@ func run() error {
 		defer func() { _ = lspMgr.Close() }()
 	}
 
+	// Ensure demarkus binaries are installed (idempotent, skips if present).
+	memMgr := memserver.New(projectRoot)
+	if err := memMgr.EnsureBinaries(); err != nil {
+		return fmt.Errorf("memory: install binaries: %w", err)
+	}
+
 	// Create LLM provider and agent from environment
 	apiKey := os.Getenv("LLM_API_KEY")
 	if apiKey != "" {
@@ -122,10 +131,21 @@ func run() error {
 		if model == "" {
 			model = "google/gemini-2.5-flash"
 		}
+
+		// Start memory server — only needed when agent is active.
+		memStore, memSummary, memCleanup, err := startMemory(memMgr, projectRoot)
+		if err != nil {
+			return fmt.Errorf("memory: %w", err)
+		}
+		defer memCleanup()
+
 		provider := llm.NewAgentAPI(baseURL, model, apiKey)
-		var opts *agent.NewOptions
+		opts := &agent.NewOptions{
+			MemoryStore:   memStore,
+			MemorySummary: memSummary,
+		}
 		if lspMgr != nil {
-			opts = &agent.NewOptions{DiagProvider: lspMgr}
+			opts.DiagProvider = lspMgr
 		}
 		ag := agent.New(provider, sess, events, opts, mcpTools...)
 		sess.SetAgent(ag, events)
@@ -372,4 +392,91 @@ func loadMCPConfigs(projectRoot string) map[string]mcpServerConfig {
 		configs[name] = mcpServerConfig{Command: cmd}
 	}
 	return configs
+}
+
+// --- Memory (demarkus) wiring ---
+
+// startMemory bootstraps auth, starts the demarkus server, seeds initial content,
+// and returns the memory store, session summary, cleanup function, and error.
+// Binaries must already be installed via EnsureBinaries.
+func startMemory(mgr *memserver.Manager, projectRoot string) (memory.Store, string, func(), error) {
+	noop := func() {}
+
+	token, err := mgr.EnsureToken()
+	if err != nil {
+		return nil, "", noop, fmt.Errorf("bootstrap token: %w", err)
+	}
+
+	if _, err := mgr.Start(); err != nil {
+		return nil, "", noop, fmt.Errorf("start server: %w", err)
+	}
+
+	store := mgr.NewStore(token)
+
+	stopAndFail := func(reason string, err error) (memory.Store, string, func(), error) {
+		if stopErr := mgr.Stop(); stopErr != nil {
+			slog.Warn("memory: stop failed during rollback", "stopErr", stopErr)
+		}
+		return nil, "", noop, fmt.Errorf("%s: %w", reason, err)
+	}
+
+	if err := seedMemory(store, projectRoot); err != nil {
+		return stopAndFail("seed", err)
+	}
+
+	var summary string
+	doc, err := store.Fetch(context.Background(), "/summary.md")
+	switch {
+	case err == nil:
+		summary = doc.Body
+		// Cap here to avoid carrying a large string through the stack.
+		// The prompt layer also caps at 8KB before template rendering.
+		const maxSummaryBytes = 8000
+		if len(summary) > maxSummaryBytes {
+			summary = summary[:maxSummaryBytes]
+		}
+	case errors.Is(err, memory.ErrNotFound):
+		// No summary yet — agent will create one.
+	default:
+		return stopAndFail("fetch summary", err)
+	}
+
+	cleanup := func() {
+		if err := mgr.Stop(); err != nil {
+			slog.Warn("memory: server stop failed", "err", err)
+		}
+	}
+
+	slog.Info("memory: ready", "port", mgr.Port())
+	return store, summary, cleanup, nil
+}
+
+// seedMemory creates the initial index.md if the memory store is empty.
+// Returns an error for backend failures (not-found is expected and handled).
+func seedMemory(store memory.Store, projectRoot string) error {
+	_, err := store.Fetch(context.Background(), "/index.md")
+	if err == nil {
+		return nil // already seeded
+	}
+	if !errors.Is(err, memory.ErrNotFound) {
+		return fmt.Errorf("check index: %w", err)
+	}
+
+	projectName := filepath.Base(projectRoot)
+	seed := fmt.Sprintf(`# Project Memory
+
+## Project
+- Name: %s
+
+## Documents
+- [Summary](/summary.md) — compact project snapshot (auto-injected on session start)
+- [Journal](/journal.md) — session notes and progress
+- [Architecture](/architecture.md) — design decisions and rationale
+- [Debugging](/debugging.md) — lessons from investigations
+`, projectName)
+
+	if _, err := store.Publish(context.Background(), "/index.md", seed, 0); err != nil {
+		return fmt.Errorf("publish index: %w", err)
+	}
+	return nil
 }

@@ -4,12 +4,26 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+// promptTestWorkspace is a minimal Workspace for prompt tests.
+type promptTestWorkspace struct{}
+
+func (promptTestWorkspace) ProjectRoot() string               { return "" }
+func (promptTestWorkspace) ReadFile(_ string) (string, error) { return "", nil }
+func (promptTestWorkspace) ListFiles() ([]string, error)      { return nil, nil }
+func (promptTestWorkspace) WriteFile(_, _ string) error       { return nil }
+func (promptTestWorkspace) CanonPath(p string) string         { return p }
+func (promptTestWorkspace) InContext(_ string) bool           { return true }
+func (promptTestWorkspace) AddContext(_ string)               {}
 
 // testAgent returns a minimal agent with embedded prompts (no project overrides).
 func testAgent() *Agent {
 	return &Agent{
-		prompts: NewPromptLoader(""),
+		prompts:   NewPromptLoader(""),
+		workspace: promptTestWorkspace{},
+		tools:     make(map[string]Tool),
 	}
 }
 
@@ -31,6 +45,66 @@ func TestBuildMessagesIncludesContextSet(t *testing.T) {
 	}
 	if !strings.Contains(user, "- src/handler.go") {
 		t.Error("user message should list src/handler.go")
+	}
+}
+
+func TestBuildMessagesIncludesMemorySummary(t *testing.T) {
+	a := testAgent()
+	a.memorySummary = "Key decision: use hexagonal arch."
+	msgs := a.buildMessages("main.go", "package main", "add tests", nil)
+
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+
+	user := msgs[1].Content
+	if !strings.Contains(user, "Memory Summary") {
+		t.Error("user message should contain Memory Summary section")
+	}
+	if !strings.Contains(user, "Key decision: use hexagonal arch.") {
+		t.Error("user message should contain the summary text")
+	}
+}
+
+func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
+	t.Run("ascii", func(t *testing.T) {
+		a := testAgent()
+		a.memorySummary = strings.Repeat("x", maxMemorySummaryBytes+100)
+		msgs := a.buildMessages("main.go", "package main", "add tests", nil)
+
+		user := msgs[1].Content
+		if !strings.Contains(user, "[truncated]") {
+			t.Error("oversized summary should be truncated with [truncated] marker")
+		}
+		if strings.Contains(user, strings.Repeat("x", maxMemorySummaryBytes+1)) {
+			t.Error("full oversized summary should not appear in prompt")
+		}
+	})
+
+	t.Run("multibyte rune boundary", func(t *testing.T) {
+		a := testAgent()
+		// U+4E16 (世) is 3 bytes in UTF-8. Fill past the limit so the cut
+		// point is likely mid-rune if not handled correctly.
+		a.memorySummary = strings.Repeat("世", maxMemorySummaryBytes)
+		msgs := a.buildMessages("main.go", "package main", "add tests", nil)
+
+		user := msgs[1].Content
+		if !strings.Contains(user, "[truncated]") {
+			t.Error("oversized multibyte summary should be truncated")
+		}
+		if !utf8.ValidString(user) {
+			t.Error("truncated prompt contains invalid UTF-8")
+		}
+	})
+}
+
+func TestBuildMessagesNoMemorySummary(t *testing.T) {
+	a := testAgent() // promptTestWorkspace returns ""
+	msgs := a.buildMessages("main.go", "package main", "add tests", nil)
+
+	user := msgs[1].Content
+	if strings.Contains(user, "Memory Summary") {
+		t.Error("user message should not contain Memory Summary section when summary is empty")
 	}
 }
 
@@ -101,6 +175,14 @@ func TestPromptLoaderFallsBackToEmbedded(t *testing.T) {
 	system := loader.SystemPrompt()
 	if !strings.Contains(system, "pair-programming agent") {
 		t.Error("expected embedded default system prompt")
+	}
+}
+
+func TestSystemPromptIncludesMemorySection(t *testing.T) {
+	loader := NewPromptLoader("")
+	system := loader.SystemPrompt()
+	if !strings.Contains(system, "## Memory") {
+		t.Error("system prompt should include Memory section")
 	}
 }
 

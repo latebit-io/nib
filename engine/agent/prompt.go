@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/llm"
 )
@@ -10,6 +11,10 @@ import (
 // maxContextInPrompt caps how many context files are listed in the prompt.
 // Prevents unbounded prompt growth in long-lived sessions.
 const maxContextInPrompt = 50
+
+// maxMemorySummaryBytes caps the memory summary injected into the prompt.
+// The summary is external content from demarkus — must be bounded.
+const maxMemorySummaryBytes = 8000
 
 // buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
@@ -36,13 +41,24 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		shown = shown[:maxContextInPrompt]
 	}
 
+	memorySummary := a.memorySummary
+	if len(memorySummary) > maxMemorySummaryBytes {
+		// Truncate at a rune boundary to avoid splitting multi-byte UTF-8.
+		cut := maxMemorySummaryBytes
+		for cut > 0 && !utf8.RuneStart(memorySummary[cut]) {
+			cut--
+		}
+		memorySummary = memorySummary[:cut] + "\n\n[truncated]"
+	}
+
 	userContent, err := a.prompts.RenderUserMessage(UserPromptData{
-		FileName:     fileName,
-		FileContent:  numbered.String(),
-		Fence:        fence,
-		ContextFiles: shown,
-		OmittedCount: omitted,
-		Goal:         goal,
+		FileName:      fileName,
+		FileContent:   numbered.String(),
+		Fence:         fence,
+		ContextFiles:  shown,
+		OmittedCount:  omitted,
+		Goal:          goal,
+		MemorySummary: memorySummary,
 	})
 	if err != nil {
 		// Template execution failed — fall back to a minimal message.

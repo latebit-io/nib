@@ -49,9 +49,20 @@ func Parse(markdown string) *Tree {
 	// When a new heading appears at depth d, it becomes a child of the
 	// deepest heading with depth < d (its nearest ancestor).
 	var headingStack []*Node
+	inFence := false
 
 	for ; i < len(lines); i++ {
 		line := lines[i]
+
+		// Skip content inside fenced code blocks — headings and task
+		// items in code examples must not create real nodes.
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
 
 		if level, title, ok := parseHeading(line); ok {
 			node := &Node{
@@ -88,15 +99,13 @@ func attachHeading(tree *Tree, stack *[]*Node, node *Node) {
 		parent.Children = append(parent.Children, node)
 	}
 
-	// Trim the stack to remove any entries at or below this depth,
-	// then push this node as the current entry at its depth.
-	var trimmed []*Node
-	for _, s := range *stack {
-		if s.Depth < node.Depth {
-			trimmed = append(trimmed, s)
-		}
+	// Pop entries at or below this depth, then push. The stack is ordered
+	// by depth so we only need to trim from the tail — no allocation.
+	cut := len(*stack)
+	for cut > 0 && (*stack)[cut-1].Depth >= node.Depth {
+		cut--
 	}
-	*stack = append(trimmed, node)
+	*stack = append((*stack)[:cut], node)
 }
 
 // attachTask inserts a task node under the most recent heading,

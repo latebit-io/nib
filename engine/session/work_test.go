@@ -91,6 +91,29 @@ func TestSetMemoryStore_Nil(t *testing.T) {
 	}
 }
 
+func TestSetMemoryStore_NilClearsStaleState(t *testing.T) {
+	store := newMockMemoryStore()
+	store.seed(workTreePath, "# Component\n- [>] active\n", 1)
+
+	sess := newWorkTestSession(t)
+	sess.SetMemoryStore(store)
+
+	if sess.WorkTree() == nil {
+		t.Fatal("WorkTree should be loaded")
+	}
+
+	// Setting nil must clear the previously loaded tree.
+	sess.SetMemoryStore(nil)
+
+	if sess.WorkTree() != nil {
+		t.Error("WorkTree should be nil after SetMemoryStore(nil)")
+	}
+	goal, path := sess.ActiveGoal()
+	if goal != nil || path != "" {
+		t.Errorf("ActiveGoal should return nil, empty after nil store; got %v, %q", goal, path)
+	}
+}
+
 func TestActiveGoal(t *testing.T) {
 	store := newMockMemoryStore()
 	store.seed(workTreePath, "# Component\n## Phase\n- [>] active task\n- [ ] other\n", 1)

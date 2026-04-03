@@ -261,6 +261,47 @@ func TestParse_EmptyTaskTitle(t *testing.T) {
 	}
 }
 
+func TestParse_FencedCodeBlockIgnored(t *testing.T) {
+	input := "# Real\n```\n# Fake Heading\n- [ ] fake task\n```\n- [ ] real task\n"
+	tree := Parse(input)
+
+	if len(tree.Roots) != 1 {
+		t.Fatalf("Roots = %d, want 1", len(tree.Roots))
+	}
+	root := tree.Roots[0]
+	assertHeading(t, root, "Real", 0)
+	if len(root.Children) != 1 {
+		t.Fatalf("Children = %d, want 1 (fenced content should be ignored)", len(root.Children))
+	}
+	assertTask(t, root.Children[0], "real task", TaskPending, 1)
+}
+
+func TestParse_TildeFenceIgnored(t *testing.T) {
+	input := "# A\n~~~\n## Fake\n~~~\n- [ ] real\n"
+	tree := Parse(input)
+
+	if len(tree.Roots) != 1 {
+		t.Fatalf("Roots = %d, want 1", len(tree.Roots))
+	}
+	if len(tree.Roots[0].Children) != 1 {
+		t.Fatalf("Children = %d, want 1", len(tree.Roots[0].Children))
+	}
+	assertTask(t, tree.Roots[0].Children[0], "real", TaskPending, 1)
+}
+
+func TestParse_FencedCodeWithLanguageTag(t *testing.T) {
+	input := "# A\n```markdown\n# Fake\n- [ ] fake\n```\n- [ ] real\n"
+	tree := Parse(input)
+
+	if len(tree.Roots) != 1 {
+		t.Fatalf("Roots = %d, want 1", len(tree.Roots))
+	}
+	if len(tree.Roots[0].Children) != 1 {
+		t.Fatalf("Children = %d, want 1 (fenced with language tag should be ignored)", len(tree.Roots[0].Children))
+	}
+	assertTask(t, tree.Roots[0].Children[0], "real", TaskPending, 1)
+}
+
 func TestParse_IndentedTasks(t *testing.T) {
 	input := "# H\n  - [ ] indented task\n"
 	tree := Parse(input)

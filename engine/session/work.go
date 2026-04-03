@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/latebit-io/junto/engine/memory"
@@ -26,10 +27,18 @@ const workTreePath = "/project.md"
 // Safe to call with nil (disables work tree features).
 func (s *Session) SetMemoryStore(store memoryStore) {
 	s.memoryStore = store
-	if store != nil {
-		if err := s.loadWorkTree(); err != nil {
-			slog.Warn("session: failed to load work tree", "err", err)
-		}
+
+	// Clear work-tree state before (re)loading to avoid stale data
+	// when the store changes or is set to nil.
+	s.workTree = nil
+	s.workTreeVer = 0
+	s.workTreeDirty = false
+
+	if store == nil {
+		return
+	}
+	if err := s.loadWorkTree(); err != nil {
+		slog.Warn("session: failed to load work tree", "err", err)
 	}
 }
 
@@ -49,11 +58,11 @@ func (s *Session) ActiveGoal() (*project.Node, string) {
 	if goal == nil {
 		return nil, ""
 	}
-	titles := make([]string, len(ancestry))
+	parts := make([]string, len(ancestry))
 	for i, n := range ancestry {
-		titles[i] = n.Title
+		parts[i] = n.Title
 	}
-	return goal, s.workTree.AncestryPath(goal.Title)
+	return goal, strings.Join(parts, " > ")
 }
 
 // SetActiveGoal marks the named task as active in the work tree and persists

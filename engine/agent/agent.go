@@ -81,10 +81,16 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		workspace:    workspace,
 	}
 
+	a.registerTools(workspace, cache, projectRoot, diagProvider, extraTools)
+
+	return a
+}
+
+// registerTools builds the tool registry. Built-in tools are registered first
+// and cannot be overridden by extraTools (e.g. MCP).
+func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, extraTools []Tool) {
 	editTool := NewEditFileTool(workspace, cache)
 
-	// Build tool registry — each tool gets exactly the dependencies it needs.
-	// Built-in tools are registered first and cannot be overridden by extraTools.
 	builtins := []Tool{
 		NewReadFileTool(workspace, cache),
 		editTool,
@@ -93,18 +99,13 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		NewBashTool(projectRoot),
 	}
 
-	// Register diagnostics tool if provider is available.
 	if diagProvider != nil {
 		builtins = append(builtins, NewDiagnosticsTool(diagProvider, workspace))
 	}
 
-	// Navigation tool — always available, effect handled by agent loop.
 	builtins = append(builtins, NewGoToLineTool(workspace))
-
-	// Project-wide search — ripgrep with Go fallback.
+	builtins = append(builtins, NewGlobTool(workspace))
 	builtins = append(builtins, NewSearchProjectTool(projectRoot))
-
-	// Package info — version lookup and API docs from the project's package manager.
 	builtins = append(builtins, NewPackageInfoTool(projectRoot))
 
 	// LSP-powered tools — conditionally registered via type assertion.
@@ -120,7 +121,6 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))
 	a.toolDefs = make([]llm.ToolDef, 0, len(builtins)+len(extraTools))
 
-	// Register built-ins.
 	builtinNames := make(map[string]bool, len(builtins))
 	for _, t := range builtins {
 		def := t.Definition()
@@ -130,7 +130,6 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		a.toolDefs = append(a.toolDefs, def)
 	}
 
-	// Register extra tools (e.g. MCP), rejecting any that shadow built-ins.
 	for _, t := range extraTools {
 		def := t.Definition()
 		key := strings.ToLower(def.Function.Name)
@@ -145,8 +144,6 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		a.tools[key] = t
 		a.toolDefs = append(a.toolDefs, def)
 	}
-
-	return a
 }
 
 // Run starts the agent loop in a goroutine.

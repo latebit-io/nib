@@ -17,9 +17,12 @@ Pick the right tool for the question:
 | "Where is this string/pattern in the codebase?" | `search_project` |
 | "Where is this type/function defined?" | `workspace_symbols` (if available) or `search_project` |
 | "What calls this function?" | `find_references` (if available) or `search_project` |
+| "Which files match a name pattern?" | `glob` (e.g. `**/*_test.go`, `engine/**/*.go`) |
 | "What files exist?" | `list_files` |
 | "What does this file contain?" | `read_file` |
 | "What's on lines 50–100 of this file?" | `read_file` with `offset` and `limit` |
+
+**Always prefer `glob` over `list_files` when you know the file name pattern.** `glob` filters server-side and returns only matching paths; `list_files` dumps every file.
 
 **Always prefer `search_project` over `bash` with grep/find/rg.** The search tool is faster, returns structured file:line results, and respects gitignore. Only use bash for builds, tests, and commands — never for searching code.
 

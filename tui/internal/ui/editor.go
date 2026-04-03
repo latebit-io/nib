@@ -158,6 +158,7 @@ type EditorModel struct {
 	charStyles   []lipgloss.Style
 	colTags      []int
 	dispToBuf    []int
+	displayBuf   []rune
 
 	// Find holds the find bar state.
 	Find FindBar
@@ -459,11 +460,15 @@ func expandTabs(runes []rune) (expanded []rune, bufToDisp []int) {
 	return
 }
 
-// fillDisplay creates a rune buffer of the given width (space-filled),
+// fillDisplay returns a rune buffer of the given width (space-filled),
 // starting from scrollCol in the expanded rune slice. Content before
 // scrollCol is not included, enabling horizontal scrolling.
-func fillDisplay(expanded []rune, w, scrollCol int) []rune {
-	displayed := make([]rune, w)
+// The buffer is reused across calls to avoid per-line allocation.
+func (m *EditorModel) fillDisplay(expanded []rune, w, scrollCol int) []rune {
+	if cap(m.displayBuf) < w {
+		m.displayBuf = make([]rune, w)
+	}
+	displayed := m.displayBuf[:w]
 	for j := range displayed {
 		displayed[j] = ' '
 	}
@@ -739,7 +744,7 @@ func (m *EditorModel) renderNormalLine(
 	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
-	displayed := fillDisplay(expanded, contentW, scrollCol)
+	displayed := m.fillDisplay(expanded, contentW, scrollCol)
 
 	// Cursor position in display coords, offset by horizontal scroll.
 	displayCursorCol := -1
@@ -1000,7 +1005,7 @@ func (m *EditorModel) renderRemovedLine(
 	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
-	displayed := fillDisplay(expanded, contentW, scrollCol)
+	displayed := m.fillDisplay(expanded, contentW, scrollCol)
 
 	// Cursor position in display coords, offset by horizontal scroll.
 	displayCursorCol := -1
@@ -1114,7 +1119,7 @@ func (m *EditorModel) renderAddedLine(
 	rawRunes := []rune(oe.Buf.LineText(overlayIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
-	displayed := fillDisplay(expanded, contentW, scrollCol)
+	displayed := m.fillDisplay(expanded, contentW, scrollCol)
 
 	displayCursorCol := -1
 	if m.Overlay.Active && overlayIdx == oe.CursorLine && oe.CursorCol >= 0 && oe.CursorCol <= len(rawRunes) {
@@ -1125,9 +1130,14 @@ func (m *EditorModel) renderAddedLine(
 	}
 
 	// Precompute inverse mapping for selection: viewport col → buffer col.
+	// Reuse the shared scratch buffer to avoid per-call allocation.
 	var dispToBuf []int
 	if oe.SelectionActive {
-		dispToBuf = make([]int, contentW)
+		if cap(m.dispToBuf) < contentW {
+			m.dispToBuf = make([]int, contentW)
+		}
+		dispToBuf = m.dispToBuf[:contentW]
+		clear(dispToBuf)
 		bufCol := 0
 		for j := range contentW {
 			absDispCol := j + scrollCol

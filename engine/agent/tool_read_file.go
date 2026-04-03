@@ -145,7 +145,7 @@ func sliceLines(content, path string, offset, limit int) string {
 	for i := startIdx; i < endIdx; i++ {
 		fmt.Fprintf(&b, "%4d\t%s\n", i+1, lines[i])
 		if b.Len() > maxContentPreview {
-			fmt.Fprintf(&b, "\n... truncated at %d bytes (use a smaller range)\n", maxContentPreview)
+			fmt.Fprintf(&b, "\n... truncated at %d bytes (use a smaller range)\n", b.Len())
 			break
 		}
 	}

@@ -1191,11 +1191,16 @@ func (e *Editor) DisplayColToBufferCol(line, displayCol int) int {
 	runes := []rune(e.Buf.LineText(line))
 	dc := 0
 	for bi, r := range runes {
-		width := 1
-		if r == '\t' {
-			width = 4
+		var width int
+		switch r {
+		case '\t':
+			width = tabWidth
+		case '\uFE0F':
+			width = 0 // VS16 is stripped from display (see expandTabs)
+		default:
+			width = 1
 		}
-		if displayCol < dc+width {
+		if width > 0 && displayCol < dc+width {
 			return bi
 		}
 		dc += width

@@ -12,6 +12,15 @@ import (
 	"github.com/latebit-io/junto/engine/highlight"
 )
 
+// tabWidth is the display width of a tab character. Must match the TUI
+// renderer's expandTabs logic so horizontal scroll stays in sync.
+const tabWidth = 4
+
+// scrollMarginCols is the horizontal lookahead margin. When the cursor
+// approaches the viewport edge, we scroll early so the developer can
+// see surrounding context rather than typing blind at the edge.
+const scrollMarginCols = 8
+
 // Editor is the frontend-agnostic editor controller.
 // It owns cursor state, selection, scroll position, and text operations.
 // Frontends call methods to manipulate state and read fields to render.
@@ -26,6 +35,11 @@ type Editor struct {
 
 	// Viewport scroll offset (in visual-line space when ExtraVisualLines > 0)
 	ScrollOffset int
+
+	// ScrollCol is the horizontal scroll offset in display-column space
+	// (post tab-expansion). The TUI slices rendered content starting at
+	// this column. Adjusted automatically by EnsureCursorVisible.
+	ScrollCol int
 
 	// ExtraVisualLines is the number of virtual lines inserted into the viewport
 	// by the frontend (e.g., inline diff overlay). Scroll methods account for
@@ -65,11 +79,12 @@ func (e *Editor) Close() {
 	}
 }
 
-// SetSize updates the editor dimensions and clamps scroll.
+// SetSize updates the editor dimensions and clamps scroll on both axes.
 func (e *Editor) SetSize(width, height int) {
 	e.Width = width
 	e.Height = height
 	e.ClampScroll()
+	e.ClampScrollCol()
 }
 
 // VisibleLines returns the number of content lines visible in the viewport.
@@ -104,7 +119,7 @@ func (e *Editor) totalVisualLines() int {
 	return e.Buf.LineCount() + e.ExtraVisualLines
 }
 
-// ClampScroll clamps the scroll offset to valid range.
+// ClampScroll clamps the vertical scroll offset to valid range.
 func (e *Editor) ClampScroll() {
 	maxScroll := e.totalVisualLines() - e.VisibleLines()
 	if maxScroll < 0 {
@@ -116,6 +131,49 @@ func (e *Editor) ClampScroll() {
 	if e.ScrollOffset < 0 {
 		e.ScrollOffset = 0
 	}
+}
+
+// ClampScrollCol ensures the horizontal scroll offset is non-negative.
+// No upper bound is enforced — lines have varying lengths.
+func (e *Editor) ClampScrollCol() {
+	if e.ScrollCol < 0 {
+		e.ScrollCol = 0
+	}
+}
+
+// BufferColToDisplayCol converts a buffer column on the given line to a
+// display column, accounting for tab expansion and wide characters.
+// This is the engine-side equivalent of the TUI's expandTabs mapping.
+func (e *Editor) BufferColToDisplayCol(line, bufCol int) int {
+	if line < 0 || line >= e.Buf.LineCount() {
+		return bufCol
+	}
+	text := e.Buf.LineText(line)
+	runes := []rune(text)
+	dispCol := 0
+	for i := 0; i < bufCol && i < len(runes); i++ {
+		switch runes[i] {
+		case '\t':
+			dispCol += tabWidth
+		case '\uFE0F':
+			// VS16 is skipped in the display buffer (see TUI expandTabs),
+			// so it contributes 0 display columns.
+		default:
+			dispCol++
+		}
+	}
+	return dispCol
+}
+
+// ScrollLeft scrolls the viewport left by the given number of columns.
+func (e *Editor) ScrollLeft(cols int) {
+	e.ScrollCol -= cols
+	e.ClampScrollCol()
+}
+
+// ScrollRight scrolls the viewport right by the given number of columns.
+func (e *Editor) ScrollRight(cols int) {
+	e.ScrollCol += cols
 }
 
 // CollapseOverlay adjusts ScrollOffset when an overlay (inline diff) is
@@ -161,18 +219,34 @@ func (e *Editor) CollapseOverlay(startLine, endLine, addedCount int, bufferMutat
 	e.ExtraVisualLines = 0
 }
 
-// EnsureCursorVisible scrolls the viewport to keep the cursor visible.
+// EnsureCursorVisible scrolls the viewport on both axes to keep the cursor visible.
 func (e *Editor) EnsureCursorVisible() {
+	// Vertical
 	vis := e.VisibleLines()
-	if vis <= 0 {
-		return
+	if vis > 0 {
+		if e.CursorLine < e.ScrollOffset {
+			e.ScrollOffset = e.CursorLine
+		}
+		if e.CursorLine >= e.ScrollOffset+vis {
+			e.ScrollOffset = e.CursorLine - vis + 1
+		}
 	}
-	if e.CursorLine < e.ScrollOffset {
-		e.ScrollOffset = e.CursorLine
+
+	// Horizontal
+	cw := e.ContentWidth()
+	dispCol := e.BufferColToDisplayCol(e.CursorLine, e.CursorCol)
+	margin := scrollMarginCols
+	if margin >= cw {
+		margin = 0 // terminal too narrow for margin
 	}
-	if e.CursorLine >= e.ScrollOffset+vis {
-		e.ScrollOffset = e.CursorLine - vis + 1
+
+	if dispCol < e.ScrollCol {
+		e.ScrollCol = dispCol
 	}
+	if dispCol >= e.ScrollCol+cw-margin {
+		e.ScrollCol = dispCol - cw + margin + 1
+	}
+	e.ClampScrollCol()
 }
 
 // --- Cursor Movement ---
@@ -1117,11 +1191,16 @@ func (e *Editor) DisplayColToBufferCol(line, displayCol int) int {
 	runes := []rune(e.Buf.LineText(line))
 	dc := 0
 	for bi, r := range runes {
-		width := 1
-		if r == '\t' {
-			width = 4
+		var width int
+		switch r {
+		case '\t':
+			width = tabWidth
+		case '\uFE0F':
+			width = 0 // VS16 is stripped from display (see expandTabs)
+		default:
+			width = 1
 		}
-		if displayCol < dc+width {
+		if width > 0 && displayCol < dc+width {
 			return bi
 		}
 		dc += width

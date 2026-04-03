@@ -121,6 +121,10 @@ type Workspace interface {
 
 	// AddContext adds a file to the developer's context set.
 	AddContext(path string)
+
+	// MemorySummary returns the project memory summary for prompt injection.
+	// Returns empty string if memory is not configured.
+	MemorySummary() string
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

@@ -37,12 +37,13 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 	}
 
 	userContent, err := a.prompts.RenderUserMessage(UserPromptData{
-		FileName:     fileName,
-		FileContent:  numbered.String(),
-		Fence:        fence,
-		ContextFiles: shown,
-		OmittedCount: omitted,
-		Goal:         goal,
+		FileName:      fileName,
+		FileContent:   numbered.String(),
+		Fence:         fence,
+		ContextFiles:  shown,
+		OmittedCount:  omitted,
+		Goal:          goal,
+		MemorySummary: a.workspace.MemorySummary(),
 	})
 	if err != nil {
 		// Template execution failed — fall back to a minimal message.

@@ -104,6 +104,11 @@ type Session struct {
 	// completionMu serializes overlay completion requests to prevent
 	// DidChange interleaving when multiple requests race.
 	completionMu sync.Mutex
+
+	// memorySummary holds the session summary fetched from demarkus on startup.
+	// Injected into the user message template so the agent has context immediately.
+	// Set once via SetMemorySummary before the TUI starts.
+	memorySummary string
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -186,6 +191,17 @@ func (s *Session) SetEvents(events <-chan event.Event) {
 // Events returns the event channel for the frontend to read.
 func (s *Session) Events() <-chan event.Event {
 	return s.events
+}
+
+// SetMemorySummary stores the session summary for prompt injection.
+// Called once during initialization, before the TUI starts.
+func (s *Session) SetMemorySummary(summary string) {
+	s.memorySummary = summary
+}
+
+// MemorySummary returns the stored session summary, if any.
+func (s *Session) MemorySummary() string {
+	return s.memorySummary
 }
 
 // HasAgent returns true if the session has an active agent.

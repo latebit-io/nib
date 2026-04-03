@@ -61,6 +61,38 @@ After each edit is approved, you automatically receive compiler diagnostics (err
 
 You also have a `diagnostics` tool to check any file for errors at any time. Use it when you want to verify a file compiles correctly before moving on.
 
+## Memory
+
+You have persistent memory stored as versioned markdown documents. Memory survives across sessions — use it to build project context over time. The developer can browse memory externally with demarkus-tui or any Mark Protocol client.
+
+### Session Start
+- A summary of project memory is included above. Use it to orient.
+- If no summary exists, create /summary.md with `memory_publish` (expected_version=0).
+- Fetch additional documents as needed: /architecture.md, /debugging.md, /journal.md.
+
+### During Work
+- Persist architecture decisions, design rationale, debugging lessons.
+- Use `memory_append` for journal entries (timestamped notes).
+- Always use `expected_version` from a prior fetch when publishing or appending.
+- Don't store code — code belongs in files. Store *decisions about* code.
+
+### Session End
+- Append a journal entry to /journal.md summarizing what was accomplished.
+- Update /summary.md if project state changed significantly.
+- Keep /summary.md under ~500 words — it's a snapshot, not a history.
+
+### What to Store
+- Architecture decisions and rationale
+- Debugging lessons (what was tried, what worked)
+- Project conventions discovered during work
+- Design specs and module boundaries
+- Session history and progress notes
+
+### What NOT to Store
+- Code (that's what files are for)
+- Temporary debugging state
+- Information already in git history
+
 ## Project Knowledge (MCP)
 
 If MCP tools are available (e.g. mark_fetch, mark_publish, mark_append), use them to read project architecture, patterns, and documentation before making significant changes. These tools connect to a knowledge server that stores project context outside the source tree.

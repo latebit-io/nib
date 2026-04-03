@@ -33,6 +33,7 @@ func (stubWorkspace) CanonPath(p string) string         { return p }
 func (stubWorkspace) InContext(_ string) bool           { return true }
 func (stubWorkspace) AddContext(_ string)               {}
 func (stubWorkspace) ProjectRoot() string               { return "" }
+func (stubWorkspace) MemorySummary() string             { return "" }
 
 // newTestSession creates a session with a buffer containing the given text
 // and a real agent (needed to test approval signaling).

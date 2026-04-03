@@ -15,7 +15,8 @@ Pick the right tool for the question:
 | Question | Tool |
 |----------|------|
 | "Where is this string/pattern in the codebase?" | `search_project` |
-| "Where is this type/function defined?" | `workspace_symbols` (if available) or `search_project` |
+| "Where is this symbol defined?" | `go_to_definition` (if available) — precise, position-based |
+| "Where is this type/function name in the project?" | `workspace_symbols` (if available) or `search_project` |
 | "What calls this function?" | `find_references` (if available) or `search_project` |
 | "Which files match a name pattern?" | `glob` (e.g. `**/*_test.go`, `engine/**/*.go`) |
 | "What files exist?" | `list_files` |
@@ -26,7 +27,7 @@ Pick the right tool for the question:
 
 **Always prefer `search_project` over `bash` with grep/find/rg.** The search tool is faster, returns structured file:line results, and respects gitignore. Only use bash for builds, tests, and commands — never for searching code.
 
-If `find_references` or `workspace_symbols` appear in your tool list, prefer them for symbol-level queries — they use the language server and are more precise than text search.
+If `go_to_definition`, `find_references`, or `workspace_symbols` appear in your tool list, prefer them for symbol-level queries — they use the language server and are more precise than text search. Use `go_to_definition` when you have a specific position (file + line + column) and want to jump to the source. Use `workspace_symbols` when you know a name but not its location.
 
 ## External Libraries
 

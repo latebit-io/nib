@@ -110,6 +110,9 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 
 	// LSP-powered tools — conditionally registered via type assertion.
 	if diagProvider != nil {
+		if dp, ok := diagProvider.(lang.DefinitionProvider); ok {
+			builtins = append(builtins, NewGoToDefinitionTool(workspace, dp))
+		}
 		if rp, ok := diagProvider.(lang.ReferenceProvider); ok {
 			builtins = append(builtins, NewFindReferencesTool(workspace, rp))
 		}

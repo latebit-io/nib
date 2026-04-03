@@ -863,13 +863,24 @@ func (s *Session) CanonPath(path string) string {
 
 // --- Intent Lifecycle ---
 
-// SubmitGoal starts the agent with a new goal.
-// Archives any previous intent that was still active.
-func (s *Session) SubmitGoal(goal string) {
+// SubmitGoal sends a message to the agent. If the agent is waiting for input
+// (mid-conversation), the message continues the existing conversation.
+// Otherwise, a new conversation is started. Returns true when the message
+// continued an existing conversation, false when a new one was started.
+//
+// Must be called from a single goroutine (the TUI main goroutine).
+func (s *Session) SubmitGoal(goal string) bool {
 	if !s.HasAgent() {
-		return
+		return false
 	}
-	// Archive previous intent if redirecting mid-run
+
+	// Continue existing conversation if the agent is waiting for input.
+	if s.agent.IsWaiting() {
+		s.agent.Reply(goal)
+		return true
+	}
+
+	// Start a new conversation. Archive any previous intent.
 	if s.CurrentIntent != "" && !s.IntentDone {
 		s.ArchiveIntent()
 	}
@@ -880,6 +891,7 @@ func (s *Session) SubmitGoal(goal string) {
 	s.CurrentIntent = goal
 	s.IntentDone = false
 	s.agent.Run(s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles())
+	return false
 }
 
 // ArchiveIntent marks the current intent as done.
@@ -1336,6 +1348,9 @@ func (s *Session) HandleEvent(ev event.Event) {
 		// File is already opened by workspace.WriteFile — frontend can
 		// render it in the project view or switch to it.
 		_ = e
+	case event.AgentWaiting:
+		// Agent finished its turn, waiting for developer input.
+		// No session state changes — intent stays active.
 	case event.AgentToken, event.AgentStatus, event.AgentToolCall, event.AgentNavigate:
 		// No session state changes — frontend renders these directly
 	case event.DiagnosticsUpdated:

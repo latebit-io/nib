@@ -14,6 +14,9 @@ import (
 // InputHeight is the number of rows reserved for the input area (separator + input + status).
 const InputHeight = 5
 
+// userMessageStyle renders the developer's messages in the conversation thread.
+var userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Bold(true)
+
 // MaxInputBufferBytes caps the goal input buffer to prevent unbounded memory
 // growth from large pastes or rapid key input. 1 MiB is generous for any
 // reasonable prompt while still protecting against accidental megabyte pastes.
@@ -116,6 +119,12 @@ func (m *AgentPaneModel) AppendToken(text string) {
 func (m *AgentPaneModel) AppendMeta(text string) {
 	var s sanitize.Sanitizer
 	m.AppendText(s.Sanitize(text))
+}
+
+// AppendUserMessage renders the developer's follow-up message in the
+// conversation thread, visually distinct from agent output.
+func (m *AgentPaneModel) AppendUserMessage(text string) {
+	m.AppendText("\n\n" + userMessageStyle.Render("You: "+text) + "\n\n")
 }
 
 func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {

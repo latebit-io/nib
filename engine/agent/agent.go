@@ -36,6 +36,11 @@ type Agent struct {
 	approveCh  chan bool   // true = approved, false = rejected
 	continueCh chan string // buffer content after user edits
 
+	// Conversation flow: agent blocks on inputCh between turns,
+	// waiting for the developer's next message.
+	inputCh chan string
+	waiting bool // true when blocked on inputCh
+
 	// diagProvider is optionally set to auto-inject diagnostics after edits.
 	diagProvider lang.DiagnosticProvider
 	// diagDelay is the wait time for the language server to push diagnostics after an edit.
@@ -44,7 +49,9 @@ type Agent struct {
 	// workspace is used by the approval flow to manage context set.
 	workspace Workspace
 
-	// memorySummary is injected into the first prompt for session context.
+	// memoryStore is used to re-fetch the session summary before each goal.
+	memoryStore memory.Store
+	// memorySummary is the fallback summary from startup, used when re-fetch fails.
 	memorySummary string
 }
 
@@ -90,7 +97,9 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		prompts:       NewPromptLoader(projectRoot),
 		approveCh:     approveCh,
 		continueCh:    continueCh,
+		inputCh:       make(chan string, 1), // capacity 1: Reply() is non-blocking; only one pending reply is meaningful
 		diagProvider:  diagProvider,
+		memoryStore:   memStore,
 		memorySummary: memorySummary,
 		diagDelay:     500 * time.Millisecond,
 		workspace:     workspace,
@@ -174,23 +183,27 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	}
 }
 
-// Run starts the agent loop in a goroutine.
+// Run starts a new conversation in a goroutine. Any previous conversation
+// is cancelled. The first user message is built from the full template
+// (file content, context set, memory summary, goal).
 // contextFiles lists the files the agent is allowed to edit.
 func (a *Agent) Run(fileName, fileContent, goal string, contextFiles []string) {
 	a.mu.Lock()
-	// Cancel any previous run
+	// Cancel any previous conversation
 	if a.cancel != nil {
 		a.cancel()
 	}
 	// Drain stale signals from previous run
 	drain(a.approveCh)
 	drain(a.continueCh)
+	drain(a.inputCh)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.activeFile = fileName
 	a.cache.Reset(fileName, fileContent)
 	a.intent = goal
+	a.waiting = false
 
 	// Reset tools with state
 	for _, t := range a.tools {
@@ -201,6 +214,35 @@ func (a *Agent) Run(fileName, fileContent, goal string, contextFiles []string) {
 	a.mu.Unlock()
 
 	go a.run(ctx, fileName, fileContent, goal, contextFiles)
+}
+
+// Reply sends a follow-up message to an ongoing conversation.
+// The agent must be in the waiting state (IsWaiting() == true).
+// If the agent is not waiting, the message is dropped.
+//
+// The check-and-send is atomic under mu to prevent a TOCTOU race where
+// the agent exits the waiting state between the check and the send.
+// Safe because inputCh is buffered(1) so the send never blocks under lock.
+func (a *Agent) Reply(input string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.waiting {
+		slog.Warn("agent.Reply called but agent is not waiting")
+		return
+	}
+	select {
+	case a.inputCh <- input:
+	default:
+		slog.Warn("agent.Reply: inputCh full, dropping message")
+	}
+}
+
+// IsWaiting returns true when the agent has finished its turn and is
+// blocked waiting for the developer's next message.
+func (a *Agent) IsWaiting() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.waiting
 }
 
 func drain[T any](ch chan T) {
@@ -290,12 +332,23 @@ func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
 }
 
 func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
-	success := false
-	defer func() { a.send(event.AgentDone{Success: success}) }()
+	// success tracks whether the conversation ended cleanly. Set to false
+	// only on actual errors (stream failure, autosave). A normal cancel
+	// (context done) counts as success since the user initiated it.
+	success := true
+	defer func() {
+		a.mu.Lock()
+		a.waiting = false
+		a.mu.Unlock()
+		a.send(event.AgentDone{Success: success})
+	}()
 
 	if goal == "" {
 		goal = "Review this code and suggest improvements, one step at a time."
 	}
+
+	// Re-fetch memory summary at conversation start.
+	a.refreshMemorySummary(ctx)
 
 	messages := a.buildMessages(fileName, fileContent, goal, contextFiles)
 	a.send(event.AgentToken{Text: "Thinking...\n\n"})
@@ -303,12 +356,57 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 
 	thinkState := false
 
+	// Outer loop: one iteration per conversation turn (user → agent).
+	// The agent processes LLM responses and tool calls, then waits for
+	// the developer's next message before continuing.
+	for {
+		// Process one LLM turn: stream, dispatch tools, repeat until
+		// the LLM responds with no tool calls.
+		var err error
+		messages, err = a.processLLMTurn(ctx, messages, &thinkState)
+		if err != nil {
+			success = false
+			return
+		}
+		if ctx.Err() != nil {
+			success = false
+			return
+		}
+
+		// Agent's turn is done — wait for the developer's next message.
+		a.mu.Lock()
+		a.waiting = true
+		a.mu.Unlock()
+		a.send(event.AgentWaiting{})
+
+		select {
+		case input := <-a.inputCh:
+			a.mu.Lock()
+			a.waiting = false
+			a.intent = input
+			a.mu.Unlock()
+			messages = append(messages, llm.Message{
+				Role:    "user",
+				Content: input,
+			})
+			a.send(event.AgentStatus{Status: "thinking"})
+			a.send(event.AgentToken{Text: "\n\n"})
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// processLLMTurn runs the LLM loop for one agent turn: stream responses,
+// dispatch tool calls, repeat until no tool calls remain. Returns the
+// updated messages list or an error if the turn could not complete.
+func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool) ([]llm.Message, error) {
 	for {
 		ch, err := a.provider.Stream(ctx, messages, a.toolDefs)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
 			a.send(event.AgentError{Err: fmt.Sprintf("LLM error: %v", err)})
-			return
+			return messages, err
 		}
 
 		var contentBuf strings.Builder
@@ -320,7 +418,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 				break
 			}
 
-			clean := stripThinkTags(ev.Token, &thinkState)
+			clean := stripThinkTags(ev.Token, thinkState)
 			if clean != "" {
 				contentBuf.WriteString(clean)
 				a.send(event.AgentToken{Text: clean})
@@ -328,7 +426,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		}
 
 		if ctx.Err() != nil {
-			return
+			return messages, ctx.Err()
 		}
 
 		assistantMsg := llm.Message{
@@ -340,22 +438,22 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		}
 		messages = append(messages, assistantMsg)
 
+		// No tool calls — agent's turn is done.
 		if len(toolCalls) == 0 {
-			success = true
-			break
+			return messages, nil
 		}
 
 		for _, tc := range toolCalls {
 			if err := a.flushDirtyBuffers(ctx); err != nil {
 				a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
-				return
+				return messages, err
 			}
 			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
 			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
 
 			result := a.dispatchTool(ctx, tc)
 			if ctx.Err() != nil {
-				return
+				return messages, ctx.Err()
 			}
 			messages = append(messages, llm.Message{
 				Role:       "tool",
@@ -545,6 +643,20 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 
 		return result
 	}
+}
+
+// refreshMemorySummary re-fetches /summary.md from the memory store so each
+// goal sees the latest state. Falls back to the previous summary on error.
+func (a *Agent) refreshMemorySummary(ctx context.Context) {
+	if a.memoryStore == nil {
+		return
+	}
+	doc, err := a.memoryStore.Fetch(ctx, "/summary.md")
+	if err != nil {
+		slog.Debug("memory: refresh summary failed, using previous", "err", err)
+		return
+	}
+	a.memorySummary = doc.Body
 }
 
 // intentReminder returns a string reminding the LLM of the current intent.

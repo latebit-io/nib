@@ -49,9 +49,16 @@ func (AgentEditProposed) eventTag() {}
 func (AgentFileCreated) eventTag()  {}
 func (AgentToolCall) eventTag()     {}
 func (AgentNavigate) eventTag()     {}
-func (AgentDone) eventTag()         {}
-func (AgentError) eventTag()        {}
-func (AgentStatus) eventTag()       {}
+
+// AgentWaiting signals the agent finished its turn and is waiting for user input.
+// The frontend should enable the input prompt so the developer can continue
+// the conversation. The agent goroutine is blocked until Reply() is called.
+type AgentWaiting struct{}
+
+func (AgentDone) eventTag()    {}
+func (AgentError) eventTag()   {}
+func (AgentStatus) eventTag()  {}
+func (AgentWaiting) eventTag() {}
 
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {

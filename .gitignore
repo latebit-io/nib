@@ -30,6 +30,7 @@ bin
 .mcp.json
 log.txt
 .project
+.claude
 
 # Editor/IDE
 # .idea/

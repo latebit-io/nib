@@ -33,9 +33,9 @@ type AgentPaneModel struct {
 	Lines        []string
 	wrappedIndex []int
 
-	// userLineSet tracks which wrapped line indices are user messages.
-	// Styled during Render() so RawLines stays plain text.
-	userLineSet map[int]bool
+	// userRawLines tracks which raw line indices are user messages.
+	// Stable across rewrap — translated to wrapped indices via wrappedIndex in Render().
+	userRawLines map[int]bool
 
 	// Scroll
 	ScrollOffset int
@@ -126,18 +126,16 @@ func (m *AgentPaneModel) AppendMeta(text string) {
 }
 
 // AppendUserMessage appends the developer's follow-up message as plain text
-// and marks the lines so Render() can style them distinctly. Keeps RawLines
-// free of ANSI so wrapping, selection, and clipboard work correctly.
+// and marks the raw lines so Render() can style them distinctly. Tracks raw
+// line indices (not wrapped) so styling survives rewrap on resize.
 func (m *AgentPaneModel) AppendUserMessage(text string) {
-	// Record the first wrapped line index that will be created.
-	firstWrapped := len(m.Lines)
+	firstRaw := len(m.RawLines)
 	m.AppendText("\n\nYou: " + text + "\n\n")
-	// Mark all wrapped lines produced by this append as user messages.
-	if m.userLineSet == nil {
-		m.userLineSet = make(map[int]bool)
+	if m.userRawLines == nil {
+		m.userRawLines = make(map[int]bool)
 	}
-	for i := firstWrapped; i < len(m.Lines); i++ {
-		m.userLineSet[i] = true
+	for i := firstRaw; i < len(m.RawLines); i++ {
+		m.userRawLines[i] = true
 	}
 }
 
@@ -464,7 +462,7 @@ func (m *AgentPaneModel) Clear() {
 	m.RawLines = nil
 	m.Lines = nil
 	m.wrappedIndex = nil
-	m.userLineSet = nil
+	m.userRawLines = nil
 	m.ScrollOffset = 0
 	m.Status = "idle"
 	m.sanitizer = sanitize.Sanitizer{}
@@ -548,6 +546,23 @@ func (m *AgentPaneModel) SelectedText() string {
 		sb.WriteString(string(runes[:ec]))
 	}
 	return sb.String()
+}
+
+// isUserLine returns true if the wrapped line index corresponds to a user
+// message. Translates the wrapped index back to a raw line index via
+// wrappedIndex, which is stable across rewrap.
+func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
+	if len(m.userRawLines) == 0 {
+		return false
+	}
+	// wrappedIndex[i] is the first wrapped line for raw line i.
+	// Walk backward to find the raw line that owns this wrapped index.
+	for rawIdx := len(m.wrappedIndex) - 1; rawIdx >= 0; rawIdx-- {
+		if m.wrappedIndex[rawIdx] <= wrappedIdx {
+			return m.userRawLines[rawIdx]
+		}
+	}
+	return false
 }
 
 func (m *AgentPaneModel) isSelected(line, col int) bool {
@@ -648,7 +663,7 @@ func (m *AgentPaneModel) Render() string {
 					line.WriteString(strings.Repeat(" ", m.Width-cellsUsed))
 				}
 				output[row] = line.String()
-			} else if m.userLineSet[lineIdx] {
+			} else if m.isUserLine(lineIdx) {
 				output[row] = userMessageStyle.Render(m.padLine(lineText))
 			} else {
 				output[row] = m.padLine(lineText)

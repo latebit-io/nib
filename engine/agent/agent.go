@@ -223,17 +223,21 @@ func (a *Agent) Run(fileName, fileContent, goal string, contextFiles []string) {
 // The check-and-send is atomic under mu to prevent a TOCTOU race where
 // the agent exits the waiting state between the check and the send.
 // Safe because inputCh is buffered(1) so the send never blocks under lock.
-func (a *Agent) Reply(input string) {
+// Returns true if the input was accepted, false if the agent is not waiting
+// or the channel is full.
+func (a *Agent) Reply(input string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.waiting {
 		slog.Warn("agent.Reply called but agent is not waiting")
-		return
+		return false
 	}
 	select {
 	case a.inputCh <- input:
+		return true
 	default:
 		slog.Warn("agent.Reply: inputCh full, dropping message")
+		return false
 	}
 }
 
@@ -348,9 +352,9 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 	}
 
 	// Re-fetch memory summary at conversation start.
-	a.refreshMemorySummary(ctx)
+	memorySummary := a.fetchMemorySummary(ctx)
 
-	messages := a.buildMessages(fileName, fileContent, goal, contextFiles)
+	messages := a.buildMessages(fileName, fileContent, goal, contextFiles, memorySummary)
 	a.send(event.AgentToken{Text: "Thinking...\n\n"})
 	a.send(event.AgentStatus{Status: "thinking"})
 
@@ -374,10 +378,16 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		}
 
 		// Agent's turn is done — wait for the developer's next message.
+		// AgentWaiting is critical: if the frontend never sees it, the
+		// agent blocks on inputCh with no way for the user to reply.
 		a.mu.Lock()
 		a.waiting = true
 		a.mu.Unlock()
-		a.send(event.AgentWaiting{})
+		if err := a.sendCritical(ctx, event.AgentWaiting{}); err != nil {
+			slog.Error("agent waiting delivery failed", "err", err)
+			success = false
+			return
+		}
 
 		select {
 		case input := <-a.inputCh:
@@ -392,6 +402,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 			a.send(event.AgentStatus{Status: "thinking"})
 			a.send(event.AgentToken{Text: "\n\n"})
 		case <-ctx.Done():
+			success = false
 			return
 		}
 	}
@@ -645,18 +656,20 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 	}
 }
 
-// refreshMemorySummary re-fetches /summary.md from the memory store so each
-// goal sees the latest state. Falls back to the previous summary on error.
-func (a *Agent) refreshMemorySummary(ctx context.Context) {
+// fetchMemorySummary re-fetches /summary.md from the memory store so each
+// conversation sees the latest state. Returns the fetched summary, or falls
+// back to the startup summary on error. The result is returned (not stored
+// on the struct) to avoid data races between concurrent run() goroutines.
+func (a *Agent) fetchMemorySummary(ctx context.Context) string {
 	if a.memoryStore == nil {
-		return
+		return a.memorySummary
 	}
 	doc, err := a.memoryStore.Fetch(ctx, "/summary.md")
 	if err != nil {
-		slog.Debug("memory: refresh summary failed, using previous", "err", err)
-		return
+		slog.Debug("memory: refresh summary failed, using startup value", "err", err)
+		return a.memorySummary
 	}
-	a.memorySummary = doc.Body
+	return doc.Body
 }
 
 // intentReminder returns a string reminding the LLM of the current intent.

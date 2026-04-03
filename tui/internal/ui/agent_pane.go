@@ -33,6 +33,10 @@ type AgentPaneModel struct {
 	Lines        []string
 	wrappedIndex []int
 
+	// userLineSet tracks which wrapped line indices are user messages.
+	// Styled during Render() so RawLines stays plain text.
+	userLineSet map[int]bool
+
 	// Scroll
 	ScrollOffset int
 
@@ -121,10 +125,20 @@ func (m *AgentPaneModel) AppendMeta(text string) {
 	m.AppendText(s.Sanitize(text))
 }
 
-// AppendUserMessage renders the developer's follow-up message in the
-// conversation thread, visually distinct from agent output.
+// AppendUserMessage appends the developer's follow-up message as plain text
+// and marks the lines so Render() can style them distinctly. Keeps RawLines
+// free of ANSI so wrapping, selection, and clipboard work correctly.
 func (m *AgentPaneModel) AppendUserMessage(text string) {
-	m.AppendText("\n\n" + userMessageStyle.Render("You: "+text) + "\n\n")
+	// Record the first wrapped line index that will be created.
+	firstWrapped := len(m.Lines)
+	m.AppendText("\n\nYou: " + text + "\n\n")
+	// Mark all wrapped lines produced by this append as user messages.
+	if m.userLineSet == nil {
+		m.userLineSet = make(map[int]bool)
+	}
+	for i := firstWrapped; i < len(m.Lines); i++ {
+		m.userLineSet[i] = true
+	}
 }
 
 func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
@@ -450,6 +464,7 @@ func (m *AgentPaneModel) Clear() {
 	m.RawLines = nil
 	m.Lines = nil
 	m.wrappedIndex = nil
+	m.userLineSet = nil
 	m.ScrollOffset = 0
 	m.Status = "idle"
 	m.sanitizer = sanitize.Sanitizer{}
@@ -633,6 +648,8 @@ func (m *AgentPaneModel) Render() string {
 					line.WriteString(strings.Repeat(" ", m.Width-cellsUsed))
 				}
 				output[row] = line.String()
+			} else if m.userLineSet[lineIdx] {
+				output[row] = userMessageStyle.Render(m.padLine(lineText))
 			} else {
 				output[row] = m.padLine(lineText)
 			}

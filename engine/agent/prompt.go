@@ -19,7 +19,8 @@ const maxMemorySummaryBytes = 8000
 // buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
 // contextFiles lists the files the agent is allowed to edit.
-func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles []string) []llm.Message {
+// memorySummary is the project memory snapshot (passed in to avoid shared state races).
+func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles []string, memorySummary string) []llm.Message {
 	// Number the lines for the LLM
 	lines := strings.Split(fileContent, "\n")
 	var numbered strings.Builder
@@ -41,7 +42,6 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		shown = shown[:maxContextInPrompt]
 	}
 
-	memorySummary := a.memorySummary
 	if len(memorySummary) > maxMemorySummaryBytes {
 		// Truncate at a rune boundary to avoid splitting multi-byte UTF-8.
 		cut := maxMemorySummaryBytes

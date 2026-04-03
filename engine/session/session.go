@@ -875,8 +875,9 @@ func (s *Session) SubmitGoal(goal string) bool {
 	}
 
 	// Continue existing conversation if the agent is waiting for input.
-	if s.agent.IsWaiting() {
-		s.agent.Reply(goal)
+	// Reply returns false if the agent raced out of the waiting state
+	// or the channel is full — fall through to start a new conversation.
+	if s.agent.Reply(goal) {
 		return true
 	}
 

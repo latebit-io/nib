@@ -17,50 +17,36 @@ func Parse(markdown string) *Tree {
 	lines := strings.Split(markdown, "\n")
 	tree := &Tree{}
 
-	i := 0
-
-	// Extract frontmatter if present. If the closing "---" delimiter is
-	// missing, the opening delimiter is not treated as frontmatter and
-	// parsing continues from line 0 to avoid silently losing content.
-	if i < len(lines) && strings.TrimSpace(lines[i]) == "---" {
-		start := i
-		i++
-		closed := false
-		var projectName string
-		for i < len(lines) {
-			line := strings.TrimSpace(lines[i])
-			i++
-			if line == "---" {
-				closed = true
-				break
-			}
-			if key, val, ok := parseYAMLField(line); ok && key == "project" {
-				projectName = val
-			}
-		}
-		if closed {
-			tree.ProjectName = projectName
-		} else {
-			i = start // rewind — treat as regular content
-		}
-	}
+	i := parseFrontmatter(lines, tree)
 
 	// headingStack tracks the most recent heading at each depth (0-indexed).
 	// When a new heading appears at depth d, it becomes a child of the
 	// deepest heading with depth < d (its nearest ancestor).
 	var headingStack []*Node
-	inFence := false
+	var fenceChar byte // '`' or '~' when inside a fence, 0 when outside
+	var fenceLen int   // minimum closer length (>= opener length)
 
 	for ; i < len(lines); i++ {
 		line := lines[i]
+		trimmed := strings.TrimSpace(line)
 
-		// Skip content inside fenced code blocks — headings and task
-		// items in code examples must not create real nodes.
-		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			inFence = !inFence
-			continue
+		// Track fenced code blocks per CommonMark: a closing fence must
+		// use the same character as the opener with at least as many chars.
+		if fc, fl, ok := parseFence(trimmed); ok {
+			if fenceChar == 0 {
+				// Enter fence.
+				fenceChar = fc
+				fenceLen = fl
+				continue
+			}
+			if fc == fenceChar && fl >= fenceLen {
+				// Matching closer — exit fence.
+				fenceChar = 0
+				fenceLen = 0
+				continue
+			}
 		}
-		if inFence {
+		if fenceChar != 0 {
 			continue
 		}
 
@@ -85,6 +71,29 @@ func Parse(markdown string) *Tree {
 	}
 
 	return tree
+}
+
+// parseFrontmatter extracts YAML frontmatter from the beginning of lines.
+// Returns the line index where content parsing should begin.
+// If the closing "---" delimiter is missing, the opening delimiter is not
+// treated as frontmatter and the returned index is 0 to avoid losing content.
+func parseFrontmatter(lines []string, tree *Tree) int {
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return 0
+	}
+
+	var projectName string
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "---" {
+			tree.ProjectName = projectName
+			return i + 1
+		}
+		if key, val, ok := parseYAMLField(line); ok && key == "project" {
+			projectName = val
+		}
+	}
+	return 0 // unterminated — rewind
 }
 
 // attachHeading inserts a heading node into the tree at the correct depth.
@@ -158,6 +167,27 @@ func parseHeading(line string) (int, string, bool) {
 	}
 
 	return level, title, true
+}
+
+// parseFence detects a fenced code block delimiter (``` or ~~~).
+// Returns the fence character, its count, and true if the line starts with
+// 3+ identical backticks or tildes. Handles language tags (e.g. ```go).
+func parseFence(trimmed string) (byte, int, bool) {
+	if len(trimmed) < 3 {
+		return 0, 0, false
+	}
+	ch := trimmed[0]
+	if ch != '`' && ch != '~' {
+		return 0, 0, false
+	}
+	count := 1
+	for count < len(trimmed) && trimmed[count] == ch {
+		count++
+	}
+	if count < 3 {
+		return 0, 0, false
+	}
+	return ch, count, true
 }
 
 // parseTaskItem extracts the title and status from a markdown task-list item.

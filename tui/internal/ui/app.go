@@ -330,6 +330,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshProjectPane()
 		return m, nil
 
+	case ProjectSetActiveGoalMsg:
+		if err := m.Session.SetActiveGoal(msg.Title); err != nil {
+			slog.Warn("set active goal", "err", err)
+		}
+		m.refreshProjectPane()
+		return m, nil
+
 	// Animation tick — advance the agent typing animation
 	case animTickMsg:
 		return m, m.handleAnimTick()

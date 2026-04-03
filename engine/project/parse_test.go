@@ -302,6 +302,34 @@ func TestParse_FencedCodeWithLanguageTag(t *testing.T) {
 	assertTask(t, tree.Roots[0].Children[0], "real", TaskPending, 1)
 }
 
+func TestParse_FenceMixedDelimiters(t *testing.T) {
+	// ~~~ inside a backtick fence must not close it.
+	input := "# A\n```\n~~~\n# Fake\n~~~\n```\n- [ ] real\n"
+	tree := Parse(input)
+
+	if len(tree.Roots) != 1 {
+		t.Fatalf("Roots = %d, want 1", len(tree.Roots))
+	}
+	if len(tree.Roots[0].Children) != 1 {
+		t.Fatalf("Children = %d, want 1 (mixed delimiters should not close fence)", len(tree.Roots[0].Children))
+	}
+	assertTask(t, tree.Roots[0].Children[0], "real", TaskPending, 1)
+}
+
+func TestParse_FenceLongerCloser(t *testing.T) {
+	// A 4-backtick fence must not be closed by 3 backticks.
+	input := "# A\n````\n```\n# Fake\n```\n````\n- [ ] real\n"
+	tree := Parse(input)
+
+	if len(tree.Roots) != 1 {
+		t.Fatalf("Roots = %d, want 1", len(tree.Roots))
+	}
+	if len(tree.Roots[0].Children) != 1 {
+		t.Fatalf("Children = %d, want 1 (shorter fence should not close longer opener)", len(tree.Roots[0].Children))
+	}
+	assertTask(t, tree.Roots[0].Children[0], "real", TaskPending, 1)
+}
+
 func TestParse_IndentedTasks(t *testing.T) {
 	input := "# H\n  - [ ] indented task\n"
 	tree := Parse(input)

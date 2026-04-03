@@ -72,18 +72,27 @@ func (t *GlobTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 		return textResult(fmt.Sprintf("Error listing files: %v", err))
 	}
 
+	prefix := ""
+	if args.Path != "" {
+		prefix = strings.TrimSuffix(args.Path, "/") + "/"
+	}
+
 	var matched []string
 	total := 0
 	for _, f := range files {
 		// If a subdirectory is specified, only consider files under it.
-		if args.Path != "" {
-			prefix := strings.TrimSuffix(args.Path, "/") + "/"
-			if !strings.HasPrefix(f, prefix) {
-				continue
-			}
+		if prefix != "" && !strings.HasPrefix(f, prefix) {
+			continue
 		}
 
-		if glob.Match(args.Pattern, f) {
+		// Match against the path relative to the scoped directory so that
+		// basename patterns like *.go work when path is set.
+		matchTarget := f
+		if prefix != "" {
+			matchTarget = f[len(prefix):]
+		}
+
+		if glob.Match(args.Pattern, matchTarget) {
 			total++
 			if len(matched) < maxGlobResults {
 				matched = append(matched, f)

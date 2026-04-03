@@ -151,6 +151,12 @@ func TestGlobTool_PathScoping(t *testing.T) {
 			wantAbsent:   []string{"engine/buffer/buffer.go"},
 		},
 		{
+			name:         "basename pattern with path scope",
+			args:         globArgs{Pattern: "*.go", Path: "engine/agent"},
+			wantContains: []string{"engine/agent/agent.go", "engine/agent/tool_glob.go"},
+			wantAbsent:   []string{"engine/buffer/buffer.go"},
+		},
+		{
 			name:         "single star matches one segment",
 			args:         globArgs{Pattern: "engine/*/buffer.go"},
 			wantContains: []string{"engine/buffer/buffer.go"},

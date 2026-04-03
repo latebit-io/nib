@@ -67,6 +67,12 @@ func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) Too
 	if args.Path == "" {
 		return textResult("Error: path is required")
 	}
+	if args.Line < 1 {
+		return textResult("Error: line must be >= 1 (1-indexed)")
+	}
+	if args.Col < 0 {
+		return textResult("Error: col must be >= 0")
+	}
 
 	canon := t.workspace.CanonPath(args.Path)
 	if !inProject(t.workspace, canon) {

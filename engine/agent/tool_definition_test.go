@@ -136,6 +136,33 @@ func TestGoToDefinitionTool_MissingPath(t *testing.T) {
 	}
 }
 
+func TestGoToDefinitionTool_InvalidPosition(t *testing.T) {
+	ws := &testWorkspace{
+		files:     map[string]string{},
+		inContext: map[string]bool{},
+	}
+	provider := &mockDefinitionProvider{}
+	tool := NewGoToDefinitionTool(ws, provider)
+
+	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+		Path: "main.go",
+		Line: 0,
+		Col:  0,
+	}))
+	if !strings.Contains(result.Content, "line must be >= 1") {
+		t.Errorf("expected line validation error, got:\n%s", result.Content)
+	}
+
+	result = tool.Execute(context.Background(), makeDefCall(t, defArgs{
+		Path: "main.go",
+		Line: 1,
+		Col:  -1,
+	}))
+	if !strings.Contains(result.Content, "col must be >= 0") {
+		t.Errorf("expected col validation error, got:\n%s", result.Content)
+	}
+}
+
 func TestGoToDefinitionTool_InvalidJSON(t *testing.T) {
 	ws := &testWorkspace{
 		files:     map[string]string{},

@@ -69,6 +69,9 @@ func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) Too
 	}
 
 	canon := t.workspace.CanonPath(args.Path)
+	if !inProject(t.workspace, canon) {
+		return textResult("Error: path is outside the project root")
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

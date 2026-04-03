@@ -136,6 +136,27 @@ func TestGoToDefinitionTool_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestGoToDefinitionTool_PathTraversal(t *testing.T) {
+	ws := &mockNavWorkspace{
+		files: map[string]string{},
+	}
+	// mockNavWorkspace.ProjectRoot() returns "/test"
+	// mockNavWorkspace.CanonPath() returns the raw path,
+	// so "../../etc/passwd" won't start with "/test".
+
+	provider := &mockDefinitionProvider{}
+	tool := NewGoToDefinitionTool(ws, provider)
+	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+		Path: "../../etc/passwd",
+		Line: 1,
+		Col:  0,
+	}))
+
+	if !strings.Contains(result.Content, "outside the project root") {
+		t.Errorf("expected traversal rejection, got:\n%s", result.Content)
+	}
+}
+
 func TestGoToDefinitionTool_Definition(t *testing.T) {
 	ws := &testWorkspace{
 		files:     map[string]string{},

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -163,6 +164,7 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 // buffer is unused. Once head fills, subsequent writes go into a circular
 // ring buffer that always retains the most recent tailSize bytes.
 type headTailWriter struct {
+	mu       sync.Mutex
 	head     []byte
 	headCap  int
 	tail     []byte // circular ring buffer
@@ -184,8 +186,12 @@ func newHeadTailWriter(headSize, tailSize int) *headTailWriter {
 }
 
 // Write implements io.Writer. Always returns len(p), nil so the subprocess
-// never stalls on a blocked pipe.
+// never stalls on a blocked pipe. Safe for concurrent use (stdout + stderr
+// are drained by separate goroutines in os/exec).
 func (w *headTailWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	n := len(p)
 	w.total += n
 
@@ -220,7 +226,11 @@ func (w *headTailWriter) Write(p []byte) (int, error) {
 
 // String returns the captured output. If no truncation occurred, returns
 // the head buffer only. Otherwise returns head + collapse marker + tail.
+// Must be called after cmd.Run() returns (no concurrent writes).
 func (w *headTailWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	headStr := string(w.head)
 
 	// No overflow — everything fit in head.
@@ -238,6 +248,10 @@ func (w *headTailWriter) String() string {
 	}
 
 	dropped := w.total - len(w.head) - len(tailStr)
+	if dropped <= 0 {
+		// Everything fit in head + tail — no middle was lost.
+		return headStr + tailStr
+	}
 	return fmt.Sprintf("%s\n\n[... %d bytes collapsed — showing first %d and last %d bytes ...]\n\n%s",
 		headStr, dropped, len(w.head), len(tailStr), tailStr)
 }

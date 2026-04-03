@@ -197,6 +197,19 @@ func TestHeadTailWriter_ExactHeadFit(t *testing.T) {
 	}
 }
 
+func TestHeadTailWriter_ExactFit(t *testing.T) {
+	w := newHeadTailWriter(4, 4)
+	writeStr(t, w, "HEADTAIL") // exactly head + tail capacity
+	got := w.String()
+
+	if strings.Contains(got, "collapsed") {
+		t.Errorf("should not show collapse message when nothing dropped, got %q", got)
+	}
+	if got != "HEADTAIL" {
+		t.Errorf("expected 'HEADTAIL', got %q", got)
+	}
+}
+
 func TestHeadTailWriter_HeadAndTail(t *testing.T) {
 	w := newHeadTailWriter(4, 4)
 	// Write 12 bytes: head gets "HEAD", tail ring gets last 4 of "MIDDTAIL" = "TAIL"

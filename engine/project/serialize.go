@@ -13,6 +13,10 @@ import (
 // preserved. This is a structural round-trip: parse → modify → serialize
 // preserves the work hierarchy, not arbitrary markdown.
 func Serialize(tree *Tree) string {
+	if tree == nil {
+		return ""
+	}
+
 	var b strings.Builder
 
 	if tree.ProjectName != "" {

@@ -87,6 +87,13 @@ func TestSerialize_EmptyTree(t *testing.T) {
 	}
 }
 
+func TestSerialize_NilTree(t *testing.T) {
+	output := Serialize(nil)
+	if output != "" {
+		t.Errorf("output = %q, want empty", output)
+	}
+}
+
 func TestSerialize_DeepNesting(t *testing.T) {
 	tree := &Tree{
 		Roots: []*Node{

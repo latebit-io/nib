@@ -19,18 +19,29 @@ func Parse(markdown string) *Tree {
 
 	i := 0
 
-	// Extract frontmatter if present.
+	// Extract frontmatter if present. If the closing "---" delimiter is
+	// missing, the opening delimiter is not treated as frontmatter and
+	// parsing continues from line 0 to avoid silently losing content.
 	if i < len(lines) && strings.TrimSpace(lines[i]) == "---" {
+		start := i
 		i++
+		closed := false
+		var projectName string
 		for i < len(lines) {
 			line := strings.TrimSpace(lines[i])
 			i++
 			if line == "---" {
+				closed = true
 				break
 			}
 			if key, val, ok := parseYAMLField(line); ok && key == "project" {
-				tree.ProjectName = val
+				projectName = val
 			}
+		}
+		if closed {
+			tree.ProjectName = projectName
+		} else {
+			i = start // rewind — treat as regular content
 		}
 	}
 

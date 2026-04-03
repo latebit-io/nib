@@ -35,6 +35,11 @@ func TestParse_Frontmatter(t *testing.T) {
 			input:   "---\nproject: My Cool Project\n---\n",
 			wantPrj: "My Cool Project",
 		},
+		{
+			name:    "unterminated frontmatter ignores fields",
+			input:   "---\nproject: Junto\n# Component",
+			wantPrj: "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -45,6 +50,24 @@ func TestParse_Frontmatter(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParse_UnterminatedFrontmatter_PreservesContent(t *testing.T) {
+	input := "---\nproject: Junto\n# Component\n- [ ] task"
+	tree := Parse(input)
+
+	if tree.ProjectName != "" {
+		t.Errorf("ProjectName = %q, want empty (unterminated frontmatter)", tree.ProjectName)
+	}
+	// The heading and task should be parsed, not swallowed.
+	if len(tree.Roots) != 1 {
+		t.Fatalf("Roots = %d, want 1 (content preserved after rewind)", len(tree.Roots))
+	}
+	assertHeading(t, tree.Roots[0], "Component", 0)
+	if len(tree.Roots[0].Children) != 1 {
+		t.Fatalf("Children = %d, want 1", len(tree.Roots[0].Children))
+	}
+	assertTask(t, tree.Roots[0].Children[0], "task", TaskPending, 1)
 }
 
 func TestParse_Headings(t *testing.T) {

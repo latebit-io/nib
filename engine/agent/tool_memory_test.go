@@ -305,22 +305,24 @@ func TestMemoryToolsCanceled(t *testing.T) {
 	cancel()
 
 	store := &mockStore{}
-	call := toolCall("test", `{"path": "/x.md"}`)
 
-	tools := []Tool{
-		NewMemoryFetchTool(store),
-		NewMemoryPublishTool(store),
-		NewMemoryAppendTool(store),
-		NewMemoryListTool(store),
+	// Use valid args for each tool so cancellation check is tested,
+	// not argument validation.
+	cases := []struct {
+		tool Tool
+		args string
+	}{
+		{NewMemoryFetchTool(store), `{"path": "/x.md"}`},
+		{NewMemoryPublishTool(store), `{"path": "/x.md", "body": "b", "expected_version": 0}`},
+		{NewMemoryAppendTool(store), `{"path": "/x.md", "body": "b", "expected_version": 1}`},
+		{NewMemoryListTool(store), `{"path": "/"}`},
 	}
 
-	for _, tool := range tools {
-		def := tool.Definition()
+	for _, tc := range cases {
+		def := tc.tool.Definition()
 		t.Run(def.Function.Name, func(t *testing.T) {
-			result := tool.Execute(ctx, call)
-			if !strings.Contains(result.Content, "Error: agent canceled") {
-				t.Errorf("got %q, want agent canceled", result.Content)
-			}
+			result := tc.tool.Execute(ctx, toolCall(def.Function.Name, tc.args))
+			assertContains(t, result.Content, "Error: agent canceled")
 		})
 	}
 }

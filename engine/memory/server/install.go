@@ -135,7 +135,7 @@ func fetchLatestVersion(component string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("fetch releases: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // best-effort; response already consumed
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
@@ -200,7 +200,7 @@ func downloadAsset(tag, filename string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // best-effort; response already consumed
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, filename)
@@ -223,7 +223,7 @@ func downloadAssetViaAPI(tag, filename, token string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // best-effort; response already consumed
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("release API returned %d for tag %s", resp.StatusCode, tag)
@@ -254,7 +254,7 @@ func downloadAssetViaAPI(tag, filename, token string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = assetResp.Body.Close() }()
+		defer func() { _ = assetResp.Body.Close() }() // best-effort; response already consumed
 
 		if assetResp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("asset download returned %d", assetResp.StatusCode)
@@ -294,7 +294,7 @@ func extractBinaries(archiveData []byte, binDir string, wantBins []string) error
 	if err != nil {
 		return fmt.Errorf("open gzip: %w", err)
 	}
-	defer func() { _ = gr.Close() }()
+	defer func() { _ = gr.Close() }() // best-effort; data already extracted
 
 	tr := tar.NewReader(gr)
 	extracted := make(map[string]bool, len(wantBins))
@@ -323,6 +323,8 @@ func extractBinaries(archiveData []byte, binDir string, wantBins []string) error
 		}
 		tmpPath := tmp.Name()
 
+		// Error paths below do best-effort cleanup of the temp file.
+		// Close/Remove errors are safe to ignore — the primary error is returned.
 		if _, err := io.Copy(tmp, tr); err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmpPath)

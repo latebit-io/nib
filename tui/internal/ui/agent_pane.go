@@ -2,6 +2,7 @@ package ui
 
 import (
 	"log/slog"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -13,6 +14,9 @@ import (
 
 // InputHeight is the number of rows reserved for the input area (separator + input + status).
 const InputHeight = 5
+
+// userMessageStyle renders the developer's messages in the conversation thread.
+var userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Bold(true)
 
 // MaxInputBufferBytes caps the goal input buffer to prevent unbounded memory
 // growth from large pastes or rapid key input. 1 MiB is generous for any
@@ -29,6 +33,10 @@ type AgentPaneModel struct {
 	RawLines     []string
 	Lines        []string
 	wrappedIndex []int
+
+	// userRawLines tracks which raw line indices are user messages.
+	// Stable across rewrap — translated to wrapped indices via wrappedIndex in Render().
+	userRawLines map[int]bool
 
 	// Scroll
 	ScrollOffset int
@@ -116,6 +124,30 @@ func (m *AgentPaneModel) AppendToken(text string) {
 func (m *AgentPaneModel) AppendMeta(text string) {
 	var s sanitize.Sanitizer
 	m.AppendText(s.Sanitize(text))
+}
+
+// AppendUserMessage appends the developer's follow-up message as plain text
+// and marks the raw lines so Render() can style them distinctly. Tracks raw
+// line indices (not wrapped) so styling survives rewrap on resize.
+func (m *AgentPaneModel) AppendUserMessage(text string) {
+	var s sanitize.Sanitizer
+	text = s.Sanitize(text)
+
+	firstRaw := len(m.RawLines)
+	m.AppendText("\n\nYou: " + text + "\n\n")
+	// Exclude the trailing empty raw line — AppendText reuses the last
+	// raw line for the first chunk of the next append, so marking it
+	// would misclassify the first agent token as a user message.
+	if m.userRawLines == nil {
+		m.userRawLines = make(map[int]bool)
+	}
+	endRaw := len(m.RawLines)
+	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
+		endRaw--
+	}
+	for i := firstRaw; i < endRaw; i++ {
+		m.userRawLines[i] = true
+	}
 }
 
 func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
@@ -441,6 +473,7 @@ func (m *AgentPaneModel) Clear() {
 	m.RawLines = nil
 	m.Lines = nil
 	m.wrappedIndex = nil
+	m.userRawLines = nil
 	m.ScrollOffset = 0
 	m.Status = "idle"
 	m.sanitizer = sanitize.Sanitizer{}
@@ -524,6 +557,23 @@ func (m *AgentPaneModel) SelectedText() string {
 		sb.WriteString(string(runes[:ec]))
 	}
 	return sb.String()
+}
+
+// isUserLine returns true if the wrapped line index corresponds to a user
+// message. Uses binary search on wrappedIndex (which is sorted by construction)
+// so cost is O(log n) per call instead of O(n).
+func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
+	if len(m.userRawLines) == 0 || len(m.wrappedIndex) == 0 {
+		return false
+	}
+	// BinarySearch finds the insertion point for wrappedIdx+1.
+	// The owning raw line is one before that.
+	rawIdx, _ := slices.BinarySearch(m.wrappedIndex, wrappedIdx+1)
+	rawIdx--
+	if rawIdx < 0 {
+		return false
+	}
+	return m.userRawLines[rawIdx]
 }
 
 func (m *AgentPaneModel) isSelected(line, col int) bool {
@@ -624,6 +674,8 @@ func (m *AgentPaneModel) Render() string {
 					line.WriteString(strings.Repeat(" ", m.Width-cellsUsed))
 				}
 				output[row] = line.String()
+			} else if m.isUserLine(lineIdx) {
+				output[row] = userMessageStyle.Render(m.padLine(lineText))
 			} else {
 				output[row] = m.padLine(lineText)
 			}

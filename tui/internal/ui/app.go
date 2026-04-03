@@ -223,10 +223,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Keep listening for the next event
 		return m, m.listenForEvents()
 
-	// Goal submitted from agent pane — delegate to session
+	// Goal submitted from agent pane — delegate to session.
+	// Only clear the pane when starting a new conversation, not on follow-ups.
 	case GoalSubmittedMsg:
-		m.AgentPane.Clear()
-		m.Session.SubmitGoal(msg.Goal)
+		continued := m.Session.SubmitGoal(msg.Goal)
+		if continued {
+			m.AgentPane.AppendUserMessage(msg.Goal)
+		} else {
+			m.AgentPane.Clear()
+		}
 		return m, nil
 
 	// Dialog result — handle the user's choice
@@ -414,9 +419,14 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
+	case event.AgentWaiting:
+		m.AgentPane.Status = "waiting"
+		m.AgentPane.InputActive = true
+		m.AgentPane.InputBuffer = ""
 	case event.AgentDone:
 		m.AgentPane.Status = "idle"
 		m.AgentPane.AppendText("\n--- Done ---\n")
+		m.AgentPane.InputActive = false
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 		m.refreshProjectPane()

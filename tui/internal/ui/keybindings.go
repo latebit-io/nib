@@ -77,6 +77,7 @@ func DefaultKeymap() *Keymap {
 			{code: 'z', mod: tea.ModCtrl}:                       ActionUndo,
 			{code: 'y', mod: tea.ModCtrl}:                       ActionRedo,
 			{code: 'z', mod: tea.ModCtrl | tea.ModShift}:        ActionRedo, // Ctrl+Shift+Z (VS Code)
+			{code: 'Z', mod: tea.ModCtrl | tea.ModShift}:        ActionRedo, // some terminals send uppercase with Shift
 			{code: 'c', mod: tea.ModCtrl}:                       ActionCopy,
 			{code: 'x', mod: tea.ModCtrl}:                       ActionCut,
 			{code: 'v', mod: tea.ModCtrl}:                       ActionPaste,
@@ -112,6 +113,7 @@ func DefaultKeymap() *Keymap {
 			{code: 'f', mod: tea.ModCtrl}:                ActionFind,
 			{code: 'h', mod: tea.ModCtrl}:                ActionFindReplace,
 			{code: 'f', mod: tea.ModCtrl | tea.ModShift}: ActionFindInProject,
+			{code: 'F', mod: tea.ModCtrl | tea.ModShift}: ActionFindInProject, // some terminals send uppercase with Shift
 
 			// Buffers
 			{code: tea.KeyPgDown, mod: tea.ModCtrl}: ActionNextBuffer,

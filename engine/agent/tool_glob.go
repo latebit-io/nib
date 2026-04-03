@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/latebit-io/junto/engine/glob"
@@ -44,17 +45,32 @@ func (t *GlobTool) Definition() llm.ToolDef {
 				Properties: map[string]llm.FunctionParam{
 					"pattern": {
 						Type:        "string",
-						Description: "Glob pattern to match against project-relative file paths. Use ** for recursive matching across directories.",
+						Description: "Glob pattern to match file paths. If path is omitted, matched against project-relative paths. If path is set, matched against paths relative to that subdirectory. Use ** for recursive matching across directories.",
 					},
 					"path": {
 						Type:        "string",
-						Description: "Optional subdirectory to search within (relative to project root). Omit to search the entire project.",
+						Description: "Optional subdirectory scope (relative to project root). When set, pattern is evaluated within this directory. Omit to search the entire project.",
 					},
 				},
 				Required: []string{"pattern"},
 			},
 		},
 	}
+}
+
+// normalizeScopePath cleans a user-supplied subdirectory path into a prefix
+// suitable for strings.HasPrefix filtering. Handles leading slashes, dot
+// prefixes, and doubled slashes (common LLM output artifacts).
+// Returns "" when the path is empty or resolves to the project root.
+func normalizeScopePath(p string) string {
+	if p == "" {
+		return ""
+	}
+	clean := strings.TrimPrefix(path.Clean(p), "/")
+	if clean == "" || clean == "." {
+		return ""
+	}
+	return clean + "/"
 }
 
 // Execute walks the project tree and returns files matching the glob pattern.
@@ -73,10 +89,7 @@ func (t *GlobTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 		return textResult(fmt.Sprintf("Error listing files: %v", err))
 	}
 
-	prefix := ""
-	if args.Path != "" {
-		prefix = strings.TrimSuffix(args.Path, "/") + "/"
-	}
+	prefix := normalizeScopePath(args.Path)
 
 	var matched []string
 	total := 0

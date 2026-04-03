@@ -481,6 +481,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	action := m.Keymap.Match(msg)
+	slog.Debug("key match", "code", msg.Code, "mod", msg.Mod, "text", msg.Text, "string", msg.String(), "action", action)
 
 	// Global / cross-pane actions
 	switch action {

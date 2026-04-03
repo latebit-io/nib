@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/latebit-io/junto/engine/glob"
 )
 
 // matcher checks paths against a set of gitignore patterns.
@@ -144,81 +146,14 @@ func (m *matcher) match(relPath string, isDir bool) (matched bool, negated bool)
 // matchPattern checks if a glob pattern matches a path.
 // If anchored, the pattern must match the full relative path.
 // If unanchored, the pattern can match just the basename or any suffix.
-func matchPattern(glob, relPath string, anchored bool) bool {
+func matchPattern(pat, relPath string, anchored bool) bool {
 	if anchored {
-		return globMatch(glob, relPath)
+		return glob.Match(pat, relPath)
 	}
 	// Unanchored: try basename first, then full path.
 	base := filepath.Base(relPath)
-	if globMatch(glob, base) {
+	if glob.Match(pat, base) {
 		return true
 	}
-	return globMatch(glob, relPath)
-}
-
-// globMatch implements simplified glob matching supporting *, **, and ?.
-func globMatch(pattern, name string) bool {
-	return doGlob([]rune(pattern), []rune(name))
-}
-
-func doGlob(pattern, name []rune) bool {
-	for len(pattern) > 0 {
-		switch {
-		case len(pattern) >= 2 && pattern[0] == '*' && pattern[1] == '*':
-			return globDoubleStar(pattern, name)
-
-		case pattern[0] == '*':
-			return globSingleStar(pattern[1:], name)
-
-		case pattern[0] == '?':
-			if len(name) == 0 || name[0] == '/' {
-				return false
-			}
-			pattern = pattern[1:]
-			name = name[1:]
-
-		default:
-			if len(name) == 0 || pattern[0] != name[0] {
-				return false
-			}
-			pattern = pattern[1:]
-			name = name[1:]
-		}
-	}
-	return len(name) == 0
-}
-
-// globDoubleStar handles ** which matches any number of path segments.
-// It only tries suffixes at path-segment boundaries (start of string or after /).
-func globDoubleStar(pattern, name []rune) bool {
-	rest := pattern[2:]
-	if len(rest) > 0 && rest[0] == '/' {
-		rest = rest[1:]
-	}
-	if len(rest) == 0 {
-		return true
-	}
-	// Try matching rest at segment boundaries only.
-	for i := range len(name) + 1 {
-		if i == 0 || (i > 0 && name[i-1] == '/') {
-			if doGlob(rest, name[i:]) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// globSingleStar handles * which matches anything except /.
-func globSingleStar(rest, name []rune) bool {
-	limit := 0
-	for limit < len(name) && name[limit] != '/' {
-		limit++
-	}
-	for i := limit; i >= 0; i-- {
-		if doGlob(rest, name[i:]) {
-			return true
-		}
-	}
-	return false
+	return glob.Match(pat, relPath)
 }

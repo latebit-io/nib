@@ -1,6 +1,10 @@
 package filelist
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/latebit-io/junto/engine/glob"
+)
 
 func TestParseLine(t *testing.T) {
 	tests := []struct {
@@ -89,9 +93,9 @@ func TestGlobMatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.pattern+"_"+tt.name, func(t *testing.T) {
-			got := globMatch(tt.pattern, tt.name)
+			got := glob.Match(tt.pattern, tt.name)
 			if got != tt.want {
-				t.Errorf("globMatch(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+				t.Errorf("glob.Match(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
 			}
 		})
 	}

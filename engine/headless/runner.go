@@ -241,8 +241,7 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 // performs the replacement on the normalized content (matching the agent's
 // view) and restores the original newline suffix before writing back.
 func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
-	absPath := r.workspace.CanonPath(edit.Path)
-	raw, err := os.ReadFile(absPath)
+	raw, absPath, err := r.workspace.ReadFileRaw(edit.Path)
 	if err != nil {
 		msg := fmt.Sprintf("cannot read %s for edit: %v", edit.Path, err)
 		slog.Error(msg)

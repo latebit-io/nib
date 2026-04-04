@@ -66,7 +66,6 @@ func (m *mockAgent) Continue(path, content string) {
 		default:
 		}
 	}
-	m.lastContent = content
 }
 
 func (m *mockAgent) Cancel() {

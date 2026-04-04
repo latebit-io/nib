@@ -52,6 +52,21 @@ func (w *DiskWorkspace) ReadFile(path string) (string, error) {
 	return content, nil
 }
 
+// ReadFileRaw returns the raw bytes and validated absolute path for a file.
+// Unlike ReadFile, it does not trim trailing newlines — used by the runner
+// to preserve the original file state when applying edits.
+func (w *DiskWorkspace) ReadFileRaw(path string) ([]byte, string, error) {
+	abs, err := w.resolvePath(path)
+	if err != nil {
+		return nil, "", err
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return data, abs, nil
+}
+
 // ListFiles returns all project files (respects .gitignore).
 // Paths are relative to the project root.
 func (w *DiskWorkspace) ListFiles() ([]string, error) {

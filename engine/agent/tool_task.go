@@ -82,12 +82,6 @@ func (t *TaskTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 		return textResult("Error: " + err.Error())
 	}
 
-	switch args.Action {
-	case "activate":
-		slog.Debug("update_task succeeded", "action", "activate", "title", args.Title)
-		return textResult("Task activated: " + args.Title)
-	default:
-		slog.Debug("update_task succeeded", "action", "complete", "title", args.Title)
-		return textResult("Task completed: " + args.Title)
-	}
+	slog.Debug("update_task succeeded", "action", args.Action, "title", args.Title)
+	return textResult("Task " + args.Action + "d: " + args.Title)
 }

@@ -10,12 +10,12 @@ import (
 
 // WriteFileTool lets the LLM create new files in the project.
 type WriteFileTool struct {
-	workspace Workspace
+	workspace FileWriter
 	cache     *FileCache
 }
 
 // NewWriteFileTool creates a WriteFileTool with the given dependencies.
-func NewWriteFileTool(ws Workspace, cache *FileCache) *WriteFileTool {
+func NewWriteFileTool(ws FileWriter, cache *FileCache) *WriteFileTool {
 	return &WriteFileTool{workspace: ws, cache: cache}
 }
 

@@ -10,11 +10,11 @@ import (
 
 // ListFilesTool lets the LLM see the project file structure.
 type ListFilesTool struct {
-	workspace Workspace
+	workspace FileReader
 }
 
 // NewListFilesTool creates a ListFilesTool with the given workspace.
-func NewListFilesTool(ws Workspace) *ListFilesTool {
+func NewListFilesTool(ws FileReader) *ListFilesTool {
 	return &ListFilesTool{workspace: ws}
 }
 

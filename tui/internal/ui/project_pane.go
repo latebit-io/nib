@@ -11,7 +11,6 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/project"
-	"github.com/latebit-io/junto/engine/session"
 )
 
 // ProjectOpenFileMsg is sent when the user selects a file in the project pane.
@@ -71,12 +70,28 @@ var (
 
 	projTaskPendingStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("252"))
+
+	// projClampStyle is a zero-value base style used by clampToWidth and
+	// assembleLine.  Calling .MaxWidth(w) on it is cheaper than NewStyle()
+	// because lipgloss styles are value types — the copy reuses internal
+	// storage instead of allocating from scratch.
+	projClampStyle = lipgloss.NewStyle()
 )
+
+// projectSession is the narrow read-only slice of session that the project pane needs.
+// Keeping this minimal prevents the TUI pane from coupling to the full session surface.
+type projectSession interface {
+	WorkTree() *project.Tree
+	ContextFiles() []string
+	AgentModifiedFiles() []string
+	ListFiles() ([]string, error)
+	ProjectRoot() string
+}
 
 // ProjectPaneModel implements Pane for the project view panel.
 // Two sections: WORK (from project.md in demarkus) and FILES (project tree).
 type ProjectPaneModel struct {
-	session *session.Session
+	session projectSession
 
 	// Layout
 	width  int
@@ -111,7 +126,7 @@ type projectItem struct {
 }
 
 // NewProjectPaneModel creates the project pane.
-func NewProjectPaneModel(sess *session.Session) *ProjectPaneModel {
+func NewProjectPaneModel(sess projectSession) *ProjectPaneModel {
 	p := &ProjectPaneModel{
 		session:       sess,
 		workCollapsed: make(map[string]bool),
@@ -611,7 +626,7 @@ func assembleLine(left, right string, width int) string {
 		return clampToWidth(left, width)
 	}
 	if leftW > maxLeft {
-		left = lipgloss.NewStyle().MaxWidth(maxLeft).Render(left)
+		left = projClampStyle.MaxWidth(maxLeft).Render(left)
 		leftW = lipgloss.Width(left)
 	}
 
@@ -627,7 +642,7 @@ func assembleLine(left, right string, width int) string {
 func clampToWidth(s string, width int) string {
 	w := lipgloss.Width(s)
 	if w > width {
-		return lipgloss.NewStyle().MaxWidth(width).Render(s)
+		return projClampStyle.MaxWidth(width).Render(s)
 	}
 	if w < width {
 		return s + strings.Repeat(" ", width-w)

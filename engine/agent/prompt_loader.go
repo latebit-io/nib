@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 )
 
@@ -46,6 +47,12 @@ type UserPromptData struct {
 // Load order: .project/prompts/<name> → embedded defaults.
 type PromptLoader struct {
 	projectRoot string
+
+	// embeddedUserTmpl caches the compiled embedded user template.
+	// The embedded template is immutable, so it only needs to be parsed once.
+	embeddedUserTmpl *template.Template
+	// embeddedUserOnce guards one-time parsing of the embedded user template.
+	embeddedUserOnce sync.Once
 }
 
 // NewPromptLoader creates a loader that checks .project/prompts/ under
@@ -70,11 +77,14 @@ func (l *PromptLoader) PlanningSystemPrompt() string {
 }
 
 // RenderUserMessage executes the user message template with the given data.
+// The embedded default template is compiled once and cached; project overrides
+// from .project/prompts/ are re-parsed on every call so edits take effect
+// immediately.
 func (l *PromptLoader) RenderUserMessage(data UserPromptData) (string, error) {
 	raw, source := l.load("user.md.tmpl")
 	slog.Debug("prompt.RenderUserMessage", "source", source)
 
-	tmpl, err := template.New("user").Parse(raw)
+	tmpl, err := l.userTemplate(raw, source)
 	if err != nil {
 		return "", fmt.Errorf("parse user template (%s): %w", source, err)
 	}
@@ -84,6 +94,24 @@ func (l *PromptLoader) RenderUserMessage(data UserPromptData) (string, error) {
 		return "", fmt.Errorf("execute user template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// userTemplate returns a compiled template for the user message. Embedded
+// templates are cached after first parse; project overrides are re-parsed
+// every call so that edits during a session take effect immediately.
+func (l *PromptLoader) userTemplate(raw, source string) (*template.Template, error) {
+	if source == "embedded" {
+		var parseErr error
+		l.embeddedUserOnce.Do(func() {
+			l.embeddedUserTmpl, parseErr = template.New("user").Parse(raw)
+		})
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		return l.embeddedUserTmpl, nil
+	}
+
+	return template.New("user").Parse(raw)
 }
 
 // load returns file content and its source ("project" or "embedded").

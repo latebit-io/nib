@@ -81,17 +81,17 @@ func (s *Session) activeGoalLocked() (*project.Node, string) {
 // Safe to call from any goroutine — guarded by mu.
 func (s *Session) SetActiveGoal(title string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.workTree == nil {
+		s.mu.Unlock()
 		return errors.New("session: no work tree loaded")
 	}
 	if !s.workTree.SetActiveGoal(title) {
+		s.mu.Unlock()
 		return fmt.Errorf("session: task not found: %q", title)
 	}
 	s.workTreeDirty = true
 	s.workTreeModGen++
-	return s.saveWorkTreeLocked()
+	return s.saveAndUnlock()
 }
 
 // MarkGoalDone marks the named task as done in the work tree and persists
@@ -100,17 +100,17 @@ func (s *Session) SetActiveGoal(title string) error {
 // Safe to call from any goroutine — guarded by mu.
 func (s *Session) MarkGoalDone(title string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.workTree == nil {
+		s.mu.Unlock()
 		return errors.New("session: no work tree loaded")
 	}
 	if !s.workTree.MarkDone(title) {
+		s.mu.Unlock()
 		return fmt.Errorf("session: task not found: %q", title)
 	}
 	s.workTreeDirty = true
 	s.workTreeModGen++
-	return s.saveWorkTreeLocked()
+	return s.saveAndUnlock()
 }
 
 // ActivateTask implements agent.TaskTracker. Marks a task as active in the
@@ -140,7 +140,7 @@ func (s *Session) ReloadWorkTree() error {
 
 // WorkTreeSnapshot holds the result of a background work tree fetch.
 // Used to separate I/O (safe in any goroutine) from state mutation
-// (must happen on the TUI goroutine).
+// (must happen on the caller's goroutine).
 type WorkTreeSnapshot struct {
 	Tree    *project.Tree
 	Version int
@@ -149,7 +149,7 @@ type WorkTreeSnapshot struct {
 
 // FetchWorkTreeSnapshot fetches the work tree from demarkus without mutating
 // session state. Safe to call from any goroutine (e.g. a tea.Cmd).
-// Apply the result via ApplyWorkTreeSnapshot on the TUI goroutine.
+// Apply the result via ApplyWorkTreeSnapshot on the caller's goroutine.
 func (s *Session) FetchWorkTreeSnapshot() WorkTreeSnapshot {
 	s.mu.RLock()
 	store := s.memoryStore
@@ -176,7 +176,7 @@ func (s *Session) FetchWorkTreeSnapshot() WorkTreeSnapshot {
 }
 
 // ApplyWorkTreeSnapshot applies a previously fetched snapshot to the session.
-// Must be called from the TUI goroutine.
+// Must be called from the caller's goroutine.
 func (s *Session) ApplyWorkTreeSnapshot(snap WorkTreeSnapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,35 +220,41 @@ func (s *Session) loadWorkTree() error {
 	return nil
 }
 
-// saveWorkTreeLocked serializes the current work tree and publishes to demarkus.
-// Caller must hold mu.Lock.
-func (s *Session) saveWorkTreeLocked() error {
-	if s.memoryStore == nil {
+// saveAndUnlock snapshots the work tree under lock, unlocks, performs I/O,
+// then re-locks to update the version. Caller must hold mu.Lock on entry;
+// the lock is always released by the time this method returns (even on error).
+func (s *Session) saveAndUnlock() error {
+	store := s.memoryStore
+	if store == nil {
+		s.mu.Unlock()
 		return errors.New("no memory store configured")
 	}
 	if s.workTree == nil {
+		s.mu.Unlock()
 		return errors.New("no work tree to save")
 	}
 
+	// Snapshot under lock — after this, the lock is released.
 	body := project.Serialize(s.workTree)
 	ver := s.workTreeVer
 	genBefore := s.workTreeModGen
-
-	// Release lock during I/O to avoid blocking reads.
 	s.mu.Unlock()
+
+	// I/O without holding the lock.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	doc, err := s.memoryStore.Publish(ctx, workTreePath, body, ver)
-	s.mu.Lock()
-
+	doc, err := store.Publish(ctx, workTreePath, body, ver)
 	if err != nil {
 		return err
 	}
+
+	// Re-lock to update version. Only clear dirty if no concurrent
+	// modification occurred while the lock was released.
+	s.mu.Lock()
 	s.workTreeVer = doc.Version
-	// Only clear dirty if no concurrent modification occurred while
-	// the lock was released for I/O.
 	if s.workTreeModGen == genBefore {
 		s.workTreeDirty = false
 	}
+	s.mu.Unlock()
 	return nil
 }

@@ -107,7 +107,7 @@ func DefaultKeymap() *Keymap {
 
 			// Agent
 			{code: 'g', mod: tea.ModAlt}:  ActionAgentPlan,
-			{code: 169, mod: 0}:           ActionAgentPlan, // macOS: Option+G sends ©
+			{code: '©', mod: 0}:           ActionAgentPlan, // macOS: Option+G sends ©
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
 			{code: tea.KeyEscape, mod: 0}: ActionAgentReject,
 			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,

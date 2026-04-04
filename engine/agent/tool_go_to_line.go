@@ -14,11 +14,11 @@ import (
 // it to direct attention while explaining code in the agent pane.
 // Navigation is handled by the frontend via an AgentNavigate event.
 type GoToLineTool struct {
-	workspace Workspace
+	workspace FileReader
 }
 
 // NewGoToLineTool creates a GoToLineTool with the given workspace.
-func NewGoToLineTool(ws Workspace) *GoToLineTool {
+func NewGoToLineTool(ws FileReader) *GoToLineTool {
 	return &GoToLineTool{workspace: ws}
 }
 

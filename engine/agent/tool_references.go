@@ -14,12 +14,12 @@ import (
 
 // FindReferencesTool lets the LLM find all references to a symbol.
 type FindReferencesTool struct {
-	workspace Workspace
+	workspace FileReader
 	provider  lang.ReferenceProvider
 }
 
 // NewFindReferencesTool creates a FindReferencesTool.
-func NewFindReferencesTool(ws Workspace, provider lang.ReferenceProvider) *FindReferencesTool {
+func NewFindReferencesTool(ws FileReader, provider lang.ReferenceProvider) *FindReferencesTool {
 	return &FindReferencesTool{workspace: ws, provider: provider}
 }
 

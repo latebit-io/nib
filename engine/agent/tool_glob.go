@@ -19,11 +19,11 @@ const maxGlobResults = 100
 // It walks the project (respecting .gitignore) and filters with the
 // same glob engine used for gitignore matching (supports *, **, ?).
 type GlobTool struct {
-	workspace Workspace
+	workspace FileReader
 }
 
 // NewGlobTool creates a GlobTool backed by the given workspace.
-func NewGlobTool(ws Workspace) *GlobTool {
+func NewGlobTool(ws FileReader) *GlobTool {
 	return &GlobTool{workspace: ws}
 }
 

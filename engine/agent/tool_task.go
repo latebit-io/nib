@@ -64,6 +64,9 @@ func (t *TaskTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	if args.Title == "" {
 		return textResult("Error: title is required")
 	}
+	if t.tracker == nil {
+		return textResult("Error: task tracking not available")
+	}
 
 	slog.Debug("update_task", "action", args.Action, "title", args.Title)
 

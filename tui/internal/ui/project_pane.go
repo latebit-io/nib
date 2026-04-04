@@ -412,9 +412,12 @@ func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
 	case project.TaskActive:
 		// Active → done
 		return func() tea.Msg { return ProjectMarkGoalDoneMsg{Title: title} }
-	default:
-		// Pending (or done) → active
+	case project.TaskPending:
+		// Pending → active
 		return func() tea.Msg { return ProjectSetActiveGoalMsg{Title: title} }
+	default:
+		// Done tasks are final — no action on Enter
+		return nil
 	}
 }
 

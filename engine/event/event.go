@@ -27,8 +27,31 @@ type AgentDone struct{ Success bool }
 // AgentError carries an error from the agent.
 type AgentError struct{ Err string }
 
+// StatusKind is a typed enum for agent status values.
+// It uses string constants so debug output remains human-readable.
+type StatusKind string
+
+const (
+	// StatusIdle means the agent is not active.
+	StatusIdle StatusKind = "idle"
+	// StatusThinking means the agent is processing / waiting on the LLM.
+	StatusThinking StatusKind = "thinking"
+	// StatusPlanning means the agent is in planning mode.
+	StatusPlanning StatusKind = "planning"
+	// StatusPlanningWaiting means planning is done and the agent awaits user action.
+	StatusPlanningWaiting StatusKind = "planning-waiting"
+	// StatusReviewing means an edit proposal is pending user review.
+	StatusReviewing StatusKind = "reviewing"
+	// StatusEditing means an approved edit is being applied and the user may continue.
+	StatusEditing StatusKind = "editing"
+	// StatusWaiting means the agent is waiting for user input.
+	StatusWaiting StatusKind = "waiting"
+	// StatusTyping means the agent is animating typed text into the editor.
+	StatusTyping StatusKind = "typing"
+)
+
 // AgentStatus updates the agent status display.
-type AgentStatus struct{ Status string }
+type AgentStatus struct{ Status StatusKind }
 
 // AgentToolCall signals the agent is invoking a tool.
 // Emitted before execution so the frontend can show what the agent is doing.

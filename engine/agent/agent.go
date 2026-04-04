@@ -32,9 +32,10 @@ const (
 // planningBlocklist contains tool names disabled during planning mode.
 // These are write-side tools that modify code or run commands.
 var planningBlocklist = map[string]bool{
-	"edit_file":  true,
-	"write_file": true,
-	"bash":       true,
+	"edit_file":   true,
+	"write_file":  true,
+	"bash":        true,
+	"update_task": true,
 }
 
 // Agent drives the multi-turn LLM loop.
@@ -50,6 +51,7 @@ type Agent struct {
 	cancel     context.CancelFunc
 	activeFile string
 	intent     string // current developer intent — included in every tool result
+	mode       Mode   // current conversation mode (execution or planning)
 
 	// Approval flow: agent blocks on these channels.
 	// These stay private to Agent — tools never see them.
@@ -69,6 +71,9 @@ type Agent struct {
 	// workspace is used by the approval flow to manage context set.
 	workspace Workspace
 
+	// planningBlocklist is the per-instance set of tool names blocked in planning mode.
+	planningBlocklist map[string]bool
+
 	// memoryStore is used to re-fetch the session summary before each goal.
 	memoryStore memory.Store
 	// memorySummary is the fallback summary from startup, used when re-fetch fails.
@@ -86,6 +91,10 @@ type NewOptions struct {
 	// MemorySummary is the project memory snapshot injected into the first prompt.
 	// Empty string when memory is not configured or no summary exists yet.
 	MemorySummary string
+	// PlanningBlocklist adds extra tool names to block during planning mode.
+	// These are merged with the built-in defaults (edit_file, write_file, bash);
+	// they extend the blocklist, not replace it.
+	PlanningBlocklist []string
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -104,25 +113,37 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var diagProvider lang.DiagnosticProvider
 	var memStore memory.Store
 	var memorySummary string
+	var extraBlocklist []string
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
 		memorySummary = opts.MemorySummary
+		extraBlocklist = opts.PlanningBlocklist
+	}
+
+	// Build per-instance planning blocklist: start from defaults, merge extras.
+	merged := make(map[string]bool, len(planningBlocklist)+len(extraBlocklist))
+	for k, v := range planningBlocklist {
+		merged[k] = v
+	}
+	for _, name := range extraBlocklist {
+		merged[strings.ToLower(name)] = true
 	}
 
 	a := &Agent{
-		provider:      provider,
-		events:        events,
-		cache:         cache,
-		prompts:       NewPromptLoader(projectRoot),
-		approveCh:     approveCh,
-		continueCh:    continueCh,
-		inputCh:       make(chan string, 1), // capacity 1: Reply() is non-blocking; only one pending reply is meaningful
-		diagProvider:  diagProvider,
-		memoryStore:   memStore,
-		memorySummary: memorySummary,
-		diagDelay:     500 * time.Millisecond,
-		workspace:     workspace,
+		provider:          provider,
+		events:            events,
+		cache:             cache,
+		prompts:           NewPromptLoader(projectRoot),
+		approveCh:         approveCh,
+		continueCh:        continueCh,
+		inputCh:           make(chan string, 1), // capacity 1: Reply() is non-blocking; only one pending reply is meaningful
+		diagProvider:      diagProvider,
+		planningBlocklist: merged,
+		memoryStore:       memStore,
+		memorySummary:     memorySummary,
+		diagDelay:         500 * time.Millisecond,
+		workspace:         workspace,
 	}
 
 	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
@@ -175,6 +196,11 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		)
 	}
 
+	// Task tracking — conditionally registered via type assertion on workspace.
+	if tt, ok := workspace.(TaskTracker); ok {
+		builtins = append(builtins, NewTaskTool(tt))
+	}
+
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))
 	a.toolDefs = make([]llm.ToolDef, 0, len(builtins)+len(extraTools))
 
@@ -204,8 +230,8 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 }
 
 // Run starts a new conversation in execution mode. See RunWithMode for details.
-func (a *Agent) Run(fileName, fileContent, goal string, contextFiles []string) {
-	a.RunWithMode(fileName, fileContent, goal, contextFiles, ModeExecution)
+func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
+	a.RunWithMode(ctx, fileName, fileContent, goal, contextFiles, ModeExecution)
 }
 
 // RunWithMode starts a new conversation in the specified mode.
@@ -214,7 +240,7 @@ func (a *Agent) Run(fileName, fileContent, goal string, contextFiles []string) {
 // contextFiles lists the files the agent is allowed to edit.
 // In ModePlanning, write-side tools (edit_file, write_file, bash) are
 // disabled and a planning-focused prompt is used.
-func (a *Agent) RunWithMode(fileName, fileContent, goal string, contextFiles []string, mode Mode) {
+func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
 	a.mu.Lock()
 	// Cancel any previous conversation
 	if a.cancel != nil {
@@ -225,11 +251,12 @@ func (a *Agent) RunWithMode(fileName, fileContent, goal string, contextFiles []s
 	drain(a.continueCh)
 	drain(a.inputCh)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
 	a.activeFile = fileName
 	a.cache.Reset(fileName, fileContent)
 	a.intent = goal
+	a.mode = mode
 	a.waiting = false
 
 	// Reset tools with state
@@ -390,10 +417,10 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 	messages := a.buildMessages(fileName, fileContent, goal, contextFiles, memorySummary, mode)
 	if mode == ModePlanning {
 		a.send(event.AgentToken{Text: "Planning...\n\n"})
-		a.send(event.AgentStatus{Status: "planning"})
+		a.send(event.AgentStatus{Status: event.StatusPlanning})
 	} else {
 		a.send(event.AgentToken{Text: "Thinking...\n\n"})
-		a.send(event.AgentStatus{Status: "thinking"})
+		a.send(event.AgentStatus{Status: event.StatusThinking})
 	}
 
 	thinkState := false
@@ -437,7 +464,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 				Role:    "user",
 				Content: input,
 			})
-			a.send(event.AgentStatus{Status: "thinking"})
+			a.send(event.AgentStatus{Status: event.StatusThinking})
 			a.send(event.AgentToken{Text: "\n\n"})
 		case <-ctx.Done():
 			success = false
@@ -451,7 +478,7 @@ func (a *Agent) planningToolDefs() []llm.ToolDef {
 	defs := make([]llm.ToolDef, 0, len(a.toolDefs))
 	for _, def := range a.toolDefs {
 		name := strings.ToLower(def.Function.Name)
-		if planningBlocklist[name] {
+		if a.planningBlocklist[name] {
 			continue
 		}
 		defs = append(defs, def)
@@ -570,6 +597,14 @@ func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
 // never need access to the event channel or approval channels.
 func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 	name := strings.ToLower(tc.Function.Name)
+
+	// Enforce planning mode blocklist at dispatch time — the schema filter
+	// removes tools from the advertised list, but a model could still emit
+	// a blocked tool call. Reject it before execution.
+	if a.mode == ModePlanning && a.planningBlocklist[name] {
+		return fmt.Sprintf("Error: tool %q is not available in planning mode", tc.Function.Name)
+	}
+
 	tool, ok := a.tools[name]
 	if !ok {
 		return fmt.Sprintf("Error: unknown tool %q", tc.Function.Name) + a.intentReminder()
@@ -608,7 +643,7 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 // This logic was formerly inside EditFileTool — now it lives here so
 // the tool is a pure computation and the channels stay private to Agent.
 func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) string {
-	a.send(event.AgentStatus{Status: "waiting"})
+	a.send(event.AgentStatus{Status: event.StatusReviewing})
 
 	// The proposal event is critical — if the frontend never sees it,
 	// waitForApproval blocks forever with nothing for the user to approve.
@@ -651,7 +686,7 @@ func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg
 		}
 	}
 
-	a.send(event.AgentStatus{Status: "thinking"})
+	a.send(event.AgentStatus{Status: event.StatusThinking})
 	a.send(event.AgentToken{Text: "\n[Edit rejected]\n\n"})
 
 	content := ""
@@ -666,7 +701,7 @@ func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg
 // continue, or the context is canceled. Compares the new content against
 // the expected result to detect developer modifications.
 func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) string {
-	a.send(event.AgentStatus{Status: "editing"})
+	a.send(event.AgentStatus{Status: event.StatusEditing})
 	a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
 
 	select {
@@ -677,7 +712,7 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 			return "Error: continue channel closed"
 		}
 		a.cache.Set(proposal.CanonPath, newContent)
-		a.send(event.AgentStatus{Status: "thinking"})
+		a.send(event.AgentStatus{Status: event.StatusThinking})
 		a.send(event.AgentToken{Text: "\n"})
 
 		var result string

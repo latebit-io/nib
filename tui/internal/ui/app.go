@@ -64,6 +64,21 @@ type hoverResultMsg struct {
 	line, col int
 }
 
+type reloadWorkTreeResultMsg struct {
+	snap session.WorkTreeSnapshot
+}
+
+// Package-level styles for the intent bar — allocated once, not per frame.
+var (
+	intentIdleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Background(lipgloss.Color("236"))
+	intentActiveStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("235"))
+)
+
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
 // reads Session state to render, and adapts agent events to tea.Msg.
@@ -219,9 +234,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Engine events — adapted from channel to tea.Msg
 	case engineEventMsg:
-		m.handleEngineEvent(msg.event)
+		cmd := m.handleEngineEvent(msg.event)
 		// Keep listening for the next event
-		return m, m.listenForEvents()
+		return m, tea.Batch(m.listenForEvents(), cmd)
 
 	// Goal submitted from agent pane — delegate to session.
 	// Only clear the pane when starting a new conversation, not on follow-ups.
@@ -242,6 +257,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
+
+	case reloadWorkTreeResultMsg:
+		if msg.snap.Err != nil {
+			slog.Warn("reload work tree", "err", msg.snap.Err)
+			m.AgentPane.AppendMeta("[reload project failed: " + msg.snap.Err.Error() + "]\n")
+		} else {
+			m.Session.ApplyWorkTreeSnapshot(msg.snap)
+		}
+		m.refreshProjectPane()
+		return m, nil
 
 	// File listing error — surface in agent pane
 	case paletteErrorMsg:
@@ -343,6 +368,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshProjectPane()
 		return m, nil
 
+	case ProjectMarkGoalDoneMsg:
+		if err := m.Session.MarkGoalDone(msg.Title); err != nil {
+			slog.Warn("mark goal done", "err", err)
+			m.AgentPane.AppendMeta("[mark done failed: " + err.Error() + "]\n")
+		}
+		m.refreshProjectPane()
+		return m, nil
+
 	// Animation tick — advance the agent typing animation
 	case animTickMsg:
 		return m, m.handleAnimTick()
@@ -373,9 +406,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleEngineEvent updates session state and renders the event.
-func (m *AppModel) handleEngineEvent(ev event.Event) {
+func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	// Let session update domain state (intent, pending edit)
 	m.Session.HandleEvent(ev)
+
+	var cmd tea.Cmd
 
 	// Render in agent pane (presentation)
 	switch e := ev.(type) {
@@ -390,8 +425,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 
-		m.AgentPane.Status = "waiting"
-		m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 		// ReviewEdit computes the diff AND marks the edit as reviewed.
 		// If the edit targets a different file, the session auto-switches
 		// and we rebuild the EditorModel to render the correct buffer.
@@ -401,6 +434,8 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 			m.refreshDiagnostics(m.Session.ActiveFile())
 		}
 		if diff != nil {
+			m.AgentPane.Status = event.StatusReviewing
+			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
 			m.Editor.Overlay = NewDiffOverlay(diff)
 			m.Editor.Overlay.Active = true
@@ -433,26 +468,30 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
-		if m.Session.Phase == session.PhasePlanning {
-			m.AgentPane.Status = "planning-waiting"
+		if m.Session.Phase() == session.PhasePlanning {
+			m.AgentPane.Status = event.StatusPlanningWaiting
 		} else {
-			m.AgentPane.Status = "waiting"
+			m.AgentPane.Status = event.StatusWaiting
 		}
 		m.AgentPane.InputActive = true
 		m.AgentPane.InputBuffer = ""
+		// Agent may have published /project.md — reload async to stay in sync.
+		cmd = m.reloadWorkTreeCmd()
 	case event.AgentDone:
-		m.AgentPane.Status = "idle"
+		m.AgentPane.Status = event.StatusIdle
 		m.AgentPane.AppendText("\n--- Done ---\n")
 		m.AgentPane.InputActive = false
+		// Agent may have published /project.md — reload async to stay in sync.
+		cmd = m.reloadWorkTreeCmd()
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
-		m.refreshProjectPane()
 	case event.FlushBuffers:
 		saved, err := m.Session.SaveDirtyBuffers()
 		e.Result <- event.FlushResult{Saved: saved, Err: err}
 	case event.DiagnosticsUpdated:
 		m.refreshDiagnostics(e.Path)
 	}
+	return cmd
 }
 
 // clearEditorOverlay delegates scroll correction to the engine and clears
@@ -516,12 +555,12 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case ActionAgentApprove:
-		slog.Debug("agent approve", "pending", m.Session.PendingEdit != nil, "agent", m.Session.HasAgent())
+		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "agent", m.Session.HasAgent())
 		// Block approve during active animation.
 		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
 			return m, nil
 		}
-		if m.Session.PendingEdit != nil && m.Editor.Overlay != nil {
+		if m.Session.PendingEdit() != nil && m.Editor.Overlay != nil {
 			cmd := m.startAnimatedApproval()
 			return m, cmd
 		}
@@ -539,16 +578,16 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.cancelAnimation()
 			return m, nil
 		}
-		if m.Session.PendingEdit != nil {
+		if m.Session.PendingEdit() != nil {
 			slog.Debug("overlay cleared", "reason", "reject")
 			m.clearEditorOverlay(false)
 			m.Session.RejectEdit()
 			return m, nil
 		}
 		// No pending edit — cancel agent if active
-		if m.Session.CurrentIntent != "" && m.Session.HasAgent() {
+		if m.Session.CurrentIntent() != "" && m.Session.HasAgent() {
 			m.Session.CancelAgent()
-			m.AgentPane.Status = "idle"
+			m.AgentPane.Status = event.StatusIdle
 			return m, nil
 		}
 		// No intent either — fall through to focused pane
@@ -558,7 +597,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
 			return m, nil
 		}
-		if m.Session.HasAgent() && m.AgentPane.Status == "editing" {
+		if m.Session.HasAgent() && m.AgentPane.Status == event.StatusEditing {
 			m.cancelAnimation()
 			m.Session.Continue()
 		}
@@ -763,33 +802,18 @@ func (m *AppModel) renderIntentBar() string {
 	var text string
 	var style lipgloss.Style
 
-	idleStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Background(lipgloss.Color("236"))
-	activeStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("230")).
-		Background(lipgloss.Color("235"))
-	doneStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("2")).
-		Background(lipgloss.Color("236"))
+	_, goalPath := m.Session.ActiveGoal()
 
 	switch {
 	case !m.Session.HasAgent():
 		text = " Editor"
-		style = idleStyle
-	case m.Session.CurrentIntent == "":
-		text = " Ctrl+G to set intent"
-		style = idleStyle
-	case m.Session.IntentDone:
-		text = " done: " + m.Session.CurrentIntent
-		style = doneStyle
-	case m.Session.Phase == session.PhasePlanning:
-		text = " [PLAN] " + m.Session.CurrentIntent
-		style = activeStyle
+		style = intentIdleStyle
+	case goalPath != "":
+		text = " " + goalPath
+		style = intentActiveStyle
 	default:
-		text = " " + m.Session.CurrentIntent
-		style = activeStyle
+		text = " Ready"
+		style = intentIdleStyle
 	}
 
 	// Truncate to fit width (one line, never wraps)
@@ -1004,6 +1028,16 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 	}
 }
 
+// reloadWorkTreeCmd returns a tea.Cmd that fetches the work tree from
+// demarkus in a background goroutine. The snapshot is applied to session
+// state on the TUI goroutine when reloadWorkTreeResultMsg is handled,
+// avoiding data races on workTree/workTreeVer fields.
+func (m *AppModel) reloadWorkTreeCmd() tea.Cmd {
+	return func() tea.Msg {
+		return reloadWorkTreeResultMsg{snap: m.Session.FetchWorkTreeSnapshot()}
+	}
+}
+
 // refreshProjectPane rebuilds the project pane if visible, or marks it
 // dirty for deferred rebuild when the pane is next shown.
 func (m *AppModel) refreshProjectPane() {
@@ -1066,7 +1100,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 		// Only clear the overlay if the session gave up on the edit
 		// (PendingEdit cleared, agent rejected). If PendingEdit is still
 		// set (e.g. "not reviewed"), keep the overlay so the user can retry.
-		if m.Session.PendingEdit == nil {
+		if m.Session.PendingEdit() == nil {
 			m.clearEditorOverlay(false)
 		}
 		return nil
@@ -1106,7 +1140,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 		m.AgentPane.AppendMeta("[applied]\n")
 		m.Session.CompleteApproval()
 		m.Session.Continue()
-		m.AgentPane.Status = "waiting"
+		m.AgentPane.Status = event.StatusThinking
 		m.refreshProjectPane()
 		return nil
 	}
@@ -1138,7 +1172,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 		devStartLine: devStartLine,
 		devStartCol:  devStartCol,
 	}
-	m.AgentPane.Status = "typing"
+	m.AgentPane.Status = event.StatusTyping
 
 	if edit.Remaining() == 0 {
 		return m.finishAnimation()
@@ -1219,7 +1253,7 @@ func (m *AppModel) yieldAnimation() tea.Cmd {
 	anim.edit.Complete()
 	anim.state = animWaiting
 	anim.yielded = true
-	m.AgentPane.Status = "editing"
+	m.AgentPane.Status = event.StatusEditing
 	m.AgentPane.AppendText("\n[yielded — your line]\n")
 	m.Session.CompleteApproval()
 
@@ -1241,7 +1275,7 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	m.refreshProjectPane()
 
 	anim.state = animWaiting
-	m.AgentPane.Status = "editing"
+	m.AgentPane.Status = event.StatusEditing
 
 	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)
@@ -1262,7 +1296,7 @@ func (m *AppModel) cancelAnimation() {
 	if anim.state == animTyping {
 		anim.edit.Abort()
 		m.Session.AbortApproval()
-		m.AgentPane.Status = "idle"
+		m.AgentPane.Status = event.StatusIdle
 	}
 	m.Editor.Anim = nil
 }

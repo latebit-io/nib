@@ -7,20 +7,21 @@ package keymap
 type Action int
 
 const (
+	// ActionNone represents no action (zero value).
 	ActionNone Action = iota
 
-	// Navigation
+	// Navigation actions move the cursor within a buffer.
 	ActionFileStart
 	ActionFileEnd
 	ActionGoToLineStart
 	ActionGoToLineEnd
 
-	// Selection
+	// Selection actions extend or create text selections.
 	ActionSelectAll
 	ActionSelectLine
 	ActionSelectNext
 
-	// Editing
+	// Editing actions modify buffer content.
 	ActionUndo
 	ActionRedo
 	ActionCopy
@@ -34,18 +35,19 @@ const (
 	ActionOutdent
 	ActionToggleComment
 
-	// File
+	// ActionSave persists the current buffer to disk.
 	ActionSave
+	// ActionQuit exits the editor.
 	ActionQuit
 
-	// Agent
+	// Agent actions control the AI assistant workflow.
 	ActionAgentStart
 	ActionAgentPlan
 	ActionAgentApprove
 	ActionAgentReject
 	ActionAgentContinue
 
-	// View
+	// View actions control pane visibility and focus.
 	ActionOpenPalette
 	ActionToggleProject
 	ActionHelp
@@ -53,16 +55,16 @@ const (
 	ActionFocusEditor
 	ActionFocusAgent
 
-	// Find
-	ActionFind          // Open find bar
-	ActionFindReplace   // Open find bar with replace mode
-	ActionFindInProject // Open project-wide search (Ctrl+Shift+F)
+	// Find actions open search interfaces.
+	ActionFind          // ActionFind opens the in-file find bar.
+	ActionFindReplace   // ActionFindReplace opens find bar with replace mode.
+	ActionFindInProject // ActionFindInProject opens project-wide search.
 
-	// Buffers
-	ActionNextBuffer // Switch to the next open buffer
-	ActionPrevBuffer // Switch to the previous open buffer
+	// Buffer actions switch between open buffers.
+	ActionNextBuffer // ActionNextBuffer switches to the next open buffer.
+	ActionPrevBuffer // ActionPrevBuffer switches to the previous open buffer.
 
-	// LSP
+	// LSP actions interact with language server features.
 	ActionGoToDefinition
 	ActionGoBack
 	ActionHover
@@ -72,15 +74,24 @@ const (
 type Category string
 
 const (
+	// CatNavigation groups cursor movement bindings.
 	CatNavigation Category = "Navigation"
-	CatSelection  Category = "Selection"
-	CatEditing    Category = "Editing"
-	CatFile       Category = "File"
-	CatAgent      Category = "Agent"
-	CatView       Category = "View"
-	CatFind       Category = "Find"
-	CatBuffers    Category = "Buffers"
-	CatLSP        Category = "Code Intelligence"
+	// CatSelection groups text selection bindings.
+	CatSelection Category = "Selection"
+	// CatEditing groups content modification bindings.
+	CatEditing Category = "Editing"
+	// CatFile groups file-level operations (save, quit).
+	CatFile Category = "File"
+	// CatAgent groups AI assistant workflow bindings.
+	CatAgent Category = "Agent"
+	// CatView groups pane and UI visibility bindings.
+	CatView Category = "View"
+	// CatFind groups search and replace bindings.
+	CatFind Category = "Find"
+	// CatBuffers groups buffer switching bindings.
+	CatBuffers Category = "Buffers"
+	// CatLSP groups language server feature bindings.
+	CatLSP Category = "Code Intelligence"
 )
 
 // Binding describes a single keybinding for display purposes.

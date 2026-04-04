@@ -22,6 +22,12 @@
 {{end}}{{- if gt .OmittedCount 0}}- ... {{.OmittedCount}} more files
 {{end}}{{- end}}
 
+{{- if .ActiveTaskPath}}
+
+## Active Task (from project plan)
+
+{{.ActiveTaskPath}}
+{{end}}
 ## Task
 
 {{.Goal}}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 )
 
@@ -36,12 +37,25 @@ type UserPromptData struct {
 	// MemorySummary is the project memory summary injected on session start.
 	// Empty string if memory is not configured.
 	MemorySummary string
+	// ActiveTaskPath is the ancestry path of the currently active task
+	// from the project plan (e.g. "Phase 3 > Priority Field > Add field").
+	// Empty if no task is active or no plan exists.
+	ActiveTaskPath string
 }
 
 // PromptLoader resolves prompt files with project-level overrides.
 // Load order: .project/prompts/<name> → embedded defaults.
 type PromptLoader struct {
 	projectRoot string
+
+	// embeddedUserTmpl caches the compiled embedded user template.
+	// The embedded template is immutable, so it only needs to be parsed once.
+	embeddedUserTmpl *template.Template
+	// embeddedUserErr persists a parse failure from the one-time embedded parse
+	// so subsequent calls return the error instead of a nil template.
+	embeddedUserErr error
+	// embeddedUserOnce guards one-time parsing of the embedded user template.
+	embeddedUserOnce sync.Once
 }
 
 // NewPromptLoader creates a loader that checks .project/prompts/ under
@@ -66,11 +80,14 @@ func (l *PromptLoader) PlanningSystemPrompt() string {
 }
 
 // RenderUserMessage executes the user message template with the given data.
+// The embedded default template is compiled once and cached; project overrides
+// from .project/prompts/ are re-parsed on every call so edits take effect
+// immediately.
 func (l *PromptLoader) RenderUserMessage(data UserPromptData) (string, error) {
 	raw, source := l.load("user.md.tmpl")
 	slog.Debug("prompt.RenderUserMessage", "source", source)
 
-	tmpl, err := template.New("user").Parse(raw)
+	tmpl, err := l.userTemplate(raw, source)
 	if err != nil {
 		return "", fmt.Errorf("parse user template (%s): %w", source, err)
 	}
@@ -80,6 +97,23 @@ func (l *PromptLoader) RenderUserMessage(data UserPromptData) (string, error) {
 		return "", fmt.Errorf("execute user template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// userTemplate returns a compiled template for the user message. Embedded
+// templates are cached after first parse; project overrides are re-parsed
+// every call so that edits during a session take effect immediately.
+func (l *PromptLoader) userTemplate(raw, source string) (*template.Template, error) {
+	if source == "embedded" {
+		l.embeddedUserOnce.Do(func() {
+			l.embeddedUserTmpl, l.embeddedUserErr = template.New("user").Parse(raw)
+		})
+		if l.embeddedUserErr != nil {
+			return nil, l.embeddedUserErr
+		}
+		return l.embeddedUserTmpl, nil
+	}
+
+	return template.New("user").Parse(raw)
 }
 
 // load returns file content and its source ("project" or "embedded").

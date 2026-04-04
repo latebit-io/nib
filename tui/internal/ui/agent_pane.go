@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/mattn/go-runewidth"
 )
@@ -50,7 +51,7 @@ type AgentPaneModel struct {
 	ScrollOffset int
 
 	// Status
-	Status string // "idle", "thinking", "typing", "editing", "waiting"
+	Status event.StatusKind
 
 	// Selection
 	SelectionActive bool
@@ -78,7 +79,7 @@ type AgentPaneModel struct {
 // NewAgentPaneModel creates a new agent pane.
 func NewAgentPaneModel(svc *Services) *AgentPaneModel {
 	return &AgentPaneModel{
-		Status:   "idle",
+		Status:   event.StatusIdle,
 		Services: svc,
 	}
 }
@@ -490,7 +491,7 @@ func (m *AgentPaneModel) Clear() {
 	m.wrappedIndex = nil
 	m.userRawLines = nil
 	m.ScrollOffset = 0
-	m.Status = "idle"
+	m.Status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
 }
 
@@ -627,29 +628,25 @@ func (m *AgentPaneModel) Render() string {
 	output := make([]string, m.Height)
 	row := 0
 
-	dimStyle := agentDimStyle
-	statusStyle := agentStatusStyle
-	selStyle := agentSelStyle
-	inputActiveStyle := agentInputStyle
-	inputDimStyle := agentInputDim
-	cursorStyle := agentCursorStyle
+	// Use package-level style vars directly — no local copies needed
+	// since lipgloss styles are immutable value types.
 
 	// No LLM configured — show message and fill remaining rows
 	if !m.HasAgent {
 		if row < m.Height {
-			output[row] = dimStyle.Render(m.padLine(""))
+			output[row] = agentDimStyle.Render(m.padLine(""))
 			row++
 		}
 		if row < m.Height {
-			output[row] = dimStyle.Render(m.padLine(" No LLM configured"))
+			output[row] = agentDimStyle.Render(m.padLine(" No LLM configured"))
 			row++
 		}
 		if row < m.Height {
-			output[row] = dimStyle.Render(m.padLine(" Set LLM_API_KEY to enable"))
+			output[row] = agentDimStyle.Render(m.padLine(" Set LLM_API_KEY to enable"))
 			row++
 		}
 		for row < m.Height {
-			output[row] = dimStyle.Render(m.padLine(""))
+			output[row] = agentDimStyle.Render(m.padLine(""))
 			row++
 		}
 		return strings.Join(output, "\n")
@@ -678,7 +675,7 @@ func (m *AgentPaneModel) Render() string {
 					}
 					ch := string(r)
 					if m.isSelected(lineIdx, j) {
-						line.WriteString(selStyle.Render(ch))
+						line.WriteString(agentSelStyle.Render(ch))
 					} else {
 						line.WriteString(ch)
 					}
@@ -709,7 +706,7 @@ func (m *AgentPaneModel) Render() string {
 
 	// Separator line
 	if row < m.Height-1 { // -1 to leave room for status
-		output[row] = dimStyle.Render(m.padLine(strings.Repeat("─", m.Width)))
+		output[row] = agentDimStyle.Render(m.padLine(strings.Repeat("─", m.Width)))
 		row++
 	}
 
@@ -750,15 +747,15 @@ func (m *AgentPaneModel) Render() string {
 			lineText := prefix + inputLines[i]
 			// Add cursor at the end of the last input line
 			if i == len(inputLines)-1 {
-				lineText += cursorStyle.Render(" ")
+				lineText += agentCursorStyle.Render(" ")
 			}
 			runes := []rune(lineText)
 			if len(runes) < m.Width {
 				lineText += strings.Repeat(" ", m.Width-len(runes))
 			}
-			output[row] = inputActiveStyle.Render(lineText)
+			output[row] = agentInputStyle.Render(lineText)
 		} else if !m.InputActive && i == 0 {
-			output[row] = inputDimStyle.Render(m.padLine(" Ctrl+G code | Alt+G plan"))
+			output[row] = agentInputDim.Render(m.padLine(" Ctrl+G code | Alt+G plan"))
 		} else {
 			output[row] = strings.Repeat(" ", m.Width)
 		}
@@ -769,20 +766,22 @@ func (m *AgentPaneModel) Render() string {
 	if row < m.Height {
 		var statusText string
 		switch m.Status {
-		case "idle":
-			statusText = dimStyle.Render(m.padLine(" Ready"))
-		case "thinking":
-			statusText = statusStyle.Render(m.padLine(" Thinking..."))
-		case "planning":
-			statusText = statusStyle.Render(m.padLine(" Planning..."))
-		case "planning-waiting":
-			statusText = statusStyle.Render(m.padLine(" Planning | :done to execute | :skip"))
-		case "editing":
-			statusText = statusStyle.Render(m.padLine(" Ctrl+N to continue"))
-		case "waiting":
-			statusText = statusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
-		case "typing":
-			statusText = statusStyle.Render(m.padLine(" Agent typing... | Esc cancel"))
+		case event.StatusIdle:
+			statusText = agentDimStyle.Render(m.padLine(" Ready"))
+		case event.StatusThinking:
+			statusText = agentStatusStyle.Render(m.padLine(" Thinking..."))
+		case event.StatusPlanning:
+			statusText = agentStatusStyle.Render(m.padLine(" Planning..."))
+		case event.StatusPlanningWaiting:
+			statusText = agentStatusStyle.Render(m.padLine(" Planning | :done to execute | :skip"))
+		case event.StatusReviewing:
+			statusText = agentStatusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
+		case event.StatusEditing:
+			statusText = agentStatusStyle.Render(m.padLine(" Ctrl+N to continue"))
+		case event.StatusWaiting:
+			statusText = agentStatusStyle.Render(m.padLine(" Type to reply | Enter send"))
+		case event.StatusTyping:
+			statusText = agentStatusStyle.Render(m.padLine(" Agent typing... | Esc cancel"))
 		default:
 			statusText = m.padLine("")
 		}

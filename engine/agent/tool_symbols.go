@@ -14,12 +14,12 @@ import (
 
 // WorkspaceSymbolsTool lets the LLM search for symbols by name across the project.
 type WorkspaceSymbolsTool struct {
-	workspace Workspace
+	workspace FileReader
 	provider  lang.SymbolProvider
 }
 
 // NewWorkspaceSymbolsTool creates a WorkspaceSymbolsTool.
-func NewWorkspaceSymbolsTool(ws Workspace, provider lang.SymbolProvider) *WorkspaceSymbolsTool {
+func NewWorkspaceSymbolsTool(ws FileReader, provider lang.SymbolProvider) *WorkspaceSymbolsTool {
 	return &WorkspaceSymbolsTool{workspace: ws, provider: provider}
 }
 

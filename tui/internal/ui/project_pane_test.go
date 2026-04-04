@@ -226,6 +226,39 @@ func TestProjectPane_ActivateWorkTask(t *testing.T) {
 	}
 }
 
+func TestProjectPane_ActivateActiveTask_MarksDone(t *testing.T) {
+	task := &project.Node{
+		Title: "Complete this", Depth: 2, Status: project.TaskActive,
+	}
+
+	items := []projectItem{
+		{isHeader: true, section: "work"},
+		{workNode: task, section: "work"},
+	}
+
+	p := &ProjectPaneModel{
+		width:         40,
+		height:        10,
+		items:         items,
+		workCollapsed: make(map[string]bool),
+		cursorIdx:     1,
+	}
+
+	cmd := p.activateItem()
+	if cmd == nil {
+		t.Fatal("expected cmd for active task")
+	}
+
+	msg := cmd()
+	doneMsg, ok := msg.(ProjectMarkGoalDoneMsg)
+	if !ok {
+		t.Fatalf("expected ProjectMarkGoalDoneMsg, got %T", msg)
+	}
+	if doneMsg.Title != "Complete this" {
+		t.Errorf("Title = %q, want %q", doneMsg.Title, "Complete this")
+	}
+}
+
 func TestProjectPane_ActivateHeaderNoop(t *testing.T) {
 	items := []projectItem{
 		{isHeader: true, section: "files"},

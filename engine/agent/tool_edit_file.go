@@ -136,7 +136,7 @@ func findMatch(expected, actual []string, ei, ai int) matchResult {
 // It validates the search text and returns an EditProposal for the agent
 // loop to handle (sending events, blocking on approval/continue).
 type EditFileTool struct {
-	workspace Workspace
+	workspace FileReader
 	cache     *FileCache
 
 	mu               sync.Mutex
@@ -145,7 +145,7 @@ type EditFileTool struct {
 }
 
 // NewEditFileTool creates an EditFileTool with the given dependencies.
-func NewEditFileTool(ws Workspace, cache *FileCache) *EditFileTool {
+func NewEditFileTool(ws FileReader, cache *FileCache) *EditFileTool {
 	return &EditFileTool{
 		workspace:        ws,
 		cache:            cache,

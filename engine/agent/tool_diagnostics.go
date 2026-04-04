@@ -15,12 +15,12 @@ import (
 // Depends on lang.DiagnosticProvider (port interface), not any concrete LSP type.
 type DiagnosticsTool struct {
 	provider  lang.DiagnosticProvider
-	workspace Workspace
+	workspace FileReader
 }
 
 // NewDiagnosticsTool creates a diagnostics tool. Only register if the language
 // service supports diagnostics (checked via type assertion in main.go).
-func NewDiagnosticsTool(provider lang.DiagnosticProvider, workspace Workspace) *DiagnosticsTool {
+func NewDiagnosticsTool(provider lang.DiagnosticProvider, workspace FileReader) *DiagnosticsTool {
 	return &DiagnosticsTool{provider: provider, workspace: workspace}
 }
 

@@ -14,12 +14,12 @@ import (
 // Supports optional line-range parameters to read specific sections,
 // reducing token usage on large files.
 type ReadFileTool struct {
-	workspace Workspace
+	workspace FileReader
 	cache     *FileCache
 }
 
 // NewReadFileTool creates a ReadFileTool with the given dependencies.
-func NewReadFileTool(ws Workspace, cache *FileCache) *ReadFileTool {
+func NewReadFileTool(ws FileReader, cache *FileCache) *ReadFileTool {
 	return &ReadFileTool{workspace: ws, cache: cache}
 }
 

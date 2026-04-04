@@ -80,7 +80,7 @@ func TestPrepareApproval(t *testing.T) {
 			search:  "hello",
 			replace: "goodbye",
 			setup: func(s *Session) {
-				s.PendingEdit = &event.PendingEdit{Search: "hello", Replace: "goodbye"}
+				s.pendingEdit = &event.PendingEdit{Search: "hello", Replace: "goodbye"}
 				// Don't call ReviewEdit
 			},
 			wantErr: "edit not reviewed",
@@ -91,7 +91,7 @@ func TestPrepareApproval(t *testing.T) {
 			search:  "missing",
 			replace: "found",
 			setup: func(s *Session) {
-				s.PendingEdit = &event.PendingEdit{Search: "missing", Replace: "found"}
+				s.pendingEdit = &event.PendingEdit{Search: "missing", Replace: "found"}
 				s.editReviewed = true
 			},
 			wantErr: "text not found",
@@ -102,7 +102,7 @@ func TestPrepareApproval(t *testing.T) {
 			search:  "hello",
 			replace: "goodbye",
 			setup: func(s *Session) {
-				s.PendingEdit = &event.PendingEdit{Search: "hello", Replace: "goodbye"}
+				s.pendingEdit = &event.PendingEdit{Search: "hello", Replace: "goodbye"}
 				s.editReviewed = true
 			},
 			wantErr: "2 matches found",
@@ -115,7 +115,7 @@ func TestPrepareApproval(t *testing.T) {
 			wantLine: 0,
 			wantCol:  0,
 			setup: func(s *Session) {
-				s.PendingEdit = &event.PendingEdit{Search: "hello", Replace: "goodbye"}
+				s.pendingEdit = &event.PendingEdit{Search: "hello", Replace: "goodbye"}
 				s.editReviewed = true
 			},
 		},
@@ -127,7 +127,7 @@ func TestPrepareApproval(t *testing.T) {
 			wantLine: 0,
 			wantCol:  6,
 			setup: func(s *Session) {
-				s.PendingEdit = &event.PendingEdit{Search: "world", Replace: "earth"}
+				s.pendingEdit = &event.PendingEdit{Search: "world", Replace: "earth"}
 				s.editReviewed = true
 			},
 		},
@@ -139,7 +139,7 @@ func TestPrepareApproval(t *testing.T) {
 			wantLine: 1,
 			wantCol:  0,
 			setup: func(s *Session) {
-				s.PendingEdit = &event.PendingEdit{Search: "line two", Replace: "LINE TWO"}
+				s.pendingEdit = &event.PendingEdit{Search: "line two", Replace: "LINE TWO"}
 				s.editReviewed = true
 			},
 		},
@@ -181,7 +181,7 @@ func TestPrepareApproval(t *testing.T) {
 				t.Errorf("Replace = %q, want %q", plan.Replace, tt.replace)
 			}
 			// Pending edit should be cleared
-			if s.PendingEdit != nil {
+			if s.pendingEdit != nil {
 				t.Error("PendingEdit should be nil after PrepareApproval")
 			}
 			if s.editReviewed {
@@ -193,7 +193,7 @@ func TestPrepareApproval(t *testing.T) {
 
 func TestPrepareApprovalDoesNotMutateBuffer(t *testing.T) {
 	s := newTestSession("hello world")
-	s.PendingEdit = &event.PendingEdit{Search: "hello", Replace: "goodbye"}
+	s.pendingEdit = &event.PendingEdit{Search: "hello", Replace: "goodbye"}
 	s.editReviewed = true
 
 	_, err := s.PrepareApproval("hello", "goodbye")
@@ -217,7 +217,7 @@ func TestCompleteApprovalSignalsAgent(t *testing.T) {
 
 func TestPrepareApprovalRejectsOnLocationFailure(t *testing.T) {
 	s := newTestSession("hello world")
-	s.PendingEdit = &event.PendingEdit{Search: "missing", Replace: "found"}
+	s.pendingEdit = &event.PendingEdit{Search: "missing", Replace: "found"}
 	s.editReviewed = true
 
 	_, err := s.PrepareApproval("missing", "found")
@@ -226,7 +226,7 @@ func TestPrepareApprovalRejectsOnLocationFailure(t *testing.T) {
 	}
 	// Agent should have been signaled to reject (via agent.Reject)
 	// and pending state should be cleared.
-	if s.PendingEdit != nil {
+	if s.pendingEdit != nil {
 		t.Error("PendingEdit should be nil after failed PrepareApproval")
 	}
 }
@@ -383,14 +383,14 @@ func TestSwitchToBlockedByPendingEdit(t *testing.T) {
 	s.SetAgent(ag, events)
 
 	// With a pending edit, SwitchTo should return ErrEditPending.
-	s.PendingEdit = &event.PendingEdit{Search: "file A", Replace: "changed"}
+	s.pendingEdit = &event.PendingEdit{Search: "file A", Replace: "changed"}
 	err = s.SwitchTo(pathB)
 	if !errors.Is(err, ErrEditPending) {
 		t.Fatalf("SwitchTo with PendingEdit: got %v, want ErrEditPending", err)
 	}
 
 	// Clear PendingEdit, simulate PrepareApproval state (stagedEditFile set).
-	s.PendingEdit = nil
+	s.pendingEdit = nil
 	s.editReviewed = false
 	s.stagedEditFile = pathA
 	err = s.SwitchTo(pathB)
@@ -562,7 +562,7 @@ func TestApproveEditMarksAgentOrigin(t *testing.T) {
 	s := newTestSession("old text")
 
 	// Simulate agent proposing an edit
-	s.PendingEdit = &event.PendingEdit{Search: "old text", Replace: "new text"}
+	s.pendingEdit = &event.PendingEdit{Search: "old text", Replace: "new text"}
 	s.ReviewEdit()
 
 	// Drain the approve signal in a goroutine (agent.Approve sends to channel)
@@ -594,7 +594,7 @@ func TestApproveEditTracksModifiedFile(t *testing.T) {
 	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
 	s.SetAgent(ag, events)
 
-	s.PendingEdit = &event.PendingEdit{Search: "old", Replace: "new"}
+	s.pendingEdit = &event.PendingEdit{Search: "old", Replace: "new"}
 	s.ReviewEdit()
 	ok, _ := s.ApproveEdit("old", "new")
 	if !ok {
@@ -638,7 +638,7 @@ func TestFileStatus(t *testing.T) {
 	}
 
 	// After agent edit: should be modified
-	s.PendingEdit = &event.PendingEdit{Search: "code", Replace: "new code"}
+	s.pendingEdit = &event.PendingEdit{Search: "code", Replace: "new code"}
 	s.ReviewEdit()
 	s.ApproveEdit("code", "new code")
 
@@ -704,7 +704,7 @@ func TestPrepareApprovalDevModifiedReplace(t *testing.T) {
 	s := newTestSession("hello world")
 
 	// Agent proposes replacing "world" with "earth"
-	s.PendingEdit = &event.PendingEdit{
+	s.pendingEdit = &event.PendingEdit{
 		Search:  "world",
 		Replace: "earth",
 	}
@@ -729,7 +729,7 @@ func TestPrepareApprovalUnmodifiedIsAgent(t *testing.T) {
 	s := newTestSession("hello world")
 
 	// Agent proposes replacing "world" with "earth"
-	s.PendingEdit = &event.PendingEdit{
+	s.pendingEdit = &event.PendingEdit{
 		Search:  "world",
 		Replace: "earth",
 	}
@@ -754,7 +754,7 @@ func TestPrepareApprovalPerLineOrigins(t *testing.T) {
 	s := newTestSession("old\ncode\nhere")
 
 	// Agent proposes 3-line replacement, only changes line 0
-	s.PendingEdit = &event.PendingEdit{
+	s.pendingEdit = &event.PendingEdit{
 		Search:  "old\ncode\nhere",
 		Replace: "new\ncode\nhere",
 	}

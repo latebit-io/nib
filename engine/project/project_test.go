@@ -84,6 +84,33 @@ func TestTree_SetActiveGoal_RejectsHeading(t *testing.T) {
 	}
 }
 
+func TestTree_MarkDone(t *testing.T) {
+	input := "# A\n- [>] active task\n- [ ] pending task\n"
+	tree := Parse(input)
+
+	ok := tree.MarkDone("active task")
+	if !ok {
+		t.Fatal("MarkDone returned false")
+	}
+	if tree.Roots[0].Children[0].Status != TaskDone {
+		t.Errorf("status = %v, want TaskDone", tree.Roots[0].Children[0].Status)
+	}
+}
+
+func TestTree_MarkDone_NotFound(t *testing.T) {
+	tree := Parse("# A\n- [ ] task\n")
+	if tree.MarkDone("nonexistent") {
+		t.Error("MarkDone returned true for nonexistent task")
+	}
+}
+
+func TestTree_MarkDone_RejectsHeading(t *testing.T) {
+	tree := Parse("# Heading\n")
+	if tree.MarkDone("Heading") {
+		t.Error("MarkDone returned true for heading node")
+	}
+}
+
 func TestTree_Walk(t *testing.T) {
 	input := "# A\n## B\n- [ ] C\n"
 	tree := Parse(input)

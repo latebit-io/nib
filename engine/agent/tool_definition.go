@@ -13,12 +13,12 @@ import (
 
 // GoToDefinitionTool lets the LLM jump to a symbol's definition via LSP.
 type GoToDefinitionTool struct {
-	workspace Workspace
+	workspace FileReader
 	provider  lang.DefinitionProvider
 }
 
 // NewGoToDefinitionTool creates a GoToDefinitionTool.
-func NewGoToDefinitionTool(ws Workspace, provider lang.DefinitionProvider) *GoToDefinitionTool {
+func NewGoToDefinitionTool(ws FileReader, provider lang.DefinitionProvider) *GoToDefinitionTool {
 	return &GoToDefinitionTool{workspace: ws, provider: provider}
 }
 

@@ -32,7 +32,7 @@ func (m *mockNavWorkspace) ReadFile(path string) (string, error) {
 	return "", fmt.Errorf("file not found: %s", path)
 }
 
-func execGoToLine(t *testing.T, ws Workspace, args string) ToolResult {
+func execGoToLine(t *testing.T, ws FileReader, args string) ToolResult {
 	t.Helper()
 	tool := NewGoToLineTool(ws)
 	call := llm.ToolCall{

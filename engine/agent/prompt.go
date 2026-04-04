@@ -16,6 +16,9 @@ const maxContextInPrompt = 50
 // The summary is external content from demarkus — must be bounded.
 const maxMemorySummaryBytes = 8000
 
+// maxActiveTaskPathBytes caps the active task ancestry path in the prompt.
+const maxActiveTaskPathBytes = 1024
+
 // buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
 // contextFiles lists the files the agent is allowed to edit.
@@ -51,14 +54,28 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		memorySummary = memorySummary[:cut] + "\n\n[truncated]"
 	}
 
+	// Include the active task path if the workspace supports task tracking.
+	var activeTaskPath string
+	if tt, ok := a.workspace.(TaskTracker); ok {
+		activeTaskPath = tt.ActiveTaskPath()
+		if len(activeTaskPath) > maxActiveTaskPathBytes {
+			cut := maxActiveTaskPathBytes
+			for cut > 0 && !utf8.RuneStart(activeTaskPath[cut]) {
+				cut--
+			}
+			activeTaskPath = activeTaskPath[:cut] + "…"
+		}
+	}
+
 	userContent, err := a.prompts.RenderUserMessage(UserPromptData{
-		FileName:      fileName,
-		FileContent:   numbered.String(),
-		Fence:         fence,
-		ContextFiles:  shown,
-		OmittedCount:  omitted,
-		Goal:          goal,
-		MemorySummary: memorySummary,
+		FileName:       fileName,
+		FileContent:    numbered.String(),
+		Fence:          fence,
+		ContextFiles:   shown,
+		OmittedCount:   omitted,
+		Goal:           goal,
+		MemorySummary:  memorySummary,
+		ActiveTaskPath: activeTaskPath,
 	})
 	if err != nil {
 		// Template execution failed — fall back to a minimal message.

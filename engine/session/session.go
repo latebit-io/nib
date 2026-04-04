@@ -26,6 +26,18 @@ import (
 	"github.com/latebit-io/junto/engine/project"
 )
 
+// agentPort is the narrow interface Session needs from an agent implementation.
+// Defined here (not in the agent package) so Session depends on an abstraction,
+// not a concrete type (DIP).
+type agentPort interface {
+	RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode agent.Mode)
+	Reply(input string) bool
+	Cancel()
+	Approve()
+	Reject()
+	Continue(path, bufferContent string)
+}
+
 // Session coordinates the interaction between the developer and agent.
 // Frontends read its state to render and call its methods to drive the workflow.
 //
@@ -38,7 +50,7 @@ type Session struct {
 	// Kept public for backward compatibility with frontends.
 	Editor *editor.Editor
 
-	agent  *agent.Agent
+	agent  agentPort
 	events <-chan event.Event // frontend reads engine events from here
 
 	// mu guards editors and activeFile for concurrent access from the
@@ -60,15 +72,15 @@ type Session struct {
 	contextSaveMu sync.Mutex
 
 	// Intent — session-level contract between developer and agent
-	CurrentIntent string   // the active goal
-	IntentDone    bool     // true when intent was completed (not cleared)
-	IntentHistory []string // resolved intents archived in order
+	currentIntent string   // the active goal
+	intentDone    bool     // true when intent was completed (not cleared)
+	intentHistory []string // resolved intents archived in order
 
-	// Phase tracks the current workflow phase (planning vs execution).
-	Phase Phase
+	// phase tracks the current workflow phase (planning vs execution).
+	phase Phase
 
-	// PendingEdit is the edit currently awaiting approval (nil = none)
-	PendingEdit *event.PendingEdit
+	// pendingEdit is the edit currently awaiting approval (nil = none)
+	pendingEdit *event.PendingEdit
 
 	// lastEditedFile tracks which file was successfully edited. Used by
 	// Continue to send the correct file's content even if the user switches
@@ -111,10 +123,11 @@ type Session struct {
 
 	// Work tree — structured project hierarchy loaded from demarkus memory.
 	// See work.go for loading, querying, and persistence.
-	memoryStore   memoryStore   // optional demarkus store (nil when not configured)
-	workTree      *project.Tree // parsed work hierarchy (nil when not loaded)
-	workTreeVer   int           // demarkus version for optimistic concurrency
-	workTreeDirty bool          // true when in-memory changes need persisting
+	memoryStore    memoryStore   // optional demarkus store (nil when not configured)
+	workTree       *project.Tree // parsed work hierarchy (nil when not loaded)
+	workTreeVer    int           // demarkus version for optimistic concurrency
+	workTreeDirty  bool          // true when in-memory changes need persisting
+	workTreeModGen uint64        // incremented on each mutation; detects concurrent changes during save
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -182,7 +195,7 @@ func New(e *editor.Editor, projectRoot string) *Session {
 
 // SetAgent wires an agent into the session. The agent is typically created
 // with the session as its Workspace, so this must be called after New.
-func (s *Session) SetAgent(ag *agent.Agent, events <-chan event.Event) {
+func (s *Session) SetAgent(ag agentPort, events <-chan event.Event) {
 	s.agent = ag
 	s.events = events
 }
@@ -202,6 +215,31 @@ func (s *Session) Events() <-chan event.Event {
 // HasAgent returns true if the session has an active agent.
 func (s *Session) HasAgent() bool {
 	return s.agent != nil
+}
+
+// Phase returns the current workflow phase (planning vs execution).
+func (s *Session) Phase() Phase {
+	return s.phase
+}
+
+// CurrentIntent returns the active goal string.
+func (s *Session) CurrentIntent() string {
+	return s.currentIntent
+}
+
+// IntentDone reports whether the current intent was completed.
+func (s *Session) IntentDone() bool {
+	return s.intentDone
+}
+
+// PendingEdit returns the edit currently awaiting approval, or nil if none.
+func (s *Session) PendingEdit() *event.PendingEdit {
+	return s.pendingEdit
+}
+
+// IntentHistory returns the resolved intents archived in order.
+func (s *Session) IntentHistory() []string {
+	return s.intentHistory
 }
 
 // SetLanguageService injects the language service port (e.g., lsp.Manager).
@@ -886,7 +924,7 @@ func (s *Session) SubmitGoal(goal string) bool {
 	}
 
 	// Handle planning phase commands.
-	if s.Phase == PhasePlanning {
+	if s.phase == PhasePlanning {
 		return s.handlePlanningInput(goal)
 	}
 
@@ -899,7 +937,7 @@ func (s *Session) SubmitGoal(goal string) bool {
 
 	// Start a new conversation. Archive any previous intent.
 	s.startNewConversation(goal, agent.ModeExecution)
-	s.Phase = PhaseExecution
+	s.phase = PhaseExecution
 	return false
 }
 
@@ -912,7 +950,7 @@ func (s *Session) SubmitPlanningGoal(goal string) {
 	}
 
 	s.startNewConversation(goal, agent.ModePlanning)
-	s.Phase = PhasePlanning
+	s.phase = PhasePlanning
 }
 
 // handlePlanningInput processes input during the planning phase.
@@ -926,7 +964,7 @@ func (s *Session) handlePlanningInput(input string) bool {
 		// with the original goal. The plan is persisted in demarkus
 		// by the planning agent, so the execution agent picks it up
 		// via memory summary.
-		originalGoal := s.CurrentIntent
+		originalGoal := s.currentIntent
 		s.agent.Cancel()
 		// Reload work tree — the planning agent may have published
 		// or updated /project.md during the conversation.
@@ -934,15 +972,15 @@ func (s *Session) handlePlanningInput(input string) bool {
 			slog.Warn("session: reload work tree after planning", "err", err)
 		}
 		s.startNewConversation(originalGoal, agent.ModeExecution)
-		s.Phase = PhaseExecution
+		s.phase = PhaseExecution
 		return false
 
 	case ":skip":
 		// Skip planning entirely — start execution with original goal.
-		originalGoal := s.CurrentIntent
+		originalGoal := s.currentIntent
 		s.agent.Cancel()
 		s.startNewConversation(originalGoal, agent.ModeExecution)
-		s.Phase = PhaseExecution
+		s.phase = PhaseExecution
 		return false
 
 	default:
@@ -954,32 +992,32 @@ func (s *Session) handlePlanningInput(input string) bool {
 // startNewConversation archives any previous intent, clears stale state,
 // and starts a new agent conversation in the specified mode.
 func (s *Session) startNewConversation(goal string, mode agent.Mode) {
-	if s.CurrentIntent != "" && !s.IntentDone {
+	if s.currentIntent != "" && !s.intentDone {
 		s.ArchiveIntent()
 	}
 	// Clear stale pending edit from previous run — Agent.Run cancels the
 	// prior run internally, so any pending approval is no longer valid.
-	s.PendingEdit = nil
+	s.pendingEdit = nil
 	s.editReviewed = false
-	s.CurrentIntent = goal
-	s.IntentDone = false
-	s.agent.RunWithMode(s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles(), mode)
+	s.currentIntent = goal
+	s.intentDone = false
+	s.agent.RunWithMode(context.Background(), s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles(), mode)
 }
 
 // ArchiveIntent marks the current intent as done.
 // The intent stays visible as completed until the developer starts a new one.
 func (s *Session) ArchiveIntent() {
-	if s.CurrentIntent != "" {
-		s.IntentDone = true
-		s.IntentHistory = append(s.IntentHistory, s.CurrentIntent)
+	if s.currentIntent != "" {
+		s.intentDone = true
+		s.intentHistory = append(s.intentHistory, s.currentIntent)
 	}
 }
 
 // ClearIntent cancels the current intent without archiving.
 // Used when the developer explicitly escapes/deletes the intent.
 func (s *Session) ClearIntent() {
-	s.CurrentIntent = ""
-	s.IntentDone = false
+	s.currentIntent = ""
+	s.intentDone = false
 }
 
 // CancelAgent cancels the current agent run, clears intent, and resets pending edit.
@@ -987,7 +1025,7 @@ func (s *Session) CancelAgent() {
 	if s.HasAgent() {
 		s.ClearIntent()
 		s.agent.Cancel()
-		s.PendingEdit = nil
+		s.pendingEdit = nil
 		s.editReviewed = false
 	}
 }
@@ -1010,7 +1048,7 @@ func (s *Session) SwitchTo(path string) error {
 	// PendingEdit covers the review phase; stagedEditFile covers the
 	// animation phase (PrepareApproval clears PendingEdit but sets
 	// stagedEditFile until CompleteApproval/AbortApproval).
-	if s.PendingEdit != nil || s.stagedEditFile != "" {
+	if s.pendingEdit != nil || s.stagedEditFile != "" {
 		s.mu.Unlock()
 		return ErrEditPending
 	}
@@ -1075,10 +1113,10 @@ func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
 	if s.HasAgent() {
 		s.agent.Cancel()
 	}
-	s.PendingEdit = nil
+	s.pendingEdit = nil
 	s.editReviewed = false
-	s.CurrentIntent = ""
-	s.IntentDone = false
+	s.currentIntent = ""
+	s.intentDone = false
 
 	old := s.Editor
 
@@ -1147,7 +1185,7 @@ func (s *Session) Close() {
 // Returns nil if there is no pending edit or the search text has no unique match.
 // Returns true for switched if the active editor changed.
 func (s *Session) ReviewEdit() (diff *editor.DiffResult, switched bool) {
-	if s.PendingEdit == nil {
+	if s.pendingEdit == nil {
 		return nil, false
 	}
 	// editorForEdit may auto-open a file that isn't in the map yet.
@@ -1157,8 +1195,8 @@ func (s *Session) ReviewEdit() (diff *editor.DiffResult, switched bool) {
 	}
 	// Auto-switch to the target file so the frontend shows the right buffer.
 	// Done after editorForEdit so auto-opened files are also switched to.
-	if s.PendingEdit.Path != "" {
-		canon := s.CanonPath(s.PendingEdit.Path)
+	if s.pendingEdit.Path != "" {
+		canon := s.CanonPath(s.pendingEdit.Path)
 		s.mu.Lock()
 		if canon != s.activeFile {
 			s.Editor = e
@@ -1167,7 +1205,7 @@ func (s *Session) ReviewEdit() (diff *editor.DiffResult, switched bool) {
 		}
 		s.mu.Unlock()
 	}
-	diff = e.ComputeDiff(s.PendingEdit.Search, s.PendingEdit.Replace)
+	diff = e.ComputeDiff(s.pendingEdit.Search, s.pendingEdit.Replace)
 	if diff != nil {
 		s.editReviewed = true
 	}
@@ -1182,7 +1220,7 @@ func (s *Session) ReviewEdit() (diff *editor.DiffResult, switched bool) {
 // Returns (true, "") on success, or (false, reason) on failure.
 // Fails if ReviewEdit was not called first.
 func (s *Session) ApproveEdit(search, replace string) (bool, string) {
-	if s.PendingEdit == nil || !s.HasAgent() {
+	if s.pendingEdit == nil || !s.HasAgent() {
 		return false, "no pending edit"
 	}
 	if !s.editReviewed {
@@ -1191,15 +1229,15 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	e := s.editorForEdit()
 	if e == nil {
 		s.agent.Reject()
-		s.PendingEdit = nil
+		s.pendingEdit = nil
 		s.editReviewed = false
 		return false, "file not open"
 	}
 	editPath := s.activeFile
-	if s.PendingEdit.Path != "" {
-		editPath = s.CanonPath(s.PendingEdit.Path)
+	if s.pendingEdit.Path != "" {
+		editPath = s.CanonPath(s.pendingEdit.Path)
 	}
-	lineOrigins := computeLineOrigins(search, s.PendingEdit.Replace, replace)
+	lineOrigins := computeLineOrigins(search, s.pendingEdit.Replace, replace)
 	ok, reason := e.ApplyEdit(search, replace, lineOrigins)
 	if ok {
 		s.lastEditedFile = editPath
@@ -1210,7 +1248,7 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	} else {
 		s.agent.Reject()
 	}
-	s.PendingEdit = nil
+	s.pendingEdit = nil
 	s.editReviewed = false
 	return ok, reason
 }
@@ -1262,7 +1300,7 @@ func (p *AnimationPlan) IsSurgical() bool {
 // Returns an error if there is no pending edit, the edit was not reviewed,
 // or the search text cannot be uniquely located in the buffer.
 func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error) {
-	if s.PendingEdit == nil || !s.HasAgent() {
+	if s.pendingEdit == nil || !s.HasAgent() {
 		return nil, errors.New("no pending edit")
 	}
 	if !s.editReviewed {
@@ -1271,23 +1309,23 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 	e := s.editorForEdit()
 	if e == nil {
 		s.agent.Reject()
-		s.PendingEdit = nil
+		s.pendingEdit = nil
 		s.editReviewed = false
 		return nil, errors.New("file not open")
 	}
 	loc, reason := e.LocateEdit(search)
 	if loc == nil {
 		s.agent.Reject()
-		s.PendingEdit = nil
+		s.pendingEdit = nil
 		s.editReviewed = false
 		return nil, errors.New(reason)
 	}
-	if s.PendingEdit.Path != "" {
-		s.stagedEditFile = s.CanonPath(s.PendingEdit.Path)
+	if s.pendingEdit.Path != "" {
+		s.stagedEditFile = s.CanonPath(s.pendingEdit.Path)
 	} else {
 		s.stagedEditFile = s.activeFile
 	}
-	lineOrigins := computeLineOrigins(search, s.PendingEdit.Replace, replace)
+	lineOrigins := computeLineOrigins(search, s.pendingEdit.Replace, replace)
 
 	// Compute hunks and narrowed edit for surgical animation.
 	searchLines := strings.Split(search, "\n")
@@ -1300,7 +1338,7 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 		narrowed = &ne
 	}
 
-	s.PendingEdit = nil
+	s.pendingEdit = nil
 	s.editReviewed = false
 	return &AnimationPlan{
 		Line:        loc.Line,
@@ -1369,10 +1407,10 @@ func (s *Session) AbortApproval() {
 
 // RejectEdit rejects the pending edit and signals the agent.
 func (s *Session) RejectEdit() {
-	if s.PendingEdit == nil || !s.HasAgent() {
+	if s.pendingEdit == nil || !s.HasAgent() {
 		return
 	}
-	s.PendingEdit = nil
+	s.pendingEdit = nil
 	s.editReviewed = false
 	s.agent.Reject()
 }
@@ -1404,14 +1442,14 @@ func (s *Session) Continue() {
 func (s *Session) HandleEvent(ev event.Event) {
 	switch e := ev.(type) {
 	case event.AgentEditProposed:
-		s.PendingEdit = &e.Edit
+		s.pendingEdit = &e.Edit
 		s.editReviewed = false
 	case event.AgentError:
-		s.PendingEdit = nil
+		s.pendingEdit = nil
 		s.editReviewed = false
 		_ = e // error text is in the event for the frontend to display
 	case event.AgentDone:
-		s.PendingEdit = nil
+		s.pendingEdit = nil
 		s.editReviewed = false
 		if e.Success {
 			s.ArchiveIntent()
@@ -1438,10 +1476,10 @@ func (s *Session) HandleEvent(ev event.Event) {
 // may have read the file via read_file (which doesn't create a buffer)
 // and then proposed an edit_file on it.
 func (s *Session) editorForEdit() *editor.Editor {
-	if s.PendingEdit == nil {
+	if s.pendingEdit == nil {
 		return s.Editor
 	}
-	path := s.PendingEdit.Path
+	path := s.pendingEdit.Path
 	if path == "" {
 		return s.Editor
 	}

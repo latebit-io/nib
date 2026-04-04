@@ -23,6 +23,28 @@ var (
 	dividerFocusStyle = lipgloss.NewStyle().
 				Foreground(dividerFocusColor).
 				Background(lipgloss.Color("235"))
+
+	// paneBorderDimStyle draws a rounded border in dim color around a pane.
+	paneBorderDimStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(dividerDimColor)
+
+	// paneBorderFocusStyle draws a rounded border in focus color around a pane.
+	paneBorderFocusStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(dividerFocusColor)
+
+	// titleDimStyle renders a pane title in dim color with bold.
+	titleDimStyle = lipgloss.NewStyle().Foreground(dividerDimColor).Bold(true)
+
+	// titleFocusStyle renders a pane title in focus color with bold.
+	titleFocusStyle = lipgloss.NewStyle().Foreground(dividerFocusColor).Bold(true)
+
+	// borderCharDimStyle renders border characters in dim color.
+	borderCharDimStyle = lipgloss.NewStyle().Foreground(dividerDimColor)
+
+	// borderCharFocusStyle renders border characters in focus color.
+	borderCharFocusStyle = lipgloss.NewStyle().Foreground(dividerFocusColor)
 )
 
 // LayoutDirection determines how regions are arranged.
@@ -445,15 +467,14 @@ func (rm *RegionManager) Render() string {
 		padLines(paneLines[i], visible[i].width)
 		content := strings.Join(paneLines[i], "\n")
 
+		borderStyle := paneBorderDimStyle
 		borderColor := dividerDimColor
 		if visible[i] == focusedRegion {
+			borderStyle = paneBorderFocusStyle
 			borderColor = dividerFocusColor
 		}
 
-		rendered := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(borderColor).
-			Render(content)
+		rendered := borderStyle.Render(content)
 
 		// Embed pane title in the top border if the pane implements Titled.
 		if titled, ok := visible[i].Pane.(Titled); ok {
@@ -493,17 +514,19 @@ func embedBorderTitle(rendered string, title string, borderColor color.Color) st
 		return rendered
 	}
 
-	titleStyle := lipgloss.NewStyle().Foreground(borderColor).Bold(true)
-	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+	titleStyle, borderCharStyle := titleDimStyle, borderCharDimStyle
+	if borderColor == dividerFocusColor {
+		titleStyle, borderCharStyle = titleFocusStyle, borderCharFocusStyle
+	}
 
 	var top strings.Builder
-	top.WriteString(borderStyle.Render("╭─"))
+	top.WriteString(borderCharStyle.Render("╭─"))
 	top.WriteString(titleStyle.Render(label))
 	dashesAfter := totalWidth - 2 - labelWidth - 1 // after label, before ╮
 	if dashesAfter > 0 {
-		top.WriteString(borderStyle.Render(strings.Repeat("─", dashesAfter)))
+		top.WriteString(borderCharStyle.Render(strings.Repeat("─", dashesAfter)))
 	}
-	top.WriteString(borderStyle.Render("╮"))
+	top.WriteString(borderCharStyle.Render("╮"))
 
 	return top.String() + "\n" + lines[1]
 }

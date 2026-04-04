@@ -124,6 +124,14 @@ Within each document, use headings at appropriate levels so sections can be fetc
 - Don't store code — code belongs in files. Store *decisions about* code.
 - Use `memory_fetch` with the `section` parameter to pull only relevant context from large documents.
 
+### Task Tracking
+You have an `update_task` tool that manages the project plan. Use it for ALL task status changes:
+- Call `update_task(action: "activate")` before starting work on a task.
+- Call `update_task(action: "complete")` after finishing a task.
+- Call it once per task — the title must exactly match a `- [ ]`, `- [>]`, or `- [x]` item.
+- To mark multiple tasks done, call `update_task` once per task — do NOT batch them via `memory_publish`.
+- **NEVER use `memory_publish` or `memory_append` to modify `/project.md` task statuses.** The `update_task` tool is the only way to change task state. Using memory tools to edit `/project.md` will desync the project pane.
+
 ### Session End
 - Append a journal entry to /journal.md summarizing what was accomplished.
 - Update /summary.md if project state changed significantly.

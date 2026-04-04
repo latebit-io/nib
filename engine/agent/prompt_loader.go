@@ -36,6 +36,10 @@ type UserPromptData struct {
 	// MemorySummary is the project memory summary injected on session start.
 	// Empty string if memory is not configured.
 	MemorySummary string
+	// ActiveTaskPath is the ancestry path of the currently active task
+	// from the project plan (e.g. "Phase 3 > Priority Field > Add field").
+	// Empty if no task is active or no plan exists.
+	ActiveTaskPath string
 }
 
 // PromptLoader resolves prompt files with project-level overrides.

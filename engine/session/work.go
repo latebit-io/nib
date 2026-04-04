@@ -90,6 +90,7 @@ func (s *Session) SetActiveGoal(title string) error {
 		return fmt.Errorf("session: task not found: %q", title)
 	}
 	s.workTreeDirty = true
+	s.workTreeModGen++
 	return s.saveWorkTreeLocked()
 }
 
@@ -108,6 +109,7 @@ func (s *Session) MarkGoalDone(title string) error {
 		return fmt.Errorf("session: task not found: %q", title)
 	}
 	s.workTreeDirty = true
+	s.workTreeModGen++
 	return s.saveWorkTreeLocked()
 }
 
@@ -230,6 +232,7 @@ func (s *Session) saveWorkTreeLocked() error {
 
 	body := project.Serialize(s.workTree)
 	ver := s.workTreeVer
+	genBefore := s.workTreeModGen
 
 	// Release lock during I/O to avoid blocking reads.
 	s.mu.Unlock()
@@ -242,6 +245,10 @@ func (s *Session) saveWorkTreeLocked() error {
 		return err
 	}
 	s.workTreeVer = doc.Version
-	s.workTreeDirty = false
+	// Only clear dirty if no concurrent modification occurred while
+	// the lock was released for I/O.
+	if s.workTreeModGen == genBefore {
+		s.workTreeDirty = false
+	}
 	return nil
 }

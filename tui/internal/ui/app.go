@@ -798,38 +798,19 @@ func (m *AppModel) renderIntentBar() string {
 		Bold(true).
 		Foreground(lipgloss.Color("230")).
 		Background(lipgloss.Color("235"))
-	doneStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("2")).
-		Background(lipgloss.Color("236"))
 
-	// Active work tree goal provides project context for the intent bar.
 	_, goalPath := m.Session.ActiveGoal()
 
 	switch {
 	case !m.Session.HasAgent():
 		text = " Editor"
 		style = idleStyle
-	case m.Session.CurrentIntent == "":
-		if goalPath != "" {
-			text = " " + goalPath
-			style = idleStyle
-		} else {
-			text = " Ctrl+G to set intent"
-			style = idleStyle
-		}
-	case m.Session.IntentDone:
-		text = " done: " + m.Session.CurrentIntent
-		style = doneStyle
-	case m.Session.Phase == session.PhasePlanning:
-		text = " [PLAN] " + m.Session.CurrentIntent
+	case goalPath != "":
+		text = " " + goalPath
 		style = activeStyle
 	default:
-		if goalPath != "" {
-			text = " " + goalPath
-		} else {
-			text = " " + m.Session.CurrentIntent
-		}
-		style = activeStyle
+		text = " Ready"
+		style = idleStyle
 	}
 
 	// Truncate to fit width (one line, never wraps)

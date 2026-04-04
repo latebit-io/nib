@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/latebit-io/junto/engine/llm"
 )
@@ -64,6 +65,8 @@ func (t *TaskTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 		return textResult("Error: title is required")
 	}
 
+	slog.Debug("update_task", "action", args.Action, "title", args.Title)
+
 	var err error
 	switch args.Action {
 	case "activate":
@@ -75,13 +78,16 @@ func (t *TaskTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	}
 
 	if err != nil {
+		slog.Warn("update_task failed", "action", args.Action, "title", args.Title, "err", err)
 		return textResult("Error: " + err.Error())
 	}
 
 	switch args.Action {
 	case "activate":
+		slog.Debug("update_task succeeded", "action", "activate", "title", args.Title)
 		return textResult("Task activated: " + args.Title)
 	default:
+		slog.Debug("update_task succeeded", "action", "complete", "title", args.Title)
 		return textResult("Task completed: " + args.Title)
 	}
 }

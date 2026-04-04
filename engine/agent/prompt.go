@@ -51,14 +51,21 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		memorySummary = memorySummary[:cut] + "\n\n[truncated]"
 	}
 
+	// Include the active task path if the workspace supports task tracking.
+	var activeTaskPath string
+	if tt, ok := a.workspace.(TaskTracker); ok {
+		activeTaskPath = tt.ActiveTaskPath()
+	}
+
 	userContent, err := a.prompts.RenderUserMessage(UserPromptData{
-		FileName:      fileName,
-		FileContent:   numbered.String(),
-		Fence:         fence,
-		ContextFiles:  shown,
-		OmittedCount:  omitted,
-		Goal:          goal,
-		MemorySummary: memorySummary,
+		FileName:       fileName,
+		FileContent:    numbered.String(),
+		Fence:          fence,
+		ContextFiles:   shown,
+		OmittedCount:   omitted,
+		Goal:           goal,
+		MemorySummary:  memorySummary,
+		ActiveTaskPath: activeTaskPath,
 	})
 	if err != nil {
 		// Template execution failed — fall back to a minimal message.

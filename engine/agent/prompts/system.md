@@ -125,11 +125,12 @@ Within each document, use headings at appropriate levels so sections can be fetc
 - Use `memory_fetch` with the `section` parameter to pull only relevant context from large documents.
 
 ### Task Tracking
-If the `update_task` tool is available, use it to track progress against the project plan:
-- Call `update_task` with action `activate` when you start working on a task.
-- Call `update_task` with action `complete` when you finish a task.
-- The title must exactly match a task item from the project plan.
-This keeps the project pane in sync with actual progress. Do NOT edit `/project.md` directly for task status changes — use the tool.
+You have an `update_task` tool that manages the project plan. Use it for ALL task status changes:
+- Call `update_task(action: "activate")` before starting work on a task.
+- Call `update_task(action: "complete")` after finishing a task.
+- Call it once per task — the title must exactly match a `- [ ]`, `- [>]`, or `- [x]` item.
+- To mark multiple tasks done, call `update_task` once per task — do NOT batch them via `memory_publish`.
+- **NEVER use `memory_publish` or `memory_append` to modify `/project.md` task statuses.** The `update_task` tool is the only way to change task state. Using memory tools to edit `/project.md` will desync the project pane.
 
 ### Session End
 - Append a journal entry to /journal.md summarizing what was accomplished.

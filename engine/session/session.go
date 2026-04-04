@@ -111,10 +111,11 @@ type Session struct {
 
 	// Work tree — structured project hierarchy loaded from demarkus memory.
 	// See work.go for loading, querying, and persistence.
-	memoryStore   memoryStore   // optional demarkus store (nil when not configured)
-	workTree      *project.Tree // parsed work hierarchy (nil when not loaded)
-	workTreeVer   int           // demarkus version for optimistic concurrency
-	workTreeDirty bool          // true when in-memory changes need persisting
+	memoryStore    memoryStore   // optional demarkus store (nil when not configured)
+	workTree       *project.Tree // parsed work hierarchy (nil when not loaded)
+	workTreeVer    int           // demarkus version for optimistic concurrency
+	workTreeDirty  bool          // true when in-memory changes need persisting
+	workTreeModGen uint64        // incremented on each mutation; detects concurrent changes during save
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.

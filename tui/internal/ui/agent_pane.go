@@ -777,10 +777,12 @@ func (m *AgentPaneModel) Render() string {
 			statusText = statusStyle.Render(m.padLine(" Planning..."))
 		case "planning-waiting":
 			statusText = statusStyle.Render(m.padLine(" Planning | :done to execute | :skip"))
+		case "reviewing":
+			statusText = statusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
 		case "editing":
 			statusText = statusStyle.Render(m.padLine(" Ctrl+N to continue"))
 		case "waiting":
-			statusText = statusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
+			statusText = statusStyle.Render(m.padLine(" Type to reply | Esc cancel"))
 		case "typing":
 			statusText = statusStyle.Render(m.padLine(" Agent typing... | Esc cancel"))
 		default:

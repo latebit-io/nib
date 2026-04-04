@@ -64,6 +64,8 @@ type hoverResultMsg struct {
 	line, col int
 }
 
+type reloadWorkTreeResultMsg struct{ err error }
+
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
 // reads Session state to render, and adapts agent events to tea.Msg.
@@ -219,9 +221,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Engine events — adapted from channel to tea.Msg
 	case engineEventMsg:
-		m.handleEngineEvent(msg.event)
+		cmd := m.handleEngineEvent(msg.event)
 		// Keep listening for the next event
-		return m, m.listenForEvents()
+		return m, tea.Batch(m.listenForEvents(), cmd)
 
 	// Goal submitted from agent pane — delegate to session.
 	// Only clear the pane when starting a new conversation, not on follow-ups.
@@ -242,6 +244,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
+
+	case reloadWorkTreeResultMsg:
+		if msg.err != nil {
+			slog.Warn("reload work tree", "err", msg.err)
+			m.AgentPane.AppendMeta("[reload project failed: " + msg.err.Error() + "]\n")
+		}
+		m.refreshProjectPane()
+		return m, nil
 
 	// File listing error — surface in agent pane
 	case paletteErrorMsg:
@@ -381,9 +391,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleEngineEvent updates session state and renders the event.
-func (m *AppModel) handleEngineEvent(ev event.Event) {
+func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	// Let session update domain state (intent, pending edit)
 	m.Session.HandleEvent(ev)
+
+	var cmd tea.Cmd
 
 	// Render in agent pane (presentation)
 	switch e := ev.(type) {
@@ -398,7 +410,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 
-		m.AgentPane.Status = "waiting"
+		m.AgentPane.Status = "reviewing"
 		m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 		// ReviewEdit computes the diff AND marks the edit as reviewed.
 		// If the edit targets a different file, the session auto-switches
@@ -448,23 +460,23 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		}
 		m.AgentPane.InputActive = true
 		m.AgentPane.InputBuffer = ""
-		// Agent may have published /project.md — reload to stay in sync.
-		m.reloadWorkTree()
+		// Agent may have published /project.md — reload async to stay in sync.
+		cmd = m.reloadWorkTreeCmd()
 	case event.AgentDone:
 		m.AgentPane.Status = "idle"
 		m.AgentPane.AppendText("\n--- Done ---\n")
 		m.AgentPane.InputActive = false
-		// Agent may have published /project.md — reload to stay in sync.
-		m.reloadWorkTree()
+		// Agent may have published /project.md — reload async to stay in sync.
+		cmd = m.reloadWorkTreeCmd()
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
-		m.refreshProjectPane()
 	case event.FlushBuffers:
 		saved, err := m.Session.SaveDirtyBuffers()
 		e.Result <- event.FlushResult{Saved: saved, Err: err}
 	case event.DiagnosticsUpdated:
 		m.refreshDiagnostics(e.Path)
 	}
+	return cmd
 }
 
 // clearEditorOverlay delegates scroll correction to the engine and clears
@@ -1016,14 +1028,13 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 	}
 }
 
-// reloadWorkTree re-fetches the work tree from demarkus and refreshes the
-// project pane. Called after agent turns where the agent may have published
-// /project.md, keeping the session's cached version in sync.
-func (m *AppModel) reloadWorkTree() {
-	if err := m.Session.ReloadWorkTree(); err != nil {
-		slog.Debug("reload work tree", "err", err)
+// reloadWorkTreeCmd returns a tea.Cmd that re-fetches the work tree from
+// demarkus asynchronously. The result is handled by reloadWorkTreeResultMsg
+// which refreshes the project pane and surfaces errors.
+func (m *AppModel) reloadWorkTreeCmd() tea.Cmd {
+	return func() tea.Msg {
+		return reloadWorkTreeResultMsg{err: m.Session.ReloadWorkTree()}
 	}
-	m.refreshProjectPane()
 }
 
 // refreshProjectPane rebuilds the project pane if visible, or marks it
@@ -1128,7 +1139,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 		m.AgentPane.AppendMeta("[applied]\n")
 		m.Session.CompleteApproval()
 		m.Session.Continue()
-		m.AgentPane.Status = "waiting"
+		m.AgentPane.Status = "thinking"
 		m.refreshProjectPane()
 		return nil
 	}

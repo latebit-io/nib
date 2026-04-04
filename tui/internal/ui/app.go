@@ -448,10 +448,14 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		}
 		m.AgentPane.InputActive = true
 		m.AgentPane.InputBuffer = ""
+		// Agent may have published /project.md — reload to stay in sync.
+		m.reloadWorkTree()
 	case event.AgentDone:
 		m.AgentPane.Status = "idle"
 		m.AgentPane.AppendText("\n--- Done ---\n")
 		m.AgentPane.InputActive = false
+		// Agent may have published /project.md — reload to stay in sync.
+		m.reloadWorkTree()
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 		m.refreshProjectPane()
@@ -1010,6 +1014,16 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 			col:          col,
 		}
 	}
+}
+
+// reloadWorkTree re-fetches the work tree from demarkus and refreshes the
+// project pane. Called after agent turns where the agent may have published
+// /project.md, keeping the session's cached version in sync.
+func (m *AppModel) reloadWorkTree() {
+	if err := m.Session.ReloadWorkTree(); err != nil {
+		slog.Debug("reload work tree", "err", err)
+	}
+	m.refreshProjectPane()
 }
 
 // refreshProjectPane rebuilds the project pane if visible, or marks it

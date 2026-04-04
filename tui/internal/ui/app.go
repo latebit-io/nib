@@ -333,6 +333,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ProjectSetActiveGoalMsg:
 		if err := m.Session.SetActiveGoal(msg.Title); err != nil {
 			slog.Warn("set active goal", "err", err)
+			m.AgentPane.AppendMeta("[set active goal failed: " + err.Error() + "]\n")
 		}
 		m.refreshProjectPane()
 		return m, nil

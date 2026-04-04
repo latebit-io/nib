@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/latebit-io/junto/engine/project"
 )
 
 // mockProjectSession provides the minimal session surface for testing.
@@ -148,6 +149,80 @@ func TestProjectPane_ToggleDirectory(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected main.go to appear after expanding src")
+	}
+}
+
+func TestProjectPane_ActivateWorkHeading(t *testing.T) {
+	heading := &project.Node{
+		Title: "Phase 6", Depth: 1, IsHeading: true,
+		Children: []*project.Node{
+			{Title: "task one", Depth: 2, Status: project.TaskPending},
+		},
+	}
+
+	items := []projectItem{
+		{isHeader: true, section: "work"},
+		{workNode: heading, section: "work"},
+		{workNode: heading.Children[0], section: "work"},
+	}
+
+	p := &ProjectPaneModel{
+		width:         40,
+		height:        10,
+		items:         items,
+		workCollapsed: make(map[string]bool),
+		cursorIdx:     1, // on heading
+	}
+
+	// Activate heading — should toggle collapse
+	cmd := p.activateItem()
+	if cmd != nil {
+		t.Error("expected nil cmd for heading toggle")
+	}
+	if !p.workCollapsed["Phase 6"] {
+		t.Error("expected heading to be collapsed after activation")
+	}
+
+	// Activate again — should uncollapse
+	// Reset items since flattenItems was called
+	p.cursorIdx = 1
+	p.items = items
+	p.activateItem()
+	if p.workCollapsed["Phase 6"] {
+		t.Error("expected heading to be uncollapsed after second activation")
+	}
+}
+
+func TestProjectPane_ActivateWorkTask(t *testing.T) {
+	task := &project.Node{
+		Title: "Add Phase to Session", Depth: 2, Status: project.TaskPending,
+	}
+
+	items := []projectItem{
+		{isHeader: true, section: "work"},
+		{workNode: task, section: "work"},
+	}
+
+	p := &ProjectPaneModel{
+		width:         40,
+		height:        10,
+		items:         items,
+		workCollapsed: make(map[string]bool),
+		cursorIdx:     1, // on task
+	}
+
+	cmd := p.activateItem()
+	if cmd == nil {
+		t.Fatal("expected cmd for task activation")
+	}
+
+	msg := cmd()
+	goalMsg, ok := msg.(ProjectSetActiveGoalMsg)
+	if !ok {
+		t.Fatalf("expected ProjectSetActiveGoalMsg, got %T", msg)
+	}
+	if goalMsg.Title != "Add Phase to Session" {
+		t.Errorf("Title = %q, want %q", goalMsg.Title, "Add Phase to Session")
 	}
 }
 

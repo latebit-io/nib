@@ -74,23 +74,30 @@ func (r *Runner) Run(ctx context.Context, goal string, files []string) *Result {
 	return result
 }
 
+// maxSummaryBytes caps the in-memory summary buffer. Tokens beyond this
+// limit are still streamed to stderr but not persisted in the Result.
+const maxSummaryBytes = 10 * 1024 * 1024 // 10 MB
+
 // processEvents drains the event channel, handling each event type.
 // Returns when AgentDone is received or the context is cancelled.
 func (r *Runner) processEvents(ctx context.Context, result *Result) {
 	var summary strings.Builder
+	summaryTruncated := false
 
 	for {
 		select {
 		case <-ctx.Done():
+			r.agent.Cancel()
 			result.Success = false
-			result.Errors = append(result.Errors, "context cancelled")
+			result.Summary = summary.String()
+			result.Errors = append(result.Errors, ctx.Err().Error())
 			return
 
 		case ev, ok := <-r.events:
 			if !ok {
 				return
 			}
-			if done := r.handleEvent(ev, result, &summary); done {
+			if done := r.handleEvent(ev, result, &summary, &summaryTruncated); done {
 				return
 			}
 		}
@@ -98,10 +105,17 @@ func (r *Runner) processEvents(ctx context.Context, result *Result) {
 }
 
 // handleEvent dispatches a single event. Returns true when the run is complete.
-func (r *Runner) handleEvent(ev event.Event, result *Result, summary *strings.Builder) bool {
+func (r *Runner) handleEvent(ev event.Event, result *Result, summary *strings.Builder, truncated *bool) bool {
 	switch e := ev.(type) {
 	case event.AgentToken:
-		summary.WriteString(e.Text)
+		if !*truncated {
+			if summary.Len()+len(e.Text) > maxSummaryBytes {
+				summary.WriteString("\n…[summary truncated]")
+				*truncated = true
+			} else {
+				summary.WriteString(e.Text)
+			}
+		}
 		r.status("%s", e.Text)
 
 	case event.AgentStatus:
@@ -115,7 +129,7 @@ func (r *Runner) handleEvent(ev event.Event, result *Result, summary *strings.Bu
 		r.applyEdit(e.Edit, result)
 
 	case event.AgentFileCreated:
-		result.FilesCreated = append(result.FilesCreated, e.Path)
+		result.FilesCreated = append(result.FilesCreated, r.workspace.CanonPath(e.Path))
 		r.status("[created %s]\n", e.Path)
 
 	case event.AgentNavigate:
@@ -204,8 +218,7 @@ func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
 
 	newContent := strings.Replace(content, edit.Search, edit.Replace, 1)
 
-	absPath := r.workspace.CanonPath(edit.Path)
-	if err := os.WriteFile(absPath, []byte(newContent), 0o644); err != nil {
+	if err := r.workspace.OverwriteFile(edit.Path, newContent); err != nil {
 		msg := fmt.Sprintf("cannot write %s: %v", edit.Path, err)
 		slog.Error(msg)
 		result.Errors = append(result.Errors, msg)
@@ -214,7 +227,7 @@ func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
 		return
 	}
 
-	result.FilesChanged = append(result.FilesChanged, edit.Path)
+	result.FilesChanged = append(result.FilesChanged, r.workspace.CanonPath(edit.Path))
 	r.status("[edited %s]\n", edit.Path)
 
 	r.agent.Approve()
@@ -232,10 +245,15 @@ func (r *Runner) status(format string, args ...any) {
 }
 
 // readInput reads a single line from stdin. Returns empty string on EOF.
+// I/O errors are logged — they look like EOF to the caller, which ends
+// the conversation gracefully rather than crashing.
 func (r *Runner) readInput() string {
 	r.status("\n> ")
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			slog.Error("stdin read failed", "err", err)
+		}
 		return ""
 	}
 	return strings.TrimSpace(scanner.Text())

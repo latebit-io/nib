@@ -253,13 +253,52 @@ func TestDiskWorkspace_ResolvePath_Traversal(t *testing.T) {
 
 	ws := NewDiskWorkspace(root)
 
-	_, err := ws.ReadFile("../secret/passwd")
-	if err == nil {
-		t.Fatal("expected error for path traversal, got nil")
-	}
-	if !strings.Contains(err.Error(), "outside project root") {
-		t.Errorf("error %q does not mention 'outside project root'", err)
-	}
+	t.Run("ReadFile", func(t *testing.T) {
+		_, err := ws.ReadFile("../secret/passwd")
+		if err == nil {
+			t.Fatal("expected error for path traversal, got nil")
+		}
+		if !strings.Contains(err.Error(), "outside project root") {
+			t.Errorf("error %q does not mention 'outside project root'", err)
+		}
+	})
+
+	t.Run("WriteFile", func(t *testing.T) {
+		err := ws.WriteFile("../secret/new.txt", "injected")
+		if err == nil {
+			t.Fatal("expected error for path traversal, got nil")
+		}
+		if !strings.Contains(err.Error(), "outside project root") {
+			t.Errorf("error %q does not mention 'outside project root'", err)
+		}
+	})
+
+	t.Run("OverwriteFile", func(t *testing.T) {
+		err := ws.OverwriteFile("../secret/passwd", "overwritten")
+		if err == nil {
+			t.Fatal("expected error for path traversal, got nil")
+		}
+		if !strings.Contains(err.Error(), "outside project root") {
+			t.Errorf("error %q does not mention 'outside project root'", err)
+		}
+	})
+
+	t.Run("symlink escape", func(t *testing.T) {
+		// A symlink inside root that points outside should be caught.
+		link := filepath.Join(root, "link")
+		target := filepath.Join(sibling, "passwd")
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlinks not supported: %v", err)
+		}
+
+		_, err := ws.ReadFile("link")
+		if err == nil {
+			t.Fatal("expected error for symlink escape, got nil")
+		}
+		if !strings.Contains(err.Error(), "outside project root") {
+			t.Errorf("error %q does not mention 'outside project root'", err)
+		}
+	})
 }
 
 func TestDiskWorkspace_ListFiles(t *testing.T) {

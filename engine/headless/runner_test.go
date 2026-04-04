@@ -24,9 +24,19 @@ type mockAgent struct {
 	lastContent string
 	cancelled   bool
 	replied     bool
+
+	// Captured from Run — used to verify pre-read behavior.
+	runFileName     string
+	runFileContent  string
+	runGoal         string
+	runContextFiles []string
 }
 
-func (m *mockAgent) Run(_ context.Context, _, _, _ string, _ []string) {
+func (m *mockAgent) Run(_ context.Context, fileName, fileContent, goal string, contextFiles []string) {
+	m.runFileName = fileName
+	m.runFileContent = fileContent
+	m.runGoal = goal
+	m.runContextFiles = contextFiles
 	if m.runFunc != nil {
 		go m.runFunc()
 	}
@@ -152,12 +162,14 @@ func TestRunner_EditProposed_AppliesAndContinues(t *testing.T) {
 		t.Error("file still contains old function")
 	}
 
-	if len(result.FilesChanged) != 1 || result.FilesChanged[0] != "main.go" {
-		t.Errorf("FilesChanged = %v, want [main.go]", result.FilesChanged)
+	wantPath := filepath.Join(dir, "main.go")
+	if len(result.FilesChanged) != 1 || result.FilesChanged[0] != wantPath {
+		t.Errorf("FilesChanged = %v, want [%s]", result.FilesChanged, wantPath)
 	}
 }
 
 func TestRunner_FileCreated_TrackedInResult(t *testing.T) {
+	dir := t.TempDir()
 	events := make(chan event.Event, 64)
 	mock := &mockAgent{
 		events: events,
@@ -167,13 +179,14 @@ func TestRunner_FileCreated_TrackedInResult(t *testing.T) {
 		},
 	}
 
-	ws := NewDiskWorkspace(t.TempDir())
+	ws := NewDiskWorkspace(dir)
 	runner := NewRunner(mock, ws, events, &bytes.Buffer{}, false)
 
 	result := runner.Run(context.Background(), "create file", nil)
 
-	if len(result.FilesCreated) != 1 || result.FilesCreated[0] != "new_file.go" {
-		t.Errorf("FilesCreated = %v, want [new_file.go]", result.FilesCreated)
+	wantPath := filepath.Join(dir, "new_file.go")
+	if len(result.FilesCreated) != 1 || result.FilesCreated[0] != wantPath {
+		t.Errorf("FilesCreated = %v, want [%s]", result.FilesCreated, wantPath)
 	}
 }
 
@@ -293,10 +306,23 @@ func TestRunner_PreReadsFirstFile(t *testing.T) {
 	}
 
 	runner := NewRunner(mock, ws, events, &bytes.Buffer{}, false)
-	result := runner.Run(context.Background(), "review", []string{"target.go"})
+	result := runner.Run(context.Background(), "review", []string{"target.go", "other.go"})
 
 	if !result.Success {
 		t.Error("expected success")
+	}
+	if mock.runFileName != "target.go" {
+		t.Errorf("agent received fileName = %q, want %q", mock.runFileName, "target.go")
+	}
+	// ReadFile trims trailing newline, matching buffer.NewFromFile behavior.
+	if mock.runFileContent != "package target" {
+		t.Errorf("agent received fileContent = %q, want %q", mock.runFileContent, "package target")
+	}
+	if mock.runGoal != "review" {
+		t.Errorf("agent received goal = %q, want %q", mock.runGoal, "review")
+	}
+	if len(mock.runContextFiles) != 2 || mock.runContextFiles[0] != "target.go" || mock.runContextFiles[1] != "other.go" {
+		t.Errorf("agent received contextFiles = %v, want [target.go other.go]", mock.runContextFiles)
 	}
 }
 

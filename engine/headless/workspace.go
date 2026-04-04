@@ -96,6 +96,20 @@ func (w *DiskWorkspace) WriteFile(path, content string) error {
 	return nil
 }
 
+// OverwriteFile writes content to an existing file on disk, replacing its
+// contents. The path is validated against the project root to prevent
+// traversal. Used by the headless runner to apply agent edits.
+func (w *DiskWorkspace) OverwriteFile(path, content string) error {
+	abs, err := w.resolvePath(path)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
 // CanonPath returns the canonical absolute form of a path.
 // Relative paths are resolved against the project root.
 func (w *DiskWorkspace) CanonPath(path string) string {
@@ -140,23 +154,48 @@ func (w *DiskWorkspace) resolvePath(path string) (string, error) {
 		abs = filepath.Clean(filepath.Join(w.root, path))
 	}
 
-	// Resolve symlinks for both the path and root to catch traversal.
-	realAbs, err := filepath.EvalSymlinks(filepath.Dir(abs))
-	if err != nil {
-		// Parent dir doesn't exist yet — that's fine for WriteFile.
-		// Fall back to the cleaned path without symlink check.
-		if os.IsNotExist(err) {
-			return abs, nil
-		}
-		return "", fmt.Errorf("resolve %s: %w", path, err)
-	}
-	realAbs = filepath.Join(realAbs, filepath.Base(abs))
-
 	realRoot, err := filepath.EvalSymlinks(w.root)
 	if err != nil {
 		return "", fmt.Errorf("resolve project root: %w", err)
 	}
 	realRoot = filepath.Clean(realRoot)
+
+	// Try resolving the full path first (catches leaf symlinks).
+	// If the file doesn't exist yet (WriteFile), fall back to resolving
+	// the parent directory and joining the base name.
+	realAbs, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("resolve %s: %w", path, err)
+		}
+		// File doesn't exist — walk up to the nearest existing ancestor
+		// and resolve from there. This handles WriteFile where intermediate
+		// dirs will be created.
+		ancestor := filepath.Dir(abs)
+		var tail []string
+		for {
+			realAnc, ancErr := filepath.EvalSymlinks(ancestor)
+			if ancErr == nil {
+				// Rebuild the full resolved path from the resolved ancestor.
+				for i := len(tail) - 1; i >= 0; i-- {
+					realAnc = filepath.Join(realAnc, tail[i])
+				}
+				realAbs = filepath.Join(realAnc, filepath.Base(abs))
+				break
+			}
+			if !os.IsNotExist(ancErr) {
+				return "", fmt.Errorf("resolve %s: %w", path, ancErr)
+			}
+			// This ancestor doesn't exist either — go up one level.
+			tail = append(tail, filepath.Base(ancestor))
+			next := filepath.Dir(ancestor)
+			if next == ancestor {
+				// Reached filesystem root without finding an existing dir.
+				return "", fmt.Errorf("resolve %s: no existing ancestor", path)
+			}
+			ancestor = next
+		}
+	}
 
 	if realAbs != realRoot && !strings.HasPrefix(realAbs, realRoot+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q resolves outside project root", path)

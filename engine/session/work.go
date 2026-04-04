@@ -27,13 +27,12 @@ const workTreePath = "/project.md"
 // Triggers an initial load of the work tree from demarkus.
 // Safe to call with nil (disables work tree features).
 func (s *Session) SetMemoryStore(store memoryStore) {
+	s.mu.Lock()
 	s.memoryStore = store
-
-	// Clear work-tree state before (re)loading to avoid stale data
-	// when the store changes or is set to nil.
 	s.workTree = nil
 	s.workTreeVer = 0
 	s.workTreeDirty = false
+	s.mu.Unlock()
 
 	if store == nil {
 		return
@@ -46,12 +45,22 @@ func (s *Session) SetMemoryStore(store memoryStore) {
 // WorkTree returns the current work hierarchy. May be nil if no project.md
 // exists in demarkus or memory is not configured.
 func (s *Session) WorkTree() *project.Tree {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.workTree
 }
 
 // ActiveGoal returns the currently active task and its ancestry path string.
 // Returns nil, "" if no work tree is loaded or no active goal is set.
 func (s *Session) ActiveGoal() (*project.Node, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeGoalLocked()
+}
+
+// activeGoalLocked is the lock-free inner implementation of ActiveGoal.
+// Caller must hold at least mu.RLock.
+func (s *Session) activeGoalLocked() (*project.Node, string) {
 	if s.workTree == nil {
 		return nil, ""
 	}
@@ -69,7 +78,11 @@ func (s *Session) ActiveGoal() (*project.Node, string) {
 // SetActiveGoal marks the named task as active in the work tree and persists
 // the change to demarkus. Returns an error if the target is not found,
 // the work tree is not loaded, or persistence fails.
+// Safe to call from any goroutine — guarded by mu.
 func (s *Session) SetActiveGoal(title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.workTree == nil {
 		return errors.New("session: no work tree loaded")
 	}
@@ -77,13 +90,17 @@ func (s *Session) SetActiveGoal(title string) error {
 		return fmt.Errorf("session: task not found: %q", title)
 	}
 	s.workTreeDirty = true
-	return s.saveWorkTree()
+	return s.saveWorkTreeLocked()
 }
 
 // MarkGoalDone marks the named task as done in the work tree and persists
 // the change to demarkus. Returns an error if the target is not found,
 // the work tree is not loaded, or persistence fails.
+// Safe to call from any goroutine — guarded by mu.
 func (s *Session) MarkGoalDone(title string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.workTree == nil {
 		return errors.New("session: no work tree loaded")
 	}
@@ -91,7 +108,7 @@ func (s *Session) MarkGoalDone(title string) error {
 		return fmt.Errorf("session: task not found: %q", title)
 	}
 	s.workTreeDirty = true
-	return s.saveWorkTree()
+	return s.saveWorkTreeLocked()
 }
 
 // ActivateTask implements agent.TaskTracker. Marks a task as active in the
@@ -115,7 +132,6 @@ func (s *Session) ActiveTaskPath() string {
 
 // ReloadWorkTree re-fetches the work tree from demarkus, discarding any
 // unsaved local changes. Useful after external modifications to project.md.
-// Must be called from the TUI goroutine — mutates session state directly.
 func (s *Session) ReloadWorkTree() error {
 	return s.loadWorkTree()
 }
@@ -133,16 +149,20 @@ type WorkTreeSnapshot struct {
 // session state. Safe to call from any goroutine (e.g. a tea.Cmd).
 // Apply the result via ApplyWorkTreeSnapshot on the TUI goroutine.
 func (s *Session) FetchWorkTreeSnapshot() WorkTreeSnapshot {
-	if s.memoryStore == nil {
+	s.mu.RLock()
+	store := s.memoryStore
+	s.mu.RUnlock()
+
+	if store == nil {
 		return WorkTreeSnapshot{}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	doc, err := s.memoryStore.Fetch(ctx, workTreePath)
+	doc, err := store.Fetch(ctx, workTreePath)
 	if errors.Is(err, memory.ErrNotFound) {
-		return WorkTreeSnapshot{} // no document — tree is nil, not an error
+		return WorkTreeSnapshot{}
 	}
 	if err != nil {
 		return WorkTreeSnapshot{Err: err}
@@ -154,8 +174,10 @@ func (s *Session) FetchWorkTreeSnapshot() WorkTreeSnapshot {
 }
 
 // ApplyWorkTreeSnapshot applies a previously fetched snapshot to the session.
-// Must be called from the TUI goroutine — mutates session state directly.
+// Must be called from the TUI goroutine.
 func (s *Session) ApplyWorkTreeSnapshot(snap WorkTreeSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.workTree = snap.Tree
 	s.workTreeVer = snap.Version
 	s.workTreeDirty = false
@@ -164,14 +186,22 @@ func (s *Session) ApplyWorkTreeSnapshot(snap WorkTreeSnapshot) {
 // loadWorkTree fetches project.md from demarkus and parses it into the
 // work tree. Sets workTree to nil if the document does not exist.
 func (s *Session) loadWorkTree() error {
-	if s.memoryStore == nil {
+	s.mu.RLock()
+	store := s.memoryStore
+	s.mu.RUnlock()
+
+	if store == nil {
 		return errors.New("no memory store configured")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	doc, err := s.memoryStore.Fetch(ctx, workTreePath)
+	doc, err := store.Fetch(ctx, workTreePath)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if errors.Is(err, memory.ErrNotFound) {
 		s.workTree = nil
 		s.workTreeVer = 0
@@ -188,10 +218,9 @@ func (s *Session) loadWorkTree() error {
 	return nil
 }
 
-// saveWorkTree serializes the current work tree and publishes it to demarkus.
-// Uses optimistic concurrency — fails with memory.ErrConflict if the document
-// was modified externally since the last fetch.
-func (s *Session) saveWorkTree() error {
+// saveWorkTreeLocked serializes the current work tree and publishes to demarkus.
+// Caller must hold mu.Lock.
+func (s *Session) saveWorkTreeLocked() error {
 	if s.memoryStore == nil {
 		return errors.New("no memory store configured")
 	}
@@ -200,11 +229,15 @@ func (s *Session) saveWorkTree() error {
 	}
 
 	body := project.Serialize(s.workTree)
+	ver := s.workTreeVer
 
+	// Release lock during I/O to avoid blocking reads.
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	doc, err := s.memoryStore.Publish(ctx, workTreePath, body, ver)
+	s.mu.Lock()
 
-	doc, err := s.memoryStore.Publish(ctx, workTreePath, body, s.workTreeVer)
 	if err != nil {
 		return err
 	}

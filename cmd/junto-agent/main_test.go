@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,6 +22,9 @@ type mockProvider struct {
 }
 
 func (m *mockProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	if m.call >= len(m.turns) {
+		return nil, fmt.Errorf("unexpected Stream call %d", m.call+1)
+	}
 	events := m.turns[m.call]
 	m.call++
 	ch := make(chan llm.StreamEvent, len(events))

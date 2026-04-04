@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/event"
@@ -64,23 +65,37 @@ func parseArgs() config {
 func run() error {
 	cfg := parseArgs()
 
-	// Detect whether stdin is a terminal.
-	stat, _ := os.Stdin.Stat()
-	isTTY := (stat.Mode() & os.ModeCharDevice) != 0
+	// Detect whether stdin/stdout are terminals.
+	stdinStat, err := os.Stdin.Stat()
+	if err != nil {
+		return fmt.Errorf("check stdin: %w", err)
+	}
+	stdinTTY := (stdinStat.Mode() & os.ModeCharDevice) != 0
+
+	stdoutStat, err := os.Stdout.Stat()
+	if err != nil {
+		return fmt.Errorf("check stdout: %w", err)
+	}
+	stdoutTTY := (stdoutStat.Mode() & os.ModeCharDevice) != 0
 
 	// Setup logging.
 	if cfg.debug {
 		logFile, err := os.OpenFile("/tmp/junto-agent-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-		if err == nil {
-			defer func() { _ = logFile.Close() }()
-			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		if err != nil {
+			return fmt.Errorf("open debug log: %w", err)
 		}
+		defer func() {
+			if err := logFile.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: close debug log: %v\n", err)
+			}
+		}()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	} else {
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
-	// Resolve output format.
-	outputJSON := cfg.output == "json" || (cfg.output == "" && !isTTY)
+	// Resolve output format based on stdout, not stdin.
+	outputJSON := cfg.output == "json" || (cfg.output == "" && !stdoutTTY)
 
 	// Resolve project root.
 	projectRoot, err := resolveProjectRoot(cfg.project)
@@ -90,17 +105,21 @@ func run() error {
 
 	// Read goal from stdin if not provided as an argument and stdin is piped.
 	goal := cfg.goal
-	if goal == "" && !isTTY {
-		data, err := io.ReadAll(os.Stdin)
+	if goal == "" && !stdinTTY {
+		const maxGoalSize = 10 * 1024 * 1024 // 10 MB
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, maxGoalSize+1))
 		if err != nil {
 			return fmt.Errorf("read stdin: %w", err)
 		}
+		if len(data) > maxGoalSize {
+			return fmt.Errorf("stdin goal exceeds %d bytes", maxGoalSize)
+		}
 		goal = strings.TrimSpace(string(data))
 	}
-	if goal == "" && !isTTY {
+	if goal == "" && !stdinTTY {
 		return fmt.Errorf("no goal provided — pass as argument or pipe to stdin")
 	}
-	// goal == "" && isTTY → Runner handles REPL mode.
+	// goal == "" && stdinTTY → Runner handles REPL mode.
 
 	// Create workspace.
 	workspace := headless.NewDiskWorkspace(projectRoot)
@@ -115,7 +134,11 @@ func run() error {
 	// Start LSP servers for language intelligence (diagnostics after edits).
 	lspMgr := wire.InitLSP(projectRoot, events)
 	if lspMgr != nil {
-		defer func() { _ = lspMgr.Close() }()
+		defer func() {
+			if err := lspMgr.Close(); err != nil {
+				slog.Error("close LSP manager", "err", err)
+			}
+		}()
 	}
 
 	// Ensure demarkus binaries are installed.
@@ -148,17 +171,17 @@ func run() error {
 	ag := agent.New(provider, workspace, events, opts, mcpTools...)
 
 	// Setup cancellation via SIGINT/SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Stderr writer — streams status in TTY or verbose mode.
 	stderr := io.Writer(io.Discard)
-	if isTTY || cfg.verbose {
+	if stdinTTY || cfg.verbose {
 		stderr = os.Stderr
 	}
 
 	// Run the agent.
-	runner := headless.NewRunner(ag, workspace, events, stderr, isTTY)
+	runner := headless.NewRunner(ag, workspace, events, stderr, stdinTTY)
 	result := runner.Run(ctx, goal, cfg.files)
 
 	// Output result.

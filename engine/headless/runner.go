@@ -97,7 +97,7 @@ func (r *Runner) processEvents(ctx context.Context, result *Result) {
 			if !ok {
 				return
 			}
-			if done := r.handleEvent(ev, result, &summary, &summaryTruncated); done {
+			if done := r.handleEvent(ctx, ev, result, &summary, &summaryTruncated); done {
 				return
 			}
 		}
@@ -105,7 +105,7 @@ func (r *Runner) processEvents(ctx context.Context, result *Result) {
 }
 
 // handleEvent dispatches a single event. Returns true when the run is complete.
-func (r *Runner) handleEvent(ev event.Event, result *Result, summary *strings.Builder, truncated *bool) bool {
+func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result, summary *strings.Builder, truncated *bool) bool {
 	switch e := ev.(type) {
 	case event.AgentToken:
 		if !*truncated {
@@ -123,7 +123,7 @@ func (r *Runner) handleEvent(ev event.Event, result *Result, summary *strings.Bu
 
 	case event.AgentToolCall:
 		r.status("[%s]\n", e.Name)
-		slog.Debug("tool call", "name", e.Name, "args", e.Args)
+		slog.Debug("tool call", "name", e.Name)
 
 	case event.AgentEditProposed:
 		r.applyEdit(e.Edit, result)
@@ -140,7 +140,7 @@ func (r *Runner) handleEvent(ev event.Event, result *Result, summary *strings.Bu
 		r.status("error: %s\n", e.Err)
 
 	case event.AgentWaiting:
-		return r.handleWaiting(result, summary)
+		return r.handleWaiting(ctx, result, summary)
 
 	case event.AgentDone:
 		result.Success = e.Success
@@ -173,15 +173,16 @@ func (r *Runner) handleStatus(e event.AgentStatus) {
 // handleWaiting processes the AgentWaiting event.
 // In single-shot mode (no TTY), cancels the agent and returns true (done).
 // In REPL mode, reads input from stdin and continues the conversation.
-func (r *Runner) handleWaiting(result *Result, summary *strings.Builder) bool {
+// The read is cancellable via ctx so a cancelled run doesn't hang on stdin.
+func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *strings.Builder) bool {
 	result.Summary = summary.String()
 	if !r.isTTY {
 		r.agent.Cancel()
 		result.Success = true
 		return true
 	}
-	input := r.readInput()
-	if input == "" {
+	input, ok := r.readInput(ctx)
+	if !ok {
 		r.agent.Cancel()
 		result.Success = true
 		return true
@@ -196,8 +197,12 @@ func (r *Runner) handleWaiting(result *Result, summary *strings.Builder) bool {
 }
 
 // applyEdit writes the edit directly to disk and signals the agent to continue.
+// Reads raw bytes to preserve the file's trailing newline state, then
+// performs the replacement on the normalized content (matching the agent's
+// view) and restores the original newline suffix before writing back.
 func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
-	content, err := r.workspace.ReadFile(edit.Path)
+	absPath := r.workspace.CanonPath(edit.Path)
+	raw, err := os.ReadFile(absPath)
 	if err != nil {
 		msg := fmt.Sprintf("cannot read %s for edit: %v", edit.Path, err)
 		slog.Error(msg)
@@ -207,8 +212,22 @@ func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
 		return
 	}
 
-	if !strings.Contains(content, edit.Search) {
+	// Normalize to match the agent's view (ReadFile trims one trailing \n).
+	rawStr := string(raw)
+	hadTrailingNL := strings.HasSuffix(rawStr, "\n")
+	content := strings.TrimSuffix(rawStr, "\n")
+
+	matches := strings.Count(content, edit.Search)
+	if matches == 0 {
 		msg := fmt.Sprintf("edit search text not found in %s", edit.Path)
+		slog.Error(msg)
+		result.Errors = append(result.Errors, msg)
+		r.agent.Approve()
+		r.agent.Continue(edit.Path, content)
+		return
+	}
+	if matches > 1 {
+		msg := fmt.Sprintf("edit search text is ambiguous in %s (%d matches)", edit.Path, matches)
 		slog.Error(msg)
 		result.Errors = append(result.Errors, msg)
 		r.agent.Approve()
@@ -218,7 +237,13 @@ func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
 
 	newContent := strings.Replace(content, edit.Search, edit.Replace, 1)
 
-	if err := r.workspace.OverwriteFile(edit.Path, newContent); err != nil {
+	// Restore the original trailing newline state.
+	writeContent := newContent
+	if hadTrailingNL {
+		writeContent += "\n"
+	}
+
+	if err := r.workspace.OverwriteFile(edit.Path, writeContent); err != nil {
 		msg := fmt.Sprintf("cannot write %s: %v", edit.Path, err)
 		slog.Error(msg)
 		result.Errors = append(result.Errors, msg)
@@ -227,9 +252,10 @@ func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
 		return
 	}
 
-	result.FilesChanged = append(result.FilesChanged, r.workspace.CanonPath(edit.Path))
+	result.FilesChanged = append(result.FilesChanged, absPath)
 	r.status("[edited %s]\n", edit.Path)
 
+	// Continue with the normalized content (agent's view, no trailing \n).
 	r.agent.Approve()
 	r.agent.Continue(edit.Path, newContent)
 }
@@ -244,17 +270,34 @@ func (r *Runner) status(format string, args ...any) {
 	_, _ = fmt.Fprintf(r.stderr, format, args...)
 }
 
-// readInput reads a single line from stdin. Returns empty string on EOF.
-// I/O errors are logged — they look like EOF to the caller, which ends
-// the conversation gracefully rather than crashing.
-func (r *Runner) readInput() string {
+// readInput reads a single line from stdin, cancellable via ctx.
+// Returns the trimmed input and true on success, or ("", false) on
+// EOF, error, or context cancellation.
+func (r *Runner) readInput(ctx context.Context) (string, bool) {
 	r.status("\n> ")
-	scanner := bufio.NewScanner(os.Stdin)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			slog.Error("stdin read failed", "err", err)
-		}
-		return ""
+
+	type scanResult struct {
+		text string
+		ok   bool
 	}
-	return strings.TrimSpace(scanner.Text())
+	ch := make(chan scanResult, 1)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				slog.Error("stdin read failed", "err", err)
+			}
+			ch <- scanResult{"", false}
+			return
+		}
+		text := strings.TrimSpace(scanner.Text())
+		ch <- scanResult{text, text != ""}
+	}()
+
+	select {
+	case res := <-ch:
+		return res.text, res.ok
+	case <-ctx.Done():
+		return "", false
+	}
 }

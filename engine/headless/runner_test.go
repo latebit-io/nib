@@ -168,6 +168,52 @@ func TestRunner_EditProposed_AppliesAndContinues(t *testing.T) {
 	}
 }
 
+func TestRunner_EditProposed_PreservesTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	ws := NewDiskWorkspace(dir)
+
+	// File with trailing newline — edit must preserve it on disk.
+	absPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(absPath, []byte("package main\n\nfunc old() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan event.Event, 64)
+	mock := &mockAgent{events: events}
+	mock.runFunc = func() {
+		events <- event.AgentEditProposed{Edit: event.PendingEdit{
+			ID:      "edit-nl",
+			Path:    "main.go",
+			Search:  "func old() {}",
+			Replace: "func new() {}",
+		}}
+		time.Sleep(50 * time.Millisecond)
+		events <- event.AgentDone{Success: true}
+	}
+
+	runner := NewRunner(mock, ws, events, &bytes.Buffer{}, false)
+	result := runner.Run(context.Background(), "edit with newline", nil)
+
+	if !result.Success {
+		t.Error("expected success")
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	want := "package main\n\nfunc new() {}\n"
+	if got != want {
+		t.Errorf("on-disk content = %q, want %q (trailing newline preserved)", got, want)
+	}
+
+	// Agent receives normalized content (no trailing \n), matching its view.
+	if mock.lastContent != "package main\n\nfunc new() {}" {
+		t.Errorf("agent received content = %q, want without trailing newline", mock.lastContent)
+	}
+}
+
 func TestRunner_FileCreated_TrackedInResult(t *testing.T) {
 	dir := t.TempDir()
 	events := make(chan event.Event, 64)

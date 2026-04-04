@@ -29,17 +29,20 @@ const (
 	ModePlanning
 )
 
-// InteractionMode controls how the agent interacts with the developer.
-// It affects prompt framing (approval flow vs autonomous) and is set
-// at construction time — it does not change per-conversation.
+// InteractionMode controls prompt framing — how the agent describes its
+// workflow to the LLM. It does NOT change runtime behavior: the agent
+// always blocks on approveCh/continueCh for edits, and the frontend
+// (TUI or headless Runner) is responsible for signaling them.
+// Set at construction time, immutable for the agent's lifetime.
 type InteractionMode int
 
 const (
-	// Interactive is the default: agent works in an editor with a developer,
-	// proposes edits for approval, and waits for continue signals.
+	// Interactive is the default: prompts describe an editor with a developer
+	// who reviews and approves edits one at a time.
 	Interactive InteractionMode = iota
-	// Headless: agent runs autonomously without a TUI. Edits are applied
-	// directly, no approval flow, optimized for throughput.
+	// Headless: prompts describe autonomous operation where edits are applied
+	// directly. The headless Runner auto-signals approval channels, so the
+	// agent runs at full speed without user interaction.
 	Headless
 )
 
@@ -88,8 +91,8 @@ type Agent struct {
 	// planningBlocklist is the per-instance set of tool names blocked in planning mode.
 	planningBlocklist map[string]bool
 
-	// interactionMode controls prompt framing (interactive vs headless).
-	// Set at construction, immutable for the agent's lifetime.
+	// interactionMode controls prompt framing only (interactive vs headless).
+	// Does not affect runtime behavior — approval channels are always used.
 	interactionMode InteractionMode
 
 	// memoryStore is used to re-fetch the session summary before each goal.
@@ -113,8 +116,9 @@ type NewOptions struct {
 	// These are merged with the built-in defaults (edit_file, write_file, bash);
 	// they extend the blocklist, not replace it.
 	PlanningBlocklist []string
-	// Interaction sets the prompt framing. Interactive (default) uses
-	// approval-based workflow language; Headless uses autonomous framing.
+	// Interaction sets the prompt framing (Interactive vs Headless).
+	// This only affects system prompt text — it does not change runtime
+	// behavior. The frontend must handle approval signaling regardless.
 	Interaction InteractionMode
 }
 

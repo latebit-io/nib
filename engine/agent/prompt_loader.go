@@ -84,25 +84,49 @@ func (l *PromptLoader) PlanningSystemPrompt(data SystemPromptData) string {
 
 // renderSystemTemplate loads a system prompt template by name and renders it
 // with the given data. Project overrides are re-parsed on every call so edits
-// during a session take effect immediately. Returns the trimmed result.
+// during a session take effect immediately. If a project override fails to
+// parse or execute, falls back to the embedded default template rather than
+// returning raw (potentially broken) template syntax.
 func (l *PromptLoader) renderSystemTemplate(name string, data SystemPromptData) string {
 	raw, source := l.load(name)
 	slog.Debug("prompt.renderSystemTemplate", "name", name, "source", source)
 
-	tmpl, err := template.New(name).Parse(raw)
-	if err != nil {
-		slog.Error("system prompt template parse failed, using raw content",
-			"name", name, "source", source, "err", err)
-		return strings.TrimSpace(raw)
+	out, err := renderTemplate(name, raw, data)
+	if err == nil {
+		return out
+	}
+	slog.Error("system prompt template render failed", "name", name, "source", source, "err", err)
+
+	// Project override failed — fall back to the embedded default template.
+	if source == "project" {
+		embedded, readErr := defaultPrompts.ReadFile("prompts/" + name)
+		if readErr != nil {
+			// Embedded files are compiled in — this should never happen.
+			panic(fmt.Sprintf("embedded prompt missing: %s: %v", name, readErr))
+		}
+		out, fallbackErr := renderTemplate(name, string(embedded), data)
+		if fallbackErr == nil {
+			return out
+		}
+		// Both project override and embedded default failed — truly broken binary.
+		slog.Error("embedded prompt template also failed", "name", name, "err", fallbackErr)
 	}
 
+	// Last resort: return raw content (only reachable for broken embedded templates).
+	return strings.TrimSpace(raw)
+}
+
+// renderTemplate parses and executes a Go template, returning the trimmed result.
+func renderTemplate(name, raw string, data SystemPromptData) (string, error) {
+	tmpl, err := template.New(name).Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse: %w", err)
+	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
-		slog.Error("system prompt template execute failed, using raw content",
-			"name", name, "err", err)
-		return strings.TrimSpace(raw)
+		return "", fmt.Errorf("execute: %w", err)
 	}
-	return strings.TrimSpace(buf.String())
+	return strings.TrimSpace(buf.String()), nil
 }
 
 // RenderUserMessage executes the user message template with the given data.

@@ -169,6 +169,27 @@ func TestPromptLoaderProjectOverride(t *testing.T) {
 	}
 }
 
+func TestPromptLoaderBrokenOverrideFallsBackToEmbedded(t *testing.T) {
+	dir := t.TempDir()
+	promptDir := dir + "/.project/prompts"
+	if err := mkdirAll(promptDir); err != nil {
+		t.Fatal(err)
+	}
+	// Write a broken template that will fail to parse.
+	if err := writeFile(promptDir+"/system.md.tmpl", "broken {{if}}"); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewPromptLoader(dir)
+	system := loader.SystemPrompt(SystemPromptData{})
+	if !strings.Contains(system, "pair-programming agent") {
+		t.Error("broken project override should fall back to embedded default, got: " + system[:min(80, len(system))])
+	}
+	if strings.Contains(system, "broken") {
+		t.Error("broken template syntax should not appear in output")
+	}
+}
+
 func TestPromptLoaderFallsBackToEmbedded(t *testing.T) {
 	loader := NewPromptLoader(t.TempDir()) // empty project dir
 	system := loader.SystemPrompt(SystemPromptData{})
@@ -247,6 +268,9 @@ func TestPlanningPromptInteractiveMode(t *testing.T) {
 	if !strings.Contains(planning, ":done") {
 		t.Error("interactive planning prompt should mention :done command")
 	}
+	if !strings.Contains(planning, ":skip") {
+		t.Error("interactive planning prompt should mention :skip command")
+	}
 }
 
 func TestPlanningPromptHeadlessMode(t *testing.T) {
@@ -261,6 +285,9 @@ func TestPlanningPromptHeadlessMode(t *testing.T) {
 	}
 	if strings.Contains(planning, ":done") {
 		t.Error("headless planning prompt should not mention :done command")
+	}
+	if strings.Contains(planning, ":skip") {
+		t.Error("headless planning prompt should not mention :skip command")
 	}
 	// Shared sections should still be present.
 	if !strings.Contains(planning, "Plan Schema") {

@@ -148,8 +148,7 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result
 		return true
 
 	case event.FlushBuffers:
-		// No in-memory buffers in headless mode — respond immediately.
-		e.Result <- event.FlushResult{Saved: nil, Err: nil}
+		r.handleFlush(ctx, e)
 
 	case event.DiagnosticsUpdated:
 		// No UI to update.
@@ -158,6 +157,16 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result
 		slog.Debug("unhandled event in headless runner", "type", fmt.Sprintf("%T", ev))
 	}
 	return false
+}
+
+// handleFlush responds to a FlushBuffers request. In headless mode there are
+// no in-memory buffers, so this responds immediately with an empty result.
+// Guarded with ctx to avoid blocking if the requester exits.
+func (r *Runner) handleFlush(ctx context.Context, e event.FlushBuffers) {
+	select {
+	case e.Result <- event.FlushResult{Saved: nil, Err: nil}:
+	case <-ctx.Done():
+	}
 }
 
 // handleStatus writes human-readable status to stderr in TTY mode.

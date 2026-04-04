@@ -25,6 +25,11 @@ type mockAgent struct {
 	cancelled   bool
 	replied     bool
 
+	// continueDone is signaled when Continue() is called. Tests that send
+	// AgentEditProposed should wait on this before sending AgentDone to
+	// avoid a race between applyEdit and the done event.
+	continueDone chan struct{}
+
 	// Captured from Run — used to verify pre-read behavior.
 	runFileName     string
 	runFileContent  string
@@ -54,6 +59,13 @@ func (m *mockAgent) Approve() {
 func (m *mockAgent) Continue(path, content string) {
 	m.continued = true
 	m.lastPath = path
+	m.lastContent = content
+	if m.continueDone != nil {
+		select {
+		case m.continueDone <- struct{}{}:
+		default:
+		}
+	}
 	m.lastContent = content
 }
 
@@ -122,7 +134,8 @@ func TestRunner_EditProposed_AppliesAndContinues(t *testing.T) {
 	}
 
 	events := make(chan event.Event, 64)
-	mock := &mockAgent{events: events}
+	done := make(chan struct{}, 1)
+	mock := &mockAgent{events: events, continueDone: done}
 	mock.runFunc = func() {
 		events <- event.AgentEditProposed{Edit: event.PendingEdit{
 			ID:      "edit-1",
@@ -130,8 +143,7 @@ func TestRunner_EditProposed_AppliesAndContinues(t *testing.T) {
 			Search:  "func old() {}",
 			Replace: "func new() {}",
 		}}
-		// Give the runner time to process the edit before sending done.
-		time.Sleep(50 * time.Millisecond)
+		<-done // wait for applyEdit to call Continue
 		events <- event.AgentDone{Success: true}
 	}
 
@@ -179,7 +191,8 @@ func TestRunner_EditProposed_PreservesTrailingNewline(t *testing.T) {
 	}
 
 	events := make(chan event.Event, 64)
-	mock := &mockAgent{events: events}
+	done := make(chan struct{}, 1)
+	mock := &mockAgent{events: events, continueDone: done}
 	mock.runFunc = func() {
 		events <- event.AgentEditProposed{Edit: event.PendingEdit{
 			ID:      "edit-nl",
@@ -187,7 +200,7 @@ func TestRunner_EditProposed_PreservesTrailingNewline(t *testing.T) {
 			Search:  "func old() {}",
 			Replace: "func new() {}",
 		}}
-		time.Sleep(50 * time.Millisecond)
+		<-done
 		events <- event.AgentDone{Success: true}
 	}
 
@@ -378,7 +391,8 @@ func TestRunner_EditSearchNotFound(t *testing.T) {
 	writeTestFile(t, dir, "main.go", "package main")
 
 	events := make(chan event.Event, 64)
-	mock := &mockAgent{events: events}
+	done := make(chan struct{}, 1)
+	mock := &mockAgent{events: events, continueDone: done}
 	mock.runFunc = func() {
 		events <- event.AgentEditProposed{Edit: event.PendingEdit{
 			ID:      "edit-1",
@@ -386,7 +400,7 @@ func TestRunner_EditSearchNotFound(t *testing.T) {
 			Search:  "nonexistent text",
 			Replace: "replacement",
 		}}
-		time.Sleep(50 * time.Millisecond)
+		<-done // wait for applyEdit to call Continue (even on error)
 		events <- event.AgentDone{Success: true}
 	}
 

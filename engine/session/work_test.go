@@ -225,6 +225,47 @@ func TestSetActiveGoal_ConflictDetection(t *testing.T) {
 	}
 }
 
+func TestMarkGoalDone(t *testing.T) {
+	store := newMockMemoryStore()
+	store.seed(workTreePath, "# A\n- [>] active task\n- [ ] other\n", 1)
+
+	sess := newWorkTestSession(t)
+	sess.SetMemoryStore(store)
+
+	if err := sess.MarkGoalDone("active task"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify in-memory state.
+	tree := sess.WorkTree()
+	if tree.Roots[0].Children[0].Status != project.TaskDone {
+		t.Errorf("status = %v, want TaskDone", tree.Roots[0].Children[0].Status)
+	}
+
+	// Verify persisted.
+	doc, err := store.Fetch(context.Background(), workTreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reparsed := project.Parse(doc.Body)
+	if reparsed.Roots[0].Children[0].Status != project.TaskDone {
+		t.Errorf("persisted status = %v, want TaskDone", reparsed.Roots[0].Children[0].Status)
+	}
+}
+
+func TestMarkGoalDone_NotFound(t *testing.T) {
+	store := newMockMemoryStore()
+	store.seed(workTreePath, "# A\n- [ ] task\n", 1)
+
+	sess := newWorkTestSession(t)
+	sess.SetMemoryStore(store)
+
+	err := sess.MarkGoalDone("nonexistent")
+	if err == nil {
+		t.Error("MarkGoalDone returned nil error for nonexistent task")
+	}
+}
+
 func TestReloadWorkTree(t *testing.T) {
 	store := newMockMemoryStore()
 	store.seed(workTreePath, "# Original\n", 1)

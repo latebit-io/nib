@@ -96,6 +96,21 @@ func (t *Tree) SetActiveGoal(targetTitle string) bool {
 	return true
 }
 
+// MarkDone marks the task at targetTitle as done (TaskDone).
+// If the task was the active goal, the active marker is simply replaced
+// with done — no new active goal is selected automatically.
+// Returns true if the target was found and updated.
+// Only leaf tasks (IsHeading=false) can be marked done.
+func (t *Tree) MarkDone(targetTitle string) bool {
+	for _, root := range t.Roots {
+		if n := findTaskByTitle(root, targetTitle); n != nil {
+			n.Status = TaskDone
+			return true
+		}
+	}
+	return false
+}
+
 // Walk calls fn for every node in depth-first order.
 // If fn returns false, traversal of that node's children is skipped.
 func (t *Tree) Walk(fn func(n *Node) bool) {

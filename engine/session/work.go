@@ -80,6 +80,20 @@ func (s *Session) SetActiveGoal(title string) error {
 	return s.saveWorkTree()
 }
 
+// MarkGoalDone marks the named task as done in the work tree and persists
+// the change to demarkus. Returns an error if the target is not found,
+// the work tree is not loaded, or persistence fails.
+func (s *Session) MarkGoalDone(title string) error {
+	if s.workTree == nil {
+		return errors.New("session: no work tree loaded")
+	}
+	if !s.workTree.MarkDone(title) {
+		return fmt.Errorf("session: task not found: %q", title)
+	}
+	s.workTreeDirty = true
+	return s.saveWorkTree()
+}
+
 // ReloadWorkTree re-fetches the work tree from demarkus, discarding any
 // unsaved local changes. Useful after external modifications to project.md.
 func (s *Session) ReloadWorkTree() error {

@@ -343,6 +343,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshProjectPane()
 		return m, nil
 
+	case ProjectMarkGoalDoneMsg:
+		if err := m.Session.MarkGoalDone(msg.Title); err != nil {
+			slog.Warn("mark goal done", "err", err)
+			m.AgentPane.AppendMeta("[mark done failed: " + err.Error() + "]\n")
+		}
+		m.refreshProjectPane()
+		return m, nil
+
 	// Animation tick — advance the agent typing animation
 	case animTickMsg:
 		return m, m.handleAnimTick()

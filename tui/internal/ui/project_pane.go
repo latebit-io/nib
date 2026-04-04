@@ -29,6 +29,10 @@ type ProjectRemoveContextMsg struct{ Path string }
 // AppModel handles the session mutation to keep writes in one place.
 type ProjectSetActiveGoalMsg struct{ Title string }
 
+// ProjectMarkGoalDoneMsg is sent when the user marks an active task as done.
+// AppModel handles the session mutation.
+type ProjectMarkGoalDoneMsg struct{ Title string }
+
 // Package-level styles — allocated once, never in render paths.
 var (
 	projSectionStyle = lipgloss.NewStyle().
@@ -377,7 +381,7 @@ func (p *ProjectPaneModel) activateItem() tea.Cmd {
 }
 
 // activateWorkItem handles Enter on a work tree node.
-// Headings toggle collapse; tasks emit a set-active-goal message.
+// Headings toggle collapse; tasks cycle status: pending → active, active → done.
 func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
 	if n.IsHeading {
 		p.workCollapsed[n.Title] = !p.workCollapsed[n.Title]
@@ -388,9 +392,15 @@ func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
 		p.clampScroll()
 		return nil
 	}
-	// Task — emit set active goal
 	title := n.Title
-	return func() tea.Msg { return ProjectSetActiveGoalMsg{Title: title} }
+	switch n.Status {
+	case project.TaskActive:
+		// Active → done
+		return func() tea.Msg { return ProjectMarkGoalDoneMsg{Title: title} }
+	default:
+		// Pending (or done) → active
+		return func() tea.Msg { return ProjectSetActiveGoalMsg{Title: title} }
+	}
 }
 
 // addContext emits a message to add the file under cursor to the context set.

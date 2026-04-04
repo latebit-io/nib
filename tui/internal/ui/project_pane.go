@@ -83,7 +83,8 @@ type ProjectPaneModel struct {
 
 	// Work tree display state — collapse tracking is TUI-specific,
 	// separate from the engine's project.Tree.
-	workCollapsed map[string]bool // title → collapsed (headings only)
+	workCollapsed   map[string]bool // title → collapsed (headings only)
+	workDepthOffset int             // subtracted from node.Depth for rendering (root elision)
 
 	// Flattened display items — rebuilt on refresh
 	items []projectItem
@@ -237,8 +238,19 @@ func (p *ProjectPaneModel) flattenItems() {
 	// WORK section — from demarkus project.md
 	if tree := p.workTree(); tree != nil && len(tree.Roots) > 0 {
 		p.items = append(p.items, projectItem{isHeader: true, section: "work"})
-		for _, root := range tree.Roots {
-			p.flattenWorkNode(root, 0)
+		p.workDepthOffset = 0
+
+		// If there's a single root whose title matches the project name
+		// (already shown in the pane border), elide it and promote children.
+		if len(tree.Roots) == 1 && tree.Roots[0].IsHeading && tree.Roots[0].Title == tree.ProjectName {
+			p.workDepthOffset = 1
+			for _, child := range tree.Roots[0].Children {
+				p.flattenWorkNode(child, 0)
+			}
+		} else {
+			for _, root := range tree.Roots {
+				p.flattenWorkNode(root, 0)
+			}
 		}
 	}
 
@@ -473,7 +485,11 @@ func (p *ProjectPaneModel) renderHeader(section string, selected bool) string {
 
 // renderWorkNode renders a work tree node (heading or task).
 func (p *ProjectPaneModel) renderWorkNode(n *project.Node, selected bool) string {
-	indent := strings.Repeat("  ", n.Depth)
+	depth := n.Depth - p.workDepthOffset
+	if depth < 0 {
+		depth = 0
+	}
+	indent := strings.Repeat("  ", depth)
 
 	var icon, name string
 	if n.IsHeading {

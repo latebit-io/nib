@@ -106,11 +106,11 @@ func DefaultKeymap() *Keymap {
 			{code: '-', mod: tea.ModCtrl}:                         ActionGoBack,        // Ctrl+- (VS Code)
 
 			// Agent
-			{code: 'g', mod: tea.ModCtrl | tea.ModShift}: ActionAgentPlan,
-			{code: 'G', mod: tea.ModCtrl | tea.ModShift}: ActionAgentPlan, // some terminals send uppercase with Shift
-			{code: 'o', mod: tea.ModCtrl}:                ActionAgentApprove,
-			{code: tea.KeyEscape, mod: 0}:                ActionAgentReject,
-			{code: 'n', mod: tea.ModCtrl}:                ActionAgentContinue,
+			{code: 'g', mod: tea.ModAlt}:  ActionAgentPlan,
+			{code: 169, mod: 0}:           ActionAgentPlan, // macOS: Option+G sends ©
+			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
+			{code: tea.KeyEscape, mod: 0}: ActionAgentReject,
+			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
 
 			// Find
 			{code: 'f', mod: tea.ModCtrl}:                ActionFind,
@@ -127,17 +127,18 @@ func DefaultKeymap() *Keymap {
 			{code: 'k', mod: tea.ModAlt}:  ActionHover,
 		},
 		byString: map[string]Action{
-			"ctrl+g":       ActionAgentStart,
-			"ctrl+shift+g": ActionAgentPlan,
-			"ctrl+p":       ActionOpenPalette,
-			"ctrl+b":       ActionToggleProject,
-			"ctrl+/":       ActionToggleComment,
-			"ctrl+_":       ActionToggleComment, // some terminals send Ctrl+/ as Ctrl+_
-			"f4":           ActionHelp,
-			"f1":           ActionFocusProject,
-			"f2":           ActionFocusEditor,
-			"f3":           ActionFocusAgent,
-			"f12":          ActionGoToDefinition, // F12 (VS Code)
+			"ctrl+g": ActionAgentStart,
+			"alt+g":  ActionAgentPlan,
+			"©":      ActionAgentPlan, // macOS: Option+G sends ©
+			"ctrl+p": ActionOpenPalette,
+			"ctrl+b": ActionToggleProject,
+			"ctrl+/": ActionToggleComment,
+			"ctrl+_": ActionToggleComment, // some terminals send Ctrl+/ as Ctrl+_
+			"f4":     ActionHelp,
+			"f1":     ActionFocusProject,
+			"f2":     ActionFocusEditor,
+			"f3":     ActionFocusAgent,
+			"f12":    ActionGoToDefinition, // F12 (VS Code)
 		},
 	}
 	return km

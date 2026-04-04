@@ -758,7 +758,7 @@ func (m *AgentPaneModel) Render() string {
 			}
 			output[row] = inputActiveStyle.Render(lineText)
 		} else if !m.InputActive && i == 0 {
-			output[row] = inputDimStyle.Render(m.padLine(" Ctrl+G to send a goal"))
+			output[row] = inputDimStyle.Render(m.padLine(" Ctrl+G code | Alt+G plan"))
 		} else {
 			output[row] = strings.Repeat(" ", m.Width)
 		}
@@ -774,7 +774,9 @@ func (m *AgentPaneModel) Render() string {
 		case "thinking":
 			statusText = statusStyle.Render(m.padLine(" Thinking..."))
 		case "planning":
-			statusText = statusStyle.Render(m.padLine(" Planning... | :done :skip"))
+			statusText = statusStyle.Render(m.padLine(" Planning..."))
+		case "planning-waiting":
+			statusText = statusStyle.Render(m.padLine(" Planning | :done to execute | :skip"))
 		case "editing":
 			statusText = statusStyle.Render(m.padLine(" Ctrl+N to continue"))
 		case "waiting":

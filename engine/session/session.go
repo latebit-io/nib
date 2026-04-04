@@ -928,6 +928,11 @@ func (s *Session) handlePlanningInput(input string) bool {
 		// via memory summary.
 		originalGoal := s.CurrentIntent
 		s.agent.Cancel()
+		// Reload work tree — the planning agent may have published
+		// or updated /project.md during the conversation.
+		if err := s.loadWorkTree(); err != nil {
+			slog.Warn("session: reload work tree after planning", "err", err)
+		}
 		s.startNewConversation(originalGoal, agent.ModeExecution)
 		s.Phase = PhaseExecution
 		return false

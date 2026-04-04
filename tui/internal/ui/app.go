@@ -433,7 +433,11 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
-		m.AgentPane.Status = "waiting"
+		if m.Session.Phase == session.PhasePlanning {
+			m.AgentPane.Status = "planning-waiting"
+		} else {
+			m.AgentPane.Status = "waiting"
+		}
 		m.AgentPane.InputActive = true
 		m.AgentPane.InputBuffer = ""
 	case event.AgentDone:

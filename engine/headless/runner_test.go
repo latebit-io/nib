@@ -419,6 +419,46 @@ func TestRunner_EditSearchNotFound(t *testing.T) {
 	}
 }
 
+func TestRunner_EditSearchAmbiguous(t *testing.T) {
+	dir := t.TempDir()
+	ws := NewDiskWorkspace(dir)
+	// File with duplicate occurrences of the search text.
+	writeTestFile(t, dir, "main.go", "foo\nbar\nfoo\n")
+
+	events := make(chan event.Event, 64)
+	done := make(chan struct{}, 1)
+	mock := &mockAgent{events: events, continueDone: done}
+	mock.runFunc = func() {
+		events <- event.AgentEditProposed{Edit: event.PendingEdit{
+			ID:      "edit-1",
+			Path:    "main.go",
+			Search:  "foo",
+			Replace: "baz",
+		}}
+		<-done
+		events <- event.AgentDone{Success: true}
+	}
+
+	runner := NewRunner(mock, ws, events, &bytes.Buffer{}, false)
+	result := runner.Run(context.Background(), "ambiguous edit", nil)
+
+	if len(result.Errors) == 0 {
+		t.Fatal("expected error for ambiguous match")
+	}
+	if !strings.Contains(result.Errors[0], "ambiguous") {
+		t.Errorf("error %q does not mention 'ambiguous'", result.Errors[0])
+	}
+
+	// Verify the file was NOT modified.
+	data, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "foo\nbar\nfoo") {
+		t.Error("file should be unchanged after ambiguous edit rejection")
+	}
+}
+
 func TestResult_WriteJSON(t *testing.T) {
 	result := &Result{
 		Success:      true,

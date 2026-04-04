@@ -227,6 +227,9 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 		result.Success = true
 		return true
 	}
+	// Reset summary for the new turn. In REPL mode, Result.Summary captures
+	// the last turn only — prior turns were already streamed to stderr.
+	// result.Summary was saved above before prompting for input.
 	summary.Reset()
 	if !r.agent.Reply(input) {
 		slog.Warn("agent not accepting input, ending conversation")

@@ -153,17 +153,17 @@ func TestBuildMessagesContextSetCapped(t *testing.T) {
 
 func TestPromptLoaderProjectOverride(t *testing.T) {
 	dir := t.TempDir()
-	// Create .project/prompts/system.md override
+	// Create .project/prompts/system.md.tmpl override
 	promptDir := dir + "/.project/prompts"
 	if err := mkdirAll(promptDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFile(promptDir+"/system.md", "You are a custom agent."); err != nil {
+	if err := writeFile(promptDir+"/system.md.tmpl", "You are a custom agent."); err != nil {
 		t.Fatal(err)
 	}
 
 	loader := NewPromptLoader(dir)
-	system := loader.SystemPrompt()
+	system := loader.SystemPrompt(SystemPromptData{})
 	if system != "You are a custom agent." {
 		t.Errorf("expected project override, got: %s", system)
 	}
@@ -171,7 +171,7 @@ func TestPromptLoaderProjectOverride(t *testing.T) {
 
 func TestPromptLoaderFallsBackToEmbedded(t *testing.T) {
 	loader := NewPromptLoader(t.TempDir()) // empty project dir
-	system := loader.SystemPrompt()
+	system := loader.SystemPrompt(SystemPromptData{})
 	if !strings.Contains(system, "pair-programming agent") {
 		t.Error("expected embedded default system prompt")
 	}
@@ -179,9 +179,106 @@ func TestPromptLoaderFallsBackToEmbedded(t *testing.T) {
 
 func TestSystemPromptIncludesMemorySection(t *testing.T) {
 	loader := NewPromptLoader("")
-	system := loader.SystemPrompt()
+	system := loader.SystemPrompt(SystemPromptData{})
 	if !strings.Contains(system, "## Memory") {
 		t.Error("system prompt should include Memory section")
+	}
+}
+
+func TestSystemPromptInteractiveMode(t *testing.T) {
+	loader := NewPromptLoader("")
+	system := loader.SystemPrompt(SystemPromptData{Headless: false})
+
+	if !strings.Contains(system, "pair-programming agent") {
+		t.Error("interactive system prompt should contain 'pair-programming agent'")
+	}
+	if !strings.Contains(system, "Context Set") {
+		t.Error("interactive system prompt should include Context Set section")
+	}
+	if !strings.Contains(system, "ONE edit_file call per step") {
+		t.Error("interactive system prompt should include single-edit rule")
+	}
+	if strings.Contains(system, "headless mode") {
+		t.Error("interactive system prompt should not mention headless mode")
+	}
+}
+
+func TestSystemPromptHeadlessMode(t *testing.T) {
+	loader := NewPromptLoader("")
+	system := loader.SystemPrompt(SystemPromptData{Headless: true})
+
+	if !strings.Contains(system, "autonomous coding agent") {
+		t.Error("headless system prompt should contain 'autonomous coding agent'")
+	}
+	if !strings.Contains(system, "headless mode") {
+		t.Error("headless system prompt should mention headless mode")
+	}
+	if strings.Contains(system, "pair-programming agent") {
+		t.Error("headless system prompt should not contain 'pair-programming agent'")
+	}
+	if strings.Contains(system, "Context Set") {
+		t.Error("headless system prompt should not include Context Set section")
+	}
+	if strings.Contains(system, "ONE edit_file call per step") {
+		t.Error("headless system prompt should not include single-edit rule")
+	}
+	if strings.Contains(system, "After a rejection") {
+		t.Error("headless system prompt should not include rejection rules")
+	}
+	// Shared sections should still be present.
+	if !strings.Contains(system, "## Memory") {
+		t.Error("headless system prompt should include Memory section")
+	}
+	if !strings.Contains(system, "Critical Perspective") {
+		t.Error("headless system prompt should include Critical Perspective section")
+	}
+	if !strings.Contains(system, "Edit Strategy") {
+		t.Error("headless system prompt should include Edit Strategy section")
+	}
+}
+
+func TestPlanningPromptInteractiveMode(t *testing.T) {
+	loader := NewPromptLoader("")
+	planning := loader.PlanningSystemPrompt(SystemPromptData{Headless: false})
+
+	if !strings.Contains(planning, "pair-programming agent") {
+		t.Error("interactive planning prompt should contain 'pair-programming agent'")
+	}
+	if !strings.Contains(planning, ":done") {
+		t.Error("interactive planning prompt should mention :done command")
+	}
+}
+
+func TestPlanningPromptHeadlessMode(t *testing.T) {
+	loader := NewPromptLoader("")
+	planning := loader.PlanningSystemPrompt(SystemPromptData{Headless: true})
+
+	if !strings.Contains(planning, "autonomous planning agent") {
+		t.Error("headless planning prompt should contain 'autonomous planning agent'")
+	}
+	if strings.Contains(planning, "pair-programming agent") {
+		t.Error("headless planning prompt should not contain 'pair-programming agent'")
+	}
+	if strings.Contains(planning, ":done") {
+		t.Error("headless planning prompt should not mention :done command")
+	}
+	// Shared sections should still be present.
+	if !strings.Contains(planning, "Plan Schema") {
+		t.Error("headless planning prompt should include Plan Schema section")
+	}
+}
+
+func TestBuildMessagesHeadlessMode(t *testing.T) {
+	a := testAgent()
+	a.interactionMode = Headless
+	msgs := a.buildMessages("main.go", "package main", "fix bug", nil, "", ModeExecution)
+
+	system := msgs[0].Content
+	if !strings.Contains(system, "autonomous coding agent") {
+		t.Error("headless buildMessages should produce headless system prompt")
+	}
+	if strings.Contains(system, "pair-programming agent") {
+		t.Error("headless buildMessages should not produce interactive system prompt")
 	}
 }
 

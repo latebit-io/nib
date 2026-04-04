@@ -84,9 +84,10 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		userContent = fmt.Sprintf("## File: %s\n\n## Task\n\n%s", fileName, goal)
 	}
 
-	systemPrompt := a.prompts.SystemPrompt()
+	sysData := SystemPromptData{Headless: a.interactionMode == Headless}
+	systemPrompt := a.prompts.SystemPrompt(sysData)
 	if mode == ModePlanning {
-		systemPrompt = a.prompts.PlanningSystemPrompt()
+		systemPrompt = a.prompts.PlanningSystemPrompt(sysData)
 	}
 
 	return []llm.Message{

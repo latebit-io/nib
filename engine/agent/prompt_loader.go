@@ -12,13 +12,20 @@ import (
 	"text/template"
 )
 
-//go:embed prompts/system.md prompts/planning_system.md prompts/user.md.tmpl
+//go:embed prompts/system.md.tmpl prompts/planning_system.md.tmpl prompts/user.md.tmpl
 var defaultPrompts embed.FS
 
 // maxPromptFileBytes is the size limit for project prompt overrides (1MB).
 // No sane prompt file should approach this; protects against accidental
 // large files in .project/prompts/.
 const maxPromptFileBytes = 1 << 20
+
+// SystemPromptData holds the template variables for system prompts.
+type SystemPromptData struct {
+	// Headless is true when the agent runs without a TUI (autonomous mode).
+	// Controls prompt framing: approval flow vs direct edit application.
+	Headless bool
+}
 
 // UserPromptData holds the template variables for the user message.
 type UserPromptData struct {
@@ -65,18 +72,37 @@ func NewPromptLoader(projectRoot string) *PromptLoader {
 	return &PromptLoader{projectRoot: projectRoot}
 }
 
-// SystemPrompt returns the system prompt text.
-func (l *PromptLoader) SystemPrompt() string {
-	content, source := l.load("system.md")
-	slog.Debug("prompt.SystemPrompt", "source", source)
-	return strings.TrimSpace(content)
+// SystemPrompt renders the execution-mode system prompt with the given data.
+func (l *PromptLoader) SystemPrompt(data SystemPromptData) string {
+	return l.renderSystemTemplate("system.md.tmpl", data)
 }
 
-// PlanningSystemPrompt returns the planning-mode system prompt text.
-func (l *PromptLoader) PlanningSystemPrompt() string {
-	content, source := l.load("planning_system.md")
-	slog.Debug("prompt.PlanningSystemPrompt", "source", source)
-	return strings.TrimSpace(content)
+// PlanningSystemPrompt renders the planning-mode system prompt with the given data.
+func (l *PromptLoader) PlanningSystemPrompt(data SystemPromptData) string {
+	return l.renderSystemTemplate("planning_system.md.tmpl", data)
+}
+
+// renderSystemTemplate loads a system prompt template by name and renders it
+// with the given data. Project overrides are re-parsed on every call so edits
+// during a session take effect immediately. Returns the trimmed result.
+func (l *PromptLoader) renderSystemTemplate(name string, data SystemPromptData) string {
+	raw, source := l.load(name)
+	slog.Debug("prompt.renderSystemTemplate", "name", name, "source", source)
+
+	tmpl, err := template.New(name).Parse(raw)
+	if err != nil {
+		slog.Error("system prompt template parse failed, using raw content",
+			"name", name, "source", source, "err", err)
+		return strings.TrimSpace(raw)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		slog.Error("system prompt template execute failed, using raw content",
+			"name", name, "err", err)
+		return strings.TrimSpace(raw)
+	}
+	return strings.TrimSpace(buf.String())
 }
 
 // RenderUserMessage executes the user message template with the given data.

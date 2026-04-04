@@ -29,6 +29,20 @@ const (
 	ModePlanning
 )
 
+// InteractionMode controls how the agent interacts with the developer.
+// It affects prompt framing (approval flow vs autonomous) and is set
+// at construction time — it does not change per-conversation.
+type InteractionMode int
+
+const (
+	// Interactive is the default: agent works in an editor with a developer,
+	// proposes edits for approval, and waits for continue signals.
+	Interactive InteractionMode = iota
+	// Headless: agent runs autonomously without a TUI. Edits are applied
+	// directly, no approval flow, optimized for throughput.
+	Headless
+)
+
 // planningBlocklist contains tool names disabled during planning mode.
 // These are write-side tools that modify code or run commands.
 var planningBlocklist = map[string]bool{
@@ -74,6 +88,10 @@ type Agent struct {
 	// planningBlocklist is the per-instance set of tool names blocked in planning mode.
 	planningBlocklist map[string]bool
 
+	// interactionMode controls prompt framing (interactive vs headless).
+	// Set at construction, immutable for the agent's lifetime.
+	interactionMode InteractionMode
+
 	// memoryStore is used to re-fetch the session summary before each goal.
 	memoryStore memory.Store
 	// memorySummary is the fallback summary from startup, used when re-fetch fails.
@@ -95,6 +113,9 @@ type NewOptions struct {
 	// These are merged with the built-in defaults (edit_file, write_file, bash);
 	// they extend the blocklist, not replace it.
 	PlanningBlocklist []string
+	// Interaction sets the prompt framing. Interactive (default) uses
+	// approval-based workflow language; Headless uses autonomous framing.
+	Interaction InteractionMode
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -114,11 +135,13 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var memStore memory.Store
 	var memorySummary string
 	var extraBlocklist []string
+	var interaction InteractionMode
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
 		memorySummary = opts.MemorySummary
 		extraBlocklist = opts.PlanningBlocklist
+		interaction = opts.Interaction
 	}
 
 	// Build per-instance planning blocklist: start from defaults, merge extras.
@@ -140,6 +163,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		inputCh:           make(chan string, 1), // capacity 1: Reply() is non-blocking; only one pending reply is meaningful
 		diagProvider:      diagProvider,
 		planningBlocklist: merged,
+		interactionMode:   interaction,
 		memoryStore:       memStore,
 		memorySummary:     memorySummary,
 		diagDelay:         500 * time.Millisecond,

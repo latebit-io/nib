@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/latebit-io/junto/engine/project"
 )
 
 // mockProjectSession provides the minimal session surface for testing.
@@ -17,12 +18,10 @@ func TestProjectPane_RenderSections(t *testing.T) {
 	// to verify rendering logic without a real session.
 
 	items := []projectItem{
-		{isHeader: true, section: "context"},
-		{node: &TreeNode{Name: "main.go", Path: "main.go", Badge: "ctx"}, section: "context"},
-		{isHeader: true, section: "review"},
-		{isHeader: true, section: "modified"},
-		{isHeader: true, section: "project"},
-		{node: &TreeNode{Name: "src", Path: "src", IsDir: true, Collapsed: true}, section: "project"},
+		{isHeader: true, section: "work"},
+		{isHeader: true, section: "files"},
+		{node: &TreeNode{Name: "main.go", Path: "main.go", Badge: "ctx"}, section: "files"},
+		{node: &TreeNode{Name: "src", Path: "src", IsDir: true, Collapsed: true}, section: "files"},
 	}
 
 	p := &ProjectPaneModel{
@@ -39,27 +38,21 @@ func TestProjectPane_RenderSections(t *testing.T) {
 	}
 
 	// Check section headers are present
-	if !strings.Contains(output, "CONTEXT") {
-		t.Error("missing CONTEXT header")
+	if !strings.Contains(output, "WORK") {
+		t.Error("missing WORK header")
 	}
-	if !strings.Contains(output, "REVIEW") {
-		t.Error("missing REVIEW header")
-	}
-	if !strings.Contains(output, "MODIFIED") {
-		t.Error("missing MODIFIED header")
-	}
-	if !strings.Contains(output, "PROJECT") {
-		t.Error("missing PROJECT header")
+	if !strings.Contains(output, "FILES") {
+		t.Error("missing FILES header")
 	}
 }
 
 func TestProjectPane_CursorMovement(t *testing.T) {
 	items := []projectItem{
-		{isHeader: true, section: "context"},
-		{node: &TreeNode{Name: "a.go", Path: "a.go"}, section: "context"},
-		{node: &TreeNode{Name: "b.go", Path: "b.go"}, section: "context"},
-		{isHeader: true, section: "review"},
-		{node: &TreeNode{Name: "c.go", Path: "c.go"}, section: "project"},
+		{isHeader: true, section: "work"},
+		{node: &TreeNode{Name: "a.go", Path: "a.go"}, section: "files"},
+		{node: &TreeNode{Name: "b.go", Path: "b.go"}, section: "files"},
+		{isHeader: true, section: "files"},
+		{node: &TreeNode{Name: "c.go", Path: "c.go"}, section: "files"},
 	}
 
 	p := &ProjectPaneModel{
@@ -96,23 +89,22 @@ func TestProjectPane_CursorMovement(t *testing.T) {
 
 func TestProjectPane_CursorSkipsHeaders(t *testing.T) {
 	items := []projectItem{
-		{isHeader: true, section: "context"},
-		{isHeader: true, section: "review"},
-		{isHeader: true, section: "modified"},
-		{node: &TreeNode{Name: "a.go", Path: "a.go"}, section: "project"},
+		{isHeader: true, section: "work"},
+		{isHeader: true, section: "files"},
+		{node: &TreeNode{Name: "a.go", Path: "a.go"}, section: "files"},
 	}
 
 	p := &ProjectPaneModel{
 		width:     40,
 		height:    10,
 		items:     items,
-		cursorIdx: 3, // on a.go
+		cursorIdx: 2, // on a.go
 	}
 
 	// Move up — all above are headers, should stay
 	p.handleKey(tea.KeyPressMsg{Code: tea.KeyUp})
-	if p.cursorIdx != 3 {
-		t.Errorf("expected cursor to stay at 3, got %d", p.cursorIdx)
+	if p.cursorIdx != 2 {
+		t.Errorf("expected cursor to stay at 2, got %d", p.cursorIdx)
 	}
 }
 
@@ -128,16 +120,17 @@ func TestProjectPane_ToggleDirectory(t *testing.T) {
 	}
 
 	items := []projectItem{
-		{isHeader: true, section: "project"},
-		{node: dir, section: "project"},
+		{isHeader: true, section: "files"},
+		{node: dir, section: "files"},
 	}
 
 	p := &ProjectPaneModel{
-		width:       40,
-		height:      10,
-		items:       items,
-		projectTree: &TreeNode{IsDir: true, Children: []*TreeNode{dir}},
-		cursorIdx:   1,
+		width:         40,
+		height:        10,
+		items:         items,
+		filesTree:     &TreeNode{IsDir: true, Children: []*TreeNode{dir}},
+		workCollapsed: make(map[string]bool),
+		cursorIdx:     1,
 	}
 
 	// Activate (Enter) on collapsed dir — should expand
@@ -159,10 +152,84 @@ func TestProjectPane_ToggleDirectory(t *testing.T) {
 	}
 }
 
+func TestProjectPane_ActivateWorkHeading(t *testing.T) {
+	heading := &project.Node{
+		Title: "Phase 6", Depth: 1, IsHeading: true,
+		Children: []*project.Node{
+			{Title: "task one", Depth: 2, Status: project.TaskPending},
+		},
+	}
+
+	items := []projectItem{
+		{isHeader: true, section: "work"},
+		{workNode: heading, section: "work"},
+		{workNode: heading.Children[0], section: "work"},
+	}
+
+	p := &ProjectPaneModel{
+		width:         40,
+		height:        10,
+		items:         items,
+		workCollapsed: make(map[string]bool),
+		cursorIdx:     1, // on heading
+	}
+
+	// Activate heading — should toggle collapse
+	cmd := p.activateItem()
+	if cmd != nil {
+		t.Error("expected nil cmd for heading toggle")
+	}
+	if !p.workCollapsed["Phase 6"] {
+		t.Error("expected heading to be collapsed after activation")
+	}
+
+	// Activate again — should uncollapse
+	// Reset items since flattenItems was called
+	p.cursorIdx = 1
+	p.items = items
+	p.activateItem()
+	if p.workCollapsed["Phase 6"] {
+		t.Error("expected heading to be uncollapsed after second activation")
+	}
+}
+
+func TestProjectPane_ActivateWorkTask(t *testing.T) {
+	task := &project.Node{
+		Title: "Add Phase to Session", Depth: 2, Status: project.TaskPending,
+	}
+
+	items := []projectItem{
+		{isHeader: true, section: "work"},
+		{workNode: task, section: "work"},
+	}
+
+	p := &ProjectPaneModel{
+		width:         40,
+		height:        10,
+		items:         items,
+		workCollapsed: make(map[string]bool),
+		cursorIdx:     1, // on task
+	}
+
+	cmd := p.activateItem()
+	if cmd == nil {
+		t.Fatal("expected cmd for task activation")
+	}
+
+	msg := cmd()
+	goalMsg, ok := msg.(ProjectSetActiveGoalMsg)
+	if !ok {
+		t.Fatalf("expected ProjectSetActiveGoalMsg, got %T", msg)
+	}
+	if goalMsg.Title != "Add Phase to Session" {
+		t.Errorf("Title = %q, want %q", goalMsg.Title, "Add Phase to Session")
+	}
+}
+
 func TestProjectPane_ActivateHeaderNoop(t *testing.T) {
 	items := []projectItem{
-		{isHeader: true, section: "context"},
-		{node: &TreeNode{Name: "a.go", Path: "a.go"}, section: "context"},
+		{isHeader: true, section: "files"},
+		{node: &TreeNode{Name: "a.go", Path: "a.go"}, section: "files"},
 	}
 
 	p := &ProjectPaneModel{
@@ -180,9 +247,9 @@ func TestProjectPane_ActivateHeaderNoop(t *testing.T) {
 
 func TestProjectPane_VimKeys(t *testing.T) {
 	items := []projectItem{
-		{isHeader: true, section: "context"},
-		{node: &TreeNode{Name: "a.go", Path: "a.go"}, section: "context"},
-		{node: &TreeNode{Name: "b.go", Path: "b.go"}, section: "context"},
+		{isHeader: true, section: "files"},
+		{node: &TreeNode{Name: "a.go", Path: "a.go"}, section: "files"},
+		{node: &TreeNode{Name: "b.go", Path: "b.go"}, section: "files"},
 	}
 
 	p := &ProjectPaneModel{
@@ -210,7 +277,7 @@ func TestProjectPane_ScrollClamp(t *testing.T) {
 	for i := range 20 {
 		items = append(items, projectItem{
 			node:    &TreeNode{Name: strings.Repeat("x", i+1), Path: strings.Repeat("x", i+1)},
-			section: "project",
+			section: "files",
 		})
 	}
 

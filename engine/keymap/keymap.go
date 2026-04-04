@@ -40,6 +40,7 @@ const (
 
 	// Agent
 	ActionAgentStart
+	ActionAgentPlan
 	ActionAgentApprove
 	ActionAgentReject
 	ActionAgentContinue
@@ -125,6 +126,7 @@ func DefaultBindings() []Binding {
 
 		// Agent
 		{ActionAgentStart, "Start agent", []string{"Ctrl+G"}, CatAgent},
+		{ActionAgentPlan, "Plan mode", []string{"Alt+G"}, CatAgent},
 		{ActionAgentApprove, "Approve edit", []string{"Ctrl+O"}, CatAgent},
 		{ActionAgentReject, "Reject / Cancel", []string{"Escape"}, CatAgent},
 		{ActionAgentContinue, "Continue agent", []string{"Ctrl+N"}, CatAgent},

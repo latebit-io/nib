@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/filelist"
+	"github.com/latebit-io/junto/engine/project"
 	"github.com/latebit-io/junto/engine/session"
 )
 
@@ -23,6 +24,10 @@ type ProjectAddContextMsg struct{ Path string }
 
 // ProjectRemoveContextMsg is sent when the user removes a file from the context set.
 type ProjectRemoveContextMsg struct{ Path string }
+
+// ProjectSetActiveGoalMsg is sent when the user activates a work item.
+// AppModel handles the session mutation to keep writes in one place.
+type ProjectSetActiveGoalMsg struct{ Title string }
 
 // Package-level styles — allocated once, never in render paths.
 var (
@@ -48,9 +53,24 @@ var (
 
 	projBadgeModStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("3"))
+
+	projWorkHeadingStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("252"))
+
+	projTaskActiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("2")).
+				Bold(true)
+
+	projTaskDoneStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240"))
+
+	projTaskPendingStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252"))
 )
 
 // ProjectPaneModel implements Pane for the project view panel.
+// Two sections: WORK (from project.md in demarkus) and FILES (project tree).
 type ProjectPaneModel struct {
 	session *session.Session
 
@@ -59,9 +79,12 @@ type ProjectPaneModel struct {
 	height int
 
 	// Tree data
-	contextTree  *TreeNode
-	modifiedTree *TreeNode
-	projectTree  *TreeNode
+	filesTree *TreeNode // full project file tree with ctx/mod badges
+
+	// Work tree display state — collapse tracking is TUI-specific,
+	// separate from the engine's project.Tree.
+	workCollapsed   map[string]bool // title → collapsed (headings only)
+	workDepthOffset int             // subtracted from node.Depth for rendering (root elision)
 
 	// Flattened display items — rebuilt on refresh
 	items []projectItem
@@ -77,18 +100,38 @@ type ProjectPaneModel struct {
 
 // projectItem is a flattened display row in the project pane.
 type projectItem struct {
-	node     *TreeNode
-	section  string // "context", "review", "modified", "project"
-	isHeader bool   // true for section headers
+	node     *TreeNode     // non-nil for file items
+	workNode *project.Node // non-nil for work items
+	section  string        // "work" or "files"
+	isHeader bool          // true for section headers
 }
 
 // NewProjectPaneModel creates the project pane.
 func NewProjectPaneModel(sess *session.Session) *ProjectPaneModel {
 	p := &ProjectPaneModel{
-		session: sess,
+		session:       sess,
+		workCollapsed: make(map[string]bool),
 	}
 	p.rebuild()
 	return p
+}
+
+// Title returns the project name for display in the pane border.
+// Falls back to "Project" if no work tree is loaded.
+// Implements the Titled interface.
+func (p *ProjectPaneModel) Title() string {
+	if tree := p.workTree(); tree != nil && tree.ProjectName != "" {
+		return tree.ProjectName
+	}
+	return "Project"
+}
+
+// workTree returns the session's work tree, or nil if no session is set.
+func (p *ProjectPaneModel) workTree() *project.Tree {
+	if p.session == nil {
+		return nil
+	}
+	return p.session.WorkTree()
 }
 
 // Update handles input when the project pane has focus.
@@ -141,7 +184,7 @@ func (p *ProjectPaneModel) rebuild() {
 	if p.cursorIdx >= 0 && p.cursorIdx < len(p.items) && p.items[p.cursorIdx].node != nil {
 		selectedPath = p.items[p.cursorIdx].node.Path
 	}
-	prevProjectExpanded := ExpandedPaths(p.projectTree)
+	prevFilesExpanded := ExpandedPaths(p.filesTree)
 
 	contextFiles := p.session.ContextFiles()
 	modifiedFiles := p.session.AgentModifiedFiles()
@@ -151,23 +194,15 @@ func (p *ProjectPaneModel) rebuild() {
 	ctxSet := toSlashSet(contextFiles)
 	modSet := toSlashSet(modifiedFiles)
 
-	// Context section — flat list of context files
-	p.contextTree = BuildTree(contextFiles)
-	expandAll(p.contextTree)
-
-	// Modified section — files modified by agent
-	p.modifiedTree = BuildTree(modifiedFiles)
-	expandAll(p.modifiedTree)
-
-	// Project section — full file tree, collapsed by default then restore
+	// FILES section — full file tree with badges
 	projectFiles, err := p.session.ListFiles()
 	if err != nil && !errors.Is(err, filelist.ErrCapped) {
 		slog.Error("project pane: failed to list files", "err", err)
 		projectFiles = nil
 	}
-	p.projectTree = BuildTree(projectFiles)
-	RestoreExpanded(p.projectTree, prevProjectExpanded)
-	SetBadges(p.projectTree, ctxSet, modSet)
+	p.filesTree = BuildTree(projectFiles)
+	RestoreExpanded(p.filesTree, prevFilesExpanded)
+	SetBadges(p.filesTree, ctxSet, modSet)
 
 	// Flatten into display items
 	p.flattenItems()
@@ -196,29 +231,46 @@ func (p *ProjectPaneModel) restoreCursor(path string) {
 	}
 }
 
-// flattenItems builds the unified item list from all sections.
+// flattenItems builds the unified item list from WORK and FILES sections.
 func (p *ProjectPaneModel) flattenItems() {
 	p.items = nil
 
-	// CONTEXT
-	p.items = append(p.items, projectItem{isHeader: true, section: "context"})
-	for _, n := range FlattenVisible(p.contextTree) {
-		p.items = append(p.items, projectItem{node: n, section: "context"})
+	// WORK section — from demarkus project.md
+	if tree := p.workTree(); tree != nil && len(tree.Roots) > 0 {
+		p.items = append(p.items, projectItem{isHeader: true, section: "work"})
+		p.workDepthOffset = 0
+
+		// If there's a single root whose title matches the project name
+		// (already shown in the pane border), elide it and promote children.
+		if len(tree.Roots) == 1 && tree.Roots[0].IsHeading && tree.Roots[0].Title == tree.ProjectName {
+			p.workDepthOffset = 1
+			for _, child := range tree.Roots[0].Children {
+				p.flattenWorkNode(child, 0)
+			}
+		} else {
+			for _, root := range tree.Roots {
+				p.flattenWorkNode(root, 0)
+			}
+		}
 	}
 
-	// REVIEW (placeholder)
-	p.items = append(p.items, projectItem{isHeader: true, section: "review"})
-
-	// MODIFIED
-	p.items = append(p.items, projectItem{isHeader: true, section: "modified"})
-	for _, n := range FlattenVisible(p.modifiedTree) {
-		p.items = append(p.items, projectItem{node: n, section: "modified"})
+	// FILES section — full project file tree
+	p.items = append(p.items, projectItem{isHeader: true, section: "files"})
+	for _, n := range FlattenVisible(p.filesTree) {
+		p.items = append(p.items, projectItem{node: n, section: "files"})
 	}
+}
 
-	// PROJECT
-	p.items = append(p.items, projectItem{isHeader: true, section: "project"})
-	for _, n := range FlattenVisible(p.projectTree) {
-		p.items = append(p.items, projectItem{node: n, section: "project"})
+// flattenWorkNode recursively flattens a work tree node into display items,
+// respecting TUI-specific collapse state.
+func (p *ProjectPaneModel) flattenWorkNode(n *project.Node, depth int) {
+	p.items = append(p.items, projectItem{workNode: n, section: "work"})
+
+	if n.IsHeading && p.workCollapsed[n.Title] {
+		return // collapsed — skip children
+	}
+	for _, child := range n.Children {
+		p.flattenWorkNode(child, depth+1)
 	}
 }
 
@@ -302,6 +354,13 @@ func (p *ProjectPaneModel) activateItem() tea.Cmd {
 	if item.isHeader {
 		return nil
 	}
+
+	// Work section — toggle headings, activate tasks
+	if item.workNode != nil {
+		return p.activateWorkItem(item.workNode)
+	}
+
+	// Files section — toggle directories, open files
 	node := item.node
 	if node.IsDir {
 		node.Toggle()
@@ -317,6 +376,23 @@ func (p *ProjectPaneModel) activateItem() tea.Cmd {
 	return func() tea.Msg { return ProjectOpenFileMsg{Path: absPath} }
 }
 
+// activateWorkItem handles Enter on a work tree node.
+// Headings toggle collapse; tasks emit a set-active-goal message.
+func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
+	if n.IsHeading {
+		p.workCollapsed[n.Title] = !p.workCollapsed[n.Title]
+		p.flattenItems()
+		if p.cursorIdx >= len(p.items) {
+			p.cursorIdx = len(p.items) - 1
+		}
+		p.clampScroll()
+		return nil
+	}
+	// Task — emit set active goal
+	title := n.Title
+	return func() tea.Msg { return ProjectSetActiveGoalMsg{Title: title} }
+}
+
 // addContext emits a message to add the file under cursor to the context set.
 // AppModel handles the actual session mutation.
 func (p *ProjectPaneModel) addContext() tea.Cmd {
@@ -324,7 +400,7 @@ func (p *ProjectPaneModel) addContext() tea.Cmd {
 		return nil
 	}
 	item := p.items[p.cursorIdx]
-	if item.isHeader || item.node == nil || item.node.IsDir {
+	if item.section != "files" || item.isHeader || item.node == nil || item.node.IsDir {
 		return nil
 	}
 	absPath := filepath.Join(p.session.ProjectRoot(), item.node.Path)
@@ -338,7 +414,7 @@ func (p *ProjectPaneModel) removeContext() tea.Cmd {
 		return nil
 	}
 	item := p.items[p.cursorIdx]
-	if item.isHeader || item.node == nil || item.node.IsDir {
+	if item.section != "files" || item.isHeader || item.node == nil || item.node.IsDir {
 		return nil
 	}
 	absPath := filepath.Join(p.session.ProjectRoot(), item.node.Path)
@@ -388,7 +464,10 @@ func (p *ProjectPaneModel) renderItem(item projectItem, selected bool) string {
 	if item.isHeader {
 		return p.renderHeader(item.section, selected)
 	}
-	return p.renderNode(item, selected)
+	if item.workNode != nil {
+		return p.renderWorkNode(item.workNode, selected)
+	}
+	return p.renderFileNode(item, selected)
 }
 
 // renderHeader renders a section header.
@@ -404,8 +483,48 @@ func (p *ProjectPaneModel) renderHeader(section string, selected bool) string {
 	return line
 }
 
-// renderNode renders a file or directory tree node.
-func (p *ProjectPaneModel) renderNode(item projectItem, selected bool) string {
+// renderWorkNode renders a work tree node (heading or task).
+func (p *ProjectPaneModel) renderWorkNode(n *project.Node, selected bool) string {
+	depth := n.Depth - p.workDepthOffset
+	if depth < 0 {
+		depth = 0
+	}
+	indent := strings.Repeat("  ", depth)
+
+	var icon, name string
+	if n.IsHeading {
+		if p.workCollapsed[n.Title] {
+			icon = "▸ "
+		} else {
+			icon = "▾ "
+		}
+		name = projWorkHeadingStyle.Render(n.Title)
+	} else {
+		icon, name = workTaskIconAndName(n)
+	}
+
+	left := indent + icon + name
+	line := clampToWidth(left, p.width)
+	if selected {
+		line = projCursorStyle.Render(line)
+	}
+	return line
+}
+
+// workTaskIconAndName returns the status icon and styled name for a task node.
+func workTaskIconAndName(n *project.Node) (string, string) {
+	switch n.Status {
+	case project.TaskActive:
+		return "● ", projTaskActiveStyle.Render(n.Title)
+	case project.TaskDone:
+		return "✓ ", projTaskDoneStyle.Render(n.Title)
+	default:
+		return "○ ", projTaskPendingStyle.Render(n.Title)
+	}
+}
+
+// renderFileNode renders a file or directory tree node.
+func (p *ProjectPaneModel) renderFileNode(item projectItem, selected bool) string {
 	node := item.node
 	depth := node.Depth()
 
@@ -504,18 +623,6 @@ func clampToWidth(s string, width int) string {
 		return s + strings.Repeat(" ", width-w)
 	}
 	return s
-}
-
-// expandAll recursively expands all directory nodes.
-func expandAll(root *TreeNode) {
-	if root == nil {
-		return
-	}
-	walkTree(root, func(n *TreeNode) {
-		if n.IsDir {
-			n.Collapsed = false
-		}
-	})
 }
 
 // toSlashSet converts a string slice to a set map, normalizing paths

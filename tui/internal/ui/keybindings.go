@@ -33,6 +33,7 @@ const (
 	ActionGoToLineStart  = keymap.ActionGoToLineStart
 	ActionGoToLineEnd    = keymap.ActionGoToLineEnd
 	ActionAgentStart     = keymap.ActionAgentStart
+	ActionAgentPlan      = keymap.ActionAgentPlan
 	ActionAgentApprove   = keymap.ActionAgentApprove
 	ActionAgentReject    = keymap.ActionAgentReject
 	ActionAgentContinue  = keymap.ActionAgentContinue
@@ -105,6 +106,8 @@ func DefaultKeymap() *Keymap {
 			{code: '-', mod: tea.ModCtrl}:                         ActionGoBack,        // Ctrl+- (VS Code)
 
 			// Agent
+			{code: 'g', mod: tea.ModAlt}:  ActionAgentPlan,
+			{code: 169, mod: 0}:           ActionAgentPlan, // macOS: Option+G sends ©
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
 			{code: tea.KeyEscape, mod: 0}: ActionAgentReject,
 			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
@@ -125,6 +128,8 @@ func DefaultKeymap() *Keymap {
 		},
 		byString: map[string]Action{
 			"ctrl+g": ActionAgentStart,
+			"alt+g":  ActionAgentPlan,
+			"©":      ActionAgentPlan, // macOS: Option+G sends ©
 			"ctrl+p": ActionOpenPalette,
 			"ctrl+b": ActionToggleProject,
 			"ctrl+/": ActionToggleComment,

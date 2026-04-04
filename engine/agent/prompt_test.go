@@ -30,7 +30,7 @@ func testAgent() *Agent {
 func TestBuildMessagesIncludesContextSet(t *testing.T) {
 	a := testAgent()
 	contextFiles := []string{"src/auth.go", "src/handler.go"}
-	msgs := a.buildMessages("main.go", "package main", "add tests", contextFiles, "")
+	msgs := a.buildMessages("main.go", "package main", "add tests", contextFiles, "", ModeExecution)
 
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
@@ -50,7 +50,7 @@ func TestBuildMessagesIncludesContextSet(t *testing.T) {
 
 func TestBuildMessagesIncludesMemorySummary(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "Key decision: use hexagonal arch.")
+	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "Key decision: use hexagonal arch.", ModeExecution)
 
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
@@ -69,7 +69,7 @@ func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
 	t.Run("ascii", func(t *testing.T) {
 		a := testAgent()
 		big := strings.Repeat("x", maxMemorySummaryBytes+100)
-		msgs := a.buildMessages("main.go", "package main", "add tests", nil, big)
+		msgs := a.buildMessages("main.go", "package main", "add tests", nil, big, ModeExecution)
 
 		user := msgs[1].Content
 		if !strings.Contains(user, "[truncated]") {
@@ -85,7 +85,7 @@ func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
 		// U+4E16 (世) is 3 bytes in UTF-8. Fill past the limit so the cut
 		// point is likely mid-rune if not handled correctly.
 		big := strings.Repeat("世", maxMemorySummaryBytes)
-		msgs := a.buildMessages("main.go", "package main", "add tests", nil, big)
+		msgs := a.buildMessages("main.go", "package main", "add tests", nil, big, ModeExecution)
 
 		user := msgs[1].Content
 		if !strings.Contains(user, "[truncated]") {
@@ -99,7 +99,7 @@ func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
 
 func TestBuildMessagesNoMemorySummary(t *testing.T) {
 	a := testAgent() // promptTestWorkspace returns ""
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "")
+	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "", ModeExecution)
 
 	user := msgs[1].Content
 	if strings.Contains(user, "Memory Summary") {
@@ -109,7 +109,7 @@ func TestBuildMessagesNoMemorySummary(t *testing.T) {
 
 func TestBuildMessagesNoContextSet(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "")
+	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "", ModeExecution)
 
 	user := msgs[1].Content
 	if strings.Contains(user, "Context Set") {
@@ -119,7 +119,7 @@ func TestBuildMessagesNoContextSet(t *testing.T) {
 
 func TestBuildMessagesSystemPromptIncludesContextSetRules(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "")
+	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "", ModeExecution)
 
 	system := msgs[0].Content
 	if !strings.Contains(system, "Context Set") {
@@ -129,7 +129,7 @@ func TestBuildMessagesSystemPromptIncludesContextSetRules(t *testing.T) {
 
 func TestBuildMessagesSystemPromptIncludesCriticalPerspective(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "")
+	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "", ModeExecution)
 
 	system := msgs[0].Content
 	if !strings.Contains(system, "Critical Perspective") {
@@ -143,7 +143,7 @@ func TestBuildMessagesContextSetCapped(t *testing.T) {
 	for i := range files {
 		files[i] = "file" + string(rune('a'+i%26)) + ".go"
 	}
-	msgs := a.buildMessages("main.go", "package main", "add tests", files, "")
+	msgs := a.buildMessages("main.go", "package main", "add tests", files, "", ModeExecution)
 
 	user := msgs[1].Content
 	if !strings.Contains(user, "10 more files") {

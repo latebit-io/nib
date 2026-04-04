@@ -23,6 +23,7 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/engine/project"
 )
 
 // Session coordinates the interaction between the developer and agent.
@@ -62,6 +63,9 @@ type Session struct {
 	CurrentIntent string   // the active goal
 	IntentDone    bool     // true when intent was completed (not cleared)
 	IntentHistory []string // resolved intents archived in order
+
+	// Phase tracks the current workflow phase (planning vs execution).
+	Phase Phase
 
 	// PendingEdit is the edit currently awaiting approval (nil = none)
 	PendingEdit *event.PendingEdit
@@ -104,6 +108,13 @@ type Session struct {
 	// completionMu serializes overlay completion requests to prevent
 	// DidChange interleaving when multiple requests race.
 	completionMu sync.Mutex
+
+	// Work tree — structured project hierarchy loaded from demarkus memory.
+	// See work.go for loading, querying, and persistence.
+	memoryStore   memoryStore   // optional demarkus store (nil when not configured)
+	workTree      *project.Tree // parsed work hierarchy (nil when not loaded)
+	workTreeVer   int           // demarkus version for optimistic concurrency
+	workTreeDirty bool          // true when in-memory changes need persisting
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -874,6 +885,11 @@ func (s *Session) SubmitGoal(goal string) bool {
 		return false
 	}
 
+	// Handle planning phase commands.
+	if s.Phase == PhasePlanning {
+		return s.handlePlanningInput(goal)
+	}
+
 	// Continue existing conversation if the agent is waiting for input.
 	// Reply returns false if the agent raced out of the waiting state
 	// or the channel is full — fall through to start a new conversation.
@@ -882,6 +898,62 @@ func (s *Session) SubmitGoal(goal string) bool {
 	}
 
 	// Start a new conversation. Archive any previous intent.
+	s.startNewConversation(goal, agent.ModeExecution)
+	s.Phase = PhaseExecution
+	return false
+}
+
+// SubmitPlanningGoal starts a new conversation in planning mode.
+// Write-side tools are disabled; the agent discusses design before coding.
+// No-op if no agent is configured.
+func (s *Session) SubmitPlanningGoal(goal string) {
+	if !s.HasAgent() {
+		return
+	}
+
+	s.startNewConversation(goal, agent.ModePlanning)
+	s.Phase = PhasePlanning
+}
+
+// handlePlanningInput processes input during the planning phase.
+// ":done" transitions to execution with the original goal.
+// ":skip" transitions to execution immediately.
+// Other input continues the planning conversation.
+func (s *Session) handlePlanningInput(input string) bool {
+	switch input {
+	case ":done":
+		// Transition to execution — cancel planning, start execution
+		// with the original goal. The plan is persisted in demarkus
+		// by the planning agent, so the execution agent picks it up
+		// via memory summary.
+		originalGoal := s.CurrentIntent
+		s.agent.Cancel()
+		// Reload work tree — the planning agent may have published
+		// or updated /project.md during the conversation.
+		if err := s.loadWorkTree(); err != nil {
+			slog.Warn("session: reload work tree after planning", "err", err)
+		}
+		s.startNewConversation(originalGoal, agent.ModeExecution)
+		s.Phase = PhaseExecution
+		return false
+
+	case ":skip":
+		// Skip planning entirely — start execution with original goal.
+		originalGoal := s.CurrentIntent
+		s.agent.Cancel()
+		s.startNewConversation(originalGoal, agent.ModeExecution)
+		s.Phase = PhaseExecution
+		return false
+
+	default:
+		// Continue planning conversation.
+		return s.agent.Reply(input)
+	}
+}
+
+// startNewConversation archives any previous intent, clears stale state,
+// and starts a new agent conversation in the specified mode.
+func (s *Session) startNewConversation(goal string, mode agent.Mode) {
 	if s.CurrentIntent != "" && !s.IntentDone {
 		s.ArchiveIntent()
 	}
@@ -891,8 +963,7 @@ func (s *Session) SubmitGoal(goal string) bool {
 	s.editReviewed = false
 	s.CurrentIntent = goal
 	s.IntentDone = false
-	s.agent.Run(s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles())
-	return false
+	s.agent.RunWithMode(s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles(), mode)
 }
 
 // ArchiveIntent marks the current intent as done.

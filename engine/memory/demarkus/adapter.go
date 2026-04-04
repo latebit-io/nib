@@ -263,9 +263,10 @@ func checkStatus(stderr string, cmdErr error) error {
 		return fmt.Errorf("memory: demarkus command failed: %s: %w", msg, cmdErr)
 	}
 
-	// Require an explicit [ok] status — missing status line means
+	// Require an explicit success status — missing status line means
 	// the CLI output format changed or was truncated.
-	if meta.status != "ok" {
+	// "ok" = update, "created" = new document.
+	if meta.status != "ok" && meta.status != "created" {
 		return fmt.Errorf("memory: unexpected response (no status line): %s", strings.TrimSpace(stderr))
 	}
 

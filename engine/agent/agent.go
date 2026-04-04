@@ -17,6 +17,26 @@ import (
 	"github.com/latebit-io/junto/engine/memory"
 )
 
+// Mode controls the agent's behavior — which tools are available and
+// which prompts are used.
+type Mode int
+
+const (
+	// ModeExecution is the default mode: all tools available, execution prompt.
+	ModeExecution Mode = iota
+	// ModePlanning restricts the agent to read-only and memory tools,
+	// using a planning-focused prompt for conversational design.
+	ModePlanning
+)
+
+// planningBlocklist contains tool names disabled during planning mode.
+// These are write-side tools that modify code or run commands.
+var planningBlocklist = map[string]bool{
+	"edit_file":  true,
+	"write_file": true,
+	"bash":       true,
+}
+
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
 	provider llm.Provider
@@ -183,11 +203,18 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	}
 }
 
-// Run starts a new conversation in a goroutine. Any previous conversation
-// is cancelled. The first user message is built from the full template
-// (file content, context set, memory summary, goal).
-// contextFiles lists the files the agent is allowed to edit.
+// Run starts a new conversation in execution mode. See RunWithMode for details.
 func (a *Agent) Run(fileName, fileContent, goal string, contextFiles []string) {
+	a.RunWithMode(fileName, fileContent, goal, contextFiles, ModeExecution)
+}
+
+// RunWithMode starts a new conversation in the specified mode.
+// Any previous conversation is cancelled. The first user message is built
+// from the full template (file content, context set, memory summary, goal).
+// contextFiles lists the files the agent is allowed to edit.
+// In ModePlanning, write-side tools (edit_file, write_file, bash) are
+// disabled and a planning-focused prompt is used.
+func (a *Agent) RunWithMode(fileName, fileContent, goal string, contextFiles []string, mode Mode) {
 	a.mu.Lock()
 	// Cancel any previous conversation
 	if a.cancel != nil {
@@ -213,7 +240,7 @@ func (a *Agent) Run(fileName, fileContent, goal string, contextFiles []string) {
 	}
 	a.mu.Unlock()
 
-	go a.run(ctx, fileName, fileContent, goal, contextFiles)
+	go a.run(ctx, fileName, fileContent, goal, contextFiles, mode)
 }
 
 // Reply sends a follow-up message to an ongoing conversation.
@@ -335,7 +362,7 @@ func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
 	}
 }
 
-func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
+func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
 	// success tracks whether the conversation ended cleanly. Set to false
 	// only on actual errors (stream failure, autosave). A normal cancel
 	// (context done) counts as success since the user initiated it.
@@ -354,9 +381,20 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 	// Re-fetch memory summary at conversation start.
 	memorySummary := a.fetchMemorySummary(ctx)
 
-	messages := a.buildMessages(fileName, fileContent, goal, contextFiles, memorySummary)
-	a.send(event.AgentToken{Text: "Thinking...\n\n"})
-	a.send(event.AgentStatus{Status: "thinking"})
+	// Build tool defs for this mode — planning mode blocks write tools.
+	activeDefs := a.toolDefs
+	if mode == ModePlanning {
+		activeDefs = a.planningToolDefs()
+	}
+
+	messages := a.buildMessages(fileName, fileContent, goal, contextFiles, memorySummary, mode)
+	if mode == ModePlanning {
+		a.send(event.AgentToken{Text: "Planning...\n\n"})
+		a.send(event.AgentStatus{Status: "planning"})
+	} else {
+		a.send(event.AgentToken{Text: "Thinking...\n\n"})
+		a.send(event.AgentStatus{Status: "thinking"})
+	}
 
 	thinkState := false
 
@@ -367,7 +405,7 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		// Process one LLM turn: stream, dispatch tools, repeat until
 		// the LLM responds with no tool calls.
 		var err error
-		messages, err = a.processLLMTurn(ctx, messages, &thinkState)
+		messages, err = a.processLLMTurn(ctx, messages, &thinkState, activeDefs)
 		if err != nil {
 			success = false
 			return
@@ -408,12 +446,26 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 	}
 }
 
+// planningToolDefs returns the tool definitions with write-side tools removed.
+func (a *Agent) planningToolDefs() []llm.ToolDef {
+	defs := make([]llm.ToolDef, 0, len(a.toolDefs))
+	for _, def := range a.toolDefs {
+		name := strings.ToLower(def.Function.Name)
+		if planningBlocklist[name] {
+			continue
+		}
+		defs = append(defs, def)
+	}
+	return defs
+}
+
 // processLLMTurn runs the LLM loop for one agent turn: stream responses,
 // dispatch tool calls, repeat until no tool calls remain. Returns the
 // updated messages list or an error if the turn could not complete.
-func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool) ([]llm.Message, error) {
+// toolDefs controls which tools the LLM can invoke for this turn.
+func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, error) {
 	for {
-		ch, err := a.provider.Stream(ctx, messages, a.toolDefs)
+		ch, err := a.provider.Stream(ctx, messages, toolDefs)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
 			a.send(event.AgentError{Err: fmt.Sprintf("LLM error: %v", err)})

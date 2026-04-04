@@ -20,7 +20,7 @@ const maxMemorySummaryBytes = 8000
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
 // contextFiles lists the files the agent is allowed to edit.
 // memorySummary is the project memory snapshot (passed in to avoid shared state races).
-func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles []string, memorySummary string) []llm.Message {
+func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles []string, memorySummary string, mode Mode) []llm.Message {
 	// Number the lines for the LLM
 	lines := strings.Split(fileContent, "\n")
 	var numbered strings.Builder
@@ -67,8 +67,13 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		userContent = fmt.Sprintf("## File: %s\n\n## Task\n\n%s", fileName, goal)
 	}
 
+	systemPrompt := a.prompts.SystemPrompt()
+	if mode == ModePlanning {
+		systemPrompt = a.prompts.PlanningSystemPrompt()
+	}
+
 	return []llm.Message{
-		{Role: "system", Content: a.prompts.SystemPrompt()},
+		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userContent},
 	}
 }

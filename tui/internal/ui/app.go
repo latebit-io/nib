@@ -234,6 +234,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case PlanningGoalSubmittedMsg:
+		m.Session.SubmitPlanningGoal(msg.Goal)
+		m.AgentPane.Clear()
+		return m, nil
+
 	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
@@ -330,6 +335,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshProjectPane()
 		return m, nil
 
+	case ProjectSetActiveGoalMsg:
+		if err := m.Session.SetActiveGoal(msg.Title); err != nil {
+			slog.Warn("set active goal", "err", err)
+			m.AgentPane.AppendMeta("[set active goal failed: " + err.Error() + "]\n")
+		}
+		m.refreshProjectPane()
+		return m, nil
+
 	// Animation tick — advance the agent typing animation
 	case animTickMsg:
 		return m, m.handleAnimTick()
@@ -420,7 +433,11 @@ func (m *AppModel) handleEngineEvent(ev event.Event) {
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
-		m.AgentPane.Status = "waiting"
+		if m.Session.Phase == session.PhasePlanning {
+			m.AgentPane.Status = "planning-waiting"
+		} else {
+			m.AgentPane.Status = "waiting"
+		}
 		m.AgentPane.InputActive = true
 		m.AgentPane.InputBuffer = ""
 	case event.AgentDone:
@@ -551,6 +568,15 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.Session.HasAgent() {
 			m.AgentPane.InputActive = true
 			m.AgentPane.InputBuffer = ""
+			m.AgentPane.PlanningMode = false
+		}
+		return m, nil
+
+	case ActionAgentPlan:
+		if m.Session.HasAgent() {
+			m.AgentPane.InputActive = true
+			m.AgentPane.InputBuffer = ""
+			m.AgentPane.PlanningMode = true
 		}
 		return m, nil
 
@@ -758,6 +784,9 @@ func (m *AppModel) renderIntentBar() string {
 	case m.Session.IntentDone:
 		text = " done: " + m.Session.CurrentIntent
 		style = doneStyle
+	case m.Session.Phase == session.PhasePlanning:
+		text = " [PLAN] " + m.Session.CurrentIntent
+		style = activeStyle
 	default:
 		text = " " + m.Session.CurrentIntent
 		style = activeStyle

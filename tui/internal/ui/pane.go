@@ -26,3 +26,9 @@ type Titled interface {
 type GoalSubmittedMsg struct {
 	Goal string
 }
+
+// PlanningGoalSubmittedMsg is emitted when the user submits a goal in planning mode.
+// AppModel routes this to Session.SubmitPlanningGoal.
+type PlanningGoalSubmittedMsg struct {
+	Goal string
+}

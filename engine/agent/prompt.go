@@ -16,6 +16,9 @@ const maxContextInPrompt = 50
 // The summary is external content from demarkus — must be bounded.
 const maxMemorySummaryBytes = 8000
 
+// maxActiveTaskPathBytes caps the active task ancestry path in the prompt.
+const maxActiveTaskPathBytes = 1024
+
 // buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
 // contextFiles lists the files the agent is allowed to edit.
@@ -55,6 +58,13 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 	var activeTaskPath string
 	if tt, ok := a.workspace.(TaskTracker); ok {
 		activeTaskPath = tt.ActiveTaskPath()
+		if len(activeTaskPath) > maxActiveTaskPathBytes {
+			cut := maxActiveTaskPathBytes
+			for cut > 0 && !utf8.RuneStart(activeTaskPath[cut]) {
+				cut--
+			}
+			activeTaskPath = activeTaskPath[:cut] + "…"
+		}
 	}
 
 	userContent, err := a.prompts.RenderUserMessage(UserPromptData{

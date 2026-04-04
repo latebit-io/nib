@@ -51,6 +51,9 @@ type PromptLoader struct {
 	// embeddedUserTmpl caches the compiled embedded user template.
 	// The embedded template is immutable, so it only needs to be parsed once.
 	embeddedUserTmpl *template.Template
+	// embeddedUserErr persists a parse failure from the one-time embedded parse
+	// so subsequent calls return the error instead of a nil template.
+	embeddedUserErr error
 	// embeddedUserOnce guards one-time parsing of the embedded user template.
 	embeddedUserOnce sync.Once
 }
@@ -101,12 +104,11 @@ func (l *PromptLoader) RenderUserMessage(data UserPromptData) (string, error) {
 // every call so that edits during a session take effect immediately.
 func (l *PromptLoader) userTemplate(raw, source string) (*template.Template, error) {
 	if source == "embedded" {
-		var parseErr error
 		l.embeddedUserOnce.Do(func() {
-			l.embeddedUserTmpl, parseErr = template.New("user").Parse(raw)
+			l.embeddedUserTmpl, l.embeddedUserErr = template.New("user").Parse(raw)
 		})
-		if parseErr != nil {
-			return nil, parseErr
+		if l.embeddedUserErr != nil {
+			return nil, l.embeddedUserErr
 		}
 		return l.embeddedUserTmpl, nil
 	}

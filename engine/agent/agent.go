@@ -32,9 +32,10 @@ const (
 // planningBlocklist contains tool names disabled during planning mode.
 // These are write-side tools that modify code or run commands.
 var planningBlocklist = map[string]bool{
-	"edit_file":  true,
-	"write_file": true,
-	"bash":       true,
+	"edit_file":   true,
+	"write_file":  true,
+	"bash":        true,
+	"update_task": true,
 }
 
 // Agent drives the multi-turn LLM loop.
@@ -50,6 +51,7 @@ type Agent struct {
 	cancel     context.CancelFunc
 	activeFile string
 	intent     string // current developer intent — included in every tool result
+	mode       Mode   // current conversation mode (execution or planning)
 
 	// Approval flow: agent blocks on these channels.
 	// These stay private to Agent — tools never see them.
@@ -254,6 +256,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.activeFile = fileName
 	a.cache.Reset(fileName, fileContent)
 	a.intent = goal
+	a.mode = mode
 	a.waiting = false
 
 	// Reset tools with state
@@ -594,6 +597,14 @@ func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
 // never need access to the event channel or approval channels.
 func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 	name := strings.ToLower(tc.Function.Name)
+
+	// Enforce planning mode blocklist at dispatch time — the schema filter
+	// removes tools from the advertised list, but a model could still emit
+	// a blocked tool call. Reject it before execution.
+	if a.mode == ModePlanning && a.planningBlocklist[name] {
+		return fmt.Sprintf("Error: tool %q is not available in planning mode", tc.Function.Name)
+	}
+
 	tool, ok := a.tools[name]
 	if !ok {
 		return fmt.Sprintf("Error: unknown tool %q", tc.Function.Name) + a.intentReminder()
@@ -632,7 +643,7 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 // This logic was formerly inside EditFileTool — now it lives here so
 // the tool is a pure computation and the channels stay private to Agent.
 func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) string {
-	a.send(event.AgentStatus{Status: event.StatusWaiting})
+	a.send(event.AgentStatus{Status: event.StatusReviewing})
 
 	// The proposal event is critical — if the frontend never sees it,
 	// waitForApproval blocks forever with nothing for the user to approve.

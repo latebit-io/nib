@@ -64,7 +64,9 @@ type hoverResultMsg struct {
 	line, col int
 }
 
-type reloadWorkTreeResultMsg struct{ err error }
+type reloadWorkTreeResultMsg struct {
+	snap session.WorkTreeSnapshot
+}
 
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
@@ -246,9 +248,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleDialogResult(msg)
 
 	case reloadWorkTreeResultMsg:
-		if msg.err != nil {
-			slog.Warn("reload work tree", "err", msg.err)
-			m.AgentPane.AppendMeta("[reload project failed: " + msg.err.Error() + "]\n")
+		if msg.snap.Err != nil {
+			slog.Warn("reload work tree", "err", msg.snap.Err)
+			m.AgentPane.AppendMeta("[reload project failed: " + msg.snap.Err.Error() + "]\n")
+		} else {
+			m.Session.ApplyWorkTreeSnapshot(msg.snap)
 		}
 		m.refreshProjectPane()
 		return m, nil
@@ -410,8 +414,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 
-		m.AgentPane.Status = "reviewing"
-		m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 		// ReviewEdit computes the diff AND marks the edit as reviewed.
 		// If the edit targets a different file, the session auto-switches
 		// and we rebuild the EditorModel to render the correct buffer.
@@ -421,6 +423,8 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshDiagnostics(m.Session.ActiveFile())
 		}
 		if diff != nil {
+			m.AgentPane.Status = "reviewing"
+			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
 			m.Editor.Overlay = NewDiffOverlay(diff)
 			m.Editor.Overlay.Active = true
@@ -798,13 +802,21 @@ func (m *AppModel) renderIntentBar() string {
 		Foreground(lipgloss.Color("2")).
 		Background(lipgloss.Color("236"))
 
+	// Active work tree goal provides project context for the intent bar.
+	_, goalPath := m.Session.ActiveGoal()
+
 	switch {
 	case !m.Session.HasAgent():
 		text = " Editor"
 		style = idleStyle
 	case m.Session.CurrentIntent == "":
-		text = " Ctrl+G to set intent"
-		style = idleStyle
+		if goalPath != "" {
+			text = " " + goalPath
+			style = idleStyle
+		} else {
+			text = " Ctrl+G to set intent"
+			style = idleStyle
+		}
 	case m.Session.IntentDone:
 		text = " done: " + m.Session.CurrentIntent
 		style = doneStyle
@@ -812,7 +824,11 @@ func (m *AppModel) renderIntentBar() string {
 		text = " [PLAN] " + m.Session.CurrentIntent
 		style = activeStyle
 	default:
-		text = " " + m.Session.CurrentIntent
+		if goalPath != "" {
+			text = " " + goalPath
+		} else {
+			text = " " + m.Session.CurrentIntent
+		}
 		style = activeStyle
 	}
 
@@ -1028,12 +1044,13 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 	}
 }
 
-// reloadWorkTreeCmd returns a tea.Cmd that re-fetches the work tree from
-// demarkus asynchronously. The result is handled by reloadWorkTreeResultMsg
-// which refreshes the project pane and surfaces errors.
+// reloadWorkTreeCmd returns a tea.Cmd that fetches the work tree from
+// demarkus in a background goroutine. The snapshot is applied to session
+// state on the TUI goroutine when reloadWorkTreeResultMsg is handled,
+// avoiding data races on workTree/workTreeVer fields.
 func (m *AppModel) reloadWorkTreeCmd() tea.Cmd {
 	return func() tea.Msg {
-		return reloadWorkTreeResultMsg{err: m.Session.ReloadWorkTree()}
+		return reloadWorkTreeResultMsg{snap: m.Session.FetchWorkTreeSnapshot()}
 	}
 }
 

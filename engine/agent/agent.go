@@ -175,6 +175,11 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		)
 	}
 
+	// Task tracking — conditionally registered via type assertion on workspace.
+	if tt, ok := workspace.(TaskTracker); ok {
+		builtins = append(builtins, NewTaskTool(tt))
+	}
+
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))
 	a.toolDefs = make([]llm.ToolDef, 0, len(builtins)+len(extraTools))
 

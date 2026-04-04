@@ -123,6 +123,19 @@ type Workspace interface {
 	AddContext(path string)
 }
 
+// TaskTracker is an optional interface for workspaces that support
+// structured task tracking via a work tree. Tools type-assert to this
+// interface — it is not required for basic workspace operations.
+type TaskTracker interface {
+	// ActivateTask marks a task as active in the work tree and persists.
+	ActivateTask(title string) error
+	// CompleteTask marks a task as done in the work tree and persists.
+	CompleteTask(title string) error
+	// ActiveTaskPath returns the ancestry path of the current active task,
+	// or empty string if no task is active.
+	ActiveTaskPath() string
+}
+
 // FileCache is a concurrency-safe cache of file contents. The agent
 // maintains its own view of file state, updated only through explicit
 // channels (Run, Continue), to avoid races with user edits.

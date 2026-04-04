@@ -782,7 +782,7 @@ func (m *AgentPaneModel) Render() string {
 		case "editing":
 			statusText = statusStyle.Render(m.padLine(" Ctrl+N to continue"))
 		case "waiting":
-			statusText = statusStyle.Render(m.padLine(" Type to reply | Esc cancel"))
+			statusText = statusStyle.Render(m.padLine(" Type to reply | Enter send"))
 		case "typing":
 			statusText = statusStyle.Render(m.padLine(" Agent typing... | Esc cancel"))
 		default:

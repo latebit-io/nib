@@ -125,9 +125,11 @@ Within each document, use headings at appropriate levels so sections can be fetc
 - Use `memory_fetch` with the `section` parameter to pull only relevant context from large documents.
 
 ### Task Tracking
-If `/project.md` exists, it contains the project plan with task status markers:
-- `- [ ]` pending, `- [>]` active (in progress), `- [x]` done.
-When you complete a task from the plan, fetch `/project.md`, change its marker from `[ ]` or `[>]` to `[x]`, and publish the update. This keeps the project pane in sync with actual progress.
+If the `update_task` tool is available, use it to track progress against the project plan:
+- Call `update_task` with action `activate` when you start working on a task.
+- Call `update_task` with action `complete` when you finish a task.
+- The title must exactly match a task item from the project plan.
+This keeps the project pane in sync with actual progress. Do NOT edit `/project.md` directly for task status changes — use the tool.
 
 ### Session End
 - Append a journal entry to /journal.md summarizing what was accomplished.

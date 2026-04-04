@@ -94,10 +94,71 @@ func (s *Session) MarkGoalDone(title string) error {
 	return s.saveWorkTree()
 }
 
+// ActivateTask implements agent.TaskTracker. Marks a task as active in the
+// work tree and persists to demarkus.
+func (s *Session) ActivateTask(title string) error {
+	return s.SetActiveGoal(title)
+}
+
+// CompleteTask implements agent.TaskTracker. Marks a task as done in the
+// work tree and persists to demarkus.
+func (s *Session) CompleteTask(title string) error {
+	return s.MarkGoalDone(title)
+}
+
+// ActiveTaskPath implements agent.TaskTracker. Returns the ancestry path
+// of the current active task.
+func (s *Session) ActiveTaskPath() string {
+	_, path := s.ActiveGoal()
+	return path
+}
+
 // ReloadWorkTree re-fetches the work tree from demarkus, discarding any
 // unsaved local changes. Useful after external modifications to project.md.
+// Must be called from the TUI goroutine — mutates session state directly.
 func (s *Session) ReloadWorkTree() error {
 	return s.loadWorkTree()
+}
+
+// WorkTreeSnapshot holds the result of a background work tree fetch.
+// Used to separate I/O (safe in any goroutine) from state mutation
+// (must happen on the TUI goroutine).
+type WorkTreeSnapshot struct {
+	Tree    *project.Tree
+	Version int
+	Err     error
+}
+
+// FetchWorkTreeSnapshot fetches the work tree from demarkus without mutating
+// session state. Safe to call from any goroutine (e.g. a tea.Cmd).
+// Apply the result via ApplyWorkTreeSnapshot on the TUI goroutine.
+func (s *Session) FetchWorkTreeSnapshot() WorkTreeSnapshot {
+	if s.memoryStore == nil {
+		return WorkTreeSnapshot{}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	doc, err := s.memoryStore.Fetch(ctx, workTreePath)
+	if errors.Is(err, memory.ErrNotFound) {
+		return WorkTreeSnapshot{} // no document — tree is nil, not an error
+	}
+	if err != nil {
+		return WorkTreeSnapshot{Err: err}
+	}
+	return WorkTreeSnapshot{
+		Tree:    project.Parse(doc.Body),
+		Version: doc.Version,
+	}
+}
+
+// ApplyWorkTreeSnapshot applies a previously fetched snapshot to the session.
+// Must be called from the TUI goroutine — mutates session state directly.
+func (s *Session) ApplyWorkTreeSnapshot(snap WorkTreeSnapshot) {
+	s.workTree = snap.Tree
+	s.workTreeVer = snap.Version
+	s.workTreeDirty = false
 }
 
 // loadWorkTree fetches project.md from demarkus and parses it into the

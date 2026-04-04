@@ -22,12 +22,11 @@ type lspServerConfig struct {
 }
 
 // LSPManager is the interface returned by InitLSP. It combines the
-// capabilities both binaries need: document syncing (for file tracking)
-// and diagnostics (for the agent's DiagProvider).
+// capabilities both binaries need: document syncing (for file tracking,
+// includes Close) and diagnostics (for the agent's DiagProvider).
 type LSPManager interface {
 	lang.DocumentSyncer
 	lang.DiagnosticProvider
-	Close() error
 }
 
 // InitLSP creates an LSP Manager from config or auto-detection.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/memory"
 	memserver "github.com/latebit-io/junto/engine/memory/server"
@@ -71,7 +72,12 @@ func StartMemory(projectRoot string) (*MemoryResult, error) {
 	case err == nil:
 		summary = doc.Body
 		if len(summary) > maxSummaryBytes {
-			summary = summary[:maxSummaryBytes]
+			// Truncate at a rune boundary to avoid splitting multi-byte UTF-8.
+			cut := maxSummaryBytes
+			for cut > 0 && !utf8.RuneStart(summary[cut]) {
+				cut--
+			}
+			summary = summary[:cut]
 		}
 	case errors.Is(err, memory.ErrNotFound):
 		// No summary yet — agent will create one.

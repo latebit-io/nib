@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,11 +29,25 @@ import (
 	"github.com/latebit-io/junto/engine/wire"
 )
 
+// errSetup is a sentinel wrapped into setup errors so main can distinguish
+// environment/configuration failures (exit 2) from agent failures (exit 1).
+var errSetup = errors.New("setup")
+
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	err := run()
+	if err == nil {
+		return
 	}
+	fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	if errors.Is(err, errSetup) {
+		os.Exit(2)
+	}
+	os.Exit(1)
+}
+
+// setupErr wraps err with the errSetup sentinel so main exits with code 2.
+func setupErr(format string, args ...any) error {
+	return fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), errSetup)
 }
 
 // config holds parsed command-line arguments.
@@ -45,6 +60,7 @@ type config struct {
 	files   []string
 }
 
+// parseArgs parses command-line flags and positional arguments.
 func parseArgs() config {
 	var c config
 	flag.StringVar(&c.output, "output", "", "Output format: json or text (default: text if TTY, json if piped)")
@@ -68,13 +84,13 @@ func run() error {
 	// Detect whether stdin/stdout are terminals.
 	stdinStat, err := os.Stdin.Stat()
 	if err != nil {
-		return fmt.Errorf("check stdin: %w", err)
+		return setupErr("check stdin: %v", err)
 	}
 	stdinTTY := (stdinStat.Mode() & os.ModeCharDevice) != 0
 
 	stdoutStat, err := os.Stdout.Stat()
 	if err != nil {
-		return fmt.Errorf("check stdout: %w", err)
+		return setupErr("check stdout: %v", err)
 	}
 	stdoutTTY := (stdoutStat.Mode() & os.ModeCharDevice) != 0
 
@@ -82,7 +98,7 @@ func run() error {
 	if cfg.debug {
 		logFile, err := os.OpenFile("/tmp/junto-agent-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
-			return fmt.Errorf("open debug log: %w", err)
+			return setupErr("open debug log: %v", err)
 		}
 		defer func() {
 			if err := logFile.Close(); err != nil {
@@ -100,7 +116,7 @@ func run() error {
 	// Resolve project root.
 	projectRoot, err := resolveProjectRoot(cfg.project)
 	if err != nil {
-		return fmt.Errorf("project root: %w", err)
+		return setupErr("project root: %v", err)
 	}
 
 	// Read goal from stdin if not provided as an argument and stdin is piped.
@@ -109,15 +125,15 @@ func run() error {
 		const maxGoalSize = 10 * 1024 * 1024 // 10 MB
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, maxGoalSize+1))
 		if err != nil {
-			return fmt.Errorf("read stdin: %w", err)
+			return setupErr("read stdin: %v", err)
 		}
 		if len(data) > maxGoalSize {
-			return fmt.Errorf("stdin goal exceeds %d bytes", maxGoalSize)
+			return setupErr("stdin goal exceeds %d bytes", maxGoalSize)
 		}
 		goal = strings.TrimSpace(string(data))
 	}
 	if goal == "" && !stdinTTY {
-		return fmt.Errorf("no goal provided — pass as argument or pipe to stdin")
+		return setupErr("no goal provided — pass as argument or pipe to stdin")
 	}
 	// goal == "" && stdinTTY → Runner handles REPL mode.
 
@@ -143,19 +159,19 @@ func run() error {
 
 	// Ensure demarkus binaries are installed.
 	if err := wire.EnsureBinaries(projectRoot); err != nil {
-		return fmt.Errorf("memory: install binaries: %w", err)
+		return setupErr("memory: install binaries: %v", err)
 	}
 
 	// Create LLM provider — required for headless mode.
 	provider := wire.NewProvider()
 	if provider == nil {
-		return fmt.Errorf("LLM_API_KEY not set")
+		return setupErr("LLM_API_KEY not set")
 	}
 
 	// Start memory server.
 	mem, err := wire.StartMemory(projectRoot)
 	if err != nil {
-		return fmt.Errorf("memory: %w", err)
+		return setupErr("memory: %v", err)
 	}
 	defer mem.Cleanup()
 

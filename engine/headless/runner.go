@@ -23,6 +23,12 @@ type agentPort interface {
 	IsWaiting() bool
 }
 
+// stdinLine carries one line read from stdin, or an error/EOF signal.
+type stdinLine struct {
+	text string
+	ok   bool // false on EOF or error
+}
+
 // Runner drives an agent to completion without a TUI.
 // It drains the event channel, auto-approves edits (writing them to disk),
 // and collects results. In TTY mode it reads follow-up input from stdin.
@@ -30,8 +36,14 @@ type Runner struct {
 	agent     agentPort
 	workspace *DiskWorkspace
 	events    <-chan event.Event
+	stdin     io.Reader // injectable for testing; defaults to os.Stdin
 	stderr    io.Writer // streaming status for human consumption
 	isTTY     bool      // true when stdin is a terminal (enables REPL)
+
+	// lines is the shared stdin reader channel, started once on first
+	// REPL read and kept alive for the runner's lifetime. A single
+	// goroutine owns the scanner so cancellations don't leak readers.
+	lines chan stdinLine
 }
 
 // NewRunner creates a headless runner. Pass os.Stderr for stderr to get
@@ -41,9 +53,28 @@ func NewRunner(agent agentPort, workspace *DiskWorkspace, events <-chan event.Ev
 		agent:     agent,
 		workspace: workspace,
 		events:    events,
+		stdin:     os.Stdin,
 		stderr:    stderr,
 		isTTY:     isTTY,
 	}
+}
+
+// startStdinReader launches the single goroutine that reads lines from
+// stdin and sends them on r.lines. Called once on the first REPL prompt.
+// The goroutine exits naturally when stdin reaches EOF or errors.
+func (r *Runner) startStdinReader() {
+	r.lines = make(chan stdinLine, 1)
+	go func() {
+		scanner := bufio.NewScanner(r.stdin)
+		for scanner.Scan() {
+			text := strings.TrimSpace(scanner.Text())
+			r.lines <- stdinLine{text, text != ""}
+		}
+		if err := scanner.Err(); err != nil {
+			slog.Error("stdin read failed", "err", err)
+		}
+		r.lines <- stdinLine{"", false} // signal EOF
+	}()
 }
 
 // Run starts the agent with the given goal and blocks until it completes.
@@ -279,33 +310,18 @@ func (r *Runner) status(format string, args ...any) {
 	_, _ = fmt.Fprintf(r.stderr, format, args...)
 }
 
-// readInput reads a single line from stdin, cancellable via ctx.
-// Returns the trimmed input and true on success, or ("", false) on
-// EOF, error, or context cancellation.
+// readInput reads a single line from the shared stdin reader, cancellable
+// via ctx. Returns the trimmed input and true on success, or ("", false)
+// on EOF, error, or context cancellation.
 func (r *Runner) readInput(ctx context.Context) (string, bool) {
+	if r.lines == nil {
+		r.startStdinReader()
+	}
 	r.status("\n> ")
 
-	type scanResult struct {
-		text string
-		ok   bool
-	}
-	ch := make(chan scanResult, 1)
-	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				slog.Error("stdin read failed", "err", err)
-			}
-			ch <- scanResult{"", false}
-			return
-		}
-		text := strings.TrimSpace(scanner.Text())
-		ch <- scanResult{text, text != ""}
-	}()
-
 	select {
-	case res := <-ch:
-		return res.text, res.ok
+	case line := <-r.lines:
+		return line.text, line.ok
 	case <-ctx.Done():
 		return "", false
 	}

@@ -407,6 +407,11 @@ func TestRunner_EditSearchNotFound(t *testing.T) {
 	runner := NewRunner(mock, ws, events, &bytes.Buffer{}, false)
 	result := runner.Run(context.Background(), "bad edit", nil)
 
+	// The agent reports success (it may try a different approach), but the
+	// edit error is still recorded for the caller to inspect.
+	if !result.Success {
+		t.Error("expected success — agent succeeded despite the failed edit")
+	}
 	if len(result.Errors) == 0 {
 		t.Error("expected error for search text not found")
 	}

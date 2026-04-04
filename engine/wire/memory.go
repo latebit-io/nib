@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"time"
 	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/memory"
@@ -16,6 +17,10 @@ import (
 // also caps at 8 KB before template rendering; this avoids carrying a
 // large string through the entire stack.
 const maxSummaryBytes = 8000
+
+// memoryOpTimeout bounds individual memory RPCs during startup.
+// Prevents indefinite blocking if the demarkus server stalls.
+const memoryOpTimeout = 10 * time.Second
 
 // EnsureBinaries installs demarkus binaries for the project if not present.
 // Idempotent — skips if already installed. This should always be called,
@@ -67,7 +72,9 @@ func StartMemory(projectRoot string) (*MemoryResult, error) {
 	}
 
 	var summary string
-	doc, err := store.Fetch(context.Background(), "/summary.md")
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), memoryOpTimeout)
+	doc, err := store.Fetch(fetchCtx, "/summary.md")
+	fetchCancel()
 	switch {
 	case err == nil:
 		summary = doc.Body
@@ -105,7 +112,9 @@ func StartMemory(projectRoot string) (*MemoryResult, error) {
 // architecture, debugging). This ensures new projects have a working
 // memory structure from the first session.
 func seedMemory(store memory.Store, projectRoot string) error {
-	_, err := store.Fetch(context.Background(), "/index.md")
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), memoryOpTimeout)
+	_, err := store.Fetch(checkCtx, "/index.md")
+	checkCancel()
 	if err == nil {
 		return nil // already seeded
 	}
@@ -126,7 +135,13 @@ func seedMemory(store memory.Store, projectRoot string) error {
 - [Debugging](/debugging.md) — lessons from investigations
 `, projectName)
 
-	if _, err := store.Publish(context.Background(), "/index.md", seed, 0); err != nil {
+	pubCtx, pubCancel := context.WithTimeout(context.Background(), memoryOpTimeout)
+	defer pubCancel()
+	if _, err := store.Publish(pubCtx, "/index.md", seed, 0); err != nil {
+		// Benign race: another session seeded between our Fetch and Publish.
+		if errors.Is(err, memory.ErrConflict) {
+			return nil
+		}
 		return fmt.Errorf("publish index: %w", err)
 	}
 	return nil

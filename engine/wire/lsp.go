@@ -66,12 +66,13 @@ func loadLSPConfigs(projectRoot string) []lsp.ServerConfig {
 
 	configs := make([]lsp.ServerConfig, 0, len(raw.Servers))
 	for name, cfg := range raw.Servers {
-		if _, err := exec.LookPath(cfg.Command); err != nil {
+		cmdPath, err := exec.LookPath(cfg.Command)
+		if err != nil {
 			slog.Warn("lsp: configured server not found on PATH", "name", name, "command", cfg.Command)
 			continue
 		}
 		configs = append(configs, lsp.ServerConfig{
-			Command:    cfg.Command,
+			Command:    cmdPath,
 			Args:       cfg.Args,
 			Env:        cfg.Env,
 			LanguageID: cfg.LanguageID,
@@ -85,10 +86,10 @@ func defaultLSPConfigs() []lsp.ServerConfig {
 	var configs []lsp.ServerConfig
 
 	// gopls for Go
-	if path, err := exec.LookPath("gopls"); err == nil {
-		slog.Debug("lsp: auto-detected gopls", "path", path)
+	if goplsPath, err := exec.LookPath("gopls"); err == nil {
+		slog.Debug("lsp: auto-detected gopls", "path", goplsPath)
 		configs = append(configs, lsp.ServerConfig{
-			Command:    "gopls",
+			Command:    goplsPath,
 			Args:       []string{"serve"},
 			LanguageID: "go",
 		})

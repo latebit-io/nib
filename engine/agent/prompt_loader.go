@@ -12,13 +12,20 @@ import (
 	"text/template"
 )
 
-//go:embed prompts/system.md prompts/planning_system.md prompts/user.md.tmpl
+//go:embed prompts/system.md.tmpl prompts/planning_system.md.tmpl prompts/user.md.tmpl
 var defaultPrompts embed.FS
 
 // maxPromptFileBytes is the size limit for project prompt overrides (1MB).
 // No sane prompt file should approach this; protects against accidental
 // large files in .project/prompts/.
 const maxPromptFileBytes = 1 << 20
+
+// SystemPromptData holds the template variables for system prompts.
+type SystemPromptData struct {
+	// Headless is true when the agent runs without a TUI (autonomous mode).
+	// Controls prompt framing: approval flow vs direct edit application.
+	Headless bool
+}
 
 // UserPromptData holds the template variables for the user message.
 type UserPromptData struct {
@@ -65,18 +72,61 @@ func NewPromptLoader(projectRoot string) *PromptLoader {
 	return &PromptLoader{projectRoot: projectRoot}
 }
 
-// SystemPrompt returns the system prompt text.
-func (l *PromptLoader) SystemPrompt() string {
-	content, source := l.load("system.md")
-	slog.Debug("prompt.SystemPrompt", "source", source)
-	return strings.TrimSpace(content)
+// SystemPrompt renders the execution-mode system prompt with the given data.
+func (l *PromptLoader) SystemPrompt(data SystemPromptData) string {
+	return l.renderSystemTemplate("system.md.tmpl", data)
 }
 
-// PlanningSystemPrompt returns the planning-mode system prompt text.
-func (l *PromptLoader) PlanningSystemPrompt() string {
-	content, source := l.load("planning_system.md")
-	slog.Debug("prompt.PlanningSystemPrompt", "source", source)
-	return strings.TrimSpace(content)
+// PlanningSystemPrompt renders the planning-mode system prompt with the given data.
+func (l *PromptLoader) PlanningSystemPrompt(data SystemPromptData) string {
+	return l.renderSystemTemplate("planning_system.md.tmpl", data)
+}
+
+// renderSystemTemplate loads a system prompt template by name and renders it
+// with the given data. Project overrides are re-parsed on every call so edits
+// during a session take effect immediately. If a project override fails to
+// parse or execute, falls back to the embedded default template rather than
+// returning raw (potentially broken) template syntax.
+func (l *PromptLoader) renderSystemTemplate(name string, data SystemPromptData) string {
+	raw, source := l.load(name)
+	slog.Debug("prompt.renderSystemTemplate", "name", name, "source", source)
+
+	out, err := renderTemplate(name, raw, data)
+	if err == nil {
+		return out
+	}
+	slog.Error("system prompt template render failed", "name", name, "source", source, "err", err)
+
+	// Project override failed — fall back to the embedded default template.
+	if source == "project" {
+		embedded, readErr := defaultPrompts.ReadFile("prompts/" + name)
+		if readErr != nil {
+			// Embedded files are compiled in — this should never happen.
+			panic(fmt.Sprintf("embedded prompt missing: %s: %v", name, readErr))
+		}
+		out, fallbackErr := renderTemplate(name, string(embedded), data)
+		if fallbackErr == nil {
+			return out
+		}
+		// Both project override and embedded default failed — truly broken binary.
+		slog.Error("embedded prompt template also failed", "name", name, "err", fallbackErr)
+	}
+
+	// Last resort: return raw content (only reachable for broken embedded templates).
+	return strings.TrimSpace(raw)
+}
+
+// renderTemplate parses and executes a Go template, returning the trimmed result.
+func renderTemplate(name, raw string, data SystemPromptData) (string, error) {
+	tmpl, err := template.New(name).Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("execute: %w", err)
+	}
+	return strings.TrimSpace(buf.String()), nil
 }
 
 // RenderUserMessage executes the user message template with the given data.

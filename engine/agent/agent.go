@@ -29,6 +29,23 @@ const (
 	ModePlanning
 )
 
+// InteractionMode controls prompt framing — how the agent describes its
+// workflow to the LLM. It does NOT change runtime behavior: the agent
+// always blocks on approveCh/continueCh for edits, and the frontend
+// (TUI or headless Runner) is responsible for signaling them.
+// Set at construction time, immutable for the agent's lifetime.
+type InteractionMode int
+
+const (
+	// Interactive is the default: prompts describe an editor with a developer
+	// who reviews and approves edits one at a time.
+	Interactive InteractionMode = iota
+	// Headless: prompts describe autonomous operation where edits are applied
+	// directly. The headless Runner auto-signals approval channels, so the
+	// agent runs at full speed without user interaction.
+	Headless
+)
+
 // planningBlocklist contains tool names disabled during planning mode.
 // These are write-side tools that modify code or run commands.
 var planningBlocklist = map[string]bool{
@@ -74,6 +91,10 @@ type Agent struct {
 	// planningBlocklist is the per-instance set of tool names blocked in planning mode.
 	planningBlocklist map[string]bool
 
+	// interactionMode controls prompt framing only (interactive vs headless).
+	// Does not affect runtime behavior — approval channels are always used.
+	interactionMode InteractionMode
+
 	// memoryStore is used to re-fetch the session summary before each goal.
 	memoryStore memory.Store
 	// memorySummary is the fallback summary from startup, used when re-fetch fails.
@@ -95,6 +116,10 @@ type NewOptions struct {
 	// These are merged with the built-in defaults (edit_file, write_file, bash);
 	// they extend the blocklist, not replace it.
 	PlanningBlocklist []string
+	// Interaction sets the prompt framing (Interactive vs Headless).
+	// This only affects system prompt text — it does not change runtime
+	// behavior. The frontend must handle approval signaling regardless.
+	Interaction InteractionMode
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -114,11 +139,13 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var memStore memory.Store
 	var memorySummary string
 	var extraBlocklist []string
+	var interaction InteractionMode
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
 		memorySummary = opts.MemorySummary
 		extraBlocklist = opts.PlanningBlocklist
+		interaction = opts.Interaction
 	}
 
 	// Build per-instance planning blocklist: start from defaults, merge extras.
@@ -140,6 +167,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		inputCh:           make(chan string, 1), // capacity 1: Reply() is non-blocking; only one pending reply is meaningful
 		diagProvider:      diagProvider,
 		planningBlocklist: merged,
+		interactionMode:   interaction,
 		memoryStore:       memStore,
 		memorySummary:     memorySummary,
 		diagDelay:         500 * time.Millisecond,

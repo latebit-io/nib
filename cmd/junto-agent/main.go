@@ -96,7 +96,7 @@ func run() error {
 
 	// Setup logging.
 	if cfg.debug {
-		logFile, err := os.OpenFile("/tmp/junto-agent-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		logFile, err := os.OpenFile("/tmp/junto-agent-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
 			return setupErr("open debug log: %v", err)
 		}
@@ -111,6 +111,9 @@ func run() error {
 	}
 
 	// Resolve output format based on stdout, not stdin.
+	if cfg.output != "" && cfg.output != "json" && cfg.output != "text" {
+		return setupErr("invalid --output %q (expected json|text)", cfg.output)
+	}
 	outputJSON := cfg.output == "json" || (cfg.output == "" && !stdoutTTY)
 
 	// Resolve project root.
@@ -202,7 +205,13 @@ func run() error {
 
 	// Output result.
 	if outputJSON {
-		return result.WriteJSON(os.Stdout)
+		if err := result.WriteJSON(os.Stdout); err != nil {
+			return err
+		}
+		if !result.Success {
+			return fmt.Errorf("agent completed with errors")
+		}
+		return nil
 	}
 	return writeText(result)
 }

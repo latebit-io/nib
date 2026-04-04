@@ -64,6 +64,9 @@ type Session struct {
 	IntentDone    bool     // true when intent was completed (not cleared)
 	IntentHistory []string // resolved intents archived in order
 
+	// Phase tracks the current workflow phase (planning vs execution).
+	Phase Phase
+
 	// PendingEdit is the edit currently awaiting approval (nil = none)
 	PendingEdit *event.PendingEdit
 
@@ -882,6 +885,11 @@ func (s *Session) SubmitGoal(goal string) bool {
 		return false
 	}
 
+	// Handle planning phase commands.
+	if s.Phase == PhasePlanning {
+		return s.handlePlanningInput(goal)
+	}
+
 	// Continue existing conversation if the agent is waiting for input.
 	// Reply returns false if the agent raced out of the waiting state
 	// or the channel is full — fall through to start a new conversation.
@@ -890,6 +898,57 @@ func (s *Session) SubmitGoal(goal string) bool {
 	}
 
 	// Start a new conversation. Archive any previous intent.
+	s.startNewConversation(goal, agent.ModeExecution)
+	s.Phase = PhaseExecution
+	return false
+}
+
+// SubmitPlanningGoal starts a new conversation in planning mode.
+// Write-side tools are disabled; the agent discusses design before coding.
+// No-op if no agent is configured.
+func (s *Session) SubmitPlanningGoal(goal string) {
+	if !s.HasAgent() {
+		return
+	}
+
+	s.startNewConversation(goal, agent.ModePlanning)
+	s.Phase = PhasePlanning
+}
+
+// handlePlanningInput processes input during the planning phase.
+// ":done" transitions to execution with the original goal.
+// ":skip" transitions to execution immediately.
+// Other input continues the planning conversation.
+func (s *Session) handlePlanningInput(input string) bool {
+	switch input {
+	case ":done":
+		// Transition to execution — cancel planning, start execution
+		// with the original goal. The plan is persisted in demarkus
+		// by the planning agent, so the execution agent picks it up
+		// via memory summary.
+		originalGoal := s.CurrentIntent
+		s.agent.Cancel()
+		s.startNewConversation(originalGoal, agent.ModeExecution)
+		s.Phase = PhaseExecution
+		return false
+
+	case ":skip":
+		// Skip planning entirely — start execution with original goal.
+		originalGoal := s.CurrentIntent
+		s.agent.Cancel()
+		s.startNewConversation(originalGoal, agent.ModeExecution)
+		s.Phase = PhaseExecution
+		return false
+
+	default:
+		// Continue planning conversation.
+		return s.agent.Reply(input)
+	}
+}
+
+// startNewConversation archives any previous intent, clears stale state,
+// and starts a new agent conversation in the specified mode.
+func (s *Session) startNewConversation(goal string, mode agent.Mode) {
 	if s.CurrentIntent != "" && !s.IntentDone {
 		s.ArchiveIntent()
 	}
@@ -899,8 +958,7 @@ func (s *Session) SubmitGoal(goal string) bool {
 	s.editReviewed = false
 	s.CurrentIntent = goal
 	s.IntentDone = false
-	s.agent.Run(s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles())
-	return false
+	s.agent.RunWithMode(s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles(), mode)
 }
 
 // ArchiveIntent marks the current intent as done.

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -70,10 +71,10 @@ func (s *Session) ActiveGoal() (*project.Node, string) {
 // the work tree is not loaded, or persistence fails.
 func (s *Session) SetActiveGoal(title string) error {
 	if s.workTree == nil {
-		return errors.New("no work tree loaded")
+		return errors.New("session: no work tree loaded")
 	}
 	if !s.workTree.SetActiveGoal(title) {
-		return errors.New("task not found: " + title)
+		return fmt.Errorf("session: task not found: %q", title)
 	}
 	s.workTreeDirty = true
 	return s.saveWorkTree()

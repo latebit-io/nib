@@ -11,7 +11,7 @@ import (
 	"text/template"
 )
 
-//go:embed prompts/system.md prompts/user.md.tmpl
+//go:embed prompts/system.md prompts/planning_system.md prompts/user.md.tmpl
 var defaultPrompts embed.FS
 
 // maxPromptFileBytes is the size limit for project prompt overrides (1MB).
@@ -55,6 +55,13 @@ func NewPromptLoader(projectRoot string) *PromptLoader {
 func (l *PromptLoader) SystemPrompt() string {
 	content, source := l.load("system.md")
 	slog.Debug("prompt.SystemPrompt", "source", source)
+	return strings.TrimSpace(content)
+}
+
+// PlanningSystemPrompt returns the planning-mode system prompt text.
+func (l *PromptLoader) PlanningSystemPrompt() string {
+	content, source := l.load("planning_system.md")
+	slog.Debug("prompt.PlanningSystemPrompt", "source", source)
 	return strings.TrimSpace(content)
 }
 

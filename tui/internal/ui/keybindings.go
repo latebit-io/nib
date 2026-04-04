@@ -33,6 +33,7 @@ const (
 	ActionGoToLineStart  = keymap.ActionGoToLineStart
 	ActionGoToLineEnd    = keymap.ActionGoToLineEnd
 	ActionAgentStart     = keymap.ActionAgentStart
+	ActionAgentPlan      = keymap.ActionAgentPlan
 	ActionAgentApprove   = keymap.ActionAgentApprove
 	ActionAgentReject    = keymap.ActionAgentReject
 	ActionAgentContinue  = keymap.ActionAgentContinue
@@ -105,9 +106,11 @@ func DefaultKeymap() *Keymap {
 			{code: '-', mod: tea.ModCtrl}:                         ActionGoBack,        // Ctrl+- (VS Code)
 
 			// Agent
-			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
-			{code: tea.KeyEscape, mod: 0}: ActionAgentReject,
-			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
+			{code: 'g', mod: tea.ModCtrl | tea.ModShift}: ActionAgentPlan,
+			{code: 'G', mod: tea.ModCtrl | tea.ModShift}: ActionAgentPlan, // some terminals send uppercase with Shift
+			{code: 'o', mod: tea.ModCtrl}:                ActionAgentApprove,
+			{code: tea.KeyEscape, mod: 0}:                ActionAgentReject,
+			{code: 'n', mod: tea.ModCtrl}:                ActionAgentContinue,
 
 			// Find
 			{code: 'f', mod: tea.ModCtrl}:                ActionFind,
@@ -124,16 +127,17 @@ func DefaultKeymap() *Keymap {
 			{code: 'k', mod: tea.ModAlt}:  ActionHover,
 		},
 		byString: map[string]Action{
-			"ctrl+g": ActionAgentStart,
-			"ctrl+p": ActionOpenPalette,
-			"ctrl+b": ActionToggleProject,
-			"ctrl+/": ActionToggleComment,
-			"ctrl+_": ActionToggleComment, // some terminals send Ctrl+/ as Ctrl+_
-			"f4":     ActionHelp,
-			"f1":     ActionFocusProject,
-			"f2":     ActionFocusEditor,
-			"f3":     ActionFocusAgent,
-			"f12":    ActionGoToDefinition, // F12 (VS Code)
+			"ctrl+g":       ActionAgentStart,
+			"ctrl+shift+g": ActionAgentPlan,
+			"ctrl+p":       ActionOpenPalette,
+			"ctrl+b":       ActionToggleProject,
+			"ctrl+/":       ActionToggleComment,
+			"ctrl+_":       ActionToggleComment, // some terminals send Ctrl+/ as Ctrl+_
+			"f4":           ActionHelp,
+			"f1":           ActionFocusProject,
+			"f2":           ActionFocusEditor,
+			"f3":           ActionFocusAgent,
+			"f12":          ActionGoToDefinition, // F12 (VS Code)
 		},
 	}
 	return km

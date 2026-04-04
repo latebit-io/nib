@@ -15,8 +15,16 @@ import (
 // InputHeight is the number of rows reserved for the input area (separator + input + status).
 const InputHeight = 5
 
-// userMessageStyle renders the developer's messages in the conversation thread.
-var userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Bold(true)
+// Package-level styles — allocated once, never in render paths.
+var (
+	userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Bold(true)
+	agentDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	agentStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	agentSelStyle    = lipgloss.NewStyle().Background(lipgloss.Color("24"))
+	agentInputStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("230"))
+	agentInputDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	agentCursorStyle = lipgloss.NewStyle().Reverse(true)
+)
 
 // MaxInputBufferBytes caps the goal input buffer to prevent unbounded memory
 // growth from large pastes or rapid key input. 1 MiB is generous for any
@@ -53,8 +61,9 @@ type AgentPaneModel struct {
 	CursorCol       int
 
 	// Input area
-	InputActive bool
-	InputBuffer string
+	InputActive  bool
+	InputBuffer  string
+	PlanningMode bool // true when input will start a planning conversation
 
 	// Shared services
 	Services *Services
@@ -269,15 +278,21 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.Code {
 	case tea.KeyEnter:
 		goal := strings.TrimSpace(m.InputBuffer)
+		planning := m.PlanningMode
 		m.InputActive = false
 		m.InputBuffer = ""
+		m.PlanningMode = false
 		if goal != "" {
+			if planning {
+				return func() tea.Msg { return PlanningGoalSubmittedMsg{Goal: goal} }
+			}
 			return func() tea.Msg { return GoalSubmittedMsg{Goal: goal} }
 		}
 		return nil
 	case tea.KeyEscape:
 		m.InputActive = false
 		m.InputBuffer = ""
+		m.PlanningMode = false
 		return nil
 	case tea.KeyBackspace:
 		if len(m.InputBuffer) > 0 {
@@ -612,12 +627,12 @@ func (m *AgentPaneModel) Render() string {
 	output := make([]string, m.Height)
 	row := 0
 
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("24"))
-	inputActiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("230"))
-	inputDimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	cursorStyle := lipgloss.NewStyle().Reverse(true)
+	dimStyle := agentDimStyle
+	statusStyle := agentStatusStyle
+	selStyle := agentSelStyle
+	inputActiveStyle := agentInputStyle
+	inputDimStyle := agentInputDim
+	cursorStyle := agentCursorStyle
 
 	// No LLM configured — show message and fill remaining rows
 	if !m.HasAgent {
@@ -758,6 +773,8 @@ func (m *AgentPaneModel) Render() string {
 			statusText = dimStyle.Render(m.padLine(" Ready"))
 		case "thinking":
 			statusText = statusStyle.Render(m.padLine(" Thinking..."))
+		case "planning":
+			statusText = statusStyle.Render(m.padLine(" Planning... | :done :skip"))
 		case "editing":
 			statusText = statusStyle.Render(m.padLine(" Ctrl+N to continue"))
 		case "waiting":

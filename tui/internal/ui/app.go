@@ -234,6 +234,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case PlanningGoalSubmittedMsg:
+		m.Session.SubmitPlanningGoal(msg.Goal)
+		m.AgentPane.Clear()
+		return m, nil
+
 	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
@@ -559,6 +564,15 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.Session.HasAgent() {
 			m.AgentPane.InputActive = true
 			m.AgentPane.InputBuffer = ""
+			m.AgentPane.PlanningMode = false
+		}
+		return m, nil
+
+	case ActionAgentPlan:
+		if m.Session.HasAgent() {
+			m.AgentPane.InputActive = true
+			m.AgentPane.InputBuffer = ""
+			m.AgentPane.PlanningMode = true
 		}
 		return m, nil
 
@@ -766,6 +780,9 @@ func (m *AppModel) renderIntentBar() string {
 	case m.Session.IntentDone:
 		text = " done: " + m.Session.CurrentIntent
 		style = doneStyle
+	case m.Session.Phase == session.PhasePlanning:
+		text = " [PLAN] " + m.Session.CurrentIntent
+		style = activeStyle
 	default:
 		text = " " + m.Session.CurrentIntent
 		style = activeStyle

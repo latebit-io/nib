@@ -3,6 +3,7 @@ package textarea
 import (
 	"log/slog"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -639,6 +640,20 @@ func (t *TextArea) paste() {
 	if text == "" {
 		return
 	}
+	// Cap pasted text to remaining capacity before processing to avoid
+	// allocating unbounded memory from a large clipboard payload.
+	remaining := t.maxBytes - t.byteLen
+	if remaining <= 0 {
+		return
+	}
+	if len(text) > remaining {
+		// Truncate on a valid UTF-8 boundary.
+		text = text[:remaining]
+		for len(text) > 0 && !utf8.Valid([]byte(text)) {
+			text = text[:len(text)-1]
+		}
+		slog.Warn("paste truncated to capacity", "cap", t.maxBytes)
+	}
 	t.deleteSelectionIfActive()
 	t.insertText(text)
 }
@@ -654,6 +669,9 @@ func (t *TextArea) insertText(text string) {
 		}
 		if r == '\t' {
 			t.insertRune(' ')
+			continue
+		}
+		if unicode.IsControl(r) {
 			continue
 		}
 		t.insertRune(r)

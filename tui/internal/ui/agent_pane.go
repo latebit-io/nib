@@ -61,7 +61,8 @@ type AgentPaneModel struct {
 	InputActive       bool
 	Input             *textarea.TextArea
 	PlanningMode      bool // true when input will start a planning conversation
-	inputAreaStartRow int  // first row of the input area (for mouse click detection)
+	inputAreaStartRow int // first row of the input area (for mouse click detection)
+	inputAreaEndRow   int // exclusive end row
 
 	// Shared services
 	Services *Services
@@ -191,7 +192,7 @@ func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 	}
 
 	// Click in the input area → focus it. Click elsewhere → unfocus.
-	if msg.Y >= m.inputAreaStartRow {
+	if msg.Y >= m.inputAreaStartRow && msg.Y < m.inputAreaEndRow {
 		m.InputActive = true
 		return nil
 	}
@@ -273,12 +274,12 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	result := cmd()
 	switch result.(type) {
 	case textarea.SubmitMsg:
-		goal := strings.TrimSpace(m.Input.Content())
+		goal := m.Input.Content()
 		planning := m.PlanningMode
 		m.InputActive = false
 		m.Input.Reset()
 		m.PlanningMode = false
-		if goal != "" {
+		if strings.TrimSpace(goal) != "" {
 			if planning {
 				return func() tea.Msg { return PlanningGoalSubmittedMsg{Goal: goal} }
 			}
@@ -714,6 +715,7 @@ func (m *AgentPaneModel) Render() string {
 
 	// Track where the input area starts for mouse click detection.
 	m.inputAreaStartRow = row
+	m.inputAreaEndRow = row + inputRows
 
 	for i := range inputRows {
 		if row >= m.Height {

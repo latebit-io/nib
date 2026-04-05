@@ -378,13 +378,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ProjectCreateFileMsg:
-		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
-		if err := m.Session.WriteFile(absPath, ""); err != nil {
+		if err := m.Session.WriteFile(msg.Path, ""); err != nil {
 			slog.Warn("create file", "err", err)
 			m.AgentPane.AppendMeta("[create failed: " + err.Error() + "]\n")
 			return m, nil
 		}
 		m.refreshProjectPane()
+		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
 		return m.openFile(absPath)
 
 	case ProjectCreateDirMsg:

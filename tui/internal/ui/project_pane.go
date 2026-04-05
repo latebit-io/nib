@@ -65,6 +65,8 @@ var (
 	projDimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240"))
 
+	projInputCursorStyle = lipgloss.NewStyle().Reverse(true)
+
 	projBadgeCtxStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("2"))
 
@@ -892,7 +894,7 @@ func (p *ProjectPaneModel) renderCreateInput() string {
 			break
 		}
 		if cursorRow == 0 && j == cursorCol {
-			lineBuilder.WriteString(agentCursorStyle.Render(ch))
+			lineBuilder.WriteString(projInputCursorStyle.Render(ch))
 		} else {
 			lineBuilder.WriteString(ch)
 		}
@@ -900,7 +902,7 @@ func (p *ProjectPaneModel) renderCreateInput() string {
 	}
 	// Cursor at end of content.
 	if cursorRow == 0 && cursorCol >= len(runes) && cellsUsed < p.width {
-		lineBuilder.WriteString(agentCursorStyle.Render(" "))
+		lineBuilder.WriteString(projInputCursorStyle.Render(" "))
 		cellsUsed++
 	}
 	// Pad to width.

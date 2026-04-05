@@ -863,10 +863,6 @@ func (s *Session) WriteFile(path, content string) error {
 	return nil
 }
 
-// DeleteFile removes a file from disk and cleans up session state.
-// Removes the file from the context set, closes its editor buffer,
-// and unwires LSP sync. If the deleted file was the active editor,
-// activeFile is cleared so the caller can switch to another buffer.
 // CreateDir creates a directory (and parents) within the project root.
 // The path is validated via resolvePath to prevent traversal outside the root.
 func (s *Session) CreateDir(path string) error {
@@ -877,6 +873,10 @@ func (s *Session) CreateDir(path string) error {
 	return os.MkdirAll(absPath, 0o755)
 }
 
+// DeleteFile removes a file or directory from disk and cleans up session state.
+// Closes editor buffers, removes context/modified entries, and unwires LSP sync
+// for the deleted path and any children. If the active editor is affected, falls
+// back to another open editor or installs a fresh empty one.
 func (s *Session) DeleteFile(path string) error {
 	absPath, err := s.resolvePath(path)
 	if err != nil {

@@ -954,7 +954,11 @@ func (s *Session) cleanupDeletedPath(canon string) []*editor.Editor {
 			break
 		}
 		if s.Editor == nil {
-			s.Editor = editor.New(buffer.New())
+			e := editor.New(buffer.New())
+			s.Editor = e
+			// Track the empty editor so Session.Close() can release its resources.
+			s.editors[""] = e
+			s.activeFile = ""
 		}
 	}
 	return removed

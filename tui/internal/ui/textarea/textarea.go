@@ -266,6 +266,7 @@ func (t *TextArea) Update(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 
 	case tea.KeyBackspace:
+		t.collapseEmptySelection()
 		if t.selActive {
 			t.deleteSelection()
 		} else {
@@ -274,6 +275,7 @@ func (t *TextArea) Update(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 
 	case tea.KeyDelete:
+		t.collapseEmptySelection()
 		if t.selActive {
 			t.deleteSelection()
 		} else {
@@ -482,6 +484,14 @@ func (t *TextArea) clearSelection() {
 	t.selActive = false
 }
 
+// collapseEmptySelection deactivates the selection if anchor equals cursor.
+// This prevents zero-width selections from intercepting edits.
+func (t *TextArea) collapseEmptySelection() {
+	if t.selActive && t.selAnchorLine == t.cursorLine && t.selAnchorCol == t.cursorCol {
+		t.selActive = false
+	}
+}
+
 func (t *TextArea) selectAll() {
 	t.selActive = true
 	t.selAnchorLine = 0
@@ -604,6 +614,7 @@ func (t *TextArea) deleteSelection() {
 }
 
 func (t *TextArea) deleteSelectionIfActive() {
+	t.collapseEmptySelection()
 	if t.selActive {
 		t.deleteSelection()
 	}
@@ -647,6 +658,9 @@ func (t *TextArea) paste() {
 	if text == "" {
 		return
 	}
+	// Delete selection first so remaining capacity accounts for freed bytes.
+	t.deleteSelectionIfActive()
+
 	// Cap pasted text to remaining capacity before processing to avoid
 	// allocating unbounded memory from a large clipboard payload.
 	remaining := t.maxBytes - t.byteLen
@@ -661,7 +675,6 @@ func (t *TextArea) paste() {
 		}
 		slog.Warn("paste truncated to capacity", "cap", t.maxBytes)
 	}
-	t.deleteSelectionIfActive()
 	t.insertText(text)
 }
 

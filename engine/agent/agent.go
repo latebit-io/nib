@@ -46,6 +46,28 @@ const (
 	Headless
 )
 
+// distributedKeywords are substrings that identify an MCP server as
+// distributed (team/shared) memory. If any keyword appears in the server
+// name (case-insensitive), the server is classified as distributed memory
+// and the system prompt explains local vs shared usage to the LLM.
+var distributedKeywords = []string{"team", "shared", "distributed", "soul"}
+
+// DetectDistributedMemory filters server names by naming convention,
+// returning those that indicate a shared/team memory server.
+func DetectDistributedMemory(serverNames []string) []string {
+	var result []string
+	for _, name := range serverNames {
+		lower := strings.ToLower(name)
+		for _, kw := range distributedKeywords {
+			if strings.Contains(lower, kw) {
+				result = append(result, name)
+				break
+			}
+		}
+	}
+	return result
+}
+
 // planningBlocklist contains tool names disabled during planning mode.
 // These are write-side tools that modify code or run commands.
 var planningBlocklist = map[string]bool{
@@ -99,6 +121,10 @@ type Agent struct {
 	memoryStore memory.Store
 	// memorySummary is the fallback summary from startup, used when re-fetch fails.
 	memorySummary string
+
+	// distributedMemory lists MCP server names recognized as shared/team memory.
+	// Injected into the system prompt so the agent distinguishes local from shared.
+	distributedMemory []string
 }
 
 // NewOptions holds optional dependencies for agent construction.
@@ -120,6 +146,10 @@ type NewOptions struct {
 	// This only affects system prompt text — it does not change runtime
 	// behavior. The frontend must handle approval signaling regardless.
 	Interaction InteractionMode
+	// DistributedMemory lists MCP server names recognized as shared/team
+	// memory (detected by naming convention). When non-empty, the system
+	// prompt includes a section explaining how to use local vs shared memory.
+	DistributedMemory []string
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -140,12 +170,14 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var memorySummary string
 	var extraBlocklist []string
 	var interaction InteractionMode
+	var distributedMemory []string
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
 		memorySummary = opts.MemorySummary
 		extraBlocklist = opts.PlanningBlocklist
 		interaction = opts.Interaction
+		distributedMemory = opts.DistributedMemory
 	}
 
 	// Build per-instance planning blocklist: start from defaults, merge extras.
@@ -170,6 +202,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		interactionMode:   interaction,
 		memoryStore:       memStore,
 		memorySummary:     memorySummary,
+		distributedMemory: distributedMemory,
 		diagDelay:         500 * time.Millisecond,
 		workspace:         workspace,
 	}

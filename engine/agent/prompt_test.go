@@ -309,6 +309,117 @@ func TestBuildMessagesHeadlessMode(t *testing.T) {
 	}
 }
 
+func TestDetectDistributedMemory(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"team-demarkus", true},
+		{"shared-docs", true},
+		{"distributed-wiki", true},
+		{"demarkus-soul", true},
+		{"Team-Server", true},  // case-insensitive
+		{"my-SHARED-db", true}, // keyword anywhere
+		{"project-tools", false},
+		{"memory", false},
+		{"lsp-server", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DetectDistributedMemory([]string{tt.name})
+			got := len(result) > 0
+			if got != tt.want {
+				t.Errorf("DetectDistributedMemory([%q]) returned %v, want match=%v", tt.name, result, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectDistributedMemoryFiltersCorrectly(t *testing.T) {
+	input := []string{"team-wiki", "lsp-server", "shared-docs", "my-linter"}
+	got := DetectDistributedMemory(input)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 distributed servers, got %d: %v", len(got), got)
+	}
+}
+
+func TestSystemPromptDistributedMemoryPresent(t *testing.T) {
+	loader := NewPromptLoader("")
+	system := loader.SystemPrompt(SystemPromptData{
+		DistributedMemory: []string{"team-demarkus"},
+	})
+
+	if !strings.Contains(system, "## Distributed Memory") {
+		t.Error("system prompt should include Distributed Memory section when servers are configured")
+	}
+	if !strings.Contains(system, "team-demarkus") {
+		t.Error("system prompt should list the distributed memory server name")
+	}
+	if !strings.Contains(system, "Publish only with developer approval") {
+		t.Error("system prompt should include publish-with-approval guideline")
+	}
+}
+
+func TestSystemPromptDistributedMemoryAbsent(t *testing.T) {
+	loader := NewPromptLoader("")
+	system := loader.SystemPrompt(SystemPromptData{})
+
+	if strings.Contains(system, "Distributed Memory") {
+		t.Error("system prompt should not include Distributed Memory section when no servers configured")
+	}
+}
+
+func TestPlanningPromptDistributedMemoryPresent(t *testing.T) {
+	loader := NewPromptLoader("")
+	planning := loader.PlanningSystemPrompt(SystemPromptData{
+		DistributedMemory: []string{"shared-wiki", "team-docs"},
+	})
+
+	if !strings.Contains(planning, "Distributed Memory") {
+		t.Error("planning prompt should include Distributed Memory section when servers are configured")
+	}
+	if !strings.Contains(planning, "shared-wiki") {
+		t.Error("planning prompt should list shared-wiki server")
+	}
+	if !strings.Contains(planning, "team-docs") {
+		t.Error("planning prompt should list team-docs server")
+	}
+}
+
+func TestPlanningPromptDistributedMemoryAbsent(t *testing.T) {
+	loader := NewPromptLoader("")
+	planning := loader.PlanningSystemPrompt(SystemPromptData{})
+
+	if strings.Contains(planning, "Distributed Memory") {
+		t.Error("planning prompt should not include Distributed Memory section when no servers configured")
+	}
+}
+
+func TestBuildMessagesDistributedMemoryInSystemPrompt(t *testing.T) {
+	a := testAgent()
+	a.distributedMemory = []string{"team-server"}
+	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", ModeExecution)
+
+	system := msgs[0].Content
+	if !strings.Contains(system, "Distributed Memory") {
+		t.Error("system prompt should include Distributed Memory when agent has distributed servers")
+	}
+	if !strings.Contains(system, "team-server") {
+		t.Error("system prompt should contain the distributed server name")
+	}
+}
+
+func TestBuildMessagesNoDistributedMemory(t *testing.T) {
+	a := testAgent()
+	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", ModeExecution)
+
+	system := msgs[0].Content
+	if strings.Contains(system, "Distributed Memory") {
+		t.Error("system prompt should not include Distributed Memory when no distributed servers")
+	}
+}
+
 func mkdirAll(path string) error {
 	return os.MkdirAll(path, 0o755)
 }

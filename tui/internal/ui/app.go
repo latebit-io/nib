@@ -760,7 +760,7 @@ func (m *AppModel) View() tea.View {
 	if m.Width == 0 || m.Height == 0 {
 		content = "Initializing..."
 	} else {
-		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width)
+		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, m.Session.DistributedMemory()...)
 		if m.Dialog.Active {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Help.Active {

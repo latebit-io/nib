@@ -150,6 +150,10 @@ type ProjectPaneModel struct {
 	// dirty is set when state changes while the pane is hidden.
 	// rebuild() is deferred until the pane becomes visible.
 	dirty bool
+
+	// pendingReveal is set before rebuild to auto-expand ancestor
+	// directories of a newly created file so it's visible in the tree.
+	pendingReveal string
 }
 
 // projectItem is a flattened display row in the project pane.
@@ -316,6 +320,10 @@ func (p *ProjectPaneModel) rebuild() {
 	sortChildren(p.filesTree)
 
 	RestoreExpanded(p.filesTree, prevFilesExpanded)
+	if p.pendingReveal != "" {
+		ExpandToPath(p.filesTree, p.pendingReveal)
+		p.pendingReveal = ""
+	}
 	SetBadges(p.filesTree, ctxSet, modSet)
 
 	// Flatten into display items

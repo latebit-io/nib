@@ -222,6 +222,40 @@ func RestoreExpanded(root *TreeNode, expanded map[string]bool) {
 	})
 }
 
+// ExpandToPath expands all ancestor directories of the given file path
+// so that the file (or deepest directory) becomes visible in the flattened
+// tree. The path should be relative with forward slashes, matching
+// TreeNode.Path conventions.
+func ExpandToPath(root *TreeNode, filePath string) {
+	if root == nil || filePath == "" {
+		return
+	}
+	filePath = filepath.ToSlash(filePath)
+	// Walk the tree following each path segment, expanding dirs along the way.
+	parts := strings.Split(filePath, "/")
+	node := root
+	for i, name := range parts {
+		var child *TreeNode
+		for _, c := range node.Children {
+			if c.Name == name {
+				child = c
+				break
+			}
+		}
+		if child == nil {
+			return // path not in tree
+		}
+		if child.IsDir {
+			child.Collapsed = false
+		}
+		// For the last segment (the file itself), nothing more to do.
+		if i == len(parts)-1 {
+			return
+		}
+		node = child
+	}
+}
+
 // findNode returns the first node with the given relative path, or nil.
 func findNode(root *TreeNode, relPath string) *TreeNode {
 	if root == nil {

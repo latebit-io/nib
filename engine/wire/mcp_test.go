@@ -17,4 +17,10 @@ func TestLoadMCPConfigsFromEnv(t *testing.T) {
 	if _, ok := configs["lsp-server"]; !ok {
 		t.Error("expected lsp-server config")
 	}
+	if got := configs["team-wiki"].Command; got != "echo hello" {
+		t.Errorf("expected team-wiki command %q, got %q", "echo hello", got)
+	}
+	if got := configs["lsp-server"].Command; got != "gopls" {
+		t.Errorf("expected lsp-server command %q, got %q", "gopls", got)
+	}
 }

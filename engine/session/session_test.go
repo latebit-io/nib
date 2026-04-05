@@ -965,4 +965,13 @@ func TestDeleteFile_ProjectMeta(t *testing.T) {
 	if _, err := os.Stat(metaFile); err != nil {
 		t.Errorf("file should still exist after rejected delete: %v", err)
 	}
+
+	// Deleting .project directory itself should also be rejected
+	err = s.DeleteFile(metaDir)
+	if err == nil {
+		t.Error("DeleteFile should reject .project directory itself")
+	}
+	if _, err := os.Stat(metaDir); err != nil {
+		t.Errorf(".project dir should still exist after rejected delete: %v", err)
+	}
 }

@@ -889,8 +889,14 @@ func (s *Session) DeleteFile(path string) error {
 		return fmt.Errorf("cannot delete project root")
 	}
 
-	if s.isProjectMeta(canon) {
+	if canon == filepath.Join(filepath.Clean(s.projectRoot), ".project") || s.isProjectMeta(canon) {
 		return fmt.Errorf("cannot delete project metadata: %s", path)
+	}
+
+	// Block deletion while an edit is pending approval or mid-animation,
+	// same guard as SwitchTo. Approval state may reference the deleted path.
+	if s.pendingEdit != nil || s.stagedEditFile != "" {
+		return ErrEditPending
 	}
 
 	if err := removeFromDisk(absPath, path); err != nil {

@@ -183,6 +183,9 @@ func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 }
 
 func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
+	if !m.HasAgent {
+		return nil
+	}
 	if msg.Button != tea.MouseLeft {
 		return nil
 	}
@@ -695,6 +698,20 @@ func (m *AgentPaneModel) Render() string {
 		cursorVisRow, cursorVisCol = m.Input.CursorPosition()
 	}
 
+	// Window the rendered input so the cursor row is always visible.
+	// inputScrollOffset is the first visual row to display.
+	inputScrollOffset := 0
+	if len(renderedInput) > inputRows && inputRows > 0 {
+		// Ensure the cursor row is on screen.
+		if cursorVisRow >= inputRows {
+			inputScrollOffset = cursorVisRow - inputRows + 1
+		}
+		maxScroll := len(renderedInput) - inputRows
+		if inputScrollOffset > maxScroll {
+			inputScrollOffset = maxScroll
+		}
+	}
+
 	// Track where the input area starts for mouse click detection.
 	m.inputAreaStartRow = row
 
@@ -702,8 +719,9 @@ func (m *AgentPaneModel) Render() string {
 		if row >= m.Height {
 			break
 		}
-		if hasContent && i < len(renderedInput) {
-			lineRunes := []rune(renderedInput[i].Text)
+		visIdx := i + inputScrollOffset
+		if hasContent && visIdx < len(renderedInput) {
+			lineRunes := []rune(renderedInput[visIdx].Text)
 			var lineBuilder strings.Builder
 			cellsUsed := 0
 
@@ -713,9 +731,9 @@ func (m *AgentPaneModel) Render() string {
 					break
 				}
 				ch := string(r)
-				if m.InputActive && i == cursorVisRow && j == cursorVisCol {
+				if m.InputActive && visIdx == cursorVisRow && j == cursorVisCol {
 					lineBuilder.WriteString(agentCursorStyle.Render(ch))
-				} else if m.InputActive && m.Input.IsSelected(i, j) {
+				} else if m.InputActive && m.Input.IsSelected(visIdx, j) {
 					lineBuilder.WriteString(agentSelStyle.Render(ch))
 				} else {
 					lineBuilder.WriteString(ch)
@@ -723,7 +741,7 @@ func (m *AgentPaneModel) Render() string {
 				cellsUsed += rw
 			}
 			// Cursor at end of line (past last char) — only when focused.
-			if m.InputActive && i == cursorVisRow && cursorVisCol >= len(lineRunes) {
+			if m.InputActive && visIdx == cursorVisRow && cursorVisCol >= len(lineRunes) && cellsUsed < m.Width {
 				lineBuilder.WriteString(agentCursorStyle.Render(" "))
 				cellsUsed++
 			}

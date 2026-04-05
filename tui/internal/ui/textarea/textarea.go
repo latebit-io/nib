@@ -1,7 +1,9 @@
 package textarea
 
 import (
+	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/junto/engine/editor"
@@ -47,6 +49,7 @@ type TextArea struct {
 
 	// Limits
 	maxBytes int
+	byteLen  int // tracked incrementally to avoid O(n) totalBytes() per edit
 
 	// Clipboard service (injected by parent).
 	clipboard Clipboard
@@ -85,6 +88,7 @@ func (t *TextArea) SetContent(text string) {
 	t.cursorCol = len(t.lines[t.cursorLine])
 	t.selActive = false
 	t.wrapDirty = true
+	t.recomputeByteLen()
 }
 
 // Content returns the full text with explicit newlines.
@@ -106,6 +110,7 @@ func (t *TextArea) Reset() {
 	t.cursorCol = 0
 	t.selActive = false
 	t.wrapDirty = true
+	t.byteLen = 0
 }
 
 // CursorPosition returns the visual (wrapped) row and column for cursor display.
@@ -383,7 +388,8 @@ func (t *TextArea) wordRight() {
 // --- Editing ---
 
 func (t *TextArea) insertRune(r rune) {
-	if t.totalBytes()+len(string(r)) > t.maxBytes {
+	n := utf8.RuneLen(r)
+	if t.byteLen+n > t.maxBytes {
 		return
 	}
 	line := t.lines[t.cursorLine]
@@ -393,11 +399,12 @@ func (t *TextArea) insertRune(r rune) {
 	copy(newLine[t.cursorCol+1:], line[t.cursorCol:])
 	t.lines[t.cursorLine] = newLine
 	t.cursorCol++
+	t.byteLen += n
 	t.wrapDirty = true
 }
 
 func (t *TextArea) insertNewline() {
-	if t.totalBytes()+1 > t.maxBytes {
+	if t.byteLen+1 > t.maxBytes {
 		return
 	}
 	line := t.lines[t.cursorLine]
@@ -414,23 +421,26 @@ func (t *TextArea) insertNewline() {
 
 	t.cursorLine++
 	t.cursorCol = 0
+	t.byteLen++ // newline byte
 	t.wrapDirty = true
 }
 
 func (t *TextArea) backspace() {
 	if t.cursorCol > 0 {
 		line := t.lines[t.cursorLine]
+		t.byteLen -= utf8.RuneLen(line[t.cursorCol-1])
 		t.lines[t.cursorLine] = append(line[:t.cursorCol-1], line[t.cursorCol:]...)
 		t.cursorCol--
 		t.wrapDirty = true
 	} else if t.cursorLine > 0 {
-		// Merge with previous line.
+		// Merge with previous line — remove the newline byte.
 		prev := t.lines[t.cursorLine-1]
 		newCol := len(prev)
 		t.lines[t.cursorLine-1] = append(prev, t.lines[t.cursorLine]...)
 		t.lines = append(t.lines[:t.cursorLine], t.lines[t.cursorLine+1:]...)
 		t.cursorLine--
 		t.cursorCol = newCol
+		t.byteLen-- // newline byte
 		t.wrapDirty = true
 	}
 }
@@ -438,12 +448,14 @@ func (t *TextArea) backspace() {
 func (t *TextArea) deleteForward() {
 	line := t.lines[t.cursorLine]
 	if t.cursorCol < len(line) {
+		t.byteLen -= utf8.RuneLen(line[t.cursorCol])
 		t.lines[t.cursorLine] = append(line[:t.cursorCol], line[t.cursorCol+1:]...)
 		t.wrapDirty = true
 	} else if t.cursorLine < len(t.lines)-1 {
-		// Merge with next line.
+		// Merge with next line — remove the newline byte.
 		t.lines[t.cursorLine] = append(line, t.lines[t.cursorLine+1]...)
 		t.lines = append(t.lines[:t.cursorLine+1], t.lines[t.cursorLine+2:]...)
+		t.byteLen-- // newline byte
 		t.wrapDirty = true
 	}
 }
@@ -580,6 +592,7 @@ func (t *TextArea) deleteSelection() {
 	t.cursorCol = sc
 	t.selActive = false
 	t.wrapDirty = true
+	t.recomputeByteLen()
 }
 
 func (t *TextArea) deleteSelectionIfActive() {
@@ -596,7 +609,9 @@ func (t *TextArea) copySelection() {
 	}
 	text := t.SelectedText()
 	if text != "" {
-		_ = t.clipboard.Write(text) // best-effort
+		if err := t.clipboard.Write(text); err != nil {
+			slog.Warn("clipboard write failed", "err", err)
+		}
 	}
 }
 
@@ -605,8 +620,13 @@ func (t *TextArea) cutSelection() {
 		return
 	}
 	text := t.SelectedText()
-	if text != "" {
-		_ = t.clipboard.Write(text) // best-effort
+	if text == "" {
+		t.deleteSelection()
+		return
+	}
+	if err := t.clipboard.Write(text); err != nil {
+		slog.Warn("clipboard write failed, selection not deleted", "err", err)
+		return
 	}
 	t.deleteSelection()
 }
@@ -642,15 +662,20 @@ func (t *TextArea) insertText(text string) {
 
 // --- Helpers ---
 
-func (t *TextArea) totalBytes() int {
+// recomputeByteLen recalculates byteLen from scratch. Called after bulk
+// mutations (SetContent, deleteSelection) where incremental tracking
+// would be more complex than a single pass.
+func (t *TextArea) recomputeByteLen() {
 	n := 0
 	for i, line := range t.lines {
-		n += len(string(line))
+		for _, r := range line {
+			n += utf8.RuneLen(r)
+		}
 		if i > 0 {
 			n++ // newline
 		}
 	}
-	return n
+	t.byteLen = n
 }
 
 // splitLines splits text into logical lines as rune slices.

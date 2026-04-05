@@ -797,6 +797,12 @@ func (s *Session) ListFiles() ([]string, error) {
 	return filelist.Walk(s.projectRoot)
 }
 
+// ListFilesAndDirs returns all project files and directories (respects .gitignore).
+// Directories are returned separately so the tree can include empty directories.
+func (s *Session) ListFilesAndDirs() (files []string, dirs []string, err error) {
+	return filelist.WalkWithDirs(s.projectRoot)
+}
+
 // WriteFile creates a new file on disk and opens it in the session.
 // Called from the agent goroutine via Workspace — uses mu for map access
 // and O_CREATE|O_EXCL for atomic existence check + create.
@@ -854,6 +860,46 @@ func (s *Session) WriteFile(path, content string) error {
 		s.saveContext()
 	}
 
+	return nil
+}
+
+// DeleteFile removes a file from disk and cleans up session state.
+// Removes the file from the context set, closes its editor buffer,
+// and unwires LSP sync. If the deleted file was the active editor,
+// activeFile is cleared so the caller can switch to another buffer.
+func (s *Session) DeleteFile(path string) error {
+	absPath, err := s.resolvePath(path)
+	if err != nil {
+		return err
+	}
+
+	if s.isProjectMeta(s.CanonPath(absPath)) {
+		return fmt.Errorf("cannot delete project metadata: %s", path)
+	}
+
+	if err := os.Remove(absPath); err != nil {
+		return fmt.Errorf("delete %s: %w", path, err)
+	}
+
+	canon := s.CanonPath(absPath)
+
+	s.mu.Lock()
+	e, hasEditor := s.editors[canon]
+	delete(s.editors, canon)
+	delete(s.contextSet, canon)
+	delete(s.modifiedFiles, canon)
+	wasActive := s.activeFile == canon
+	if wasActive {
+		s.activeFile = ""
+		s.Editor = nil
+	}
+	s.mu.Unlock()
+
+	if hasEditor {
+		s.unwireBufferSync(e)
+	}
+
+	s.saveContext()
 	return nil
 }
 

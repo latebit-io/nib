@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/junto/engine/project"
+	"github.com/latebit-io/junto/tui/internal/ui/textarea"
 )
 
 // mockProjectSession provides the minimal session surface for testing.
@@ -340,5 +341,265 @@ func TestProjectPane_EmptyRender(t *testing.T) {
 	}
 	if p.Render() != "" {
 		t.Error("expected empty render with zero dimensions")
+	}
+}
+
+func TestProjectPane_StartFileCreate_OnDir(t *testing.T) {
+	dir := &TreeNode{Name: "src", Path: "src", IsDir: true, Collapsed: true}
+
+	p := &ProjectPaneModel{
+		width:        40,
+		height:       10,
+		items:        []projectItem{{isHeader: true, section: "files"}, {node: dir, section: "files"}},
+		filesTree:    &TreeNode{IsDir: true, Children: []*TreeNode{dir}},
+		workExpanded: make(map[string]bool),
+		createInput:  textarea.New(1),
+		cursorIdx:    1,
+	}
+
+	p.startFileCreate()
+
+	if !p.creatingFile {
+		t.Error("expected creatingFile to be true")
+	}
+	if p.createDirPath != "src" {
+		t.Errorf("createDirPath = %q, want %q", p.createDirPath, "src")
+	}
+	// Directory should be expanded
+	if dir.Collapsed {
+		t.Error("directory should be expanded when creating file inside it")
+	}
+}
+
+func TestProjectPane_StartFileCreate_OnFile(t *testing.T) {
+	file := &TreeNode{Name: "main.go", Path: "src/main.go"}
+
+	p := &ProjectPaneModel{
+		width:        40,
+		height:       10,
+		items:        []projectItem{{isHeader: true, section: "files"}, {node: file, section: "files"}},
+		workExpanded: make(map[string]bool),
+		createInput:  textarea.New(1),
+		cursorIdx:    1,
+	}
+
+	p.startFileCreate()
+
+	if !p.creatingFile {
+		t.Error("expected creatingFile to be true")
+	}
+	if p.createDirPath != "src" {
+		t.Errorf("createDirPath = %q, want %q", p.createDirPath, "src")
+	}
+}
+
+func TestProjectPane_StartFileCreate_RootLevel(t *testing.T) {
+	file := &TreeNode{Name: "main.go", Path: "main.go"}
+
+	p := &ProjectPaneModel{
+		width:        40,
+		height:       10,
+		items:        []projectItem{{isHeader: true, section: "files"}, {node: file, section: "files"}},
+		workExpanded: make(map[string]bool),
+		createInput:  textarea.New(1),
+		cursorIdx:    1,
+	}
+
+	p.startFileCreate()
+
+	if p.createDirPath != "" {
+		t.Errorf("createDirPath = %q, want empty for root level", p.createDirPath)
+	}
+}
+
+func TestProjectPane_HandleCreateInput_Submit(t *testing.T) {
+	p := &ProjectPaneModel{
+		width:         40,
+		height:        10,
+		creatingFile:  true,
+		createDirPath: "src",
+		createInput:   textarea.New(1),
+		workExpanded:  make(map[string]bool),
+	}
+	p.createInput.SetSize(40)
+	p.createInput.SetContent("new_file.go")
+
+	cmd := p.handleCreateInput(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected cmd on submit")
+	}
+
+	msg := cmd()
+	createMsg, ok := msg.(ProjectCreateFileMsg)
+	if !ok {
+		t.Fatalf("expected ProjectCreateFileMsg, got %T", msg)
+	}
+	if createMsg.Path != "src/new_file.go" {
+		t.Errorf("Path = %q, want %q", createMsg.Path, "src/new_file.go")
+	}
+	if p.creatingFile {
+		t.Error("creatingFile should be false after submit")
+	}
+}
+
+func TestProjectPane_HandleCreateInput_Cancel(t *testing.T) {
+	p := &ProjectPaneModel{
+		width:        40,
+		height:       10,
+		creatingFile: true,
+		createInput:  textarea.New(1),
+		workExpanded: make(map[string]bool),
+	}
+
+	p.handleCreateInput(tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if p.creatingFile {
+		t.Error("creatingFile should be false after cancel")
+	}
+}
+
+func TestProjectPane_StartDirCreate(t *testing.T) {
+	dir := &TreeNode{Name: "src", Path: "src", IsDir: true, Collapsed: true}
+
+	p := &ProjectPaneModel{
+		width:        40,
+		height:       10,
+		items:        []projectItem{{isHeader: true, section: "files"}, {node: dir, section: "files"}},
+		filesTree:    &TreeNode{IsDir: true, Children: []*TreeNode{dir}},
+		workExpanded: make(map[string]bool),
+		createInput:  textarea.New(1),
+		cursorIdx:    1,
+	}
+
+	p.startDirCreate()
+
+	if !p.creatingFile {
+		t.Error("expected creatingFile to be true")
+	}
+	if !p.creatingDir {
+		t.Error("expected creatingDir to be true")
+	}
+	if p.createDirPath != "src" {
+		t.Errorf("createDirPath = %q, want %q", p.createDirPath, "src")
+	}
+}
+
+func TestProjectPane_HandleCreateInput_SubmitDir(t *testing.T) {
+	p := &ProjectPaneModel{
+		width:         40,
+		height:        10,
+		creatingFile:  true,
+		creatingDir:   true,
+		createDirPath: "src",
+		createInput:   textarea.New(1),
+		workExpanded:  make(map[string]bool),
+	}
+	p.createInput.SetSize(40)
+	p.createInput.SetContent("pkg")
+
+	cmd := p.handleCreateInput(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected cmd on submit")
+	}
+
+	msg := cmd()
+	dirMsg, ok := msg.(ProjectCreateDirMsg)
+	if !ok {
+		t.Fatalf("expected ProjectCreateDirMsg, got %T", msg)
+	}
+	if dirMsg.Path != "src/pkg" {
+		t.Errorf("Path = %q, want %q", dirMsg.Path, "src/pkg")
+	}
+	if p.creatingDir {
+		t.Error("creatingDir should be false after submit")
+	}
+}
+
+func TestProjectPane_StartFileDelete(t *testing.T) {
+	file := &TreeNode{Name: "victim.go", Path: "src/victim.go"}
+
+	p := &ProjectPaneModel{
+		width:     40,
+		height:    10,
+		items:     []projectItem{{isHeader: true, section: "files"}, {node: file, section: "files"}},
+		cursorIdx: 1,
+	}
+
+	p.startFileDelete()
+
+	if !p.confirmDelete {
+		t.Error("expected confirmDelete to be true")
+	}
+	if p.confirmDeletePath != "src/victim.go" {
+		t.Errorf("confirmDeletePath = %q, want %q", p.confirmDeletePath, "src/victim.go")
+	}
+}
+
+func TestProjectPane_ConfirmDelete_Yes(t *testing.T) {
+	p := &ProjectPaneModel{
+		width:             40,
+		height:            10,
+		confirmDelete:     true,
+		confirmDeletePath: "src/victim.go",
+	}
+
+	cmd := p.handleConfirmDelete(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if cmd == nil {
+		t.Fatal("expected cmd on confirm")
+	}
+	msg := cmd()
+	deleteMsg, ok := msg.(ProjectDeleteFileMsg)
+	if !ok {
+		t.Fatalf("expected ProjectDeleteFileMsg, got %T", msg)
+	}
+	if deleteMsg.Path != "src/victim.go" {
+		t.Errorf("Path = %q, want %q", deleteMsg.Path, "src/victim.go")
+	}
+	if p.confirmDelete {
+		t.Error("confirmDelete should be false after confirm")
+	}
+}
+
+func TestProjectPane_ConfirmDelete_No(t *testing.T) {
+	p := &ProjectPaneModel{
+		width:             40,
+		height:            10,
+		confirmDelete:     true,
+		confirmDeletePath: "src/victim.go",
+	}
+
+	cmd := p.handleConfirmDelete(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if cmd != nil {
+		t.Error("expected nil cmd on cancel")
+	}
+	if p.confirmDelete {
+		t.Error("confirmDelete should be false after cancel")
+	}
+}
+
+func TestProjectPane_StartFileDelete_OnDir_Noop(t *testing.T) {
+	dir := &TreeNode{Name: "src", Path: "src", IsDir: true}
+
+	p := &ProjectPaneModel{
+		width:     40,
+		height:    10,
+		items:     []projectItem{{isHeader: true, section: "files"}, {node: dir, section: "files"}},
+		cursorIdx: 1,
+	}
+
+	cmd := p.startFileDelete()
+	if cmd != nil {
+		t.Error("expected nil cmd when deleting a directory")
+	}
+}
+
+func TestProjectPane_IsInputActive(t *testing.T) {
+	p := &ProjectPaneModel{}
+	if p.IsInputActive() {
+		t.Error("should not be active by default")
+	}
+	p.creatingFile = true
+	if !p.IsInputActive() {
+		t.Error("should be active when creatingFile is true")
 	}
 }

@@ -57,10 +57,10 @@ func (d *DialogModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-// Render draws the dialog as a centered overlay within the given dimensions.
-func (d *DialogModel) Render(width, height int) string {
+// RenderOverlay draws the dialog centered over the given background content.
+func (d *DialogModel) RenderOverlay(base string, width, height int) string {
 	if !d.Active || width == 0 || height == 0 {
-		return ""
+		return base
 	}
 
 	boxStyle := lipgloss.NewStyle().
@@ -91,26 +91,25 @@ func (d *DialogModel) Render(width, height int) string {
 	content := d.Message + "\n\n" + strings.Join(buttons, "  ")
 	box := boxStyle.Render(content)
 
-	// Center the box vertically
+	// Overlay the box onto the background
+	bgLines := strings.Split(base, "\n")
+	for len(bgLines) < height {
+		bgLines = append(bgLines, strings.Repeat(" ", width))
+	}
+
 	boxLines := strings.Split(box, "\n")
-	boxH := len(boxLines)
-	topPad := (height - boxH) / 2
+	topPad := (height - len(boxLines)) / 2
 	if topPad < 0 {
 		topPad = 0
 	}
 
-	// Center each line horizontally
-	var output []string
-	for range topPad {
-		output = append(output, strings.Repeat(" ", width))
-	}
-	for _, line := range boxLines {
-		output = append(output, lipgloss.Place(width, 1, lipgloss.Center, lipgloss.Center, line))
-	}
-	// Fill remaining lines
-	for len(output) < height {
-		output = append(output, strings.Repeat(" ", width))
+	for i, boxLine := range boxLines {
+		row := topPad + i
+		if row >= height {
+			break
+		}
+		bgLines[row] = lipgloss.Place(width, 1, lipgloss.Center, lipgloss.Center, boxLine)
 	}
 
-	return strings.Join(output[:height], "\n")
+	return strings.Join(bgLines[:height], "\n")
 }

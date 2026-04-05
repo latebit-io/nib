@@ -25,23 +25,32 @@ var ErrCapped = errors.New("file listing capped at 50000 files — results may b
 // Paths are relative to root with forward slashes. The .git directory is
 // always excluded. Returns a sorted slice. Caps at 50k files with a warning.
 func Walk(root string) ([]string, error) {
+	files, _, err := WalkWithDirs(root)
+	return files, err
+}
+
+// WalkWithDirs returns all regular files and all non-ignored directory paths
+// under root. Directories are included whether or not they contain files,
+// so empty directories appear in the tree. Both slices are sorted.
+func WalkWithDirs(root string) (files []string, dirs []string, err error) {
 	root = filepath.Clean(root)
-	var files []string
-	err := walk(root, "", nil, &files)
-	if err == errFileCap {
+	walkErr := walk(root, "", nil, &files, &dirs)
+	if walkErr == errFileCap {
 		slog.Warn("file listing capped", "max", maxFiles)
 		sort.Strings(files)
-		return files, ErrCapped
-	} else if err != nil {
-		return nil, err
+		sort.Strings(dirs)
+		return files, dirs, ErrCapped
+	} else if walkErr != nil {
+		return nil, nil, walkErr
 	}
 	sort.Strings(files)
-	return files, nil
+	sort.Strings(dirs)
+	return files, dirs, nil
 }
 
 // walk recursively lists files under dir. relDir is the path relative to root.
 // matchers is the stack of gitignore matchers from parent directories.
-func walk(absDir, relDir string, matchers []*matcher, files *[]string) error {
+func walk(absDir, relDir string, matchers []*matcher, files, dirs *[]string) error {
 	if len(*files) >= maxFiles {
 		return errFileCap
 	}
@@ -78,7 +87,8 @@ func walk(absDir, relDir string, matchers []*matcher, files *[]string) error {
 		}
 
 		if isDir {
-			if err := walk(filepath.Join(absDir, name), rel, matchers, files); err != nil {
+			*dirs = append(*dirs, rel)
+			if err := walk(filepath.Join(absDir, name), rel, matchers, files, dirs); err != nil {
 				return err
 			}
 		} else if entry.Type().IsRegular() {

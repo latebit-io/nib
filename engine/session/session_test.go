@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -781,5 +782,120 @@ func TestPrepareApprovalPerLineOrigins(t *testing.T) {
 	// Line 2: search="here", final="here" → unchanged → nil (skip)
 	if plan.LineOrigins[2] != nil {
 		t.Errorf("LineOrigins[2] = %v, want nil (unchanged line)", plan.LineOrigins[2])
+	}
+}
+
+func TestDeleteFile(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	// Create file first
+	if err := s.WriteFile("victim.go", "package victim"); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	absPath := dir + "/victim.go"
+	canon := s.CanonPath(absPath)
+
+	// Verify it exists and is in context
+	if _, err := os.Stat(absPath); err != nil {
+		t.Fatalf("file should exist: %v", err)
+	}
+	if !s.InContext(canon) {
+		t.Fatal("file should be in context after WriteFile")
+	}
+
+	// Delete it
+	if err := s.DeleteFile(absPath); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	// File should be gone from disk
+	if _, err := os.Stat(absPath); !os.IsNotExist(err) {
+		t.Errorf("file should not exist after DeleteFile, got err=%v", err)
+	}
+
+	// Should be removed from context
+	if s.InContext(canon) {
+		t.Error("file should not be in context after DeleteFile")
+	}
+
+	// Should be removed from editors
+	s.mu.RLock()
+	_, hasEditor := s.editors[canon]
+	s.mu.RUnlock()
+	if hasEditor {
+		t.Error("editor should be removed after DeleteFile")
+	}
+}
+
+func TestDeleteFile_ActiveFile(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	// Create and switch to a file
+	if err := s.WriteFile("active.go", "package active"); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	absPath := dir + "/active.go"
+	if err := s.SwitchTo(absPath); err != nil {
+		t.Fatalf("SwitchTo: %v", err)
+	}
+
+	// Delete the active file
+	if err := s.DeleteFile(absPath); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	// activeFile should be cleared
+	if s.ActiveFile() != "" {
+		t.Errorf("ActiveFile should be empty after deleting active file, got %q", s.ActiveFile())
+	}
+}
+
+func TestDeleteFile_NonExistent(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	err := s.DeleteFile(dir + "/nope.go")
+	if err == nil {
+		t.Error("DeleteFile on non-existent file should return error")
+	}
+}
+
+func TestDeleteFile_EscapesRoot(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	err := s.DeleteFile("../../etc/passwd")
+	if err == nil {
+		t.Error("DeleteFile with path escape should return error")
+	}
+}
+
+func TestDeleteFile_ProjectMeta(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	// Create .project/context.md
+	metaDir := filepath.Join(dir, ".project")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metaFile := filepath.Join(metaDir, "context.md")
+	if err := os.WriteFile(metaFile, []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.DeleteFile(metaFile)
+	if err == nil {
+		t.Error("DeleteFile should reject .project/ files")
+	}
+	if !strings.Contains(err.Error(), "project metadata") {
+		t.Errorf("error should mention project metadata, got: %v", err)
+	}
+
+	// File should still exist
+	if _, err := os.Stat(metaFile); err != nil {
+		t.Errorf("file should still exist after rejected delete: %v", err)
 	}
 }

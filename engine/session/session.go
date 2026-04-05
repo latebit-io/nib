@@ -128,6 +128,10 @@ type Session struct {
 	workTreeVer    int           // demarkus version for optimistic concurrency
 	workTreeDirty  bool          // true when in-memory changes need persisting
 	workTreeModGen uint64        // incremented on each mutation; detects concurrent changes during save
+
+	// distributedMemory lists MCP server names classified as shared/team memory.
+	// Set once during startup, read by frontends for status display.
+	distributedMemory []string
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -198,6 +202,18 @@ func New(e *editor.Editor, projectRoot string) *Session {
 func (s *Session) SetAgent(ag agentPort, events <-chan event.Event) {
 	s.agent = ag
 	s.events = events
+}
+
+// SetDistributedMemory records which MCP servers are classified as distributed
+// (team/shared) memory. Called once during startup. The frontend reads this
+// via DistributedMemory() for status display.
+func (s *Session) SetDistributedMemory(names []string) {
+	s.distributedMemory = names
+}
+
+// DistributedMemory returns the names of MCP servers classified as distributed memory.
+func (s *Session) DistributedMemory() []string {
+	return s.distributedMemory
 }
 
 // SetEvents sets the event channel for frontends to read.

@@ -144,8 +144,8 @@ func run() error {
 	workspace := headless.NewDiskWorkspace(projectRoot)
 
 	// Discover MCP tools.
-	mcpTools, mcpCleanup := wire.DiscoverMCPTools(projectRoot)
-	defer mcpCleanup()
+	mcpResult := wire.DiscoverMCPTools(projectRoot)
+	defer mcpResult.Cleanup()
 
 	// Shared event channel.
 	events := make(chan event.Event, 128)
@@ -180,14 +180,15 @@ func run() error {
 
 	// Create agent in headless mode.
 	opts := &agent.NewOptions{
-		MemoryStore:   mem.Store,
-		MemorySummary: mem.Summary,
-		Interaction:   agent.Headless,
+		MemoryStore:       mem.Store,
+		MemorySummary:     mem.Summary,
+		Interaction:       agent.Headless,
+		DistributedMemory: agent.DetectDistributedMemory(mcpResult.ServerNames),
 	}
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr
 	}
-	ag := agent.New(provider, workspace, events, opts, mcpTools...)
+	ag := agent.New(provider, workspace, events, opts, mcpResult.Tools...)
 
 	// Setup cancellation via SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

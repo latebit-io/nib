@@ -26,10 +26,23 @@ type mcpConfig struct {
 	Servers map[string]mcpServerConfig `json:"mcpServers"`
 }
 
+// MCPResult holds the outputs of MCP server discovery.
+type MCPResult struct {
+	// Tools are the agent-compatible tool adapters from all MCP servers.
+	Tools []agent.Tool
+	// ServerNames lists the names of all successfully connected MCP servers.
+	// The caller is responsible for interpreting these names (e.g. classifying
+	// which servers are distributed memory based on naming conventions).
+	ServerNames []string
+	// Cleanup closes all MCP client connections. Must be called on shutdown.
+	Cleanup func()
+}
+
 // DiscoverMCPTools connects to MCP servers and returns their tools as
-// agent.Tool adapters. Returns a cleanup function that closes all clients.
-func DiscoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
+// agent.Tool adapters. The caller must invoke MCPResult.Cleanup on shutdown.
+func DiscoverMCPTools(projectRoot string) MCPResult {
 	var tools []agent.Tool
+	var serverNames []string
 	var clients []*mcp.Client
 
 	cleanup := func() {
@@ -41,7 +54,7 @@ func DiscoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 	configs := loadMCPConfigs(projectRoot)
 	if len(configs) == 0 {
 		slog.Debug("mcp: no servers configured")
-		return nil, cleanup
+		return MCPResult{Cleanup: cleanup}
 	}
 
 	for name, cfg := range configs {
@@ -81,6 +94,7 @@ func DiscoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 			continue
 		}
 		clients = append(clients, client) // only track successfully initialized clients
+		serverNames = append(serverNames, name)
 
 		for _, info := range serverTools {
 			adapted := agent.MCPToolInfo{
@@ -94,7 +108,11 @@ func DiscoverMCPTools(projectRoot string) ([]agent.Tool, func()) {
 		slog.Info("mcp: connected", "server", name, "tools", len(serverTools))
 	}
 
-	return tools, cleanup
+	return MCPResult{
+		Tools:       tools,
+		ServerNames: serverNames,
+		Cleanup:     cleanup,
+	}
 }
 
 // initMCPServer performs the MCP handshake and tool discovery for a single server.

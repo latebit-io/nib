@@ -1301,7 +1301,9 @@ func sanitizeStatusText(s string) string {
 }
 
 // renderStatusBar renders the full-width status bar. Called by AppModel.View().
-func (m *EditorModel) renderStatusBar(width int) string {
+// indicators is an optional list of short labels displayed on the right side
+// before the cursor position (e.g. distributed memory server names).
+func (m *EditorModel) renderStatusBar(width int, indicators ...string) string {
 	name := m.eng.Buf.Path
 	if name == "" {
 		name = "[new]"
@@ -1338,6 +1340,13 @@ func (m *EditorModel) renderStatusBar(width int) string {
 	default:
 		right = fmt.Sprintf(" %d:%d ", m.eng.CursorLine+1, m.eng.CursorCol+1)
 	}
+
+	// Append indicators (e.g. distributed memory) before cursor position.
+	var indicator string
+	if len(indicators) > 0 {
+		indicator = strings.Join(indicators, " | ") + " | "
+	}
+	right = indicator + right
 
 	leftW := runewidth.StringWidth(left)
 	rightW := runewidth.StringWidth(right)

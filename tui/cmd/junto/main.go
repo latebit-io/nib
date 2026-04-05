@@ -90,8 +90,14 @@ func run() error {
 	sess := session.New(e, projectRoot)
 
 	// Discover MCP tools from .mcp.json or JUNTO_MCP env var.
-	mcpTools, mcpCleanup := wire.DiscoverMCPTools(projectRoot)
-	defer mcpCleanup()
+	mcpResult := wire.DiscoverMCPTools(projectRoot)
+	defer mcpResult.Cleanup()
+
+	// Classify distributed memory servers and expose to the session for UI display.
+	distributed := agent.DetectDistributedMemory(mcpResult.ServerNames)
+	if len(distributed) > 0 {
+		sess.SetDistributedMemory(distributed)
+	}
 
 	// Shared event channel — agent and LSP both write here, frontend reads one channel.
 	events := make(chan event.Event, 128)
@@ -119,13 +125,14 @@ func run() error {
 		defer mem.Cleanup()
 
 		opts := &agent.NewOptions{
-			MemoryStore:   mem.Store,
-			MemorySummary: mem.Summary,
+			MemoryStore:       mem.Store,
+			MemorySummary:     mem.Summary,
+			DistributedMemory: distributed,
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
 		}
-		ag := agent.New(provider, sess, events, opts, mcpTools...)
+		ag := agent.New(provider, sess, events, opts, mcpResult.Tools...)
 		sess.SetAgent(ag, events)
 		sess.SetMemoryStore(mem.Store)
 	} else if lspMgr != nil {

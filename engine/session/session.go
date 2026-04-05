@@ -885,6 +885,10 @@ func (s *Session) DeleteFile(path string) error {
 
 	canon := s.CanonPath(absPath)
 
+	if canon == filepath.Clean(s.projectRoot) {
+		return fmt.Errorf("cannot delete project root")
+	}
+
 	if s.isProjectMeta(canon) {
 		return fmt.Errorf("cannot delete project metadata: %s", path)
 	}

@@ -911,6 +911,24 @@ func TestDeleteFile_NonExistent(t *testing.T) {
 	}
 }
 
+func TestDeleteFile_ProjectRoot(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	err := s.DeleteFile(".")
+	if err == nil {
+		t.Fatal("DeleteFile(\".\") should return error")
+	}
+	if !strings.Contains(err.Error(), "project root") {
+		t.Errorf("error should mention project root, got: %v", err)
+	}
+
+	err = s.DeleteFile(dir)
+	if err == nil {
+		t.Fatal("DeleteFile(projectRoot) should return error")
+	}
+}
+
 func TestDeleteFile_EscapesRoot(t *testing.T) {
 	dir := t.TempDir()
 	s := New(editor.New(buffer.New()), dir)

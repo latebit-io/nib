@@ -284,8 +284,8 @@ func (t *TextArea) Update(msg tea.KeyPressMsg) tea.Cmd {
 	if msg.Text != "" {
 		t.deleteSelectionIfActive()
 		for _, r := range msg.Text {
-			if r == '\n' || r == '\r' || r == '\t' {
-				continue // ignore control chars in text input
+			if unicode.IsControl(r) {
+				continue
 			}
 			t.insertRune(r)
 		}

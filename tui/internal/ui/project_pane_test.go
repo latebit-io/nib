@@ -125,12 +125,12 @@ func TestProjectPane_ToggleDirectory(t *testing.T) {
 	}
 
 	p := &ProjectPaneModel{
-		width:         40,
-		height:        10,
-		items:         items,
-		filesTree:     &TreeNode{IsDir: true, Children: []*TreeNode{dir}},
-		workCollapsed: make(map[string]bool),
-		cursorIdx:     1,
+		width:        40,
+		height:       10,
+		items:        items,
+		filesTree:    &TreeNode{IsDir: true, Children: []*TreeNode{dir}},
+		workExpanded: make(map[string]bool),
+		cursorIdx:    1,
 	}
 
 	// Activate (Enter) on collapsed dir — should expand
@@ -167,29 +167,29 @@ func TestProjectPane_ActivateWorkHeading(t *testing.T) {
 	}
 
 	p := &ProjectPaneModel{
-		width:         40,
-		height:        10,
-		items:         items,
-		workCollapsed: make(map[string]bool),
-		cursorIdx:     1, // on heading
+		width:        40,
+		height:       10,
+		items:        items,
+		workExpanded: make(map[string]bool),
+		cursorIdx:    1, // on heading
 	}
 
-	// Activate heading — should toggle collapse
+	// Activate heading — should toggle to expanded
 	cmd := p.activateItem()
 	if cmd != nil {
 		t.Error("expected nil cmd for heading toggle")
 	}
-	if !p.workCollapsed["Phase 6"] {
-		t.Error("expected heading to be collapsed after activation")
+	if !p.workExpanded["Phase 6"] {
+		t.Error("expected heading to be expanded after activation")
 	}
 
-	// Activate again — should uncollapse
+	// Activate again — should collapse
 	// Reset items since flattenItems was called
 	p.cursorIdx = 1
 	p.items = items
 	p.activateItem()
-	if p.workCollapsed["Phase 6"] {
-		t.Error("expected heading to be uncollapsed after second activation")
+	if p.workExpanded["Phase 6"] {
+		t.Error("expected heading to be collapsed after second activation")
 	}
 }
 
@@ -204,11 +204,11 @@ func TestProjectPane_ActivateWorkTask(t *testing.T) {
 	}
 
 	p := &ProjectPaneModel{
-		width:         40,
-		height:        10,
-		items:         items,
-		workCollapsed: make(map[string]bool),
-		cursorIdx:     1, // on task
+		width:        40,
+		height:       10,
+		items:        items,
+		workExpanded: make(map[string]bool),
+		cursorIdx:    1, // on task
 	}
 
 	cmd := p.activateItem()
@@ -237,11 +237,11 @@ func TestProjectPane_ActivateActiveTask_MarksDone(t *testing.T) {
 	}
 
 	p := &ProjectPaneModel{
-		width:         40,
-		height:        10,
-		items:         items,
-		workCollapsed: make(map[string]bool),
-		cursorIdx:     1,
+		width:        40,
+		height:       10,
+		items:        items,
+		workExpanded: make(map[string]bool),
+		cursorIdx:    1,
 	}
 
 	cmd := p.activateItem()

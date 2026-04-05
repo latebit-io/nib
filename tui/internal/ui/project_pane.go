@@ -102,7 +102,10 @@ type ProjectPaneModel struct {
 
 	// Work tree display state — collapse tracking is TUI-specific,
 	// separate from the engine's project.Tree.
-	workCollapsed   map[string]bool // title → collapsed (headings only)
+	// workExpanded tracks headings the user has explicitly expanded.
+	// Headings not in the map default to collapsed; headings with
+	// active descendants are auto-expanded on rebuild.
+	workExpanded    map[string]bool // title → expanded (headings only)
 	workDepthOffset int             // subtracted from node.Depth for rendering (root elision)
 
 	// Flattened display items — rebuilt on refresh
@@ -128,8 +131,8 @@ type projectItem struct {
 // NewProjectPaneModel creates the project pane.
 func NewProjectPaneModel(sess projectSession) *ProjectPaneModel {
 	p := &ProjectPaneModel{
-		session:       sess,
-		workCollapsed: make(map[string]bool),
+		session:      sess,
+		workExpanded: make(map[string]bool),
 	}
 	p.rebuild()
 	return p
@@ -259,6 +262,9 @@ func (p *ProjectPaneModel) flattenItems() {
 		p.items = append(p.items, projectItem{isHeader: true, section: "work"})
 		p.workDepthOffset = 0
 
+		// Auto-expand headings that contain active tasks.
+		p.autoExpandActive(tree.Roots)
+
 		// If there's a single root whose title matches the project name
 		// (already shown in the pane border), elide it and promote children.
 		if len(tree.Roots) == 1 && tree.Roots[0].IsHeading && tree.Roots[0].Title == tree.ProjectName {
@@ -280,12 +286,43 @@ func (p *ProjectPaneModel) flattenItems() {
 	}
 }
 
+// autoExpandActive expands headings that contain incomplete tasks,
+// without overriding headings the user has explicitly toggled.
+// A heading is "explicitly toggled" if it's in workExpanded; headings
+// absent from the map get their state set here based on incomplete descendants.
+func (p *ProjectPaneModel) autoExpandActive(roots []*project.Node) {
+	for _, root := range roots {
+		p.autoExpandNode(root)
+	}
+}
+
+// autoExpandNode sets workExpanded for headings with incomplete descendants,
+// skipping headings the user has already toggled (present in the map).
+func (p *ProjectPaneModel) autoExpandNode(n *project.Node) bool {
+	if !n.IsHeading {
+		return n.Status != project.TaskDone
+	}
+
+	active := false
+	for _, child := range n.Children {
+		if p.autoExpandNode(child) {
+			active = true
+		}
+	}
+
+	// Only auto-set if the user hasn't explicitly toggled this heading.
+	if _, toggled := p.workExpanded[n.Title]; !toggled && active {
+		p.workExpanded[n.Title] = true
+	}
+	return active
+}
+
 // flattenWorkNode recursively flattens a work tree node into display items,
 // respecting TUI-specific collapse state.
 func (p *ProjectPaneModel) flattenWorkNode(n *project.Node, depth int) {
 	p.items = append(p.items, projectItem{workNode: n, section: "work"})
 
-	if n.IsHeading && p.workCollapsed[n.Title] {
+	if n.IsHeading && !p.workExpanded[n.Title] {
 		return // collapsed — skip children
 	}
 	for _, child := range n.Children {
@@ -399,7 +436,7 @@ func (p *ProjectPaneModel) activateItem() tea.Cmd {
 // Headings toggle collapse; tasks cycle status: pending → active, active → done.
 func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
 	if n.IsHeading {
-		p.workCollapsed[n.Title] = !p.workCollapsed[n.Title]
+		p.workExpanded[n.Title] = !p.workExpanded[n.Title]
 		p.flattenItems()
 		if p.cursorIdx >= len(p.items) {
 			p.cursorIdx = len(p.items) - 1
@@ -521,10 +558,10 @@ func (p *ProjectPaneModel) renderWorkNode(n *project.Node, selected bool) string
 
 	var icon, name string
 	if n.IsHeading {
-		if p.workCollapsed[n.Title] {
-			icon = "▸ "
-		} else {
+		if p.workExpanded[n.Title] {
 			icon = "▾ "
+		} else {
+			icon = "▸ "
 		}
 		name = projWorkHeadingStyle.Render(n.Title)
 	} else {

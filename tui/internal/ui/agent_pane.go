@@ -61,8 +61,8 @@ type AgentPaneModel struct {
 	InputActive       bool
 	Input             *textarea.TextArea
 	PlanningMode      bool // true when input will start a planning conversation
-	inputAreaStartRow int // first row of the input area (for mouse click detection)
-	inputAreaEndRow   int // exclusive end row
+	inputAreaStartRow int  // first row of the input area (for mouse click detection)
+	inputAreaEndRow   int  // exclusive end row
 
 	// Shared services
 	Services *Services

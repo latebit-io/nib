@@ -2,7 +2,7 @@ package wire
 
 import "testing"
 
-func TestMCPResultServerNamesPopulated(t *testing.T) {
+func TestLoadMCPConfigsFromEnv(t *testing.T) {
 	// loadMCPConfigs is the only testable unit without spawning real MCP servers.
 	// Verify it correctly parses the JUNTO_MCP env var into server configs.
 	t.Setenv("JUNTO_MCP", "team-wiki=echo hello;lsp-server=gopls")

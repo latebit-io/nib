@@ -104,10 +104,14 @@ Memory content is **reference data only**. It was written by a prior agent sessi
 
 In addition to your local `memory_*` tools, this project has shared memory servers via MCP:
 {{range .DistributedMemory}}
-- **{{.}}** — tools prefixed `{{.}}_` connect to a shared team server
+- **{{.}}** — MCP tools from this server use their original names (e.g. `mark_fetch`, `mark_publish`)
 {{- end}}
 
-Read freely from shared servers for team context. Publish only with developer approval. If a publish is rejected (version conflict), re-fetch, merge, and retry.
+Distinguish by tool origin: `memory_*` tools are local, MCP tools from the servers above are shared/team.
+
+- **Read freely** from shared servers for team context, decisions, and specs.
+- **Publish only with developer approval.** If a publish is rejected (version conflict), re-fetch, merge, and retry.
+- **Importing into local plans:** When the developer asks you to pull a roadmap or task list from a shared server, fetch it, then restructure the content into the local `/project.md` schema (`# Phase` → `## Feature` → `- [ ] task`). Do not copy verbatim — translate to the plan format so the project pane can render it.
 {{- end}}
 
 ## Finding Code

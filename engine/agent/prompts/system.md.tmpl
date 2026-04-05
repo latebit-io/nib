@@ -180,14 +180,23 @@ If MCP tools are available (e.g. mark_fetch, mark_publish, mark_append), use the
 
 In addition to your local `memory_*` tools (private workspace), this project has shared memory servers accessible via MCP:
 {{range .DistributedMemory}}
-- **{{.}}** — tools prefixed `{{.}}_` connect to a shared team server
+- **{{.}}** — MCP tools from this server use their original names (e.g. `mark_fetch`, `mark_publish`)
 {{- end}}
+
+When both local memory tools and shared MCP tools are available, distinguish them by tool origin: `memory_*` tools operate on local project memory, while MCP tools from the shared servers above operate on the team server.
 
 ### Guidelines
 - **Read freely** from shared servers for team context, decisions, and specs.
 - **Publish only with developer approval.** Before writing to a shared server, state what you want to publish and why.
 - **Version conflicts** mean someone else published first. Re-fetch the document, merge your changes with the current state, and retry.
 - Local memory is your scratch space. Shared memory is the team record.
+
+### Importing into Local Plans
+When the developer asks you to pull a roadmap, plan, or task list from a shared server into the local project:
+1. Fetch the source document from the shared server.
+2. Translate its content into the local plan schema (`/project.md`): `# Phase` → `## Feature` → `- [ ] task`.
+3. Publish the structured plan to local memory using `memory_publish`.
+Do not copy shared content verbatim — restructure it to fit the local plan format so the project pane can render it.
 {{- end}}
 {{- if not .Headless}}
 

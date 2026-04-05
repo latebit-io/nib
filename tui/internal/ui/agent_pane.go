@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/tui/internal/sanitize"
+	"github.com/latebit-io/junto/tui/internal/ui/textarea"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -26,11 +27,6 @@ var (
 	agentInputDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	agentCursorStyle = lipgloss.NewStyle().Reverse(true)
 )
-
-// MaxInputBufferBytes caps the goal input buffer to prevent unbounded memory
-// growth from large pastes or rapid key input. 1 MiB is generous for any
-// reasonable prompt while still protecting against accidental megabyte pastes.
-const MaxInputBufferBytes = 1 << 20 // 1 MiB
 
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
 type AgentPaneModel struct {
@@ -62,9 +58,11 @@ type AgentPaneModel struct {
 	CursorCol       int
 
 	// Input area
-	InputActive  bool
-	InputBuffer  string
-	PlanningMode bool // true when input will start a planning conversation
+	InputActive       bool
+	Input             *textarea.TextArea
+	PlanningMode      bool // true when input will start a planning conversation
+	inputAreaStartRow int // first row of the input area (for mouse click detection)
+	inputAreaEndRow   int // exclusive end row
 
 	// Shared services
 	Services *Services
@@ -78,9 +76,12 @@ type AgentPaneModel struct {
 
 // NewAgentPaneModel creates a new agent pane.
 func NewAgentPaneModel(svc *Services) *AgentPaneModel {
+	input := textarea.New(1) // width set properly in SetSize
+	input.SetClipboard(svc.Clipboard)
 	return &AgentPaneModel{
 		Status:   event.StatusIdle,
 		Services: svc,
+		Input:    input,
 	}
 }
 
@@ -98,6 +99,7 @@ func (m *AgentPaneModel) SetSize(width, height int) {
 	if width != oldWidth {
 		m.rewrap()
 	}
+	m.Input.SetSize(width)
 	m.clampScroll()
 }
 
@@ -182,7 +184,21 @@ func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 }
 
 func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
-	if msg.Button != tea.MouseLeft || msg.Y < 0 || msg.Y >= m.VisibleLines() {
+	if !m.HasAgent {
+		return nil
+	}
+	if msg.Button != tea.MouseLeft {
+		return nil
+	}
+
+	// Click in the input area → focus it. Click elsewhere → unfocus.
+	if msg.Y >= m.inputAreaStartRow && msg.Y < m.inputAreaEndRow {
+		m.InputActive = true
+		return nil
+	}
+	m.InputActive = false
+
+	if msg.Y < 0 || msg.Y >= m.VisibleLines() {
 		return nil
 	}
 	line, col := m.mouseToLineCol(msg.X, msg.Y)
@@ -245,79 +261,39 @@ func (m *AgentPaneModel) mouseToLineCol(x, y int) (int, int) {
 	return line, col
 }
 
-// appendInput appends text to InputBuffer without exceeding MaxInputBufferBytes.
-// It truncates on a rune boundary so partial runes are never stored.
-func (m *AgentPaneModel) appendInput(text string) {
-	remaining := MaxInputBufferBytes - len(m.InputBuffer)
-	if remaining <= 0 {
-		return
-	}
-	if len(text) > remaining {
-		// Truncate to remaining bytes on a valid rune boundary.
-		text = text[:remaining]
-		for len(text) > 0 && !utf8.Valid([]byte(text)) {
-			text = text[:len(text)-1]
-		}
-		slog.Warn("goal input truncated to cap", "cap", MaxInputBufferBytes)
-	}
-	m.InputBuffer += text
-}
-
+// handleInput delegates key handling to the TextArea component.
+// Submit (Enter) and Cancel (Escape) are intercepted to manage
+// the agent pane's input lifecycle.
 func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
-	// Paste from system clipboard (Ctrl+V)
-	if msg.Code == 'v' && msg.Mod == tea.ModCtrl {
-		if text := m.Services.Clipboard.Read(); text != "" {
-			text = strings.ReplaceAll(text, "\r\n", " ")
-			text = strings.ReplaceAll(text, "\r", " ")
-			text = strings.ReplaceAll(text, "\n", " ")
-			text = strings.ReplaceAll(text, "\t", " ")
-			m.appendInput(text)
-		}
+	cmd := m.Input.Update(msg)
+	if cmd == nil {
 		return nil
 	}
 
-	switch msg.Code {
-	case tea.KeyEnter:
-		goal := strings.TrimSpace(m.InputBuffer)
+	// Inspect the command's message to handle submit/cancel.
+	result := cmd()
+	switch result.(type) {
+	case textarea.SubmitMsg:
+		goal := m.Input.Content()
 		planning := m.PlanningMode
 		m.InputActive = false
-		m.InputBuffer = ""
+		m.Input.Reset()
 		m.PlanningMode = false
-		if goal != "" {
+		if strings.TrimSpace(goal) != "" {
 			if planning {
 				return func() tea.Msg { return PlanningGoalSubmittedMsg{Goal: goal} }
 			}
 			return func() tea.Msg { return GoalSubmittedMsg{Goal: goal} }
 		}
 		return nil
-	case tea.KeyEscape:
+	case textarea.CancelMsg:
+		// Deactivate focus but preserve content — Ctrl+G or click restores it.
 		m.InputActive = false
-		m.InputBuffer = ""
-		m.PlanningMode = false
 		return nil
-	case tea.KeyBackspace:
-		if len(m.InputBuffer) > 0 {
-			runes := []rune(m.InputBuffer)
-			m.InputBuffer = string(runes[:len(runes)-1])
-		}
-		return nil
-	case tea.KeySpace:
-		m.appendInput(" ")
-		return nil
+	default:
+		// Re-wrap the command — we already consumed the thunk.
+		return func() tea.Msg { return result }
 	}
-
-	// Printable text
-	if msg.Text != "" {
-		text := msg.Text
-		text = strings.ReplaceAll(text, "\r\n", " ")
-		text = strings.ReplaceAll(text, "\r", " ")
-		text = strings.ReplaceAll(text, "\n", " ")
-		text = strings.ReplaceAll(text, "\t", " ")
-		slog.Debug("goal input text", "text_len", len(text))
-		m.appendInput(text)
-		return nil
-	}
-	return nil
 }
 
 func (m *AgentPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -715,46 +691,72 @@ func (m *AgentPaneModel) Render() string {
 	if inputRows < 0 {
 		inputRows = 0
 	}
-	var inputLines []string
+	// Always render the TextArea content — visible even when unfocused.
+	renderedInput := m.Input.Render()
+	hasContent := m.InputActive || (len(renderedInput) > 0 && (len(renderedInput) > 1 || renderedInput[0].Text != ""))
+	var cursorVisRow, cursorVisCol int
 	if m.InputActive {
-		// Wrap input text to width-2 (1 for "> " prefix on first line)
-		inputW := m.Width - 2
-		if inputW < 1 {
-			inputW = 1
+		cursorVisRow, cursorVisCol = m.Input.CursorPosition()
+	}
+
+	// Window the rendered input so the cursor row is always visible.
+	// inputScrollOffset is the first visual row to display.
+	inputScrollOffset := 0
+	if len(renderedInput) > inputRows && inputRows > 0 {
+		// Ensure the cursor row is on screen.
+		if cursorVisRow >= inputRows {
+			inputScrollOffset = cursorVisRow - inputRows + 1
 		}
-		buf := m.InputBuffer
-		if len(buf) == 0 {
-			inputLines = []string{""}
-		} else {
-			runes := []rune(buf)
-			for len(runes) > inputW {
-				inputLines = append(inputLines, string(runes[:inputW]))
-				runes = runes[inputW:]
-			}
-			inputLines = append(inputLines, string(runes))
+		maxScroll := len(renderedInput) - inputRows
+		if inputScrollOffset > maxScroll {
+			inputScrollOffset = maxScroll
 		}
 	}
+
+	// Track where the input area starts for mouse click detection.
+	m.inputAreaStartRow = row
+	m.inputAreaEndRow = row + inputRows
 
 	for i := range inputRows {
 		if row >= m.Height {
 			break
 		}
-		if m.InputActive && i < len(inputLines) {
-			prefix := "  "
-			if i == 0 {
-				prefix = "> "
+		visIdx := i + inputScrollOffset
+		if hasContent && visIdx < len(renderedInput) {
+			lineRunes := []rune(renderedInput[visIdx].Text)
+			var lineBuilder strings.Builder
+			cellsUsed := 0
+
+			for j, r := range lineRunes {
+				rw := runewidth.RuneWidth(r)
+				if cellsUsed+rw > m.Width {
+					break
+				}
+				ch := string(r)
+				if m.InputActive && visIdx == cursorVisRow && j == cursorVisCol {
+					lineBuilder.WriteString(agentCursorStyle.Render(ch))
+				} else if m.InputActive && m.Input.IsSelected(visIdx, j) {
+					lineBuilder.WriteString(agentSelStyle.Render(ch))
+				} else {
+					lineBuilder.WriteString(ch)
+				}
+				cellsUsed += rw
 			}
-			lineText := prefix + inputLines[i]
-			// Add cursor at the end of the last input line
-			if i == len(inputLines)-1 {
-				lineText += agentCursorStyle.Render(" ")
+			// Cursor at end of line (past last char) — only when focused.
+			if m.InputActive && visIdx == cursorVisRow && cursorVisCol >= len(lineRunes) && cellsUsed < m.Width {
+				lineBuilder.WriteString(agentCursorStyle.Render(" "))
+				cellsUsed++
 			}
-			runes := []rune(lineText)
-			if len(runes) < m.Width {
-				lineText += strings.Repeat(" ", m.Width-len(runes))
+			// Pad to full width.
+			if cellsUsed < m.Width {
+				lineBuilder.WriteString(strings.Repeat(" ", m.Width-cellsUsed))
 			}
-			output[row] = agentInputStyle.Render(lineText)
-		} else if !m.InputActive && i == 0 {
+			style := agentInputStyle
+			if !m.InputActive {
+				style = agentInputDim
+			}
+			output[row] = style.Render(lineBuilder.String())
+		} else if !hasContent && i == 0 {
 			output[row] = agentInputDim.Render(m.padLine(" Ctrl+G code | Alt+G plan"))
 		} else {
 			output[row] = strings.Repeat(" ", m.Width)

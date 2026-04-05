@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -376,6 +377,50 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshProjectPane()
 		return m, nil
 
+	case ProjectCreateFileMsg:
+		if err := m.Session.WriteFile(msg.Path, ""); err != nil {
+			slog.Warn("create file", "err", err)
+			m.AgentPane.AppendMeta("[create failed: " + err.Error() + "]\n")
+			return m, nil
+		}
+		m.refreshProjectPane()
+		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
+		return m.openFile(absPath)
+
+	case ProjectCreateDirMsg:
+		if err := m.Session.CreateDir(msg.Path); err != nil {
+			slog.Warn("create dir", "err", err)
+			m.AgentPane.AppendMeta("[create dir failed: " + err.Error() + "]\n")
+			return m, nil
+		}
+		m.ProjectPane.AddEmptyDir(msg.Path)
+		m.refreshProjectPane()
+		return m, nil
+
+	case ProjectDeleteFileMsg:
+		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
+		prevActive := m.Session.ActiveFile()
+		if err := m.Session.DeleteFile(absPath); err != nil {
+			slog.Warn("delete file", "err", err)
+			m.AgentPane.AppendMeta("[delete failed: " + err.Error() + "]\n")
+			return m, nil
+		}
+		// Preserve parent directory in tree if it's now empty on disk.
+		parentRel := filepath.ToSlash(filepath.Dir(msg.Path))
+		if parentRel != "." && parentRel != "" {
+			parentAbs := filepath.Join(m.Session.ProjectRoot(), parentRel)
+			if entries, err := os.ReadDir(parentAbs); err == nil && len(entries) == 0 {
+				m.ProjectPane.AddEmptyDir(parentRel)
+			}
+		}
+		m.refreshProjectPane()
+		// If the active editor changed (deleted file or dir containing it),
+		// rebuild the editor pane to reflect the session's fallback.
+		if m.Session.ActiveFile() != prevActive {
+			m.rebuildEditorModel()
+		}
+		return m, nil
+
 	// Animation tick — advance the agent typing animation
 	case animTickMsg:
 		return m, m.handleAnimTick()
@@ -545,6 +590,12 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Project pane inline input — all keys go to project pane
+	if m.ProjectPane != nil && m.ProjectPane.IsInputActive() {
+		cmd := m.ProjectPane.Update(msg)
+		return m, cmd
+	}
+
 	// Toggle focus between visible panes
 	if msg.Code == '\\' && msg.Mod == tea.ModCtrl {
 		m.Regions.FocusNext()
@@ -708,11 +759,11 @@ func (m *AppModel) View() tea.View {
 	var content string
 	if m.Width == 0 || m.Height == 0 {
 		content = "Initializing..."
-	} else if m.Dialog.Active {
-		content = m.Dialog.Render(m.Width, m.Height)
 	} else {
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width)
-		if m.Help.Active {
+		if m.Dialog.Active {
+			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
+		} else if m.Help.Active {
 			content = m.Help.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Palette.Active {
 			content = m.Palette.RenderOverlay(base, m.Width, m.Height)

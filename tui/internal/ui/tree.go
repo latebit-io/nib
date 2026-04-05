@@ -92,6 +92,39 @@ func insertPath(parent *TreeNode, parts []string, fullPath string) {
 	insertPath(dir, parts[1:], fullPath)
 }
 
+// InsertDir ensures a directory node exists at the given relative path.
+// Creates intermediate directories as needed. The path is normalized
+// to forward slashes. Returns the directory node.
+func InsertDir(root *TreeNode, relPath string) *TreeNode {
+	relPath = filepath.ToSlash(relPath)
+	parts := strings.Split(relPath, "/")
+	node := root
+	for _, name := range parts {
+		if name == "" {
+			continue
+		}
+		var child *TreeNode
+		for _, c := range node.Children {
+			if c.IsDir && c.Name == name {
+				child = c
+				break
+			}
+		}
+		if child == nil {
+			child = &TreeNode{
+				Name:      name,
+				Path:      path.Join(node.Path, name),
+				IsDir:     true,
+				Collapsed: true,
+				parent:    node,
+			}
+			node.Children = append(node.Children, child)
+		}
+		node = child
+	}
+	return node
+}
+
 // sortChildren recursively sorts: directories first, then files,
 // alphabetical within each group.
 func sortChildren(n *TreeNode) {

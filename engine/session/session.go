@@ -797,6 +797,12 @@ func (s *Session) ListFiles() ([]string, error) {
 	return filelist.Walk(s.projectRoot)
 }
 
+// ListFilesAndDirs returns all project files and directories (respects .gitignore).
+// Directories are returned separately so the tree can include empty directories.
+func (s *Session) ListFilesAndDirs() (files []string, dirs []string, err error) {
+	return filelist.WalkWithDirs(s.projectRoot)
+}
+
 // WriteFile creates a new file on disk and opens it in the session.
 // Called from the agent goroutine via Workspace — uses mu for map access
 // and O_CREATE|O_EXCL for atomic existence check + create.
@@ -855,6 +861,126 @@ func (s *Session) WriteFile(path, content string) error {
 	}
 
 	return nil
+}
+
+// CreateDir creates a directory (and parents) within the project root.
+// The path is validated via resolvePath to prevent traversal outside the root.
+func (s *Session) CreateDir(path string) error {
+	absPath, err := s.resolvePath(path)
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(absPath, 0o755)
+}
+
+// DeleteFile removes a file or directory from disk and cleans up session state.
+// Closes editor buffers, removes context/modified entries, and unwires LSP sync
+// for the deleted path and any children. If the active editor is affected, falls
+// back to another open editor or installs a fresh empty one.
+func (s *Session) DeleteFile(path string) error {
+	absPath, err := s.resolvePath(path)
+	if err != nil {
+		return err
+	}
+
+	canon := s.CanonPath(absPath)
+
+	if canon == filepath.Clean(s.projectRoot) {
+		return fmt.Errorf("cannot delete project root")
+	}
+
+	if canon == filepath.Join(filepath.Clean(s.projectRoot), ".project") || s.isProjectMeta(canon) {
+		return fmt.Errorf("cannot delete project metadata: %s", path)
+	}
+
+	// Block deletion while an edit is pending approval or mid-animation,
+	// same guard as SwitchTo. Approval state may reference the deleted path.
+	if s.pendingEdit != nil || s.stagedEditFile != "" {
+		return ErrEditPending
+	}
+
+	if err := removeFromDisk(absPath, path); err != nil {
+		return err
+	}
+
+	removed := s.cleanupDeletedPath(canon)
+	for _, e := range removed {
+		s.unwireBufferSync(e)
+		e.Close()
+	}
+
+	s.saveContext()
+	return nil
+}
+
+// removeFromDisk removes a file or directory from disk.
+func removeFromDisk(absPath, displayPath string) error {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", displayPath, err)
+	}
+	if info.IsDir() {
+		err = os.RemoveAll(absPath)
+	} else {
+		err = os.Remove(absPath)
+	}
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", displayPath, err)
+	}
+	return nil
+}
+
+// cleanupDeletedPath removes all session state (editors, context, modified)
+// for the given canonical path and any children (if a directory was deleted).
+// Returns removed editors so the caller can unwire and close them.
+func (s *Session) cleanupDeletedPath(canon string) []*editor.Editor {
+	dirPrefix := canon + string(filepath.Separator)
+	matches := func(p string) bool {
+		return p == canon || strings.HasPrefix(p, dirPrefix)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var removed []*editor.Editor
+	for p, e := range s.editors {
+		if matches(p) {
+			removed = append(removed, e)
+			delete(s.editors, p)
+			if s.activeFile == p {
+				s.activeFile = ""
+				s.Editor = nil
+			}
+		}
+	}
+	deleteMatching(s.contextSet, matches)
+	deleteMatching(s.modifiedFiles, matches)
+
+	// Ensure s.Editor is never nil.
+	if s.Editor == nil {
+		for p, ed := range s.editors {
+			s.Editor = ed
+			s.activeFile = p
+			break
+		}
+		if s.Editor == nil {
+			e := editor.New(buffer.New())
+			s.Editor = e
+			// Track the empty editor so Session.Close() can release its resources.
+			s.editors[""] = e
+			s.activeFile = ""
+		}
+	}
+	return removed
+}
+
+// deleteMatching removes all entries from a map whose keys satisfy pred.
+func deleteMatching(m map[string]bool, pred func(string) bool) {
+	for k := range m {
+		if pred(k) {
+			delete(m, k)
+		}
+	}
 }
 
 // resolvePath converts a path to a cleaned absolute path within the project

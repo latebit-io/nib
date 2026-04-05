@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -781,5 +782,196 @@ func TestPrepareApprovalPerLineOrigins(t *testing.T) {
 	// Line 2: search="here", final="here" → unchanged → nil (skip)
 	if plan.LineOrigins[2] != nil {
 		t.Errorf("LineOrigins[2] = %v, want nil (unchanged line)", plan.LineOrigins[2])
+	}
+}
+
+func TestDeleteFile(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	// Create file first
+	if err := s.WriteFile("victim.go", "package victim"); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	absPath := dir + "/victim.go"
+	canon := s.CanonPath(absPath)
+
+	// Verify it exists and is in context
+	if _, err := os.Stat(absPath); err != nil {
+		t.Fatalf("file should exist: %v", err)
+	}
+	if !s.InContext(canon) {
+		t.Fatal("file should be in context after WriteFile")
+	}
+
+	// Delete it
+	if err := s.DeleteFile(absPath); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	// File should be gone from disk
+	if _, err := os.Stat(absPath); !os.IsNotExist(err) {
+		t.Errorf("file should not exist after DeleteFile, got err=%v", err)
+	}
+
+	// Should be removed from context
+	if s.InContext(canon) {
+		t.Error("file should not be in context after DeleteFile")
+	}
+
+	// Should be removed from editors
+	s.mu.RLock()
+	_, hasEditor := s.editors[canon]
+	s.mu.RUnlock()
+	if hasEditor {
+		t.Error("editor should be removed after DeleteFile")
+	}
+}
+
+func TestDeleteFile_ActiveFile(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	// Create and switch to a file
+	if err := s.WriteFile("active.go", "package active"); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	absPath := dir + "/active.go"
+	if err := s.SwitchTo(absPath); err != nil {
+		t.Fatalf("SwitchTo: %v", err)
+	}
+
+	// Delete the active file
+	if err := s.DeleteFile(absPath); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+
+	// activeFile should be cleared (no other named editors remain)
+	if s.ActiveFile() != "" {
+		t.Errorf("ActiveFile should be empty after deleting active file, got %q", s.ActiveFile())
+	}
+	// Editor must never be nil — a fresh empty editor is installed as fallback
+	if s.Editor == nil {
+		t.Fatal("Editor should not be nil after deleting active file")
+	}
+}
+
+func TestDeleteFile_Directory(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	// Create files inside a subdirectory
+	if err := s.WriteFile("pkg/a.go", "package pkg"); err != nil {
+		t.Fatalf("WriteFile a.go: %v", err)
+	}
+	if err := s.WriteFile("pkg/b.go", "package pkg"); err != nil {
+		t.Fatalf("WriteFile b.go: %v", err)
+	}
+
+	// Both should be in context
+	canonA := s.CanonPath(filepath.Join(dir, "pkg/a.go"))
+	canonB := s.CanonPath(filepath.Join(dir, "pkg/b.go"))
+	if !s.InContext(canonA) || !s.InContext(canonB) {
+		t.Fatal("files should be in context")
+	}
+
+	// Delete the directory
+	if err := s.DeleteFile(filepath.Join(dir, "pkg")); err != nil {
+		t.Fatalf("DeleteFile dir: %v", err)
+	}
+
+	// Directory should be gone
+	if _, err := os.Stat(filepath.Join(dir, "pkg")); !os.IsNotExist(err) {
+		t.Errorf("directory should not exist after delete, got err=%v", err)
+	}
+
+	// Both files should be removed from context and editors
+	if s.InContext(canonA) {
+		t.Error("a.go should not be in context after dir delete")
+	}
+	if s.InContext(canonB) {
+		t.Error("b.go should not be in context after dir delete")
+	}
+	s.mu.RLock()
+	_, hasA := s.editors[canonA]
+	_, hasB := s.editors[canonB]
+	s.mu.RUnlock()
+	if hasA || hasB {
+		t.Error("editors should be removed after dir delete")
+	}
+}
+
+func TestDeleteFile_NonExistent(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	err := s.DeleteFile(dir + "/nope.go")
+	if err == nil {
+		t.Error("DeleteFile on non-existent file should return error")
+	}
+}
+
+func TestDeleteFile_ProjectRoot(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	err := s.DeleteFile(".")
+	if err == nil {
+		t.Fatal("DeleteFile(\".\") should return error")
+	}
+	if !strings.Contains(err.Error(), "project root") {
+		t.Errorf("error should mention project root, got: %v", err)
+	}
+
+	err = s.DeleteFile(dir)
+	if err == nil {
+		t.Fatal("DeleteFile(projectRoot) should return error")
+	}
+}
+
+func TestDeleteFile_EscapesRoot(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	err := s.DeleteFile("../../etc/passwd")
+	if err == nil {
+		t.Error("DeleteFile with path escape should return error")
+	}
+}
+
+func TestDeleteFile_ProjectMeta(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	// Create .project/context.md
+	metaDir := filepath.Join(dir, ".project")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metaFile := filepath.Join(metaDir, "context.md")
+	if err := os.WriteFile(metaFile, []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.DeleteFile(metaFile)
+	if err == nil {
+		t.Error("DeleteFile should reject .project/ files")
+	}
+	if !strings.Contains(err.Error(), "project metadata") {
+		t.Errorf("error should mention project metadata, got: %v", err)
+	}
+
+	// File should still exist
+	if _, err := os.Stat(metaFile); err != nil {
+		t.Errorf("file should still exist after rejected delete: %v", err)
+	}
+
+	// Deleting .project directory itself should also be rejected
+	err = s.DeleteFile(metaDir)
+	if err == nil {
+		t.Error("DeleteFile should reject .project directory itself")
+	}
+	if _, err := os.Stat(metaDir); err != nil {
+		t.Errorf(".project dir should still exist after rejected delete: %v", err)
 	}
 }

@@ -54,6 +54,9 @@ type TextArea struct {
 
 	// Clipboard service (injected by parent).
 	clipboard Clipboard
+
+	// Reusable render buffer — avoids allocation per frame.
+	renderBuf []RenderedLine
 }
 
 // New creates a TextArea with the given display width.
@@ -133,11 +136,15 @@ type RenderedLine struct {
 // prefixing ("> "), cursor styling, and padding.
 func (t *TextArea) Render() []RenderedLine {
 	t.buildWrapCache()
-	result := make([]RenderedLine, len(t.wrapCache))
-	for i, vl := range t.wrapCache {
-		result[i] = RenderedLine{Text: string(vl.runes)}
+	if cap(t.renderBuf) < len(t.wrapCache) {
+		t.renderBuf = make([]RenderedLine, len(t.wrapCache))
+	} else {
+		t.renderBuf = t.renderBuf[:len(t.wrapCache)]
 	}
-	return result
+	for i, vl := range t.wrapCache {
+		t.renderBuf[i] = RenderedLine{Text: string(vl.runes)}
+	}
+	return t.renderBuf
 }
 
 // Update processes a key press. Returns a tea.Cmd for submit/cancel,

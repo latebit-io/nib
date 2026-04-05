@@ -389,6 +389,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.MouseMsg:
+		// Any click unfocuses the agent input; the agent pane's own
+		// click handler re-focuses if the click landed in the input area.
+		if _, ok := msg.(tea.MouseClickMsg); ok {
+			m.AgentPane.InputActive = false
+		}
 		// Translate Y for intent bar row
 		mouse := msg.Mouse()
 		mouse.Y -= 1
@@ -474,7 +479,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.AgentPane.Status = event.StatusWaiting
 		}
 		m.AgentPane.InputActive = true
-		m.AgentPane.InputBuffer = ""
+		m.AgentPane.Input.Reset()
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = m.reloadWorkTreeCmd()
 	case event.AgentDone:
@@ -606,7 +611,6 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionAgentStart:
 		if m.Session.HasAgent() {
 			m.AgentPane.InputActive = true
-			m.AgentPane.InputBuffer = ""
 			m.AgentPane.PlanningMode = false
 		}
 		return m, nil
@@ -614,7 +618,6 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionAgentPlan:
 		if m.Session.HasAgent() {
 			m.AgentPane.InputActive = true
-			m.AgentPane.InputBuffer = ""
 			m.AgentPane.PlanningMode = true
 		}
 		return m, nil

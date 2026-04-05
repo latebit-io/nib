@@ -388,8 +388,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.openFile(absPath)
 
 	case ProjectCreateDirMsg:
-		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
-		if err := os.MkdirAll(absPath, 0o755); err != nil {
+		if err := m.Session.CreateDir(msg.Path); err != nil {
 			slog.Warn("create dir", "err", err)
 			m.AgentPane.AppendMeta("[create dir failed: " + err.Error() + "]\n")
 			return m, nil
@@ -400,7 +399,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ProjectDeleteFileMsg:
 		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
-		wasActive := m.Session.ActiveFile() == m.Session.CanonPath(absPath)
+		prevActive := m.Session.ActiveFile()
 		if err := m.Session.DeleteFile(absPath); err != nil {
 			slog.Warn("delete file", "err", err)
 			m.AgentPane.AppendMeta("[delete failed: " + err.Error() + "]\n")
@@ -415,11 +414,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.refreshProjectPane()
-		if wasActive {
-			openFiles := m.Session.OpenFiles()
-			if len(openFiles) > 0 {
-				return m.openFile(openFiles[0])
-			}
+		// If the active editor changed (deleted file or dir containing it),
+		// rebuild the editor pane to reflect the session's fallback.
+		if m.Session.ActiveFile() != prevActive {
+			m.rebuildEditorModel()
 		}
 		return m, nil
 

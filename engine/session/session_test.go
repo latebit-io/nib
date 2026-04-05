@@ -846,9 +846,58 @@ func TestDeleteFile_ActiveFile(t *testing.T) {
 		t.Fatalf("DeleteFile: %v", err)
 	}
 
-	// activeFile should be cleared
+	// activeFile should be cleared (no other named editors remain)
 	if s.ActiveFile() != "" {
 		t.Errorf("ActiveFile should be empty after deleting active file, got %q", s.ActiveFile())
+	}
+	// Editor must never be nil — a fresh empty editor is installed as fallback
+	if s.Editor == nil {
+		t.Fatal("Editor should not be nil after deleting active file")
+	}
+}
+
+func TestDeleteFile_Directory(t *testing.T) {
+	dir := t.TempDir()
+	s := New(editor.New(buffer.New()), dir)
+
+	// Create files inside a subdirectory
+	if err := s.WriteFile("pkg/a.go", "package pkg"); err != nil {
+		t.Fatalf("WriteFile a.go: %v", err)
+	}
+	if err := s.WriteFile("pkg/b.go", "package pkg"); err != nil {
+		t.Fatalf("WriteFile b.go: %v", err)
+	}
+
+	// Both should be in context
+	canonA := s.CanonPath(filepath.Join(dir, "pkg/a.go"))
+	canonB := s.CanonPath(filepath.Join(dir, "pkg/b.go"))
+	if !s.InContext(canonA) || !s.InContext(canonB) {
+		t.Fatal("files should be in context")
+	}
+
+	// Delete the directory
+	if err := s.DeleteFile(filepath.Join(dir, "pkg")); err != nil {
+		t.Fatalf("DeleteFile dir: %v", err)
+	}
+
+	// Directory should be gone
+	if _, err := os.Stat(filepath.Join(dir, "pkg")); !os.IsNotExist(err) {
+		t.Errorf("directory should not exist after delete, got err=%v", err)
+	}
+
+	// Both files should be removed from context and editors
+	if s.InContext(canonA) {
+		t.Error("a.go should not be in context after dir delete")
+	}
+	if s.InContext(canonB) {
+		t.Error("b.go should not be in context after dir delete")
+	}
+	s.mu.RLock()
+	_, hasA := s.editors[canonA]
+	_, hasB := s.editors[canonB]
+	s.mu.RUnlock()
+	if hasA || hasB {
+		t.Error("editors should be removed after dir delete")
 	}
 }
 

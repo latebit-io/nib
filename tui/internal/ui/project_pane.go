@@ -230,13 +230,22 @@ func (p *ProjectPaneModel) Render() string {
 	var lines []string
 	visible := p.visibleItems()
 
+	// Reserve one row for the inline create input so we never exceed p.height.
+	maxItemRows := p.height
+	if p.creatingFile {
+		maxItemRows--
+	}
+
 	for i, item := range visible {
+		if len(lines) >= maxItemRows {
+			break
+		}
 		globalIdx := p.scrollOffset + i
 		line := p.renderItem(item, globalIdx == p.cursorIdx)
 		lines = append(lines, line)
 
-		// Insert inline create input after the cursor item
-		if p.creatingFile && globalIdx == p.cursorIdx && len(lines) < p.height {
+		// Insert inline create input after the cursor item.
+		if p.creatingFile && globalIdx == p.cursorIdx {
 			lines = append(lines, p.renderCreateInput())
 		}
 	}
@@ -591,11 +600,14 @@ func (p *ProjectPaneModel) startCreate(dir bool) tea.Cmd {
 		return nil
 	}
 	item := p.items[p.cursorIdx]
-	if item.section != "files" || item.isHeader || item.node == nil {
+	if item.section != "files" {
 		return nil
 	}
 
-	if item.node.IsDir {
+	// FILES header or empty section → create at project root.
+	if item.isHeader || item.node == nil {
+		p.createDirPath = ""
+	} else if item.node.IsDir {
 		p.createDirPath = item.node.Path
 		// Expand the directory so the input appears inside it.
 		item.node.Collapsed = false
@@ -617,14 +629,14 @@ func (p *ProjectPaneModel) startCreate(dir bool) tea.Cmd {
 	return nil
 }
 
-// startFileDelete shows an inline delete confirmation for the file under cursor.
-// Only works on files (not directories, headers, or work items).
+// startFileDelete shows an inline delete confirmation for the file or directory
+// under cursor. Only works in the FILES section (not headers or work items).
 func (p *ProjectPaneModel) startFileDelete() tea.Cmd {
 	if p.cursorIdx < 0 || p.cursorIdx >= len(p.items) {
 		return nil
 	}
 	item := p.items[p.cursorIdx]
-	if item.section != "files" || item.isHeader || item.node == nil || item.node.IsDir {
+	if item.section != "files" || item.isHeader || item.node == nil {
 		return nil
 	}
 	p.confirmDelete = true
@@ -672,28 +684,31 @@ func (p *ProjectPaneModel) handleCreateInput(msg tea.KeyPressMsg) tea.Cmd {
 func (p *ProjectPaneModel) handleConfirmDelete(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.Code {
 	case tea.KeyEnter:
-		deletePath := p.confirmDeletePath
-		p.confirmDelete = false
-		p.confirmDeletePath = ""
-		return func() tea.Msg { return ProjectDeleteFileMsg{Path: deletePath} }
+		return p.confirmDeleteAction()
 	case tea.KeyEscape:
-		p.confirmDelete = false
-		p.confirmDeletePath = ""
-		return nil
+		return p.cancelDeleteAction()
 	}
 	if rs := []rune(msg.Text); len(rs) == 1 {
 		switch rs[0] {
 		case 'y', 'Y':
-			deletePath := p.confirmDeletePath
-			p.confirmDelete = false
-			p.confirmDeletePath = ""
-			return func() tea.Msg { return ProjectDeleteFileMsg{Path: deletePath} }
+			return p.confirmDeleteAction()
 		case 'n', 'N':
-			p.confirmDelete = false
-			p.confirmDeletePath = ""
-			return nil
+			return p.cancelDeleteAction()
 		}
 	}
+	return nil
+}
+
+func (p *ProjectPaneModel) confirmDeleteAction() tea.Cmd {
+	deletePath := p.confirmDeletePath
+	p.confirmDelete = false
+	p.confirmDeletePath = ""
+	return func() tea.Msg { return ProjectDeleteFileMsg{Path: deletePath} }
+}
+
+func (p *ProjectPaneModel) cancelDeleteAction() tea.Cmd {
+	p.confirmDelete = false
+	p.confirmDeletePath = ""
 	return nil
 }
 
@@ -872,12 +887,16 @@ func (p *ProjectPaneModel) renderCreateInput() string {
 
 	for j, r := range runes {
 		ch := string(r)
+		w := lipgloss.Width(ch)
+		if cellsUsed+w > p.width {
+			break
+		}
 		if cursorRow == 0 && j == cursorCol {
 			lineBuilder.WriteString(agentCursorStyle.Render(ch))
 		} else {
 			lineBuilder.WriteString(ch)
 		}
-		cellsUsed++
+		cellsUsed += w
 	}
 	// Cursor at end of content.
 	if cursorRow == 0 && cursorCol >= len(runes) && cellsUsed < p.width {

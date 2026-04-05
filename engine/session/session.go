@@ -867,40 +867,106 @@ func (s *Session) WriteFile(path, content string) error {
 // Removes the file from the context set, closes its editor buffer,
 // and unwires LSP sync. If the deleted file was the active editor,
 // activeFile is cleared so the caller can switch to another buffer.
+// CreateDir creates a directory (and parents) within the project root.
+// The path is validated via resolvePath to prevent traversal outside the root.
+func (s *Session) CreateDir(path string) error {
+	absPath, err := s.resolvePath(path)
+	if err != nil {
+		return err
+	}
+	return os.MkdirAll(absPath, 0o755)
+}
+
 func (s *Session) DeleteFile(path string) error {
 	absPath, err := s.resolvePath(path)
 	if err != nil {
 		return err
 	}
 
-	if s.isProjectMeta(s.CanonPath(absPath)) {
+	canon := s.CanonPath(absPath)
+
+	if s.isProjectMeta(canon) {
 		return fmt.Errorf("cannot delete project metadata: %s", path)
 	}
 
-	if err := os.Remove(absPath); err != nil {
-		return fmt.Errorf("delete %s: %w", path, err)
+	if err := removeFromDisk(absPath, path); err != nil {
+		return err
 	}
 
-	canon := s.CanonPath(absPath)
-
-	s.mu.Lock()
-	e, hasEditor := s.editors[canon]
-	delete(s.editors, canon)
-	delete(s.contextSet, canon)
-	delete(s.modifiedFiles, canon)
-	wasActive := s.activeFile == canon
-	if wasActive {
-		s.activeFile = ""
-		s.Editor = nil
-	}
-	s.mu.Unlock()
-
-	if hasEditor {
+	removed := s.cleanupDeletedPath(canon)
+	for _, e := range removed {
 		s.unwireBufferSync(e)
+		e.Close()
 	}
 
 	s.saveContext()
 	return nil
+}
+
+// removeFromDisk removes a file or directory from disk.
+func removeFromDisk(absPath, displayPath string) error {
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", displayPath, err)
+	}
+	if info.IsDir() {
+		err = os.RemoveAll(absPath)
+	} else {
+		err = os.Remove(absPath)
+	}
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", displayPath, err)
+	}
+	return nil
+}
+
+// cleanupDeletedPath removes all session state (editors, context, modified)
+// for the given canonical path and any children (if a directory was deleted).
+// Returns removed editors so the caller can unwire and close them.
+func (s *Session) cleanupDeletedPath(canon string) []*editor.Editor {
+	dirPrefix := canon + string(filepath.Separator)
+	matches := func(p string) bool {
+		return p == canon || strings.HasPrefix(p, dirPrefix)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var removed []*editor.Editor
+	for p, e := range s.editors {
+		if matches(p) {
+			removed = append(removed, e)
+			delete(s.editors, p)
+			if s.activeFile == p {
+				s.activeFile = ""
+				s.Editor = nil
+			}
+		}
+	}
+	deleteMatching(s.contextSet, matches)
+	deleteMatching(s.modifiedFiles, matches)
+
+	// Ensure s.Editor is never nil.
+	if s.Editor == nil {
+		for p, ed := range s.editors {
+			s.Editor = ed
+			s.activeFile = p
+			break
+		}
+		if s.Editor == nil {
+			s.Editor = editor.New(buffer.New())
+		}
+	}
+	return removed
+}
+
+// deleteMatching removes all entries from a map whose keys satisfy pred.
+func deleteMatching(m map[string]bool, pred func(string) bool) {
+	for k := range m {
+		if pred(k) {
+			delete(m, k)
+		}
+	}
 }
 
 // resolvePath converts a path to a cleaned absolute path within the project

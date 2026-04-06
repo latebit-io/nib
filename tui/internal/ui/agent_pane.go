@@ -17,6 +17,13 @@ import (
 // InputHeight is the number of rows reserved for the input area (separator + input + status).
 const InputHeight = 5
 
+// fenceState records the active code fence after processing a raw line.
+// Zero value means "not inside a code block".
+type fenceState struct {
+	char rune // '`' or '~', 0 when outside a block
+	len  int  // fence run length, 0 when outside a block
+}
+
 // Package-level styles — allocated once, never in render paths.
 var (
 	userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Bold(true)
@@ -69,6 +76,22 @@ type AgentPaneModel struct {
 
 	// Stateful sanitizer for streamed text
 	sanitizer sanitize.Sanitizer
+
+	// inCodeAfter[i] is true when Lines[i] is inside a code block after
+	// processing that line (i.e. the opening fence flips it to true, the
+	// closing fence flips it back to false). Used by isCodeLine().
+	inCodeAfter []bool
+
+	// rawFenceAfter[i] records the active fence state after processing
+	// RawLines[i]. This allows incremental recomputation in O(new_lines)
+	// instead of rescanning the entire prefix on every token append.
+	rawFenceAfter []fenceState
+
+	// mdCache holds rendered markdown for Lines in the visible viewport only.
+	// mdCacheOffset is the ScrollOffset the cache was built for; when the viewport
+	// moves or content changes, the cache is invalidated. Bounded to O(VisibleLines).
+	mdCache       []string
+	mdCacheOffset int
 
 	// HasAgent is true when an LLM provider is configured.
 	HasAgent bool
@@ -160,6 +183,152 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 	for i := firstRaw; i < endRaw; i++ {
 		m.userRawLines[i] = true
 	}
+
+	// AppendText ran recomputeCodeBlock before user lines were marked, so
+	// fence state may have advanced through user content (e.g. an unmatched
+	// "```" in the message). Recompute from firstRaw now that userRawLines
+	// is populated — this skips user lines and resets fence state correctly.
+	m.recomputeCodeBlock(firstRaw)
+	m.invalidateMdCache()
+}
+
+// recomputeCodeBlock rebuilds inCodeAfter starting from raw line index fromRaw.
+// Fence detection runs on RawLines (logical lines) so that wrapping can never
+// split or fabricate a fence. The per-raw-line state is then projected to all
+// wrapped lines belonging to that raw line via wrappedIndex.
+//
+// Fence state is persisted in rawFenceAfter so incremental appends seed from
+// rawFenceAfter[fromRaw-1] in O(1) instead of rescanning the entire prefix.
+//
+// Fences follow CommonMark rules: 3+ backticks or tildes, 0–3 leading spaces,
+// opener can have info string, closer must use the same char at >= opener
+// length with no non-space content after. This correctly handles nested fences
+// (e.g. ```“ wrapping an inner ```).
+func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
+	// Size inCodeAfter to match Lines.
+	for len(m.inCodeAfter) < len(m.Lines) {
+		m.inCodeAfter = append(m.inCodeAfter, false)
+	}
+	m.inCodeAfter = m.inCodeAfter[:len(m.Lines)]
+
+	// Truncate rawFenceAfter to fromRaw so we rebuild from there.
+	if fromRaw < len(m.rawFenceAfter) {
+		m.rawFenceAfter = m.rawFenceAfter[:fromRaw]
+	}
+
+	// Seed from persisted state — O(1).
+	var fence fenceState
+	if fromRaw > 0 && fromRaw-1 < len(m.rawFenceAfter) {
+		fence = m.rawFenceAfter[fromRaw-1]
+	}
+
+	for ri := fromRaw; ri < len(m.RawLines); ri++ {
+		// User messages are rendered with userMessageStyle, not markdown.
+		// Skip them so an unmatched fence in user input doesn't bleed into
+		// subsequent agent output.
+		if m.userRawLines[ri] {
+			m.rawFenceAfter = append(m.rawFenceAfter, fence)
+			wStart := m.wrappedIndex[ri]
+			wEnd := len(m.Lines)
+			if ri+1 < len(m.wrappedIndex) {
+				wEnd = m.wrappedIndex[ri+1]
+			}
+			for wi := wStart; wi < wEnd; wi++ {
+				m.inCodeAfter[wi] = false
+			}
+			continue
+		}
+
+		fenceBefore := fence
+		fc, fl, closeable := parseFenceLine(m.RawLines[ri])
+		if fl > 0 {
+			if fence.len == 0 {
+				// Not in a code block — any fence opens one (info string allowed).
+				fence = fenceState{char: fc, len: fl}
+			} else if closeable && fc == fence.char && fl >= fence.len {
+				// In a code block — only close if no trailing non-space content.
+				fence = fenceState{}
+			}
+		}
+
+		// A raw line is "code" if we were inside a fence before processing it
+		// (body + closer) OR if processing it opened a fence (opener). This
+		// ensures all wrapped segments of a closer line are marked as code,
+		// not just the first one.
+		lineIsCode := fenceBefore.len > 0 || fence.len > 0
+
+		// Persist fence state for this raw line.
+		m.rawFenceAfter = append(m.rawFenceAfter, fence)
+
+		// Fill all wrapped lines that belong to this raw line.
+		wStart := m.wrappedIndex[ri]
+		wEnd := len(m.Lines)
+		if ri+1 < len(m.wrappedIndex) {
+			wEnd = m.wrappedIndex[ri+1]
+		}
+		for wi := wStart; wi < wEnd; wi++ {
+			m.inCodeAfter[wi] = lineIsCode
+		}
+	}
+}
+
+// parseFenceLine checks if line is a code fence (opener or closer).
+// Returns the fence character ('`' or '~'), the run length, and whether the
+// line can act as a closer (no non-space content after the fence run).
+// Returns 0, 0, false if the line is not a fence at all.
+//
+// CommonMark rules: 0–3 leading spaces, 3+ of the same fence char. An opener
+// may have trailing info text (canClose=false). A closer must have only
+// optional trailing spaces (canClose=true).
+func parseFenceLine(line string) (ch rune, count int, canClose bool) {
+	runes := []rune(line)
+	i := 0
+
+	// Skip 0–3 leading spaces.
+	spaces := 0
+	for i < len(runes) && runes[i] == ' ' && spaces < 3 {
+		i++
+		spaces++
+	}
+	if i >= len(runes) {
+		return 0, 0, false
+	}
+
+	ch = runes[i]
+	if ch != '`' && ch != '~' {
+		return 0, 0, false
+	}
+
+	// Count consecutive fence chars.
+	start := i
+	for i < len(runes) && runes[i] == ch {
+		i++
+	}
+	count = i - start
+	if count < 3 {
+		return 0, 0, false
+	}
+
+	// A closer requires only optional trailing spaces after the fence run.
+	canClose = true
+	for j := i; j < len(runes); j++ {
+		if runes[j] != ' ' && runes[j] != '\t' {
+			canClose = false
+			break
+		}
+	}
+
+	return ch, count, canClose
+}
+
+// isCodeLine returns true when Lines[i] should be rendered with code block styling.
+// This covers the opening fence, body lines, and the closing fence — all wrapped
+// segments of a raw line share the same flag.
+func (m *AgentPaneModel) isCodeLine(i int) bool {
+	if i < 0 || i >= len(m.inCodeAfter) {
+		return false
+	}
+	return m.inCodeAfter[i]
 }
 
 func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
@@ -355,6 +524,10 @@ func (m *AgentPaneModel) AppendText(text string) {
 	}
 	m.Lines = m.Lines[:truncateTo]
 	m.wrappedIndex = m.wrappedIndex[:firstAffected]
+	if truncateTo < len(m.inCodeAfter) {
+		m.inCodeAfter = m.inCodeAfter[:truncateTo]
+	}
+	m.invalidateMdCache()
 
 	for i := firstAffected; i < len(m.RawLines); i++ {
 		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
@@ -364,6 +537,7 @@ func (m *AgentPaneModel) AppendText(text string) {
 			m.Lines = append(m.Lines, m.RawLines[i])
 		}
 	}
+	m.recomputeCodeBlock(firstAffected)
 
 	if wasAtBottom {
 		m.scrollToBottom()
@@ -384,6 +558,9 @@ func (m *AgentPaneModel) isAtBottom() bool {
 func (m *AgentPaneModel) rewrap() {
 	m.Lines = nil
 	m.wrappedIndex = nil
+	m.inCodeAfter = nil
+	m.rawFenceAfter = nil
+	m.invalidateMdCache()
 	for _, raw := range m.RawLines {
 		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
 		if m.Width > 0 && runewidth.StringWidth(raw) > m.Width {
@@ -392,6 +569,7 @@ func (m *AgentPaneModel) rewrap() {
 			m.Lines = append(m.Lines, raw)
 		}
 	}
+	m.recomputeCodeBlock(0)
 }
 
 func (m *AgentPaneModel) clampScroll() {
@@ -466,6 +644,9 @@ func (m *AgentPaneModel) Clear() {
 	m.Lines = nil
 	m.wrappedIndex = nil
 	m.userRawLines = nil
+	m.inCodeAfter = nil
+	m.rawFenceAfter = nil
+	m.invalidateMdCache()
 	m.ScrollOffset = 0
 	m.Status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
@@ -585,6 +766,44 @@ func (m *AgentPaneModel) isSelected(line, col int) bool {
 	return true
 }
 
+// invalidateMdCache clears the viewport markdown cache so the next Render
+// recomputes it. Called when Lines content changes (AppendText, rewrap, Clear).
+func (m *AgentPaneModel) invalidateMdCache() {
+	m.mdCache = m.mdCache[:0]
+	m.mdCacheOffset = -1
+}
+
+// cachedMarkdown returns the rendered markdown for Lines[lineIdx]. The cache
+// is viewport-scoped: it holds at most VisibleLines() entries starting at
+// m.ScrollOffset, so memory is O(visible) regardless of transcript length.
+func (m *AgentPaneModel) cachedMarkdown(lineIdx int) string {
+	vis := m.VisibleLines()
+
+	// Rebuild cache if viewport moved or was invalidated.
+	if m.mdCacheOffset != m.ScrollOffset || len(m.mdCache) != vis {
+		if cap(m.mdCache) >= vis {
+			m.mdCache = m.mdCache[:vis]
+		} else {
+			m.mdCache = make([]string, vis)
+		}
+		// Zero out entries (reused slice may have stale data).
+		for j := range m.mdCache {
+			m.mdCache[j] = ""
+		}
+		m.mdCacheOffset = m.ScrollOffset
+	}
+
+	slot := lineIdx - m.mdCacheOffset
+	if slot < 0 || slot >= len(m.mdCache) {
+		// Outside viewport — compute without caching.
+		return renderMarkdownLine(m.Lines[lineIdx], m.isCodeLine(lineIdx), m.Width)
+	}
+	if m.mdCache[slot] == "" {
+		m.mdCache[slot] = renderMarkdownLine(m.Lines[lineIdx], m.isCodeLine(lineIdx), m.Width)
+	}
+	return m.mdCache[slot]
+}
+
 // padLine pads or truncates a string to exactly width display cells.
 // Uses cell-width measurement to handle wide characters (CJK, emoji).
 func (m *AgentPaneModel) padLine(s string) string {
@@ -665,7 +884,7 @@ func (m *AgentPaneModel) Render() string {
 			} else if m.isUserLine(lineIdx) {
 				output[row] = userMessageStyle.Render(m.padLine(lineText))
 			} else {
-				output[row] = m.padLine(lineText)
+				output[row] = m.cachedMarkdown(lineIdx)
 			}
 		} else {
 			output[row] = strings.Repeat(" ", m.Width)

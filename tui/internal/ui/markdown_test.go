@@ -290,32 +290,77 @@ func TestAgentPaneModel_isCodeLine_TildeFence(t *testing.T) {
 	}
 }
 
+// TestAgentPaneModel_isCodeLine_UserFenceNoBleed verifies that an unmatched
+// fence in a user message does not bleed into subsequent agent output.
+func TestAgentPaneModel_isCodeLine_UserFenceNoBleed(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m.SetSize(80, 30)
+
+	// Agent writes some text, then user sends a message with an unmatched fence.
+	m.AppendText("agent line 1")
+	m.AppendUserMessage("here is a fence: ```")
+	m.AppendText("agent line 2\nagent line 3")
+
+	// Agent lines after the user message must NOT be marked as code.
+	for i, line := range m.Lines {
+		isUser := m.isUserLine(i)
+		isCode := m.isCodeLine(i)
+		if !isUser && isCode {
+			t.Errorf("isCodeLine(%d)=%v — user fence bled into agent line %q", i, isCode, line)
+		}
+	}
+}
+
+// TestAgentPaneModel_isCodeLine_TrailingTextDoesNotCloseFence verifies that a
+// fence-like line with trailing non-space content (e.g. "```go" inside an open
+// block) does NOT close the block. Per CommonMark, a closing fence must have
+// only optional trailing spaces.
+func TestAgentPaneModel_isCodeLine_TrailingTextDoesNotCloseFence(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m.SetSize(80, 20)
+	m.AppendText("before\n```\n```go\nstill code\n```\nafter")
+
+	// Lines: "before", "```"(opener), "```go"(body, NOT closer), "still code", "```"(closer), "after"
+	want := []bool{false, true, true, true, true, false}
+	if len(m.Lines) != len(want) {
+		t.Fatalf("got %d lines, want %d: %v", len(m.Lines), len(want), m.Lines)
+	}
+	for i, w := range want {
+		if got := m.isCodeLine(i); got != w {
+			t.Errorf("isCodeLine(%d)=%v want %v (line=%q)", i, got, w, m.Lines[i])
+		}
+	}
+}
+
 // TestParseFenceLine verifies fence detection edge cases.
 func TestParseFenceLine(t *testing.T) {
 	tests := []struct {
-		line     string
-		wantChar rune
-		wantLen  int
+		line         string
+		wantChar     rune
+		wantLen      int
+		wantCanClose bool
 	}{
-		{"```", '`', 3},
-		{"```go", '`', 3},
-		{"`````", '`', 5},
-		{"~~~", '~', 3},
-		{"~~~~python", '~', 4},
-		{"  ```", '`', 3},     // 2 leading spaces OK
-		{"   ```", '`', 3},    // 3 leading spaces OK
-		{"    ```", 0, 0},     // 4 leading spaces — NOT a fence
-		{"``", 0, 0},          // too short
-		{"not a fence", 0, 0}, // no fence chars
-		{"", 0, 0},            // empty
-		{"```~``", '`', 3},    // mixed — only backticks counted
+		{"```", '`', 3, true},
+		{"```go", '`', 3, false}, // info string → can open, NOT close
+		{"`````", '`', 5, true},
+		{"~~~", '~', 3, true},
+		{"~~~~python", '~', 4, false}, // info string → can open, NOT close
+		{"  ```", '`', 3, true},       // 2 leading spaces OK
+		{"   ```", '`', 3, true},      // 3 leading spaces OK
+		{"    ```", 0, 0, false},      // 4 leading spaces — NOT a fence
+		{"``", 0, 0, false},           // too short
+		{"not a fence", 0, 0, false},  // no fence chars
+		{"", 0, 0, false},             // empty
+		{"```~``", '`', 3, false},     // trailing non-space → can open, NOT close
+		{"```   ", '`', 3, true},      // trailing spaces only → can close
+		{"```\t", '`', 3, true},       // trailing tab only → can close
 	}
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
-			ch, n := parseFenceLine(tt.line)
-			if ch != tt.wantChar || n != tt.wantLen {
-				t.Errorf("parseFenceLine(%q) = (%c, %d), want (%c, %d)",
-					tt.line, ch, n, tt.wantChar, tt.wantLen)
+			ch, n, canClose := parseFenceLine(tt.line)
+			if ch != tt.wantChar || n != tt.wantLen || canClose != tt.wantCanClose {
+				t.Errorf("parseFenceLine(%q) = (%c, %d, %v), want (%c, %d, %v)",
+					tt.line, ch, n, canClose, tt.wantChar, tt.wantLen, tt.wantCanClose)
 			}
 		})
 	}

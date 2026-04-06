@@ -216,12 +216,30 @@ func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 	}
 
 	for ri := fromRaw; ri < len(m.RawLines); ri++ {
+		// User messages are rendered with userMessageStyle, not markdown.
+		// Skip them so an unmatched fence in user input doesn't bleed into
+		// subsequent agent output.
+		if m.userRawLines[ri] {
+			m.rawFenceAfter = append(m.rawFenceAfter, fence)
+			wStart := m.wrappedIndex[ri]
+			wEnd := len(m.Lines)
+			if ri+1 < len(m.wrappedIndex) {
+				wEnd = m.wrappedIndex[ri+1]
+			}
+			for wi := wStart; wi < wEnd; wi++ {
+				m.inCodeAfter[wi] = false
+			}
+			continue
+		}
+
 		fenceBefore := fence
-		fc, fl := parseFenceLine(m.RawLines[ri])
+		fc, fl, closeable := parseFenceLine(m.RawLines[ri])
 		if fl > 0 {
 			if fence.len == 0 {
+				// Not in a code block — any fence opens one (info string allowed).
 				fence = fenceState{char: fc, len: fl}
-			} else if fc == fence.char && fl >= fence.len {
+			} else if closeable && fc == fence.char && fl >= fence.len {
+				// In a code block — only close if no trailing non-space content.
 				fence = fenceState{}
 			}
 		}
@@ -248,11 +266,14 @@ func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 }
 
 // parseFenceLine checks if line is a code fence (opener or closer).
-// Returns the fence character ('`' or '~') and the run length, or 0,0 if
-// the line is not a fence. CommonMark rules: 0–3 leading spaces, 3+ of the
-// same fence char. An opener may have trailing info text; a closer must have
-// only optional trailing spaces (caller checks context to distinguish).
-func parseFenceLine(line string) (rune, int) {
+// Returns the fence character ('`' or '~'), the run length, and whether the
+// line can act as a closer (no non-space content after the fence run).
+// Returns 0, 0, false if the line is not a fence at all.
+//
+// CommonMark rules: 0–3 leading spaces, 3+ of the same fence char. An opener
+// may have trailing info text (canClose=false). A closer must have only
+// optional trailing spaces (canClose=true).
+func parseFenceLine(line string) (ch rune, count int, canClose bool) {
 	runes := []rune(line)
 	i := 0
 
@@ -263,12 +284,12 @@ func parseFenceLine(line string) (rune, int) {
 		spaces++
 	}
 	if i >= len(runes) {
-		return 0, 0
+		return 0, 0, false
 	}
 
-	ch := runes[i]
+	ch = runes[i]
 	if ch != '`' && ch != '~' {
-		return 0, 0
+		return 0, 0, false
 	}
 
 	// Count consecutive fence chars.
@@ -276,12 +297,21 @@ func parseFenceLine(line string) (rune, int) {
 	for i < len(runes) && runes[i] == ch {
 		i++
 	}
-	count := i - start
+	count = i - start
 	if count < 3 {
-		return 0, 0
+		return 0, 0, false
 	}
 
-	return ch, count
+	// A closer requires only optional trailing spaces after the fence run.
+	canClose = true
+	for j := i; j < len(runes); j++ {
+		if runes[j] != ' ' && runes[j] != '\t' {
+			canClose = false
+			break
+		}
+	}
+
+	return ch, count, canClose
 }
 
 // isCodeLine returns true when Lines[i] should be rendered with code block styling.

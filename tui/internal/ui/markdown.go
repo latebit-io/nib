@@ -62,13 +62,13 @@ func renderMarkdownLine(line string, isCode bool, width int) string {
 		return mdHeaderStyle.Render(padToWidth(line, width))
 	}
 
-	// Bullets: replace leading - or + marker with • (U+2022).
-	// Both are single display cells, so all rune positions after the marker
-	// are unchanged. * is intentionally excluded here because * is also used
-	// for italic spans; the inline parser handles it at column context.
+	// Bullets: replace leading -, +, or * marker with • (U+2022).
+	// All three markers are single display cells, so rune positions after the
+	// marker are unchanged. * at line start followed by space is unambiguous —
+	// italic requires *text* with a closing marker.
 	trimmed := strings.TrimLeft(line, " \t")
 	indent := len([]rune(line)) - len([]rune(trimmed))
-	if len(trimmed) >= 2 && (trimmed[0] == '-' || trimmed[0] == '+') && trimmed[1] == ' ' {
+	if len(trimmed) >= 2 && (trimmed[0] == '-' || trimmed[0] == '+' || trimmed[0] == '*') && trimmed[1] == ' ' {
 		bullet := strings.Repeat(" ", indent) + "• " + trimmed[2:]
 		return applyInlineMarkdown(bullet, width)
 	}

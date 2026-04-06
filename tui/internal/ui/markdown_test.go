@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/mattn/go-runewidth"
 )
 
 type testClipboard struct{ content string }
@@ -122,18 +124,22 @@ func TestRenderMarkdownLine_Width(t *testing.T) {
 		{"header h3", "### Sub", false},
 		{"bullet dash", "- item", false},
 		{"bullet plus", "+ item", false},
+		{"bullet star", "* item", false},
 		{"code block", "func foo() {}", true},
 		{"inline code", "use `x` here", false},
 		{"bold", "**bold** text", false},
 		{"italic", "*italic* text", false},
+		{"wide CJK", "你好world", false},
+		{"wide emoji", "🎉 done", false},
+		{"wide code block", "你好", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := renderMarkdownLine(tc.line, tc.isCode, width)
 			plain := stripANSI(out)
-			if len([]rune(plain)) != width {
+			if runewidth.StringWidth(plain) != width {
 				t.Errorf("renderMarkdownLine(%q, %v, %d): visual width %d, want %d (plain=%q)",
-					tc.line, tc.isCode, width, len([]rune(plain)), width, plain)
+					tc.line, tc.isCode, width, runewidth.StringWidth(plain), width, plain)
 			}
 		})
 	}
@@ -152,6 +158,7 @@ func TestRenderMarkdownLine_ColumnAlignment(t *testing.T) {
 		{"use `code` inline"},
 		{"**bold** and *italic*"},
 		{"- bullet item"},
+		{"* star bullet"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.line, func(t *testing.T) {
@@ -213,6 +220,77 @@ func TestAgentPaneModel_isCodeLine_NarrowWidth(t *testing.T) {
 		if got != wantCode {
 			t.Errorf("isCodeLine(%d)=%v want %v (wrapped=%q, raw=%q)", i, got, wantCode, line, raw)
 		}
+	}
+}
+
+// TestAgentPaneModel_isCodeLine_NestedFence verifies that an inner ``` fence
+// inside a ```“ block does not close the outer block.
+func TestAgentPaneModel_isCodeLine_NestedFence(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m.SetSize(80, 30)
+	m.AppendText("before\n`````\ninner ```\nstill code\n`````\nafter")
+
+	// RawLines: "before", "`````", "inner ```", "still code", "`````", "after"
+	// Only "before" and "after" are outside the block.
+	for i := range m.Lines {
+		got := m.isCodeLine(i)
+		line := m.Lines[i]
+		wantCode := line != "before" && line != "after"
+		if got != wantCode {
+			t.Errorf("nested: isCodeLine(%d)=%v want %v (line=%q)", i, got, wantCode, line)
+		}
+	}
+}
+
+// TestAgentPaneModel_isCodeLine_TildeFence verifies tilde fences work.
+func TestAgentPaneModel_isCodeLine_TildeFence(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m.SetSize(80, 20)
+	m.AppendText("before\n~~~\ncode\n~~~\nafter")
+
+	want := map[string]bool{
+		"before": false,
+		"~~~":    true,
+		"code":   true,
+		"after":  false,
+	}
+	for i, line := range m.Lines {
+		got := m.isCodeLine(i)
+		// ~~~ appears twice (opener and closer); both should be code.
+		if w, ok := want[line]; ok && got != w {
+			t.Errorf("tilde: isCodeLine(%d)=%v want %v (line=%q)", i, got, w, line)
+		}
+	}
+}
+
+// TestParseFenceLine verifies fence detection edge cases.
+func TestParseFenceLine(t *testing.T) {
+	tests := []struct {
+		line     string
+		wantChar rune
+		wantLen  int
+	}{
+		{"```", '`', 3},
+		{"```go", '`', 3},
+		{"`````", '`', 5},
+		{"~~~", '~', 3},
+		{"~~~~python", '~', 4},
+		{"  ```", '`', 3},     // 2 leading spaces OK
+		{"   ```", '`', 3},    // 3 leading spaces OK
+		{"    ```", 0, 0},     // 4 leading spaces — NOT a fence
+		{"``", 0, 0},          // too short
+		{"not a fence", 0, 0}, // no fence chars
+		{"", 0, 0},            // empty
+		{"```~``", '`', 3},    // mixed — only backticks counted
+	}
+	for _, tt := range tests {
+		t.Run(tt.line, func(t *testing.T) {
+			ch, n := parseFenceLine(tt.line)
+			if ch != tt.wantChar || n != tt.wantLen {
+				t.Errorf("parseFenceLine(%q) = (%c, %d), want (%c, %d)",
+					tt.line, ch, n, tt.wantChar, tt.wantLen)
+			}
+		})
 	}
 }
 

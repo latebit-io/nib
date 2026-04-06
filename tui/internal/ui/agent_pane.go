@@ -75,6 +75,11 @@ type AgentPaneModel struct {
 	// closing fence flips it back to false). Used by isCodeLine().
 	inCodeAfter []bool
 
+	// mdCache[i] holds the rendered markdown for Lines[i] at the current Width.
+	// Populated lazily in Render(), invalidated by AppendText/rewrap/Clear/SetSize.
+	// User lines and selected lines bypass the cache.
+	mdCache []string
+
 	// HasAgent is true when an LLM provider is configured.
 	HasAgent bool
 }
@@ -171,6 +176,11 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 // Fence detection runs on RawLines (logical lines) so that wrapping can never
 // split or fabricate a fence. The per-raw-line state is then projected to all
 // wrapped lines belonging to that raw line via wrappedIndex.
+//
+// Fences follow CommonMark rules: 3+ backticks or tildes, 0–3 leading spaces,
+// opener can have info string, closer must use the same char at >= opener
+// length with no non-space content after. This correctly handles nested fences
+// (e.g. ```“ wrapping an inner ```).
 func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 	// Size inCodeAfter to match Lines.
 	for len(m.inCodeAfter) < len(m.Lines) {
@@ -178,20 +188,34 @@ func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 	}
 	m.inCodeAfter = m.inCodeAfter[:len(m.Lines)]
 
-	// Seed inCode from the last wrapped line before the first affected raw line.
-	inCode := false
-	if fromRaw > 0 && fromRaw < len(m.wrappedIndex) {
-		wStart := m.wrappedIndex[fromRaw]
-		if wStart > 0 && wStart-1 < len(m.inCodeAfter) {
-			inCode = m.inCodeAfter[wStart-1]
+	// Seed fence state by scanning raw lines [0, fromRaw).
+	var fenceChar rune
+	var fenceLen int
+	for ri := 0; ri < fromRaw && ri < len(m.RawLines); ri++ {
+		fc, fl := parseFenceLine(m.RawLines[ri])
+		if fl == 0 {
+			continue
+		}
+		if fenceLen == 0 {
+			// Not in a code block — this is an opener.
+			fenceChar, fenceLen = fc, fl
+		} else if fc == fenceChar && fl >= fenceLen {
+			// Matching closer.
+			fenceChar, fenceLen = 0, 0
 		}
 	}
 
 	for ri := fromRaw; ri < len(m.RawLines); ri++ {
-		trimmed := strings.TrimSpace(m.RawLines[ri])
-		if strings.HasPrefix(trimmed, "```") {
-			inCode = !inCode
+		fc, fl := parseFenceLine(m.RawLines[ri])
+		if fl > 0 {
+			if fenceLen == 0 {
+				fenceChar, fenceLen = fc, fl
+			} else if fc == fenceChar && fl >= fenceLen {
+				fenceChar, fenceLen = 0, 0
+			}
 		}
+		inCode := fenceLen > 0
+
 		// Fill all wrapped lines that belong to this raw line.
 		wStart := m.wrappedIndex[ri]
 		wEnd := len(m.Lines)
@@ -202,6 +226,43 @@ func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 			m.inCodeAfter[wi] = inCode
 		}
 	}
+}
+
+// parseFenceLine checks if line is a code fence (opener or closer).
+// Returns the fence character ('`' or '~') and the run length, or 0,0 if
+// the line is not a fence. CommonMark rules: 0–3 leading spaces, 3+ of the
+// same fence char. An opener may have trailing info text; a closer must have
+// only optional trailing spaces (caller checks context to distinguish).
+func parseFenceLine(line string) (rune, int) {
+	runes := []rune(line)
+	i := 0
+
+	// Skip 0–3 leading spaces.
+	spaces := 0
+	for i < len(runes) && runes[i] == ' ' && spaces < 3 {
+		i++
+		spaces++
+	}
+	if i >= len(runes) {
+		return 0, 0
+	}
+
+	ch := runes[i]
+	if ch != '`' && ch != '~' {
+		return 0, 0
+	}
+
+	// Count consecutive fence chars.
+	start := i
+	for i < len(runes) && runes[i] == ch {
+		i++
+	}
+	count := i - start
+	if count < 3 {
+		return 0, 0
+	}
+
+	return ch, count
 }
 
 // isCodeLine returns true when Lines[i] should be rendered with code block styling.
@@ -411,6 +472,9 @@ func (m *AgentPaneModel) AppendText(text string) {
 	if truncateTo < len(m.inCodeAfter) {
 		m.inCodeAfter = m.inCodeAfter[:truncateTo]
 	}
+	if truncateTo < len(m.mdCache) {
+		m.mdCache = m.mdCache[:truncateTo]
+	}
 
 	for i := firstAffected; i < len(m.RawLines); i++ {
 		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
@@ -442,6 +506,7 @@ func (m *AgentPaneModel) rewrap() {
 	m.Lines = nil
 	m.wrappedIndex = nil
 	m.inCodeAfter = nil
+	m.mdCache = nil
 	for _, raw := range m.RawLines {
 		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
 		if m.Width > 0 && runewidth.StringWidth(raw) > m.Width {
@@ -526,6 +591,7 @@ func (m *AgentPaneModel) Clear() {
 	m.wrappedIndex = nil
 	m.userRawLines = nil
 	m.inCodeAfter = nil
+	m.mdCache = nil
 	m.ScrollOffset = 0
 	m.Status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
@@ -645,6 +711,20 @@ func (m *AgentPaneModel) isSelected(line, col int) bool {
 	return true
 }
 
+// cachedMarkdown returns the rendered markdown for Lines[i], computing and
+// caching it on first access. The cache is invalidated whenever Lines changes
+// (AppendText truncation, rewrap, Clear, SetSize width change).
+func (m *AgentPaneModel) cachedMarkdown(i int) string {
+	// Grow cache to match Lines length.
+	for len(m.mdCache) <= i {
+		m.mdCache = append(m.mdCache, "")
+	}
+	if m.mdCache[i] == "" {
+		m.mdCache[i] = renderMarkdownLine(m.Lines[i], m.isCodeLine(i), m.Width)
+	}
+	return m.mdCache[i]
+}
+
 // padLine pads or truncates a string to exactly width display cells.
 // Uses cell-width measurement to handle wide characters (CJK, emoji).
 func (m *AgentPaneModel) padLine(s string) string {
@@ -725,7 +805,7 @@ func (m *AgentPaneModel) Render() string {
 			} else if m.isUserLine(lineIdx) {
 				output[row] = userMessageStyle.Render(m.padLine(lineText))
 			} else {
-				output[row] = renderMarkdownLine(lineText, m.isCodeLine(lineIdx), m.Width)
+				output[row] = m.cachedMarkdown(lineIdx)
 			}
 		} else {
 			output[row] = strings.Repeat(" ", m.Width)

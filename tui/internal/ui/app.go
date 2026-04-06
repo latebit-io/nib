@@ -512,6 +512,12 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.ProjectPane.pendingReveal = e.Path
 		}
 		m.openFile(e.Path)
+		// If openFile failed (e.g. edit pending), the file was still
+		// created on disk. Refresh the project pane so it appears in
+		// the tree and pendingReveal is consumed.
+		if m.ProjectPane != nil && m.ProjectPane.pendingReveal != "" {
+			m.refreshProjectPane()
+		}
 	case event.AgentNavigate:
 		m.openFile(e.Path)
 		// Only navigate if we successfully switched to the target file.

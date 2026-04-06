@@ -296,9 +296,10 @@ func TestAgentPaneModel_isCodeLine_UserFenceNoBleed(t *testing.T) {
 	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
 	m.SetSize(80, 30)
 
-	// Agent writes some text, then user sends a message with an unmatched fence.
+	// Agent writes some text, then user sends a multiline message where the
+	// fence is on its own raw line (after the "You: " prefix line).
 	m.AppendText("agent line 1")
-	m.AppendUserMessage("here is a fence: ```")
+	m.AppendUserMessage("intro\n```")
 	m.AppendText("agent line 2\nagent line 3")
 
 	// Agent lines after the user message must NOT be marked as code.
@@ -307,6 +308,27 @@ func TestAgentPaneModel_isCodeLine_UserFenceNoBleed(t *testing.T) {
 		isCode := m.isCodeLine(i)
 		if !isUser && isCode {
 			t.Errorf("isCodeLine(%d)=%v — user fence bled into agent line %q", i, isCode, line)
+		}
+	}
+}
+
+// TestAgentPaneModel_isCodeLine_MultilineUserFenceNoBleed verifies that a
+// multiline user message where one raw line is a bare fence opener does not
+// leave rawFenceAfter open for the next agent append.
+func TestAgentPaneModel_isCodeLine_MultilineUserFenceNoBleed(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m.SetSize(80, 30)
+
+	m.AppendText("agent before")
+	// User sends a message that, after wrapping, has "```" as its own raw line.
+	m.AppendUserMessage("check this:\n```\nsome code")
+	m.AppendText("agent after line 1\nagent after line 2")
+
+	for i, line := range m.Lines {
+		isUser := m.isUserLine(i)
+		isCode := m.isCodeLine(i)
+		if !isUser && isCode {
+			t.Errorf("isCodeLine(%d)=%v — multiline user fence bled into agent line %q", i, isCode, line)
 		}
 	}
 }

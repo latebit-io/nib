@@ -183,6 +183,13 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 	for i := firstRaw; i < endRaw; i++ {
 		m.userRawLines[i] = true
 	}
+
+	// AppendText ran recomputeCodeBlock before user lines were marked, so
+	// fence state may have advanced through user content (e.g. an unmatched
+	// "```" in the message). Recompute from firstRaw now that userRawLines
+	// is populated — this skips user lines and resets fence state correctly.
+	m.recomputeCodeBlock(firstRaw)
+	m.invalidateMdCache()
 }
 
 // recomputeCodeBlock rebuilds inCodeAfter starting from raw line index fromRaw.

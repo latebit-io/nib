@@ -289,15 +289,10 @@ func (t *TextArea) Update(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	}
 
-	// Printable text.
+	// Printable text (including bracket paste from terminal).
 	if msg.Text != "" {
 		t.deleteSelectionIfActive()
-		for _, r := range msg.Text {
-			if unicode.IsControl(r) {
-				continue
-			}
-			t.insertRune(r)
-		}
+		t.insertText(msg.Text)
 		return nil
 	}
 
@@ -680,6 +675,9 @@ func (t *TextArea) paste() {
 
 func (t *TextArea) insertText(text string) {
 	for _, r := range text {
+		if t.byteLen >= t.maxBytes {
+			return
+		}
 		if r == '\r' {
 			continue
 		}

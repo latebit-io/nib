@@ -461,6 +461,22 @@ func TestMoveLeftAtStartNoop(t *testing.T) {
 	}
 }
 
+// TestBracketPastePreservesNewlines simulates terminal bracket paste
+// (Cmd+V) which delivers multi-line text via msg.Text on a KeyPressMsg.
+func TestBracketPastePreservesNewlines(t *testing.T) {
+	ta := newTestArea("")
+
+	// Simulate bracket paste: terminal delivers entire pasted text as msg.Text.
+	ta.Update(tea.KeyPressMsg{Text: "line1\nline2\nline3"})
+
+	if got := ta.Content(); got != "line1\nline2\nline3" {
+		t.Errorf("Content() = %q, want %q", got, "line1\nline2\nline3")
+	}
+	if ta.cursorLine != 2 || ta.cursorCol != 5 {
+		t.Errorf("cursor = (%d,%d), want (2,5)", ta.cursorLine, ta.cursorCol)
+	}
+}
+
 func TestSpaceKey(t *testing.T) {
 	ta := newTestArea("")
 	ta.Update(key('a'))

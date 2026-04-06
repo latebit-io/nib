@@ -176,7 +176,7 @@ func TestRenderMarkdownLine_ColumnAlignment(t *testing.T) {
 }
 
 func TestAgentPaneModel_isCodeLine(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
 	m.SetSize(80, 20)
 	m.AppendText("before\n```go\nfunc foo() {}\n```\nafter")
 
@@ -197,7 +197,7 @@ func TestAgentPaneModel_isCodeLine(t *testing.T) {
 // would split "```go" into multiple wrapped lines — none of which start with
 // "```" — so scanning wrapped Lines for fences would miss it entirely.
 func TestAgentPaneModel_isCodeLine_NarrowWidth(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
 	m.SetSize(4, 20) // narrow: "```go" wraps to ["```g", "o"]
 	m.AppendText("hi\n```go\nfunc foo() {}\n```\nbye")
 
@@ -227,7 +227,7 @@ func TestAgentPaneModel_isCodeLine_NarrowWidth(t *testing.T) {
 // of a closing fence are marked as code. At width 2, "```" wraps to ["“", "`"]
 // and both segments must be code-styled.
 func TestAgentPaneModel_isCodeLine_WrappedCloser(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
 	m.SetSize(2, 20)
 	m.AppendText("x\n```\ny\n```\nz")
 
@@ -253,7 +253,7 @@ func TestAgentPaneModel_isCodeLine_WrappedCloser(t *testing.T) {
 // TestAgentPaneModel_isCodeLine_NestedFence verifies that an inner ``` fence
 // inside a ```“ block does not close the outer block.
 func TestAgentPaneModel_isCodeLine_NestedFence(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
 	m.SetSize(80, 30)
 	m.AppendText("before\n`````\ninner ```\nstill code\n`````\nafter")
 
@@ -271,7 +271,7 @@ func TestAgentPaneModel_isCodeLine_NestedFence(t *testing.T) {
 
 // TestAgentPaneModel_isCodeLine_TildeFence verifies tilde fences work.
 func TestAgentPaneModel_isCodeLine_TildeFence(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
 	m.SetSize(80, 20)
 	m.AppendText("before\n~~~\ncode\n~~~\nafter")
 
@@ -293,7 +293,7 @@ func TestAgentPaneModel_isCodeLine_TildeFence(t *testing.T) {
 // TestAgentPaneModel_isCodeLine_UserFenceNoBleed verifies that an unmatched
 // fence in a user message does not bleed into subsequent agent output.
 func TestAgentPaneModel_isCodeLine_UserFenceNoBleed(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
 	m.SetSize(80, 30)
 
 	// Agent writes some text, then user sends a multiline message where the
@@ -316,7 +316,7 @@ func TestAgentPaneModel_isCodeLine_UserFenceNoBleed(t *testing.T) {
 // multiline user message where one raw line is a bare fence opener does not
 // leave rawFenceAfter open for the next agent append.
 func TestAgentPaneModel_isCodeLine_MultilineUserFenceNoBleed(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
 	m.SetSize(80, 30)
 
 	m.AppendText("agent before")
@@ -338,7 +338,7 @@ func TestAgentPaneModel_isCodeLine_MultilineUserFenceNoBleed(t *testing.T) {
 // block) does NOT close the block. Per CommonMark, a closing fence must have
 // only optional trailing spaces.
 func TestAgentPaneModel_isCodeLine_TrailingTextDoesNotCloseFence(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
 	m.SetSize(80, 20)
 	m.AppendText("before\n```\n```go\nstill code\n```\nafter")
 

@@ -121,8 +121,7 @@ func NewApp(sess *session.Session) AppModel {
 
 	editorPane := NewEditorModel(sess.Editor, km, svc)
 	editorPane.OnSave = func() { sess.NotifySaved() }
-	agentPane := NewAgentPaneModel(svc)
-	agentPane.HasAgent = sess.HasAgent()
+	agentPane := NewAgentPaneModel(svc, sess.HasAgent())
 	projectPane := NewProjectPaneModel(sess)
 
 	rm := NewRegionManager(Horizontal)
@@ -437,7 +436,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Any click unfocuses the agent input; the agent pane's own
 		// click handler re-focuses if the click landed in the input area.
 		if _, ok := msg.(tea.MouseClickMsg); ok {
-			m.AgentPane.InputActive = false
+			m.AgentPane.SetInputActive(false)
 		}
 		// Translate Y for intent bar row
 		mouse := msg.Mouse()
@@ -469,7 +468,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentToolCall:
 		m.AgentPane.AppendMeta("\n> " + e.Name + "\n")
 	case event.AgentStatus:
-		m.AgentPane.Status = e.Status
+		m.AgentPane.SetStatus(e.Status)
 	case event.AgentEditProposed:
 		// Clean up any running animation before creating a new overlay.
 		m.cancelAnimation()
@@ -484,7 +483,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshDiagnostics(m.Session.ActiveFile())
 		}
 		if diff != nil {
-			m.AgentPane.Status = event.StatusReviewing
+			m.AgentPane.SetStatus(event.StatusReviewing)
 			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
 			m.Editor.Overlay = NewDiffOverlay(diff)
@@ -532,18 +531,18 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
 		if m.Session.Phase() == session.PhasePlanning {
-			m.AgentPane.Status = event.StatusPlanningWaiting
+			m.AgentPane.SetStatus(event.StatusPlanningWaiting)
 		} else {
-			m.AgentPane.Status = event.StatusWaiting
+			m.AgentPane.SetStatus(event.StatusWaiting)
 		}
-		m.AgentPane.InputActive = true
-		m.AgentPane.Input.Reset()
+		m.AgentPane.SetInputActive(true)
+		m.AgentPane.ResetInput()
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = m.reloadWorkTreeCmd()
 	case event.AgentDone:
-		m.AgentPane.Status = event.StatusIdle
+		m.AgentPane.SetStatus(event.StatusIdle)
 		m.AgentPane.AppendText("\n--- Done ---\n")
-		m.AgentPane.InputActive = false
+		m.AgentPane.SetInputActive(false)
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = m.reloadWorkTreeCmd()
 		m.cancelAnimation()
@@ -598,7 +597,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.recentMouse = false
 
 	// Agent pane input mode — all keys go to agent pane
-	if m.AgentPane.InputActive {
+	if m.AgentPane.IsInputActive() {
 		cmd := m.AgentPane.Update(msg)
 		return m, cmd
 	}
@@ -656,7 +655,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// No pending edit — cancel agent if active
 		if m.Session.CurrentIntent() != "" && m.Session.HasAgent() {
 			m.Session.CancelAgent()
-			m.AgentPane.Status = event.StatusIdle
+			m.AgentPane.SetStatus(event.StatusIdle)
 			return m, nil
 		}
 		// No intent either — fall through to focused pane
@@ -666,7 +665,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
 			return m, nil
 		}
-		if m.Session.HasAgent() && m.AgentPane.Status == event.StatusEditing {
+		if m.Session.HasAgent() && m.AgentPane.StatusKind() == event.StatusEditing {
 			m.cancelAnimation()
 			m.Session.Continue()
 		}
@@ -674,15 +673,15 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionAgentStart:
 		if m.Session.HasAgent() {
-			m.AgentPane.InputActive = true
-			m.AgentPane.PlanningMode = false
+			m.AgentPane.SetInputActive(true)
+			m.AgentPane.SetPlanningMode(false)
 		}
 		return m, nil
 
 	case ActionAgentPlan:
 		if m.Session.HasAgent() {
-			m.AgentPane.InputActive = true
-			m.AgentPane.PlanningMode = true
+			m.AgentPane.SetInputActive(true)
+			m.AgentPane.SetPlanningMode(true)
 		}
 		return m, nil
 
@@ -1207,7 +1206,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 		m.AgentPane.AppendMeta("[applied]\n")
 		m.Session.CompleteApproval()
 		m.Session.Continue()
-		m.AgentPane.Status = event.StatusThinking
+		m.AgentPane.SetStatus(event.StatusThinking)
 		m.refreshProjectPane()
 		return nil
 	}
@@ -1239,7 +1238,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 		devStartLine: devStartLine,
 		devStartCol:  devStartCol,
 	}
-	m.AgentPane.Status = event.StatusTyping
+	m.AgentPane.SetStatus(event.StatusTyping)
 
 	if edit.Remaining() == 0 {
 		return m.finishAnimation()
@@ -1320,7 +1319,7 @@ func (m *AppModel) yieldAnimation() tea.Cmd {
 	anim.edit.Complete()
 	anim.state = animWaiting
 	anim.yielded = true
-	m.AgentPane.Status = event.StatusEditing
+	m.AgentPane.SetStatus(event.StatusEditing)
 	m.AgentPane.AppendText("\n[yielded — your line]\n")
 	m.Session.CompleteApproval()
 
@@ -1342,7 +1341,7 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	m.refreshProjectPane()
 
 	anim.state = animWaiting
-	m.AgentPane.Status = event.StatusEditing
+	m.AgentPane.SetStatus(event.StatusEditing)
 
 	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)
@@ -1363,7 +1362,7 @@ func (m *AppModel) cancelAnimation() {
 	if anim.state == animTyping {
 		anim.edit.Abort()
 		m.Session.AbortApproval()
-		m.AgentPane.Status = event.StatusIdle
+		m.AgentPane.SetStatus(event.StatusIdle)
 	}
 	m.Editor.Anim = nil
 }

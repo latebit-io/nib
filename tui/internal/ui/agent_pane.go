@@ -70,6 +70,11 @@ type AgentPaneModel struct {
 	// Stateful sanitizer for streamed text
 	sanitizer sanitize.Sanitizer
 
+	// inCodeAfter[i] is true when Lines[i] is inside a code block after
+	// processing that line (i.e. the opening fence flips it to true, the
+	// closing fence flips it back to false). Used by isCodeLine().
+	inCodeAfter []bool
+
 	// HasAgent is true when an LLM provider is configured.
 	HasAgent bool
 }
@@ -160,6 +165,39 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 	for i := firstRaw; i < endRaw; i++ {
 		m.userRawLines[i] = true
 	}
+}
+
+// recomputeCodeBlock rebuilds inCodeAfter from fromLine to the end of Lines.
+// It reads the prior state from inCodeAfter[fromLine-1] when fromLine > 0 so
+// incremental appends only scan newly-added lines.
+func (m *AgentPaneModel) recomputeCodeBlock(fromLine int) {
+	for len(m.inCodeAfter) < len(m.Lines) {
+		m.inCodeAfter = append(m.inCodeAfter, false)
+	}
+	m.inCodeAfter = m.inCodeAfter[:len(m.Lines)]
+
+	inCode := false
+	if fromLine > 0 && fromLine-1 < len(m.inCodeAfter) {
+		inCode = m.inCodeAfter[fromLine-1]
+	}
+	for i := fromLine; i < len(m.Lines); i++ {
+		trimmed := strings.TrimSpace(m.Lines[i])
+		if strings.HasPrefix(trimmed, "```") {
+			inCode = !inCode
+		}
+		m.inCodeAfter[i] = inCode
+	}
+}
+
+// isCodeLine returns true when Lines[i] should be rendered with code block styling.
+// This covers the opening fence, body lines, and the closing fence.
+func (m *AgentPaneModel) isCodeLine(i int) bool {
+	if i < 0 || i >= len(m.inCodeAfter) {
+		return false
+	}
+	after := m.inCodeAfter[i]
+	before := i > 0 && m.inCodeAfter[i-1]
+	return after || before
 }
 
 func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
@@ -355,6 +393,9 @@ func (m *AgentPaneModel) AppendText(text string) {
 	}
 	m.Lines = m.Lines[:truncateTo]
 	m.wrappedIndex = m.wrappedIndex[:firstAffected]
+	if truncateTo < len(m.inCodeAfter) {
+		m.inCodeAfter = m.inCodeAfter[:truncateTo]
+	}
 
 	for i := firstAffected; i < len(m.RawLines); i++ {
 		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
@@ -364,6 +405,7 @@ func (m *AgentPaneModel) AppendText(text string) {
 			m.Lines = append(m.Lines, m.RawLines[i])
 		}
 	}
+	m.recomputeCodeBlock(truncateTo)
 
 	if wasAtBottom {
 		m.scrollToBottom()
@@ -384,6 +426,7 @@ func (m *AgentPaneModel) isAtBottom() bool {
 func (m *AgentPaneModel) rewrap() {
 	m.Lines = nil
 	m.wrappedIndex = nil
+	m.inCodeAfter = nil
 	for _, raw := range m.RawLines {
 		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
 		if m.Width > 0 && runewidth.StringWidth(raw) > m.Width {
@@ -392,6 +435,7 @@ func (m *AgentPaneModel) rewrap() {
 			m.Lines = append(m.Lines, raw)
 		}
 	}
+	m.recomputeCodeBlock(0)
 }
 
 func (m *AgentPaneModel) clampScroll() {
@@ -466,6 +510,7 @@ func (m *AgentPaneModel) Clear() {
 	m.Lines = nil
 	m.wrappedIndex = nil
 	m.userRawLines = nil
+	m.inCodeAfter = nil
 	m.ScrollOffset = 0
 	m.Status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
@@ -665,7 +710,7 @@ func (m *AgentPaneModel) Render() string {
 			} else if m.isUserLine(lineIdx) {
 				output[row] = userMessageStyle.Render(m.padLine(lineText))
 			} else {
-				output[row] = m.padLine(lineText)
+				output[row] = renderMarkdownLine(lineText, m.isCodeLine(lineIdx), m.Width)
 			}
 		} else {
 			output[row] = strings.Repeat(" ", m.Width)

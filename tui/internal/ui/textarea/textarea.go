@@ -703,6 +703,7 @@ func (t *TextArea) insertText(text string) {
 // clearing any active selection. Call this on mouse-down in the input area.
 func (t *TextArea) HandleClick(visRow, cellCol int) {
 	t.clearSelection()
+	visRow = t.clampVisualRow(visRow)
 	runeCol := t.cellToRuneCol(visRow, cellCol)
 	t.cursorLine, t.cursorCol = t.visualToLogical(visRow, runeCol)
 }
@@ -711,8 +712,22 @@ func (t *TextArea) HandleClick(visRow, cellCol int) {
 // If no selection is active, one is started from the current cursor position.
 func (t *TextArea) HandleDrag(visRow, cellCol int) {
 	t.startSelection()
+	visRow = t.clampVisualRow(visRow)
 	runeCol := t.cellToRuneCol(visRow, cellCol)
 	t.cursorLine, t.cursorCol = t.visualToLogical(visRow, runeCol)
+}
+
+// clampVisualRow constrains visRow to the valid wrap cache range so that
+// clicks on blank padding rows below content map to the last wrapped line.
+func (t *TextArea) clampVisualRow(visRow int) int {
+	t.buildWrapCache()
+	if len(t.wrapCache) == 0 || visRow < 0 {
+		return 0
+	}
+	if visRow >= len(t.wrapCache) {
+		return len(t.wrapCache) - 1
+	}
+	return visRow
 }
 
 // cellToRuneCol converts a cell (display) column to a rune index within

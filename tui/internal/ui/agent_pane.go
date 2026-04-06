@@ -544,7 +544,9 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case textarea.CancelMsg:
 		// Deactivate focus but preserve content — Ctrl+G or click restores it.
+		// Clear planningMode so refocus via click doesn't silently submit as a plan.
 		m.inputActive = false
+		m.planningMode = false
 		return nil
 	default:
 		// Re-wrap the command — we already consumed the thunk.
@@ -725,7 +727,9 @@ func (m *AgentPaneModel) wrapLine(line string) []string {
 	return result
 }
 
-// Clear clears the agent pane content.
+// Clear clears the agent pane content and resets all transient state
+// (selection, scroll, status, sanitizer) so no stale references survive
+// into the next conversation.
 func (m *AgentPaneModel) Clear() {
 	m.RawLines = nil
 	m.Lines = nil
@@ -735,6 +739,12 @@ func (m *AgentPaneModel) Clear() {
 	m.rawFenceAfter = nil
 	m.invalidateMdCache()
 	m.ScrollOffset = 0
+	m.selActive = false
+	m.selDragging = false
+	m.selStartLn = 0
+	m.selStartCol = 0
+	m.cursorLn = 0
+	m.cursorCol = 0
 	m.status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
 }

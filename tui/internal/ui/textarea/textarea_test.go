@@ -542,6 +542,30 @@ func TestClickClearsSelection(t *testing.T) {
 	}
 }
 
+func TestHandleClickBlankRow(t *testing.T) {
+	ta := newTestArea("hi")
+	// Click on row 5 — well past the single visual line. Should clamp to
+	// end of last line, not land on (0, 0).
+	ta.HandleClick(5, 20)
+	if ta.cursorLine != 0 || ta.cursorCol != 2 {
+		t.Errorf("cursor = (%d,%d), want (0,2)", ta.cursorLine, ta.cursorCol)
+	}
+}
+
+func TestHandleDragToBlankRow(t *testing.T) {
+	ta := newTestArea("abc\ndef")
+	ta.HandleClick(0, 1)  // after 'a'
+	ta.HandleDrag(10, 50) // far past content
+
+	if !ta.selActive {
+		t.Fatal("selection should be active")
+	}
+	// Should select from (0,1) to end of last line
+	if got := ta.SelectedText(); got != "bc\ndef" {
+		t.Errorf("SelectedText() = %q, want %q", got, "bc\ndef")
+	}
+}
+
 func TestSpaceKey(t *testing.T) {
 	ta := newTestArea("")
 	ta.Update(key('a'))

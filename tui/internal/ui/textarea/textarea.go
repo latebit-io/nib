@@ -675,6 +675,9 @@ func (t *TextArea) paste() {
 
 func (t *TextArea) insertText(text string) {
 	for _, r := range text {
+		if t.byteLen >= t.maxBytes {
+			return
+		}
 		if r == '\r' {
 			continue
 		}

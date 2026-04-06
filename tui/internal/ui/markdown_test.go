@@ -223,6 +223,33 @@ func TestAgentPaneModel_isCodeLine_NarrowWidth(t *testing.T) {
 	}
 }
 
+// TestAgentPaneModel_isCodeLine_WrappedCloser verifies that all wrapped segments
+// of a closing fence are marked as code. At width 2, "```" wraps to ["“", "`"]
+// and both segments must be code-styled.
+func TestAgentPaneModel_isCodeLine_WrappedCloser(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m.SetSize(2, 20)
+	m.AppendText("x\n```\ny\n```\nz")
+
+	for i, line := range m.Lines {
+		got := m.isCodeLine(i)
+
+		rawIdx := 0
+		for ri := len(m.wrappedIndex) - 1; ri >= 0; ri-- {
+			if m.wrappedIndex[ri] <= i {
+				rawIdx = ri
+				break
+			}
+		}
+		raw := m.RawLines[rawIdx]
+
+		wantCode := raw != "x" && raw != "z"
+		if got != wantCode {
+			t.Errorf("isCodeLine(%d)=%v want %v (wrapped=%q, raw=%q)", i, got, wantCode, line, raw)
+		}
+	}
+}
+
 // TestAgentPaneModel_isCodeLine_NestedFence verifies that an inner ``` fence
 // inside a ```“ block does not close the outer block.
 func TestAgentPaneModel_isCodeLine_NestedFence(t *testing.T) {

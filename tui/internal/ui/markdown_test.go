@@ -3,7 +3,13 @@ package ui
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+type testClipboard struct{ content string }
+
+func (c *testClipboard) Read() string         { return c.content }
+func (c *testClipboard) Write(s string) error { c.content = s; return nil }
 
 func TestParseInlineMarkdown(t *testing.T) {
 	tests := []struct {
@@ -17,24 +23,28 @@ func TestParseInlineMarkdown(t *testing.T) {
 			want:  []mdSpan{{"hello world", mdPlain}},
 		},
 		{
+			// Span text includes both backticks so rune count is preserved.
 			name:  "inline code",
 			input: "use `foo()` here",
-			want:  []mdSpan{{"use ", mdPlain}, {"foo()", mdCode}, {" here", mdPlain}},
+			want:  []mdSpan{{"use ", mdPlain}, {"`foo()`", mdCode}, {" here", mdPlain}},
 		},
 		{
+			// Span text includes ** delimiters on both sides.
 			name:  "bold",
 			input: "this is **bold** text",
-			want:  []mdSpan{{"this is ", mdPlain}, {"bold", mdBold}, {" text", mdPlain}},
+			want:  []mdSpan{{"this is ", mdPlain}, {"**bold**", mdBold}, {" text", mdPlain}},
 		},
 		{
+			// Span text includes * delimiters on both sides.
 			name:  "italic",
 			input: "this is *italic* text",
-			want:  []mdSpan{{"this is ", mdPlain}, {"italic", mdItalic}, {" text", mdPlain}},
+			want:  []mdSpan{{"this is ", mdPlain}, {"*italic*", mdItalic}, {" text", mdPlain}},
 		},
 		{
+			// Span text includes *** delimiters on both sides.
 			name:  "bold italic",
 			input: "***both***",
-			want:  []mdSpan{{"both", mdBoldItalic}},
+			want:  []mdSpan{{"***both***", mdBoldItalic}},
 		},
 		{
 			name:  "unclosed backtick treated as plain",
@@ -68,6 +78,35 @@ func TestParseInlineMarkdown(t *testing.T) {
 	}
 }
 
+// TestParseInlineMarkdown_RuneCountInvariant verifies the key property that
+// preserves hit-test correctness: the sum of span rune counts equals the
+// input rune count, so display cell columns == raw m.Lines rune indices.
+func TestParseInlineMarkdown_RuneCountInvariant(t *testing.T) {
+	inputs := []string{
+		"hello world",
+		"use `foo()` here",
+		"this is **bold** text",
+		"this is *italic* text",
+		"***both***",
+		"no `close here",
+		"**no close",
+		"mix `code` and **bold** together",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			wantRunes := utf8.RuneCountInString(input)
+			spans := parseInlineMarkdown(input)
+			got := 0
+			for _, s := range spans {
+				got += utf8.RuneCountInString(s.text)
+			}
+			if got != wantRunes {
+				t.Errorf("rune count: got %d want %d for %q", got, wantRunes, input)
+			}
+		})
+	}
+}
+
 func TestRenderMarkdownLine_Width(t *testing.T) {
 	// Output must be padded to exactly the requested width (in display cells).
 	// ANSI codes don't count toward visual width, so we strip them when measuring.
@@ -78,16 +117,19 @@ func TestRenderMarkdownLine_Width(t *testing.T) {
 		isCode bool
 	}{
 		{"plain", "hello", false},
-		{"header", "# Title", false},
-		{"bullet", "- item", false},
+		{"header h1", "# Title", false},
+		{"header h2", "## Section", false},
+		{"header h3", "### Sub", false},
+		{"bullet dash", "- item", false},
+		{"bullet plus", "+ item", false},
 		{"code block", "func foo() {}", true},
 		{"inline code", "use `x` here", false},
 		{"bold", "**bold** text", false},
+		{"italic", "*italic* text", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := renderMarkdownLine(tc.line, tc.isCode, width)
-			// Strip ANSI escape sequences to measure visual width.
 			plain := stripANSI(out)
 			if len([]rune(plain)) != width {
 				t.Errorf("renderMarkdownLine(%q, %v, %d): visual width %d, want %d (plain=%q)",
@@ -97,23 +139,79 @@ func TestRenderMarkdownLine_Width(t *testing.T) {
 	}
 }
 
-func TestAgentPaneModel_isCodeLine(t *testing.T) {
-	m := &AgentPaneModel{Width: 80, Height: 20}
-	// Simulate Lines from a code block.
-	m.Lines = []string{
-		"before",
-		"```go",
-		"func foo() {}",
-		"```",
-		"after",
+// TestRenderMarkdownLine_ColumnAlignment verifies that the plain-text content
+// of a rendered line has the same rune count as the source line (headers
+// included, because we no longer strip `# ` prefixes). This is the property
+// that lets mouseToLineCol operate on m.Lines without a display→source map.
+func TestRenderMarkdownLine_ColumnAlignment(t *testing.T) {
+	cases := []struct{ line string }{
+		{"# Header one"},
+		{"## Header two"},
+		{"### Header three"},
+		{"plain text here"},
+		{"use `code` inline"},
+		{"**bold** and *italic*"},
+		{"- bullet item"},
 	}
-	m.recomputeCodeBlock(0)
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
+			// Render to a width larger than any test input so no truncation occurs.
+			out := renderMarkdownLine(tc.line, false, 80)
+			plainRendered := strings.TrimRight(stripANSI(out), " ")
+			wantRunes := utf8.RuneCountInString(tc.line)
+			gotRunes := utf8.RuneCountInString(plainRendered)
+			if gotRunes != wantRunes {
+				t.Errorf("%q: rendered rune count %d, source rune count %d — column alignment broken",
+					tc.line, gotRunes, wantRunes)
+			}
+		})
+	}
+}
+
+func TestAgentPaneModel_isCodeLine(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m.SetSize(80, 20)
+	m.AppendText("before\n```go\nfunc foo() {}\n```\nafter")
 
 	want := []bool{false, true, true, true, false}
+	if len(m.Lines) != len(want) {
+		t.Fatalf("got %d lines, want %d: %v", len(m.Lines), len(want), m.Lines)
+	}
 	for i, w := range want {
 		got := m.isCodeLine(i)
 		if got != w {
 			t.Errorf("isCodeLine(%d)=%v want %v (line=%q)", i, got, w, m.Lines[i])
+		}
+	}
+}
+
+// TestAgentPaneModel_isCodeLine_NarrowWidth verifies that fence detection works
+// from RawLines even when the fence line wraps at narrow widths. A width of 2
+// would split "```go" into multiple wrapped lines — none of which start with
+// "```" — so scanning wrapped Lines for fences would miss it entirely.
+func TestAgentPaneModel_isCodeLine_NarrowWidth(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}})
+	m.SetSize(4, 20) // narrow: "```go" wraps to ["```g", "o"]
+	m.AppendText("hi\n```go\nfunc foo() {}\n```\nbye")
+
+	// Every wrapped line belonging to a code-block raw line must be flagged.
+	for i, line := range m.Lines {
+		got := m.isCodeLine(i)
+
+		// Determine which raw line owns this wrapped line.
+		rawIdx := 0
+		for ri := len(m.wrappedIndex) - 1; ri >= 0; ri-- {
+			if m.wrappedIndex[ri] <= i {
+				rawIdx = ri
+				break
+			}
+		}
+		raw := m.RawLines[rawIdx]
+
+		// "hi" and "bye" are outside the block; everything else is inside.
+		wantCode := raw != "hi" && raw != "bye"
+		if got != wantCode {
+			t.Errorf("isCodeLine(%d)=%v want %v (wrapped=%q, raw=%q)", i, got, wantCode, line, raw)
 		}
 	}
 }

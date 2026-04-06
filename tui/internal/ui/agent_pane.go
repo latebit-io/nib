@@ -167,25 +167,40 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 	}
 }
 
-// recomputeCodeBlock rebuilds inCodeAfter from fromLine to the end of Lines.
-// It reads the prior state from inCodeAfter[fromLine-1] when fromLine > 0 so
-// incremental appends only scan newly-added lines.
-func (m *AgentPaneModel) recomputeCodeBlock(fromLine int) {
+// recomputeCodeBlock rebuilds inCodeAfter starting from raw line index fromRaw.
+// Fence detection runs on RawLines (logical lines) so that wrapping can never
+// split or fabricate a fence. The per-raw-line state is then projected to all
+// wrapped lines belonging to that raw line via wrappedIndex.
+func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
+	// Size inCodeAfter to match Lines.
 	for len(m.inCodeAfter) < len(m.Lines) {
 		m.inCodeAfter = append(m.inCodeAfter, false)
 	}
 	m.inCodeAfter = m.inCodeAfter[:len(m.Lines)]
 
+	// Seed inCode from the last wrapped line before the first affected raw line.
 	inCode := false
-	if fromLine > 0 && fromLine-1 < len(m.inCodeAfter) {
-		inCode = m.inCodeAfter[fromLine-1]
+	if fromRaw > 0 && fromRaw < len(m.wrappedIndex) {
+		wStart := m.wrappedIndex[fromRaw]
+		if wStart > 0 && wStart-1 < len(m.inCodeAfter) {
+			inCode = m.inCodeAfter[wStart-1]
+		}
 	}
-	for i := fromLine; i < len(m.Lines); i++ {
-		trimmed := strings.TrimSpace(m.Lines[i])
+
+	for ri := fromRaw; ri < len(m.RawLines); ri++ {
+		trimmed := strings.TrimSpace(m.RawLines[ri])
 		if strings.HasPrefix(trimmed, "```") {
 			inCode = !inCode
 		}
-		m.inCodeAfter[i] = inCode
+		// Fill all wrapped lines that belong to this raw line.
+		wStart := m.wrappedIndex[ri]
+		wEnd := len(m.Lines)
+		if ri+1 < len(m.wrappedIndex) {
+			wEnd = m.wrappedIndex[ri+1]
+		}
+		for wi := wStart; wi < wEnd; wi++ {
+			m.inCodeAfter[wi] = inCode
+		}
 	}
 }
 
@@ -405,7 +420,7 @@ func (m *AgentPaneModel) AppendText(text string) {
 			m.Lines = append(m.Lines, m.RawLines[i])
 		}
 	}
-	m.recomputeCodeBlock(truncateTo)
+	m.recomputeCodeBlock(firstAffected)
 
 	if wasAtBottom {
 		m.scrollToBottom()

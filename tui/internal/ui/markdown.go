@@ -31,36 +31,46 @@ const (
 )
 
 // mdSpan is a segment of inline-parsed text with its rendering kind.
+// The text field always includes delimiter characters (backticks, asterisks)
+// so that span rune counts equal the raw source rune counts. This keeps
+// display cell positions aligned with m.Lines rune indices, preserving
+// correctness of mouse hit-testing and selection without a display→source map.
 type mdSpan struct {
 	text string
 	kind mdKind
 }
 
 // renderMarkdownLine renders a single agent pane line with markdown styling and
-// pads the result to exactly width display cells. isCode indicates the line is
-// inside (or is) a code block fence.
+// pads the result to exactly width display cells.
+//
+// Marker characters (# prefixes, **, *, `, bullet replacements) are KEPT in
+// the rendered output so display cell columns equal raw m.Lines rune indices.
+// This preserves mouseToLineCol, isSelected, and SelectedText correctness.
+// isCode indicates the line is inside (or is) a code block fence.
 func renderMarkdownLine(line string, isCode bool, width int) string {
 	if isCode {
 		return mdCodeBlockStyle.Render(padToWidth(line, width))
 	}
 
-	// Headers must be checked before inline parsing.
+	// Headers: style the full line including `# ` prefix — no stripping.
 	switch {
 	case strings.HasPrefix(line, "### "):
-		return mdHeader3Style.Render(padToWidth(line[4:], width))
+		return mdHeader3Style.Render(padToWidth(line, width))
 	case strings.HasPrefix(line, "## "):
-		return mdHeader2Style.Render(padToWidth(line[3:], width))
+		return mdHeader2Style.Render(padToWidth(line, width))
 	case strings.HasPrefix(line, "# "):
-		return mdHeaderStyle.Render(padToWidth(line[2:], width))
+		return mdHeaderStyle.Render(padToWidth(line, width))
 	}
 
-	// Bullet points at line start: replace ASCII marker with •.
-	// Intentionally check byte 0/1 — these are ASCII, so byte == rune.
+	// Bullets: replace leading - or + marker with • (U+2022).
+	// Both are single display cells, so all rune positions after the marker
+	// are unchanged. * is intentionally excluded here because * is also used
+	// for italic spans; the inline parser handles it at column context.
 	trimmed := strings.TrimLeft(line, " \t")
 	indent := len([]rune(line)) - len([]rune(trimmed))
-	if len(trimmed) >= 2 && (trimmed[0] == '-' || trimmed[0] == '+' || trimmed[0] == '*') && trimmed[1] == ' ' {
-		prefix := strings.Repeat(" ", indent) + "• "
-		return applyInlineMarkdown(prefix+trimmed[2:], width)
+	if len(trimmed) >= 2 && (trimmed[0] == '-' || trimmed[0] == '+') && trimmed[1] == ' ' {
+		bullet := strings.Repeat(" ", indent) + "• " + trimmed[2:]
+		return applyInlineMarkdown(bullet, width)
 	}
 
 	return applyInlineMarkdown(line, width)
@@ -106,6 +116,10 @@ func applyInlineMarkdown(line string, width int) string {
 // parseInlineMarkdown splits text into styled spans for inline rendering.
 // Handles: `code`, **bold**, *italic*, ***bold italic***.
 //
+// Span text INCLUDES delimiter characters so that the total rune count of all
+// spans equals the input rune count. This is the invariant that keeps display
+// cell columns aligned with raw source column indices.
+//
 // All indexing is done on []rune, never via strings.Index or byte offsets,
 // to avoid the rune/byte mismatch bug documented in patterns.md.
 func parseInlineMarkdown(text string) []mdSpan {
@@ -125,7 +139,7 @@ func parseInlineMarkdown(text string) []mdSpan {
 	for i < n {
 		r := runes[i]
 
-		// Inline code: `content`
+		// Inline code: `content` — span includes both backticks.
 		if r == '`' {
 			j := i + 1
 			for j < n && runes[j] != '`' {
@@ -133,7 +147,7 @@ func parseInlineMarkdown(text string) []mdSpan {
 			}
 			if j < n { // found closing backtick
 				flushPlain()
-				spans = append(spans, mdSpan{string(runes[i+1 : j]), mdCode})
+				spans = append(spans, mdSpan{string(runes[i : j+1]), mdCode})
 				i = j + 1
 				continue
 			}
@@ -143,7 +157,7 @@ func parseInlineMarkdown(text string) []mdSpan {
 			continue
 		}
 
-		// Bold / italic: *, **, ***
+		// Bold / italic: *, **, *** — span includes all delimiter runes.
 		if r == '*' {
 			// Count the run of stars starting at i.
 			j := i + 1
@@ -156,7 +170,8 @@ func parseInlineMarkdown(text string) []mdSpan {
 				closeIdx := findRuneSeq(runes, j, '*', stars)
 				if closeIdx >= 0 {
 					flushPlain()
-					content := string(runes[j:closeIdx])
+					// Include opening markers (i..j) + content + closing markers.
+					content := string(runes[i : closeIdx+stars])
 					var kind mdKind
 					switch stars {
 					case 1:

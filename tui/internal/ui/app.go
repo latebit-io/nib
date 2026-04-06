@@ -504,7 +504,20 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		}
 	case event.AgentFileCreated:
 		m.AgentPane.AppendMeta("\n[Created: " + e.Path + "]\n")
-		m.refreshProjectPane()
+		// Set pendingReveal before openFile — openFile calls
+		// refreshProjectPane internally, which triggers rebuild.
+		// ExpandToPath runs during that rebuild to uncollapse
+		// ancestor dirs so the new file is visible in the tree.
+		if m.ProjectPane != nil {
+			m.ProjectPane.pendingReveal = e.Path
+		}
+		m.openFile(e.Path)
+		// If openFile failed (e.g. edit pending), the file was still
+		// created on disk. Refresh the project pane so it appears in
+		// the tree and pendingReveal is consumed.
+		if m.ProjectPane != nil && m.ProjectPane.pendingReveal != "" {
+			m.refreshProjectPane()
+		}
 	case event.AgentNavigate:
 		m.openFile(e.Path)
 		// Only navigate if we successfully switched to the target file.

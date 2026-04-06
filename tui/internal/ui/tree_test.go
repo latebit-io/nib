@@ -253,6 +253,74 @@ func TestSortOrder_DirsBeforeFiles(t *testing.T) {
 	assertNames(t, names, want)
 }
 
+func TestExpandToPath_ExpandsAncestors(t *testing.T) {
+	root := BuildTree([]string{
+		"a/b/c.go",
+		"a/b/d.go",
+		"a/x.go",
+		"top.go",
+	})
+
+	// All dirs start collapsed.
+	ExpandToPath(root, "a/b/c.go")
+
+	// "a" and "a/b" should now be expanded.
+	a := findNode(root, "a")
+	if a == nil {
+		t.Fatal("dir 'a' not found")
+	}
+	if a.Collapsed {
+		t.Error("dir 'a' should be expanded")
+	}
+
+	b := findNode(root, "a/b")
+	if b == nil {
+		t.Fatal("dir 'a/b' not found")
+	}
+	if b.Collapsed {
+		t.Error("dir 'a/b' should be expanded")
+	}
+
+	// Flattening should now show the file.
+	flat := FlattenVisible(root)
+	names := nodeNames(flat)
+	want := []string{"a", "b", "c.go", "d.go", "x.go", "top.go"}
+	assertNames(t, names, want)
+}
+
+func TestExpandToPath_NonexistentPath(t *testing.T) {
+	root := BuildTree([]string{"a/b.go"})
+	// Should not panic on missing path.
+	ExpandToPath(root, "x/y/z.go")
+
+	a := findNode(root, "a")
+	if a == nil {
+		t.Fatal("dir 'a' not found")
+	}
+	if !a.Collapsed {
+		t.Error("dir 'a' should remain collapsed")
+	}
+}
+
+func TestExpandToPath_NilRoot(t *testing.T) {
+	// Should not panic.
+	ExpandToPath(nil, "a/b.go")
+}
+
+func TestExpandToPath_TopLevelFile(t *testing.T) {
+	root := BuildTree([]string{"main.go", "a/b.go"})
+	// Expanding a top-level file should be a no-op (no dirs to expand).
+	ExpandToPath(root, "main.go")
+
+	a := findNode(root, "a")
+	if a == nil {
+		t.Fatal("dir 'a' not found")
+	}
+	if !a.Collapsed {
+		t.Error("dir 'a' should remain collapsed")
+	}
+}
+
 // --- helpers ---
 
 func nodeNames(nodes []*TreeNode) []string {

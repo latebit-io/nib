@@ -1363,11 +1363,11 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	if m.dial.AutoContinue() {
 		m.Editor.Anim = nil
 		m.Session.Continue()
-		m.AgentPane.Status = event.StatusThinking
+		m.AgentPane.SetStatus(event.StatusThinking)
 		return nil
 	}
 
-	m.AgentPane.Status = event.StatusEditing
+	m.AgentPane.SetStatus(event.StatusEditing)
 	return nil
 }
 

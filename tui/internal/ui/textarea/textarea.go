@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/junto/engine/editor"
+	"github.com/mattn/go-runewidth"
 )
 
 // Clipboard abstracts system clipboard access for copy/cut/paste.
@@ -694,6 +695,58 @@ func (t *TextArea) insertText(text string) {
 		}
 		t.insertRune(r)
 	}
+}
+
+// --- Mouse ---
+
+// HandleClick positions the cursor at the given visual row and cell column,
+// clearing any active selection. Call this on mouse-down in the input area.
+func (t *TextArea) HandleClick(visRow, cellCol int) {
+	t.clearSelection()
+	visRow = t.clampVisualRow(visRow)
+	runeCol := t.cellToRuneCol(visRow, cellCol)
+	t.cursorLine, t.cursorCol = t.visualToLogical(visRow, runeCol)
+}
+
+// HandleDrag extends the selection to the given visual row and cell column.
+// If no selection is active, one is started from the current cursor position.
+func (t *TextArea) HandleDrag(visRow, cellCol int) {
+	t.startSelection()
+	visRow = t.clampVisualRow(visRow)
+	runeCol := t.cellToRuneCol(visRow, cellCol)
+	t.cursorLine, t.cursorCol = t.visualToLogical(visRow, runeCol)
+}
+
+// clampVisualRow constrains visRow to the valid wrap cache range so that
+// clicks on blank padding rows below content map to the last wrapped line.
+func (t *TextArea) clampVisualRow(visRow int) int {
+	t.buildWrapCache()
+	if len(t.wrapCache) == 0 || visRow < 0 {
+		return 0
+	}
+	if visRow >= len(t.wrapCache) {
+		return len(t.wrapCache) - 1
+	}
+	return visRow
+}
+
+// cellToRuneCol converts a cell (display) column to a rune index within
+// the given visual row, accounting for wide characters.
+func (t *TextArea) cellToRuneCol(visRow, cellCol int) int {
+	t.buildWrapCache()
+	if visRow < 0 || visRow >= len(t.wrapCache) {
+		return 0
+	}
+	vl := t.wrapCache[visRow]
+	cellsSeen := 0
+	for i, r := range vl.runes {
+		w := runewidth.RuneWidth(r)
+		if cellsSeen+w > cellCol {
+			return i
+		}
+		cellsSeen += w
+	}
+	return len(vl.runes)
 }
 
 // --- Helpers ---

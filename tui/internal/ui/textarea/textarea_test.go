@@ -477,6 +477,95 @@ func TestBracketPastePreservesNewlines(t *testing.T) {
 	}
 }
 
+// --- Mouse ---
+
+func TestHandleClickPositionsCursor(t *testing.T) {
+	ta := newTestArea("hello world")
+	ta.cursorCol = 0
+
+	// Click at visual row 0, cell col 6 → should land on 'w'
+	ta.HandleClick(0, 6)
+	if ta.cursorLine != 0 || ta.cursorCol != 6 {
+		t.Errorf("cursor = (%d,%d), want (0,6)", ta.cursorLine, ta.cursorCol)
+	}
+	if ta.selActive {
+		t.Error("selection should not be active after click")
+	}
+}
+
+func TestHandleClickPastEnd(t *testing.T) {
+	ta := newTestArea("hi")
+	ta.HandleClick(0, 20) // past end of "hi"
+	if ta.cursorCol != 2 {
+		t.Errorf("col = %d, want 2", ta.cursorCol)
+	}
+}
+
+func TestHandleDragCreatesSelection(t *testing.T) {
+	ta := newTestArea("hello world")
+
+	ta.HandleClick(0, 0)
+	ta.HandleDrag(0, 5)
+
+	if !ta.selActive {
+		t.Fatal("selection should be active after drag")
+	}
+	if got := ta.SelectedText(); got != "hello" {
+		t.Errorf("SelectedText() = %q, want %q", got, "hello")
+	}
+}
+
+func TestHandleDragMultiline(t *testing.T) {
+	ta := newTestArea("abc\ndef")
+
+	ta.HandleClick(0, 1) // after 'a'
+	ta.HandleDrag(1, 2)  // after 'e' on second line
+
+	if !ta.selActive {
+		t.Fatal("selection should be active")
+	}
+	if got := ta.SelectedText(); got != "bc\nde" {
+		t.Errorf("SelectedText() = %q, want %q", got, "bc\nde")
+	}
+}
+
+func TestClickClearsSelection(t *testing.T) {
+	ta := newTestArea("hello")
+	ta.Update(ctrl('a')) // select all
+	if !ta.selActive {
+		t.Fatal("selection should be active after Ctrl+A")
+	}
+
+	ta.HandleClick(0, 2) // click clears it
+	if ta.selActive {
+		t.Error("selection should be cleared after click")
+	}
+}
+
+func TestHandleClickBlankRow(t *testing.T) {
+	ta := newTestArea("hi")
+	// Click on row 5 — well past the single visual line. Should clamp to
+	// end of last line, not land on (0, 0).
+	ta.HandleClick(5, 20)
+	if ta.cursorLine != 0 || ta.cursorCol != 2 {
+		t.Errorf("cursor = (%d,%d), want (0,2)", ta.cursorLine, ta.cursorCol)
+	}
+}
+
+func TestHandleDragToBlankRow(t *testing.T) {
+	ta := newTestArea("abc\ndef")
+	ta.HandleClick(0, 1)  // after 'a'
+	ta.HandleDrag(10, 50) // far past content
+
+	if !ta.selActive {
+		t.Fatal("selection should be active")
+	}
+	// Should select from (0,1) to end of last line
+	if got := ta.SelectedText(); got != "bc\ndef" {
+		t.Errorf("SelectedText() = %q, want %q", got, "bc\ndef")
+	}
+}
+
 func TestSpaceKey(t *testing.T) {
 	ta := newTestArea("")
 	ta.Update(key('a'))

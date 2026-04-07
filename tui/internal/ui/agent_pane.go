@@ -37,10 +37,11 @@ var (
 
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
 type AgentPaneModel struct {
-	Width  int
-	Height int
+	// Layout — set via SetSize, read by Render and mouse hit-testing.
+	width  int
+	height int
 
-	// RawLines stores unwrapped content; Lines is derived by wrapping to Width.
+	// RawLines stores unwrapped content; Lines is derived by wrapping to width.
 	// wrappedIndex[i] is the index into Lines where RawLines[i] starts.
 	RawLines     []string
 	Lines        []string
@@ -53,26 +54,31 @@ type AgentPaneModel struct {
 	// Scroll
 	ScrollOffset int
 
-	// Status
-	Status event.StatusKind
+	// status is the current agent status (idle, thinking, reviewing, etc.).
+	// Set via SetStatus, read via StatusKind.
+	status event.StatusKind
 
-	// Selection
-	SelectionActive bool
-	SelectDragging  bool
-	SelectStartLine int
-	SelectStartCol  int
-	CursorLine      int
-	CursorCol       int
+	// Output selection — fully internal, driven by mouse events on the
+	// output region. Not accessed outside agent_pane.go.
+	selActive   bool
+	selDragging bool
+	selStartLn  int
+	selStartCol int
+	cursorLn    int
+	cursorCol   int
 
 	// Input area
-	InputActive       bool
-	Input             *textarea.TextArea
-	PlanningMode      bool // true when input will start a planning conversation
-	inputAreaStartRow int  // first row of the input area (for mouse click detection)
-	inputAreaEndRow   int  // exclusive end row
+	inputActive       bool               // true when the textarea has keyboard focus
+	input             *textarea.TextArea // multiline text editor for user input
+	planningMode      bool               // true when input will start a planning conversation
+	inputAreaStartRow int                // first row of the input area (mouse hit-testing)
+	inputAreaEndRow   int                // exclusive end row
+	inputScrollOffset int                // first visible visual row in the textarea
+	inputDragging     bool               // true while dragging inside the input area
+	inputPadLeft      int                // cell offset from pane left edge to textarea content
 
 	// Shared services
-	Services *Services
+	services *Services
 
 	// Stateful sanitizer for streamed text
 	sanitizer sanitize.Sanitizer
@@ -93,20 +99,51 @@ type AgentPaneModel struct {
 	mdCache       []string
 	mdCacheOffset int
 
-	// HasAgent is true when an LLM provider is configured.
-	HasAgent bool
+	// hasAgent is true when an LLM provider is configured.
+	hasAgent bool
 }
 
 // NewAgentPaneModel creates a new agent pane.
-func NewAgentPaneModel(svc *Services) *AgentPaneModel {
+func NewAgentPaneModel(svc *Services, hasAgent bool) *AgentPaneModel {
 	input := textarea.New(1) // width set properly in SetSize
 	input.SetClipboard(svc.Clipboard)
 	return &AgentPaneModel{
-		Status:   event.StatusIdle,
-		Services: svc,
-		Input:    input,
+		status:   event.StatusIdle,
+		services: svc,
+		input:    input,
+		hasAgent: hasAgent,
 	}
 }
+
+// --- Accessors ---
+
+// SetStatus updates the agent status displayed in the status bar.
+func (m *AgentPaneModel) SetStatus(s event.StatusKind) { m.status = s }
+
+// StatusKind returns the current agent status.
+func (m *AgentPaneModel) StatusKind() event.StatusKind { return m.status }
+
+// SetInputActive sets keyboard focus on or off for the input textarea.
+func (m *AgentPaneModel) SetInputActive(active bool) {
+	m.inputActive = active
+	m.recomputeInputLayout()
+}
+
+// IsInputActive reports whether the input textarea has keyboard focus.
+func (m *AgentPaneModel) IsInputActive() bool { return m.inputActive }
+
+// SetPlanningMode configures whether the next submission starts a planning
+// conversation rather than a normal agent conversation.
+func (m *AgentPaneModel) SetPlanningMode(planning bool) { m.planningMode = planning }
+
+// ResetInput clears the textarea content and recomputes the input layout.
+func (m *AgentPaneModel) ResetInput() {
+	m.input.Reset()
+	m.recomputeInputLayout()
+}
+
+// Clipboard returns the shared clipboard service.
+func (m *AgentPaneModel) Clipboard() ClipboardService { return m.services.Clipboard }
 
 // Title returns the pane title for display in the border. Implements Titled.
 func (m *AgentPaneModel) Title() string {
@@ -116,14 +153,49 @@ func (m *AgentPaneModel) Title() string {
 // SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.
 // Re-wraps content when width changes so text reflows correctly.
 func (m *AgentPaneModel) SetSize(width, height int) {
-	oldWidth := m.Width
-	m.Width = width
-	m.Height = height
+	oldWidth := m.width
+	m.width = width
+	m.height = height
 	if width != oldWidth {
 		m.rewrap()
 	}
-	m.Input.SetSize(width)
+	m.input.SetSize(width)
 	m.clampScroll()
+	m.recomputeInputLayout()
+}
+
+// recomputeInputLayout updates the input area geometry and scroll offset.
+// Must be called after any change to Height, input content, or cursor position
+// so that mouse hit-testing uses current values.
+func (m *AgentPaneModel) recomputeInputLayout() {
+	// Input area sits between the separator line and the status line.
+	contentEnd := m.height - InputHeight
+	if contentEnd < 0 {
+		contentEnd = 0
+	}
+	m.inputAreaStartRow = contentEnd + 1 // after separator
+	inputRows := m.height - m.inputAreaStartRow - 1
+	if inputRows < 0 {
+		inputRows = 0
+	}
+	m.inputAreaEndRow = m.inputAreaStartRow + inputRows
+
+	// Scroll the textarea so the cursor row is visible.
+	m.inputScrollOffset = 0
+	if inputRows > 0 {
+		cursorVisRow, _ := m.input.CursorPosition()
+		lineCount := m.input.VisualLineCount()
+		if lineCount > inputRows && cursorVisRow >= inputRows {
+			m.inputScrollOffset = cursorVisRow - inputRows + 1
+		}
+		maxScroll := lineCount - inputRows
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if m.inputScrollOffset > maxScroll {
+			m.inputScrollOffset = maxScroll
+		}
+	}
 }
 
 // Update handles messages for the agent pane. Implements Pane.
@@ -140,7 +212,7 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 	case tea.MouseWheelMsg:
 		return m.handleMouseWheel(msg)
 	case tea.KeyPressMsg:
-		if m.InputActive {
+		if m.inputActive {
 			return m.handleInput(msg)
 		}
 		return m.handleKey(msg)
@@ -353,48 +425,62 @@ func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 }
 
 func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
-	if !m.HasAgent {
+	if !m.hasAgent {
 		return nil
 	}
 	if msg.Button != tea.MouseLeft {
+		m.inputDragging = false
+		m.selDragging = false
 		return nil
 	}
 
-	// Click in the input area → focus it. Click elsewhere → unfocus.
+	// Click in the input area → focus it and position cursor.
 	if msg.Y >= m.inputAreaStartRow && msg.Y < m.inputAreaEndRow {
-		m.InputActive = true
+		m.inputActive = true
+		m.inputDragging = true
+		visRow := (msg.Y - m.inputAreaStartRow) + m.inputScrollOffset
+		m.input.HandleClick(visRow, msg.X-m.inputPadLeft)
 		return nil
 	}
-	m.InputActive = false
+	m.inputActive = false
+	m.inputDragging = false
 
 	if msg.Y < 0 || msg.Y >= m.VisibleLines() {
 		return nil
 	}
 	line, col := m.mouseToLineCol(msg.X, msg.Y)
-	m.SelectionActive = true
-	m.SelectDragging = true
-	m.SelectStartLine = line
-	m.SelectStartCol = col
-	m.CursorLine = line
-	m.CursorCol = col
+	m.selActive = true
+	m.selDragging = true
+	m.selStartLn = line
+	m.selStartCol = col
+	m.cursorLn = line
+	m.cursorCol = col
 	return nil
 }
 
 func (m *AgentPaneModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
-	if !m.SelectDragging || msg.Y < 0 || msg.Y >= m.VisibleLines() {
+	// Drag inside the input area → extend textarea selection.
+	if m.inputDragging {
+		visRow := (msg.Y - m.inputAreaStartRow) + m.inputScrollOffset
+		m.input.HandleDrag(visRow, msg.X-m.inputPadLeft)
+		return nil
+	}
+
+	if !m.selDragging || msg.Y < 0 || msg.Y >= m.VisibleLines() {
 		return nil
 	}
 	line, col := m.mouseToLineCol(msg.X, msg.Y)
-	m.CursorLine = line
-	m.CursorCol = col
+	m.cursorLn = line
+	m.cursorCol = col
 	return nil
 }
 
 func (m *AgentPaneModel) handleMouseRelease(_ tea.MouseReleaseMsg) tea.Cmd {
-	m.SelectDragging = false
-	if m.CursorLine == m.SelectStartLine &&
-		m.CursorCol == m.SelectStartCol {
-		m.SelectionActive = false
+	m.inputDragging = false
+	m.selDragging = false
+	if m.cursorLn == m.selStartLn &&
+		m.cursorCol == m.selStartCol {
+		m.selActive = false
 	}
 	return nil
 }
@@ -434,7 +520,8 @@ func (m *AgentPaneModel) mouseToLineCol(x, y int) (int, int) {
 // Submit (Enter) and Cancel (Escape) are intercepted to manage
 // the agent pane's input lifecycle.
 func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
-	cmd := m.Input.Update(msg)
+	cmd := m.input.Update(msg)
+	m.recomputeInputLayout() // cursor/content may have changed
 	if cmd == nil {
 		return nil
 	}
@@ -443,11 +530,11 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	result := cmd()
 	switch result.(type) {
 	case textarea.SubmitMsg:
-		goal := m.Input.Content()
-		planning := m.PlanningMode
-		m.InputActive = false
-		m.Input.Reset()
-		m.PlanningMode = false
+		goal := m.input.Content()
+		planning := m.planningMode
+		m.inputActive = false
+		m.input.Reset()
+		m.planningMode = false
 		if strings.TrimSpace(goal) != "" {
 			if planning {
 				return func() tea.Msg { return PlanningGoalSubmittedMsg{Goal: goal} }
@@ -457,7 +544,9 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case textarea.CancelMsg:
 		// Deactivate focus but preserve content — Ctrl+G or click restores it.
-		m.InputActive = false
+		// Clear planningMode so refocus via click doesn't silently submit as a plan.
+		m.inputActive = false
+		m.planningMode = false
 		return nil
 	default:
 		// Re-wrap the command — we already consumed the thunk.
@@ -477,13 +566,13 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	case 'c':
 		if msg.Mod == tea.ModCtrl {
-			if m.SelectionActive {
-				if err := m.Services.Clipboard.Write(m.SelectedText()); err != nil {
+			if m.selActive {
+				if err := m.services.Clipboard.Write(m.SelectedText()); err != nil {
 					slog.Warn("system clipboard write failed", "err", err)
 				}
-				m.SelectionActive = false
+				m.selActive = false
 			} else {
-				if err := m.Services.Clipboard.Write(strings.Join(m.Lines, "\n")); err != nil {
+				if err := m.services.Clipboard.Write(strings.Join(m.Lines, "\n")); err != nil {
 					slog.Warn("system clipboard write failed", "err", err)
 				}
 			}
@@ -531,7 +620,7 @@ func (m *AgentPaneModel) AppendText(text string) {
 
 	for i := firstAffected; i < len(m.RawLines); i++ {
 		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
-		if m.Width > 0 && runewidth.StringWidth(m.RawLines[i]) > m.Width {
+		if m.width > 0 && runewidth.StringWidth(m.RawLines[i]) > m.width {
 			m.Lines = append(m.Lines, m.wrapLine(m.RawLines[i])...)
 		} else {
 			m.Lines = append(m.Lines, m.RawLines[i])
@@ -563,7 +652,7 @@ func (m *AgentPaneModel) rewrap() {
 	m.invalidateMdCache()
 	for _, raw := range m.RawLines {
 		m.wrappedIndex = append(m.wrappedIndex, len(m.Lines))
-		if m.Width > 0 && runewidth.StringWidth(raw) > m.Width {
+		if m.width > 0 && runewidth.StringWidth(raw) > m.width {
 			m.Lines = append(m.Lines, m.wrapLine(raw)...)
 		} else {
 			m.Lines = append(m.Lines, raw)
@@ -586,7 +675,7 @@ func (m *AgentPaneModel) clampScroll() {
 // Uses cell-width measurement to handle wide characters (CJK, emoji).
 // Tracks remaining width incrementally to stay O(n) in line length.
 func (m *AgentPaneModel) wrapLine(line string) []string {
-	if m.Width <= 0 {
+	if m.width <= 0 {
 		return []string{line}
 	}
 
@@ -601,11 +690,11 @@ func (m *AgentPaneModel) wrapLine(line string) []string {
 	start := 0
 
 	for start < len(runes) {
-		// Find how many runes fit within m.Width cells
+		// Find how many runes fit within m.width cells
 		cellW := 0
 		fitEnd := start
 		for i := start; i < len(runes); i++ {
-			if cellW+widths[i] > m.Width {
+			if cellW+widths[i] > m.width {
 				break
 			}
 			cellW += widths[i]
@@ -638,7 +727,9 @@ func (m *AgentPaneModel) wrapLine(line string) []string {
 	return result
 }
 
-// Clear clears the agent pane content.
+// Clear clears the agent pane content and resets all transient state
+// (selection, scroll, status, sanitizer) so no stale references survive
+// into the next conversation.
 func (m *AgentPaneModel) Clear() {
 	m.RawLines = nil
 	m.Lines = nil
@@ -648,14 +739,20 @@ func (m *AgentPaneModel) Clear() {
 	m.rawFenceAfter = nil
 	m.invalidateMdCache()
 	m.ScrollOffset = 0
-	m.Status = event.StatusIdle
+	m.selActive = false
+	m.selDragging = false
+	m.selStartLn = 0
+	m.selStartCol = 0
+	m.cursorLn = 0
+	m.cursorCol = 0
+	m.status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
 }
 
 // VisibleLines returns the number of content lines visible.
 // Layout: content + InputHeight bottom area (separator + input + status).
 func (m *AgentPaneModel) VisibleLines() int {
-	h := m.Height - InputHeight
+	h := m.height - InputHeight
 	if h < 1 {
 		h = 1
 	}
@@ -673,8 +770,8 @@ func (m *AgentPaneModel) scrollToBottom() {
 
 // SelectedRange returns the normalized (start, end) of the selection.
 func (m *AgentPaneModel) SelectedRange() (int, int, int, int) {
-	sl, sc := m.SelectStartLine, m.SelectStartCol
-	el, ec := m.CursorLine, m.CursorCol
+	sl, sc := m.selStartLn, m.selStartCol
+	el, ec := m.cursorLn, m.cursorCol
 	if sl > el || (sl == el && sc > ec) {
 		sl, sc, el, ec = el, ec, sl, sc
 	}
@@ -683,7 +780,7 @@ func (m *AgentPaneModel) SelectedRange() (int, int, int, int) {
 
 // SelectedText returns the text in the current selection.
 func (m *AgentPaneModel) SelectedText() string {
-	if !m.SelectionActive || len(m.Lines) == 0 {
+	if !m.selActive || len(m.Lines) == 0 {
 		return ""
 	}
 	sl, sc, el, ec := m.SelectedRange()
@@ -750,7 +847,7 @@ func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
 }
 
 func (m *AgentPaneModel) isSelected(line, col int) bool {
-	if !m.SelectionActive {
+	if !m.selActive {
 		return false
 	}
 	sl, sc, el, ec := m.SelectedRange()
@@ -796,10 +893,10 @@ func (m *AgentPaneModel) cachedMarkdown(lineIdx int) string {
 	slot := lineIdx - m.mdCacheOffset
 	if slot < 0 || slot >= len(m.mdCache) {
 		// Outside viewport — compute without caching.
-		return renderMarkdownLine(m.Lines[lineIdx], m.isCodeLine(lineIdx), m.Width)
+		return renderMarkdownLine(m.Lines[lineIdx], m.isCodeLine(lineIdx), m.width)
 	}
 	if m.mdCache[slot] == "" {
-		m.mdCache[slot] = renderMarkdownLine(m.Lines[lineIdx], m.isCodeLine(lineIdx), m.Width)
+		m.mdCache[slot] = renderMarkdownLine(m.Lines[lineIdx], m.isCodeLine(lineIdx), m.width)
 	}
 	return m.mdCache[slot]
 }
@@ -808,39 +905,39 @@ func (m *AgentPaneModel) cachedMarkdown(lineIdx int) string {
 // Uses cell-width measurement to handle wide characters (CJK, emoji).
 func (m *AgentPaneModel) padLine(s string) string {
 	w := runewidth.StringWidth(s)
-	if w >= m.Width {
-		return runewidth.Truncate(s, m.Width, "")
+	if w >= m.width {
+		return runewidth.Truncate(s, m.width, "")
 	}
-	return s + strings.Repeat(" ", m.Width-w)
+	return s + strings.Repeat(" ", m.width-w)
 }
 
-// Render renders the agent pane as exactly m.Height lines joined by \n.
+// Render renders the agent pane as exactly m.height lines joined by \n.
 func (m *AgentPaneModel) Render() string {
-	if m.Height <= 0 || m.Width <= 0 {
+	if m.height <= 0 || m.width <= 0 {
 		return ""
 	}
 
-	output := make([]string, m.Height)
+	output := make([]string, m.height)
 	row := 0
 
 	// Use package-level style vars directly — no local copies needed
 	// since lipgloss styles are immutable value types.
 
 	// No LLM configured — show message and fill remaining rows
-	if !m.HasAgent {
-		if row < m.Height {
+	if !m.hasAgent {
+		if row < m.height {
 			output[row] = agentDimStyle.Render(m.padLine(""))
 			row++
 		}
-		if row < m.Height {
+		if row < m.height {
 			output[row] = agentDimStyle.Render(m.padLine(" No LLM configured"))
 			row++
 		}
-		if row < m.Height {
+		if row < m.height {
 			output[row] = agentDimStyle.Render(m.padLine(" Set LLM_API_KEY to enable"))
 			row++
 		}
-		for row < m.Height {
+		for row < m.height {
 			output[row] = agentDimStyle.Render(m.padLine(""))
 			row++
 		}
@@ -850,7 +947,7 @@ func (m *AgentPaneModel) Render() string {
 	// Content rows
 	vis := m.VisibleLines()
 	for i := range vis {
-		if row >= m.Height {
+		if row >= m.height {
 			break
 		}
 		lineIdx := m.ScrollOffset + i
@@ -858,14 +955,14 @@ func (m *AgentPaneModel) Render() string {
 			lineText := m.Lines[lineIdx]
 
 			sl, _, el, _ := m.SelectedRange()
-			if m.SelectionActive && lineIdx >= sl && lineIdx <= el {
+			if m.selActive && lineIdx >= sl && lineIdx <= el {
 				// Render char-by-char with selection highlighting
 				var line strings.Builder
 				runes := []rune(lineText)
 				cellsUsed := 0
 				for j, r := range runes {
 					w := runewidth.RuneWidth(r)
-					if cellsUsed+w > m.Width {
+					if cellsUsed+w > m.width {
 						break
 					}
 					ch := string(r)
@@ -877,8 +974,8 @@ func (m *AgentPaneModel) Render() string {
 					cellsUsed += w
 				}
 				// Pad remaining cells
-				if cellsUsed < m.Width {
-					line.WriteString(strings.Repeat(" ", m.Width-cellsUsed))
+				if cellsUsed < m.width {
+					line.WriteString(strings.Repeat(" ", m.width-cellsUsed))
 				}
 				output[row] = line.String()
 			} else if m.isUserLine(lineIdx) {
@@ -887,60 +984,43 @@ func (m *AgentPaneModel) Render() string {
 				output[row] = m.cachedMarkdown(lineIdx)
 			}
 		} else {
-			output[row] = strings.Repeat(" ", m.Width)
+			output[row] = strings.Repeat(" ", m.width)
 		}
 		row++
 	}
 
 	// Fill remaining content area
-	contentEnd := m.Height - InputHeight
+	contentEnd := m.height - InputHeight
 	for row < contentEnd {
-		output[row] = strings.Repeat(" ", m.Width)
+		output[row] = strings.Repeat(" ", m.width)
 		row++
 	}
 
 	// Separator line
-	if row < m.Height-1 { // -1 to leave room for status
-		output[row] = agentDimStyle.Render(m.padLine(strings.Repeat("─", m.Width)))
+	if row < m.height-1 { // -1 to leave room for status
+		output[row] = agentDimStyle.Render(m.padLine(strings.Repeat("─", m.width)))
 		row++
 	}
 
-	// Input area: fill rows between separator and status
-	inputRows := m.Height - row - 1 // -1 for status line
+	// Input area: fill rows between separator and status.
+	// Layout values (inputAreaStartRow, inputScrollOffset) are maintained by
+	// recomputeInputLayout — Render reads them, never writes.
+	inputRows := m.inputAreaEndRow - m.inputAreaStartRow
 	if inputRows < 0 {
 		inputRows = 0
 	}
-	// Always render the TextArea content — visible even when unfocused.
-	renderedInput := m.Input.Render()
-	hasContent := m.InputActive || (len(renderedInput) > 0 && (len(renderedInput) > 1 || renderedInput[0].Text != ""))
+	renderedInput := m.input.Render()
+	hasContent := m.inputActive || (len(renderedInput) > 0 && (len(renderedInput) > 1 || renderedInput[0].Text != ""))
 	var cursorVisRow, cursorVisCol int
-	if m.InputActive {
-		cursorVisRow, cursorVisCol = m.Input.CursorPosition()
+	if m.inputActive {
+		cursorVisRow, cursorVisCol = m.input.CursorPosition()
 	}
-
-	// Window the rendered input so the cursor row is always visible.
-	// inputScrollOffset is the first visual row to display.
-	inputScrollOffset := 0
-	if len(renderedInput) > inputRows && inputRows > 0 {
-		// Ensure the cursor row is on screen.
-		if cursorVisRow >= inputRows {
-			inputScrollOffset = cursorVisRow - inputRows + 1
-		}
-		maxScroll := len(renderedInput) - inputRows
-		if inputScrollOffset > maxScroll {
-			inputScrollOffset = maxScroll
-		}
-	}
-
-	// Track where the input area starts for mouse click detection.
-	m.inputAreaStartRow = row
-	m.inputAreaEndRow = row + inputRows
 
 	for i := range inputRows {
-		if row >= m.Height {
+		if row >= m.height {
 			break
 		}
-		visIdx := i + inputScrollOffset
+		visIdx := i + m.inputScrollOffset
 		if hasContent && visIdx < len(renderedInput) {
 			lineRunes := []rune(renderedInput[visIdx].Text)
 			var lineBuilder strings.Builder
@@ -948,13 +1028,13 @@ func (m *AgentPaneModel) Render() string {
 
 			for j, r := range lineRunes {
 				rw := runewidth.RuneWidth(r)
-				if cellsUsed+rw > m.Width {
+				if cellsUsed+rw > m.width {
 					break
 				}
 				ch := string(r)
-				if m.InputActive && visIdx == cursorVisRow && j == cursorVisCol {
+				if m.inputActive && visIdx == cursorVisRow && j == cursorVisCol {
 					lineBuilder.WriteString(agentCursorStyle.Render(ch))
-				} else if m.InputActive && m.Input.IsSelected(visIdx, j) {
+				} else if m.inputActive && m.input.IsSelected(visIdx, j) {
 					lineBuilder.WriteString(agentSelStyle.Render(ch))
 				} else {
 					lineBuilder.WriteString(ch)
@@ -962,31 +1042,31 @@ func (m *AgentPaneModel) Render() string {
 				cellsUsed += rw
 			}
 			// Cursor at end of line (past last char) — only when focused.
-			if m.InputActive && visIdx == cursorVisRow && cursorVisCol >= len(lineRunes) && cellsUsed < m.Width {
+			if m.inputActive && visIdx == cursorVisRow && cursorVisCol >= len(lineRunes) && cellsUsed < m.width {
 				lineBuilder.WriteString(agentCursorStyle.Render(" "))
 				cellsUsed++
 			}
 			// Pad to full width.
-			if cellsUsed < m.Width {
-				lineBuilder.WriteString(strings.Repeat(" ", m.Width-cellsUsed))
+			if cellsUsed < m.width {
+				lineBuilder.WriteString(strings.Repeat(" ", m.width-cellsUsed))
 			}
 			style := agentInputStyle
-			if !m.InputActive {
+			if !m.inputActive {
 				style = agentInputDim
 			}
 			output[row] = style.Render(lineBuilder.String())
 		} else if !hasContent && i == 0 {
 			output[row] = agentInputDim.Render(m.padLine(" Ctrl+G code | Alt+G plan"))
 		} else {
-			output[row] = strings.Repeat(" ", m.Width)
+			output[row] = strings.Repeat(" ", m.width)
 		}
 		row++
 	}
 
 	// Status line (last row)
-	if row < m.Height {
+	if row < m.height {
 		var statusText string
-		switch m.Status {
+		switch m.status {
 		case event.StatusIdle:
 			statusText = agentDimStyle.Render(m.padLine(" Ready"))
 		case event.StatusThinking:

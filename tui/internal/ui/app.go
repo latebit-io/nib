@@ -683,7 +683,6 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionDialCycle:
 		m.dial = m.dial.Cycle()
-		m.Editor.StatusMsg = m.dial.String()
 		return m, nil
 
 	case ActionAgentStart:

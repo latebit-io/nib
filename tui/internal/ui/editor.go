@@ -13,6 +13,7 @@ import (
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -24,9 +25,21 @@ var (
 	agentCursorWaitingStyle = lipgloss.NewStyle().
 				Background(lipgloss.Color("243")).
 				Foreground(lipgloss.Color("0"))
+
+	// agentLineBgColor is the subtle dark-green background applied to lines
+	// written by the agent. Matches the diff-added colour so the visual meaning
+	// is consistent: green == agent contribution.
+	agentLineBgColor = lipgloss.Color("22")
+
 	// agentLineGutterStyle renders the gutter for agent-written lines.
+	// The background extends the green tint into the gutter column.
 	agentLineGutterStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("34")) // green
+				Foreground(lipgloss.Color("34")).
+				Background(agentLineBgColor)
+
+	// agentLineBgStyle is the background applied to plain-text spans
+	// (no syntax colour) on agent-written lines.
+	agentLineBgStyle = lipgloss.NewStyle().Background(agentLineBgColor)
 )
 
 // Hover overlay styles — floating panel for type info and documentation.
@@ -720,6 +733,15 @@ func (m *EditorModel) renderNormalLine(
 ) string {
 	var line strings.Builder
 
+	isAgentLine := m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent
+
+	// Sanitize agent-origin lines to prevent ANSI injection from LLM output.
+	lineText := m.eng.Buf.LineText(lineIdx)
+	if isAgentLine {
+		var san sanitize.Sanitizer
+		lineText = san.Sanitize(lineText)
+	}
+
 	numText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1)
 	if diag := m.diagnosticForLine(lineIdx); diag != nil {
 		// Diagnostic icon takes priority in the gutter suffix.
@@ -735,13 +757,13 @@ func (m *EditorModel) renderNormalLine(
 			icon, iconStyle = diagInfoIcon, diagInfoGutterStyle
 		}
 		line.WriteString(iconStyle.Render(icon))
-	} else if m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent {
-		line.WriteString(agentLineGutterStyle.Render(numText + "j"))
+	} else if isAgentLine {
+		line.WriteString(agentLineGutterStyle.Render(numText + " "))
 	} else {
 		line.WriteString(gutterStyle.Render(numText + " "))
 	}
 
-	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
+	rawRunes := []rune(lineText)
 	expanded, bufToDisp := expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
 	displayed := m.fillDisplay(expanded, contentW, scrollCol)
@@ -961,7 +983,13 @@ func (m *EditorModel) renderNormalLine(
 		case tagFindMatch:
 			line.WriteString(findMatchStyle.Render(text))
 		case tagPlain:
-			if ul {
+			if isAgentLine {
+				s := agentLineBgStyle
+				if ul {
+					s = s.Underline(true)
+				}
+				line.WriteString(s.Render(text))
+			} else if ul {
 				line.WriteString(diagUnderlineStyle.Render(text))
 			} else {
 				line.WriteString(text)
@@ -970,6 +998,9 @@ func (m *EditorModel) renderNormalLine(
 			s := charStyles[start]
 			if ul {
 				s = s.Underline(true)
+			}
+			if isAgentLine {
+				s = s.Background(agentLineBgColor)
 			}
 			line.WriteString(s.Render(text))
 		}
@@ -1002,7 +1033,13 @@ func (m *EditorModel) renderRemovedLine(
 	gutterText := fmt.Sprintf("%*d-", gutterW-1, lineIdx+1)
 	line.WriteString(gutterSt.Render(gutterText))
 
-	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
+	// Sanitize agent-origin lines to prevent ANSI injection from LLM output.
+	removedText := m.eng.Buf.LineText(lineIdx)
+	if m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent {
+		var san sanitize.Sanitizer
+		removedText = san.Sanitize(removedText)
+	}
+	rawRunes := []rune(removedText)
 	expanded, bufToDisp := expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
 	displayed := m.fillDisplay(expanded, contentW, scrollCol)

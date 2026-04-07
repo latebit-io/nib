@@ -100,7 +100,8 @@ type AppModel struct {
 	Palette       PaletteModel
 	Help          HelpModel
 	SearchOverlay SearchOverlayModel
-	recentMouse   bool // tracks leaked CSI prefix from unparsed mouse events
+	recentMouse   bool          // tracks leaked CSI prefix from unparsed mouse events
+	dial          AutonomyLevel // current autonomy level; defaults to LevelGuided
 	Services      *Services
 	Keymap        *Keymap
 	Quit          bool
@@ -138,6 +139,7 @@ func NewApp(sess *session.Session) AppModel {
 		Regions:     rm,
 		Services:    svc,
 		Keymap:      km,
+		dial:        LevelGuided,
 		SearchOverlay: SearchOverlayModel{
 			SearchFunc: func(pattern string) ([]search.Result, error) {
 				return sess.Search(pattern, search.Options{})
@@ -483,19 +485,30 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshDiagnostics(m.Session.ActiveFile())
 		}
 		if diff != nil {
-			m.AgentPane.SetStatus(event.StatusReviewing)
 			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
+
+			// Build the overlay — startAnimatedApproval reads it for
+			// search/replace content even when we skip the visual review.
 			m.Editor.Overlay = NewDiffOverlay(diff)
-			m.Editor.Overlay.Active = true
-			// Auto-scroll so the diff is visible with some context above.
-			target := diff.StartLine - 3
-			if target < 0 {
-				target = 0
+
+			if m.dial.AutoApproveEdits() {
+				// At LevelTrusted, skip the visual review step and apply
+				// immediately. No activation, no visual-line sync —
+				// startAnimatedApproval handles its own scroll and apply.
+				cmd = m.startAnimatedApproval()
+			} else {
+				m.AgentPane.SetStatus(event.StatusReviewing)
+				m.Editor.Overlay.Active = true
+				// Auto-scroll so the diff is visible with some context above.
+				target := diff.StartLine - 3
+				if target < 0 {
+					target = 0
+				}
+				m.Editor.eng.ScrollOffset = target
+				m.Editor.syncExtraVisualLines()
+				m.Editor.eng.ClampScroll()
 			}
-			m.Editor.eng.ScrollOffset = target
-			m.Editor.syncExtraVisualLines()
-			m.Editor.eng.ClampScroll()
 		} else {
 			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
 			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
@@ -671,6 +684,10 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ActionDialCycle:
+		m.dial = m.dial.Cycle()
+		return m, nil
+
 	case ActionAgentStart:
 		if m.Session.HasAgent() {
 			m.AgentPane.SetInputActive(true)
@@ -772,7 +789,11 @@ func (m *AppModel) View() tea.View {
 	if m.Width == 0 || m.Height == 0 {
 		content = "Initializing..."
 	} else {
-		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, m.Session.DistributedMemory()...)
+		mem := m.Session.DistributedMemory()
+		indicators := make([]string, len(mem)+1)
+		copy(indicators, mem)
+		indicators[len(mem)] = m.dial.String()
+		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
 		if m.Dialog.Active {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Help.Active {
@@ -1195,7 +1216,8 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 
 	// Instant-apply: skip animation, apply the full edit atomically,
 	// and auto-continue so the agent proceeds without Ctrl+N.
-	if m.Editor.InstantApply {
+	// LevelTrusted behaves identically to InstantApply.
+	if m.Editor.InstantApply || m.dial.AutoApproveEdits() {
 		ok, reason := m.Editor.eng.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
 		if !ok {
 			slog.Warn("instant apply failed", "reason", reason)
@@ -1204,8 +1226,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 			return nil
 		}
 		m.AgentPane.AppendMeta("[applied]\n")
-		m.Session.CompleteApproval()
-		m.Session.Continue()
+		m.Session.ApproveAndContinue()
 		m.AgentPane.SetStatus(event.StatusThinking)
 		m.refreshProjectPane()
 		return nil
@@ -1337,14 +1358,24 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	}
 
 	anim.edit.Complete()
-	m.Session.CompleteApproval()
 	m.refreshProjectPane()
 
 	anim.state = animWaiting
-	m.AgentPane.SetStatus(event.StatusEditing)
 
 	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)
+
+	// At LevelCollaborate or higher, approve and continue atomically
+	// so the agent proceeds without requiring a manual Ctrl+N.
+	if m.dial.AutoContinue() {
+		m.Editor.Anim = nil
+		m.Session.ApproveAndContinue()
+		m.AgentPane.SetStatus(event.StatusThinking)
+		return nil
+	}
+
+	m.Session.CompleteApproval()
+	m.AgentPane.SetStatus(event.StatusEditing)
 	return nil
 }
 

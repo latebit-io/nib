@@ -15,8 +15,5 @@ import (
 // info and support runtime profile switching even when the provider is nil.
 func NewProvider(projectRoot string) (llm.Provider, *llmconfig.Config, *llmconfig.Resolved) {
 	cfg, resolved := llmconfig.Resolve(projectRoot)
-	if !resolved.HasProvider() {
-		return nil, cfg, resolved
-	}
-	return llm.NewAgentAPI(resolved.BaseURL, resolved.Model, resolved.APIKey), cfg, resolved
+	return resolved.NewProvider(), cfg, resolved
 }

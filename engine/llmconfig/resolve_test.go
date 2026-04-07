@@ -225,8 +225,8 @@ func TestResolveProfile(t *testing.T) {
 		if r.Model != "test-model" {
 			t.Errorf("Model = %q", r.Model)
 		}
-		if r.APIKey != "secret" {
-			t.Errorf("APIKey = %q", r.APIKey)
+		if r.apiKey != "secret" {
+			t.Errorf("APIKey = %q", r.apiKey)
 		}
 		if r.Profile != "test" {
 			t.Errorf("Profile = %q", r.Profile)
@@ -245,8 +245,8 @@ func TestResolveProfile(t *testing.T) {
 		if r.Model != DefaultModel {
 			t.Errorf("Model = %q, want default", r.Model)
 		}
-		if r.APIKey != "fallback" {
-			t.Errorf("APIKey = %q, want fallback from LLM_API_KEY", r.APIKey)
+		if r.apiKey != "fallback" {
+			t.Errorf("APIKey = %q, want fallback from LLM_API_KEY", r.apiKey)
 		}
 	})
 

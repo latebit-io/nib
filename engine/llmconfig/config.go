@@ -5,6 +5,8 @@ package llmconfig
 import (
 	"slices"
 	"strings"
+
+	"github.com/latebit-io/junto/engine/llm"
 )
 
 // Profile holds the configuration for a single LLM provider endpoint.
@@ -24,10 +26,12 @@ type Config struct {
 
 // Resolved holds the final merged configuration with all values populated.
 // Produced by [Resolve]; consumed by wire and session.
+// The API key is kept private — use [Resolved.NewProvider] to create a
+// provider, or [Resolved.HasProvider] to check availability.
 type Resolved struct {
 	BaseURL   string // full endpoint URL
 	Model     string // model identifier sent to the provider
-	APIKey    string // actual secret resolved from the environment
+	apiKey    string // actual secret resolved from the environment (private)
 	APIKeyEnv string // which env var supplied the key (for diagnostics)
 	Profile   string // active profile name ("env" if env-var-only)
 }
@@ -43,7 +47,16 @@ func (r *Resolved) DisplayModel() string {
 
 // HasProvider reports whether enough configuration exists to create
 // an LLM provider (at minimum, a non-empty API key).
-func (r *Resolved) HasProvider() bool { return r.APIKey != "" }
+func (r *Resolved) HasProvider() bool { return r.apiKey != "" }
+
+// NewProvider creates an LLM provider from the resolved configuration.
+// Returns nil if no API key is available.
+func (r *Resolved) NewProvider() llm.Provider {
+	if r.apiKey == "" {
+		return nil
+	}
+	return llm.NewAgentAPI(r.BaseURL, r.Model, r.apiKey)
+}
 
 // ProfileNames returns the sorted list of profile names in the config.
 // Returns nil if no profiles are defined.

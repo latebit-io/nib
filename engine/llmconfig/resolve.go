@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"maps"
 	"os"
 	"path/filepath"
 )
@@ -72,11 +71,17 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 	if r.APIKeyEnv == "" {
 		r.APIKeyEnv = DefaultKeyEnv
 	}
-	r.APIKey = os.Getenv(r.APIKeyEnv)
+	r.apiKey = os.Getenv(r.APIKeyEnv)
 
-	// LLM_API_KEY always wins if set.
-	if key := os.Getenv("LLM_API_KEY"); key != "" {
-		r.APIKey = key
+	// Environment variable overrides — same precedence as Resolve().
+	if v := os.Getenv("LLM_BASE_URL"); v != "" {
+		r.BaseURL = v
+	}
+	if v := os.Getenv("LLM_MODEL"); v != "" {
+		r.Model = v
+	}
+	if v := os.Getenv("LLM_API_KEY"); v != "" {
+		r.apiKey = v
 	}
 	return r
 }
@@ -110,7 +115,7 @@ func resolve(cfg *Config) *Resolved {
 	}
 
 	// Resolve API key from the named env var.
-	r.APIKey = os.Getenv(r.APIKeyEnv)
+	r.apiKey = os.Getenv(r.APIKeyEnv)
 
 	// Environment variable overrides (highest priority).
 	if v := os.Getenv("LLM_BASE_URL"); v != "" {
@@ -120,7 +125,7 @@ func resolve(cfg *Config) *Resolved {
 		r.Model = v
 	}
 	if v := os.Getenv("LLM_API_KEY"); v != "" {
-		r.APIKey = v
+		r.apiKey = v
 	}
 
 	return r
@@ -147,9 +152,9 @@ func loadFile(path string) *Config {
 	return &cfg
 }
 
-// mergeConfigs overlays src onto dst. Profiles are merged by name
-// (src profiles override dst profiles with the same name, new profiles
-// are added). Active is overridden if non-empty in src.
+// mergeConfigs overlays src onto dst. Profiles are merged by name:
+// existing profiles get non-empty fields overwritten, new profiles are added.
+// Active is overridden if non-empty in src.
 func mergeConfigs(dst, src *Config) {
 	if src.Active != "" {
 		dst.Active = src.Active
@@ -157,7 +162,19 @@ func mergeConfigs(dst, src *Config) {
 	if dst.Profiles == nil {
 		dst.Profiles = make(map[string]Profile)
 	}
-	maps.Copy(dst.Profiles, src.Profiles)
+	for name, sp := range src.Profiles {
+		dp := dst.Profiles[name]
+		if sp.BaseURL != "" {
+			dp.BaseURL = sp.BaseURL
+		}
+		if sp.Model != "" {
+			dp.Model = sp.Model
+		}
+		if sp.APIKeyEnv != "" {
+			dp.APIKeyEnv = sp.APIKeyEnv
+		}
+		dst.Profiles[name] = dp
+	}
 }
 
 // globalConfigPath returns <UserConfigDir>/junto/llm.json.

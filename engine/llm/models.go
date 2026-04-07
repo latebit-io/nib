@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 )
 
 // ModelInfo describes an available model from a provider.
@@ -42,8 +41,7 @@ func (a *AgentAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 		req.Header.Set("Authorization", "Bearer "+a.apiKey)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := a.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("llm: list models: %w", err)
 	}

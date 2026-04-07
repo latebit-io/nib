@@ -13,7 +13,6 @@ import (
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/wire"
@@ -161,10 +160,11 @@ func run() error {
 			if !resolved.HasProvider() {
 				return "", fmt.Errorf("profile %q: no API key (set %s)", name, resolved.APIKeyEnv)
 			}
-			newProvider := llm.NewAgentAPI(resolved.BaseURL, resolved.Model, resolved.APIKey)
-			if ag != nil {
-				ag.SetProvider(newProvider)
+			if ag == nil {
+				return "", fmt.Errorf("agent not initialized — restart with an API key to enable agent features")
 			}
+			newProvider := resolved.NewProvider()
+			ag.SetProvider(newProvider)
 			sess.SetLLMInfo(resolved.DisplayModel(), resolved.Profile)
 			slog.Info("llm: switched profile", "profile", name, "model", resolved.Model)
 			return resolved.DisplayModel(), nil

@@ -114,6 +114,11 @@ func (s *ModelSelectorModel) RenderOverlay(background string, width, height int)
 		bgLines = append(bgLines, "")
 	}
 
+	// Bail out if the terminal is too narrow for any useful display.
+	if width < 10 || height < 5 {
+		return background
+	}
+
 	// Determine box dimensions.
 	maxLabelW := 0
 	for _, p := range s.Profiles {
@@ -127,8 +132,12 @@ func (s *ModelSelectorModel) RenderOverlay(background string, width, height int)
 	if boxInnerW < modelSelMinWidth {
 		boxInnerW = modelSelMinWidth
 	}
-	if boxInnerW > width-4 {
-		boxInnerW = width - 4
+	maxInner := width - 4
+	if maxInner < 1 {
+		maxInner = 1
+	}
+	if boxInnerW > maxInner {
+		boxInnerW = maxInner
 	}
 
 	visible := len(s.Profiles)
@@ -157,7 +166,11 @@ func (s *ModelSelectorModel) RenderOverlay(background string, width, height int)
 		if p == s.Current {
 			indicator = "● "
 		}
-		label := indicator + p
+		availW := boxInnerW - runewidth.StringWidth(indicator)
+		if availW < 0 {
+			availW = 0
+		}
+		label := indicator + runewidth.Truncate(p, availW, "…")
 		padW := boxInnerW - runewidth.StringWidth(label)
 		if padW > 0 {
 			label += strings.Repeat(" ", padW)

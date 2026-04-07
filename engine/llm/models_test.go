@@ -7,20 +7,25 @@ import (
 	"testing"
 )
 
-func newModelServer(t *testing.T, status int, body string) *AgentAPI {
+func newModelServer(t *testing.T, status int, body, wantAuth string) *AgentAPI {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Errorf("Authorization = %q, want Bearer test-key", got)
+		if got := r.Header.Get("Authorization"); got != wantAuth {
+			t.Errorf("Authorization = %q, want %q", got, wantAuth)
 		}
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body)) // test server, error irrelevant
 	}))
 	t.Cleanup(srv.Close)
-	return NewAgentAPI(srv.URL, "test-model", "test-key")
+	key := ""
+	if wantAuth != "" {
+		// Extract key from "Bearer <key>".
+		key = wantAuth[len("Bearer "):]
+	}
+	return NewAgentAPI(srv.URL, "test-model", key)
 }
 
 func TestListModels(t *testing.T) {
@@ -41,7 +46,7 @@ func TestListModels(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			api := newModelServer(t, tt.status, tt.body)
+			api := newModelServer(t, tt.status, tt.body, "Bearer test-key")
 			models, err := api.ListModels(context.Background())
 
 			if tt.wantErr {
@@ -63,5 +68,16 @@ func TestListModels(t *testing.T) {
 				t.Error("Name should not be empty (falls back to ID)")
 			}
 		})
+	}
+}
+
+func TestListModels_NoAuth(t *testing.T) {
+	api := newModelServer(t, http.StatusOK, `{"data":[{"id":"public-model"}]}`, "")
+	models, err := api.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "public-model" {
+		t.Errorf("got %v, want [{public-model public-model}]", models)
 	}
 }

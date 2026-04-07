@@ -46,6 +46,8 @@ const (
 	ActionAgentApprove
 	ActionAgentReject
 	ActionAgentContinue
+	// ActionDialCycle cycles the autonomy level dial (guided → collaborate → trust → guided).
+	ActionDialCycle
 
 	// View actions control pane visibility and focus.
 	ActionOpenPalette
@@ -141,6 +143,7 @@ func DefaultBindings() []Binding {
 		{ActionAgentApprove, "Approve edit", []string{"Ctrl+O"}, CatAgent},
 		{ActionAgentReject, "Reject / Cancel", []string{"Escape"}, CatAgent},
 		{ActionAgentContinue, "Continue agent", []string{"Ctrl+N"}, CatAgent},
+		{ActionDialCycle, "Cycle autonomy dial", []string{"Alt+A"}, CatAgent},
 
 		// View
 		{ActionOpenPalette, "Open file palette", []string{"Ctrl+P"}, CatView},

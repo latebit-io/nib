@@ -100,7 +100,8 @@ type AppModel struct {
 	Palette       PaletteModel
 	Help          HelpModel
 	SearchOverlay SearchOverlayModel
-	recentMouse   bool // tracks leaked CSI prefix from unparsed mouse events
+	recentMouse   bool          // tracks leaked CSI prefix from unparsed mouse events
+	dial          AutonomyLevel // current autonomy level; defaults to LevelGuided
 	Services      *Services
 	Keymap        *Keymap
 	Quit          bool
@@ -138,6 +139,7 @@ func NewApp(sess *session.Session) AppModel {
 		Regions:     rm,
 		Services:    svc,
 		Keymap:      km,
+		dial:        LevelGuided,
 		SearchOverlay: SearchOverlayModel{
 			SearchFunc: func(pattern string) ([]search.Result, error) {
 				return sess.Search(pattern, search.Options{})
@@ -496,6 +498,10 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.Editor.eng.ScrollOffset = target
 			m.Editor.syncExtraVisualLines()
 			m.Editor.eng.ClampScroll()
+			// At LevelTrusted, skip the review step and apply immediately.
+			if m.dial.AutoApproveEdits() {
+				cmd = m.startAnimatedApproval()
+			}
 		} else {
 			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
 			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
@@ -671,6 +677,11 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ActionDialCycle:
+		m.dial = m.dial.Cycle()
+		m.Editor.StatusMsg = m.dial.String()
+		return m, nil
+
 	case ActionAgentStart:
 		if m.Session.HasAgent() {
 			m.AgentPane.SetInputActive(true)
@@ -772,7 +783,8 @@ func (m *AppModel) View() tea.View {
 	if m.Width == 0 || m.Height == 0 {
 		content = "Initializing..."
 	} else {
-		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, m.Session.DistributedMemory()...)
+		indicators := append(m.Session.DistributedMemory(), m.dial.String())
+		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
 		if m.Dialog.Active {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Help.Active {
@@ -1195,7 +1207,8 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 
 	// Instant-apply: skip animation, apply the full edit atomically,
 	// and auto-continue so the agent proceeds without Ctrl+N.
-	if m.Editor.InstantApply {
+	// LevelTrusted behaves identically to InstantApply.
+	if m.Editor.InstantApply || m.dial.AutoApproveEdits() {
 		ok, reason := m.Editor.eng.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
 		if !ok {
 			slog.Warn("instant apply failed", "reason", reason)
@@ -1341,10 +1354,20 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	m.refreshProjectPane()
 
 	anim.state = animWaiting
-	m.AgentPane.SetStatus(event.StatusEditing)
 
 	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)
+
+	// At LevelCollaborate or higher, continue the agent automatically
+	// without requiring a manual Ctrl+N.
+	if m.dial.AutoContinue() {
+		m.Editor.Anim = nil
+		m.Session.Continue()
+		m.AgentPane.Status = event.StatusThinking
+		return nil
+	}
+
+	m.AgentPane.Status = event.StatusEditing
 	return nil
 }
 

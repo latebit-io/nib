@@ -488,14 +488,17 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
 
-			// At LevelTrusted, skip the overlay/review step entirely and
-			// proceed straight to approval. No overlay, no visual-line sync
-			// — startAnimatedApproval handles its own scroll and apply.
+			// Build the overlay — startAnimatedApproval reads it for
+			// search/replace content even when we skip the visual review.
+			m.Editor.Overlay = NewDiffOverlay(diff)
+
 			if m.dial.AutoApproveEdits() {
+				// At LevelTrusted, skip the visual review step and apply
+				// immediately. No activation, no visual-line sync —
+				// startAnimatedApproval handles its own scroll and apply.
 				cmd = m.startAnimatedApproval()
 			} else {
 				m.AgentPane.SetStatus(event.StatusReviewing)
-				m.Editor.Overlay = NewDiffOverlay(diff)
 				m.Editor.Overlay.Active = true
 				// Auto-scroll so the diff is visible with some context above.
 				target := diff.StartLine - 3
@@ -1223,8 +1226,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 			return nil
 		}
 		m.AgentPane.AppendMeta("[applied]\n")
-		m.Session.CompleteApproval()
-		m.Session.Continue()
+		m.Session.ApproveAndContinue()
 		m.AgentPane.SetStatus(event.StatusThinking)
 		m.refreshProjectPane()
 		return nil
@@ -1356,7 +1358,6 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	}
 
 	anim.edit.Complete()
-	m.Session.CompleteApproval()
 	m.refreshProjectPane()
 
 	anim.state = animWaiting
@@ -1364,15 +1365,16 @@ func (m *AppModel) finishAnimation() tea.Cmd {
 	line, col := anim.edit.Position()
 	slog.Debug("animation complete", "line", line, "col", col)
 
-	// At LevelCollaborate or higher, continue the agent automatically
-	// without requiring a manual Ctrl+N.
+	// At LevelCollaborate or higher, approve and continue atomically
+	// so the agent proceeds without requiring a manual Ctrl+N.
 	if m.dial.AutoContinue() {
 		m.Editor.Anim = nil
-		m.Session.Continue()
+		m.Session.ApproveAndContinue()
 		m.AgentPane.SetStatus(event.StatusThinking)
 		return nil
 	}
 
+	m.Session.CompleteApproval()
 	m.AgentPane.SetStatus(event.StatusEditing)
 	return nil
 }

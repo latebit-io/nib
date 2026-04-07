@@ -133,6 +133,8 @@ func DefaultKeymap() *Keymap {
 			"ctrl+g": ActionAgentStart,
 			"alt+g":  ActionAgentPlan,
 			"©":      ActionAgentPlan, // macOS: Option+G sends ©
+			"alt+a":  ActionDialCycle,
+			"å":      ActionDialCycle, // macOS: Option+A sends å
 			"ctrl+p": ActionOpenPalette,
 			"ctrl+b": ActionToggleProject,
 			"ctrl+/": ActionToggleComment,

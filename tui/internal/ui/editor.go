@@ -13,6 +13,7 @@ import (
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -733,6 +734,14 @@ func (m *EditorModel) renderNormalLine(
 	var line strings.Builder
 
 	isAgentLine := m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent
+
+	// Sanitize agent-origin lines to prevent ANSI injection from LLM output.
+	lineText := m.eng.Buf.LineText(lineIdx)
+	if isAgentLine {
+		var san sanitize.Sanitizer
+		lineText = san.Sanitize(lineText)
+	}
+
 	numText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1)
 	if diag := m.diagnosticForLine(lineIdx); diag != nil {
 		// Diagnostic icon takes priority in the gutter suffix.
@@ -754,7 +763,7 @@ func (m *EditorModel) renderNormalLine(
 		line.WriteString(gutterStyle.Render(numText + " "))
 	}
 
-	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
+	rawRunes := []rune(lineText)
 	expanded, bufToDisp := expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
 	displayed := m.fillDisplay(expanded, contentW, scrollCol)
@@ -1024,7 +1033,13 @@ func (m *EditorModel) renderRemovedLine(
 	gutterText := fmt.Sprintf("%*d-", gutterW-1, lineIdx+1)
 	line.WriteString(gutterSt.Render(gutterText))
 
-	rawRunes := []rune(m.eng.Buf.LineText(lineIdx))
+	// Sanitize agent-origin lines to prevent ANSI injection from LLM output.
+	removedText := m.eng.Buf.LineText(lineIdx)
+	if m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent {
+		var san sanitize.Sanitizer
+		removedText = san.Sanitize(removedText)
+	}
+	rawRunes := []rune(removedText)
 	expanded, bufToDisp := expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
 	displayed := m.fillDisplay(expanded, contentW, scrollCol)

@@ -1557,6 +1557,16 @@ func (s *Session) RejectEdit() {
 	s.agent.Reject()
 }
 
+// ApproveAndContinue atomically approves the edit and continues the agent.
+// Use this when the agent should proceed immediately after approval (e.g.
+// instant-apply, auto-continue at higher autonomy levels). Serialising both
+// steps inside the session avoids the TUI orchestrating multi-step engine
+// transitions.
+func (s *Session) ApproveAndContinue() {
+	s.CompleteApproval()
+	s.Continue()
+}
+
 // Continue signals the agent to proceed after the developer has finished editing.
 // Sends the content of the file that was last edited (not necessarily the
 // currently active file, in case the user switched files after approving).

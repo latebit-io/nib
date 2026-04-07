@@ -374,6 +374,22 @@ func drain[T any](ch chan T) {
 	}
 }
 
+// SetProvider replaces the LLM provider for subsequent turns.
+// Safe to call while the agent is waiting for input — the next
+// processLLMTurn call will use the new provider.
+func (a *Agent) SetProvider(p llm.Provider) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.provider = p
+}
+
+// currentProvider returns the active provider under lock.
+func (a *Agent) currentProvider() llm.Provider {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.provider
+}
+
 // Approve signals that the user approved the pending edit.
 func (a *Agent) Approve() {
 	select {
@@ -553,7 +569,7 @@ func (a *Agent) planningToolDefs() []llm.ToolDef {
 // toolDefs controls which tools the LLM can invoke for this turn.
 func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, error) {
 	for {
-		ch, err := a.provider.Stream(ctx, messages, toolDefs)
+		ch, err := a.currentProvider().Stream(ctx, messages, toolDefs)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
 			a.send(event.AgentError{Err: fmt.Sprintf("LLM error: %v", err)})

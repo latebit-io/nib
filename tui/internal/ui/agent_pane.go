@@ -58,6 +58,10 @@ type AgentPaneModel struct {
 	// Set via SetStatus, read via StatusKind.
 	status event.StatusKind
 
+	// modelLabel is the display name of the active LLM model (e.g. "gemini-2.5-flash").
+	// Shown on the left side of the status line. Set via SetModelLabel.
+	modelLabel string
+
 	// Output selection — fully internal, driven by mouse events on the
 	// output region. Not accessed outside agent_pane.go.
 	selActive   bool
@@ -122,6 +126,9 @@ func (m *AgentPaneModel) SetStatus(s event.StatusKind) { m.status = s }
 
 // StatusKind returns the current agent status.
 func (m *AgentPaneModel) StatusKind() event.StatusKind { return m.status }
+
+// SetModelLabel sets the display name shown in the agent pane status line.
+func (m *AgentPaneModel) SetModelLabel(label string) { m.modelLabel = label }
 
 // SetInputActive sets keyboard focus on or off for the input textarea.
 func (m *AgentPaneModel) SetInputActive(active bool) {
@@ -911,6 +918,27 @@ func (m *AgentPaneModel) padLine(s string) string {
 	return s + strings.Repeat(" ", m.width-w)
 }
 
+// renderStatusLine builds the status line with the model label on the left
+// and the status message on the right, padded to m.width.
+func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string) string {
+	left := ""
+	if m.modelLabel != "" {
+		left = " " + m.modelLabel
+	}
+	right := ""
+	if statusMsg != "" {
+		right = statusMsg + " "
+	}
+	leftW := runewidth.StringWidth(left)
+	rightW := runewidth.StringWidth(right)
+	padding := m.width - leftW - rightW
+	if padding < 1 {
+		// Not enough space — truncate to fit.
+		return style.Render(m.padLine(left))
+	}
+	return style.Render(left + strings.Repeat(" ", padding) + right)
+}
+
 // Render renders the agent pane as exactly m.height lines joined by \n.
 func (m *AgentPaneModel) Render() string {
 	if m.height <= 0 || m.width <= 0 {
@@ -1063,30 +1091,30 @@ func (m *AgentPaneModel) Render() string {
 		row++
 	}
 
-	// Status line (last row)
+	// Status line (last row): model label on the left, status on the right.
 	if row < m.height {
-		var statusText string
+		var statusMsg string
+		style := agentStatusStyle
 		switch m.status {
 		case event.StatusIdle:
-			statusText = agentDimStyle.Render(m.padLine(" Ready"))
+			statusMsg = "Ready"
+			style = agentDimStyle
 		case event.StatusThinking:
-			statusText = agentStatusStyle.Render(m.padLine(" Thinking..."))
+			statusMsg = "Thinking..."
 		case event.StatusPlanning:
-			statusText = agentStatusStyle.Render(m.padLine(" Planning..."))
+			statusMsg = "Planning..."
 		case event.StatusPlanningWaiting:
-			statusText = agentStatusStyle.Render(m.padLine(" Planning | :done to execute | :skip"))
+			statusMsg = "Planning | :done to execute | :skip"
 		case event.StatusReviewing:
-			statusText = agentStatusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
+			statusMsg = "Ctrl+O approve | Esc reject"
 		case event.StatusEditing:
-			statusText = agentStatusStyle.Render(m.padLine(" Ctrl+N to continue"))
+			statusMsg = "Ctrl+N to continue"
 		case event.StatusWaiting:
-			statusText = agentStatusStyle.Render(m.padLine(" Type to reply | Enter send"))
+			statusMsg = "Type to reply | Enter send"
 		case event.StatusTyping:
-			statusText = agentStatusStyle.Render(m.padLine(" Agent typing... | Esc cancel"))
-		default:
-			statusText = m.padLine("")
+			statusMsg = "Agent typing... | Esc cancel"
 		}
-		output[row] = statusText
+		output[row] = m.renderStatusLine(style, statusMsg)
 	}
 
 	return strings.Join(output, "\n")

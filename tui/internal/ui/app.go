@@ -100,14 +100,25 @@ type AppModel struct {
 	Palette       PaletteModel
 	Help          HelpModel
 	SearchOverlay SearchOverlayModel
+	ModelSelector ModelSelectorModel
 	recentMouse   bool          // tracks leaked CSI prefix from unparsed mouse events
 	dial          AutonomyLevel // current autonomy level; defaults to LevelGuided
-	Services      *Services
-	Keymap        *Keymap
-	Quit          bool
-	Width         int
-	Height        int
-	program       *tea.Program
+
+	// SwitchProfile is called to switch the active LLM profile at runtime.
+	// Set by the entry point (main.go) — nil when no profiles are configured.
+	// Returns the display model name on success.
+	SwitchProfile func(name string) (displayModel string, err error)
+
+	// ProfileNames returns the available LLM profile names.
+	// Set by the entry point — nil when no profiles are configured.
+	ProfileNames func() []string
+
+	Services *Services
+	Keymap   *Keymap
+	Quit     bool
+	Width    int
+	Height   int
+	program  *tea.Program
 }
 
 // SetProgram sets the tea.Program reference.
@@ -176,6 +187,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPressMsg:
 			m.Help.Update(typed, m.Height-2)
 			return m, nil
+		case tea.MouseMsg:
+			return m, nil
+		}
+	}
+
+	// Model selector is modal — captures all input when active
+	if m.ModelSelector.Active {
+		switch typed := msg.(type) {
+		case tea.KeyPressMsg:
+			cmd := m.ModelSelector.Update(typed)
+			return m, cmd
 		case tea.MouseMsg:
 			return m, nil
 		}
@@ -279,6 +301,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// File listing completed — open the palette with results
 	case paletteFilesMsg:
 		m.Palette.Open(msg.items)
+		return m, nil
+
+	// Model selector result — user selected a profile or cancelled
+	case ModelSelectorResultMsg:
+		if !msg.Cancelled && m.SwitchProfile != nil {
+			displayModel, err := m.SwitchProfile(msg.Profile)
+			if err != nil {
+				m.AgentPane.AppendMeta("\n[model switch failed: " + err.Error() + "]\n")
+			} else {
+				m.AgentPane.SetModelLabel(displayModel)
+				m.AgentPane.AppendMeta("\n[switched to " + msg.Profile + ": " + displayModel + "]\n")
+			}
+		}
 		return m, nil
 
 	// Palette result — user selected a file or cancelled
@@ -688,6 +723,17 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.dial = m.dial.Cycle()
 		return m, nil
 
+	case ActionModelSelector:
+		if m.ProfileNames != nil {
+			names := m.ProfileNames()
+			if len(names) > 0 {
+				m.ModelSelector.Width = m.Width
+				m.ModelSelector.Height = m.Height
+				m.ModelSelector.Open(names, m.Session.LLMProfile())
+			}
+		}
+		return m, nil
+
 	case ActionAgentStart:
 		if m.Session.HasAgent() {
 			m.AgentPane.SetInputActive(true)
@@ -798,6 +844,8 @@ func (m *AppModel) View() tea.View {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Help.Active {
 			content = m.Help.RenderOverlay(base, m.Width, m.Height)
+		} else if m.ModelSelector.Active {
+			content = m.ModelSelector.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Palette.Active {
 			content = m.Palette.RenderOverlay(base, m.Width, m.Height)
 		} else if m.SearchOverlay.Active {

@@ -13,6 +13,8 @@ import (
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/wire"
 	"github.com/latebit-io/junto/tui/internal/ui"
@@ -114,8 +116,12 @@ func run() error {
 		return fmt.Errorf("memory: install binaries: %w", err)
 	}
 
-	// Create LLM provider and agent from environment.
-	provider := wire.NewProvider()
+	// Create LLM provider and agent from configuration.
+	provider, llmCfg, llmResolved := wire.NewProvider(projectRoot)
+	if llmResolved != nil {
+		sess.SetLLMInfo(llmResolved.DisplayModel(), llmResolved.Profile)
+	}
+	var ag *agent.Agent
 	if provider != nil {
 		// Start memory server — only needed when agent is active.
 		mem, err := wire.StartMemory(projectRoot)
@@ -132,7 +138,7 @@ func run() error {
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
 		}
-		ag := agent.New(provider, sess, events, opts, mcpResult.Tools...)
+		ag = agent.New(provider, sess, events, opts, mcpResult.Tools...)
 		sess.SetAgent(ag, events)
 		sess.SetMemoryStore(mem.Store)
 	} else if lspMgr != nil {
@@ -141,6 +147,29 @@ func run() error {
 	}
 
 	app := ui.NewApp(sess)
+	if llmResolved != nil && llmResolved.HasProvider() {
+		app.AgentPane.SetModelLabel(llmResolved.DisplayModel())
+	}
+	// Wire profile switching — closures capture ag and llmCfg.
+	if llmCfg != nil && len(llmCfg.Profiles) > 0 {
+		app.ProfileNames = llmCfg.ProfileNames
+		app.SwitchProfile = func(name string) (string, error) {
+			resolved := llmconfig.ResolveProfile(llmCfg, name)
+			if resolved == nil {
+				return "", fmt.Errorf("profile %q not found", name)
+			}
+			if !resolved.HasProvider() {
+				return "", fmt.Errorf("profile %q: no API key (set %s)", name, resolved.APIKeyEnv)
+			}
+			newProvider := llm.NewAgentAPI(resolved.BaseURL, resolved.Model, resolved.APIKey)
+			if ag != nil {
+				ag.SetProvider(newProvider)
+			}
+			sess.SetLLMInfo(resolved.DisplayModel(), resolved.Profile)
+			slog.Info("llm: switched profile", "profile", name, "model", resolved.Model)
+			return resolved.DisplayModel(), nil
+		}
+	}
 
 	// Agent typing speed (words per minute)
 	if wpmStr := os.Getenv("JUNTO_TYPING_WPM"); wpmStr != "" {

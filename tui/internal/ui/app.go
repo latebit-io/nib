@@ -485,22 +485,26 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshDiagnostics(m.Session.ActiveFile())
 		}
 		if diff != nil {
-			m.AgentPane.SetStatus(event.StatusReviewing)
 			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
-			m.Editor.Overlay = NewDiffOverlay(diff)
-			m.Editor.Overlay.Active = true
-			// Auto-scroll so the diff is visible with some context above.
-			target := diff.StartLine - 3
-			if target < 0 {
-				target = 0
-			}
-			m.Editor.eng.ScrollOffset = target
-			m.Editor.syncExtraVisualLines()
-			m.Editor.eng.ClampScroll()
-			// At LevelTrusted, skip the review step and apply immediately.
+
+			// At LevelTrusted, skip the overlay/review step entirely and
+			// proceed straight to approval. No overlay, no visual-line sync
+			// — startAnimatedApproval handles its own scroll and apply.
 			if m.dial.AutoApproveEdits() {
 				cmd = m.startAnimatedApproval()
+			} else {
+				m.AgentPane.SetStatus(event.StatusReviewing)
+				m.Editor.Overlay = NewDiffOverlay(diff)
+				m.Editor.Overlay.Active = true
+				// Auto-scroll so the diff is visible with some context above.
+				target := diff.StartLine - 3
+				if target < 0 {
+					target = 0
+				}
+				m.Editor.eng.ScrollOffset = target
+				m.Editor.syncExtraVisualLines()
+				m.Editor.eng.ClampScroll()
 			}
 		} else {
 			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
@@ -783,7 +787,10 @@ func (m *AppModel) View() tea.View {
 	if m.Width == 0 || m.Height == 0 {
 		content = "Initializing..."
 	} else {
-		indicators := append(m.Session.DistributedMemory(), m.dial.String())
+		mem := m.Session.DistributedMemory()
+		indicators := make([]string, len(mem)+1)
+		copy(indicators, mem)
+		indicators[len(mem)] = m.dial.String()
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
 		if m.Dialog.Active {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)

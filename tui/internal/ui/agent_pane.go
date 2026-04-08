@@ -14,8 +14,42 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// InputHeight is the number of rows reserved for the input area (separator + input + status).
-const InputHeight = 5
+// inputHeight returns the number of rows reserved for the input area
+// (separator + input + status). Uses 1/6 of the pane height, minimum 5.
+func (m *AgentPaneModel) inputHeight() int {
+	h := m.height / 6
+	if h < 5 {
+		h = 5
+	}
+	return h
+}
+
+// modelSelHeight returns the number of rows reserved for the bottom area
+// when the model selector is active — uses half the pane, minimum 10 rows.
+func (m *AgentPaneModel) modelSelHeight() int {
+	maxH := m.height - 2
+	if maxH < 0 {
+		maxH = 0
+	}
+	h := m.height / 2
+	if h < 10 {
+		h = 10
+	}
+	if h > maxH {
+		h = maxH
+	}
+	return h
+}
+
+// inlineDisplayReplacer strips newlines/carriage returns that would break
+// single-line display labels in the selector and status line.
+var inlineDisplayReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+
+// sanitizeInlineDisplay strips ANSI escapes and forces single-line output.
+func sanitizeInlineDisplay(s string) string {
+	var san sanitize.Sanitizer
+	return inlineDisplayReplacer.Replace(san.Sanitize(s))
+}
 
 // fenceState records the active code fence after processing a raw line.
 // Zero value means "not inside a code block".
@@ -57,6 +91,18 @@ type AgentPaneModel struct {
 	// status is the current agent status (idle, thinking, reviewing, etc.).
 	// Set via SetStatus, read via StatusKind.
 	status event.StatusKind
+
+	// modelLabel is the display name of the active LLM model (e.g. "gemini-2.5-flash").
+	// Shown on the left side of the status line. Set via SetModelLabel.
+	modelLabel string
+
+	// modelSelector state — when active, replaces the input area with a model list.
+	modelSelActive   bool
+	modelSelItems    []ModelSelectorItem
+	modelSelSelected int
+	modelSelCurrent  string   // current model ID (highlighted with ●)
+	modelSelProfile  string   // profile name shown in title
+	modelSelProfiles []string // all available profiles (for Tab cycling)
 
 	// Output selection — fully internal, driven by mouse events on the
 	// output region. Not accessed outside agent_pane.go.
@@ -123,6 +169,100 @@ func (m *AgentPaneModel) SetStatus(s event.StatusKind) { m.status = s }
 // StatusKind returns the current agent status.
 func (m *AgentPaneModel) StatusKind() event.StatusKind { return m.status }
 
+// SetModelLabel sets the display name shown in the agent pane status line.
+func (m *AgentPaneModel) SetModelLabel(label string) { m.modelLabel = label }
+
+// OpenModelSelector activates the inline model selector, replacing the input area.
+// profiles is the full list of available profiles (for Tab cycling); may be nil.
+func (m *AgentPaneModel) OpenModelSelector(items []ModelSelectorItem, profile, currentModel string, profiles []string) {
+	m.modelSelActive = true
+	m.modelSelItems = items
+	m.modelSelProfile = profile
+	m.modelSelCurrent = currentModel
+	m.modelSelProfiles = profiles
+	m.modelSelSelected = 0
+	for i, item := range items {
+		if item.ID == currentModel {
+			m.modelSelSelected = i
+			break
+		}
+	}
+	m.recomputeInputLayout()
+}
+
+// CloseModelSelector deactivates the inline model selector.
+func (m *AgentPaneModel) CloseModelSelector() {
+	m.modelSelActive = false
+	m.modelSelItems = nil
+	m.recomputeInputLayout()
+	m.clampScroll()
+}
+
+// IsModelSelectorActive reports whether the inline model selector is open.
+func (m *AgentPaneModel) IsModelSelectorActive() bool { return m.modelSelActive }
+
+// modelSelSwitchProfileMsg requests fetching models for a different profile.
+type modelSelSwitchProfileMsg struct {
+	profile string
+}
+
+// UpdateModelSelector handles key input for the inline model selector.
+// Returns a tea.Cmd if a selection or cancellation occurred.
+func (m *AgentPaneModel) UpdateModelSelector(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.Code {
+	case tea.KeyEscape:
+		m.CloseModelSelector()
+		return func() tea.Msg { return ModelSelectorResultMsg{Cancelled: true} }
+	case tea.KeyEnter:
+		if m.modelSelSelected < len(m.modelSelItems) {
+			item := m.modelSelItems[m.modelSelSelected]
+			profile := m.modelSelProfile
+			m.CloseModelSelector()
+			return func() tea.Msg {
+				return ModelSelectorResultMsg{Profile: profile, ModelID: item.ID}
+			}
+		}
+		return nil
+	case tea.KeyTab:
+		// Cycle to next provider profile. Clear items so stale models
+		// can't be selected while the async fetch is in flight.
+		if len(m.modelSelProfiles) > 1 {
+			next := m.nextProfile()
+			m.modelSelProfile = next
+			m.modelSelItems = nil
+			m.modelSelSelected = 0
+			return func() tea.Msg {
+				return modelSelSwitchProfileMsg{profile: next}
+			}
+		}
+		return nil
+	case tea.KeyUp:
+		if m.modelSelSelected > 0 {
+			m.modelSelSelected--
+		}
+		return nil
+	case tea.KeyDown:
+		if len(m.modelSelItems) == 0 {
+			return nil
+		}
+		if m.modelSelSelected < len(m.modelSelItems)-1 {
+			m.modelSelSelected++
+		}
+		return nil
+	}
+	return nil
+}
+
+// nextProfile returns the profile after the current one, wrapping around.
+func (m *AgentPaneModel) nextProfile() string {
+	for i, p := range m.modelSelProfiles {
+		if p == m.modelSelProfile {
+			return m.modelSelProfiles[(i+1)%len(m.modelSelProfiles)]
+		}
+	}
+	return m.modelSelProfiles[0]
+}
+
 // SetInputActive sets keyboard focus on or off for the input textarea.
 func (m *AgentPaneModel) SetInputActive(active bool) {
 	m.inputActive = active
@@ -169,7 +309,11 @@ func (m *AgentPaneModel) SetSize(width, height int) {
 // so that mouse hit-testing uses current values.
 func (m *AgentPaneModel) recomputeInputLayout() {
 	// Input area sits between the separator line and the status line.
-	contentEnd := m.height - InputHeight
+	bottomH := m.inputHeight()
+	if m.modelSelActive {
+		bottomH = m.modelSelHeight()
+	}
+	contentEnd := m.height - bottomH
 	if contentEnd < 0 {
 		contentEnd = 0
 	}
@@ -749,10 +893,13 @@ func (m *AgentPaneModel) Clear() {
 	m.sanitizer = sanitize.Sanitizer{}
 }
 
-// VisibleLines returns the number of content lines visible.
-// Layout: content + InputHeight bottom area (separator + input + status).
+// VisibleLines returns the number of content lines visible above the input area.
 func (m *AgentPaneModel) VisibleLines() int {
-	h := m.height - InputHeight
+	bottomH := m.inputHeight()
+	if m.modelSelActive {
+		bottomH = m.modelSelHeight()
+	}
+	h := m.height - bottomH
 	if h < 1 {
 		h = 1
 	}
@@ -911,6 +1058,173 @@ func (m *AgentPaneModel) padLine(s string) string {
 	return s + strings.Repeat(" ", m.width-w)
 }
 
+// renderInputArea renders the textarea input into the output rows.
+func (m *AgentPaneModel) renderInputArea(output []string, row *int) {
+	inputRows := m.inputAreaEndRow - m.inputAreaStartRow
+	if inputRows < 0 {
+		inputRows = 0
+	}
+	renderedInput := m.input.Render()
+	hasContent := m.inputActive || (len(renderedInput) > 0 && (len(renderedInput) > 1 || renderedInput[0].Text != ""))
+	var cursorVisRow, cursorVisCol int
+	if m.inputActive {
+		cursorVisRow, cursorVisCol = m.input.CursorPosition()
+	}
+
+	for i := range inputRows {
+		if *row >= m.height {
+			break
+		}
+		visIdx := i + m.inputScrollOffset
+		if hasContent && visIdx < len(renderedInput) {
+			lineRunes := []rune(renderedInput[visIdx].Text)
+			var lineBuilder strings.Builder
+			cellsUsed := 0
+
+			for j, r := range lineRunes {
+				rw := runewidth.RuneWidth(r)
+				if cellsUsed+rw > m.width {
+					break
+				}
+				ch := string(r)
+				if m.inputActive && visIdx == cursorVisRow && j == cursorVisCol {
+					lineBuilder.WriteString(agentCursorStyle.Render(ch))
+				} else if m.inputActive && m.input.IsSelected(visIdx, j) {
+					lineBuilder.WriteString(agentSelStyle.Render(ch))
+				} else {
+					lineBuilder.WriteString(ch)
+				}
+				cellsUsed += rw
+			}
+			if m.inputActive && visIdx == cursorVisRow && cursorVisCol >= len(lineRunes) && cellsUsed < m.width {
+				lineBuilder.WriteString(agentCursorStyle.Render(" "))
+				cellsUsed++
+			}
+			if cellsUsed < m.width {
+				lineBuilder.WriteString(strings.Repeat(" ", m.width-cellsUsed))
+			}
+			style := agentInputStyle
+			if !m.inputActive {
+				style = agentInputDim
+			}
+			output[*row] = style.Render(lineBuilder.String())
+		} else if !hasContent && i == 0 {
+			output[*row] = agentInputDim.Render(m.padLine(" Ctrl+G code | Alt+G plan"))
+		} else {
+			output[*row] = strings.Repeat(" ", m.width)
+		}
+		*row++
+	}
+}
+
+// renderModelSelector renders the inline model list in place of the input area.
+func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
+	totalRows := m.inputAreaEndRow - m.inputAreaStartRow
+	if totalRows < 0 {
+		totalRows = 0
+	}
+
+	// Title row showing provider/profile.
+	if totalRows > 0 && *row < m.height {
+		title := " Select Model"
+		if m.modelSelProfile != "" {
+			title = " " + sanitizeInlineDisplay(m.modelSelProfile) + " — Select Model"
+		}
+		title = runewidth.Truncate(title, m.width, "…")
+		padW := m.width - runewidth.StringWidth(title)
+		if padW > 0 {
+			title += strings.Repeat(" ", padW)
+		}
+		output[*row] = agentDimStyle.Render(title)
+		*row++
+		totalRows--
+	}
+
+	// Hint row at the bottom.
+	hintRows := 0
+	if totalRows > 2 {
+		hintRows = 1
+		totalRows--
+	}
+
+	// Model list with scroll.
+	visible := totalRows
+	if visible <= 0 {
+		return
+	}
+	scrollOff := 0
+	if m.modelSelSelected >= visible {
+		scrollOff = m.modelSelSelected - visible + 1
+	}
+
+	for i := range visible {
+		if *row >= m.height {
+			break
+		}
+		idx := scrollOff + i
+		if idx < len(m.modelSelItems) {
+			item := m.modelSelItems[idx]
+			indicator := "  "
+			if item.ID == m.modelSelCurrent {
+				indicator = "● "
+			}
+			label := indicator + sanitizeInlineDisplay(item.Name)
+			label = runewidth.Truncate(label, m.width, "…")
+			padW := m.width - runewidth.StringWidth(label)
+			if padW > 0 {
+				label += strings.Repeat(" ", padW)
+			}
+			if idx == m.modelSelSelected {
+				output[*row] = modelSelSelectedStyle.Render(label)
+			} else if item.ID == m.modelSelCurrent {
+				output[*row] = modelSelCurrentStyle.Render(label)
+			} else {
+				output[*row] = modelSelNormalStyle.Render(label)
+			}
+		} else {
+			output[*row] = strings.Repeat(" ", m.width)
+		}
+		*row++
+	}
+
+	// Hint row.
+	if hintRows > 0 && *row < m.height {
+		hint := " ↑↓ navigate · Enter select · Esc cancel"
+		if len(m.modelSelProfiles) > 1 {
+			hint = " ↑↓ navigate · Tab provider · Enter select · Esc cancel"
+		}
+		hint = runewidth.Truncate(hint, m.width, "")
+		padW := m.width - runewidth.StringWidth(hint)
+		if padW > 0 {
+			hint += strings.Repeat(" ", padW)
+		}
+		output[*row] = agentDimStyle.Render(hint)
+		*row++
+	}
+}
+
+func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string) string {
+	left := ""
+	if m.modelLabel != "" {
+		left = " " + sanitizeInlineDisplay(m.modelLabel)
+	}
+	right := ""
+	if statusMsg != "" {
+		right = statusMsg + " "
+	}
+	leftW := runewidth.StringWidth(left)
+	rightW := runewidth.StringWidth(right)
+	padding := m.width - leftW - rightW
+	if padding < 1 {
+		// Not enough space — prefer the status message over the model label.
+		if right != "" {
+			return style.Render(m.padLine(runewidth.Truncate(right, m.width, "…")))
+		}
+		return style.Render(m.padLine(runewidth.Truncate(left, m.width, "…")))
+	}
+	return style.Render(left + strings.Repeat(" ", padding) + right)
+}
+
 // Render renders the agent pane as exactly m.height lines joined by \n.
 func (m *AgentPaneModel) Render() string {
 	if m.height <= 0 || m.width <= 0 {
@@ -990,7 +1304,11 @@ func (m *AgentPaneModel) Render() string {
 	}
 
 	// Fill remaining content area
-	contentEnd := m.height - InputHeight
+	bottomH := m.inputHeight()
+	if m.modelSelActive {
+		bottomH = m.modelSelHeight()
+	}
+	contentEnd := m.height - bottomH
 	for row < contentEnd {
 		output[row] = strings.Repeat(" ", m.width)
 		row++
@@ -1002,91 +1320,37 @@ func (m *AgentPaneModel) Render() string {
 		row++
 	}
 
-	// Input area: fill rows between separator and status.
-	// Layout values (inputAreaStartRow, inputScrollOffset) are maintained by
-	// recomputeInputLayout — Render reads them, never writes.
-	inputRows := m.inputAreaEndRow - m.inputAreaStartRow
-	if inputRows < 0 {
-		inputRows = 0
-	}
-	renderedInput := m.input.Render()
-	hasContent := m.inputActive || (len(renderedInput) > 0 && (len(renderedInput) > 1 || renderedInput[0].Text != ""))
-	var cursorVisRow, cursorVisCol int
-	if m.inputActive {
-		cursorVisRow, cursorVisCol = m.input.CursorPosition()
+	// Model selector replaces the input area when active.
+	if m.modelSelActive {
+		m.renderModelSelector(output, &row)
+	} else {
+		m.renderInputArea(output, &row)
 	}
 
-	for i := range inputRows {
-		if row >= m.height {
-			break
-		}
-		visIdx := i + m.inputScrollOffset
-		if hasContent && visIdx < len(renderedInput) {
-			lineRunes := []rune(renderedInput[visIdx].Text)
-			var lineBuilder strings.Builder
-			cellsUsed := 0
-
-			for j, r := range lineRunes {
-				rw := runewidth.RuneWidth(r)
-				if cellsUsed+rw > m.width {
-					break
-				}
-				ch := string(r)
-				if m.inputActive && visIdx == cursorVisRow && j == cursorVisCol {
-					lineBuilder.WriteString(agentCursorStyle.Render(ch))
-				} else if m.inputActive && m.input.IsSelected(visIdx, j) {
-					lineBuilder.WriteString(agentSelStyle.Render(ch))
-				} else {
-					lineBuilder.WriteString(ch)
-				}
-				cellsUsed += rw
-			}
-			// Cursor at end of line (past last char) — only when focused.
-			if m.inputActive && visIdx == cursorVisRow && cursorVisCol >= len(lineRunes) && cellsUsed < m.width {
-				lineBuilder.WriteString(agentCursorStyle.Render(" "))
-				cellsUsed++
-			}
-			// Pad to full width.
-			if cellsUsed < m.width {
-				lineBuilder.WriteString(strings.Repeat(" ", m.width-cellsUsed))
-			}
-			style := agentInputStyle
-			if !m.inputActive {
-				style = agentInputDim
-			}
-			output[row] = style.Render(lineBuilder.String())
-		} else if !hasContent && i == 0 {
-			output[row] = agentInputDim.Render(m.padLine(" Ctrl+G code | Alt+G plan"))
-		} else {
-			output[row] = strings.Repeat(" ", m.width)
-		}
-		row++
-	}
-
-	// Status line (last row)
+	// Status line (last row): model label on the left, status on the right.
 	if row < m.height {
-		var statusText string
+		var statusMsg string
+		style := agentStatusStyle
 		switch m.status {
 		case event.StatusIdle:
-			statusText = agentDimStyle.Render(m.padLine(" Ready"))
+			statusMsg = "Ready"
+			style = agentDimStyle
 		case event.StatusThinking:
-			statusText = agentStatusStyle.Render(m.padLine(" Thinking..."))
+			statusMsg = "Thinking..."
 		case event.StatusPlanning:
-			statusText = agentStatusStyle.Render(m.padLine(" Planning..."))
+			statusMsg = "Planning..."
 		case event.StatusPlanningWaiting:
-			statusText = agentStatusStyle.Render(m.padLine(" Planning | :done to execute | :skip"))
+			statusMsg = "Planning | :done to execute | :skip"
 		case event.StatusReviewing:
-			statusText = agentStatusStyle.Render(m.padLine(" Ctrl+O approve | Esc reject"))
+			statusMsg = "Ctrl+O approve | Esc reject"
 		case event.StatusEditing:
-			statusText = agentStatusStyle.Render(m.padLine(" Ctrl+N to continue"))
+			statusMsg = "Ctrl+N to continue"
 		case event.StatusWaiting:
-			statusText = agentStatusStyle.Render(m.padLine(" Type to reply | Enter send"))
+			statusMsg = "Type to reply | Enter send"
 		case event.StatusTyping:
-			statusText = agentStatusStyle.Render(m.padLine(" Agent typing... | Esc cancel"))
-		default:
-			statusText = m.padLine("")
+			statusMsg = "Agent typing... | Esc cancel"
 		}
-		output[row] = statusText
+		output[row] = m.renderStatusLine(style, statusMsg)
 	}
 
 	return strings.Join(output, "\n")

@@ -38,6 +38,7 @@ const (
 	ActionAgentReject    = keymap.ActionAgentReject
 	ActionAgentContinue  = keymap.ActionAgentContinue
 	ActionDialCycle      = keymap.ActionDialCycle
+	ActionModelSelector  = keymap.ActionModelSelector
 	ActionOpenPalette    = keymap.ActionOpenPalette
 	ActionToggleProject  = keymap.ActionToggleProject
 	ActionHelp           = keymap.ActionHelp
@@ -111,6 +112,8 @@ func DefaultKeymap() *Keymap {
 			{code: '©', mod: 0}:           ActionAgentPlan, // macOS: Option+G sends ©
 			{code: 'a', mod: tea.ModAlt}:  ActionDialCycle,
 			{code: 'å', mod: 0}:           ActionDialCycle, // macOS: Option+A sends å
+			{code: 'm', mod: tea.ModAlt}:  ActionModelSelector,
+			{code: 'µ', mod: 0}:           ActionModelSelector, // macOS: Option+M sends µ
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
 			{code: tea.KeyEscape, mod: 0}: ActionAgentReject,
 			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
@@ -135,6 +138,8 @@ func DefaultKeymap() *Keymap {
 			"©":      ActionAgentPlan, // macOS: Option+G sends ©
 			"alt+a":  ActionDialCycle,
 			"å":      ActionDialCycle, // macOS: Option+A sends å
+			"alt+m":  ActionModelSelector,
+			"µ":      ActionModelSelector, // macOS: Option+M sends µ
 			"ctrl+p": ActionOpenPalette,
 			"ctrl+b": ActionToggleProject,
 			"ctrl+/": ActionToggleComment,

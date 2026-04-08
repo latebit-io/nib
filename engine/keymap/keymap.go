@@ -48,6 +48,8 @@ const (
 	ActionAgentContinue
 	// ActionDialCycle cycles the autonomy level dial (guided → collaborate → trust → guided).
 	ActionDialCycle
+	// ActionModelSelector opens the LLM model/profile selector overlay.
+	ActionModelSelector
 
 	// View actions control pane visibility and focus.
 	ActionOpenPalette
@@ -144,6 +146,7 @@ func DefaultBindings() []Binding {
 		{ActionAgentReject, "Reject / Cancel", []string{"Escape"}, CatAgent},
 		{ActionAgentContinue, "Continue agent", []string{"Ctrl+N"}, CatAgent},
 		{ActionDialCycle, "Cycle autonomy dial", []string{"Alt+A"}, CatAgent},
+		{ActionModelSelector, "Select model", []string{"Alt+M"}, CatAgent},
 
 		// View
 		{ActionOpenPalette, "Open file palette", []string{"Ctrl+P"}, CatView},

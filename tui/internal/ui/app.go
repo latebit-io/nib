@@ -16,6 +16,7 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/search"
 	"github.com/latebit-io/junto/engine/session"
 )
@@ -100,14 +101,30 @@ type AppModel struct {
 	Palette       PaletteModel
 	Help          HelpModel
 	SearchOverlay SearchOverlayModel
-	recentMouse   bool          // tracks leaked CSI prefix from unparsed mouse events
-	dial          AutonomyLevel // current autonomy level; defaults to LevelGuided
-	Services      *Services
-	Keymap        *Keymap
-	Quit          bool
-	Width         int
-	Height        int
-	program       *tea.Program
+	recentMouse          bool          // tracks leaked CSI prefix from unparsed mouse events
+	dial                 AutonomyLevel // current autonomy level; defaults to LevelGuided
+	pendingModelProfile  string        // profile of the in-flight ListModels request (stale detection)
+
+	// SwitchModel is called to switch the active LLM model at runtime.
+	// Set by the entry point (main.go) — nil when no LLM is configured.
+	// The profile parameter selects which provider to use.
+	// Returns the display model name on success.
+	SwitchModel func(profile, modelID string) (displayModel string, err error)
+
+	// ListModels returns available models for the given profile.
+	// Set by the entry point — nil when no LLM is configured.
+	ListModels func(profile string) ([]ModelSelectorItem, error)
+
+	// LLMProfileNames returns the available profile names.
+	// Set by the entry point — nil when no LLM is configured.
+	LLMProfileNames func() []string
+
+	Services *Services
+	Keymap   *Keymap
+	Quit     bool
+	Width    int
+	Height   int
+	program  *tea.Program
 }
 
 // SetProgram sets the tea.Program reference.
@@ -176,6 +193,17 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyPressMsg:
 			m.Help.Update(typed, m.Height-2)
 			return m, nil
+		case tea.MouseMsg:
+			return m, nil
+		}
+	}
+
+	// Model selector is modal — captures all input when active
+	if m.AgentPane.IsModelSelectorActive() {
+		switch typed := msg.(type) {
+		case tea.KeyPressMsg:
+			cmd := m.AgentPane.UpdateModelSelector(typed)
+			return m, cmd
 		case tea.MouseMsg:
 			return m, nil
 		}
@@ -279,6 +307,73 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// File listing completed — open the palette with results
 	case paletteFilesMsg:
 		m.Palette.Open(msg.items)
+		return m, nil
+
+	// Tab pressed in model selector — switch to a different provider's models
+	case modelSelSwitchProfileMsg:
+		if m.ListModels != nil {
+			profile := msg.profile
+			m.pendingModelProfile = profile
+			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
+			listFn := m.ListModels
+			return m, func() tea.Msg {
+				items, err := listFn(profile)
+				return modelListMsg{profile: profile, items: items, err: err}
+			}
+		}
+		return m, nil
+
+	// Model list fetched — open the inline selector in the agent pane
+	case modelListMsg:
+		// Drop stale responses from superseded requests.
+		if msg.profile != m.pendingModelProfile {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.AgentPane.AppendMeta("\n[failed to list models: " + msg.err.Error() + "]\n")
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			m.AgentPane.AppendMeta("\n[no models available from provider]\n")
+			return m, nil
+		}
+		var profiles []string
+		if m.LLMProfileNames != nil {
+			profiles = m.LLMProfileNames()
+		}
+		m.AgentPane.OpenModelSelector(msg.items, msg.profile, m.Session.LLMModel(), profiles)
+		return m, nil
+
+	// Model selector result — user selected a model/profile or cancelled
+	case ModelSelectorResultMsg:
+		if msg.Cancelled {
+			return m, nil
+		}
+		// Profile selection (multi-profile mode) — fetch models for that profile.
+		if msg.ModelID == "" && msg.Profile != "" && m.ListModels != nil {
+			profile := msg.Profile
+			m.pendingModelProfile = profile
+			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
+			listFn := m.ListModels
+			return m, func() tea.Msg {
+				items, err := listFn(profile)
+				return modelListMsg{profile: profile, items: items, err: err}
+			}
+		}
+		// Model selection — switch to the chosen model.
+		if msg.ModelID != "" && m.SwitchModel != nil {
+			displayModel, err := m.SwitchModel(msg.Profile, msg.ModelID)
+			if err != nil {
+				m.AgentPane.AppendMeta("\n[model switch failed: " + err.Error() + "]\n")
+			} else {
+				label := displayModel
+				if msg.Profile != "" {
+					label = msg.Profile + ": " + displayModel
+				}
+				m.AgentPane.SetModelLabel(label)
+				m.AgentPane.AppendMeta("\n[switched to " + label + "]\n")
+			}
+		}
 		return m, nil
 
 	// Palette result — user selected a file or cancelled
@@ -609,8 +704,16 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	m.recentMouse = false
 
-	// Agent pane input mode — all keys go to agent pane
+	// Agent pane input mode — most keys go to agent pane, but global
+	// actions (model selector, dial cycle) are handled here first.
 	if m.AgentPane.IsInputActive() {
+		switch m.Keymap.Match(msg) {
+		case ActionModelSelector:
+			return m, m.openModelSelector()
+		case ActionDialCycle:
+			m.dial = m.dial.Cycle()
+			return m, nil
+		}
 		cmd := m.AgentPane.Update(msg)
 		return m, cmd
 	}
@@ -687,6 +790,9 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionDialCycle:
 		m.dial = m.dial.Cycle()
 		return m, nil
+
+	case ActionModelSelector:
+		return m, m.openModelSelector()
 
 	case ActionAgentStart:
 		if m.Session.HasAgent() {
@@ -777,6 +883,29 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// openModelSelector opens the model selector overlay.
+// If multiple profiles exist, shows profile picker first.
+// If one profile, fetches models directly.
+func (m *AppModel) openModelSelector() tea.Cmd {
+	if m.ListModels == nil {
+		globalPath := llmconfig.GlobalConfigPath()
+		if globalPath == "" {
+			globalPath = "<user-config-dir>/junto/llm.json"
+		}
+		m.AgentPane.AppendMeta("\n[no LLM configured — create " + globalPath + " or .project/llm.json]\n")
+		return nil
+	}
+	// Fetch models for the current profile. Tab cycles providers if multiple exist.
+	profile := m.Session.LLMProfile()
+	m.pendingModelProfile = profile
+	m.AgentPane.AppendMeta("\n[fetching models...]\n")
+	listFn := m.ListModels
+	return func() tea.Msg {
+		items, err := listFn(profile)
+		return modelListMsg{profile: profile, items: items, err: err}
+	}
 }
 
 func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {

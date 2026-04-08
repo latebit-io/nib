@@ -132,6 +132,13 @@ type Session struct {
 	// distributedMemory lists MCP server names classified as shared/team memory.
 	// Set once during startup, read by frontends for status display.
 	distributedMemory []string
+
+	// llmModel is the full model ID (e.g. "google/gemini-2.5-flash").
+	// Set during startup and updated on model switch.
+	llmModel string
+
+	// llmProfile is the active profile name.
+	llmProfile string
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -215,6 +222,19 @@ func (s *Session) SetDistributedMemory(names []string) {
 func (s *Session) DistributedMemory() []string {
 	return s.distributedMemory
 }
+
+// SetLLMInfo stores the active LLM model ID and profile name.
+// Called during startup and after model switches.
+func (s *Session) SetLLMInfo(modelID, profile string) {
+	s.llmModel = modelID
+	s.llmProfile = profile
+}
+
+// LLMModel returns the full model ID (e.g. "google/gemini-2.5-flash").
+func (s *Session) LLMModel() string { return s.llmModel }
+
+// LLMProfile returns the active LLM profile name.
+func (s *Session) LLMProfile() string { return s.llmProfile }
 
 // SetEvents sets the event channel for frontends to read.
 // Used when there is no agent but other event sources (e.g. LSP) need

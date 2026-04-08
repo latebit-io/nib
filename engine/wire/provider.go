@@ -4,34 +4,16 @@
 package wire
 
 import (
-	"os"
-
 	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/engine/llmconfig"
 )
 
-// defaultBaseURL is the LLM provider base URL when LLM_BASE_URL is unset.
-const defaultBaseURL = "https://openrouter.ai/api/v1"
-
-// defaultModel is the LLM model when LLM_MODEL is unset.
-const defaultModel = "google/gemini-2.5-flash"
-
-// NewProvider creates an LLM provider from environment variables.
-// Returns nil if LLM_API_KEY is not set. The caller should check for nil
-// to decide whether to enable agent features.
-func NewProvider() llm.Provider {
-	apiKey := os.Getenv("LLM_API_KEY")
-	if apiKey == "" {
-		return nil
-	}
-
-	baseURL := os.Getenv("LLM_BASE_URL")
-	if baseURL == "" {
-		baseURL = defaultBaseURL
-	}
-	model := os.Getenv("LLM_MODEL")
-	if model == "" {
-		model = defaultModel
-	}
-
-	return llm.NewAgentAPI(baseURL, model, apiKey)
+// NewProvider creates an LLM provider from the merged configuration.
+// Returns (nil, config, resolved) if no API key is available — the caller
+// checks the provider for nil to decide whether to enable agent features.
+// The Config and Resolved are always returned so callers can display model
+// info and support runtime profile switching even when the provider is nil.
+func NewProvider(projectRoot string) (llm.Provider, *llmconfig.Config, *llmconfig.Resolved) {
+	cfg, resolved := llmconfig.Resolve(projectRoot)
+	return resolved.NewProvider(), cfg, resolved
 }

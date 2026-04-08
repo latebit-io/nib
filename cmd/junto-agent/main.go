@@ -166,10 +166,15 @@ func run() error {
 	}
 
 	// Create LLM provider — required for headless mode.
-	provider := wire.NewProvider()
+	provider, _, llmResolved := wire.NewProvider(projectRoot)
 	if provider == nil {
-		return setupErr("LLM_API_KEY not set")
+		hint := "set LLM_API_KEY or configure ~/.config/junto/llm.json"
+		if llmResolved != nil && llmResolved.APIKeyEnv != "" {
+			hint = fmt.Sprintf("set %s or configure ~/.config/junto/llm.json", llmResolved.APIKeyEnv)
+		}
+		return setupErr("no LLM API key — %s", hint)
 	}
+	slog.Debug("llm config", "profile", llmResolved.Profile, "model", llmResolved.Model)
 
 	// Start memory server.
 	mem, err := wire.StartMemory(projectRoot)

@@ -1,0 +1,313 @@
+package llmconfig
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+type resolveTestCase struct {
+	name        string
+	globalJSON  string
+	projectJSON string
+	env         map[string]string
+	wantProfile string
+	wantBaseURL string
+	wantModel   string
+	wantKeyEnv  string
+	wantHas     bool
+}
+
+var resolveTests = []resolveTestCase{
+	{
+		name:        "defaults only",
+		wantProfile: "env",
+		wantBaseURL: DefaultBaseURL,
+		wantModel:   DefaultModel,
+		wantKeyEnv:  DefaultKeyEnv,
+		wantHas:     false,
+	},
+	{
+		name:        "env vars only",
+		env:         map[string]string{"LLM_API_KEY": "sk-test", "LLM_MODEL": "gpt-4o"},
+		wantProfile: "env",
+		wantBaseURL: DefaultBaseURL,
+		wantModel:   "gpt-4o",
+		wantKeyEnv:  DefaultKeyEnv,
+		wantHas:     true,
+	},
+	{
+		name: "global file sets profile",
+		globalJSON: `{
+				"profiles": {
+					"openrouter": {
+						"base_url": "https://openrouter.ai/api/v1",
+						"model": "anthropic/claude-sonnet-4",
+						"api_key_env": "OR_KEY"
+					}
+				},
+				"active": "openrouter"
+			}`,
+		env:         map[string]string{"OR_KEY": "or-secret"},
+		wantProfile: "openrouter",
+		wantBaseURL: "https://openrouter.ai/api/v1",
+		wantModel:   "anthropic/claude-sonnet-4",
+		wantKeyEnv:  "OR_KEY",
+		wantHas:     true,
+	},
+	{
+		name: "project overrides global active",
+		globalJSON: `{
+				"profiles": {
+					"openrouter": {"model": "gpt-4o", "api_key_env": "OR_KEY"},
+					"glm": {"base_url": "https://glm.example/v4", "model": "glm-5", "api_key_env": "GLM_KEY"}
+				},
+				"active": "openrouter"
+			}`,
+		projectJSON: `{"active": "glm"}`,
+		env:         map[string]string{"GLM_KEY": "glm-secret"},
+		wantProfile: "glm",
+		wantBaseURL: "https://glm.example/v4",
+		wantModel:   "glm-5",
+		wantKeyEnv:  "GLM_KEY",
+		wantHas:     true,
+	},
+	{
+		name: "project adds new profile",
+		globalJSON: `{
+				"profiles": {"base": {"model": "gpt-4o"}},
+				"active": "base"
+			}`,
+		projectJSON: `{
+				"profiles": {"local": {"base_url": "http://localhost:11434/v1", "model": "llama3", "api_key_env": "LOCAL_KEY"}},
+				"active": "local"
+			}`,
+		env:         map[string]string{"LOCAL_KEY": "unused"},
+		wantProfile: "local",
+		wantBaseURL: "http://localhost:11434/v1",
+		wantModel:   "llama3",
+		wantKeyEnv:  "LOCAL_KEY",
+		wantHas:     true,
+	},
+	{
+		name: "env vars override profile",
+		globalJSON: `{
+				"profiles": {"p": {"base_url": "https://example.com", "model": "m1", "api_key_env": "P_KEY"}},
+				"active": "p"
+			}`,
+		env:         map[string]string{"P_KEY": "p-secret", "LLM_MODEL": "override-model", "LLM_BASE_URL": "https://override.com"},
+		wantProfile: "p",
+		wantBaseURL: "https://override.com",
+		wantModel:   "override-model",
+		wantKeyEnv:  "P_KEY",
+		wantHas:     true,
+	},
+	{
+		name: "LLM_API_KEY overrides api_key_env",
+		globalJSON: `{
+				"profiles": {"p": {"api_key_env": "CUSTOM_KEY"}},
+				"active": "p"
+			}`,
+		env:         map[string]string{"CUSTOM_KEY": "custom", "LLM_API_KEY": "direct"},
+		wantProfile: "p",
+		wantBaseURL: DefaultBaseURL,
+		wantModel:   DefaultModel,
+		wantKeyEnv:  "CUSTOM_KEY",
+		wantHas:     true,
+	},
+	{
+		name:        "partial project config inherits defaults",
+		projectJSON: `{"profiles": {"p": {"model": "tiny"}}, "active": "p"}`,
+		env:         map[string]string{"LLM_API_KEY": "key"},
+		wantProfile: "p",
+		wantBaseURL: DefaultBaseURL,
+		wantModel:   "tiny",
+		wantKeyEnv:  DefaultKeyEnv,
+		wantHas:     true,
+	},
+	{
+		name:        "malformed JSON skipped",
+		globalJSON:  `{bad json`,
+		env:         map[string]string{"LLM_API_KEY": "key"},
+		wantProfile: "env",
+		wantBaseURL: DefaultBaseURL,
+		wantModel:   DefaultModel,
+		wantKeyEnv:  DefaultKeyEnv,
+		wantHas:     true,
+	},
+	{
+		name:        "active profile not found warns and uses defaults",
+		globalJSON:  `{"active": "nonexistent"}`,
+		wantProfile: "env",
+		wantBaseURL: DefaultBaseURL,
+		wantModel:   DefaultModel,
+		wantKeyEnv:  DefaultKeyEnv,
+		wantHas:     false,
+	},
+}
+
+func TestResolve(t *testing.T) {
+	for _, tt := range resolveTests {
+		t.Run(tt.name, func(t *testing.T) {
+			globalPath, projectRoot := setupResolveTest(t, tt.globalJSON, tt.projectJSON, tt.env)
+			_, got := resolveWithPaths(globalPath, projectRoot)
+			assertResolved(t, got, tt.wantProfile, tt.wantBaseURL, tt.wantModel, tt.wantKeyEnv, tt.wantHas)
+		})
+	}
+}
+
+func TestDisplayModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  string
+	}{
+		{"google/gemini-2.5-flash", "gemini-2.5-flash"},
+		{"anthropic/claude-sonnet-4", "claude-sonnet-4"},
+		{"glm-5", "glm-5"},
+		{"org/sub/model", "model"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		r := &Resolved{Model: tt.model}
+		if got := r.DisplayModel(); got != tt.want {
+			t.Errorf("DisplayModel(%q) = %q, want %q", tt.model, got, tt.want)
+		}
+	}
+}
+
+func TestProfileNames(t *testing.T) {
+	cfg := &Config{
+		Profiles: map[string]Profile{
+			"zebra": {},
+			"alpha": {},
+			"mid":   {},
+		},
+	}
+	names := cfg.ProfileNames()
+	want := []string{"alpha", "mid", "zebra"}
+	if len(names) != len(want) {
+		t.Fatalf("ProfileNames() = %v, want %v", names, want)
+	}
+	for i, n := range names {
+		if n != want[i] {
+			t.Errorf("ProfileNames()[%d] = %q, want %q", i, n, want[i])
+		}
+	}
+
+	empty := &Config{}
+	if got := empty.ProfileNames(); got != nil {
+		t.Errorf("ProfileNames() on empty = %v, want nil", got)
+	}
+}
+
+func TestResolveProfile(t *testing.T) {
+	cfg := &Config{
+		Profiles: map[string]Profile{
+			"test": {
+				BaseURL:   "https://test.example",
+				Model:     "test-model",
+				APIKeyEnv: "TEST_KEY",
+			},
+			"minimal": {},
+		},
+	}
+
+	t.Run("existing profile", func(t *testing.T) {
+		t.Setenv("TEST_KEY", "secret")
+		t.Setenv("LLM_API_KEY", "")
+		r := ResolveProfile(cfg, "test")
+		if r == nil {
+			t.Fatal("ResolveProfile returned nil")
+		}
+		if r.BaseURL != "https://test.example" {
+			t.Errorf("BaseURL = %q", r.BaseURL)
+		}
+		if r.Model != "test-model" {
+			t.Errorf("Model = %q", r.Model)
+		}
+		if r.apiKey != "secret" {
+			t.Errorf("APIKey = %q", r.apiKey)
+		}
+		if r.Profile != "test" {
+			t.Errorf("Profile = %q", r.Profile)
+		}
+	})
+
+	t.Run("minimal profile uses defaults", func(t *testing.T) {
+		t.Setenv("LLM_API_KEY", "fallback")
+		r := ResolveProfile(cfg, "minimal")
+		if r == nil {
+			t.Fatal("ResolveProfile returned nil")
+		}
+		if r.BaseURL != DefaultBaseURL {
+			t.Errorf("BaseURL = %q, want default", r.BaseURL)
+		}
+		if r.Model != DefaultModel {
+			t.Errorf("Model = %q, want default", r.Model)
+		}
+		if r.apiKey != "fallback" {
+			t.Errorf("APIKey = %q, want fallback from LLM_API_KEY", r.apiKey)
+		}
+	})
+
+	t.Run("nonexistent profile", func(t *testing.T) {
+		r := ResolveProfile(cfg, "nope")
+		if r != nil {
+			t.Errorf("ResolveProfile(nope) = %+v, want nil", r)
+		}
+	})
+}
+
+// setupResolveTest creates temp config files and sets env vars for a resolve test.
+func setupResolveTest(t *testing.T, globalJSON, projectJSON string, env map[string]string) (globalPath, projectRoot string) {
+	t.Helper()
+	for _, key := range []string{"LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"} {
+		t.Setenv(key, "")
+	}
+	for key, val := range env {
+		t.Setenv(key, val)
+	}
+
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global", "junto")
+	if globalJSON != "" {
+		if err := os.MkdirAll(globalDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(globalDir, "llm.json"), []byte(globalJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	projectRoot = filepath.Join(tmpDir, "project")
+	if projectJSON != "" {
+		projDir := filepath.Join(projectRoot, ".project")
+		if err := os.MkdirAll(projDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projDir, "llm.json"), []byte(projectJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(globalDir, "llm.json"), projectRoot
+}
+
+// assertResolved checks all fields of a Resolved value.
+func assertResolved(t *testing.T, got *Resolved, wantProfile, wantBaseURL, wantModel, wantKeyEnv string, wantHas bool) {
+	t.Helper()
+	if got.Profile != wantProfile {
+		t.Errorf("Profile = %q, want %q", got.Profile, wantProfile)
+	}
+	if got.BaseURL != wantBaseURL {
+		t.Errorf("BaseURL = %q, want %q", got.BaseURL, wantBaseURL)
+	}
+	if got.Model != wantModel {
+		t.Errorf("Model = %q, want %q", got.Model, wantModel)
+	}
+	if got.APIKeyEnv != wantKeyEnv {
+		t.Errorf("APIKeyEnv = %q, want %q", got.APIKeyEnv, wantKeyEnv)
+	}
+	if got.HasProvider() != wantHas {
+		t.Errorf("HasProvider() = %v, want %v", got.HasProvider(), wantHas)
+	}
+}

@@ -1,18 +1,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/wire"
 	"github.com/latebit-io/junto/tui/internal/ui"
@@ -114,8 +118,12 @@ func run() error {
 		return fmt.Errorf("memory: install binaries: %w", err)
 	}
 
-	// Create LLM provider and agent from environment.
-	provider := wire.NewProvider()
+	// Create LLM provider and agent from configuration.
+	provider, llmCfg, llmResolved := wire.NewProvider(projectRoot)
+	if llmResolved != nil {
+		sess.SetLLMInfo(llmResolved.Model, llmResolved.Profile)
+	}
+	var ag *agent.Agent
 	if provider != nil {
 		// Start memory server — only needed when agent is active.
 		mem, err := wire.StartMemory(projectRoot)
@@ -132,7 +140,7 @@ func run() error {
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
 		}
-		ag := agent.New(provider, sess, events, opts, mcpResult.Tools...)
+		ag = agent.New(provider, sess, events, opts, mcpResult.Tools...)
 		sess.SetAgent(ag, events)
 		sess.SetMemoryStore(mem.Store)
 	} else if lspMgr != nil {
@@ -141,6 +149,60 @@ func run() error {
 	}
 
 	app := ui.NewApp(sess)
+	if llmResolved != nil && llmResolved.HasProvider() {
+		app.AgentPane.SetModelLabel(llmResolved.Profile + ": " + llmResolved.DisplayModel())
+	}
+	// Wire model listing and switching — closures capture ag, llmCfg, and llmResolved.
+	if provider != nil && ag != nil {
+		app.LLMProfileNames = llmCfg.ProfileNames
+
+		app.ListModels = func(profile string) ([]ui.ModelSelectorItem, error) {
+			// Resolve the profile to get its base_url and key.
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				// Fallback: use current provider (env-only config).
+				resolved = llmResolved
+			}
+			p := resolved.NewProvider()
+			if p == nil {
+				return nil, fmt.Errorf("no API key for profile %q", profile)
+			}
+			lister, ok := p.(llm.ModelLister)
+			if !ok {
+				return nil, fmt.Errorf("provider does not support model listing")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			models, err := lister.ListModels(ctx)
+			if err != nil {
+				return nil, err
+			}
+			items := make([]ui.ModelSelectorItem, len(models))
+			for i, m := range models {
+				items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
+			}
+			return items, nil
+		}
+
+		app.SwitchModel = func(profile, modelID string) (string, error) {
+			// Resolve the target profile.
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				resolved = llmResolved
+			}
+			resolved.Model = modelID
+			newProvider := resolved.NewProvider()
+			if newProvider == nil {
+				return "", fmt.Errorf("no API key available for profile %q", profile)
+			}
+			ag.SetProvider(newProvider)
+			provider = newProvider
+			llmResolved = resolved
+			sess.SetLLMInfo(resolved.Model, resolved.Profile)
+			slog.Info("llm: switched model", "profile", profile, "model", modelID)
+			return resolved.DisplayModel(), nil
+		}
+	}
 
 	// Agent typing speed (words per minute)
 	if wpmStr := os.Getenv("JUNTO_TYPING_WPM"); wpmStr != "" {

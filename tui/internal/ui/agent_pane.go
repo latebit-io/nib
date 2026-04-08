@@ -15,7 +15,7 @@ import (
 )
 
 // inputHeight returns the number of rows reserved for the input area
-// (separator + input + status). Uses 1/4 of the pane height, minimum 5.
+// (separator + input + status). Uses 1/6 of the pane height, minimum 5.
 func (m *AgentPaneModel) inputHeight() int {
 	h := m.height / 6
 	if h < 5 {
@@ -893,7 +893,6 @@ func (m *AgentPaneModel) Clear() {
 	m.sanitizer = sanitize.Sanitizer{}
 }
 
-// VisibleLines returns the number of content lines visible.
 // VisibleLines returns the number of content lines visible above the input area.
 func (m *AgentPaneModel) VisibleLines() int {
 	bottomH := m.inputHeight()
@@ -1059,8 +1058,6 @@ func (m *AgentPaneModel) padLine(s string) string {
 	return s + strings.Repeat(" ", m.width-w)
 }
 
-// renderStatusLine builds the status line with the model label on the left
-// and the status message on the right, padded to m.width.
 // renderInputArea renders the textarea input into the output rows.
 func (m *AgentPaneModel) renderInputArea(output []string, row *int) {
 	inputRows := m.inputAreaEndRow - m.inputAreaStartRow

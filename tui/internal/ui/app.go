@@ -100,18 +100,22 @@ type AppModel struct {
 	Palette       PaletteModel
 	Help          HelpModel
 	SearchOverlay SearchOverlayModel
-	ModelSelector ModelSelectorModel
 	recentMouse   bool          // tracks leaked CSI prefix from unparsed mouse events
 	dial          AutonomyLevel // current autonomy level; defaults to LevelGuided
 
-	// SwitchProfile is called to switch the active LLM profile at runtime.
-	// Set by the entry point (main.go) — nil when no profiles are configured.
+	// SwitchModel is called to switch the active LLM model at runtime.
+	// Set by the entry point (main.go) — nil when no LLM is configured.
+	// The profile parameter selects which provider to use.
 	// Returns the display model name on success.
-	SwitchProfile func(name string) (displayModel string, err error)
+	SwitchModel func(profile, modelID string) (displayModel string, err error)
 
-	// ProfileNames returns the available LLM profile names.
-	// Set by the entry point — nil when no profiles are configured.
-	ProfileNames func() []string
+	// ListModels returns available models for the given profile.
+	// Set by the entry point — nil when no LLM is configured.
+	ListModels func(profile string) ([]ModelSelectorItem, error)
+
+	// LLMProfileNames returns the available profile names.
+	// Set by the entry point — nil when no LLM is configured.
+	LLMProfileNames func() []string
 
 	Services *Services
 	Keymap   *Keymap
@@ -193,10 +197,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Model selector is modal — captures all input when active
-	if m.ModelSelector.Active {
+	if m.AgentPane.IsModelSelectorActive() {
 		switch typed := msg.(type) {
 		case tea.KeyPressMsg:
-			cmd := m.ModelSelector.Update(typed)
+			cmd := m.AgentPane.UpdateModelSelector(typed)
 			return m, cmd
 		case tea.MouseMsg:
 			return m, nil
@@ -303,15 +307,63 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Palette.Open(msg.items)
 		return m, nil
 
-	// Model selector result — user selected a profile or cancelled
+	// Tab pressed in model selector — switch to a different provider's models
+	case modelSelSwitchProfileMsg:
+		if m.ListModels != nil {
+			profile := msg.profile
+			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
+			listFn := m.ListModels
+			return m, func() tea.Msg {
+				items, err := listFn(profile)
+				return modelListMsg{profile: profile, items: items, err: err}
+			}
+		}
+		return m, nil
+
+	// Model list fetched — open the inline selector in the agent pane
+	case modelListMsg:
+		if msg.err != nil {
+			m.AgentPane.AppendMeta("\n[failed to list models: " + msg.err.Error() + "]\n")
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			m.AgentPane.AppendMeta("\n[no models available from provider]\n")
+			return m, nil
+		}
+		var profiles []string
+		if m.LLMProfileNames != nil {
+			profiles = m.LLMProfileNames()
+		}
+		m.AgentPane.OpenModelSelector(msg.items, msg.profile, m.Session.LLMModel(), profiles)
+		return m, nil
+
+	// Model selector result — user selected a model/profile or cancelled
 	case ModelSelectorResultMsg:
-		if !msg.Cancelled && m.SwitchProfile != nil {
-			displayModel, err := m.SwitchProfile(msg.Profile)
+		if msg.Cancelled {
+			return m, nil
+		}
+		// Profile selection (multi-profile mode) — fetch models for that profile.
+		if msg.ModelID == "" && msg.Profile != "" && m.ListModels != nil {
+			profile := msg.Profile
+			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
+			listFn := m.ListModels
+			return m, func() tea.Msg {
+				items, err := listFn(profile)
+				return modelListMsg{profile: profile, items: items, err: err}
+			}
+		}
+		// Model selection — switch to the chosen model.
+		if msg.ModelID != "" && m.SwitchModel != nil {
+			displayModel, err := m.SwitchModel(msg.Profile, msg.ModelID)
 			if err != nil {
 				m.AgentPane.AppendMeta("\n[model switch failed: " + err.Error() + "]\n")
 			} else {
-				m.AgentPane.SetModelLabel(displayModel)
-				m.AgentPane.AppendMeta("\n[switched to " + msg.Profile + ": " + displayModel + "]\n")
+				label := displayModel
+				if msg.Profile != "" {
+					label = msg.Profile + ": " + displayModel
+				}
+				m.AgentPane.SetModelLabel(label)
+				m.AgentPane.AppendMeta("\n[switched to " + label + "]\n")
 			}
 		}
 		return m, nil
@@ -644,8 +696,16 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	m.recentMouse = false
 
-	// Agent pane input mode — all keys go to agent pane
+	// Agent pane input mode — most keys go to agent pane, but global
+	// actions (model selector, dial cycle) are handled here first.
 	if m.AgentPane.IsInputActive() {
+		switch m.Keymap.Match(msg) {
+		case ActionModelSelector:
+			return m, m.openModelSelector()
+		case ActionDialCycle:
+			m.dial = m.dial.Cycle()
+			return m, nil
+		}
 		cmd := m.AgentPane.Update(msg)
 		return m, cmd
 	}
@@ -724,15 +784,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ActionModelSelector:
-		if m.ProfileNames != nil {
-			names := m.ProfileNames()
-			if len(names) > 0 {
-				m.ModelSelector.Width = m.Width
-				m.ModelSelector.Height = m.Height
-				m.ModelSelector.Open(names, m.Session.LLMProfile())
-			}
-		}
-		return m, nil
+		return m, m.openModelSelector()
 
 	case ActionAgentStart:
 		if m.Session.HasAgent() {
@@ -825,6 +877,24 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// openModelSelector opens the model selector overlay.
+// If multiple profiles exist, shows profile picker first.
+// If one profile, fetches models directly.
+func (m *AppModel) openModelSelector() tea.Cmd {
+	if m.ListModels == nil {
+		m.AgentPane.AppendMeta("\n[no LLM configured — create ~/.config/junto/llm.json or .project/llm.json]\n")
+		return nil
+	}
+	// Fetch models for the current profile. Tab cycles providers if multiple exist.
+	profile := m.Session.LLMProfile()
+	m.AgentPane.AppendMeta("\n[fetching models...]\n")
+	listFn := m.ListModels
+	return func() tea.Msg {
+		items, err := listFn(profile)
+		return modelListMsg{profile: profile, items: items, err: err}
+	}
+}
+
 func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {
 	// Placeholder — implement specific dialog responses as needed.
 	return m, nil
@@ -844,8 +914,6 @@ func (m *AppModel) View() tea.View {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Help.Active {
 			content = m.Help.RenderOverlay(base, m.Width, m.Height)
-		} else if m.ModelSelector.Active {
-			content = m.ModelSelector.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Palette.Active {
 			content = m.Palette.RenderOverlay(base, m.Width, m.Height)
 		} else if m.SearchOverlay.Active {

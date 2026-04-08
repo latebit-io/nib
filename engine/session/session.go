@@ -133,8 +133,8 @@ type Session struct {
 	// Set once during startup, read by frontends for status display.
 	distributedMemory []string
 
-	// llmModel is the display name of the active LLM model.
-	// Set during startup and updated on profile switch.
+	// llmModel is the full model ID (e.g. "google/gemini-2.5-flash").
+	// Set during startup and updated on model switch.
 	llmModel string
 
 	// llmProfile is the active profile name.
@@ -223,14 +223,14 @@ func (s *Session) DistributedMemory() []string {
 	return s.distributedMemory
 }
 
-// SetLLMInfo stores the active LLM model and profile name for display.
-// Called during startup and after profile switches.
-func (s *Session) SetLLMInfo(model, profile string) {
-	s.llmModel = model
+// SetLLMInfo stores the active LLM model ID and profile name.
+// Called during startup and after model switches.
+func (s *Session) SetLLMInfo(modelID, profile string) {
+	s.llmModel = modelID
 	s.llmProfile = profile
 }
 
-// LLMModel returns the display name of the active LLM model.
+// LLMModel returns the full model ID (e.g. "google/gemini-2.5-flash").
 func (s *Session) LLMModel() string { return s.llmModel }
 
 // LLMProfile returns the active LLM profile name.

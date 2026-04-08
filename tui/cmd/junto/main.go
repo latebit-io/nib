@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/wire"
@@ -118,7 +120,7 @@ func run() error {
 	// Create LLM provider and agent from configuration.
 	provider, llmCfg, llmResolved := wire.NewProvider(projectRoot)
 	if llmResolved != nil {
-		sess.SetLLMInfo(llmResolved.DisplayModel(), llmResolved.Profile)
+		sess.SetLLMInfo(llmResolved.Model, llmResolved.Profile)
 	}
 	var ag *agent.Agent
 	if provider != nil {
@@ -147,26 +149,54 @@ func run() error {
 
 	app := ui.NewApp(sess)
 	if llmResolved != nil && llmResolved.HasProvider() {
-		app.AgentPane.SetModelLabel(llmResolved.DisplayModel())
+		app.AgentPane.SetModelLabel(llmResolved.Profile + ": " + llmResolved.DisplayModel())
 	}
-	// Wire profile switching — closures capture ag and llmCfg.
-	if llmCfg != nil && len(llmCfg.Profiles) > 0 {
-		app.ProfileNames = llmCfg.ProfileNames
-		app.SwitchProfile = func(name string) (string, error) {
-			resolved := llmconfig.ResolveProfile(llmCfg, name)
+	// Wire model listing and switching — closures capture ag, llmCfg, and llmResolved.
+	if provider != nil && ag != nil {
+		app.LLMProfileNames = llmCfg.ProfileNames
+
+		app.ListModels = func(profile string) ([]ui.ModelSelectorItem, error) {
+			// Resolve the profile to get its base_url and key.
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
-				return "", fmt.Errorf("profile %q not found", name)
+				// Fallback: use current provider (env-only config).
+				resolved = llmResolved
 			}
-			if !resolved.HasProvider() {
-				return "", fmt.Errorf("profile %q: no API key (set %s)", name, resolved.APIKeyEnv)
+			p := resolved.NewProvider()
+			if p == nil {
+				return nil, fmt.Errorf("no API key for profile %q", profile)
 			}
-			if ag == nil {
-				return "", fmt.Errorf("agent not initialized — restart with an API key to enable agent features")
+			lister, ok := p.(llm.ModelLister)
+			if !ok {
+				return nil, fmt.Errorf("provider does not support model listing")
 			}
+			models, err := lister.ListModels(context.Background())
+			if err != nil {
+				return nil, err
+			}
+			items := make([]ui.ModelSelectorItem, len(models))
+			for i, m := range models {
+				items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
+			}
+			return items, nil
+		}
+
+		app.SwitchModel = func(profile, modelID string) (string, error) {
+			// Resolve the target profile.
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				resolved = llmResolved
+			}
+			resolved.Model = modelID
 			newProvider := resolved.NewProvider()
+			if newProvider == nil {
+				return "", fmt.Errorf("no API key available for profile %q", profile)
+			}
 			ag.SetProvider(newProvider)
-			sess.SetLLMInfo(resolved.DisplayModel(), resolved.Profile)
-			slog.Info("llm: switched profile", "profile", name, "model", resolved.Model)
+			provider = newProvider
+			llmResolved = resolved
+			sess.SetLLMInfo(resolved.Model, resolved.Profile)
+			slog.Info("llm: switched model", "profile", profile, "model", modelID)
 			return resolved.DisplayModel(), nil
 		}
 	}

@@ -17,7 +17,7 @@ import (
 // inputHeight returns the number of rows reserved for the input area
 // (separator + input + status). Uses 1/4 of the pane height, minimum 5.
 func (m *AgentPaneModel) inputHeight() int {
-	h := m.height / 4
+	h := m.height / 6
 	if h < 5 {
 		h = 5
 	}
@@ -1113,11 +1113,10 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 	}
 
 	// Title row showing provider/profile.
-	// Sanitize profile name — it originates from config files or provider APIs.
-	var san sanitize.Sanitizer
 	if totalRows > 0 && *row < m.height {
 		title := " Select Model"
 		if m.modelSelProfile != "" {
+			var san sanitize.Sanitizer
 			title = " " + san.Sanitize(m.modelSelProfile) + " — Select Model"
 		}
 		title = runewidth.Truncate(title, m.width, "…")
@@ -1158,6 +1157,7 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 			if item.ID == m.modelSelCurrent {
 				indicator = "● "
 			}
+			var san sanitize.Sanitizer
 			label := indicator + san.Sanitize(item.Name)
 			label = runewidth.Truncate(label, m.width, "…")
 			padW := m.width - runewidth.StringWidth(label)

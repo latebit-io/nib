@@ -227,6 +227,9 @@ func (m *AgentPaneModel) UpdateModelSelector(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case tea.KeyDown:
+		if len(m.modelSelItems) == 0 {
+			return nil
+		}
 		if m.modelSelSelected < len(m.modelSelItems)-1 {
 			m.modelSelSelected++
 		}

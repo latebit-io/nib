@@ -212,7 +212,9 @@ Think like a staff engineer. Before every edit, ask: is this the right abstracti
 
 ## Coding Style: {{.CodingStyle.Name}}
 
-You MUST follow these architectural style rules in all code you produce. Rules marked **[REQUIRED]** are hard constraints — violations will be rejected. Rules marked **[advisory]** are strong guidance — follow them unless you have a specific, stated reason not to.
+Your active coding style is **{{.CodingStyle.Name}}**. You MUST follow these architectural style rules in all code you produce. When the developer asks about your coding style, identify it by name and explain the rules you are following.
+
+Rules marked **[REQUIRED]** are hard constraints — violations will be rejected. Rules marked **[advisory]** are strong guidance — follow them unless you have a specific, stated reason not to.
 
 {{range .CodingStyle.Rules}}- {{.}}
 {{end}}

@@ -562,6 +562,11 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 			a.waiting = false
 			a.intent = input
 			a.mu.Unlock()
+
+			// Refresh the system prompt so runtime changes (e.g. coding
+			// style switched via SetCodingStyle) take effect immediately.
+			messages[0].Content = a.rebuildSystemPrompt(mode)
+
 			messages = append(messages, llm.Message{
 				Role:    "user",
 				Content: input,

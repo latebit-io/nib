@@ -28,7 +28,7 @@ type CodingStyleData struct {
 	Rules []string
 }
 
-// StyleRule is a name-instruction pair used to build CodingStyleData.
+// StyleRule is a single enforceable principle used to build CodingStyleData.
 // Callers convert from their domain-specific rule types into this
 // common form before passing to [NewCodingStyleData].
 type StyleRule struct {
@@ -36,15 +36,22 @@ type StyleRule struct {
 	Name string
 	// Instruction is the directive the agent must follow.
 	Instruction string
+	// Enforcement is "hard" (structural, verifiable — violations are rejected)
+	// or "soft" (judgment-based — violations are flagged but not blocked).
+	Enforcement string
 }
 
 // NewCodingStyleData creates a CodingStyleData from a name and a set of
-// rules. Each rule is formatted as "**Name**: Instruction" for emphasis
-// in the prompt.
+// rules. Each rule is formatted with its enforcement level so the agent
+// can distinguish mandatory constraints from advisory guidance.
 func NewCodingStyleData(name string, rules []StyleRule) *CodingStyleData {
 	formatted := make([]string, len(rules))
 	for i, r := range rules {
-		formatted[i] = "**" + r.Name + "**: " + r.Instruction
+		tag := "advisory"
+		if r.Enforcement == "hard" {
+			tag = "REQUIRED"
+		}
+		formatted[i] = "**" + r.Name + "** [" + tag + "]: " + r.Instruction
 	}
 	return &CodingStyleData{Name: name, Rules: formatted}
 }

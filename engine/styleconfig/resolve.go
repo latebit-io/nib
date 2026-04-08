@@ -22,7 +22,8 @@ var builtinStyles embed.FS
 //  4. JUNTO_STYLE environment variable (overrides active style name)
 //
 // Missing files are silently skipped. Parse errors are logged and skipped.
-// Returns (nil, nil) when no style is active.
+// Config is always non-nil (builtins are loaded even without config files).
+// Resolved is nil when no style is active.
 func Resolve(projectRoot string) (*Config, *Resolved) {
 	return resolveWithPaths(globalConfigPath(), projectRoot)
 }

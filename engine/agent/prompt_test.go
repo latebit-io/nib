@@ -422,13 +422,10 @@ func TestBuildMessagesNoDistributedMemory(t *testing.T) {
 
 func TestBuildMessagesCodingStyleInSystemPrompt(t *testing.T) {
 	a := testAgent()
-	a.codingStyle = &CodingStyleData{
-		Name: "SOLID + Hexagonal",
-		Rules: []string{
-			"**Single Responsibility**: Each type has one reason to change.",
-			"**Dependency Inversion**: Depend on interfaces, not concretions.",
-		},
-	}
+	a.codingStyle = NewCodingStyleData("SOLID + Hexagonal", []StyleRule{
+		{Name: "Single Responsibility", Instruction: "Each type has one reason to change.", Enforcement: "hard"},
+		{Name: "Dependency Inversion", Instruction: "Depend on interfaces, not concretions.", Enforcement: "soft"},
+	})
 	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", ModeExecution)
 
 	system := msgs[0].Content
@@ -441,8 +438,11 @@ func TestBuildMessagesCodingStyleInSystemPrompt(t *testing.T) {
 	if !strings.Contains(system, "Dependency Inversion") {
 		t.Error("system prompt should contain all style rules")
 	}
-	if !strings.Contains(system, "runtime constraints") {
-		t.Error("system prompt should explain that rules are constraints")
+	if !strings.Contains(system, "[REQUIRED]") {
+		t.Error("system prompt should render hard enforcement as [REQUIRED]")
+	}
+	if !strings.Contains(system, "[advisory]") {
+		t.Error("system prompt should render soft enforcement as [advisory]")
 	}
 }
 
@@ -458,8 +458,8 @@ func TestBuildMessagesNoCodingStyle(t *testing.T) {
 
 func TestNewCodingStyleData(t *testing.T) {
 	rules := []StyleRule{
-		{Name: "SRP", Instruction: "One reason to change"},
-		{Name: "DIP", Instruction: "Depend on abstractions"},
+		{Name: "SRP", Instruction: "One reason to change", Enforcement: "hard"},
+		{Name: "DIP", Instruction: "Depend on abstractions", Enforcement: "soft"},
 	}
 	data := NewCodingStyleData("Test Style", rules)
 
@@ -469,20 +469,21 @@ func TestNewCodingStyleData(t *testing.T) {
 	if len(data.Rules) != 2 {
 		t.Fatalf("len(Rules) = %d, want 2", len(data.Rules))
 	}
-	if data.Rules[0] != "**SRP**: One reason to change" {
-		t.Errorf("Rules[0] = %q, want %q", data.Rules[0], "**SRP**: One reason to change")
+	wantHard := "**SRP** [REQUIRED]: One reason to change"
+	if data.Rules[0] != wantHard {
+		t.Errorf("Rules[0] = %q, want %q", data.Rules[0], wantHard)
 	}
-	if data.Rules[1] != "**DIP**: Depend on abstractions" {
-		t.Errorf("Rules[1] = %q, want %q", data.Rules[1], "**DIP**: Depend on abstractions")
+	wantSoft := "**DIP** [advisory]: Depend on abstractions"
+	if data.Rules[1] != wantSoft {
+		t.Errorf("Rules[1] = %q, want %q", data.Rules[1], wantSoft)
 	}
 }
 
 func TestBuildMessagesCodingStyleInPlanningMode(t *testing.T) {
 	a := testAgent()
-	a.codingStyle = &CodingStyleData{
-		Name:  "DDD",
-		Rules: []string{"**Aggregates**: Enforce invariants through roots."},
-	}
+	a.codingStyle = NewCodingStyleData("DDD", []StyleRule{
+		{Name: "Aggregates", Instruction: "Enforce invariants through roots.", Enforcement: "hard"},
+	})
 	msgs := a.buildMessages("main.go", "package main", "plan feature", nil, "", ModePlanning)
 
 	system := msgs[0].Content

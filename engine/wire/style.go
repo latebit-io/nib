@@ -42,7 +42,7 @@ func NewStyle(projectRoot string) StyleResult {
 func ConvertRules(rules []styleconfig.Rule) []agent.StyleRule {
 	out := make([]agent.StyleRule, len(rules))
 	for i, r := range rules {
-		out[i] = agent.StyleRule{Name: r.Name, Instruction: r.Instruction}
+		out[i] = agent.StyleRule{Name: r.Name, Instruction: r.Instruction, Enforcement: r.Enforcement}
 	}
 	return out
 }

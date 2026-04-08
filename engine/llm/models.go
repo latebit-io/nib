@@ -48,8 +48,10 @@ func (a *AgentAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	defer func() { _ = resp.Body.Close() }() // HTTP response body close rarely fails
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("llm: list models: HTTP %d: %s", resp.StatusCode, string(body))
+		// Drain body for connection reuse but don't surface it — provider
+		// error responses may echo back API key fragments.
+		_, _ = io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("llm: list models: HTTP %d", resp.StatusCode)
 	}
 
 	var result listModelsResponse

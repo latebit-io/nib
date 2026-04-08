@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/junto/engine/agent"
@@ -170,7 +171,9 @@ func run() error {
 			if !ok {
 				return nil, fmt.Errorf("provider does not support model listing")
 			}
-			models, err := lister.ListModels(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			models, err := lister.ListModels(ctx)
 			if err != nil {
 				return nil, err
 			}

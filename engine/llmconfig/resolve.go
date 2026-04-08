@@ -29,7 +29,7 @@ const (
 // Missing files are silently skipped. Parse errors are logged and skipped.
 // The projectRoot parameter may be empty to skip project-level config.
 func Resolve(projectRoot string) (*Config, *Resolved) {
-	return resolveWithPaths(globalConfigPath(), projectRoot)
+	return resolveWithPaths(GlobalConfigPath(), projectRoot)
 }
 
 // resolveWithPaths is the internal implementation that accepts an explicit
@@ -50,7 +50,8 @@ func resolveWithPaths(globalPath, projectRoot string) (*Config, *Resolved) {
 }
 
 // ResolveProfile resolves a specific named profile from a merged Config.
-// Returns nil if the profile doesn't exist or has no API key.
+// Returns nil if the profile doesn't exist. Use [Resolved.HasProvider] to
+// check whether the returned config has an API key.
 func ResolveProfile(cfg *Config, name string) *Resolved {
 	p, ok := cfg.Profiles[name]
 	if !ok {
@@ -177,10 +178,12 @@ func mergeConfigs(dst, src *Config) {
 	}
 }
 
-// globalConfigPath returns <UserConfigDir>/junto/llm.json.
-func globalConfigPath() string {
+// GlobalConfigPath returns <UserConfigDir>/junto/llm.json.
+// Returns empty string if the user config directory cannot be resolved.
+func GlobalConfigPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
+		slog.Warn("llmconfig: cannot resolve user config dir", "err", err)
 		return ""
 	}
 	return filepath.Join(dir, "junto", "llm.json")

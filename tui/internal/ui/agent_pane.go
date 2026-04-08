@@ -27,12 +27,16 @@ func (m *AgentPaneModel) inputHeight() int {
 // modelSelHeight returns the number of rows reserved for the bottom area
 // when the model selector is active — uses half the pane, minimum 10 rows.
 func (m *AgentPaneModel) modelSelHeight() int {
+	maxH := m.height - 2
+	if maxH < 0 {
+		maxH = 0
+	}
 	h := m.height / 2
 	if h < 10 {
 		h = 10
 	}
-	if h > m.height-2 {
-		h = m.height - 2
+	if h > maxH {
+		h = maxH
 	}
 	return h
 }
@@ -1106,10 +1110,12 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 	}
 
 	// Title row showing provider/profile.
+	// Sanitize profile name — it originates from config files or provider APIs.
+	var san sanitize.Sanitizer
 	if totalRows > 0 && *row < m.height {
 		title := " Select Model"
 		if m.modelSelProfile != "" {
-			title = " " + m.modelSelProfile + " — Select Model"
+			title = " " + san.Sanitize(m.modelSelProfile) + " — Select Model"
 		}
 		title = runewidth.Truncate(title, m.width, "…")
 		padW := m.width - runewidth.StringWidth(title)
@@ -1149,7 +1155,7 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 			if item.ID == m.modelSelCurrent {
 				indicator = "● "
 			}
-			label := indicator + item.Name
+			label := indicator + san.Sanitize(item.Name)
 			label = runewidth.Truncate(label, m.width, "…")
 			padW := m.width - runewidth.StringWidth(label)
 			if padW > 0 {
@@ -1187,7 +1193,8 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string) string {
 	left := ""
 	if m.modelLabel != "" {
-		left = " " + m.modelLabel
+		var san sanitize.Sanitizer
+		left = " " + san.Sanitize(m.modelLabel)
 	}
 	right := ""
 	if statusMsg != "" {

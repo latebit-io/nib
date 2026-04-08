@@ -16,6 +16,7 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/search"
 	"github.com/latebit-io/junto/engine/session"
 )
@@ -100,8 +101,9 @@ type AppModel struct {
 	Palette       PaletteModel
 	Help          HelpModel
 	SearchOverlay SearchOverlayModel
-	recentMouse   bool          // tracks leaked CSI prefix from unparsed mouse events
-	dial          AutonomyLevel // current autonomy level; defaults to LevelGuided
+	recentMouse          bool          // tracks leaked CSI prefix from unparsed mouse events
+	dial                 AutonomyLevel // current autonomy level; defaults to LevelGuided
+	pendingModelProfile  string        // profile of the in-flight ListModels request (stale detection)
 
 	// SwitchModel is called to switch the active LLM model at runtime.
 	// Set by the entry point (main.go) — nil when no LLM is configured.
@@ -311,6 +313,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelSelSwitchProfileMsg:
 		if m.ListModels != nil {
 			profile := msg.profile
+			m.pendingModelProfile = profile
 			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
 			listFn := m.ListModels
 			return m, func() tea.Msg {
@@ -322,6 +325,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Model list fetched — open the inline selector in the agent pane
 	case modelListMsg:
+		// Drop stale responses from superseded requests.
+		if msg.profile != m.pendingModelProfile {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.AgentPane.AppendMeta("\n[failed to list models: " + msg.err.Error() + "]\n")
 			return m, nil
@@ -345,6 +352,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Profile selection (multi-profile mode) — fetch models for that profile.
 		if msg.ModelID == "" && msg.Profile != "" && m.ListModels != nil {
 			profile := msg.Profile
+			m.pendingModelProfile = profile
 			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
 			listFn := m.ListModels
 			return m, func() tea.Msg {
@@ -882,11 +890,16 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // If one profile, fetches models directly.
 func (m *AppModel) openModelSelector() tea.Cmd {
 	if m.ListModels == nil {
-		m.AgentPane.AppendMeta("\n[no LLM configured — create ~/.config/junto/llm.json or .project/llm.json]\n")
+		globalPath := llmconfig.GlobalConfigPath()
+		if globalPath == "" {
+			globalPath = "<user-config-dir>/junto/llm.json"
+		}
+		m.AgentPane.AppendMeta("\n[no LLM configured — create " + globalPath + " or .project/llm.json]\n")
 		return nil
 	}
 	// Fetch models for the current profile. Tab cycles providers if multiple exist.
 	profile := m.Session.LLMProfile()
+	m.pendingModelProfile = profile
 	m.AgentPane.AppendMeta("\n[fetching models...]\n")
 	listFn := m.ListModels
 	return func() tea.Msg {

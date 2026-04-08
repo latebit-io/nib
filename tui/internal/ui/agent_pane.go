@@ -41,6 +41,16 @@ func (m *AgentPaneModel) modelSelHeight() int {
 	return h
 }
 
+// inlineDisplayReplacer strips newlines/carriage returns that would break
+// single-line display labels in the selector and status line.
+var inlineDisplayReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+
+// sanitizeInlineDisplay strips ANSI escapes and forces single-line output.
+func sanitizeInlineDisplay(s string) string {
+	var san sanitize.Sanitizer
+	return inlineDisplayReplacer.Replace(san.Sanitize(s))
+}
+
 // fenceState records the active code fence after processing a raw line.
 // Zero value means "not inside a code block".
 type fenceState struct {
@@ -185,6 +195,7 @@ func (m *AgentPaneModel) CloseModelSelector() {
 	m.modelSelActive = false
 	m.modelSelItems = nil
 	m.recomputeInputLayout()
+	m.clampScroll()
 }
 
 // IsModelSelectorActive reports whether the inline model selector is open.
@@ -213,9 +224,13 @@ func (m *AgentPaneModel) UpdateModelSelector(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case tea.KeyTab:
-		// Cycle to next provider profile.
+		// Cycle to next provider profile. Clear items so stale models
+		// can't be selected while the async fetch is in flight.
 		if len(m.modelSelProfiles) > 1 {
 			next := m.nextProfile()
+			m.modelSelProfile = next
+			m.modelSelItems = nil
+			m.modelSelSelected = 0
 			return func() tea.Msg {
 				return modelSelSwitchProfileMsg{profile: next}
 			}
@@ -1116,8 +1131,7 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 	if totalRows > 0 && *row < m.height {
 		title := " Select Model"
 		if m.modelSelProfile != "" {
-			var san sanitize.Sanitizer
-			title = " " + san.Sanitize(m.modelSelProfile) + " — Select Model"
+			title = " " + sanitizeInlineDisplay(m.modelSelProfile) + " — Select Model"
 		}
 		title = runewidth.Truncate(title, m.width, "…")
 		padW := m.width - runewidth.StringWidth(title)
@@ -1157,8 +1171,7 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 			if item.ID == m.modelSelCurrent {
 				indicator = "● "
 			}
-			var san sanitize.Sanitizer
-			label := indicator + san.Sanitize(item.Name)
+			label := indicator + sanitizeInlineDisplay(item.Name)
 			label = runewidth.Truncate(label, m.width, "…")
 			padW := m.width - runewidth.StringWidth(label)
 			if padW > 0 {
@@ -1196,8 +1209,7 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string) string {
 	left := ""
 	if m.modelLabel != "" {
-		var san sanitize.Sanitizer
-		left = " " + san.Sanitize(m.modelLabel)
+		left = " " + sanitizeInlineDisplay(m.modelLabel)
 	}
 	right := ""
 	if statusMsg != "" {
@@ -1207,8 +1219,11 @@ func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string
 	rightW := runewidth.StringWidth(right)
 	padding := m.width - leftW - rightW
 	if padding < 1 {
-		// Not enough space — truncate to fit.
-		return style.Render(m.padLine(left))
+		// Not enough space — prefer the status message over the model label.
+		if right != "" {
+			return style.Render(m.padLine(runewidth.Truncate(right, m.width, "…")))
+		}
+		return style.Render(m.padLine(runewidth.Truncate(left, m.width, "…")))
 	}
 	return style.Render(left + strings.Repeat(" ", padding) + right)
 }

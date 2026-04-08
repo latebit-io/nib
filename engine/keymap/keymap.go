@@ -50,6 +50,8 @@ const (
 	ActionDialCycle
 	// ActionModelSelector opens the LLM model/profile selector overlay.
 	ActionModelSelector
+	// ActionStyleCycle cycles through available coding styles.
+	ActionStyleCycle
 
 	// View actions control pane visibility and focus.
 	ActionOpenPalette
@@ -147,6 +149,7 @@ func DefaultBindings() []Binding {
 		{ActionAgentContinue, "Continue agent", []string{"Ctrl+N"}, CatAgent},
 		{ActionDialCycle, "Cycle autonomy dial", []string{"Alt+A"}, CatAgent},
 		{ActionModelSelector, "Select model", []string{"Alt+M"}, CatAgent},
+		{ActionStyleCycle, "Cycle coding style", []string{"Alt+S"}, CatAgent},
 
 		// View
 		{ActionOpenPalette, "Open file palette", []string{"Ctrl+P"}, CatView},

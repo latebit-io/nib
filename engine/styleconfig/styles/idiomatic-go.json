@@ -1,0 +1,66 @@
+{
+  "name": "Idiomatic Go",
+  "description": "Go-specific idioms and best practices. Effective Go, the Go proverbs, and community conventions.",
+  "rules": [
+    {
+      "name": "Accept Interfaces, Return Structs",
+      "instruction": "Function parameters should accept interfaces; return types should be concrete structs. This maximizes flexibility for callers while keeping the contract clear.",
+      "enforcement": "soft"
+    },
+    {
+      "name": "Errors Are Values",
+      "instruction": "Handle errors explicitly with if err != nil checks. Never panic for expected failure modes. Use error wrapping (fmt.Errorf with %w) to add context. Define sentinel errors or custom types for errors callers need to inspect.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Small Interfaces",
+      "instruction": "Define interfaces with one to three methods. The larger the interface, the weaker the abstraction. Define interfaces at the point of use (consumer side), not at the point of implementation.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Package by Responsibility",
+      "instruction": "Package names are short, lowercase, singular nouns that describe what the package provides (buffer, editor, session), not what it contains (utils, helpers, common).",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Zero Values Are Useful",
+      "instruction": "Design types so their zero value is valid and useful. A zero-value sync.Mutex is ready to use. A zero-value bytes.Buffer is an empty buffer. Follow this convention.",
+      "enforcement": "soft"
+    },
+    {
+      "name": "Composition Over Embedding",
+      "instruction": "Prefer named fields over embedding when you do not want to promote all methods. Embedding is for interface satisfaction and method forwarding, not for code reuse.",
+      "enforcement": "soft"
+    },
+    {
+      "name": "Goroutines Must Have an Owner",
+      "instruction": "Every goroutine must have a clear owner responsible for stopping it. Use context cancellation, done channels, or sync.WaitGroup. Never fire-and-forget a goroutine.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Channel Semantics",
+      "instruction": "Use channels for communication and coordination between goroutines. Use mutexes for protecting shared state. Do not use channels as mutexes or mutexes as channels.",
+      "enforcement": "soft"
+    },
+    {
+      "name": "Table-Driven Tests",
+      "instruction": "Use table-driven tests with t.Run subtests. Each case is a struct with inputs and expected outputs. Use t.Helper() on test helpers. No test framework dependencies — stdlib only.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Doc Comments on Exports",
+      "instruction": "Every exported type, function, method, and constant must have a doc comment starting with the name. Comments are complete sentences. No exported symbol goes undocumented.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "No Init Functions",
+      "instruction": "Avoid init() functions. They run implicitly, complicate testing, and create hidden dependencies. Use explicit initialization in main() or constructors.",
+      "enforcement": "soft"
+    },
+    {
+      "name": "Use the Standard Library",
+      "instruction": "Prefer stdlib over third-party packages when the stdlib solution is adequate. Never reimplement functionality available in the standard library.",
+      "enforcement": "hard"
+    }
+  ]
+}

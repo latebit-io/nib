@@ -125,6 +125,10 @@ type Agent struct {
 	// distributedMemory lists MCP server names recognized as shared/team memory.
 	// Injected into the system prompt so the agent distinguishes local from shared.
 	distributedMemory []string
+
+	// codingStyle holds the active coding style rules for prompt injection.
+	// Nil when no style is configured.
+	codingStyle *CodingStyleData
 }
 
 // NewOptions holds optional dependencies for agent construction.
@@ -150,6 +154,9 @@ type NewOptions struct {
 	// memory (detected by naming convention). When non-empty, the system
 	// prompt includes a section explaining how to use local vs shared memory.
 	DistributedMemory []string
+	// CodingStyle holds the resolved coding style. When non-nil, style rules
+	// are injected into the system prompt as architectural constraints.
+	CodingStyle *CodingStyleData
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -171,6 +178,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var extraBlocklist []string
 	var interaction InteractionMode
 	var distributedMemory []string
+	var codingStyle *CodingStyleData
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -178,6 +186,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		extraBlocklist = opts.PlanningBlocklist
 		interaction = opts.Interaction
 		distributedMemory = opts.DistributedMemory
+		codingStyle = opts.CodingStyle
 	}
 
 	// Build per-instance planning blocklist: start from defaults, merge extras.
@@ -203,6 +212,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		memoryStore:       memStore,
 		memorySummary:     memorySummary,
 		distributedMemory: distributedMemory,
+		codingStyle:       codingStyle,
 		diagDelay:         500 * time.Millisecond,
 		workspace:         workspace,
 	}
@@ -381,6 +391,21 @@ func (a *Agent) SetProvider(p llm.Provider) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.provider = p
+}
+
+// SetCodingStyle replaces the active coding style for subsequent turns.
+// Pass nil to disable style enforcement. Safe to call between turns.
+func (a *Agent) SetCodingStyle(style *CodingStyleData) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.codingStyle = style
+}
+
+// currentCodingStyle returns the active coding style under lock.
+func (a *Agent) currentCodingStyle() *CodingStyleData {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.codingStyle
 }
 
 // currentProvider returns the active provider under lock.

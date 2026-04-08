@@ -1,0 +1,56 @@
+{
+  "name": "Domain-Driven Design",
+  "description": "DDD tactical patterns — aggregates, value objects, repositories, domain events. Model the domain explicitly and protect invariants.",
+  "rules": [
+    {
+      "name": "Ubiquitous Language",
+      "instruction": "Use domain terminology consistently in code. Type names, method names, and variable names must match the language domain experts use. No generic names like Manager, Helper, or Processor.",
+      "enforcement": "soft"
+    },
+    {
+      "name": "Entities Have Identity",
+      "instruction": "Entities are distinguished by identity (an ID), not by attribute values. Equality is based on ID, not field comparison. Entities are mutable and have a lifecycle.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Value Objects Are Immutable",
+      "instruction": "Value objects have no identity — equality is based on all fields. They must be immutable: operations return new instances, never modify in place. Use them for measurements, ranges, addresses, money.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Aggregates Enforce Invariants",
+      "instruction": "An aggregate is a cluster of entities and value objects with a single root entity. All mutations go through the aggregate root. The root enforces all invariants — external code never reaches inside to modify child entities directly.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Repositories Return Aggregates",
+      "instruction": "Repositories persist and retrieve whole aggregates, not individual entities or raw data. One repository per aggregate root. The repository interface lives in the domain layer; the implementation lives in infrastructure.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Domain Events Are Immutable",
+      "instruction": "Domain events capture something that happened in the domain. They are past-tense, immutable value objects (OrderPlaced, PaymentReceived). They carry the data needed to react, nothing more.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "Domain Services for Cross-Aggregate Logic",
+      "instruction": "When an operation doesn't naturally belong to a single aggregate, use a domain service. Domain services are stateless and express domain concepts. They are not a dumping ground for all logic.",
+      "enforcement": "soft"
+    },
+    {
+      "name": "Bounded Context Separation",
+      "instruction": "Each bounded context has its own models, its own language, and its own package boundary. Never share domain types across contexts — translate at the boundary with anti-corruption layers.",
+      "enforcement": "hard"
+    },
+    {
+      "name": "No Anemic Domain Model",
+      "instruction": "Domain objects must contain behavior, not just data. If all logic lives in services while entities are pure data holders, the model is anemic. Push behavior into the types that own the data.",
+      "enforcement": "soft"
+    },
+    {
+      "name": "Infrastructure Independence",
+      "instruction": "The domain layer has zero imports from infrastructure (database, HTTP, messaging). All external concerns are injected through interfaces defined in the domain.",
+      "enforcement": "hard"
+    }
+  ]
+}

@@ -20,6 +20,35 @@ var defaultPrompts embed.FS
 // large files in .project/prompts/.
 const maxPromptFileBytes = 1 << 20
 
+// CodingStyleData holds the style rules injected into the system prompt.
+type CodingStyleData struct {
+	// Name is the display name of the active coding style.
+	Name string
+	// Rules are the formatted rule strings (each is "**Name**: Instruction").
+	Rules []string
+}
+
+// StyleRule is a name-instruction pair used to build CodingStyleData.
+// Callers convert from their domain-specific rule types into this
+// common form before passing to [NewCodingStyleData].
+type StyleRule struct {
+	// Name is a short label for the rule (e.g. "Single Responsibility").
+	Name string
+	// Instruction is the directive the agent must follow.
+	Instruction string
+}
+
+// NewCodingStyleData creates a CodingStyleData from a name and a set of
+// rules. Each rule is formatted as "**Name**: Instruction" for emphasis
+// in the prompt.
+func NewCodingStyleData(name string, rules []StyleRule) *CodingStyleData {
+	formatted := make([]string, len(rules))
+	for i, r := range rules {
+		formatted[i] = "**" + r.Name + "**: " + r.Instruction
+	}
+	return &CodingStyleData{Name: name, Rules: formatted}
+}
+
 // SystemPromptData holds the template variables for system prompts.
 type SystemPromptData struct {
 	// Headless is true when the agent runs without a TUI (autonomous mode).
@@ -28,6 +57,8 @@ type SystemPromptData struct {
 	// DistributedMemory lists MCP server names recognized as shared/team memory.
 	// When non-empty, the template renders a section explaining local vs shared usage.
 	DistributedMemory []string
+	// CodingStyle holds the active style rules. Nil when no style is configured.
+	CodingStyle *CodingStyleData
 }
 
 // UserPromptData holds the template variables for the user message.

@@ -420,6 +420,81 @@ func TestBuildMessagesNoDistributedMemory(t *testing.T) {
 	}
 }
 
+func TestBuildMessagesCodingStyleInSystemPrompt(t *testing.T) {
+	a := testAgent()
+	a.codingStyle = NewCodingStyleData("SOLID + Hexagonal", []StyleRule{
+		{Name: "Single Responsibility", Instruction: "Each type has one reason to change.", Enforcement: "hard"},
+		{Name: "Dependency Inversion", Instruction: "Depend on interfaces, not concretions.", Enforcement: "soft"},
+	})
+	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", ModeExecution)
+
+	system := msgs[0].Content
+	if !strings.Contains(system, "Coding Style: SOLID + Hexagonal") {
+		t.Error("system prompt should include Coding Style section when style is configured")
+	}
+	if !strings.Contains(system, "Single Responsibility") {
+		t.Error("system prompt should contain style rule names")
+	}
+	if !strings.Contains(system, "Dependency Inversion") {
+		t.Error("system prompt should contain all style rules")
+	}
+	if !strings.Contains(system, "[REQUIRED]") {
+		t.Error("system prompt should render hard enforcement as [REQUIRED]")
+	}
+	if !strings.Contains(system, "[advisory]") {
+		t.Error("system prompt should render soft enforcement as [advisory]")
+	}
+}
+
+func TestBuildMessagesNoCodingStyle(t *testing.T) {
+	a := testAgent()
+	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", ModeExecution)
+
+	system := msgs[0].Content
+	if strings.Contains(system, "Coding Style") {
+		t.Error("system prompt should not include Coding Style section when no style configured")
+	}
+}
+
+func TestNewCodingStyleData(t *testing.T) {
+	rules := []StyleRule{
+		{Name: "SRP", Instruction: "One reason to change", Enforcement: "hard"},
+		{Name: "DIP", Instruction: "Depend on abstractions", Enforcement: "soft"},
+	}
+	data := NewCodingStyleData("Test Style", rules)
+
+	if data.Name != "Test Style" {
+		t.Errorf("Name = %q, want %q", data.Name, "Test Style")
+	}
+	if len(data.Rules) != 2 {
+		t.Fatalf("len(Rules) = %d, want 2", len(data.Rules))
+	}
+	wantHard := "**SRP** [REQUIRED]: One reason to change"
+	if data.Rules[0] != wantHard {
+		t.Errorf("Rules[0] = %q, want %q", data.Rules[0], wantHard)
+	}
+	wantSoft := "**DIP** [advisory]: Depend on abstractions"
+	if data.Rules[1] != wantSoft {
+		t.Errorf("Rules[1] = %q, want %q", data.Rules[1], wantSoft)
+	}
+}
+
+func TestBuildMessagesCodingStyleInPlanningMode(t *testing.T) {
+	a := testAgent()
+	a.codingStyle = NewCodingStyleData("DDD", []StyleRule{
+		{Name: "Aggregates", Instruction: "Enforce invariants through roots.", Enforcement: "hard"},
+	})
+	msgs := a.buildMessages("main.go", "package main", "plan feature", nil, "", ModePlanning)
+
+	system := msgs[0].Content
+	if !strings.Contains(system, "Coding Style: DDD") {
+		t.Error("planning prompt should include Coding Style section — style guides design too")
+	}
+	if !strings.Contains(system, "Aggregates") {
+		t.Error("planning prompt should contain style rules")
+	}
+}
+
 func mkdirAll(path string) error {
 	return os.MkdirAll(path, 0o755)
 }

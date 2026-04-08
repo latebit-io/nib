@@ -87,6 +87,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 	sysData := SystemPromptData{
 		Headless:          a.interactionMode == Headless,
 		DistributedMemory: a.distributedMemory,
+		CodingStyle:       a.currentCodingStyle(),
 	}
 	systemPrompt := a.prompts.SystemPrompt(sysData)
 	if mode == ModePlanning {
@@ -97,4 +98,20 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userContent},
 	}
+}
+
+// rebuildSystemPrompt regenerates the system prompt text using the current
+// runtime state (e.g. coding style). Called between conversation turns so
+// that changes from SetCodingStyle take effect immediately without requiring
+// a new RunWithMode call.
+func (a *Agent) rebuildSystemPrompt(mode Mode) string {
+	sysData := SystemPromptData{
+		Headless:          a.interactionMode == Headless,
+		DistributedMemory: a.distributedMemory,
+		CodingStyle:       a.currentCodingStyle(),
+	}
+	if mode == ModePlanning {
+		return a.prompts.PlanningSystemPrompt(sysData)
+	}
+	return a.prompts.SystemPrompt(sysData)
 }

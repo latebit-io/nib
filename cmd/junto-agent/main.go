@@ -183,12 +183,16 @@ func run() error {
 	}
 	defer mem.Cleanup()
 
+	// Resolve coding style — injected into the agent's system prompt.
+	styleResult := wire.NewStyle(projectRoot)
+
 	// Create agent in headless mode.
 	opts := &agent.NewOptions{
 		MemoryStore:       mem.Store,
 		MemorySummary:     mem.Summary,
 		Interaction:       agent.Headless,
 		DistributedMemory: agent.DetectDistributedMemory(mcpResult.ServerNames),
+		CodingStyle:       styleResult.AgentStyle,
 	}
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr

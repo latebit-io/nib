@@ -97,13 +97,14 @@ type AppModel struct {
 	Regions *RegionManager
 
 	// TUI-only state
-	Dialog        DialogModel
-	Palette       PaletteModel
-	Help          HelpModel
-	SearchOverlay SearchOverlayModel
-	recentMouse          bool          // tracks leaked CSI prefix from unparsed mouse events
-	dial                 AutonomyLevel // current autonomy level; defaults to LevelGuided
-	pendingModelProfile  string        // profile of the in-flight ListModels request (stale detection)
+	Dialog              DialogModel
+	Palette             PaletteModel
+	Help                HelpModel
+	SearchOverlay       SearchOverlayModel
+	recentMouse         bool          // tracks leaked CSI prefix from unparsed mouse events
+	dial                AutonomyLevel // current autonomy level; defaults to LevelGuided
+	styleName           string        // current coding style display name; empty when disabled
+	pendingModelProfile string        // profile of the in-flight ListModels request (stale detection)
 
 	// SwitchModel is called to switch the active LLM model at runtime.
 	// Set by the entry point (main.go) — nil when no LLM is configured.
@@ -119,6 +120,11 @@ type AppModel struct {
 	// Set by the entry point — nil when no LLM is configured.
 	LLMProfileNames func() []string
 
+	// CycleStyle advances to the next available coding style and returns its
+	// display name (or "" if styles are exhausted and cycling disables enforcement).
+	// Set by the entry point — nil when no styles are configured.
+	CycleStyle func() string
+
 	Services *Services
 	Keymap   *Keymap
 	Quit     bool
@@ -130,6 +136,21 @@ type AppModel struct {
 // SetProgram sets the tea.Program reference.
 func (m *AppModel) SetProgram(p *tea.Program) {
 	m.program = p
+}
+
+// SetStyleName sets the current coding style display name for the status bar.
+// Pass empty string to clear the indicator.
+func (m *AppModel) SetStyleName(name string) {
+	m.styleName = name
+}
+
+// cycleStyle advances to the next coding style via the CycleStyle callback.
+// Does nothing if no styles are configured.
+func (m *AppModel) cycleStyle() {
+	if m.CycleStyle == nil {
+		return
+	}
+	m.styleName = m.CycleStyle()
 }
 
 // NewApp creates the application model.
@@ -713,6 +734,9 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case ActionDialCycle:
 			m.dial = m.dial.Cycle()
 			return m, nil
+		case ActionStyleCycle:
+			m.cycleStyle()
+			return m, nil
 		}
 		cmd := m.AgentPane.Update(msg)
 		return m, cmd
@@ -789,6 +813,10 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionDialCycle:
 		m.dial = m.dial.Cycle()
+		return m, nil
+
+	case ActionStyleCycle:
+		m.cycleStyle()
 		return m, nil
 
 	case ActionModelSelector:
@@ -919,9 +947,18 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		indicators := make([]string, len(mem)+1)
+		extra := 1 // dial is always shown
+		if m.styleName != "" {
+			extra++
+		}
+		indicators := make([]string, len(mem)+extra)
 		copy(indicators, mem)
-		indicators[len(mem)] = m.dial.String()
+		idx := len(mem)
+		indicators[idx] = m.dial.String()
+		if m.styleName != "" {
+			idx++
+			indicators[idx] = "style:" + m.styleName
+		}
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
 		if m.Dialog.Active {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)

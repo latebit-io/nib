@@ -123,6 +123,10 @@ func run() error {
 	if llmResolved != nil {
 		sess.SetLLMInfo(llmResolved.Model, llmResolved.Profile)
 	}
+
+	// Resolve coding style — injected into the agent's system prompt.
+	styleResult := wire.NewStyle(projectRoot)
+
 	var ag *agent.Agent
 	if provider != nil {
 		// Start memory server — only needed when agent is active.
@@ -136,6 +140,7 @@ func run() error {
 			MemoryStore:       mem.Store,
 			MemorySummary:     mem.Summary,
 			DistributedMemory: distributed,
+			CodingStyle:       styleResult.AgentStyle,
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
@@ -201,6 +206,44 @@ func run() error {
 			sess.SetLLMInfo(resolved.Model, resolved.Profile)
 			slog.Info("llm: switched model", "profile", profile, "model", modelID)
 			return resolved.DisplayModel(), nil
+		}
+	}
+
+	// Wire coding style cycling — closures capture ag, styleResult, and the style config.
+	if styleResult.Resolved != nil {
+		app.SetStyleName(styleResult.Resolved.Name)
+	}
+	if ag != nil {
+		styleNames := styleResult.Config.StyleNames()
+		if len(styleNames) > 0 {
+			currentStyleKey := "" // track the current style key for cycling
+			if styleResult.Config.Active != "" {
+				currentStyleKey = styleResult.Config.Active
+			}
+			app.CycleStyle = func() string {
+				// Find current index, advance to next (with "none" after the last).
+				idx := -1
+				for i, name := range styleNames {
+					if name == currentStyleKey {
+						idx = i
+						break
+					}
+				}
+				idx++
+				if idx >= len(styleNames) {
+					// Wrap to "none" — disable style enforcement.
+					currentStyleKey = ""
+					ag.SetCodingStyle(nil)
+					slog.Info("style: disabled")
+					return ""
+				}
+				currentStyleKey = styleNames[idx]
+				s := styleResult.Config.Styles[currentStyleKey]
+				data := agent.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
+				ag.SetCodingStyle(data)
+				slog.Info("style: switched", "style", s.Name)
+				return s.Name
+			}
 		}
 	}
 

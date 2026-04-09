@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 type styleLintTestCase struct {
@@ -22,6 +24,7 @@ var styleLintTests = []styleLintTestCase{
 	{name: "multiple commands concatenated", cmds: []string{`echo "lint1: issue"`, `echo "lint2: issue"`}, contains: []string{"lint1: issue", "lint2: issue"}},
 	{name: "multiple commands one silent", cmds: []string{"true", `echo "only this"`}, contains: []string{"only this"}},
 	{name: "command not found", cmds: []string{"nonexistent_lint_tool_xyz123"}, contains: []string{"not found"}},
+	{name: "shell metacharacters in path rejected", cmds: []string{`echo "checking {file}"`}, relPath: "src/'; rm -rf / #.go", wantEmpty: true},
 }
 
 func TestRunStyleLint(t *testing.T) {
@@ -35,7 +38,7 @@ func TestRunStyleLint(t *testing.T) {
 			if relPath == "" {
 				relPath = "test.go"
 			}
-			result := a.runStyleLint(relPath)
+			result := a.runStyleLint(context.Background(), relPath)
 			assertLintResult(t, result, tc)
 		})
 	}
@@ -60,25 +63,19 @@ func assertLintResult(t *testing.T, result string, tc styleLintTestCase) {
 }
 
 func TestRunStyleLint_timeout(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping timeout test in short mode")
-	}
-
 	a := &Agent{
 		workspace:    promptTestWorkspace{},
-		styleLintCmd: []string{"sleep 60"},
+		styleLintCmd: []string{`echo "started" && sleep 60`},
+		lintTimeout:  200 * time.Millisecond,
 	}
 
-	// Override the timeout for testing — we don't want to wait 30s.
-	// Since styleLintTimeout is a const, we test the timeout behavior
-	// by using a command that blocks and checking the result contains
-	// the timeout indicator. This test will take ~30s.
-	// Instead, use a command that we can detect was killed.
-	a.styleLintCmd = []string{`echo "started" && sleep 60`}
-
-	// This will take styleLintTimeout (30s) — skip in CI.
-	// For manual testing: go test ./agent/ -run TestRunStyleLint_timeout -timeout 60s
-	t.Skip("timeout test takes 30s — run manually with: go test ./agent/ -run TestRunStyleLint_timeout -timeout 60s")
+	result := a.runStyleLint(context.Background(), "test.go")
+	if !strings.Contains(result, "timed out") {
+		t.Errorf("expected timeout indicator, got %q", result)
+	}
+	if !strings.Contains(result, "started") {
+		t.Errorf("expected partial output before timeout, got %q", result)
+	}
 }
 
 func TestRunLintCommand(t *testing.T) {
@@ -107,7 +104,7 @@ func TestRunLintCommand(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := runLintCommand("", tc.cmd)
+			result := runLintCommand(context.Background(), "", tc.cmd, defaultLintTimeout)
 
 			if tc.wantEmpty {
 				if result != "" {
@@ -122,6 +119,31 @@ func TestRunLintCommand(t *testing.T) {
 	}
 }
 
+func TestSafeForShell(t *testing.T) {
+	safe := []string{"src/main.go", "internal/ui/app.go", "file-name_v2.txt", "a/b/c.rs"}
+	for _, s := range safe {
+		if !safeForShell(s) {
+			t.Errorf("safeForShell(%q) = false, want true", s)
+		}
+	}
+	unsafe := []string{
+		"",
+		"file name.go",
+		"src/';echo pwned",
+		"$(whoami).go",
+		"file`id`.go",
+		"a|b.go",
+		"a&b.go",
+		"a;b.go",
+		"file\nname.go",
+	}
+	for _, s := range unsafe {
+		if safeForShell(s) {
+			t.Errorf("safeForShell(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestRunStyleLint_concurrencySafe(t *testing.T) {
 	// Verify that SetStyleLintCmd and runStyleLint don't race.
 	a := &Agent{
@@ -133,12 +155,12 @@ func TestRunStyleLint_concurrencySafe(t *testing.T) {
 	go func() {
 		defer close(done)
 		for range 10 {
-			a.SetStyleLintCmd([]string{`echo "updated"`})
+			a.SetStyle(nil, []string{`echo "updated"`})
 		}
 	}()
 
 	for range 10 {
-		a.runStyleLint("test.go")
+		a.runStyleLint(context.Background(), "test.go")
 	}
 	<-done
 }

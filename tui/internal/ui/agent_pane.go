@@ -1349,6 +1349,8 @@ func (m *AgentPaneModel) Render() string {
 			statusMsg = "Type to reply | Enter send"
 		case event.StatusTyping:
 			statusMsg = "Agent typing... | Esc cancel"
+		case event.StatusLinting:
+			statusMsg = "Running style lint..."
 		}
 		output[row] = m.renderStatusLine(style, statusMsg)
 	}

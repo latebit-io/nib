@@ -134,6 +134,10 @@ type Agent struct {
 	// The placeholder {file} is replaced with the edited file's relative path.
 	// Nil when no style lint is configured.
 	styleLintCmd []string
+
+	// lintTimeout is the per-command timeout for style lint. Zero uses defaultLintTimeout.
+	// Settable for testing.
+	lintTimeout time.Duration
 }
 
 // NewOptions holds optional dependencies for agent construction.
@@ -405,21 +409,21 @@ func (a *Agent) SetProvider(p llm.Provider) {
 	a.provider = p
 }
 
-// SetCodingStyle replaces the active coding style and lint commands for
-// subsequent turns. Pass nil to disable style enforcement.
+// SetStyle atomically replaces the active coding style and lint commands.
+// Pass nil style and nil lintCmd to disable style enforcement.
 // Safe to call between turns.
-func (a *Agent) SetCodingStyle(style *CodingStyleData) {
+func (a *Agent) SetStyle(style *CodingStyleData, lintCmd []string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.codingStyle = style
+	a.styleLintCmd = lintCmd
 }
 
-// SetStyleLintCmd replaces the lint commands run after each approved edit.
-// Pass nil to disable style linting. Safe to call between turns.
-func (a *Agent) SetStyleLintCmd(cmds []string) {
+// currentStyleLintCmd returns the active lint commands under lock.
+func (a *Agent) currentStyleLintCmd() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.styleLintCmd = cmds
+	return a.styleLintCmd
 }
 
 // currentCodingStyle returns the active coding style under lock.
@@ -868,8 +872,16 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 		}
 
 		// Auto-inject style lint so the agent can self-correct style violations.
-		if lint := a.runStyleLint(proposal.Path); lint != "" {
-			result += "\n\nStyle lint after edit:\n" + lint
+		if len(a.currentStyleLintCmd()) > 0 {
+			a.send(event.AgentStatus{Status: event.StatusLinting})
+			a.send(event.AgentToken{Text: "\n[Running style lint...]\n"})
+			if lint := a.runStyleLint(ctx, proposal.Path); lint != "" {
+				a.send(event.AgentToken{Text: "[Style lint violations found]\n"})
+				result += "\n\nStyle lint after edit:\n" + lint
+			} else {
+				a.send(event.AgentToken{Text: "[Style lint: clean]\n"})
+			}
+			a.send(event.AgentStatus{Status: event.StatusThinking})
 		}
 
 		return result

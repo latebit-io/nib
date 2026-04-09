@@ -10,13 +10,26 @@ import (
 	"time"
 )
 
-// styleLintTimeout is the maximum duration a single lint command can run.
-const styleLintTimeout = 30 * time.Second
+// defaultLintTimeout is the maximum duration a single lint command can run.
+const defaultLintTimeout = 30 * time.Second
+
+// safeForShell reports whether s is safe to interpolate into a shell command.
+// Rejects paths containing shell metacharacters that could enable injection.
+func safeForShell(s string) bool {
+	for _, c := range s {
+		switch c {
+		case '\'', '"', '`', '$', '\\', ';', '&', '|', '(', ')', '<', '>', '\n', '\r', '\t', ' ', '*', '?', '[', ']', '{', '}', '~', '!', '#':
+			return false
+		}
+	}
+	return s != ""
+}
 
 // runStyleLint executes configured lint commands against the edited file
 // and returns formatted output for injection into the agent's context.
 // Returns empty string when there are no violations or no commands configured.
-func (a *Agent) runStyleLint(relPath string) string {
+// Skips execution if the file path contains shell metacharacters.
+func (a *Agent) runStyleLint(ctx context.Context, relPath string) string {
 	a.mu.Lock()
 	cmds := a.styleLintCmd
 	a.mu.Unlock()
@@ -25,12 +38,22 @@ func (a *Agent) runStyleLint(relPath string) string {
 		return ""
 	}
 
+	if !safeForShell(relPath) {
+		slog.Warn("style lint: skipping — file path contains shell metacharacters", "path", relPath)
+		return ""
+	}
+
+	timeout := a.lintTimeout
+	if timeout == 0 {
+		timeout = defaultLintTimeout
+	}
+
 	projectRoot := a.workspace.ProjectRoot()
 	var parts []string
 
 	for _, cmdTemplate := range cmds {
 		cmdStr := strings.ReplaceAll(cmdTemplate, "{file}", relPath)
-		output := runLintCommand(projectRoot, cmdStr)
+		output := runLintCommand(ctx, projectRoot, cmdStr, timeout)
 		if output != "" {
 			parts = append(parts, fmt.Sprintf("$ %s\n%s", cmdStr, output))
 		}
@@ -46,8 +69,8 @@ func (a *Agent) runStyleLint(relPath string) string {
 // Returns empty string on success (no output) or when the command produces
 // no stdout/stderr. Non-zero exit codes are expected from linters that
 // find violations — the output is returned regardless of exit code.
-func runLintCommand(projectRoot, cmdStr string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), styleLintTimeout)
+func runLintCommand(parent context.Context, projectRoot, cmdStr string, timeout time.Duration) string {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
@@ -69,11 +92,11 @@ func runLintCommand(projectRoot, cmdStr string) string {
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			slog.Warn("style lint: command timed out", "command", cmdStr, "timeout", styleLintTimeout)
+			slog.Warn("style lint: command timed out", "command", cmdStr, "timeout", timeout)
 			if output == "" {
-				return fmt.Sprintf("[timed out after %s]", styleLintTimeout)
+				return fmt.Sprintf("[timed out after %s]", timeout)
 			}
-			return output + fmt.Sprintf("\n[timed out after %s]", styleLintTimeout)
+			return output + fmt.Sprintf("\n[timed out after %s]", timeout)
 		}
 		// Non-zero exit is normal for linters that find violations.
 		slog.Debug("style lint: command exited with error", "command", cmdStr, "err", err)

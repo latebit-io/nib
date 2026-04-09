@@ -23,7 +23,8 @@ type Style struct {
 	// Rules lists the enforceable principles for this style.
 	Rules []Rule `json:"rules"`
 	// LintCmd lists shell commands to run after edits for style validation.
-	// The placeholder {file} is replaced with the edited file's relative path.
+	// The placeholder {file} is replaced with the edited file's relative path,
+	// and {dir} is replaced with the file's directory (for package-level linting).
 	LintCmd []string `json:"lint_cmd,omitempty"`
 }
 

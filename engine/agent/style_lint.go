@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -38,7 +39,8 @@ func (a *Agent) runStyleLint(ctx context.Context, relPath string) string {
 		return ""
 	}
 
-	if !safeForShell(relPath) {
+	dir := filepath.Dir(relPath)
+	if !safeForShell(relPath) || !safeForShell(dir) {
 		slog.Warn("style lint: skipping — file path contains shell metacharacters", "path", relPath)
 		return "[style lint skipped: file path contains shell metacharacters]"
 	}
@@ -51,9 +53,20 @@ func (a *Agent) runStyleLint(ctx context.Context, relPath string) string {
 	projectRoot := a.workspace.ProjectRoot()
 	var parts []string
 
+	// Base filename for filtering — lint output typically prefixes lines with
+	// the file path. We filter to only show violations from the edited file,
+	// not from other files in the same package directory.
+	baseName := filepath.Base(relPath)
+
 	for _, cmdTemplate := range cmds {
 		cmdStr := strings.ReplaceAll(cmdTemplate, "{file}", relPath)
+		cmdStr = strings.ReplaceAll(cmdStr, "{dir}", dir)
 		output := runLintCommand(ctx, projectRoot, cmdStr, timeout)
+		// When linting a directory ({dir}), filter to only show violations
+		// from the edited file — other files in the package are noise.
+		if output != "" && strings.Contains(cmdTemplate, "{dir}") {
+			output = filterLintOutput(output, relPath, baseName)
+		}
 		if output != "" {
 			// Show the template with {file} placeholder, not the expanded command,
 			// to avoid leaking private paths or inline credentials from user config.
@@ -65,6 +78,22 @@ func (a *Agent) runStyleLint(ctx context.Context, relPath string) string {
 		return ""
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// filterLintOutput keeps only lines that reference the edited file.
+// Linters typically prefix each violation with "path/to/file.go:line:col:".
+// Lines that don't match any known prefix (summary lines, blank lines) are
+// kept if at least one file-specific line was found.
+func filterLintOutput(output, relPath, baseName string) string {
+	lines := strings.Split(output, "\n")
+	var filtered []string
+	for _, line := range lines {
+		// Match full relative path or just the base filename.
+		if strings.Contains(line, relPath) || strings.HasPrefix(line, baseName+":") {
+			filtered = append(filtered, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(filtered, "\n"))
 }
 
 // runLintCommand executes a single lint command and returns its output.

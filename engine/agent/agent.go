@@ -131,13 +131,20 @@ type Agent struct {
 	codingStyle *CodingStyleData
 
 	// styleLintCmd lists shell commands for post-edit style validation.
-	// The placeholder {file} is replaced with the edited file's relative path.
+	// The placeholder {file} is replaced with the edited file's relative path,
+	// and {dir} with the file's directory (for package-level linting).
 	// Nil when no style lint is configured.
 	styleLintCmd []string
 
 	// lintTimeout is the per-command timeout for style lint. Zero uses defaultLintTimeout.
 	// Settable for testing.
 	lintTimeout time.Duration
+
+	// pendingLint holds lint violations from the last edit. When non-empty,
+	// processLLMTurn injects a user message before the next LLM call,
+	// then clears it. This ensures lint violations are seen as user-priority
+	// instructions rather than buried in tool results.
+	pendingLint string
 }
 
 // NewOptions holds optional dependencies for agent construction.
@@ -624,6 +631,23 @@ func (a *Agent) planningToolDefs() []llm.ToolDef {
 // toolDefs controls which tools the LLM can invoke for this turn.
 func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, error) {
 	for {
+		// Inject pending lint violations as a user message so the LLM
+		// treats them as a high-priority instruction. Checked each iteration
+		// because waitForContinue (called during dispatchTool) may set
+		// pendingLint mid-loop after an edit is approved.
+		a.mu.Lock()
+		lint := a.pendingLint
+		a.pendingLint = ""
+		a.mu.Unlock()
+		if lint != "" {
+			messages = append(messages, llm.Message{
+				Role: "user",
+				Content: "STOP. Style lint found violations in the file you just edited. " +
+					"Your next edit MUST fix these violations before you do anything else. " +
+					"Do NOT continue with your previous task until lint passes clean.\n\n" + lint,
+			})
+		}
+
 		ch, err := a.currentProvider().Stream(ctx, messages, toolDefs)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
@@ -871,15 +895,20 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 			result += "\n\nDiagnostics after edit:\n" + diagResult
 		}
 
-		// Auto-inject style lint so the agent can self-correct style violations.
+		// Run style lint and store violations for injection as a user
+		// message in processLLMTurn. User messages are higher priority
+		// than tool results — the LLM is much more likely to act on them.
 		if len(a.currentStyleLintCmd()) > 0 {
 			a.send(event.AgentStatus{Status: event.StatusLinting})
 			a.send(event.AgentToken{Text: "\n[Running style lint...]\n"})
 			if lint := a.runStyleLint(ctx, proposal.Path); lint != "" {
-				a.send(event.AgentToken{Text: "[Style lint violations found]\n"})
-				result += "\n\nStyle lint after edit:\n" + lint
+				lines := strings.Count(lint, "\n") + 1
+				a.send(event.AgentToken{Text: fmt.Sprintf("[Style lint: %d violation(s) — fixing before continuing]\n", lines)})
+				a.mu.Lock()
+				a.pendingLint = lint
+				a.mu.Unlock()
 			} else {
-				a.send(event.AgentToken{Text: "[Style lint: clean]\n"})
+				a.send(event.AgentToken{Text: "[Style lint: clean ✓]\n"})
 			}
 			a.send(event.AgentStatus{Status: event.StatusThinking})
 		}

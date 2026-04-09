@@ -21,6 +21,7 @@ var styleLintTests = []styleLintTestCase{
 	{name: "command with no output", cmds: []string{"true"}, wantEmpty: true},
 	{name: "non-zero exit with output", cmds: []string{`echo "error: bad style" && exit 1`}, contains: []string{"error: bad style"}},
 	{name: "file placeholder substituted", cmds: []string{`echo "checking {file}"`}, relPath: "src/main.go", contains: []string{"checking src/main.go"}},
+	{name: "dir placeholder filters to edited file", cmds: []string{`echo "internal/ui/app.go:10:1: missing doc" && echo "internal/ui/other.go:5:1: noise" && echo "linting ./{dir}"`}, relPath: "internal/ui/app.go", contains: []string{"app.go:10:1"}},
 	{name: "multiple commands concatenated", cmds: []string{`echo "lint1: issue"`, `echo "lint2: issue"`}, contains: []string{"lint1: issue", "lint2: issue"}},
 	{name: "multiple commands one silent", cmds: []string{"true", `echo "only this"`}, contains: []string{"only this"}},
 	{name: "command not found", cmds: []string{"nonexistent_lint_tool_xyz123"}, contains: []string{"not found"}},
@@ -116,6 +117,35 @@ func TestRunLintCommand(t *testing.T) {
 				t.Errorf("result should contain %q, got %q", tc.contains, result)
 			}
 		})
+	}
+}
+
+func TestFilterLintOutput(t *testing.T) {
+	output := `internal/ui/tui.go:45:2: exported function Foo should have comment (golint)
+internal/ui/todo.go:12:5: error return value not checked (errcheck)
+internal/ui/todo.go:30:1: function too long (funlen)
+internal/ui/model.go:8:1: missing doc comment (golint)`
+
+	got := filterLintOutput(output, "internal/ui/todo.go", "todo.go")
+	if !strings.Contains(got, "todo.go:12:5") {
+		t.Errorf("should contain todo.go:12 violation, got:\n%s", got)
+	}
+	if !strings.Contains(got, "todo.go:30:1") {
+		t.Errorf("should contain todo.go:30 violation, got:\n%s", got)
+	}
+	if strings.Contains(got, "tui.go") {
+		t.Errorf("should not contain tui.go violations, got:\n%s", got)
+	}
+	if strings.Contains(got, "model.go") {
+		t.Errorf("should not contain model.go violations, got:\n%s", got)
+	}
+}
+
+func TestFilterLintOutput_noMatches(t *testing.T) {
+	output := `other.go:1:1: some issue`
+	got := filterLintOutput(output, "main.go", "main.go")
+	if got != "" {
+		t.Errorf("expected empty, got %q", got)
 	}
 }
 

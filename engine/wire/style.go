@@ -58,15 +58,18 @@ func NewStyle(projectRoot string) StyleResult {
 // project language. Returns nil when no linter is detected.
 func detectLintCommands(projectRoot string) []string {
 	// Go project: check for go.mod and a linter on PATH.
+	// Use {dir} (package directory) instead of {file} — Go requires package-level
+	// compilation, so linting a single file misses type definitions from sibling
+	// files and produces false positives.
 	if _, err := os.Stat(filepath.Join(projectRoot, "go.mod")); err == nil {
 		if _, err := exec.LookPath("golangci-lint"); err == nil {
 			slog.Info("wire: auto-detected golangci-lint for Go project")
-			return []string{"golangci-lint run {file}"}
+			return []string{"golangci-lint run ./{dir}/..."}
 		}
 		// Fallback: go vet is always available in a Go project.
 		if _, err := exec.LookPath("go"); err == nil {
 			slog.Info("wire: auto-detected go vet for Go project (golangci-lint not found)")
-			return []string{"go vet {file}"}
+			return []string{"go vet ./{dir}/..."}
 		}
 	}
 

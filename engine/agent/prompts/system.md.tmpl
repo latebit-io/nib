@@ -90,6 +90,29 @@ After each edit is approved, you automatically receive compiler diagnostics (err
 - Do NOT move on to a new task while errors remain — the code must compile.
 
 You also have a `diagnostics` tool to check any file for errors at any time. Use it when you want to verify a file compiles correctly before moving on.
+{{- if .CodingStyle}}
+
+## Style Lint
+
+After each approved edit, style lint commands run automatically against the edited file.
+
+### First encounter with a file
+
+When lint reports violations on a file you are editing for the first time in this conversation:
+1. Count the violations and note how many are pre-existing (not caused by your edit).
+2. If there are pre-existing violations, ask the developer: "This file has N pre-existing lint violations. Should I fix them all before continuing, or should I only fix violations I introduce?"
+3. If the developer says fix all → fix every violation before resuming your task.
+4. If the developer says only new → remember the pre-existing violations for this file and only fix NEW violations that your edits introduce. Ignore the pre-existing ones going forward.
+
+### After every edit
+
+If lint reports violations after your edit:
+- STOP what you are doing. Your very next edit MUST fix the lint violations.
+- Fix every reported violation (or only new ones, per the developer's earlier choice) in a single edit.
+- Let lint run again to confirm the fix.
+- Only after lint passes clean may you resume your original task.
+- Do NOT move on while fixable violations remain.
+{{- end}}
 
 ## Memory
 

@@ -129,6 +129,11 @@ type Agent struct {
 	// codingStyle holds the active coding style rules for prompt injection.
 	// Nil when no style is configured.
 	codingStyle *CodingStyleData
+
+	// styleLintCmd lists shell commands for post-edit style validation.
+	// The placeholder {file} is replaced with the edited file's relative path.
+	// Nil when no style lint is configured.
+	styleLintCmd []string
 }
 
 // NewOptions holds optional dependencies for agent construction.
@@ -157,6 +162,10 @@ type NewOptions struct {
 	// CodingStyle holds the resolved coding style. When non-nil, style rules
 	// are injected into the system prompt as architectural constraints.
 	CodingStyle *CodingStyleData
+	// StyleLintCmd lists shell commands to run after each approved edit for
+	// style validation. The placeholder {file} is replaced with the edited
+	// file's relative path. Nil when no lint is configured.
+	StyleLintCmd []string
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -179,6 +188,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var interaction InteractionMode
 	var distributedMemory []string
 	var codingStyle *CodingStyleData
+	var styleLintCmd []string
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -187,6 +197,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		interaction = opts.Interaction
 		distributedMemory = opts.DistributedMemory
 		codingStyle = opts.CodingStyle
+		styleLintCmd = opts.StyleLintCmd
 	}
 
 	// Build per-instance planning blocklist: start from defaults, merge extras.
@@ -213,6 +224,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		memorySummary:     memorySummary,
 		distributedMemory: distributedMemory,
 		codingStyle:       codingStyle,
+		styleLintCmd:      styleLintCmd,
 		diagDelay:         500 * time.Millisecond,
 		workspace:         workspace,
 	}
@@ -393,12 +405,21 @@ func (a *Agent) SetProvider(p llm.Provider) {
 	a.provider = p
 }
 
-// SetCodingStyle replaces the active coding style for subsequent turns.
-// Pass nil to disable style enforcement. Safe to call between turns.
+// SetCodingStyle replaces the active coding style and lint commands for
+// subsequent turns. Pass nil to disable style enforcement.
+// Safe to call between turns.
 func (a *Agent) SetCodingStyle(style *CodingStyleData) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.codingStyle = style
+}
+
+// SetStyleLintCmd replaces the lint commands run after each approved edit.
+// Pass nil to disable style linting. Safe to call between turns.
+func (a *Agent) SetStyleLintCmd(cmds []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.styleLintCmd = cmds
 }
 
 // currentCodingStyle returns the active coding style under lock.
@@ -844,6 +865,11 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 			time.Sleep(a.diagDelay)
 			diagResult := formatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
 			result += "\n\nDiagnostics after edit:\n" + diagResult
+		}
+
+		// Auto-inject style lint so the agent can self-correct style violations.
+		if lint := a.runStyleLint(proposal.Path); lint != "" {
+			result += "\n\nStyle lint after edit:\n" + lint
 		}
 
 		return result

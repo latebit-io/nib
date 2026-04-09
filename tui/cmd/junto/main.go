@@ -142,6 +142,9 @@ func run() error {
 			DistributedMemory: distributed,
 			CodingStyle:       styleResult.AgentStyle,
 		}
+		if styleResult.Resolved != nil {
+			opts.StyleLintCmd = styleResult.Resolved.LintCmd
+		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
 		}
@@ -234,6 +237,7 @@ func run() error {
 					// Wrap to "none" — disable style enforcement.
 					currentStyleKey = ""
 					ag.SetCodingStyle(nil)
+					ag.SetStyleLintCmd(nil)
 					slog.Info("style: disabled")
 					return ""
 				}
@@ -241,6 +245,7 @@ func run() error {
 				s := styleResult.Config.Styles[currentStyleKey]
 				data := agent.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
 				ag.SetCodingStyle(data)
+				ag.SetStyleLintCmd(s.LintCmd)
 				slog.Info("style: switched", "style", s.Name)
 				return s.Name
 			}

@@ -24,7 +24,7 @@ var styleLintTests = []styleLintTestCase{
 	{name: "multiple commands concatenated", cmds: []string{`echo "lint1: issue"`, `echo "lint2: issue"`}, contains: []string{"lint1: issue", "lint2: issue"}},
 	{name: "multiple commands one silent", cmds: []string{"true", `echo "only this"`}, contains: []string{"only this"}},
 	{name: "command not found", cmds: []string{"nonexistent_lint_tool_xyz123"}, contains: []string{"not found"}},
-	{name: "shell metacharacters in path rejected", cmds: []string{`echo "checking {file}"`}, relPath: "src/'; rm -rf / #.go", wantEmpty: true},
+	{name: "shell metacharacters in path rejected", cmds: []string{`echo "checking {file}"`}, relPath: "src/'; rm -rf / #.go", contains: []string{"skipped", "shell metacharacters"}},
 }
 
 func TestRunStyleLint(t *testing.T) {

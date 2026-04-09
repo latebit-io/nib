@@ -40,7 +40,7 @@ func (a *Agent) runStyleLint(ctx context.Context, relPath string) string {
 
 	if !safeForShell(relPath) {
 		slog.Warn("style lint: skipping — file path contains shell metacharacters", "path", relPath)
-		return ""
+		return "[style lint skipped: file path contains shell metacharacters]"
 	}
 
 	timeout := a.lintTimeout
@@ -55,7 +55,9 @@ func (a *Agent) runStyleLint(ctx context.Context, relPath string) string {
 		cmdStr := strings.ReplaceAll(cmdTemplate, "{file}", relPath)
 		output := runLintCommand(ctx, projectRoot, cmdStr, timeout)
 		if output != "" {
-			parts = append(parts, fmt.Sprintf("$ %s\n%s", cmdStr, output))
+			// Show the template with {file} placeholder, not the expanded command,
+			// to avoid leaking private paths or inline credentials from user config.
+			parts = append(parts, fmt.Sprintf("$ %s\n%s", cmdTemplate, output))
 		}
 	}
 

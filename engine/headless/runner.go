@@ -207,6 +207,8 @@ func (r *Runner) handleStatus(e event.AgentStatus) {
 		r.status("[thinking...]\n")
 	case event.StatusPlanning:
 		r.status("[planning...]\n")
+	case event.StatusLinting:
+		r.status("[running style lint...]\n")
 	}
 }
 

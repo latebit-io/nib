@@ -69,11 +69,19 @@ type AgentNavigate struct {
 	Line int    // 1-indexed line number
 }
 
-func (AgentToken) eventTag()        {}
-func (AgentEditProposed) eventTag() {}
-func (AgentFileCreated) eventTag()  {}
-func (AgentToolCall) eventTag()     {}
-func (AgentNavigate) eventTag()     {}
+// AgentStyleRejected signals that the style evaluator rejected a proposed
+// edit. The frontend should dismiss the diff overlay. Violation explanations
+// are sent separately via AgentToken events.
+type AgentStyleRejected struct {
+	Path string // file that was being edited
+}
+
+func (AgentToken) eventTag()         {}
+func (AgentEditProposed) eventTag()  {}
+func (AgentStyleRejected) eventTag() {}
+func (AgentFileCreated) eventTag()   {}
+func (AgentToolCall) eventTag()      {}
+func (AgentNavigate) eventTag()      {}
 
 // AgentWaiting signals the agent finished its turn and is waiting for user input.
 // The frontend should enable the input prompt so the developer can continue

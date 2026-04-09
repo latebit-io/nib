@@ -52,6 +52,8 @@ const (
 	ActionModelSelector
 	// ActionStyleCycle cycles through available coding styles.
 	ActionStyleCycle
+	// ActionEvaluatorToggle toggles the style evaluator on/off.
+	ActionEvaluatorToggle
 
 	// View actions control pane visibility and focus.
 	ActionOpenPalette
@@ -150,6 +152,7 @@ func DefaultBindings() []Binding {
 		{ActionDialCycle, "Cycle autonomy dial", []string{"Alt+A"}, CatAgent},
 		{ActionModelSelector, "Select model", []string{"Alt+M"}, CatAgent},
 		{ActionStyleCycle, "Cycle coding style", []string{"Alt+S"}, CatAgent},
+		{ActionEvaluatorToggle, "Toggle style evaluator", []string{"Alt+E"}, CatAgent},
 
 		// View
 		{ActionOpenPalette, "Open file palette", []string{"Ctrl+P"}, CatView},

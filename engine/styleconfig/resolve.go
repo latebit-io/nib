@@ -66,9 +66,11 @@ func resolve(cfg *Config) *Resolved {
 	}
 
 	return &Resolved{
-		Name:    s.Name,
-		Rules:   s.Rules,
-		LintCmd: s.LintCmd,
+		Name:           s.Name,
+		Rules:          s.Rules,
+		LintCmd:        s.LintCmd,
+		Evaluator:      s.Evaluator,
+		EvaluatorModel: s.EvaluatorModel,
 	}
 }
 

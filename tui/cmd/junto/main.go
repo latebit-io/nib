@@ -144,6 +144,7 @@ func run() error {
 		}
 		if styleResult.Resolved != nil {
 			opts.StyleLintCmd = styleResult.Resolved.LintCmd
+			opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, provider, llmCfg)
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
@@ -251,6 +252,31 @@ func run() error {
 				slog.Info("style: switched", "style", s.Name)
 				return s.Name
 			}
+		}
+	}
+
+	// Wire evaluator toggle — Alt+E enables/disables the style evaluator at runtime.
+	if ag != nil && styleResult.Resolved != nil {
+		// Cache the evaluator created at startup (may be nil if not configured).
+		currentEval := styleResult.Evaluator
+		if currentEval != nil {
+			app.SetEvaluatorEnabled(true)
+		}
+		app.ToggleEvaluator = func(enabled bool) bool {
+			if enabled {
+				eval := wire.NewStyleEvaluator(styleResult.Resolved, provider, llmCfg)
+				if eval == nil {
+					return false // no provider available
+				}
+				ag.SetEvaluator(eval)
+				currentEval = eval
+				slog.Info("evaluator: enabled")
+				return true
+			}
+			ag.SetEvaluator(nil)
+			currentEval = nil
+			slog.Info("evaluator: disabled")
+			return false
 		}
 	}
 

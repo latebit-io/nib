@@ -1577,6 +1577,14 @@ func (s *Session) RejectEdit() {
 	s.agent.Reject()
 }
 
+// ClearPendingEdit clears the pending edit state without signaling the agent.
+// Used when the style evaluator rejects an edit internally — the agent handles
+// its own retry, so no Reject() signal is needed.
+func (s *Session) ClearPendingEdit() {
+	s.pendingEdit = nil
+	s.editReviewed = false
+}
+
 // ApproveAndContinue atomically approves the edit and continues the agent.
 // Use this when the agent should proceed immediately after approval (e.g.
 // instant-apply, auto-continue at higher autonomy levels). Serialising both

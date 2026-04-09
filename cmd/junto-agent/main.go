@@ -166,7 +166,7 @@ func run() error {
 	}
 
 	// Create LLM provider — required for headless mode.
-	provider, _, llmResolved := wire.NewProvider(projectRoot)
+	provider, llmCfg, llmResolved := wire.NewProvider(projectRoot)
 	if provider == nil {
 		hint := "set LLM_API_KEY or configure ~/.config/junto/llm.json"
 		if llmResolved != nil && llmResolved.APIKeyEnv != "" {
@@ -196,6 +196,7 @@ func run() error {
 	}
 	if styleResult.Resolved != nil {
 		opts.StyleLintCmd = styleResult.Resolved.LintCmd
+		opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, provider, llmCfg)
 	}
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr

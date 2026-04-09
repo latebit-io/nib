@@ -26,6 +26,12 @@ type Style struct {
 	// The placeholder {file} is replaced with the edited file's relative path,
 	// and {dir} is replaced with the file's directory (for package-level linting).
 	LintCmd []string `json:"lint_cmd,omitempty"`
+	// Evaluator enables an optional LLM review pass that checks proposed
+	// edits against the style rules before they reach the developer.
+	Evaluator bool `json:"evaluator,omitempty"`
+	// EvaluatorModel overrides the model for the evaluator (e.g. a cheaper/faster
+	// model). When empty, the main agent's provider is used.
+	EvaluatorModel string `json:"evaluator_model,omitempty"`
 }
 
 // Rule is a single enforceable principle within a coding style.
@@ -48,6 +54,10 @@ type Resolved struct {
 	Rules []Rule
 	// LintCmd lists shell commands for post-edit style validation.
 	LintCmd []string
+	// Evaluator is true when the LLM review pass is enabled for this style.
+	Evaluator bool
+	// EvaluatorModel overrides the model for the evaluator. Empty uses the main provider.
+	EvaluatorModel string
 }
 
 // StyleNames returns the sorted list of style names in the config.

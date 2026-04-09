@@ -139,14 +139,7 @@ func (r *Runner) processEvents(ctx context.Context, result *Result) {
 func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result, summary *strings.Builder, truncated *bool) bool {
 	switch e := ev.(type) {
 	case event.AgentToken:
-		if !*truncated {
-			if summary.Len()+len(e.Text) > maxSummaryBytes {
-				summary.WriteString("\n…[summary truncated]")
-				*truncated = true
-			} else {
-				summary.WriteString(e.Text)
-			}
-		}
+		appendSummary(summary, e.Text, truncated)
 		r.status("%s", e.Text)
 
 	case event.AgentStatus:
@@ -165,6 +158,9 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result
 
 	case event.AgentNavigate:
 		slog.Debug("navigate ignored in headless mode", "path", e.Path, "line", e.Line)
+
+	case event.AgentStyleRejected:
+		r.status("[style review rejected edit in %s]\n", e.Path)
 
 	case event.AgentError:
 		result.Errors = append(result.Errors, e.Err)
@@ -198,6 +194,20 @@ func (r *Runner) handleFlush(ctx context.Context, e event.FlushBuffers) {
 	case e.Result <- event.FlushResult{Saved: nil, Err: nil}:
 	case <-ctx.Done():
 	}
+}
+
+// appendSummary adds text to the summary builder, truncating if it exceeds
+// the byte limit.
+func appendSummary(summary *strings.Builder, text string, truncated *bool) {
+	if *truncated {
+		return
+	}
+	if summary.Len()+len(text) > maxSummaryBytes {
+		summary.WriteString("\n…[summary truncated]")
+		*truncated = true
+		return
+	}
+	summary.WriteString(text)
 }
 
 // handleStatus writes human-readable status to stderr in TTY mode.

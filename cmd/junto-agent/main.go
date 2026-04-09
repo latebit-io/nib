@@ -194,6 +194,9 @@ func run() error {
 		DistributedMemory: agent.DetectDistributedMemory(mcpResult.ServerNames),
 		CodingStyle:       styleResult.AgentStyle,
 	}
+	if styleResult.Resolved != nil {
+		opts.StyleLintCmd = styleResult.Resolved.LintCmd
+	}
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr
 	}

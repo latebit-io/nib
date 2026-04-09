@@ -48,6 +48,8 @@ const (
 	StatusWaiting StatusKind = "waiting"
 	// StatusTyping means the agent is animating typed text into the editor.
 	StatusTyping StatusKind = "typing"
+	// StatusLinting means the agent is running post-edit style lint commands.
+	StatusLinting StatusKind = "linting"
 )
 
 // AgentStatus updates the agent status display.

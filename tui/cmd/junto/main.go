@@ -243,7 +243,11 @@ func run() error {
 				currentStyleKey = styleNames[idx]
 				s := styleResult.Config.Styles[currentStyleKey]
 				data := agent.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
-				ag.SetStyle(data, s.LintCmd)
+				lintCmd := s.LintCmd
+				if len(lintCmd) == 0 {
+					lintCmd = styleResult.DefaultLintCmd
+				}
+				ag.SetStyle(data, lintCmd)
 				slog.Info("style: switched", "style", s.Name)
 				return s.Name
 			}

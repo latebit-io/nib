@@ -902,8 +902,7 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 			a.send(event.AgentStatus{Status: event.StatusLinting})
 			a.send(event.AgentToken{Text: "\n[Running style lint...]\n"})
 			if lint := a.runStyleLint(ctx, proposal.Path); lint != "" {
-				lines := strings.Count(lint, "\n") + 1
-				a.send(event.AgentToken{Text: fmt.Sprintf("[Style lint: %d violation(s) — fixing before continuing]\n", lines)})
+				a.send(event.AgentToken{Text: "[Style lint: violations found — fixing before continuing]\n"})
 				a.mu.Lock()
 				a.pendingLint = lint
 				a.mu.Unlock()

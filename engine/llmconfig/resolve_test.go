@@ -181,6 +181,15 @@ var resolveTests = []resolveTestCase{
 		wantHas:     true,
 	},
 	{
+		name:        "GEMINI_API_KEY preferred over MINIMAX_API_KEY in fallback",
+		env:         map[string]string{"GEMINI_API_KEY": "gem-key", "MINIMAX_API_KEY": "mm-key"},
+		wantProfile: "gemini",
+		wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		wantModel:   "gemini-2.5-flash",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+	},
+	{
 		name:        "GEMINI_API_KEY preferred over OPENROUTER_API_KEY in fallback",
 		env:         map[string]string{"GEMINI_API_KEY": "gem-key", "OPENROUTER_API_KEY": "or-key"},
 		wantProfile: "gemini",

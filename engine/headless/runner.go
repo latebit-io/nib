@@ -139,14 +139,7 @@ func (r *Runner) processEvents(ctx context.Context, result *Result) {
 func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result, summary *strings.Builder, truncated *bool) bool {
 	switch e := ev.(type) {
 	case event.AgentToken:
-		if !*truncated {
-			if summary.Len()+len(e.Text) > maxSummaryBytes {
-				summary.WriteString("\n…[summary truncated]")
-				*truncated = true
-			} else {
-				summary.WriteString(e.Text)
-			}
-		}
+		appendSummary(summary, e.Text, truncated)
 		r.status("%s", e.Text)
 
 	case event.AgentStatus:
@@ -171,7 +164,7 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result
 		r.status("error: %s\n", e.Err)
 
 	case event.AgentWaiting:
-		return r.handleWaiting(ctx, result, summary)
+		return r.handleWaiting(ctx, result, summary, truncated)
 
 	case event.AgentDone:
 		result.Success = e.Success
@@ -200,6 +193,20 @@ func (r *Runner) handleFlush(ctx context.Context, e event.FlushBuffers) {
 	}
 }
 
+// appendSummary adds text to the summary builder, truncating if it exceeds
+// the byte limit.
+func appendSummary(summary *strings.Builder, text string, truncated *bool) {
+	if *truncated {
+		return
+	}
+	if summary.Len()+len(text) > maxSummaryBytes {
+		summary.WriteString("\n…[summary truncated]")
+		*truncated = true
+		return
+	}
+	summary.WriteString(text)
+}
+
 // handleStatus writes human-readable status to stderr in TTY mode.
 func (r *Runner) handleStatus(e event.AgentStatus) {
 	switch e.Status {
@@ -216,7 +223,7 @@ func (r *Runner) handleStatus(e event.AgentStatus) {
 // In single-shot mode (no TTY), cancels the agent and returns true (done).
 // In REPL mode, reads input from stdin and continues the conversation.
 // The read is cancellable via ctx so a cancelled run doesn't hang on stdin.
-func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *strings.Builder) bool {
+func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *strings.Builder, truncated *bool) bool {
 	result.Summary = summary.String()
 	if !r.isTTY {
 		r.agent.Cancel()
@@ -231,8 +238,8 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 	}
 	// Reset summary for the new turn. In REPL mode, Result.Summary captures
 	// the last turn only — prior turns were already streamed to stderr.
-	// result.Summary was saved above before prompting for input.
 	summary.Reset()
+	*truncated = false
 	if !r.agent.Reply(input) {
 		slog.Warn("agent not accepting input, ending conversation")
 		result.Success = true

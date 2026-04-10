@@ -1,12 +1,15 @@
 package wire
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/styleconfig"
 )
 
@@ -52,6 +55,58 @@ func NewStyle(projectRoot string) StyleResult {
 		AgentStyle:     agent.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules)),
 		DefaultLintCmd: defaultLint,
 	}
+}
+
+// NewStyleEvaluator creates a StyleEvaluator from the resolved style config
+// and an LLM provider. If the style's EvaluatorModel is set, a new provider
+// is created for that model using the given LLM config. Returns nil when the
+// evaluator is disabled in config or no provider is available.
+// Use [ForceStyleEvaluator] when the developer explicitly toggles the evaluator on.
+func NewStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider, llmCfg *llmconfig.Config) *agent.StyleEvaluator {
+	if resolved == nil || !resolved.Evaluator {
+		return nil
+	}
+	return ForceStyleEvaluator(resolved, mainProvider, llmCfg)
+}
+
+// ForceStyleEvaluator creates a StyleEvaluator regardless of the config's
+// Evaluator flag. Used when the developer explicitly enables the evaluator
+// at runtime via Alt+V. Honors EvaluatorModel if configured.
+// Returns nil when no provider is available.
+func ForceStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider, llmCfg *llmconfig.Config) *agent.StyleEvaluator {
+	if resolved == nil {
+		return nil
+	}
+
+	provider := mainProvider
+	if resolved.EvaluatorModel != "" && llmCfg != nil {
+		// Try to create a provider for the evaluator model using the active profile.
+		if rp := llmconfig.ResolveProfile(llmCfg, llmCfg.Active); rp != nil {
+			rp.Model = resolved.EvaluatorModel
+			if p := rp.NewProvider(); p != nil {
+				provider = p
+				slog.Info("wire: style evaluator using dedicated model", "model", resolved.EvaluatorModel)
+			}
+		}
+	}
+
+	if provider == nil {
+		slog.Warn("wire: style evaluator enabled but no provider available")
+		return nil
+	}
+
+	// Build rules from the resolved style's CodingStyleData format.
+	rules := make([]string, len(resolved.Rules))
+	for i, r := range resolved.Rules {
+		tag := "advisory"
+		if r.Enforcement == "hard" {
+			tag = "REQUIRED"
+		}
+		rules[i] = fmt.Sprintf("**%s** [%s]: %s", r.Name, tag, r.Instruction)
+	}
+
+	slog.Info("wire: style evaluator enabled", "style", resolved.Name, "rules", len(rules))
+	return agent.NewStyleEvaluator(provider, rules, 0) // 0 = default timeout
 }
 
 // detectLintCommands auto-detects appropriate lint commands based on the

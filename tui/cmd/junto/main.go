@@ -18,6 +18,7 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/session"
+	"github.com/latebit-io/junto/engine/styleconfig"
 	"github.com/latebit-io/junto/engine/wire"
 	"github.com/latebit-io/junto/tui/internal/ui"
 )
@@ -144,6 +145,7 @@ func run() error {
 		}
 		if styleResult.Resolved != nil {
 			opts.StyleLintCmd = styleResult.Resolved.LintCmd
+			opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, provider, llmCfg)
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
@@ -216,6 +218,11 @@ func run() error {
 	if styleResult.Resolved != nil {
 		app.SetStyleName(styleResult.Resolved.Name)
 	}
+	// Shared state for style cycling and evaluator toggle — both closures
+	// need to know the current resolved style to stay in sync.
+	currentResolved := styleResult.Resolved
+	evaluatorActive := false
+
 	if ag != nil {
 		styleNames := styleResult.Config.StyleNames()
 		if len(styleNames) > 0 {
@@ -236,7 +243,13 @@ func run() error {
 				if idx >= len(styleNames) {
 					// Wrap to "none" — disable style enforcement.
 					currentStyleKey = ""
+					currentResolved = nil
 					ag.SetStyle(nil, nil)
+					if evaluatorActive {
+						ag.SetEvaluator(nil)
+						evaluatorActive = false
+						app.SetEvaluatorEnabled(false)
+					}
 					slog.Info("style: disabled")
 					return ""
 				}
@@ -248,9 +261,61 @@ func run() error {
 					lintCmd = styleResult.DefaultLintCmd
 				}
 				ag.SetStyle(data, lintCmd)
+
+				// Update the resolved style for the evaluator.
+				currentResolved = &styleconfig.Resolved{
+					Name:           s.Name,
+					Rules:          s.Rules,
+					LintCmd:        lintCmd,
+					Evaluator:      s.Evaluator,
+					EvaluatorModel: s.EvaluatorModel,
+				}
+
+				// Rebuild evaluator if it's active, using the new style's rules.
+				if evaluatorActive {
+					eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
+					ag.SetEvaluator(eval) // nil is fine — disables if no provider
+					if eval == nil {
+						evaluatorActive = false
+						app.SetEvaluatorEnabled(false)
+					}
+				}
+
 				slog.Info("style: switched", "style", s.Name)
 				return s.Name
 			}
+		}
+	}
+
+	// Wire evaluator toggle — Alt+V enables/disables the style evaluator at runtime.
+	if ag != nil {
+		// If the config has evaluator enabled at startup, set the initial state.
+		if currentResolved != nil && currentResolved.Evaluator {
+			eval := wire.NewStyleEvaluator(currentResolved, provider, llmCfg)
+			if eval != nil {
+				ag.SetEvaluator(eval)
+				evaluatorActive = true
+				app.SetEvaluatorEnabled(true)
+			}
+		}
+		app.ToggleEvaluator = func(enabled bool) bool {
+			if currentResolved == nil {
+				return false // no style active
+			}
+			if enabled {
+				eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
+				if eval == nil {
+					return false // no provider available
+				}
+				ag.SetEvaluator(eval)
+				evaluatorActive = true
+				slog.Info("evaluator: enabled")
+				return true
+			}
+			ag.SetEvaluator(nil)
+			evaluatorActive = false
+			slog.Info("evaluator: disabled")
+			return false
 		}
 	}
 

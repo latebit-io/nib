@@ -104,6 +104,7 @@ type AppModel struct {
 	recentMouse         bool          // tracks leaked CSI prefix from unparsed mouse events
 	dial                AutonomyLevel // current autonomy level; defaults to LevelGuided
 	styleName           string        // current coding style display name; empty when disabled
+	evaluatorEnabled    bool          // true when the style evaluator is active
 	pendingModelProfile string        // profile of the in-flight ListModels request (stale detection)
 
 	// SwitchModel is called to switch the active LLM model at runtime.
@@ -125,6 +126,11 @@ type AppModel struct {
 	// Set by the entry point — nil when no styles are configured.
 	CycleStyle func() string
 
+	// ToggleEvaluator enables or disables the style evaluator at runtime.
+	// Returns the new state (true = enabled). Set by the entry point — nil
+	// when no style or provider is configured.
+	ToggleEvaluator func(enabled bool) bool
+
 	Services *Services
 	Keymap   *Keymap
 	Quit     bool
@@ -144,6 +150,11 @@ func (m *AppModel) SetStyleName(name string) {
 	m.styleName = name
 }
 
+// SetEvaluatorEnabled sets the evaluator status bar indicator.
+func (m *AppModel) SetEvaluatorEnabled(enabled bool) {
+	m.evaluatorEnabled = enabled
+}
+
 // cycleStyle advances to the next coding style via the CycleStyle callback.
 // Does nothing if no styles are configured.
 func (m *AppModel) cycleStyle() {
@@ -151,6 +162,15 @@ func (m *AppModel) cycleStyle() {
 		return
 	}
 	m.styleName = m.CycleStyle()
+}
+
+// toggleEvaluator flips the style evaluator on/off via the ToggleEvaluator callback.
+// Does nothing if no callback is wired (no agent or no provider).
+func (m *AppModel) toggleEvaluator() {
+	if m.ToggleEvaluator == nil {
+		return
+	}
+	m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
 }
 
 // NewApp creates the application model.
@@ -737,6 +757,9 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case ActionStyleCycle:
 			m.cycleStyle()
 			return m, nil
+		case ActionEvaluatorToggle:
+			m.toggleEvaluator()
+			return m, nil
 		}
 		cmd := m.AgentPane.Update(msg)
 		return m, cmd
@@ -817,6 +840,10 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionStyleCycle:
 		m.cycleStyle()
+		return m, nil
+
+	case ActionEvaluatorToggle:
+		m.toggleEvaluator()
 		return m, nil
 
 	case ActionModelSelector:
@@ -947,17 +974,22 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		extra := 1 // dial is always shown
-		if m.styleName != "" {
-			extra++
-		}
+		extra := 3 // dial + style + evaluator always shown
 		indicators := make([]string, len(mem)+extra)
 		copy(indicators, mem)
 		idx := len(mem)
 		indicators[idx] = m.dial.String()
+		idx++
 		if m.styleName != "" {
-			idx++
 			indicators[idx] = "style:" + m.styleName
+		} else {
+			indicators[idx] = "style:none"
+		}
+		idx++
+		if m.evaluatorEnabled {
+			indicators[idx] = "eval:on"
+		} else {
+			indicators[idx] = "eval:off"
 		}
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
 		if m.Dialog.Active {

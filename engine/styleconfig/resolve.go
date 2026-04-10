@@ -66,9 +66,11 @@ func resolve(cfg *Config) *Resolved {
 	}
 
 	return &Resolved{
-		Name:    s.Name,
-		Rules:   s.Rules,
-		LintCmd: s.LintCmd,
+		Name:           s.Name,
+		Rules:          s.Rules,
+		LintCmd:        s.LintCmd,
+		Evaluator:      s.Evaluator,
+		EvaluatorModel: s.EvaluatorModel,
 	}
 }
 
@@ -168,6 +170,12 @@ func mergeConfigs(dst, src *Config) {
 		}
 		if len(ss.LintCmd) > 0 {
 			ds.LintCmd = ss.LintCmd
+		}
+		if ss.Evaluator {
+			ds.Evaluator = true
+		}
+		if ss.EvaluatorModel != "" {
+			ds.EvaluatorModel = ss.EvaluatorModel
 		}
 		dst.Styles[name] = ds
 	}

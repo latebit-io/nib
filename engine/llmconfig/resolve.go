@@ -18,6 +18,24 @@ const (
 	DefaultKeyEnv = "LLM_API_KEY"
 )
 
+// builtinProfiles are always available — user config files can override them.
+var builtinProfiles = map[string]Profile{
+	"openrouter": {
+		BaseURL:   "https://openrouter.ai/api/v1",
+		Model:     "google/gemini-2.5-flash",
+		APIKeyEnv: "OPENROUTER_API_KEY",
+	},
+	"gemini": {
+		BaseURL:   "https://generativelanguage.googleapis.com/v1beta/openai",
+		Model:     "gemini-2.5-flash",
+		APIKeyEnv: "GEMINI_API_KEY",
+	},
+}
+
+// builtinFallbackOrder is the priority when auto-selecting a built-in profile
+// because the active profile has no API key. First match wins.
+var builtinFallbackOrder = []string{"gemini", "openrouter"}
+
 // Resolve loads and merges LLM configuration from all sources.
 // The merge order (each layer overrides the previous):
 //
@@ -36,6 +54,11 @@ func Resolve(projectRoot string) (*Config, *Resolved) {
 // global config path, allowing tests to inject a temp directory.
 func resolveWithPaths(globalPath, projectRoot string) (*Config, *Resolved) {
 	cfg := &Config{Profiles: make(map[string]Profile)}
+
+	// Seed built-in profiles first — file configs merge on top.
+	for name, p := range builtinProfiles {
+		cfg.Profiles[name] = p
+	}
 
 	if g := loadFile(globalPath); g != nil {
 		mergeConfigs(cfg, g)
@@ -127,6 +150,23 @@ func resolve(cfg *Config) *Resolved {
 	}
 	if v := os.Getenv("LLM_API_KEY"); v != "" {
 		r.apiKey = v
+	}
+
+	// Auto-fallback: if no API key yet, try built-in profiles in priority order.
+	// This lets GEMINI_API_KEY "just work" without any config file.
+	if r.apiKey == "" {
+		for _, name := range builtinFallbackOrder {
+			p := builtinProfiles[name]
+			keyEnv := p.APIKeyEnv
+			if key := os.Getenv(keyEnv); key != "" {
+				r.Profile = name
+				r.BaseURL = p.BaseURL
+				r.Model = p.Model
+				r.APIKeyEnv = keyEnv
+				r.apiKey = key
+				break
+			}
+		}
 	}
 
 	return r

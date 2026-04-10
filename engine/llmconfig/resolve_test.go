@@ -112,7 +112,7 @@ var resolveTests = []resolveTestCase{
 		wantProfile: "p",
 		wantBaseURL: DefaultBaseURL,
 		wantModel:   DefaultModel,
-		wantKeyEnv:  "CUSTOM_KEY",
+		wantKeyEnv:  DefaultKeyEnv,
 		wantHas:     true,
 	},
 	{
@@ -143,6 +143,88 @@ var resolveTests = []resolveTestCase{
 		wantModel:   DefaultModel,
 		wantKeyEnv:  DefaultKeyEnv,
 		wantHas:     false,
+	},
+	{
+		name:        "GEMINI_API_KEY auto-fallback with no config",
+		env:         map[string]string{"GEMINI_API_KEY": "gem-key"},
+		wantProfile: "gemini",
+		wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		wantModel:   "gemini-2.5-flash",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+	},
+	{
+		name:        "OPENROUTER_API_KEY auto-fallback with no config",
+		env:         map[string]string{"OPENROUTER_API_KEY": "or-key"},
+		wantProfile: "openrouter",
+		wantBaseURL: "https://openrouter.ai/api/v1",
+		wantModel:   "google/gemini-2.5-flash",
+		wantKeyEnv:  "OPENROUTER_API_KEY",
+		wantHas:     true,
+	},
+	{
+		name:        "GEMINI_API_KEY preferred over OPENROUTER_API_KEY in fallback",
+		env:         map[string]string{"GEMINI_API_KEY": "gem-key", "OPENROUTER_API_KEY": "or-key"},
+		wantProfile: "gemini",
+		wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		wantModel:   "gemini-2.5-flash",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+	},
+	{
+		name:        "LLM_API_KEY takes precedence over auto-fallback",
+		env:         map[string]string{"LLM_API_KEY": "llm-key", "GEMINI_API_KEY": "gem-key"},
+		wantProfile: "env",
+		wantBaseURL: DefaultBaseURL,
+		wantModel:   DefaultModel,
+		wantKeyEnv:  DefaultKeyEnv,
+		wantHas:     true,
+	},
+	{
+		name: "file config overrides built-in gemini profile",
+		globalJSON: `{
+				"profiles": {
+					"gemini": {
+						"model": "gemini-2.5-pro"
+					}
+				},
+				"active": "gemini"
+			}`,
+		env:         map[string]string{"GEMINI_API_KEY": "gem-key"},
+		wantProfile: "gemini",
+		wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		wantModel:   "gemini-2.5-pro",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+	},
+	{
+		name: "fallback keeps LLM_BASE_URL and LLM_MODEL overrides",
+		env: map[string]string{
+			"GEMINI_API_KEY": "gem-key",
+			"LLM_BASE_URL":   "https://override.example/v1",
+			"LLM_MODEL":      "override-model",
+		},
+		wantProfile: "gemini",
+		wantBaseURL: "https://override.example/v1",
+		wantModel:   "override-model",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+	},
+	{
+		name: "fallback uses file-overridden built-in profile when no active profile",
+		globalJSON: `{
+				"profiles": {
+					"gemini": {
+						"model": "gemini-2.5-pro"
+					}
+				}
+			}`,
+		env:         map[string]string{"GEMINI_API_KEY": "gem-key"},
+		wantProfile: "gemini",
+		wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		wantModel:   "gemini-2.5-pro",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
 	},
 }
 
@@ -263,6 +345,12 @@ func setupResolveTest(t *testing.T, globalJSON, projectJSON string, env map[stri
 	t.Helper()
 	for _, key := range []string{"LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"} {
 		t.Setenv(key, "")
+	}
+	// Clear built-in profile env vars so auto-fallback doesn't trigger unexpectedly.
+	for _, p := range builtinProfiles {
+		if p.APIKeyEnv != "" {
+			t.Setenv(p.APIKeyEnv, "")
+		}
 	}
 	for key, val := range env {
 		t.Setenv(key, val)

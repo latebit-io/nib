@@ -51,9 +51,13 @@ func NewStyleEvaluator(provider llm.Provider, rules []string, timeout time.Durat
 // violation descriptions. Returns nil when the edit passes review.
 // Returns nil (not error) on timeout or provider failure — evaluator
 // failures must not block the edit flow.
-func (e *StyleEvaluator) Review(ctx context.Context, path, search, replace string) []string {
+// Review sends the proposed edit to the evaluator model and returns
+// violation descriptions. The ok flag indicates whether the review completed
+// successfully — false means timeout, provider error, or other failure.
+// Returns (nil, true) when the edit passes, (nil, false) on failure.
+func (e *StyleEvaluator) Review(ctx context.Context, path, search, replace string) (violations []string, ok bool) {
 	if len(e.rules) == 0 {
-		return nil
+		return nil, true // no rules = nothing to check = clean
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
@@ -69,7 +73,7 @@ func (e *StyleEvaluator) Review(ctx context.Context, path, search, replace strin
 	ch, err := e.provider.Stream(ctx, messages, nil)
 	if err != nil {
 		slog.Warn("style evaluator: stream failed", "err", err)
-		return nil
+		return nil, false
 	}
 
 	// Drain stream to collect the full response, capped to prevent
@@ -79,7 +83,7 @@ func (e *StyleEvaluator) Review(ctx context.Context, path, search, replace strin
 		if ev.Token != "" {
 			if response.Len()+len(ev.Token) > maxEvaluatorResponseBytes {
 				slog.Warn("style evaluator: response too large, aborting", "limit", maxEvaluatorResponseBytes)
-				return nil
+				return nil, false
 			}
 			response.WriteString(ev.Token)
 		}
@@ -87,10 +91,11 @@ func (e *StyleEvaluator) Review(ctx context.Context, path, search, replace strin
 
 	if ctx.Err() != nil {
 		slog.Warn("style evaluator: timed out", "timeout", e.timeout)
-		return nil
+		return nil, false
 	}
 
-	return parseViolations(response.String())
+	v := parseViolations(response.String())
+	return v, true
 }
 
 // truncateCode caps a code snippet to maxEvaluatorCodeBytes for the evaluator prompt.

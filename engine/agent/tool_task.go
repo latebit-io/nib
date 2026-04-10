@@ -86,5 +86,9 @@ func (t *TaskTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	}
 
 	slog.Debug("update_task succeeded", "action", args.Action, "title", args.Title)
-	return textResult("Task " + args.Action + "d: " + args.Title)
+	msg := "Task " + args.Action + "d: " + args.Title
+	if args.Action == "complete" {
+		return ToolResult{Content: msg, Effect: EffectTaskCompleted}
+	}
+	return textResult(msg)
 }

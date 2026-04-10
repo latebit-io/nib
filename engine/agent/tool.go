@@ -24,6 +24,9 @@ const (
 	// EffectEditProposed proposes an edit for approval. Payload: EditProposal.
 	// The agent loop handles sending the event and blocking on approval/continue.
 	EffectEditProposed
+	// EffectTaskCompleted signals a plan task was marked done. Payload: nil.
+	// The agent loop runs style lint + evaluator on all edited files.
+	EffectTaskCompleted
 )
 
 // ToolResult is what a tool returns to the agent loop.

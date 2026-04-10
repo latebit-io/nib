@@ -29,7 +29,10 @@ func TestStyleEvaluator_violations(t *testing.T) {
 	provider := &mockStreamProvider{response: `["Adapter contains business logic", "Missing doc comment"]`}
 	eval := NewStyleEvaluator(provider, []string{"rule1", "rule2"}, time.Second)
 
-	violations := eval.Review(context.Background(), "main.go", "old code", "new code")
+	violations, ok := eval.Review(context.Background(), "main.go", "old code", "new code")
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
 	if len(violations) != 2 {
 		t.Fatalf("expected 2 violations, got %d", len(violations))
 	}
@@ -45,7 +48,10 @@ func TestStyleEvaluator_clean(t *testing.T) {
 	provider := &mockStreamProvider{response: `[]`}
 	eval := NewStyleEvaluator(provider, []string{"rule1"}, time.Second)
 
-	violations := eval.Review(context.Background(), "main.go", "old", "new")
+	violations, ok := eval.Review(context.Background(), "main.go", "old", "new")
+	if !ok {
+		t.Fatal("expected ok=true for clean edit")
+	}
 	if violations != nil {
 		t.Errorf("expected nil for clean edit, got %v", violations)
 	}
@@ -55,7 +61,10 @@ func TestStyleEvaluator_providerError(t *testing.T) {
 	provider := &mockStreamProvider{err: context.DeadlineExceeded}
 	eval := NewStyleEvaluator(provider, []string{"rule1"}, time.Second)
 
-	violations := eval.Review(context.Background(), "main.go", "old", "new")
+	violations, ok := eval.Review(context.Background(), "main.go", "old", "new")
+	if ok {
+		t.Error("expected ok=false on provider error")
+	}
 	if violations != nil {
 		t.Errorf("expected nil on provider error, got %v", violations)
 	}
@@ -65,7 +74,10 @@ func TestStyleEvaluator_malformedJSON(t *testing.T) {
 	provider := &mockStreamProvider{response: `not json at all`}
 	eval := NewStyleEvaluator(provider, []string{"rule1"}, time.Second)
 
-	violations := eval.Review(context.Background(), "main.go", "old", "new")
+	violations, ok := eval.Review(context.Background(), "main.go", "old", "new")
+	if !ok {
+		t.Error("expected ok=true (malformed JSON is a completed review, just unparseable)")
+	}
 	if violations != nil {
 		t.Errorf("expected nil on malformed JSON, got %v", violations)
 	}
@@ -75,7 +87,10 @@ func TestStyleEvaluator_markdownFences(t *testing.T) {
 	provider := &mockStreamProvider{response: "```json\n[\"violation\"]\n```"}
 	eval := NewStyleEvaluator(provider, []string{"rule1"}, time.Second)
 
-	violations := eval.Review(context.Background(), "main.go", "old", "new")
+	violations, ok := eval.Review(context.Background(), "main.go", "old", "new")
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
 	if len(violations) != 1 {
 		t.Fatalf("expected 1 violation through markdown fences, got %d", len(violations))
 	}
@@ -88,21 +103,26 @@ func TestStyleEvaluator_emptyRules(t *testing.T) {
 	provider := &mockStreamProvider{response: `["should not reach"]`}
 	eval := NewStyleEvaluator(provider, nil, time.Second)
 
-	violations := eval.Review(context.Background(), "main.go", "old", "new")
+	violations, ok := eval.Review(context.Background(), "main.go", "old", "new")
+	if !ok {
+		t.Error("expected ok=true for empty rules")
+	}
 	if violations != nil {
 		t.Errorf("expected nil when rules are empty, got %v", violations)
 	}
 }
 
 func TestStyleEvaluator_timeout(t *testing.T) {
-	// Use a context that's already cancelled to simulate timeout.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	provider := &mockStreamProvider{response: `["violation"]`}
 	eval := NewStyleEvaluator(provider, []string{"rule1"}, time.Millisecond)
 
-	violations := eval.Review(ctx, "main.go", "old", "new")
+	violations, ok := eval.Review(ctx, "main.go", "old", "new")
+	if ok {
+		t.Error("expected ok=false on timeout")
+	}
 	if violations != nil {
 		t.Errorf("expected nil on timeout, got %v", violations)
 	}

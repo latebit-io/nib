@@ -610,8 +610,6 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 	}
 
 	thinkState := false
-	evalRounds := 0
-	const maxEvalRounds = 2
 	for {
 		// Process one LLM turn: stream, dispatch tools, repeat until
 		// the LLM responds with no tool calls.
@@ -625,17 +623,6 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 			success = false
 			return
 		}
-
-		// Run style evaluator — limited rounds to prevent infinite fix loops.
-		if evalRounds < maxEvalRounds {
-			if evalMsg := a.evaluateTurn(ctx); evalMsg != "" {
-				evalRounds++
-				messages = append(messages, llm.Message{Role: "user", Content: evalMsg})
-				a.send(event.AgentStatus{Status: event.StatusThinking})
-				continue
-			}
-		}
-		evalRounds = 0
 
 		// Agent's turn is done — wait for the developer's next message.
 		// AgentWaiting is critical: if the frontend never sees it, the
@@ -851,9 +838,62 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 		}
 		content := a.handleEditProposal(ctx, proposal)
 		return content + a.intentReminder()
+
+	case EffectTaskCompleted:
+		return a.runTaskReview(ctx, result.Content)
 	}
 
 	return result.Content + a.intentReminder()
+}
+
+// runTaskReview runs lint and evaluator on all files edited during the task.
+// Called when update_task(action: "complete") fires. Returns the tool result
+// with any lint/evaluator feedback appended.
+func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
+	a.mu.Lock()
+	edits := a.turnEdits
+	a.mu.Unlock()
+
+	var review strings.Builder
+	review.WriteString(toolMsg)
+
+	// Collect unique files that were edited.
+	seen := make(map[string]bool)
+	var files []string
+	for _, e := range edits {
+		if !seen[e.Path] {
+			seen[e.Path] = true
+			files = append(files, e.Path)
+		}
+	}
+
+	// Run lint on each edited file.
+	if len(files) > 0 && len(a.currentStyleLintCmd()) > 0 {
+		a.send(event.AgentStatus{Status: event.StatusLinting})
+		a.send(event.AgentToken{Text: "\n[Task complete — running style lint...]\n"})
+		var lintResults []string
+		for _, path := range files {
+			if lint := a.runStyleLint(ctx, path); lint != "" {
+				lintResults = append(lintResults, lint)
+			}
+		}
+		if len(lintResults) > 0 {
+			a.send(event.AgentToken{Text: "[Style lint: violations found — fix before next task]\n"})
+			a.mu.Lock()
+			a.pendingLint = strings.Join(lintResults, "\n\n")
+			a.mu.Unlock()
+		} else {
+			a.send(event.AgentToken{Text: "[Style lint: clean ✓]\n"})
+		}
+	}
+
+	// Run evaluator on all edits.
+	if evalMsg := a.evaluateTurn(ctx); evalMsg != "" {
+		review.WriteString("\n\n")
+		review.WriteString(evalMsg)
+	}
+
+	return review.String() + a.intentReminder()
 }
 
 // recordEdit tracks an approved edit for end-of-turn review.
@@ -885,15 +925,23 @@ func (a *Agent) evaluateTurn(ctx context.Context) string {
 	a.send(event.AgentToken{Text: "\n[Style evaluator reviewing changes...]\n"})
 
 	var allViolations []string
+	anyCompleted := false
 	for _, edit := range edits {
-		violations := eval.Review(ctx, edit.Path, edit.Search, edit.Replace)
+		violations, ok := eval.Review(ctx, edit.Path, edit.Search, edit.Replace)
+		if ok {
+			anyCompleted = true
+		}
 		for _, v := range violations {
 			allViolations = append(allViolations, fmt.Sprintf("%s: %s", edit.Path, v))
 		}
 	}
 
 	if len(allViolations) == 0 {
-		a.send(event.AgentToken{Text: "[Style review: clean ✓]\n"})
+		if anyCompleted {
+			a.send(event.AgentToken{Text: "[Style review: clean ✓]\n"})
+		} else {
+			a.send(event.AgentToken{Text: "[Style review: skipped (evaluator unavailable)]\n"})
+		}
 		return ""
 	}
 
@@ -1008,28 +1056,10 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 		}
 
 		// Auto-inject diagnostics so the agent can self-correct errors.
-		hasErrors := false
 		if a.diagProvider != nil {
 			time.Sleep(a.diagDelay)
 			diagResult := formatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
 			result += "\n\nDiagnostics after edit:\n" + diagResult
-			hasErrors = hasDiagnosticErrors(a.diagProvider, proposal.CanonPath)
-		}
-
-		// Skip style lint when the file has compile errors — lint on
-		// broken code produces noise. Let diagnostics guide the fix first.
-		if !hasErrors && len(a.currentStyleLintCmd()) > 0 {
-			a.send(event.AgentStatus{Status: event.StatusLinting})
-			a.send(event.AgentToken{Text: "\n[Running style lint...]\n"})
-			if lint := a.runStyleLint(ctx, proposal.Path); lint != "" {
-				a.send(event.AgentToken{Text: "[Style lint: violations found — fixing before continuing]\n"})
-				a.mu.Lock()
-				a.pendingLint = lint
-				a.mu.Unlock()
-			} else {
-				a.send(event.AgentToken{Text: "[Style lint: clean ✓]\n"})
-			}
-			a.send(event.AgentStatus{Status: event.StatusThinking})
 		}
 
 		return result

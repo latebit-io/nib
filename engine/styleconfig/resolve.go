@@ -171,6 +171,12 @@ func mergeConfigs(dst, src *Config) {
 		if len(ss.LintCmd) > 0 {
 			ds.LintCmd = ss.LintCmd
 		}
+		if ss.Evaluator {
+			ds.Evaluator = true
+		}
+		if ss.EvaluatorModel != "" {
+			ds.EvaluatorModel = ss.EvaluatorModel
+		}
 		dst.Styles[name] = ds
 	}
 }

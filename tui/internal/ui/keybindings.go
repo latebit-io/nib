@@ -118,8 +118,8 @@ func DefaultKeymap() *Keymap {
 			{code: 'µ', mod: 0}:           ActionModelSelector, // macOS: Option+M sends µ
 			{code: 's', mod: tea.ModAlt}:  ActionStyleCycle,
 			{code: 'ß', mod: 0}:           ActionStyleCycle, // macOS: Option+S sends ß
-			{code: 'e', mod: tea.ModAlt}:  ActionEvaluatorToggle,
-			{code: '´', mod: 0}:           ActionEvaluatorToggle, // macOS: Option+E sends ´
+			{code: 'v', mod: tea.ModAlt}:  ActionEvaluatorToggle,
+			{code: '√', mod: 0}:           ActionEvaluatorToggle, // macOS: Option+V sends √
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
 			{code: tea.KeyEscape, mod: 0}: ActionAgentReject,
 			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
@@ -148,8 +148,8 @@ func DefaultKeymap() *Keymap {
 			"µ":      ActionModelSelector, // macOS: Option+M sends µ
 			"alt+s":  ActionStyleCycle,
 			"ß":      ActionStyleCycle, // macOS: Option+S sends ß
-			"alt+e":  ActionEvaluatorToggle,
-			"´":      ActionEvaluatorToggle, // macOS: Option+E sends ´
+			"alt+v":  ActionEvaluatorToggle,
+			"√":      ActionEvaluatorToggle, // macOS: Option+V sends √
 			"ctrl+p": ActionOpenPalette,
 			"ctrl+b": ActionToggleProject,
 			"ctrl+/": ActionToggleComment,

@@ -69,6 +69,11 @@ type AgentNavigate struct {
 	Line int    // 1-indexed line number
 }
 
+// AgentEditPreview signals the evaluator is reviewing a proposed edit.
+// The frontend should show the diff overlay for visibility but must NOT
+// enter the approval flow — no Ctrl+O, no pending edit in the session.
+type AgentEditPreview struct{ Edit PendingEdit }
+
 // AgentStyleRejected signals that the style evaluator rejected a proposed
 // edit. The frontend should dismiss the diff overlay. Violation explanations
 // are sent separately via AgentToken events.
@@ -78,6 +83,7 @@ type AgentStyleRejected struct {
 
 func (AgentToken) eventTag()         {}
 func (AgentEditProposed) eventTag()  {}
+func (AgentEditPreview) eventTag()   {}
 func (AgentStyleRejected) eventTag() {}
 func (AgentFileCreated) eventTag()   {}
 func (AgentToolCall) eventTag()      {}

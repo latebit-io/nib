@@ -603,12 +603,20 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	switch e := ev.(type) {
 	case event.AgentToken:
 		m.AgentPane.AppendToken(e.Text)
+	case event.AgentEditPreview:
+		// Evaluator is reviewing — show the diff as a preview only.
+		// Does NOT enter the approval flow (no ReviewEdit, no pending edit).
+		m.cancelAnimation()
+		m.clearEditorOverlay(false)
+		diff := m.Session.PreviewEdit(e.Edit)
+		if diff != nil {
+			m.Editor.Overlay = NewDiffOverlay(diff)
+		}
 	case event.AgentStyleRejected:
 		// Evaluator rejected the edit — dismiss the diff preview.
 		// The violation explanations are sent separately via AgentToken.
 		m.cancelAnimation()
 		m.clearEditorOverlay(false)
-		m.Session.ClearPendingEdit()
 	case event.AgentToolCall:
 		m.AgentPane.AppendMeta("\n> " + e.Name + "\n")
 	case event.AgentStatus:

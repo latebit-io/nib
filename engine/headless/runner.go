@@ -159,6 +159,9 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result
 	case event.AgentNavigate:
 		slog.Debug("navigate ignored in headless mode", "path", e.Path, "line", e.Line)
 
+	case event.AgentEditPreview:
+		r.status("[style evaluator reviewing edit...]\n")
+
 	case event.AgentStyleRejected:
 		r.status("[style review rejected edit in %s]\n", e.Path)
 

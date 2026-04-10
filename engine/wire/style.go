@@ -26,8 +26,6 @@ type StyleResult struct {
 	// DefaultLintCmd holds auto-detected lint commands for the project.
 	// Used as fallback when a style has no explicit lint_cmd configured.
 	DefaultLintCmd []string
-	// Evaluator is the optional LLM-based style reviewer. Nil when disabled.
-	Evaluator *agent.StyleEvaluator
 }
 
 // NewStyle resolves the coding style configuration and converts it to

@@ -111,22 +111,22 @@ type EditorModel struct {
 	// surface. Use Engine() for explicit access from outside this type.
 	eng *editor.Editor
 
-	// Transient status message (shown in status bar, cleared on next key)
+	// StatusMsg is a transient status message shown in the status bar, cleared on next key.
 	StatusMsg string
 
-	// Keymap for action matching (shared with AppModel)
+	// Keymap holds the active key-binding configuration (shared with AppModel).
 	Keymap *Keymap
 
-	// Shared services (clipboard, etc.)
+	// Services holds shared runtime services (clipboard, LSP, etc.).
 	Services *Services
 
-	// Internal clipboard buffer
+	// Clipboard is the internal copy/paste buffer for the editor.
 	Clipboard string
 
-	// Inline diff preview and editable replacement (nil when no edit is pending)
+	// Overlay is the inline diff preview and editable replacement (nil when no edit is pending).
 	Overlay *DiffOverlay
 
-	// Animated agent typing (nil when no animation is active)
+	// Anim is the animated agent typing context (nil when no animation is active).
 	Anim *animationContext
 
 	// TypingWPM controls the agent typing speed. 0 uses the default (800).
@@ -457,8 +457,10 @@ func expandTabs(runes []rune) (expanded []rune, bufToDisp []int) {
 		bufToDisp[bi] = dispCol
 		switch r {
 		case '\t':
-			expanded = append(expanded, ' ', ' ', ' ', ' ')
-			dispCol += 4
+			for range editor.TabWidth {
+				expanded = append(expanded, ' ')
+			}
+			dispCol += editor.TabWidth
 		case '\uFE0F':
 			// Variation Selector 16 would force emoji presentation (2 cells)
 			// but terminal width measurement disagrees. Skip it in the
@@ -511,9 +513,9 @@ func displayColToBufCol(bufToDisp []int, displayCol int) int {
 // to match the overlay state so scroll methods work correctly.
 func (m *EditorModel) syncExtraVisualLines() {
 	if m.Overlay != nil {
-		m.eng.ExtraVisualLines = m.Overlay.LineCount()
+		m.eng.SetExtraVisualLines(m.Overlay.LineCount())
 	} else {
-		m.eng.ExtraVisualLines = 0
+		m.eng.SetExtraVisualLines(0)
 	}
 }
 
@@ -1711,7 +1713,7 @@ func (m *EditorModel) adjustOverlayPosition(linesBefore int) {
 		if m.Overlay.StartLine < 0 || m.Overlay.EndLine < 0 {
 			slog.Debug("overlay removed", "reason", "shifted to invalid position")
 			m.Overlay = nil
-			m.eng.ExtraVisualLines = 0
+			m.eng.SetExtraVisualLines(0)
 		}
 	}
 }

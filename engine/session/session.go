@@ -17,7 +17,6 @@ import (
 	"github.com/latebit-io/junto/engine/search"
 	"time"
 
-	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
@@ -30,7 +29,7 @@ import (
 // Defined here (not in the agent package) so Session depends on an abstraction,
 // not a concrete type (DIP).
 type agentPort interface {
-	RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode agent.Mode)
+	RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode event.Mode)
 	Reply(input string) bool
 	Cancel()
 	Approve()
@@ -538,7 +537,7 @@ func (s *Session) wireBufferSync(e *editor.Editor) {
 }
 
 // unwireBufferSync sends DidClose and removes the wired state for an editor.
-// Used when an editor is removed from the session (e.g., SwitchEditor).
+// Used when an editor is removed from the session (e.g., file close).
 func (s *Session) unwireBufferSync(e *editor.Editor) {
 	if s.langSyncer == nil || e == nil || e.Buf.Path == "" {
 		return
@@ -563,6 +562,15 @@ func (s *Session) unwireBufferSync(e *editor.Editor) {
 // ActiveFile returns the path of the currently active file.
 func (s *Session) ActiveFile() string {
 	return s.activeFile
+}
+
+// ActiveEditor returns the currently active editor. Safe to call from
+// any goroutine — reads under mu.RLock to avoid racing with SwitchTo.
+func (s *Session) ActiveEditor() *editor.Editor {
+	s.mu.RLock()
+	e := s.Editor
+	s.mu.RUnlock()
+	return e
 }
 
 // ProjectRoot returns the project root path.
@@ -1098,7 +1106,7 @@ func (s *Session) SubmitGoal(goal string) bool {
 	}
 
 	// Start a new conversation. Archive any previous intent.
-	s.startNewConversation(goal, agent.ModeExecution)
+	s.startNewConversation(goal, event.ModeExecution)
 	s.phase = PhaseExecution
 	return false
 }
@@ -1111,7 +1119,7 @@ func (s *Session) SubmitPlanningGoal(goal string) {
 		return
 	}
 
-	s.startNewConversation(goal, agent.ModePlanning)
+	s.startNewConversation(goal, event.ModePlanning)
 	s.phase = PhasePlanning
 }
 
@@ -1133,7 +1141,7 @@ func (s *Session) handlePlanningInput(input string) bool {
 		if err := s.loadWorkTree(); err != nil {
 			slog.Warn("session: reload work tree after planning", "err", err)
 		}
-		s.startNewConversation(originalGoal, agent.ModeExecution)
+		s.startNewConversation(originalGoal, event.ModeExecution)
 		s.phase = PhaseExecution
 		return false
 
@@ -1141,7 +1149,7 @@ func (s *Session) handlePlanningInput(input string) bool {
 		// Skip planning entirely — start execution with original goal.
 		originalGoal := s.currentIntent
 		s.agent.Cancel()
-		s.startNewConversation(originalGoal, agent.ModeExecution)
+		s.startNewConversation(originalGoal, event.ModeExecution)
 		s.phase = PhaseExecution
 		return false
 
@@ -1153,7 +1161,7 @@ func (s *Session) handlePlanningInput(input string) bool {
 
 // startNewConversation archives any previous intent, clears stale state,
 // and starts a new agent conversation in the specified mode.
-func (s *Session) startNewConversation(goal string, mode agent.Mode) {
+func (s *Session) startNewConversation(goal string, mode event.Mode) {
 	if s.currentIntent != "" && !s.intentDone {
 		s.ArchiveIntent()
 	}
@@ -1263,48 +1271,6 @@ func (s *Session) SwitchTo(path string) error {
 		s.saveContext()
 	}
 	return nil
-}
-
-// SwitchEditor replaces the current editor with a new one. Cancels any
-// running agent, clears all pending state, and resets intent. Returns the
-// old editor so the caller can Close() it to free resources (e.g. tree-sitter).
-//
-// Deprecated: Use SwitchTo for multi-buffer file switching. This method
-// exists for backward compatibility with frontends that create editors externally.
-func (s *Session) SwitchEditor(newEditor *editor.Editor) *editor.Editor {
-	if s.HasAgent() {
-		s.agent.Cancel()
-	}
-	s.pendingEdit = nil
-	s.editReviewed = false
-	s.currentIntent = ""
-	s.intentDone = false
-
-	old := s.Editor
-
-	// Notify LSP that the old document is closing.
-	s.unwireBufferSync(old)
-
-	s.mu.Lock()
-	// Remove old editor from map
-	if s.activeFile != "" {
-		delete(s.editors, s.activeFile)
-	}
-	// Add new editor — only track in map if it has a path.
-	s.Editor = newEditor
-	if newEditor.Buf.Path != "" {
-		canon := s.CanonPath(newEditor.Buf.Path)
-		s.editors[canon] = newEditor
-		s.activeFile = canon
-	} else {
-		s.activeFile = ""
-	}
-	s.mu.Unlock()
-
-	// Wire LSP sync for the new editor.
-	s.wireBufferSync(newEditor)
-
-	return old
 }
 
 // Close frees resources for all open editors.

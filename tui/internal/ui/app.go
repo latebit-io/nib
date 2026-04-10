@@ -85,21 +85,26 @@ var (
 // It is a thin presentation layer: maps input to engine Session methods,
 // reads Session state to render, and adapts agent events to tea.Msg.
 type AppModel struct {
-	// Engine session — owns all domain logic
+	// Session is the engine session that owns all domain logic.
 	Session *session.Session
 
-	// Typed references for rendering
-	Editor      *EditorModel
-	AgentPane   *AgentPaneModel
+	// Editor is the code editor pane model.
+	Editor *EditorModel
+	// AgentPane is the agent conversation pane model.
+	AgentPane *AgentPaneModel
+	// ProjectPane is the file-tree / project sidebar model.
 	ProjectPane *ProjectPaneModel
 
-	// Layout and focus
+	// Regions manages layout zones and focus routing.
 	Regions *RegionManager
 
-	// TUI-only state
-	Dialog              DialogModel
-	Palette             PaletteModel
-	Help                HelpModel
+	// Dialog is the modal confirmation dialog state.
+	Dialog DialogModel
+	// Palette is the command / file palette overlay state.
+	Palette PaletteModel
+	// Help is the keyboard-shortcut help overlay state.
+	Help HelpModel
+	// SearchOverlay is the project-wide search overlay state.
 	SearchOverlay       SearchOverlayModel
 	recentMouse         bool          // tracks leaked CSI prefix from unparsed mouse events
 	dial                AutonomyLevel // current autonomy level; defaults to LevelGuided
@@ -131,12 +136,17 @@ type AppModel struct {
 	// when no style or provider is configured.
 	ToggleEvaluator func(enabled bool) bool
 
+	// Services holds shared runtime services (clipboard, LSP, etc.).
 	Services *Services
-	Keymap   *Keymap
-	Quit     bool
-	Width    int
-	Height   int
-	program  *tea.Program
+	// Keymap holds the active key-binding configuration.
+	Keymap *Keymap
+	// Quit signals that the application should exit.
+	Quit bool
+	// Width is the current terminal width in columns.
+	Width int
+	// Height is the current terminal height in rows.
+	Height  int
+	program *tea.Program
 }
 
 // SetProgram sets the tea.Program reference.
@@ -178,7 +188,7 @@ func NewApp(sess *session.Session) AppModel {
 	km := DefaultKeymap()
 	svc := NewServices()
 
-	editorPane := NewEditorModel(sess.Editor, km, svc)
+	editorPane := NewEditorModel(sess.ActiveEditor(), km, svc)
 	editorPane.OnSave = func() { sess.NotifySaved() }
 	agentPane := NewAgentPaneModel(svc, sess.HasAgent())
 	projectPane := NewProjectPaneModel(sess)
@@ -670,9 +680,10 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		m.openFile(e.Path)
 		// Only navigate if we successfully switched to the target file.
 		if m.Session.ActiveFile() == m.Session.CanonPath(e.Path) {
-			m.Session.Editor.ClearSelection()
-			m.Session.Editor.MoveCursorTo(e.Line-1, 0)
-			m.Session.Editor.EnsureCursorVisible()
+			ae := m.Session.ActiveEditor()
+			ae.ClearSelection()
+			ae.MoveCursorTo(e.Line-1, 0)
+			ae.EnsureCursorVisible()
 		}
 	case event.AgentError:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
@@ -1016,7 +1027,7 @@ func (m *AppModel) View() tea.View {
 func (m *AppModel) rebuildEditorModel() {
 	wpm := m.Editor.TypingWPM
 	instantApply := m.Editor.InstantApply
-	m.Editor = NewEditorModel(m.Session.Editor, m.Keymap, m.Services)
+	m.Editor = NewEditorModel(m.Session.ActiveEditor(), m.Keymap, m.Services)
 	m.Editor.TypingWPM = wpm
 	m.Editor.InstantApply = instantApply
 	m.Editor.OnSave = func() { m.Session.NotifySaved() }
@@ -1177,12 +1188,12 @@ func (m *AppModel) applyGoToDefinition(msg goToDefResultMsg) (tea.Model, tea.Cmd
 	}
 
 	// Rebuild EditorModel if session switched files.
-	if m.Session.Editor != m.Editor.eng {
+	if m.Session.ActiveEditor() != m.Editor.eng {
 		m.rebuildEditorModel()
 		m.refreshDiagnostics(m.Session.ActiveFile())
 	}
 
-	m.Session.Editor.MoveCursorTo(msg.line, msg.col)
+	m.Session.ActiveEditor().MoveCursorTo(msg.line, msg.col)
 	slog.Debug("go-to-definition", "path", msg.path, "line", msg.line, "col", msg.col)
 	return m, nil
 }
@@ -1195,7 +1206,7 @@ func (m *AppModel) handleGoBack() (tea.Model, tea.Cmd) {
 	}
 
 	// Session may have switched files — rebuild EditorModel if needed.
-	if m.Session.Editor != m.Editor.eng {
+	if m.Session.ActiveEditor() != m.Editor.eng {
 		m.rebuildEditorModel()
 		m.refreshDiagnostics(m.Session.ActiveFile())
 	}

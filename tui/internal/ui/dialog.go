@@ -7,19 +7,23 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// DialogResultMsg is emitted when the user selects a dialog option.
-// Choice is the index of the selected option, or -1 if cancelled.
+// DialogResultMsg is emitted when the user selects a dialog option or cancels.
 type DialogResultMsg struct {
+	// Choice is the index of the selected option, or -1 if cancelled.
 	Choice int
 }
 
 // DialogModel renders a centered modal overlay that captures all key input
 // until the user picks an option or cancels with Escape.
 type DialogModel struct {
-	Message  string
-	Options  []string
+	// Message is the prompt text displayed in the dialog body.
+	Message string
+	// Options is the list of button labels the user can choose from.
+	Options []string
+	// Selected is the index of the currently highlighted option.
 	Selected int
-	Active   bool
+	// Active is true when the dialog is visible and capturing input.
+	Active bool
 }
 
 // Show activates the dialog with a message and options.

@@ -11,9 +11,10 @@ import (
 // The replacement text lives in a real editor.Editor, so all editing operations
 // (cursor, selection, text ops, undo/redo) come from the engine — no duplication.
 type DiffOverlay struct {
-	// Buffer line range being replaced (from DiffResult, 0-indexed, inclusive).
+	// StartLine is the first buffer line being replaced (0-indexed, inclusive).
 	StartLine int
-	EndLine   int
+	// EndLine is the last buffer line being replaced (0-indexed, inclusive).
+	EndLine int
 
 	// Active is true when the cursor is in the replacement zone.
 	Active bool

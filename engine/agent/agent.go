@@ -18,16 +18,17 @@ import (
 	"github.com/latebit-io/junto/engine/memory"
 )
 
-// Mode controls the agent's behavior — which tools are available and
-// which prompts are used.
-type Mode int
+// Mode is an alias for event.Mode so existing callers within the agent
+// package can use the unqualified names. The canonical definition lives
+// in the event package (shared domain types).
+type Mode = event.Mode
 
 const (
 	// ModeExecution is the default mode: all tools available, execution prompt.
-	ModeExecution Mode = iota
+	ModeExecution = event.ModeExecution
 	// ModePlanning restricts the agent to read-only and memory tools,
 	// using a planning-focused prompt for conversational design.
-	ModePlanning
+	ModePlanning = event.ModePlanning
 )
 
 // InteractionMode controls prompt framing — how the agent describes its

@@ -12,6 +12,7 @@ import (
 
 // HelpModel manages the help overlay state.
 type HelpModel struct {
+	// Active is true when the help overlay is visible and capturing input.
 	Active    bool
 	scrollOff int      // scroll offset in lines
 	lines     []string // pre-built help content lines (unstyled box content)

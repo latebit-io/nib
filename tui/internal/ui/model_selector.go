@@ -6,15 +6,21 @@ import (
 
 // ModelSelectorItem represents an entry in the model selector.
 type ModelSelectorItem struct {
-	ID      string // model identifier sent to the provider
-	Name    string // display name
-	Profile string // which profile/provider this belongs to
+	// ID is the model identifier sent to the provider.
+	ID string
+	// Name is the human-readable display name.
+	Name string
+	// Profile is the provider profile this model belongs to.
+	Profile string
 }
 
 // ModelSelectorResultMsg is emitted when the user selects a model or cancels.
 type ModelSelectorResultMsg struct {
-	Profile   string // selected profile
-	ModelID   string // selected model ID (empty for profile-level selection)
+	// Profile is the selected provider profile.
+	Profile string
+	// ModelID is the selected model ID (empty for profile-level selection).
+	ModelID string
+	// Cancelled is true when the user dismissed the selector without choosing.
 	Cancelled bool
 }
 

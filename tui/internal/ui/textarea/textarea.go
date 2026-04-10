@@ -130,6 +130,7 @@ func (t *TextArea) VisualLineCount() int {
 
 // RenderedLine is a single visual line for display.
 type RenderedLine struct {
+	// Text is the string content of this visual line.
 	Text string
 }
 

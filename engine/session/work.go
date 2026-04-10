@@ -142,9 +142,12 @@ func (s *Session) ReloadWorkTree() error {
 // Used to separate I/O (safe in any goroutine) from state mutation
 // (must happen on the caller's goroutine).
 type WorkTreeSnapshot struct {
-	Tree    *project.Tree
+	// Tree is the parsed project hierarchy (nil on error).
+	Tree *project.Tree
+	// Version is the document version from the memory server.
 	Version int
-	Err     error
+	// Err is the fetch or parse error (nil on success).
+	Err error
 }
 
 // FetchWorkTreeSnapshot fetches the work tree from demarkus without mutating

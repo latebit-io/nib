@@ -12,9 +12,10 @@ import (
 	"github.com/latebit-io/junto/engine/highlight"
 )
 
-// tabWidth is the display width of a tab character. Must match the TUI
-// renderer's expandTabs logic so horizontal scroll stays in sync.
-const tabWidth = 4
+// TabWidth is the display width of a tab character. Frontends must use
+// this constant in their tab-expansion logic so horizontal scroll stays
+// in sync with the engine's column calculations.
+const TabWidth = 4
 
 // scrollMarginCols is the horizontal lookahead margin. When the cursor
 // approaches the viewport edge, we scroll early so the developer can
@@ -33,7 +34,7 @@ type Editor struct {
 	CursorLine int
 	CursorCol  int
 
-	// Viewport scroll offset (in visual-line space when ExtraVisualLines > 0)
+	// Viewport scroll offset (in visual-line space when extraVisualLines > 0)
 	ScrollOffset int
 
 	// ScrollCol is the horizontal scroll offset in display-column space
@@ -41,10 +42,11 @@ type Editor struct {
 	// this column. Adjusted automatically by EnsureCursorVisible.
 	ScrollCol int
 
-	// ExtraVisualLines is the number of virtual lines inserted into the viewport
-	// by the frontend (e.g., inline diff overlay). Scroll methods account for
-	// these so the viewport can scroll through all visual content.
-	ExtraVisualLines int
+	// extraVisualLines is the number of virtual lines inserted into the viewport
+	// by the frontend (e.g., inline diff overlay). Set via SetExtraVisualLines;
+	// scroll methods account for these so the viewport scrolls through all
+	// visual content. Defaults to 0 (no overlay).
+	extraVisualLines int
 
 	// Selection
 	SelectionActive bool
@@ -113,10 +115,18 @@ func (e *Editor) ContentWidth() int {
 	return w
 }
 
+// SetExtraVisualLines sets the number of virtual lines the frontend has
+// inserted into the viewport (e.g., inline diff overlay). Scroll methods
+// account for these so the viewport scrolls through all visual content.
+func (e *Editor) SetExtraVisualLines(n int) { e.extraVisualLines = n }
+
+// ExtraVisualLines returns the current number of virtual lines.
+func (e *Editor) ExtraVisualLines() int { return e.extraVisualLines }
+
 // totalVisualLines returns the total number of visual lines in the viewport,
 // including any extra virtual lines set by the frontend.
 func (e *Editor) totalVisualLines() int {
-	return e.Buf.LineCount() + e.ExtraVisualLines
+	return e.Buf.LineCount() + e.extraVisualLines
 }
 
 // ClampScroll clamps the vertical scroll offset to valid range.
@@ -154,7 +164,7 @@ func (e *Editor) BufferColToDisplayCol(line, bufCol int) int {
 	for i := 0; i < bufCol && i < len(runes); i++ {
 		switch runes[i] {
 		case '\t':
-			dispCol += tabWidth
+			dispCol += TabWidth
 		case '\uFE0F':
 			// VS16 is skipped in the display buffer (see TUI expandTabs),
 			// so it contributes 0 display columns.
@@ -188,7 +198,7 @@ func (e *Editor) ScrollRight(cols int) {
 //   - bufferMutated: true when the buffer already contains the replacement
 //     (approve path); false when the buffer is unchanged (reject/error/done)
 //
-// After calling this, the frontend should clear ExtraVisualLines to 0.
+// CollapseOverlay also resets extraVisualLines to 0.
 func (e *Editor) CollapseOverlay(startLine, endLine, addedCount int, bufferMutated bool) {
 	addedEnd := endLine + addedCount
 
@@ -216,7 +226,7 @@ func (e *Editor) CollapseOverlay(startLine, endLine, addedCount int, bufferMutat
 			e.ScrollOffset = endLine + 1
 		}
 	}
-	e.ExtraVisualLines = 0
+	e.extraVisualLines = 0
 }
 
 // EnsureCursorVisible scrolls the viewport on both axes to keep the cursor visible.
@@ -1194,7 +1204,7 @@ func (e *Editor) DisplayColToBufferCol(line, displayCol int) int {
 		var width int
 		switch r {
 		case '\t':
-			width = tabWidth
+			width = TabWidth
 		case '\uFE0F':
 			width = 0 // VS16 is stripped from display (see expandTabs)
 		default:

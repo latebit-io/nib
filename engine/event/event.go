@@ -9,23 +9,53 @@ type Event interface {
 	eventTag()
 }
 
+// --- Agent mode ---
+
+// Mode controls the agent's behavior — which tools are available and
+// which prompts are used. Defined in event (the shared domain types package)
+// so both session and agent can import it without circular dependencies.
+type Mode int
+
+const (
+	// ModeExecution is the default mode: all tools available, execution prompt.
+	ModeExecution Mode = iota
+	// ModePlanning restricts the agent to read-only and memory tools,
+	// using a planning-focused prompt for conversational design.
+	ModePlanning
+)
+
 // --- Agent events ---
 
 // AgentToken delivers streaming text from the LLM.
-type AgentToken struct{ Text string }
+type AgentToken struct {
+	// Text is the text delta from the LLM stream.
+	Text string
+}
 
 // AgentEditProposed signals the agent wants to apply an edit.
-type AgentEditProposed struct{ Edit PendingEdit }
+type AgentEditProposed struct {
+	// Edit is the proposed edit awaiting approval.
+	Edit PendingEdit
+}
 
 // AgentFileCreated signals the agent created a new file.
-type AgentFileCreated struct{ Path string }
+type AgentFileCreated struct {
+	// Path is the absolute path of the newly created file.
+	Path string
+}
 
 // AgentDone signals the agent loop has finished.
 // Success is true when the loop completed normally (not cancelled or errored).
-type AgentDone struct{ Success bool }
+type AgentDone struct {
+	// Success is true when the loop completed normally.
+	Success bool
+}
 
 // AgentError carries an error from the agent.
-type AgentError struct{ Err string }
+type AgentError struct {
+	// Err is the error message.
+	Err string
+}
 
 // StatusKind is a typed enum for agent status values.
 // It uses string constants so debug output remains human-readable.
@@ -53,20 +83,27 @@ const (
 )
 
 // AgentStatus updates the agent status display.
-type AgentStatus struct{ Status StatusKind }
+type AgentStatus struct {
+	// Status is the current agent status kind.
+	Status StatusKind
+}
 
 // AgentToolCall signals the agent is invoking a tool.
 // Emitted before execution so the frontend can show what the agent is doing.
 type AgentToolCall struct {
-	Name string // tool name (e.g. "search_project", "read_file")
-	Args string // raw JSON arguments
+	// Name is the tool name (e.g., "search_project", "read_file").
+	Name string
+	// Args is the raw JSON arguments for the tool call.
+	Args string
 }
 
 // AgentNavigate signals the agent wants to navigate the editor to a location.
 // The frontend handles the actual cursor movement on its own goroutine.
 type AgentNavigate struct {
-	Path string // file to navigate to
-	Line int    // 1-indexed line number
+	// Path is the file to navigate to.
+	Path string
+	// Line is the 1-indexed line number to navigate to.
+	Line int
 }
 
 func (AgentToken) eventTag()        {}
@@ -87,24 +124,32 @@ func (AgentWaiting) eventTag() {}
 
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {
-	ID      string
-	Path    string // which file this edit targets
-	Search  string
+	// ID uniquely identifies this edit proposal.
+	ID string
+	// Path is the file this edit targets.
+	Path string
+	// Search is the exact text to find in the file.
+	Search string
+	// Replace is the replacement text.
 	Replace string
-	Reason  string
+	// Reason is the LLM's explanation for the edit.
+	Reason string
 }
 
 // FlushResult carries the outcome of a FlushBuffers request.
 type FlushResult struct {
-	Saved []string // canonical paths of files that were saved
-	Err   error    // first error encountered (nil on full success)
+	// Saved lists the canonical paths of files that were saved.
+	Saved []string
+	// Err is the first error encountered (nil on full success).
+	Err error
 }
 
 // FlushBuffers requests the frontend to save all dirty buffers to disk.
 // The agent blocks on Result until the frontend completes the save.
-// This routes the I/O through the buffer-owning goroutine (TUI main)
-// so that no cross-goroutine buffer access occurs.
+// This routes the I/O through the buffer-owning goroutine (the frontend's
+// main loop) so that no cross-goroutine buffer access occurs.
 type FlushBuffers struct {
+	// Result receives the flush outcome from the frontend.
 	Result chan<- FlushResult
 }
 
@@ -114,6 +159,9 @@ func (FlushBuffers) eventTag() {}
 
 // DiagnosticsUpdated signals that diagnostics changed for a file.
 // Frontend should re-query the DiagnosticProvider for the updated diagnostics.
-type DiagnosticsUpdated struct{ Path string }
+type DiagnosticsUpdated struct {
+	// Path is the file whose diagnostics changed.
+	Path string
+}
 
 func (DiagnosticsUpdated) eventTag() {}

@@ -1,7 +1,6 @@
 package wire
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -95,18 +94,15 @@ func ForceStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provid
 		return nil
 	}
 
-	// Build rules from the resolved style's CodingStyleData format.
-	rules := make([]string, len(resolved.Rules))
+	// Convert styleconfig rules to agent rules and use shared formatting.
+	agentRules := make([]agent.StyleRule, len(resolved.Rules))
 	for i, r := range resolved.Rules {
-		tag := "advisory"
-		if r.Enforcement == "hard" {
-			tag = "REQUIRED"
-		}
-		rules[i] = fmt.Sprintf("**%s** [%s]: %s", r.Name, tag, r.Instruction)
+		agentRules[i] = agent.StyleRule{Name: r.Name, Instruction: r.Instruction, Enforcement: r.Enforcement}
 	}
+	data := agent.NewCodingStyleData(resolved.Name, agentRules)
 
-	slog.Info("wire: style evaluator enabled", "style", resolved.Name, "rules", len(rules))
-	return agent.NewStyleEvaluator(provider, rules, 0) // 0 = default timeout
+	slog.Info("wire: style evaluator enabled", "style", resolved.Name, "rules", len(data.Rules))
+	return agent.NewStyleEvaluator(provider, data.Rules, 0) // 0 = default timeout
 }
 
 // detectLintCommands auto-detects appropriate lint commands based on the

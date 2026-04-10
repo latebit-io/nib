@@ -10,8 +10,10 @@ import "slices"
 // Both global and project files share this format. Fields left unset
 // are inherited from lower-priority sources during merge.
 type Config struct {
+	// Styles maps style names to their definitions.
 	Styles map[string]Style `json:"styles,omitempty"`
-	Active string           `json:"active,omitempty"`
+	// Active is the name of the currently selected style.
+	Active string `json:"active,omitempty"`
 }
 
 // Style defines a coding style with enforceable rules and optional lint commands.

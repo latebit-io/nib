@@ -94,12 +94,7 @@ func ForceStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provid
 		return nil
 	}
 
-	// Convert styleconfig rules to agent rules and use shared formatting.
-	agentRules := make([]agent.StyleRule, len(resolved.Rules))
-	for i, r := range resolved.Rules {
-		agentRules[i] = agent.StyleRule{Name: r.Name, Instruction: r.Instruction, Enforcement: r.Enforcement}
-	}
-	data := agent.NewCodingStyleData(resolved.Name, agentRules)
+	data := agent.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules))
 
 	slog.Info("wire: style evaluator enabled", "style", resolved.Name, "rules", len(data.Rules))
 	return agent.NewStyleEvaluator(provider, data.Rules, 0) // 0 = default timeout

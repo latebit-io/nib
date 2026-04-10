@@ -118,7 +118,9 @@ func (e *Editor) ContentWidth() int {
 // SetExtraVisualLines sets the number of virtual lines the frontend has
 // inserted into the viewport (e.g., inline diff overlay). Scroll methods
 // account for these so the viewport scrolls through all visual content.
-func (e *Editor) SetExtraVisualLines(n int) { e.extraVisualLines = n }
+func (e *Editor) SetExtraVisualLines(n int) {
+	e.extraVisualLines = max(n, 0)
+}
 
 // ExtraVisualLines returns the current number of virtual lines.
 func (e *Editor) ExtraVisualLines() int { return e.extraVisualLines }

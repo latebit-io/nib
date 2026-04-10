@@ -60,9 +60,21 @@ func NewStyle(projectRoot string) StyleResult {
 // NewStyleEvaluator creates a StyleEvaluator from the resolved style config
 // and an LLM provider. If the style's EvaluatorModel is set, a new provider
 // is created for that model using the given LLM config. Returns nil when the
-// evaluator is disabled or no provider is available.
+// evaluator is disabled in config or no provider is available.
+// Use [ForceStyleEvaluator] when the developer explicitly toggles the evaluator on.
 func NewStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider, llmCfg *llmconfig.Config) *agent.StyleEvaluator {
 	if resolved == nil || !resolved.Evaluator {
+		return nil
+	}
+	return ForceStyleEvaluator(resolved, mainProvider, llmCfg)
+}
+
+// ForceStyleEvaluator creates a StyleEvaluator regardless of the config's
+// Evaluator flag. Used when the developer explicitly enables the evaluator
+// at runtime via Alt+V. Honors EvaluatorModel if configured.
+// Returns nil when no provider is available.
+func ForceStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider, llmCfg *llmconfig.Config) *agent.StyleEvaluator {
+	if resolved == nil {
 		return nil
 	}
 

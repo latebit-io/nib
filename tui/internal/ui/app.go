@@ -165,13 +165,12 @@ func (m *AppModel) cycleStyle() {
 }
 
 // toggleEvaluator flips the style evaluator on/off via the ToggleEvaluator callback.
+// Does nothing if no callback is wired (no agent or no provider).
 func (m *AppModel) toggleEvaluator() {
-	if m.ToggleEvaluator != nil {
-		m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
-	} else {
-		// No callback wired — toggle the indicator only (no agent-side effect).
-		m.evaluatorEnabled = !m.evaluatorEnabled
+	if m.ToggleEvaluator == nil {
+		return
 	}
+	m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
 }
 
 // NewApp creates the application model.

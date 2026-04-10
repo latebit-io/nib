@@ -273,7 +273,7 @@ func run() error {
 
 				// Rebuild evaluator if it's active, using the new style's rules.
 				if evaluatorActive {
-					eval := wire.NewStyleEvaluator(currentResolved, provider, llmCfg)
+					eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
 					ag.SetEvaluator(eval) // nil is fine — disables if no provider
 					if eval == nil {
 						evaluatorActive = false
@@ -303,16 +303,10 @@ func run() error {
 				return false // no style active
 			}
 			if enabled {
-				// Build rules from the current style for the evaluator.
-				rules := make([]string, len(currentResolved.Rules))
-				for i, r := range currentResolved.Rules {
-					tag := "advisory"
-					if r.Enforcement == "hard" {
-						tag = "REQUIRED"
-					}
-					rules[i] = fmt.Sprintf("**%s** [%s]: %s", r.Name, tag, r.Instruction)
+				eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
+				if eval == nil {
+					return false // no provider available
 				}
-				eval := agent.NewStyleEvaluator(provider, rules, 0)
 				ag.SetEvaluator(eval)
 				evaluatorActive = true
 				slog.Info("evaluator: enabled")

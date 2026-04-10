@@ -582,10 +582,7 @@ func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
 }
 
 func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
-	// success tracks whether the conversation ended cleanly. Set to false
-	// only on actual errors (stream failure, autosave). A normal cancel
-	// (context done) counts as success since the user initiated it.
-	success := true
+	success := true // false only on actual errors, not user-initiated cancel
 	defer func() {
 		a.mu.Lock()
 		a.waiting = false
@@ -597,11 +594,8 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		goal = "Review this code and suggest improvements, one step at a time."
 	}
 
-	// Re-fetch memory summary at conversation start.
 	memorySummary := a.fetchMemorySummary(ctx)
-
-	// Build tool defs for this mode — planning mode blocks write tools.
-	activeDefs := a.toolDefs
+	activeDefs := a.toolDefs // planning mode blocks write tools
 	if mode == ModePlanning {
 		activeDefs = a.planningToolDefs()
 	}
@@ -616,10 +610,8 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 	}
 
 	thinkState := false
-
-	// Outer loop: one iteration per conversation turn (user → agent).
-	// The agent processes LLM responses and tool calls, then waits for
-	// the developer's next message before continuing.
+	evalRounds := 0
+	const maxEvalRounds = 2
 	for {
 		// Process one LLM turn: stream, dispatch tools, repeat until
 		// the LLM responds with no tool calls.
@@ -634,17 +626,16 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 			return
 		}
 
-		// Turn complete — run style evaluator on all edits from this turn.
-		// If violations are found, inject them as a user message and loop
-		// back for the agent to fix them before presenting to the developer.
-		if evalMsg := a.evaluateTurn(ctx); evalMsg != "" {
-			messages = append(messages, llm.Message{
-				Role:    "user",
-				Content: evalMsg,
-			})
-			a.send(event.AgentStatus{Status: event.StatusThinking})
-			continue // re-enter processLLMTurn to fix violations
+		// Run style evaluator — limited rounds to prevent infinite fix loops.
+		if evalRounds < maxEvalRounds {
+			if evalMsg := a.evaluateTurn(ctx); evalMsg != "" {
+				evalRounds++
+				messages = append(messages, llm.Message{Role: "user", Content: evalMsg})
+				a.send(event.AgentStatus{Status: event.StatusThinking})
+				continue
+			}
 		}
+		evalRounds = 0
 
 		// Agent's turn is done — wait for the developer's next message.
 		// AgentWaiting is critical: if the frontend never sees it, the

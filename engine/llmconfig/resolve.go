@@ -30,11 +30,16 @@ var builtinProfiles = map[string]Profile{
 		Model:     "gemini-2.5-flash",
 		APIKeyEnv: "GEMINI_API_KEY",
 	},
+	"minimax": {
+		BaseURL:   "https://api.minimax.io/v1",
+		Model:     "MiniMax-M2.7",
+		APIKeyEnv: "MINIMAX_API_KEY",
+	},
 }
 
 // builtinFallbackOrder is the priority when auto-selecting a built-in profile
 // because the active profile has no API key. First match wins.
-var builtinFallbackOrder = []string{"gemini", "openrouter"}
+var builtinFallbackOrder = []string{"gemini", "minimax", "openrouter"}
 
 // Resolve loads and merges LLM configuration from all sources.
 // The merge order (each layer overrides the previous):

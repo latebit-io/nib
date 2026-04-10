@@ -154,6 +154,15 @@ var resolveTests = []resolveTestCase{
 		wantHas:     true,
 	},
 	{
+		name:        "MINIMAX_API_KEY auto-fallback with no config",
+		env:         map[string]string{"MINIMAX_API_KEY": "mm-key"},
+		wantProfile: "minimax",
+		wantBaseURL: "https://api.minimax.io/v1",
+		wantModel:   "MiniMax-M2.7",
+		wantKeyEnv:  "MINIMAX_API_KEY",
+		wantHas:     true,
+	},
+	{
 		name:        "OPENROUTER_API_KEY auto-fallback with no config",
 		env:         map[string]string{"OPENROUTER_API_KEY": "or-key"},
 		wantProfile: "openrouter",

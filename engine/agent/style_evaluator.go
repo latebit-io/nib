@@ -103,7 +103,12 @@ func truncateCode(s string) string {
 	if len(s) <= maxEvaluatorCodeBytes {
 		return s
 	}
-	return s[:maxEvaluatorCodeBytes] + "\n... [truncated]"
+	// Back up to a rune boundary to avoid splitting multi-byte UTF-8.
+	cut := maxEvaluatorCodeBytes
+	for cut > 0 && cut < len(s) && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut] + "\n... [truncated]"
 }
 
 // buildEvaluatorPrompt constructs the review prompt for the evaluator.

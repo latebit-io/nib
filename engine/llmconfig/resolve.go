@@ -141,22 +141,19 @@ func resolve(cfg *Config) *Resolved {
 	// Resolve API key from the named env var.
 	r.apiKey = os.Getenv(r.APIKeyEnv)
 
-	// Environment variable overrides (highest priority).
-	if v := os.Getenv("LLM_BASE_URL"); v != "" {
-		r.BaseURL = v
-	}
-	if v := os.Getenv("LLM_MODEL"); v != "" {
-		r.Model = v
-	}
+	// Resolve API key from LLM_API_KEY override.
 	if v := os.Getenv("LLM_API_KEY"); v != "" {
 		r.apiKey = v
 	}
 
 	// Auto-fallback: if no API key yet, try built-in profiles in priority order.
-	// This lets GEMINI_API_KEY "just work" without any config file.
+	// Uses cfg.Profiles (not builtinProfiles) so file overrides are respected.
 	if r.apiKey == "" {
 		for _, name := range builtinFallbackOrder {
-			p := builtinProfiles[name]
+			p, ok := cfg.Profiles[name]
+			if !ok {
+				continue
+			}
 			keyEnv := p.APIKeyEnv
 			if key := os.Getenv(keyEnv); key != "" {
 				r.Profile = name
@@ -167,6 +164,15 @@ func resolve(cfg *Config) *Resolved {
 				break
 			}
 		}
+	}
+
+	// Environment variable overrides (highest priority) — applied after
+	// fallback so they can't be clobbered by it.
+	if v := os.Getenv("LLM_BASE_URL"); v != "" {
+		r.BaseURL = v
+	}
+	if v := os.Getenv("LLM_MODEL"); v != "" {
+		r.Model = v
 	}
 
 	return r

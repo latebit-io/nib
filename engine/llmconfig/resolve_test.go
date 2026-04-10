@@ -197,6 +197,35 @@ var resolveTests = []resolveTestCase{
 		wantKeyEnv:  "GEMINI_API_KEY",
 		wantHas:     true,
 	},
+	{
+		name: "fallback keeps LLM_BASE_URL and LLM_MODEL overrides",
+		env: map[string]string{
+			"GEMINI_API_KEY": "gem-key",
+			"LLM_BASE_URL":  "https://override.example/v1",
+			"LLM_MODEL":     "override-model",
+		},
+		wantProfile: "gemini",
+		wantBaseURL: "https://override.example/v1",
+		wantModel:   "override-model",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+	},
+	{
+		name: "fallback uses file-overridden built-in profile when no active profile",
+		globalJSON: `{
+				"profiles": {
+					"gemini": {
+						"model": "gemini-2.5-pro"
+					}
+				}
+			}`,
+		env:         map[string]string{"GEMINI_API_KEY": "gem-key"},
+		wantProfile: "gemini",
+		wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		wantModel:   "gemini-2.5-pro",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+	},
 }
 
 func TestResolve(t *testing.T) {

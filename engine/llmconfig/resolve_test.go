@@ -112,7 +112,7 @@ var resolveTests = []resolveTestCase{
 		wantProfile: "p",
 		wantBaseURL: DefaultBaseURL,
 		wantModel:   DefaultModel,
-		wantKeyEnv:  "CUSTOM_KEY",
+		wantKeyEnv:  DefaultKeyEnv,
 		wantHas:     true,
 	},
 	{
@@ -201,8 +201,8 @@ var resolveTests = []resolveTestCase{
 		name: "fallback keeps LLM_BASE_URL and LLM_MODEL overrides",
 		env: map[string]string{
 			"GEMINI_API_KEY": "gem-key",
-			"LLM_BASE_URL":  "https://override.example/v1",
-			"LLM_MODEL":     "override-model",
+			"LLM_BASE_URL":   "https://override.example/v1",
+			"LLM_MODEL":      "override-model",
 		},
 		wantProfile: "gemini",
 		wantBaseURL: "https://override.example/v1",

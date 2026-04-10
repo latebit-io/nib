@@ -105,6 +105,7 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 		r.Model = v
 	}
 	if v := os.Getenv("LLM_API_KEY"); v != "" {
+		r.APIKeyEnv = DefaultKeyEnv
 		r.apiKey = v
 	}
 	return r
@@ -143,6 +144,7 @@ func resolve(cfg *Config) *Resolved {
 
 	// Resolve API key from LLM_API_KEY override.
 	if v := os.Getenv("LLM_API_KEY"); v != "" {
+		r.APIKeyEnv = DefaultKeyEnv
 		r.apiKey = v
 	}
 

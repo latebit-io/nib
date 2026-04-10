@@ -123,3 +123,14 @@ func formatDiagnostics(provider lang.DiagnosticProvider, lookupPath, displayPath
 	}
 	return summary + sb.String()
 }
+
+// hasDiagnosticErrors reports whether a file has any error-severity diagnostics.
+func hasDiagnosticErrors(provider lang.DiagnosticProvider, path string) bool {
+	diags := provider.Diagnostics(path)
+	for _, d := range diags {
+		if d.Severity == lang.SeverityError {
+			return true
+		}
+	}
+	return false
+}

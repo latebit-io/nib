@@ -1008,16 +1008,17 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 		}
 
 		// Auto-inject diagnostics so the agent can self-correct errors.
+		hasErrors := false
 		if a.diagProvider != nil {
 			time.Sleep(a.diagDelay)
 			diagResult := formatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
 			result += "\n\nDiagnostics after edit:\n" + diagResult
+			hasErrors = hasDiagnosticErrors(a.diagProvider, proposal.CanonPath)
 		}
 
-		// Run style lint and store violations for injection as a user
-		// message in processLLMTurn. User messages are higher priority
-		// than tool results — the LLM is much more likely to act on them.
-		if len(a.currentStyleLintCmd()) > 0 {
+		// Skip style lint when the file has compile errors — lint on
+		// broken code produces noise. Let diagnostics guide the fix first.
+		if !hasErrors && len(a.currentStyleLintCmd()) > 0 {
 			a.send(event.AgentStatus{Status: event.StatusLinting})
 			a.send(event.AgentToken{Text: "\n[Running style lint...]\n"})
 			if lint := a.runStyleLint(ctx, proposal.Path); lint != "" {

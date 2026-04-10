@@ -12,16 +12,17 @@ import (
 )
 
 // defaultEvaluatorTimeout is the maximum duration for a single evaluator LLM call.
-const defaultEvaluatorTimeout = 10 * time.Second
+// Needs headroom for large edits that produce big prompts.
+const defaultEvaluatorTimeout = 30 * time.Second
+
+// maxEvaluatorCodeBytes caps the code snippets sent to the evaluator.
+// Large files would blow up the prompt and cause timeouts.
+const maxEvaluatorCodeBytes = 4096
 
 // maxEvaluatorResponseBytes caps the evaluator response to prevent unbounded
 // memory growth from a looping or malicious model. A JSON array of violation
 // strings should never approach this limit.
 const maxEvaluatorResponseBytes = 64 * 1024
-
-// maxEvaluatorRetries is the number of times the evaluator can reject an edit
-// before letting it through. Prevents infinite self-correction loops.
-const maxEvaluatorRetries = 2
 
 // StyleEvaluator reviews proposed edits against coding style rules using
 // a secondary LLM call. It catches design-level violations that static
@@ -92,6 +93,14 @@ func (e *StyleEvaluator) Review(ctx context.Context, path, search, replace strin
 	return parseViolations(response.String())
 }
 
+// truncateCode caps a code snippet to maxEvaluatorCodeBytes for the evaluator prompt.
+func truncateCode(s string) string {
+	if len(s) <= maxEvaluatorCodeBytes {
+		return s
+	}
+	return s[:maxEvaluatorCodeBytes] + "\n... [truncated]"
+}
+
 // buildEvaluatorPrompt constructs the review prompt for the evaluator.
 func buildEvaluatorPrompt(rules []string, path, search, replace string) string {
 	var b strings.Builder
@@ -105,9 +114,9 @@ func buildEvaluatorPrompt(rules []string, path, search, replace string) string {
 	b.WriteString("\n## File: ")
 	b.WriteString(path)
 	b.WriteString("\n\n### Current code\n```\n")
-	b.WriteString(search)
+	b.WriteString(truncateCode(search))
 	b.WriteString("\n```\n\n### Proposed replacement\n```\n")
-	b.WriteString(replace)
+	b.WriteString(truncateCode(replace))
 	b.WriteString("\n```\n\n")
 	b.WriteString("If the edit violates any rules, respond with a JSON array of concise violation strings.\n")
 	b.WriteString("If the edit is compliant, respond with: []\n")

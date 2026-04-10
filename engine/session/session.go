@@ -1577,22 +1577,6 @@ func (s *Session) RejectEdit() {
 	s.agent.Reject()
 }
 
-// PreviewEdit computes the diff for a proposed edit without entering the
-// approval flow. No pending edit is set, no editReviewed flag is changed.
-// Used by the style evaluator to show the diff while it reviews.
-func (s *Session) PreviewEdit(pe event.PendingEdit) *editor.DiffResult {
-	e := s.Editor
-	if pe.Path != "" {
-		canon := s.CanonPath(pe.Path)
-		s.mu.RLock()
-		if ed, ok := s.editors[canon]; ok {
-			e = ed
-		}
-		s.mu.RUnlock()
-	}
-	return e.ComputeDiff(pe.Search, pe.Replace)
-}
-
 // ApproveAndContinue atomically approves the edit and continues the agent.
 // Use this when the agent should proceed immediately after approval (e.g.
 // instant-apply, auto-continue at higher autonomy levels). Serialising both

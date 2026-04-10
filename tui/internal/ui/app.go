@@ -165,12 +165,13 @@ func (m *AppModel) cycleStyle() {
 }
 
 // toggleEvaluator flips the style evaluator on/off via the ToggleEvaluator callback.
-// Does nothing if no evaluator is configured.
 func (m *AppModel) toggleEvaluator() {
-	if m.ToggleEvaluator == nil {
-		return
+	if m.ToggleEvaluator != nil {
+		m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
+	} else {
+		// No callback wired — toggle the indicator only (no agent-side effect).
+		m.evaluatorEnabled = !m.evaluatorEnabled
 	}
-	m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
 }
 
 // NewApp creates the application model.
@@ -603,20 +604,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	switch e := ev.(type) {
 	case event.AgentToken:
 		m.AgentPane.AppendToken(e.Text)
-	case event.AgentEditPreview:
-		// Evaluator is reviewing — show the diff as a preview only.
-		// Does NOT enter the approval flow (no ReviewEdit, no pending edit).
-		m.cancelAnimation()
-		m.clearEditorOverlay(false)
-		diff := m.Session.PreviewEdit(e.Edit)
-		if diff != nil {
-			m.Editor.Overlay = NewDiffOverlay(diff)
-		}
-	case event.AgentStyleRejected:
-		// Evaluator rejected the edit — dismiss the diff preview.
-		// The violation explanations are sent separately via AgentToken.
-		m.cancelAnimation()
-		m.clearEditorOverlay(false)
 	case event.AgentToolCall:
 		m.AgentPane.AppendMeta("\n> " + e.Name + "\n")
 	case event.AgentStatus:
@@ -988,24 +975,22 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		extra := 1 // dial is always shown
-		if m.styleName != "" {
-			extra++
-		}
-		if m.evaluatorEnabled {
-			extra++
-		}
+		extra := 3 // dial + style + evaluator always shown
 		indicators := make([]string, len(mem)+extra)
 		copy(indicators, mem)
 		idx := len(mem)
 		indicators[idx] = m.dial.String()
+		idx++
 		if m.styleName != "" {
-			idx++
 			indicators[idx] = "style:" + m.styleName
+		} else {
+			indicators[idx] = "style:none"
 		}
+		idx++
 		if m.evaluatorEnabled {
-			idx++
 			indicators[idx] = "eval:on"
+		} else {
+			indicators[idx] = "eval:off"
 		}
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
 		if m.Dialog.Active {

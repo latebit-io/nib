@@ -26,8 +26,8 @@ type FileWatcher struct {
 	ch      chan fileChangedMsg
 
 	mu            sync.Mutex
-	watchingFiles map[string]bool   // canonical file paths to react to
-	dirRefCount   map[string]int    // parent dir → number of watched files in it
+	watchingFiles map[string]bool        // canonical file paths to react to
+	dirRefCount   map[string]int         // parent dir → number of watched files in it
 	timers        map[string]*time.Timer // pending debounce timers per file path
 	closed        bool
 }

@@ -25,7 +25,7 @@ func newModelServer(t *testing.T, status int, body, wantAuth string) *AgentAPI {
 		// Extract key from "Bearer <key>".
 		key = wantAuth[len("Bearer "):]
 	}
-	return NewAgentAPI(srv.URL, "test-model", key)
+	return NewAgentAPI(srv.URL, "test-model", key, false)
 }
 
 func TestListModels(t *testing.T) {

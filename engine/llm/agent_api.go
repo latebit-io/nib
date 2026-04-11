@@ -15,18 +15,22 @@ import (
 
 // AgentAPI implements Provider using an OpenAI-compatible chat completions API.
 type AgentAPI struct {
-	apiKey  string
-	baseURL string
-	model   string
-	client  *http.Client
+	apiKey        string
+	baseURL       string
+	model         string
+	promptCaching bool
+	client        *http.Client
 }
 
-// NewAgentAPI creates an AgentAPI provider with the given base URL, model, and API key.
-func NewAgentAPI(baseURL, model, apiKey string) *AgentAPI {
+// NewAgentAPI creates an AgentAPI provider with the given base URL, model,
+// API key, and prompt caching flag. When promptCaching is true, messages are
+// annotated with cache_control breakpoints for Anthropic-style prompt caching.
+func NewAgentAPI(baseURL, model, apiKey string, promptCaching bool) *AgentAPI {
 	return &AgentAPI{
-		apiKey:  apiKey,
-		baseURL: baseURL,
-		model:   model,
+		apiKey:        apiKey,
+		baseURL:       baseURL,
+		model:         model,
+		promptCaching: promptCaching,
 		client: &http.Client{
 			Transport: agentTransport(),
 			// No client-level Timeout — would kill SSE streams mid-flight.
@@ -54,6 +58,103 @@ type chatRequest struct {
 	Tools    []ToolDef `json:"tools,omitempty"`
 }
 
+// cachingChatRequest is the JSON wire format when prompt caching is enabled.
+// Messages and tools use extended types that support cache_control annotations.
+type cachingChatRequest struct {
+	Model    string           `json:"model"`
+	Messages []cachingMessage `json:"messages"`
+	Stream   bool             `json:"stream"`
+	Tools    []cachingToolDef `json:"tools,omitempty"`
+}
+
+// cachingMessage extends Message with support for content blocks.
+// When CacheControl is set, Content is serialized as []contentBlock
+// instead of a plain string so the cache_control field can be attached.
+type cachingMessage struct {
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"` // string or []contentBlock; nil omits the field
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// contentBlock is a typed content element with optional cache control.
+type contentBlock struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// cachingToolDef extends ToolDef with optional cache control.
+type cachingToolDef struct {
+	Type         string        `json:"type"`
+	Function     FunctionDef   `json:"function"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+// ephemeralCache is the standard Anthropic cache control value.
+var ephemeralCache = &CacheControl{Type: "ephemeral"}
+
+// annotateCacheBreakpoints transforms messages and tools for Anthropic-style
+// prompt caching. Places cache_control breakpoints on:
+//  1. The system message (static across turns)
+//  2. The last tool definition (static within a mode)
+//  3. The second-to-last message (caches the growing conversation prefix)
+func annotateCacheBreakpoints(messages []Message, tools []ToolDef) ([]cachingMessage, []cachingToolDef) {
+	cms := make([]cachingMessage, len(messages))
+	for i, m := range messages {
+		// Convert empty content to nil so omitempty drops the field,
+		// matching Message's json:"content,omitempty" behavior.
+		var content any
+		if m.Content != "" {
+			content = m.Content
+		}
+		cms[i] = cachingMessage{
+			Role:       m.Role,
+			Content:    content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+		}
+	}
+
+	// Breakpoint 1: system message → content blocks with cache_control.
+	if len(cms) > 0 && cms[0].Role == "system" {
+		if s, ok := cms[0].Content.(string); ok && s != "" {
+			cms[0].Content = []contentBlock{{
+				Type:         "text",
+				Text:         s,
+				CacheControl: ephemeralCache,
+			}}
+		}
+	}
+
+	// Breakpoint 3: second-to-last message (caches conversation prefix).
+	// The last message is the new content; everything before it is stable.
+	if len(cms) >= 3 {
+		idx := len(cms) - 2
+		if s, ok := cms[idx].Content.(string); ok && s != "" {
+			cms[idx].Content = []contentBlock{{
+				Type:         "text",
+				Text:         s,
+				CacheControl: ephemeralCache,
+			}}
+		}
+	}
+
+	// Breakpoint 2: last tool definition.
+	cts := make([]cachingToolDef, len(tools))
+	for i, t := range tools {
+		cts[i] = cachingToolDef{
+			Type:     t.Type,
+			Function: t.Function,
+		}
+	}
+	if len(cts) > 0 {
+		cts[len(cts)-1].CacheControl = ephemeralCache
+	}
+
+	return cms, cts
+}
+
 type sseChunk struct {
 	Choices []struct {
 		Delta struct {
@@ -79,12 +180,25 @@ type sseDeltaCall struct {
 
 // Stream sends a chat completion request and returns a channel of streaming events.
 func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
-	body, err := json.Marshal(chatRequest{
-		Model:    a.model,
-		Messages: messages,
-		Stream:   true,
-		Tools:    tools,
-	})
+	var body []byte
+	var err error
+
+	if a.promptCaching {
+		cms, cts := annotateCacheBreakpoints(messages, tools)
+		body, err = json.Marshal(cachingChatRequest{
+			Model:    a.model,
+			Messages: cms,
+			Stream:   true,
+			Tools:    cts,
+		})
+	} else {
+		body, err = json.Marshal(chatRequest{
+			Model:    a.model,
+			Messages: messages,
+			Stream:   true,
+			Tools:    tools,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}

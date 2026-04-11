@@ -42,6 +42,14 @@ type StreamEvent struct {
 	Done bool
 }
 
+// CacheControl marks a message or tool definition for provider-level prompt
+// caching. Supported by Anthropic models via OpenRouter — cached input tokens
+// cost ~90% less on subsequent requests with the same prefix.
+type CacheControl struct {
+	// Type is the cache control type (always "ephemeral").
+	Type string `json:"type"`
+}
+
 // Provider abstracts an LLM backend for streaming chat completions.
 type Provider interface {
 	// Stream sends messages with the given tool definitions and returns

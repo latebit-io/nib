@@ -122,6 +122,34 @@ func (AgentError) eventTag()   {}
 func (AgentStatus) eventTag()  {}
 func (AgentWaiting) eventTag() {}
 
+// AgentTurnUsage reports token consumption for a single agent turn
+// (one or more LLM calls within processLLMTurn). Combines provider-reported
+// exact counts with client-side composition estimates.
+type AgentTurnUsage struct {
+	// Turn is the 1-indexed turn number within this agent run.
+	Turn int
+	// PromptTokens is the provider-reported total input tokens (0 if unavailable).
+	PromptTokens int
+	// CompletionTokens is the provider-reported output tokens (0 if unavailable).
+	CompletionTokens int
+	// CachedTokens is the provider-reported cached input tokens (0 if unavailable).
+	CachedTokens int
+	// ToolCalls is the number of tool calls dispatched in this turn.
+	ToolCalls int
+
+	// Client-side estimates (always available).
+	// SystemEst is the estimated system prompt tokens.
+	SystemEst int
+	// ToolsEst is the estimated tool definition tokens.
+	ToolsEst int
+	// HistoryEst is the estimated conversation history tokens.
+	HistoryEst int
+	// NewEst is the estimated new input tokens.
+	NewEst int
+}
+
+func (AgentTurnUsage) eventTag() {}
+
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {
 	// ID uniquely identifies this edit proposal.

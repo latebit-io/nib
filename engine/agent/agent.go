@@ -157,6 +157,23 @@ type Agent struct {
 	evaluator *StyleEvaluator
 	// turnEdits collects edits made during the current turn for batch review.
 	turnEdits []turnEdit
+
+	// sessionUsage accumulates token consumption across the entire agent run.
+	sessionUsage SessionUsage
+	// turnCounter is the 1-indexed turn number within the current run.
+	turnCounter int
+}
+
+// SessionUsage holds accumulated token consumption across an agent run.
+type SessionUsage struct {
+	// TotalPromptTokens is the sum of provider-reported input tokens.
+	TotalPromptTokens int
+	// TotalCompletionTokens is the sum of provider-reported output tokens.
+	TotalCompletionTokens int
+	// TotalCachedTokens is the sum of provider-reported cached input tokens.
+	TotalCachedTokens int
+	// Turns is the number of completed turns.
+	Turns int
 }
 
 // turnEdit records a single edit made during an agent turn, for batch review.
@@ -505,6 +522,38 @@ func (a *Agent) SetEvaluator(eval *StyleEvaluator) {
 	a.evaluator = eval
 }
 
+// recordTurnUsage accumulates turn-level usage into the session total and
+// sends an AgentTurnUsage event to the frontend.
+func (a *Agent) recordTurnUsage(tu turnUsage) {
+	a.mu.Lock()
+	a.turnCounter++
+	turn := a.turnCounter
+	a.sessionUsage.TotalPromptTokens += tu.promptTokens
+	a.sessionUsage.TotalCompletionTokens += tu.completionTokens
+	a.sessionUsage.TotalCachedTokens += tu.cachedTokens
+	a.sessionUsage.Turns = turn
+	a.mu.Unlock()
+
+	a.send(event.AgentTurnUsage{
+		Turn:             turn,
+		PromptTokens:     tu.promptTokens,
+		CompletionTokens: tu.completionTokens,
+		CachedTokens:     tu.cachedTokens,
+		ToolCalls:        tu.toolCalls,
+		SystemEst:        tu.estimate.System,
+		ToolsEst:         tu.estimate.Tools,
+		HistoryEst:       tu.estimate.History,
+		NewEst:           tu.estimate.New,
+	})
+}
+
+// Usage returns the accumulated token consumption for the current session.
+func (a *Agent) Usage() SessionUsage {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sessionUsage
+}
+
 // hasLintPending reports whether lint violations are waiting to be injected.
 func (a *Agent) hasLintPending() bool {
 	a.mu.Lock()
@@ -637,12 +686,23 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		a.send(event.AgentStatus{Status: event.StatusThinking})
 	}
 
+	// Reset session usage and turn counter at the start of each run.
+	a.mu.Lock()
+	a.sessionUsage = SessionUsage{}
+	a.turnCounter = 0
+	a.mu.Unlock()
+
 	thinkState := false
 	for {
 		// Process one LLM turn: stream, dispatch tools, repeat until
 		// the LLM responds with no tool calls.
 		var err error
-		messages, err = a.processLLMTurn(ctx, messages, &thinkState, activeDefs)
+		var tu turnUsage
+		messages, tu, err = a.processLLMTurn(ctx, messages, &thinkState, activeDefs)
+
+		// Record usage regardless of error — partial data is still valuable.
+		a.recordTurnUsage(tu)
+
 		if err != nil {
 			success = false
 			return
@@ -701,11 +761,33 @@ func (a *Agent) planningToolDefs() []llm.ToolDef {
 	return defs
 }
 
+// turnUsage accumulates token consumption across multiple LLM calls within
+// a single agent turn (the inner loop may call Stream multiple times due to
+// tool-call iterations).
+type turnUsage struct {
+	promptTokens     int
+	completionTokens int
+	cachedTokens     int
+	toolCalls        int
+	estimate         llm.InputEstimate // from the last LLM call (most recent composition)
+}
+
+// addUsage incorporates provider-reported usage from one LLM call.
+func (u *turnUsage) addUsage(usage *llm.Usage) {
+	if usage == nil {
+		return
+	}
+	u.promptTokens += usage.PromptTokens
+	u.completionTokens += usage.CompletionTokens
+	u.cachedTokens += usage.CachedTokens
+}
+
 // processLLMTurn runs the LLM loop for one agent turn: stream responses,
 // dispatch tool calls, repeat until no tool calls remain. Returns the
-// updated messages list or an error if the turn could not complete.
-// toolDefs controls which tools the LLM can invoke for this turn.
-func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, error) {
+// updated messages list, accumulated usage, or an error if the turn could
+// not complete. toolDefs controls which tools the LLM can invoke for this turn.
+func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, turnUsage, error) {
+	var tu turnUsage
 	for {
 		// Inject pending lint violations as a user message so the LLM
 		// treats them as a high-priority instruction. Checked each iteration
@@ -715,31 +797,35 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			messages = append(messages, llm.Message{Role: "user", Content: msg})
 		}
 
+		// Client-side input composition estimate (before the call).
+		tu.estimate = llm.EstimateMessageTokens(messages, toolDefs)
+
 		ch, err := a.currentProvider().Stream(ctx, messages, toolDefs)
 		if err != nil {
 			slog.Error("stream failed", "err", err)
 			a.send(event.AgentError{Err: fmt.Sprintf("LLM error: %v", err)})
-			return messages, err
+			return messages, tu, err
 		}
 
-		var contentBuf strings.Builder
-		var toolCalls []llm.ToolCall
-
+		var (
+			contentBuf  strings.Builder
+			toolCalls   []llm.ToolCall
+			streamUsage *llm.Usage
+		)
 		for ev := range ch {
 			if ev.Done {
-				toolCalls = ev.ToolCalls
+				toolCalls, streamUsage = ev.ToolCalls, ev.Usage
 				break
 			}
-
-			clean := stripThinkTags(ev.Token, thinkState)
-			if clean != "" {
+			if clean := stripThinkTags(ev.Token, thinkState); clean != "" {
 				contentBuf.WriteString(clean)
 				a.send(event.AgentToken{Text: clean})
 			}
 		}
+		tu.addUsage(streamUsage)
 
 		if ctx.Err() != nil {
-			return messages, ctx.Err()
+			return messages, tu, ctx.Err()
 		}
 
 		assistantMsg := llm.Message{
@@ -753,8 +839,9 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 
 		// No tool calls — agent's turn is done.
 		if len(toolCalls) == 0 {
-			return messages, nil
+			return messages, tu, nil
 		}
+		tu.toolCalls += len(toolCalls)
 
 		for _, tc := range toolCalls {
 			if a.hasLintPending() {
@@ -768,14 +855,14 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 
 			if err := a.flushDirtyBuffers(ctx); err != nil {
 				a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
-				return messages, err
+				return messages, tu, err
 			}
 			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
 			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
 
 			result := a.dispatchTool(ctx, tc)
 			if ctx.Err() != nil {
-				return messages, ctx.Err()
+				return messages, tu, ctx.Err()
 			}
 			messages = append(messages, llm.Message{
 				Role:       "tool",

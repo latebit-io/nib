@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -13,6 +14,87 @@ import (
 	"github.com/latebit-io/junto/tui/internal/ui/textarea"
 	"github.com/mattn/go-runewidth"
 )
+
+// usageState tracks cumulative token consumption for display.
+type usageState struct {
+	totalPrompt     int
+	totalCompletion int
+	totalCached     int
+	turns           int
+}
+
+// UpdateUsage accumulates token counts from a turn usage event.
+func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
+	m.usage.totalPrompt += u.PromptTokens
+	m.usage.totalCompletion += u.CompletionTokens
+	m.usage.totalCached += u.CachedTokens
+	m.usage.turns++
+}
+
+// ResetUsage clears accumulated usage for a new agent run.
+func (m *AgentPaneModel) ResetUsage() {
+	m.usage = usageState{}
+}
+
+// formatTokenCount renders a token count as a compact string.
+// < 1000 → "847", ≥ 1000 → "12.3k", ≥ 1000000 → "1.2M".
+func formatTokenCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// formatTurnUsage produces a dim metadata line for a single turn.
+func formatTurnUsage(u event.AgentTurnUsage) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n[turn %d", u.Turn)
+
+	if u.PromptTokens > 0 || u.CompletionTokens > 0 {
+		fmt.Fprintf(&b, ": %s in", formatTokenCount(u.PromptTokens))
+		if u.CachedTokens > 0 {
+			fmt.Fprintf(&b, " (%s cached)", formatTokenCount(u.CachedTokens))
+		}
+		fmt.Fprintf(&b, " · %s out", formatTokenCount(u.CompletionTokens))
+	}
+	if u.ToolCalls > 0 {
+		fmt.Fprintf(&b, " · %d tools", u.ToolCalls)
+	}
+
+	// Composition estimate — always available.
+	total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
+	if total > 0 {
+		fmt.Fprintf(&b, " | sys:%s tools:%s hist:%s new:%s",
+			formatTokenCount(u.SystemEst),
+			formatTokenCount(u.ToolsEst),
+			formatTokenCount(u.HistoryEst),
+			formatTokenCount(u.NewEst))
+	}
+	b.WriteString("]\n")
+	return b.String()
+}
+
+// formatSessionSummary produces the summary shown when the agent finishes.
+func formatSessionSummary(u usageState) string {
+	if u.turns == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Session: %d turns", u.turns)
+	if u.totalPrompt > 0 || u.totalCompletion > 0 {
+		fmt.Fprintf(&b, " · %s in", formatTokenCount(u.totalPrompt))
+		if u.totalCached > 0 {
+			pct := u.totalCached * 100 / u.totalPrompt
+			fmt.Fprintf(&b, " (%s cached, %d%%)", formatTokenCount(u.totalCached), pct)
+		}
+		fmt.Fprintf(&b, " · %s out", formatTokenCount(u.totalCompletion))
+	}
+	return b.String()
+}
 
 // inputHeight returns the number of rows reserved for the input area
 // (separator + input + status). Uses 1/6 of the pane height, minimum 5.
@@ -95,6 +177,9 @@ type AgentPaneModel struct {
 	// modelLabel is the display name of the active LLM model (e.g. "gemini-2.5-flash").
 	// Shown on the left side of the status line. Set via SetModelLabel.
 	modelLabel string
+
+	// usage tracks cumulative token consumption for the status line display.
+	usage usageState
 
 	// modelSelector state — when active, replaces the input area with a model list.
 	modelSelActive   bool
@@ -891,6 +976,7 @@ func (m *AgentPaneModel) Clear() {
 	m.cursorCol = 0
 	m.status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
+	m.usage = usageState{}
 }
 
 // VisibleLines returns the number of content lines visible above the input area.
@@ -1207,6 +1293,15 @@ func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string
 	left := ""
 	if m.modelLabel != "" {
 		left = " " + sanitizeInlineDisplay(m.modelLabel)
+	}
+	// Append usage summary to the left section when data is available.
+	if m.usage.turns > 0 && (m.usage.totalPrompt > 0 || m.usage.totalCompletion > 0) {
+		usage := fmt.Sprintf(" | %s in", formatTokenCount(m.usage.totalPrompt))
+		if m.usage.totalCached > 0 {
+			usage += fmt.Sprintf(" (%s cached)", formatTokenCount(m.usage.totalCached))
+		}
+		usage += fmt.Sprintf(" · %s out", formatTokenCount(m.usage.totalCompletion))
+		left += usage
 	}
 	right := ""
 	if statusMsg != "" {

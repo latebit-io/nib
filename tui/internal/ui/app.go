@@ -761,7 +761,12 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		cmd = m.reloadWorkTreeCmd()
 	case event.AgentDone:
 		m.AgentPane.SetStatus(event.StatusIdle)
-		m.AgentPane.AppendText("\n--- Done ---\n")
+		summary := formatSessionSummary(m.AgentPane.usage)
+		if summary != "" {
+			m.AgentPane.AppendText("\n--- Done ---\n" + summary + "\n")
+		} else {
+			m.AgentPane.AppendText("\n--- Done ---\n")
+		}
 		m.AgentPane.SetInputActive(false)
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = m.reloadWorkTreeCmd()
@@ -772,6 +777,9 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		e.Result <- event.FlushResult{Saved: saved, Err: err}
 	case event.DiagnosticsUpdated:
 		m.refreshDiagnostics(e.Path)
+	case event.AgentTurnUsage:
+		m.AgentPane.AppendMeta(formatTurnUsage(e))
+		m.AgentPane.UpdateUsage(e)
 	}
 	return cmd
 }

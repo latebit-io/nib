@@ -32,6 +32,18 @@ type FunctionCall struct {
 	Arguments string `json:"arguments"`
 }
 
+// Usage holds token consumption data from a single LLM call.
+// Populated from the provider's response when available.
+type Usage struct {
+	// PromptTokens is the total number of input tokens.
+	PromptTokens int
+	// CompletionTokens is the number of output tokens generated.
+	CompletionTokens int
+	// CachedTokens is the number of input tokens served from cache
+	// (a subset of PromptTokens). Zero when caching is not active.
+	CachedTokens int
+}
+
 // StreamEvent is one chunk from the LLM stream.
 type StreamEvent struct {
 	// Token is the text delta (may be empty on the final event).
@@ -40,6 +52,9 @@ type StreamEvent struct {
 	ToolCalls []ToolCall
 	// Done is true when the stream is complete.
 	Done bool
+	// Usage holds token consumption data, populated on the final event
+	// when the provider reports usage. Nil when unavailable.
+	Usage *Usage
 }
 
 // CacheControl marks a message or tool definition for provider-level prompt

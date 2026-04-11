@@ -1273,6 +1273,33 @@ func (s *Session) SwitchTo(path string) error {
 	return nil
 }
 
+// ReloadFile re-reads a file from disk, replacing the in-memory buffer content.
+// If the file is not currently open in the editors map, this is a no-op.
+// Returns ErrEditPending if an edit is being reviewed or animated.
+func (s *Session) ReloadFile(path string) error {
+	canon := s.CanonPath(path)
+
+	s.mu.Lock()
+	if s.pendingEdit != nil || s.stagedEditFile != "" {
+		s.mu.Unlock()
+		return ErrEditPending
+	}
+	e, ok := s.editors[canon]
+	s.mu.Unlock()
+
+	if !ok {
+		return nil // not open — nothing to reload
+	}
+	if err := e.Buf.ReloadFromDisk(); err != nil {
+		return fmt.Errorf("reload %s: %w", path, err)
+	}
+	// Clamp cursor and scroll to safe positions after content change.
+	e.MoveCursorTo(e.CursorLine, e.CursorCol)
+	e.ClampScroll()
+	slog.Debug("file reloaded from disk", "path", canon)
+	return nil
+}
+
 // Close frees resources for all open editors.
 func (s *Session) Close() {
 	// Notify language service of all document closes, then shut it down.

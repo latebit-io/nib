@@ -103,6 +103,9 @@ const (
 	ActionGoBack
 	// ActionHover shows hover information for the symbol under the cursor.
 	ActionHover
+
+	// ActionReloadFile reloads the active file from disk, discarding in-memory changes.
+	ActionReloadFile
 )
 
 // Category groups related bindings in the help screen.
@@ -201,6 +204,9 @@ func DefaultBindings() []Binding {
 		// Buffers
 		{ActionNextBuffer, "Next buffer", []string{"Ctrl+PageDown"}, CatBuffers},
 		{ActionPrevBuffer, "Previous buffer", []string{"Ctrl+PageUp"}, CatBuffers},
+
+		// File
+		{ActionReloadFile, "Reload file from disk", []string{"Ctrl+Shift+R"}, CatFile},
 
 		// Code Intelligence
 		{ActionGoToDefinition, "Go to definition", []string{"F12"}, CatLSP},

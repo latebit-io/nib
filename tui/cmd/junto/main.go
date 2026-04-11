@@ -335,9 +335,11 @@ func run() error {
 	app.SetProgram(p)
 
 	if _, err := p.Run(); err != nil {
+		app.CloseWatcher()
 		sess.Close()
 		return err
 	}
+	app.CloseWatcher()
 	sess.Close()
 	return nil
 }

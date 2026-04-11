@@ -128,6 +128,26 @@ func NewFromFile(path string) (*Buffer, error) {
 	return b, nil
 }
 
+// ReloadFromDisk re-reads the buffer's file from disk, replacing all content.
+// Undo/redo history is cleared since external changes cannot be meaningfully
+// undone. Returns an error if the buffer has no associated path or the read fails.
+func (b *Buffer) ReloadFromDisk() error {
+	if b.Path == "" {
+		return errors.New("buffer has no file path")
+	}
+	data, err := os.ReadFile(b.Path)
+	if err != nil {
+		return err
+	}
+	b.loadString(string(data))
+	b.undo = nil
+	b.redo = nil
+	if b.OnChange != nil {
+		b.OnChange()
+	}
+	return nil
+}
+
 func (b *Buffer) loadString(s string) {
 	// Remove trailing newline to avoid empty final line
 	s = strings.TrimSuffix(s, "\n")

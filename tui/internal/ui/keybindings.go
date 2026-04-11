@@ -55,6 +55,7 @@ const (
 	ActionNextBuffer      = keymap.ActionNextBuffer
 	ActionPrevBuffer      = keymap.ActionPrevBuffer
 	ActionFindInProject   = keymap.ActionFindInProject
+	ActionReloadFile      = keymap.ActionReloadFile
 )
 
 // keyBinding represents a key combination mapped to an action.
@@ -135,6 +136,10 @@ func DefaultKeymap() *Keymap {
 			// Buffers
 			{code: tea.KeyPgDown, mod: tea.ModCtrl}: ActionNextBuffer,
 			{code: tea.KeyPgUp, mod: tea.ModCtrl}:   ActionPrevBuffer,
+
+			// File reload
+			{code: 'r', mod: tea.ModCtrl | tea.ModShift}: ActionReloadFile,
+			{code: 'R', mod: tea.ModCtrl | tea.ModShift}: ActionReloadFile, // some terminals send uppercase with Shift
 
 			// LSP
 			{code: 't', mod: tea.ModCtrl}: ActionGoBack,

@@ -147,6 +147,17 @@ type AppModel struct {
 	// Height is the current terminal height in rows.
 	Height  int
 	program *tea.Program
+
+	// fileWatcher monitors open files for external changes.
+	// nil when the OS watcher is unavailable.
+	fileWatcher *FileWatcher
+}
+
+// CloseWatcher shuts down the file watcher. Safe to call if the watcher is nil.
+func (m *AppModel) CloseWatcher() {
+	if m.fileWatcher != nil {
+		m.fileWatcher.Close()
+	}
 }
 
 // SetProgram sets the tea.Program reference.
@@ -199,6 +210,12 @@ func NewApp(sess *session.Session) AppModel {
 	rm.Add("agent", agentPane, 0.3)
 	rm.FocusByName("editor")
 
+	fw := NewFileWatcher(sess)
+	// Watch the initial file.
+	if fw != nil && sess.ActiveFile() != "" {
+		fw.Watch(sess.ActiveFile())
+	}
+
 	return AppModel{
 		Session:     sess,
 		Editor:      editorPane,
@@ -208,6 +225,7 @@ func NewApp(sess *session.Session) AppModel {
 		Services:    svc,
 		Keymap:      km,
 		dial:        LevelGuided,
+		fileWatcher: fw,
 		SearchOverlay: SearchOverlayModel{
 			SearchFunc: func(pattern string) ([]search.Result, error) {
 				return sess.Search(pattern, search.Options{})
@@ -217,10 +235,27 @@ func NewApp(sess *session.Session) AppModel {
 }
 
 func (m *AppModel) Init() tea.Cmd {
+	var cmds []tea.Cmd
 	if m.Session.Events() != nil {
-		return m.listenForEvents()
+		cmds = append(cmds, m.listenForEvents())
 	}
-	return nil
+	if m.fileWatcher != nil {
+		cmds = append(cmds, m.listenForFileChanges())
+	}
+	return tea.Batch(cmds...)
+}
+
+// listenForFileChanges returns a tea.Cmd that blocks on the file watcher
+// channel and delivers the next change as a tea.Msg.
+func (m *AppModel) listenForFileChanges() tea.Cmd {
+	ch := m.fileWatcher.Changes()
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
 }
 
 // listenForEvents returns a tea.Cmd that blocks on the engine event channel
@@ -318,6 +353,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.handleEngineEvent(msg.event)
 		// Keep listening for the next event
 		return m, tea.Batch(m.listenForEvents(), cmd)
+
+	// File watcher — external change detected
+	case fileChangedMsg:
+		m.handleFileChanged(msg.Path)
+		return m, m.listenForFileChanges()
 
 	// Goal submitted from agent pane — delegate to session.
 	// Only clear the pane when starting a new conversation, not on follow-ups.
@@ -877,6 +917,9 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionToggleProject:
 		return m.handleToggleProject()
 
+	case ActionReloadFile:
+		return m.reloadActiveFile()
+
 	case ActionNextBuffer:
 		return m.switchBuffer(1)
 	case ActionPrevBuffer:
@@ -1085,12 +1128,53 @@ func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
 	// Cancel any running animation.
 	m.cancelAnimation()
 
+	// Watch the newly opened file for external changes.
+	if m.fileWatcher != nil {
+		m.fileWatcher.Watch(m.Session.ActiveFile())
+	}
+
 	// Rebuild EditorModel with the new active editor from session.
 	m.rebuildEditorModel()
 
 	slog.Debug("file opened", "path", path)
 	m.refreshDiagnostics(m.Session.ActiveFile())
 	m.refreshProjectPane()
+	return m, nil
+}
+
+// handleFileChanged reloads a file that was modified externally.
+// Skips reload if the buffer has unsaved in-editor changes.
+func (m *AppModel) handleFileChanged(path string) {
+	// Don't reload buffers the user has modified in-editor.
+	ed := m.Session.EditorForPath(path)
+	if ed != nil && ed.Buf.Modified {
+		slog.Debug("skip external reload (buffer modified)", "path", path)
+		return
+	}
+	if err := m.Session.ReloadFile(path); err != nil {
+		slog.Warn("auto-reload failed", "path", path, "err", err)
+		return
+	}
+	// If the changed file is the active one, rebuild the editor model.
+	if path == m.Session.ActiveFile() {
+		m.rebuildEditorModel()
+	}
+	slog.Debug("auto-reloaded file", "path", path)
+}
+
+// reloadActiveFile re-reads the active file from disk into its buffer.
+func (m *AppModel) reloadActiveFile() (tea.Model, tea.Cmd) {
+	path := m.Session.ActiveFile()
+	if path == "" {
+		return m, nil
+	}
+	if err := m.Session.ReloadFile(path); err != nil {
+		slog.Error("reload file failed", "path", path, "err", err)
+		m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
+		return m, nil
+	}
+	m.rebuildEditorModel()
+	slog.Debug("file reloaded", "path", path)
 	return m, nil
 }
 

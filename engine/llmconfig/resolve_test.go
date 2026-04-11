@@ -295,6 +295,25 @@ var resolveTests = []resolveTestCase{
 		wantCaching: false,
 	},
 	{
+		name: "fallback clears prompt_caching from rejected active profile",
+		globalJSON: `{
+				"profiles": {
+					"nocreds": {
+						"api_key_env": "MISSING_KEY",
+						"prompt_caching": true
+					}
+				},
+				"active": "nocreds"
+			}`,
+		env:         map[string]string{"GEMINI_API_KEY": "gem-key"},
+		wantProfile: "gemini",
+		wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		wantModel:   "gemini-2.5-flash",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+		wantCaching: false, // gemini has no prompt_caching; must not inherit from rejected profile
+	},
+	{
 		name: "project config enables prompt_caching on profile",
 		projectJSON: `{
 				"profiles": {

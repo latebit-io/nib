@@ -124,6 +124,8 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 }
 
 // applyProfile copies non-zero fields from a Profile into a Resolved.
+// PromptCaching is always reset to the profile's value (or false if unset)
+// so that a previous profile's setting cannot leak through.
 func applyProfile(r *Resolved, p Profile, name string) {
 	r.Profile = name
 	if p.BaseURL != "" {
@@ -135,9 +137,7 @@ func applyProfile(r *Resolved, p Profile, name string) {
 	if p.APIKeyEnv != "" {
 		r.APIKeyEnv = p.APIKeyEnv
 	}
-	if p.PromptCaching != nil {
-		r.PromptCaching = *p.PromptCaching
-	}
+	r.PromptCaching = p.PromptCaching != nil && *p.PromptCaching
 }
 
 // resolve converts a merged Config into a Resolved by looking up the active

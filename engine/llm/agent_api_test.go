@@ -244,6 +244,90 @@ func TestCachingChatRequestJSON(t *testing.T) {
 	}
 }
 
+func TestCachingChatRequestJSON_AssistantToolCall(t *testing.T) {
+	messages := []Message{
+		{Role: "system", Content: "You are helpful."},
+		{Role: "user", Content: "Read the file"},
+		{Role: "assistant", Content: "", ToolCalls: []ToolCall{
+			{ID: "tc_1", Type: "function", Function: FunctionCall{Name: "read_file", Arguments: `{"path":"main.go"}`}},
+		}},
+		{Role: "tool", ToolCallID: "tc_1", Content: "package main"},
+		{Role: "user", Content: "Now edit it"},
+	}
+	tools := []ToolDef{
+		{Type: "function", Function: FunctionDef{Name: "read_file"}},
+	}
+
+	cms, cts := annotateCacheBreakpoints(messages, tools)
+	req := cachingChatRequest{
+		Model:    "anthropic/claude-sonnet-4",
+		Messages: cms,
+		Stream:   true,
+		Tools:    cts,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Assistant message (index 2): empty content + tool_calls present.
+	var assistantRaw map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Messages[2], &assistantRaw); err != nil {
+		t.Fatalf("unmarshal assistant: %v", err)
+	}
+
+	// Content field should be omitted entirely (matching Message's omitempty behavior).
+	if _, hasContent := assistantRaw["content"]; hasContent {
+		t.Errorf("assistant message should omit content field, got: %s", assistantRaw["content"])
+	}
+
+	// tool_calls must be present with the correct structure.
+	tcRaw, ok := assistantRaw["tool_calls"]
+	if !ok {
+		t.Fatal("assistant message missing tool_calls field")
+	}
+	var toolCalls []map[string]any
+	if err := json.Unmarshal(tcRaw, &toolCalls); err != nil {
+		t.Fatalf("unmarshal tool_calls: %v", err)
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("tool_calls count = %d, want 1", len(toolCalls))
+	}
+	if toolCalls[0]["id"] != "tc_1" {
+		t.Errorf("tool_call id = %v, want tc_1", toolCalls[0]["id"])
+	}
+
+	// cache_control should NOT appear on the assistant message
+	// (empty content is not converted to content blocks).
+	if _, hasCacheControl := assistantRaw["cache_control"]; hasCacheControl {
+		t.Error("assistant message should not have top-level cache_control")
+	}
+
+	// Tool result message (index 3) is penultimate — should be cached.
+	var toolRaw map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Messages[3], &toolRaw); err != nil {
+		t.Fatalf("unmarshal tool msg: %v", err)
+	}
+	var toolContent []map[string]any
+	if err := json.Unmarshal(toolRaw["content"], &toolContent); err != nil {
+		t.Fatalf("penultimate tool content should be array: %v", err)
+	}
+	if len(toolContent) != 1 {
+		t.Fatalf("tool content blocks = %d, want 1", len(toolContent))
+	}
+	if _, ok := toolContent[0]["cache_control"]; !ok {
+		t.Error("penultimate tool message should have cache_control")
+	}
+}
+
 func TestNonCachingRequestOmitsCacheControl(t *testing.T) {
 	req := chatRequest{
 		Model: "test",

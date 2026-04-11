@@ -72,7 +72,7 @@ type cachingChatRequest struct {
 // instead of a plain string so the cache_control field can be attached.
 type cachingMessage struct {
 	Role       string     `json:"role"`
-	Content    any        `json:"content"` // string or []contentBlock
+	Content    any        `json:"content,omitempty"` // string or []contentBlock; nil omits the field
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
@@ -102,9 +102,15 @@ var ephemeralCache = &CacheControl{Type: "ephemeral"}
 func annotateCacheBreakpoints(messages []Message, tools []ToolDef) ([]cachingMessage, []cachingToolDef) {
 	cms := make([]cachingMessage, len(messages))
 	for i, m := range messages {
+		// Convert empty content to nil so omitempty drops the field,
+		// matching Message's json:"content,omitempty" behavior.
+		var content any
+		if m.Content != "" {
+			content = m.Content
+		}
 		cms[i] = cachingMessage{
 			Role:       m.Role,
-			Content:    m.Content,
+			Content:    content,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 		}

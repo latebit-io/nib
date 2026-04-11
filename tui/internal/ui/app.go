@@ -107,7 +107,7 @@ type AppModel struct {
 	// SearchOverlay is the project-wide search overlay state.
 	SearchOverlay       SearchOverlayModel
 	recentMouse         bool          // tracks leaked CSI prefix from unparsed mouse events
-	dial                AutonomyLevel // current autonomy level; defaults to LevelGuided
+	dial                AutonomyLevel // current autonomy level; defaults to LevelTrusted
 	styleName           string        // current coding style display name; empty when disabled
 	evaluatorEnabled    bool          // true when the style evaluator is active
 	terse               bool          // true when terse output mode is active
@@ -199,6 +199,12 @@ func (m *AppModel) toggleEvaluator() {
 	m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
 }
 
+// SetTerse sets the terse mode indicator. Use this at startup to sync
+// the UI with the agent's initial state.
+func (m *AppModel) SetTerse(on bool) {
+	m.terse = on
+}
+
 // toggleTerse flips terse output mode on/off via the ToggleTerse callback.
 // Does nothing if no callback is wired.
 func (m *AppModel) toggleTerse() {
@@ -238,7 +244,7 @@ func NewApp(sess *session.Session) AppModel {
 		Regions:     rm,
 		Services:    svc,
 		Keymap:      km,
-		dial:        LevelGuided,
+		dial:        LevelTrusted,
 		fileWatcher: fw,
 		SearchOverlay: SearchOverlayModel{
 			SearchFunc: func(pattern string) ([]search.Result, error) {

@@ -497,7 +497,7 @@ func TestBuildMessagesCodingStyleInPlanningMode(t *testing.T) {
 
 func TestBuildMessagesTerseInSystemPrompt(t *testing.T) {
 	a := testAgent()
-	a.terse = true
+	a.SetTerse(true)
 	msgs := a.buildMessages("main.go", "package main", "fix bug", nil, "", ModeExecution)
 
 	system := msgs[0].Content
@@ -521,7 +521,7 @@ func TestBuildMessagesNoTerse(t *testing.T) {
 
 func TestBuildMessagesTerseInPlanningMode(t *testing.T) {
 	a := testAgent()
-	a.terse = true
+	a.SetTerse(true)
 	msgs := a.buildMessages("main.go", "package main", "plan feature", nil, "", ModePlanning)
 
 	system := msgs[0].Content

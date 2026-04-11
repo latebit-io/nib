@@ -74,9 +74,14 @@ func resolve(cfg *Config) *Resolved {
 	}
 }
 
+// defaultActiveStyle is the built-in style activated when no config file or
+// environment variable selects a different one. File configs and JUNTO_STYLE
+// override this.
+const defaultActiveStyle = "clean-code"
+
 // loadBuiltins reads all embedded style JSON files into a Config.
 func loadBuiltins() *Config {
-	cfg := &Config{Styles: make(map[string]Style)}
+	cfg := &Config{Styles: make(map[string]Style), Active: defaultActiveStyle}
 
 	entries, err := builtinStyles.ReadDir("styles")
 	if err != nil {

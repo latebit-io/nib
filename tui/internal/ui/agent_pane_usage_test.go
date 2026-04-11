@@ -213,4 +213,17 @@ func TestUpdateUsageMixed(t *testing.T) {
 	if m.usage.turns != 2 {
 		t.Errorf("turns = %d, want 2", m.usage.turns)
 	}
+
+	// Rendered summary: mixed run with provider data should show exact-style
+	// (no ~ prefix) and contain the blended totals.
+	got := formatSessionSummary(m.usage)
+	if strings.Contains(got, "~") {
+		t.Errorf("mixed run with provider data should not have ~ prefix, got: %s", got)
+	}
+	if !strings.Contains(got, "2.0k in") {
+		t.Errorf("summary should contain blended input total, got: %s", got)
+	}
+	if !strings.Contains(got, "350 out") {
+		t.Errorf("summary should contain blended output total, got: %s", got)
+	}
 }

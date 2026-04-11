@@ -10,8 +10,10 @@ import (
 
 // ModelInfo describes an available model from a provider.
 type ModelInfo struct {
-	ID   string // model identifier (e.g. "google/gemini-2.5-flash")
-	Name string // human-readable name (may equal ID if provider doesn't distinguish)
+	// ID is the model identifier sent in API requests (e.g., "google/gemini-2.5-flash").
+	ID string
+	// Name is a human-readable label (may equal ID if the provider doesn't distinguish).
+	Name string
 }
 
 // ModelLister can enumerate available models from a provider.

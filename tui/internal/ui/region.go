@@ -62,10 +62,14 @@ const MinPaneWidth = 20
 
 // Region is a named slot in the layout that holds a Pane.
 type Region struct {
-	Name    string
-	Pane    Pane
-	Ratio   float64 // proportion of available space (0.0-1.0)
-	Visible bool    // user intent — Show/Hide toggle
+	// Name identifies this region for lookup and focus operations.
+	Name string
+	// Pane is the UI module rendered inside this region.
+	Pane Pane
+	// Ratio is the proportion of available space allocated to this region (0.0-1.0).
+	Ratio float64
+	// Visible indicates user intent to show or hide this region.
+	Visible bool
 
 	// Calculated by SetSize — position in global coordinates.
 	x, y, width, height int
@@ -78,11 +82,16 @@ type Region struct {
 // view composition, and mouse hit testing for all registered panes.
 // It owns the spatial arrangement — AppModel delegates to it.
 type RegionManager struct {
-	Regions   []*Region
+	// Regions is the ordered list of layout slots managed by this manager.
+	Regions []*Region
+	// Direction controls whether regions are arranged horizontally or vertically.
 	Direction LayoutDirection
-	FocusIdx  int
-	Width     int
-	Height    int
+	// FocusIdx is the index into the visible regions that currently has keyboard focus.
+	FocusIdx int
+	// Width is the total available width in columns.
+	Width int
+	// Height is the total available height in rows.
+	Height int
 
 	// Drag state for divider resizing.
 	dragging    bool

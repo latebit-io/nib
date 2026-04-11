@@ -15,7 +15,7 @@ func TestCollapseOverlay(t *testing.T) {
 		buf.Insert(0, 0, "line0\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\nline16\nline17\nline18\nline19")
 		e := New(buf)
 		e.ScrollOffset = scroll
-		e.ExtraVisualLines = extra
+		e.SetExtraVisualLines(extra)
 		return e
 	}
 
@@ -116,8 +116,8 @@ func TestCollapseOverlay(t *testing.T) {
 			if e.ScrollOffset != tt.wantScroll {
 				t.Errorf("ScrollOffset = %d, want %d", e.ScrollOffset, tt.wantScroll)
 			}
-			if e.ExtraVisualLines != 0 {
-				t.Errorf("ExtraVisualLines = %d, want 0", e.ExtraVisualLines)
+			if e.ExtraVisualLines() != 0 {
+				t.Errorf("ExtraVisualLines = %d, want 0", e.ExtraVisualLines())
 			}
 		})
 	}

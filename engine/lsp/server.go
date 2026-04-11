@@ -34,10 +34,14 @@ type Server struct {
 // ServerConfig defines how to launch a language server.
 // Injected at construction — the lsp package never hardcodes server binaries.
 type ServerConfig struct {
-	Command    string   // e.g. "gopls"
-	Args       []string // e.g. ["serve"]
-	Env        []string // optional extra env vars
-	LanguageID string   // e.g. "go" — matches lang.DetectLanguage output
+	// Command is the language server executable (e.g., "gopls").
+	Command string
+	// Args are the command-line arguments (e.g., ["serve"]).
+	Args []string
+	// Env is optional extra environment variables for the server process.
+	Env []string
+	// LanguageID is the language identifier (e.g., "go") matching lang.DetectLanguage.
+	LanguageID string
 }
 
 // newServer spawns a language server process and initializes it.

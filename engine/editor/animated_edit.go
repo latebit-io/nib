@@ -4,7 +4,7 @@ package editor
 // IncrementalEdit implements this interface. Surgical animation uses
 // the same IncrementalEdit but with narrowed search/replace spans
 // computed via NarrowEdit — unchanged prefix/suffix lines are excluded.
-// The TUI animation loop consumes this interface.
+// Frontends consume this interface to drive animated edit playback.
 //
 //nolint:interfacebloat // animation lifecycle requires all 8 methods — advance, position (2), lifecycle (3), progress, yield
 type AnimatedEdit interface {

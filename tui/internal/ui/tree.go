@@ -9,13 +9,19 @@ import (
 
 // TreeNode represents a file or directory in a collapsible tree.
 type TreeNode struct {
-	Name      string      // display name (filename or dirname)
-	Path      string      // relative path from project root (forward slashes)
-	IsDir     bool        // true for directories
-	Collapsed bool        // only meaningful for directories
-	Badge     string      // optional right-aligned badge ("ctx", "mod")
-	Children  []*TreeNode // sorted: dirs first, then files, alphabetical within each
-	parent    *TreeNode   // back-pointer for depth calculation
+	// Name is the display name (filename or directory name).
+	Name string
+	// Path is the relative path from the project root (forward slashes).
+	Path string
+	// IsDir is true for directory nodes.
+	IsDir bool
+	// Collapsed is true when a directory's children are hidden.
+	Collapsed bool
+	// Badge is an optional right-aligned label ("ctx", "mod").
+	Badge string
+	// Children holds child nodes, sorted: directories first, then files, alphabetical.
+	Children []*TreeNode
+	parent   *TreeNode // back-pointer for depth calculation
 }
 
 // Depth returns the nesting level (0 for top-level entries).

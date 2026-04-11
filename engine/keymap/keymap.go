@@ -10,29 +10,45 @@ const (
 	// ActionNone represents no action (zero value).
 	ActionNone Action = iota
 
-	// Navigation actions move the cursor within a buffer.
+	// ActionFileStart moves the cursor to the beginning of the file.
 	ActionFileStart
+	// ActionFileEnd moves the cursor to the end of the file.
 	ActionFileEnd
+	// ActionGoToLineStart moves the cursor to the start of the current line.
 	ActionGoToLineStart
+	// ActionGoToLineEnd moves the cursor to the end of the current line.
 	ActionGoToLineEnd
 
-	// Selection actions extend or create text selections.
+	// ActionSelectAll selects all text in the buffer.
 	ActionSelectAll
+	// ActionSelectLine selects the current line.
 	ActionSelectLine
+	// ActionSelectNext selects the next occurrence of the current selection.
 	ActionSelectNext
 
-	// Editing actions modify buffer content.
+	// ActionUndo undoes the last edit operation.
 	ActionUndo
+	// ActionRedo redoes the last undone operation.
 	ActionRedo
+	// ActionCopy copies the selection to the clipboard.
 	ActionCopy
+	// ActionCut cuts the selection to the clipboard.
 	ActionCut
+	// ActionPaste pastes from the clipboard.
 	ActionPaste
+	// ActionDeleteLine deletes the current line.
 	ActionDeleteLine
+	// ActionDuplicateLine duplicates the current line.
 	ActionDuplicateLine
+	// ActionSwapLineUp swaps the current line with the one above.
 	ActionSwapLineUp
+	// ActionSwapLineDown swaps the current line with the one below.
 	ActionSwapLineDown
+	// ActionIndent increases the indentation of the selection.
 	ActionIndent
+	// ActionOutdent decreases the indentation of the selection.
 	ActionOutdent
+	// ActionToggleComment toggles line comments on the selection.
 	ActionToggleComment
 
 	// ActionSave persists the current buffer to disk.
@@ -40,11 +56,15 @@ const (
 	// ActionQuit exits the editor.
 	ActionQuit
 
-	// Agent actions control the AI assistant workflow.
+	// ActionAgentStart begins an agent conversation.
 	ActionAgentStart
+	// ActionAgentPlan starts the agent in planning mode.
 	ActionAgentPlan
+	// ActionAgentApprove approves the pending edit.
 	ActionAgentApprove
+	// ActionAgentReject rejects the pending edit.
 	ActionAgentReject
+	// ActionAgentContinue continues the agent after an approved edit.
 	ActionAgentContinue
 	// ActionDialCycle cycles the autonomy level dial (guided → collaborate → trust → guided).
 	ActionDialCycle
@@ -55,12 +75,17 @@ const (
 	// ActionEvaluatorToggle toggles the style evaluator on/off.
 	ActionEvaluatorToggle
 
-	// View actions control pane visibility and focus.
+	// ActionOpenPalette opens the command palette.
 	ActionOpenPalette
+	// ActionToggleProject toggles the project pane visibility.
 	ActionToggleProject
+	// ActionHelp opens the help overlay.
 	ActionHelp
+	// ActionFocusProject focuses the project pane.
 	ActionFocusProject
+	// ActionFocusEditor focuses the editor pane.
 	ActionFocusEditor
+	// ActionFocusAgent focuses the agent pane.
 	ActionFocusAgent
 
 	// Find actions open search interfaces.
@@ -72,9 +97,11 @@ const (
 	ActionNextBuffer // ActionNextBuffer switches to the next open buffer.
 	ActionPrevBuffer // ActionPrevBuffer switches to the previous open buffer.
 
-	// LSP actions interact with language server features.
+	// ActionGoToDefinition jumps to the definition of the symbol under the cursor.
 	ActionGoToDefinition
+	// ActionGoBack returns to the previous cursor location.
 	ActionGoBack
+	// ActionHover shows hover information for the symbol under the cursor.
 	ActionHover
 )
 
@@ -104,9 +131,13 @@ const (
 
 // Binding describes a single keybinding for display purposes.
 type Binding struct {
-	Action   Action
-	Label    string   // human-readable name, e.g. "Delete Line"
-	Keys     []string // display strings, e.g. ["Ctrl+K"]
+	// Action is the editor action this binding triggers.
+	Action Action
+	// Label is the human-readable name (e.g., "Delete Line").
+	Label string
+	// Keys lists the display strings for the key combination (e.g., ["Ctrl+K"]).
+	Keys []string
+	// Category groups this binding in the help screen.
 	Category Category
 }
 

@@ -17,8 +17,11 @@ import (
 
 // ToolInfo describes a tool exposed by an MCP server.
 type ToolInfo struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
+	// Name is the tool identifier.
+	Name string `json:"name"`
+	// Description explains what the tool does.
+	Description string `json:"description"`
+	// InputSchema is the JSON Schema for the tool's parameters.
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 

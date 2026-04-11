@@ -75,9 +75,9 @@ type AgentPaneModel struct {
 	width  int
 	height int
 
-	// RawLines stores unwrapped content; Lines is derived by wrapping to width.
-	// wrappedIndex[i] is the index into Lines where RawLines[i] starts.
-	RawLines     []string
+	// RawLines stores unwrapped content lines before word-wrapping.
+	RawLines []string
+	// Lines holds the word-wrapped display lines derived from RawLines.
 	Lines        []string
 	wrappedIndex []int
 
@@ -85,7 +85,7 @@ type AgentPaneModel struct {
 	// Stable across rewrap — translated to wrapped indices via wrappedIndex in Render().
 	userRawLines map[int]bool
 
-	// Scroll
+	// ScrollOffset is the first visible line index in the output area.
 	ScrollOffset int
 
 	// status is the current agent status (idle, thinking, reviewing, etc.).

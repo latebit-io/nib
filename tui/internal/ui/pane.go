@@ -24,11 +24,13 @@ type Titled interface {
 // GoalSubmittedMsg is emitted by the agent pane when the user submits a goal.
 // AppModel catches this and wires up the agent run with editor state.
 type GoalSubmittedMsg struct {
+	// Goal is the user-entered text describing what the agent should do.
 	Goal string
 }
 
 // PlanningGoalSubmittedMsg is emitted when the user submits a goal in planning mode.
 // AppModel routes this to Session.SubmitPlanningGoal.
 type PlanningGoalSubmittedMsg struct {
+	// Goal is the user-entered text for the planning-mode goal.
 	Goal string
 }

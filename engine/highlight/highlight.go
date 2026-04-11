@@ -15,19 +15,29 @@ import (
 type TokenKind string
 
 const (
-	KindKeyword  TokenKind = "keyword"
-	KindString   TokenKind = "string"
-	KindComment  TokenKind = "comment"
-	KindNumber   TokenKind = "number"
-	KindType     TokenKind = "type"
+	// KindKeyword marks language keywords (if, for, func, etc.).
+	KindKeyword TokenKind = "keyword"
+	// KindString marks string literals.
+	KindString TokenKind = "string"
+	// KindComment marks comments.
+	KindComment TokenKind = "comment"
+	// KindNumber marks numeric literals.
+	KindNumber TokenKind = "number"
+	// KindType marks type names.
+	KindType TokenKind = "type"
+	// KindOperator marks operators and punctuation.
 	KindOperator TokenKind = "operator"
-	KindNone     TokenKind = ""
+	// KindNone is the zero value — plain text with no syntax role.
+	KindNone TokenKind = ""
 )
 
 // Token represents a highlighted range on a single line.
 type Token struct {
-	Col  int
-	Len  int
+	// Col is the start column (0-indexed, in runes).
+	Col int
+	// Len is the length in runes.
+	Len int
+	// Kind is the syntactic role of this token.
 	Kind TokenKind
 }
 

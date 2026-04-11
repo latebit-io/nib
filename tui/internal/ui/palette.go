@@ -11,15 +11,21 @@ import (
 
 // PaletteItem represents an entry in the command palette.
 type PaletteItem struct {
-	Label    string // display text (file path, command name)
-	Category string // "file", "command" — for future extensibility
-	Value    string // action payload (absolute path, command ID)
+	// Label is the display text shown in the palette (file path, command name).
+	Label string
+	// Category classifies the item type ("file", "command") for routing.
+	Category string
+	// Value is the action payload dispatched on selection (absolute path, command ID).
+	Value string
 }
 
 // PaletteResultMsg is emitted when the user selects a palette item or cancels.
 type PaletteResultMsg struct {
-	Item      PaletteItem
-	Category  string
+	// Item is the palette entry the user selected.
+	Item PaletteItem
+	// Category is copied from the selected item for convenient routing.
+	Category string
+	// Cancelled is true when the user dismissed the palette without selecting.
 	Cancelled bool
 }
 
@@ -27,15 +33,23 @@ type PaletteResultMsg struct {
 // It is purely presentational — filtering delegates to engine/fuzzy,
 // file opening delegates to session via PaletteResultMsg.
 type PaletteModel struct {
-	Active       bool
-	Query        string
-	Items        []PaletteItem
-	labels       []string // cached labels for fuzzy filtering
-	Filtered     []fuzzy.Match
-	Selected     int
+	// Active is true when the palette overlay is visible and capturing input.
+	Active bool
+	// Query is the current user-typed search string.
+	Query string
+	// Items is the full set of palette entries provided on Open.
+	Items  []PaletteItem
+	labels []string // cached labels for fuzzy filtering
+	// Filtered holds the fuzzy-matched results for the current query.
+	Filtered []fuzzy.Match
+	// Selected is the index into Filtered of the highlighted entry.
+	Selected int
+	// ScrollOffset is the first visible index in the results list.
 	ScrollOffset int
-	Width        int
-	Height       int
+	// Width is the terminal width available for rendering the overlay.
+	Width int
+	// Height is the terminal height available for rendering the overlay.
+	Height int
 }
 
 // Palette rendering constants.

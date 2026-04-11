@@ -61,17 +61,27 @@ const maxQueryRunes = 1000
 
 // FindBar manages the find (and optional replace) overlay for the editor.
 type FindBar struct {
-	Active    bool
-	Query     []rune
-	CursorPos int // cursor position within Query
+	// Active is true when the find bar is visible and capturing input.
+	Active bool
+	// Query is the current search text as runes.
+	Query []rune
+	// CursorPos is the cursor position within Query.
+	CursorPos int
 
-	ReplaceMode   bool
-	ReplaceQuery  []rune
+	// ReplaceMode enables the replace field below the find field.
+	ReplaceMode bool
+	// ReplaceQuery is the replacement text as runes.
+	ReplaceQuery []rune
+	// ReplaceCursor is the cursor position within ReplaceQuery.
 	ReplaceCursor int
-	ReplaceActive bool // true when replace field has focus
+	// ReplaceActive is true when the replace field has keyboard focus.
+	ReplaceActive bool
 
-	Matches       []editor.FindMatch
-	CurrentMatch  int // index into Matches, -1 if none
+	// Matches holds all buffer positions matching the current query.
+	Matches []editor.FindMatch
+	// CurrentMatch is the index into Matches of the focused match, or -1 if none.
+	CurrentMatch int
+	// CaseSensitive controls whether the search is case-sensitive.
 	CaseSensitive bool
 
 	// eng is a reference to the editor for running searches.

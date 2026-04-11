@@ -109,7 +109,9 @@ type incomingMessage struct {
 
 // RPCError represents a JSON-RPC error response from the server.
 type RPCError struct {
-	Code    int
+	// Code is the JSON-RPC error code.
+	Code int
+	// Message is the human-readable error description.
 	Message string
 }
 

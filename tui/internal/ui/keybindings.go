@@ -41,6 +41,7 @@ const (
 	ActionModelSelector   = keymap.ActionModelSelector
 	ActionStyleCycle      = keymap.ActionStyleCycle
 	ActionEvaluatorToggle = keymap.ActionEvaluatorToggle
+	ActionTerseToggle     = keymap.ActionTerseToggle
 	ActionOpenPalette     = keymap.ActionOpenPalette
 	ActionToggleProject   = keymap.ActionToggleProject
 	ActionHelp            = keymap.ActionHelp
@@ -123,6 +124,8 @@ func DefaultKeymap() *Keymap {
 			{code: '√', mod: 0}:           ActionEvaluatorToggle, // macOS: Option+V sends √
 			{code: 'r', mod: tea.ModAlt}:  ActionEvaluatorToggle,
 			{code: '®', mod: 0}:           ActionEvaluatorToggle, // macOS: Option+R sends ®
+			{code: 't', mod: tea.ModAlt}:  ActionTerseToggle,
+			{code: '†', mod: 0}:           ActionTerseToggle, // macOS: Option+T sends †
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
 			{code: tea.KeyEscape, mod: 0}: ActionAgentReject,
 			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
@@ -159,6 +162,8 @@ func DefaultKeymap() *Keymap {
 			"√":      ActionEvaluatorToggle, // macOS: Option+V sends √
 			"alt+r":  ActionEvaluatorToggle,
 			"®":      ActionEvaluatorToggle, // macOS: Option+R sends ®
+			"alt+t":  ActionTerseToggle,
+			"†":      ActionTerseToggle, // macOS: Option+T sends †
 			"ctrl+p": ActionOpenPalette,
 			"ctrl+b": ActionToggleProject,
 			"ctrl+/": ActionToggleComment,

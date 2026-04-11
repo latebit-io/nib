@@ -319,6 +319,19 @@ func run() error {
 		}
 	}
 
+	// Wire terse toggle — Alt+T enables/disables terse output mode at runtime.
+	if ag != nil {
+		app.ToggleTerse = func(enabled bool) bool {
+			ag.SetTerse(enabled)
+			if enabled {
+				slog.Info("terse mode: enabled")
+			} else {
+				slog.Info("terse mode: disabled")
+			}
+			return enabled
+		}
+	}
+
 	// Agent typing speed (words per minute)
 	if wpmStr := os.Getenv("JUNTO_TYPING_WPM"); wpmStr != "" {
 		if wpm, err := strconv.Atoi(wpmStr); err == nil && wpm > 0 {

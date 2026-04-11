@@ -110,6 +110,7 @@ type AppModel struct {
 	dial                AutonomyLevel // current autonomy level; defaults to LevelGuided
 	styleName           string        // current coding style display name; empty when disabled
 	evaluatorEnabled    bool          // true when the style evaluator is active
+	terse               bool          // true when terse output mode is active
 	pendingModelProfile string        // profile of the in-flight ListModels request (stale detection)
 
 	// SwitchModel is called to switch the active LLM model at runtime.
@@ -135,6 +136,10 @@ type AppModel struct {
 	// Returns the new state (true = enabled). Set by the entry point — nil
 	// when no style or provider is configured.
 	ToggleEvaluator func(enabled bool) bool
+
+	// ToggleTerse enables or disables terse output mode at runtime.
+	// Returns the new state (true = enabled). Set by the entry point.
+	ToggleTerse func(enabled bool) bool
 
 	// Services holds shared runtime services (clipboard, LSP, etc.).
 	Services *Services
@@ -192,6 +197,15 @@ func (m *AppModel) toggleEvaluator() {
 		return
 	}
 	m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
+}
+
+// toggleTerse flips terse output mode on/off via the ToggleTerse callback.
+// Does nothing if no callback is wired.
+func (m *AppModel) toggleTerse() {
+	if m.ToggleTerse == nil {
+		return
+	}
+	m.terse = m.ToggleTerse(!m.terse)
 }
 
 // NewApp creates the application model.
@@ -811,6 +825,9 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case ActionEvaluatorToggle:
 			m.toggleEvaluator()
 			return m, nil
+		case ActionTerseToggle:
+			m.toggleTerse()
+			return m, nil
 		}
 		cmd := m.AgentPane.Update(msg)
 		return m, cmd
@@ -895,6 +912,10 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionEvaluatorToggle:
 		m.toggleEvaluator()
+		return m, nil
+
+	case ActionTerseToggle:
+		m.toggleTerse()
 		return m, nil
 
 	case ActionModelSelector:
@@ -1028,7 +1049,7 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		extra := 3 // dial + style + evaluator always shown
+		extra := 4 // dial + style + evaluator + terse always shown
 		indicators := make([]string, len(mem)+extra)
 		copy(indicators, mem)
 		idx := len(mem)
@@ -1044,6 +1065,12 @@ func (m *AppModel) View() tea.View {
 			indicators[idx] = "eval:on"
 		} else {
 			indicators[idx] = "eval:off"
+		}
+		idx++
+		if m.terse {
+			indicators[idx] = "terse:on"
+		} else {
+			indicators[idx] = "terse:off"
 		}
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
 		if m.Dialog.Active {

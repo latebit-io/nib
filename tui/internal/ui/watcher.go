@@ -15,6 +15,11 @@ type fileChangedMsg struct{ Path string }
 
 // FileWatcher monitors open files for external changes and delivers
 // fileChangedMsg events through a channel that Bubble Tea can poll.
+//
+// Directories are watched (not individual files) so that atomic-save
+// flows (write temp + rename) are detected. A reference count per
+// directory tracks how many watched files live there; when the last
+// file in a directory is unwatched, the directory watch is removed.
 type FileWatcher struct {
 	watcher *fsnotify.Watcher
 	session *session.Session
@@ -22,7 +27,7 @@ type FileWatcher struct {
 
 	mu            sync.Mutex
 	watchingFiles map[string]bool // canonical file paths to react to
-	watchingDirs  map[string]bool // parent dirs registered with fsnotify
+	dirRefCount   map[string]int  // parent dir → number of watched files in it
 	closed        bool
 }
 
@@ -39,7 +44,7 @@ func NewFileWatcher(sess *session.Session) *FileWatcher {
 		session:       sess,
 		ch:            make(chan fileChangedMsg, 16),
 		watchingFiles: make(map[string]bool),
-		watchingDirs:  make(map[string]bool),
+		dirRefCount:   make(map[string]int),
 	}
 	go fw.loop()
 	return fw
@@ -110,14 +115,37 @@ func (fw *FileWatcher) Watch(path string) {
 	if fw.closed || fw.watchingFiles[canon] {
 		return
 	}
-	if !fw.watchingDirs[dir] {
+	if fw.dirRefCount[dir] == 0 {
 		if err := fw.watcher.Add(dir); err != nil {
 			slog.Warn("watch failed", "dir", dir, "err", err)
 			return
 		}
-		fw.watchingDirs[dir] = true
 	}
+	fw.dirRefCount[dir]++
 	fw.watchingFiles[canon] = true
+}
+
+// Unwatch removes a file from the watch list. When the last watched file
+// in a directory is removed, the directory watch is also removed.
+// Safe to call for paths that were never watched.
+func (fw *FileWatcher) Unwatch(path string) {
+	canon := fw.session.CanonPath(path)
+	dir := filepath.Dir(canon)
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	if !fw.watchingFiles[canon] {
+		return
+	}
+	delete(fw.watchingFiles, canon)
+	fw.dirRefCount[dir]--
+	if fw.dirRefCount[dir] <= 0 {
+		delete(fw.dirRefCount, dir)
+		if !fw.closed {
+			if err := fw.watcher.Remove(dir); err != nil {
+				slog.Warn("unwatch dir failed", "dir", dir, "err", err)
+			}
+		}
+	}
 }
 
 // Changes returns the channel that delivers file change notifications.

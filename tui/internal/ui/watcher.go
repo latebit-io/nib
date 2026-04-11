@@ -2,6 +2,7 @@ package ui
 
 import (
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,9 +20,10 @@ type FileWatcher struct {
 	session *session.Session
 	ch      chan fileChangedMsg
 
-	mu       sync.Mutex
-	watching map[string]bool // canonical paths currently watched
-	closed   bool
+	mu            sync.Mutex
+	watchingFiles map[string]bool // canonical file paths to react to
+	watchingDirs  map[string]bool // parent dirs registered with fsnotify
+	closed        bool
 }
 
 // NewFileWatcher creates a watcher that monitors open editor files.
@@ -33,10 +35,11 @@ func NewFileWatcher(sess *session.Session) *FileWatcher {
 		return nil
 	}
 	fw := &FileWatcher{
-		watcher:  w,
-		session:  sess,
-		ch:       make(chan fileChangedMsg, 16),
-		watching: make(map[string]bool),
+		watcher:       w,
+		session:       sess,
+		ch:            make(chan fileChangedMsg, 16),
+		watchingFiles: make(map[string]bool),
+		watchingDirs:  make(map[string]bool),
 	}
 	go fw.loop()
 	return fw
@@ -60,6 +63,14 @@ func (fw *FileWatcher) loop() {
 				continue
 			}
 			canon := fw.session.CanonPath(ev.Name)
+
+			// Only emit for files we're explicitly tracking.
+			fw.mu.Lock()
+			tracked := fw.watchingFiles[canon]
+			fw.mu.Unlock()
+			if !tracked {
+				continue
+			}
 
 			// Cancel previous timer for this path (debounce).
 			if t, exists := timers[canon]; exists {
@@ -87,20 +98,26 @@ func (fw *FileWatcher) loop() {
 	}
 }
 
-// Watch adds a file path to the watch list. Safe to call multiple times
-// with the same path.
+// Watch adds a file path to the watch list. Registers the parent directory
+// with fsnotify (not the file itself) so that atomic-save flows
+// (write temp + rename) are detected correctly.
+// Safe to call multiple times with the same path.
 func (fw *FileWatcher) Watch(path string) {
 	canon := fw.session.CanonPath(path)
+	dir := filepath.Dir(canon)
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
-	if fw.closed || fw.watching[canon] {
+	if fw.closed || fw.watchingFiles[canon] {
 		return
 	}
-	if err := fw.watcher.Add(canon); err != nil {
-		slog.Warn("watch failed", "path", canon, "err", err)
-		return
+	if !fw.watchingDirs[dir] {
+		if err := fw.watcher.Add(dir); err != nil {
+			slog.Warn("watch failed", "dir", dir, "err", err)
+			return
+		}
+		fw.watchingDirs[dir] = true
 	}
-	fw.watching[canon] = true
+	fw.watchingFiles[canon] = true
 }
 
 // Changes returns the channel that delivers file change notifications.

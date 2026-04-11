@@ -638,7 +638,7 @@ func (a *Agent) Cancel() {
 // to prevent indefinite blocking if the frontend stops draining.
 func (a *Agent) send(ev event.Event) {
 	switch ev.(type) {
-	case event.AgentToken, event.AgentStatus, event.AgentTurnUsage:
+	case event.AgentToken, event.AgentStatus, event.AgentTurnUsage, event.AgentInputEstimate, event.ReloadBuffers:
 		select {
 		case a.events <- ev:
 		default:
@@ -785,6 +785,29 @@ type turnUsage struct {
 	lastEstimate     llm.InputEstimate // from the final LLM call (current input composition)
 }
 
+// afterToolDispatch performs post-dispatch cleanup for tools that modify
+// the filesystem outside the edit approval flow (e.g. bash). Invalidates
+// the file cache and asks the frontend to reload open buffers.
+func (a *Agent) afterToolDispatch(toolName string) {
+	if toolName == "bash" {
+		a.cache.Reset("", "")
+		a.send(event.ReloadBuffers{})
+	}
+}
+
+// estimateAndBroadcast computes a client-side input estimate and sends it
+// to the frontend so the status bar updates before the LLM call starts.
+func (a *Agent) estimateAndBroadcast(messages []llm.Message, toolDefs []llm.ToolDef) llm.InputEstimate {
+	est := llm.EstimateMessageTokens(messages, toolDefs)
+	a.send(event.AgentInputEstimate{
+		System:  est.System,
+		Tools:   est.Tools,
+		History: est.History,
+		New:     est.New,
+	})
+	return est
+}
+
 // addUsage incorporates provider-reported usage from one LLM call.
 func (u *turnUsage) addUsage(usage *llm.Usage) {
 	if usage == nil {
@@ -810,8 +833,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			messages = append(messages, llm.Message{Role: "user", Content: msg})
 		}
 
-		// Client-side input composition estimate (before the call).
-		tu.lastEstimate = llm.EstimateMessageTokens(messages, toolDefs)
+		tu.lastEstimate = a.estimateAndBroadcast(messages, toolDefs)
 
 		ch, err := a.currentProvider().Stream(ctx, messages, toolDefs)
 		if err != nil {
@@ -877,6 +899,8 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			if ctx.Err() != nil {
 				return messages, tu, ctx.Err()
 			}
+
+			a.afterToolDispatch(tc.Function.Name)
 			messages = append(messages, llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,

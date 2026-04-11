@@ -152,6 +152,30 @@ type AgentTurnUsage struct {
 
 func (AgentTurnUsage) eventTag() {}
 
+// AgentInputEstimate signals the estimated input token composition before
+// an LLM call starts. Sent right before Stream() so the frontend can show
+// real-time input cost while the response is streaming.
+type AgentInputEstimate struct {
+	// System is the estimated system prompt tokens.
+	System int
+	// Tools is the estimated tool definition tokens.
+	Tools int
+	// History is the estimated conversation history tokens.
+	History int
+	// New is the estimated new input tokens.
+	New int
+}
+
+func (AgentInputEstimate) eventTag() {}
+
+// ReloadBuffers requests the frontend to re-read all open buffers from disk.
+// Sent after bash tool calls that may have modified files outside the edit
+// approval flow. The frontend should reload buffers whose on-disk content
+// differs from the in-memory content.
+type ReloadBuffers struct{}
+
+func (ReloadBuffers) eventTag() {}
+
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {
 	// ID uniquely identifies this edit proposal.

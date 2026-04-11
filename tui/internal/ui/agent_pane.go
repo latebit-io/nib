@@ -17,12 +17,14 @@ import (
 
 // usageState tracks cumulative token consumption for display.
 type usageState struct {
-	totalPrompt     int // provider-reported (exact, 0 if unavailable)
-	totalCompletion int // provider-reported (exact, 0 if unavailable)
-	totalCached     int // provider-reported (exact, 0 if unavailable)
-	totalInputEst   int // client-side estimate (always available)
-	totalOutputEst  int // estimated from completion tokens or content length
-	turns           int
+	totalPrompt       int // provider-reported (exact, 0 if unavailable)
+	totalCompletion   int // provider-reported (exact, 0 if unavailable)
+	totalCached       int // provider-reported (exact, 0 if unavailable)
+	totalInputEst     int // client-side estimate (always available)
+	totalOutputEst    int // estimated from completion tokens or content length
+	turns             int
+	streamingChars    int // characters received via AppendToken since last turn completed
+	streamingInputEst int // current LLM call's input estimate (set before Stream, cleared on turn end)
 }
 
 // hasProviderData reports whether any provider-reported usage has been received.
@@ -30,14 +32,51 @@ func (u *usageState) hasProviderData() bool {
 	return u.totalPrompt > 0 || u.totalCompletion > 0
 }
 
+// SetStreamingInput updates the current LLM call's input estimate.
+// Called right before Stream() starts so the status bar can show input cost
+// in real-time while the response is streaming.
+func (m *AgentPaneModel) SetStreamingInput(e event.AgentInputEstimate) {
+	m.usage.streamingInputEst = e.System + e.Tools + e.History + e.New
+}
+
 // UpdateUsage accumulates token counts from a turn usage event.
+// Resets the streaming counters since the turn data supersedes them.
 func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
 	m.usage.totalPrompt += u.PromptTokens
 	m.usage.totalCompletion += u.CompletionTokens
 	m.usage.totalCached += u.CachedTokens
 	m.usage.totalInputEst += u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
 	m.usage.totalOutputEst += u.CompletionEst
+	m.usage.streamingChars = 0
+	m.usage.streamingInputEst = 0
 	m.usage.turns++
+}
+
+// UsageIndicator returns a compact string for the main editor status bar.
+// Updates in real-time: shows streaming input/output estimates while tokens
+// arrive, switches to exact totals when provider data is available.
+func (m *AgentPaneModel) UsageIndicator() string {
+	streamOut := (m.usage.streamingChars + 3) / 4
+	streamIn := m.usage.streamingInputEst
+
+	if m.usage.hasProviderData() {
+		in := m.usage.totalPrompt
+		out := m.usage.totalCompletion + streamOut
+		s := formatTokenCount(in) + "↓"
+		if m.usage.totalCached > 0 && in > 0 {
+			pct := m.usage.totalCached * 100 / in
+			s += fmt.Sprintf("(%d%%⚡)", pct)
+		}
+		s += " " + formatTokenCount(out) + "↑"
+		return s
+	}
+
+	inEst := m.usage.totalInputEst + streamIn
+	outEst := m.usage.totalOutputEst + streamOut
+	if inEst > 0 || outEst > 0 {
+		return "~" + formatTokenCount(inEst) + "↓ ~" + formatTokenCount(outEst) + "↑"
+	}
+	return ""
 }
 
 // ResetUsage clears accumulated usage for a new agent run.
@@ -102,7 +141,7 @@ func formatSessionSummary(u usageState) string {
 	fmt.Fprintf(&b, "Session: %d turns", u.turns)
 	if u.hasProviderData() {
 		fmt.Fprintf(&b, " · %s in", formatTokenCount(u.totalPrompt))
-		if u.totalCached > 0 {
+		if u.totalCached > 0 && u.totalPrompt > 0 {
 			pct := u.totalCached * 100 / u.totalPrompt
 			fmt.Fprintf(&b, " (%s cached, %d%%)", formatTokenCount(u.totalCached), pct)
 		}
@@ -468,7 +507,9 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 
 // AppendToken sanitizes and appends streaming text from the agent.
 // Uses the stateful sanitizer to handle escape sequences split across chunks.
+// Also counts characters for real-time output token estimation.
 func (m *AgentPaneModel) AppendToken(text string) {
+	m.usage.streamingChars += len(text)
 	m.AppendText(m.sanitizer.Sanitize(text))
 }
 

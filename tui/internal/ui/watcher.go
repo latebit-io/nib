@@ -67,14 +67,14 @@ func (fw *FileWatcher) loop() {
 			}
 			timers[canon] = time.AfterFunc(debounceDelay, func() {
 				fw.mu.Lock()
-				closed := fw.closed
-				fw.mu.Unlock()
-				if closed {
+				defer fw.mu.Unlock()
+				if fw.closed {
 					return
 				}
 				select {
 				case fw.ch <- fileChangedMsg{Path: canon}:
 				default:
+					slog.Warn("file change notification dropped (channel full)", "path", canon)
 				}
 			})
 

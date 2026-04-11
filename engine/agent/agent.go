@@ -638,7 +638,7 @@ func (a *Agent) Cancel() {
 // to prevent indefinite blocking if the frontend stops draining.
 func (a *Agent) send(ev event.Event) {
 	switch ev.(type) {
-	case event.AgentToken, event.AgentStatus:
+	case event.AgentToken, event.AgentStatus, event.AgentTurnUsage:
 		select {
 		case a.events <- ev:
 		default:
@@ -780,7 +780,7 @@ type turnUsage struct {
 	promptTokens     int
 	completionTokens int
 	cachedTokens     int
-	completionEst    int               // client-side output estimate (summed across calls)
+	completionEst    int // client-side output estimate (summed across calls)
 	toolCalls        int
 	lastEstimate     llm.InputEstimate // from the final LLM call (current input composition)
 }
@@ -855,8 +855,6 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 		if len(toolCalls) == 0 {
 			return messages, tu, nil
 		}
-		tu.toolCalls += len(toolCalls)
-
 		for _, tc := range toolCalls {
 			if a.hasLintPending() {
 				messages = append(messages, llm.Message{
@@ -866,6 +864,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 				})
 				continue
 			}
+			tu.toolCalls++
 
 			if err := a.flushDirtyBuffers(ctx); err != nil {
 				a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})

@@ -1314,15 +1314,19 @@ func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string
 	// Append usage summary to the left section when data is available.
 	// Prefer provider-reported data; fall back to client-side estimates.
 	if m.usage.turns > 0 {
+		sep := " "
+		if left != "" {
+			sep = " | "
+		}
 		var usage string
 		if m.usage.hasProviderData() {
-			usage = fmt.Sprintf(" | %s in", formatTokenCount(m.usage.totalPrompt))
+			usage = fmt.Sprintf("%s%s in", sep, formatTokenCount(m.usage.totalPrompt))
 			if m.usage.totalCached > 0 {
 				usage += fmt.Sprintf(" (%s cached)", formatTokenCount(m.usage.totalCached))
 			}
 			usage += fmt.Sprintf(" · %s out", formatTokenCount(m.usage.totalCompletion))
 		} else if m.usage.totalInputEst > 0 {
-			usage = fmt.Sprintf(" | ~%s in · ~%s out", formatTokenCount(m.usage.totalInputEst), formatTokenCount(m.usage.totalOutputEst))
+			usage = fmt.Sprintf("%s~%s in · ~%s out", sep, formatTokenCount(m.usage.totalInputEst), formatTokenCount(m.usage.totalOutputEst))
 		}
 		left += usage
 	}

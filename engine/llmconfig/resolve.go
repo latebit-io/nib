@@ -21,9 +21,10 @@ const (
 // builtinProfiles are always available — user config files can override them.
 var builtinProfiles = map[string]Profile{
 	"openrouter": {
-		BaseURL:   "https://openrouter.ai/api/v1",
-		Model:     "google/gemini-2.5-flash",
-		APIKeyEnv: "OPENROUTER_API_KEY",
+		BaseURL:       "https://openrouter.ai/api/v1",
+		Model:         "google/gemini-2.5-flash",
+		APIKeyEnv:     "OPENROUTER_API_KEY",
+		PromptCaching: ptrBool(true),
 	},
 	"gemini": {
 		BaseURL:   "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -40,6 +41,9 @@ var builtinProfiles = map[string]Profile{
 // builtinFallbackOrder is the priority when auto-selecting a built-in profile
 // because the active profile has no API key. First match wins.
 var builtinFallbackOrder = []string{"gemini", "minimax", "openrouter"}
+
+// ptrBool returns a pointer to a bool value.
+func ptrBool(b bool) *bool { return &b }
 
 // Resolve loads and merges LLM configuration from all sources.
 // The merge order (each layer overrides the previous):
@@ -91,6 +95,9 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 		APIKeyEnv: p.APIKeyEnv,
 		Profile:   name,
 	}
+	if p.PromptCaching != nil {
+		r.PromptCaching = *p.PromptCaching
+	}
 	if r.BaseURL == "" {
 		r.BaseURL = DefaultBaseURL
 	}
@@ -116,6 +123,23 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 	return r
 }
 
+// applyProfile copies non-zero fields from a Profile into a Resolved.
+func applyProfile(r *Resolved, p Profile, name string) {
+	r.Profile = name
+	if p.BaseURL != "" {
+		r.BaseURL = p.BaseURL
+	}
+	if p.Model != "" {
+		r.Model = p.Model
+	}
+	if p.APIKeyEnv != "" {
+		r.APIKeyEnv = p.APIKeyEnv
+	}
+	if p.PromptCaching != nil {
+		r.PromptCaching = *p.PromptCaching
+	}
+}
+
 // resolve converts a merged Config into a Resolved by looking up the active
 // profile and applying environment variable overrides.
 func resolve(cfg *Config) *Resolved {
@@ -129,16 +153,7 @@ func resolve(cfg *Config) *Resolved {
 	// Look up active profile.
 	if cfg.Active != "" {
 		if p, ok := cfg.Profiles[cfg.Active]; ok {
-			r.Profile = cfg.Active
-			if p.BaseURL != "" {
-				r.BaseURL = p.BaseURL
-			}
-			if p.Model != "" {
-				r.Model = p.Model
-			}
-			if p.APIKeyEnv != "" {
-				r.APIKeyEnv = p.APIKeyEnv
-			}
+			applyProfile(r, p, cfg.Active)
 		} else {
 			slog.Warn("llmconfig: active profile not found", "profile", cfg.Active)
 		}
@@ -161,12 +176,8 @@ func resolve(cfg *Config) *Resolved {
 			if !ok {
 				continue
 			}
-			keyEnv := p.APIKeyEnv
-			if key := os.Getenv(keyEnv); key != "" {
-				r.Profile = name
-				r.BaseURL = p.BaseURL
-				r.Model = p.Model
-				r.APIKeyEnv = keyEnv
+			if key := os.Getenv(p.APIKeyEnv); key != "" {
+				applyProfile(r, p, name)
 				r.apiKey = key
 				break
 			}
@@ -226,6 +237,9 @@ func mergeConfigs(dst, src *Config) {
 		}
 		if sp.APIKeyEnv != "" {
 			dp.APIKeyEnv = sp.APIKeyEnv
+		}
+		if sp.PromptCaching != nil {
+			dp.PromptCaching = sp.PromptCaching
 		}
 		dst.Profiles[name] = dp
 	}

@@ -16,6 +16,7 @@ type resolveTestCase struct {
 	wantModel   string
 	wantKeyEnv  string
 	wantHas     bool
+	wantCaching bool
 }
 
 var resolveTests = []resolveTestCase{
@@ -54,6 +55,7 @@ var resolveTests = []resolveTestCase{
 		wantModel:   "anthropic/claude-sonnet-4",
 		wantKeyEnv:  "OR_KEY",
 		wantHas:     true,
+		wantCaching: true, // inherited from builtin openrouter profile
 	},
 	{
 		name: "project overrides global active",
@@ -179,6 +181,7 @@ var resolveTests = []resolveTestCase{
 		wantModel:   "google/gemini-2.5-flash",
 		wantKeyEnv:  "OPENROUTER_API_KEY",
 		wantHas:     true,
+		wantCaching: true,
 	},
 	{
 		name:        "GEMINI_API_KEY preferred over MINIMAX_API_KEY in fallback",
@@ -253,6 +256,62 @@ var resolveTests = []resolveTestCase{
 		wantKeyEnv:  "GEMINI_API_KEY",
 		wantHas:     true,
 	},
+	{
+		name: "prompt_caching enabled via active profile",
+		globalJSON: `{
+				"profiles": {
+					"custom": {
+						"model": "test-model",
+						"api_key_env": "C_KEY",
+						"prompt_caching": true
+					}
+				},
+				"active": "custom"
+			}`,
+		env:         map[string]string{"C_KEY": "key"},
+		wantProfile: "custom",
+		wantBaseURL: DefaultBaseURL,
+		wantModel:   "test-model",
+		wantKeyEnv:  "C_KEY",
+		wantHas:     true,
+		wantCaching: true,
+	},
+	{
+		name: "prompt_caching explicitly disabled overrides builtin",
+		globalJSON: `{
+				"profiles": {
+					"openrouter": {
+						"prompt_caching": false
+					}
+				},
+				"active": "openrouter"
+			}`,
+		env:         map[string]string{"OPENROUTER_API_KEY": "or-key"},
+		wantProfile: "openrouter",
+		wantBaseURL: "https://openrouter.ai/api/v1",
+		wantModel:   "google/gemini-2.5-flash",
+		wantKeyEnv:  "OPENROUTER_API_KEY",
+		wantHas:     true,
+		wantCaching: false,
+	},
+	{
+		name: "project config enables prompt_caching on profile",
+		projectJSON: `{
+				"profiles": {
+					"gemini": {
+						"prompt_caching": true
+					}
+				},
+				"active": "gemini"
+			}`,
+		env:         map[string]string{"GEMINI_API_KEY": "gem-key"},
+		wantProfile: "gemini",
+		wantBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		wantModel:   "gemini-2.5-flash",
+		wantKeyEnv:  "GEMINI_API_KEY",
+		wantHas:     true,
+		wantCaching: true,
+	},
 }
 
 func TestResolve(t *testing.T) {
@@ -260,7 +319,7 @@ func TestResolve(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			globalPath, projectRoot := setupResolveTest(t, tt.globalJSON, tt.projectJSON, tt.env)
 			_, got := resolveWithPaths(globalPath, projectRoot)
-			assertResolved(t, got, tt.wantProfile, tt.wantBaseURL, tt.wantModel, tt.wantKeyEnv, tt.wantHas)
+			assertResolved(t, got, tt)
 		})
 	}
 }
@@ -365,6 +424,28 @@ func TestResolveProfile(t *testing.T) {
 			t.Errorf("ResolveProfile(nope) = %+v, want nil", r)
 		}
 	})
+
+	t.Run("prompt caching from profile", func(t *testing.T) {
+		cacheCfg := &Config{
+			Profiles: map[string]Profile{
+				"cached": {
+					BaseURL:       "https://test.example",
+					Model:         "test-model",
+					APIKeyEnv:     "TEST_KEY",
+					PromptCaching: ptrBool(true),
+				},
+			},
+		}
+		t.Setenv("TEST_KEY", "secret")
+		t.Setenv("LLM_API_KEY", "")
+		r := ResolveProfile(cacheCfg, "cached")
+		if r == nil {
+			t.Fatal("ResolveProfile returned nil")
+		}
+		if !r.PromptCaching {
+			t.Error("PromptCaching should be true")
+		}
+	})
 }
 
 // setupResolveTest creates temp config files and sets env vars for a resolve test.
@@ -408,21 +489,24 @@ func setupResolveTest(t *testing.T, globalJSON, projectJSON string, env map[stri
 }
 
 // assertResolved checks all fields of a Resolved value.
-func assertResolved(t *testing.T, got *Resolved, wantProfile, wantBaseURL, wantModel, wantKeyEnv string, wantHas bool) {
+func assertResolved(t *testing.T, got *Resolved, tc resolveTestCase) {
 	t.Helper()
-	if got.Profile != wantProfile {
-		t.Errorf("Profile = %q, want %q", got.Profile, wantProfile)
+	if got.Profile != tc.wantProfile {
+		t.Errorf("Profile = %q, want %q", got.Profile, tc.wantProfile)
 	}
-	if got.BaseURL != wantBaseURL {
-		t.Errorf("BaseURL = %q, want %q", got.BaseURL, wantBaseURL)
+	if got.BaseURL != tc.wantBaseURL {
+		t.Errorf("BaseURL = %q, want %q", got.BaseURL, tc.wantBaseURL)
 	}
-	if got.Model != wantModel {
-		t.Errorf("Model = %q, want %q", got.Model, wantModel)
+	if got.Model != tc.wantModel {
+		t.Errorf("Model = %q, want %q", got.Model, tc.wantModel)
 	}
-	if got.APIKeyEnv != wantKeyEnv {
-		t.Errorf("APIKeyEnv = %q, want %q", got.APIKeyEnv, wantKeyEnv)
+	if got.APIKeyEnv != tc.wantKeyEnv {
+		t.Errorf("APIKeyEnv = %q, want %q", got.APIKeyEnv, tc.wantKeyEnv)
 	}
-	if got.HasProvider() != wantHas {
-		t.Errorf("HasProvider() = %v, want %v", got.HasProvider(), wantHas)
+	if got.HasProvider() != tc.wantHas {
+		t.Errorf("HasProvider() = %v, want %v", got.HasProvider(), tc.wantHas)
+	}
+	if got.PromptCaching != tc.wantCaching {
+		t.Errorf("PromptCaching = %v, want %v", got.PromptCaching, tc.wantCaching)
 	}
 }

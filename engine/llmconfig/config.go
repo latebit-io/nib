@@ -18,6 +18,12 @@ type Profile struct {
 	// APIKeyEnv is the environment variable name holding the API key.
 	// Never stores the key itself — only the variable name.
 	APIKeyEnv string `json:"api_key_env,omitempty"`
+	// PromptCaching enables Anthropic-style cache_control annotations on
+	// messages and tools. Reduces repeated input token costs by ~90% for
+	// providers that support it (e.g., Anthropic models via OpenRouter).
+	// Use a pointer to distinguish "not set" from "explicitly false" during
+	// config merging — nil means inherit from the lower-priority layer.
+	PromptCaching *bool `json:"prompt_caching,omitempty"`
 }
 
 // Config represents the on-disk shape of an LLM configuration file.
@@ -45,6 +51,9 @@ type Resolved struct {
 	APIKeyEnv string
 	// Profile is the active profile name ("env" if env-var-only).
 	Profile string
+	// PromptCaching indicates whether cache_control annotations should be
+	// added to LLM requests.
+	PromptCaching bool
 }
 
 // DisplayModel returns a short display name for the model.
@@ -66,7 +75,7 @@ func (r *Resolved) NewProvider() llm.Provider {
 	if r.apiKey == "" {
 		return nil
 	}
-	return llm.NewAgentAPI(r.BaseURL, r.Model, r.apiKey)
+	return llm.NewAgentAPI(r.BaseURL, r.Model, r.apiKey, r.PromptCaching)
 }
 
 // ProfileNames returns the sorted list of profile names in the config.

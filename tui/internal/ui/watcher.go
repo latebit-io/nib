@@ -26,8 +26,9 @@ type FileWatcher struct {
 	ch      chan fileChangedMsg
 
 	mu            sync.Mutex
-	watchingFiles map[string]bool // canonical file paths to react to
-	dirRefCount   map[string]int  // parent dir → number of watched files in it
+	watchingFiles map[string]bool   // canonical file paths to react to
+	dirRefCount   map[string]int    // parent dir → number of watched files in it
+	timers        map[string]*time.Timer // pending debounce timers per file path
 	closed        bool
 }
 
@@ -45,6 +46,7 @@ func NewFileWatcher(sess *session.Session) *FileWatcher {
 		ch:            make(chan fileChangedMsg, 16),
 		watchingFiles: make(map[string]bool),
 		dirRefCount:   make(map[string]int),
+		timers:        make(map[string]*time.Timer),
 	}
 	go fw.loop()
 	return fw
@@ -57,7 +59,6 @@ const debounceDelay = 100 * time.Millisecond
 
 // loop reads fsnotify events and debounces writes per path.
 func (fw *FileWatcher) loop() {
-	timers := make(map[string]*time.Timer)
 	for {
 		select {
 		case ev, ok := <-fw.watcher.Events:
@@ -69,22 +70,21 @@ func (fw *FileWatcher) loop() {
 			}
 			canon := fw.session.CanonPath(ev.Name)
 
-			// Only emit for files we're explicitly tracking.
 			fw.mu.Lock()
-			tracked := fw.watchingFiles[canon]
-			fw.mu.Unlock()
-			if !tracked {
+			// Only emit for files we're explicitly tracking.
+			if !fw.watchingFiles[canon] {
+				fw.mu.Unlock()
 				continue
 			}
-
 			// Cancel previous timer for this path (debounce).
-			if t, exists := timers[canon]; exists {
+			if t, exists := fw.timers[canon]; exists {
 				t.Stop()
 			}
-			timers[canon] = time.AfterFunc(debounceDelay, func() {
+			fw.timers[canon] = time.AfterFunc(debounceDelay, func() {
 				fw.mu.Lock()
 				defer fw.mu.Unlock()
-				if fw.closed {
+				delete(fw.timers, canon)
+				if fw.closed || !fw.watchingFiles[canon] {
 					return
 				}
 				select {
@@ -93,6 +93,7 @@ func (fw *FileWatcher) loop() {
 					slog.Warn("file change notification dropped (channel full)", "path", canon)
 				}
 			})
+			fw.mu.Unlock()
 
 		case err, ok := <-fw.watcher.Errors:
 			if !ok {

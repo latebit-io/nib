@@ -99,17 +99,18 @@ func TestFormatTurnUsageNoProviderData(t *testing.T) {
 
 func TestFormatSessionSummary(t *testing.T) {
 	u := usageState{
-		totalPrompt:     24891,
-		totalCompletion: 3421,
-		totalCached:     18200,
-		turns:           5,
+		totalIn:     24891,
+		totalOut:    3421,
+		totalCached: 18200,
+		hasExact:    true,
+		turns:       5,
 	}
 	got := formatSessionSummary(u)
 	if !strings.Contains(got, "5 turns") {
 		t.Error("should contain turn count")
 	}
 	if !strings.Contains(got, "24.9k in") {
-		t.Errorf("should contain total prompt tokens, got: %s", got)
+		t.Errorf("should contain total input tokens, got: %s", got)
 	}
 	if !strings.Contains(got, "18.2k cached") {
 		t.Error("should contain cached tokens")
@@ -118,15 +119,19 @@ func TestFormatSessionSummary(t *testing.T) {
 		t.Error("should contain cache hit percentage")
 	}
 	if !strings.Contains(got, "3.4k out") {
-		t.Error("should contain total completion tokens")
+		t.Error("should contain total output tokens")
+	}
+	// Exact data — no ~ prefix.
+	if strings.Contains(got, "~") {
+		t.Errorf("exact data should not have ~ prefix, got: %s", got)
 	}
 }
 
 func TestFormatSessionSummaryEstimateOnly(t *testing.T) {
 	u := usageState{
-		totalInputEst:  5000,
-		totalOutputEst: 1000,
-		turns:          3,
+		totalIn:  5000,
+		totalOut: 1000,
+		turns:    3,
 	}
 	got := formatSessionSummary(u)
 	if !strings.Contains(got, "3 turns") {
@@ -151,6 +156,7 @@ func TestFormatSessionSummaryEmpty(t *testing.T) {
 func TestUpdateUsage(t *testing.T) {
 	svc := &Services{Clipboard: &mockClipboard{}}
 	m := NewAgentPaneModel(svc, true)
+	// Two turns with provider data.
 	m.UpdateUsage(event.AgentTurnUsage{
 		PromptTokens:     1000,
 		CompletionTokens: 200,
@@ -162,14 +168,47 @@ func TestUpdateUsage(t *testing.T) {
 		CachedTokens:     1200,
 	})
 
-	if m.usage.totalPrompt != 2500 {
-		t.Errorf("totalPrompt = %d, want 2500", m.usage.totalPrompt)
+	if m.usage.totalIn != 2500 {
+		t.Errorf("totalIn = %d, want 2500", m.usage.totalIn)
 	}
-	if m.usage.totalCompletion != 500 {
-		t.Errorf("totalCompletion = %d, want 500", m.usage.totalCompletion)
+	if m.usage.totalOut != 500 {
+		t.Errorf("totalOut = %d, want 500", m.usage.totalOut)
 	}
 	if m.usage.totalCached != 2000 {
 		t.Errorf("totalCached = %d, want 2000", m.usage.totalCached)
+	}
+	if !m.usage.hasExact {
+		t.Error("hasExact should be true after provider data")
+	}
+	if m.usage.turns != 2 {
+		t.Errorf("turns = %d, want 2", m.usage.turns)
+	}
+}
+
+func TestUpdateUsageMixed(t *testing.T) {
+	svc := &Services{Clipboard: &mockClipboard{}}
+	m := NewAgentPaneModel(svc, true)
+	// Turn 1: provider data.
+	m.UpdateUsage(event.AgentTurnUsage{
+		PromptTokens:     1000,
+		CompletionTokens: 200,
+	})
+	// Turn 2: no provider data, only estimates.
+	m.UpdateUsage(event.AgentTurnUsage{
+		SystemEst:     500,
+		ToolsEst:      300,
+		HistoryEst:    100,
+		NewEst:        100,
+		CompletionEst: 150,
+	})
+
+	// totalIn = 1000 (provider) + 1000 (estimates sum) = 2000
+	if m.usage.totalIn != 2000 {
+		t.Errorf("totalIn = %d, want 2000", m.usage.totalIn)
+	}
+	// totalOut = 200 (provider) + 150 (estimate) = 350
+	if m.usage.totalOut != 350 {
+		t.Errorf("totalOut = %d, want 350", m.usage.totalOut)
 	}
 	if m.usage.turns != 2 {
 		t.Errorf("turns = %d, want 2", m.usage.turns)

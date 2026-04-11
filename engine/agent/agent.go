@@ -545,7 +545,7 @@ func (a *Agent) recordTurnUsage(runID uint64, tu turnUsage) {
 	a.sessionUsage.TotalCompletionTokens += tu.completionTokens
 	a.sessionUsage.TotalCachedTokens += tu.cachedTokens
 	a.sessionUsage.Turns = turn
-	a.mu.Unlock()
+	a.mu.Unlock() // safe: runID matched, so this run is still active
 
 	a.send(event.AgentTurnUsage{
 		Turn:             turn,
@@ -677,8 +677,11 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 	defer func() {
 		a.mu.Lock()
 		a.waiting = false
+		stale := runID != a.runID
 		a.mu.Unlock()
-		a.send(event.AgentDone{Success: success})
+		if !stale {
+			a.send(event.AgentDone{Success: success})
+		}
 	}()
 
 	if goal == "" {

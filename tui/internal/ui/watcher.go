@@ -69,8 +69,12 @@ func (fw *FileWatcher) loop() {
 				fw.mu.Lock()
 				closed := fw.closed
 				fw.mu.Unlock()
-				if !closed {
-					fw.ch <- fileChangedMsg{Path: canon}
+				if closed {
+					return
+				}
+				select {
+				case fw.ch <- fileChangedMsg{Path: canon}:
+				default:
 				}
 			})
 
@@ -104,15 +108,17 @@ func (fw *FileWatcher) Changes() <-chan fileChangedMsg {
 	return fw.ch
 }
 
-// Close shuts down the file watcher.
+// Close shuts down the file watcher and unblocks any consumer waiting on Changes().
 func (fw *FileWatcher) Close() {
 	fw.mu.Lock()
-	defer fw.mu.Unlock()
 	if fw.closed {
+		fw.mu.Unlock()
 		return
 	}
 	fw.closed = true
+	fw.mu.Unlock()
 	if err := fw.watcher.Close(); err != nil {
 		slog.Warn("close file watcher", "err", err)
 	}
+	close(fw.ch)
 }

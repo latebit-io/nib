@@ -176,6 +176,7 @@ func DefaultBindings() []Binding {
 		// File
 		{ActionSave, "Save", []string{"Ctrl+S"}, CatFile},
 		{ActionQuit, "Quit", []string{"Ctrl+Q"}, CatFile},
+		{ActionReloadFile, "Reload file from disk", []string{"Ctrl+Shift+R"}, CatFile},
 
 		// Agent
 		{ActionAgentStart, "Start agent", []string{"Ctrl+G"}, CatAgent},
@@ -204,9 +205,6 @@ func DefaultBindings() []Binding {
 		// Buffers
 		{ActionNextBuffer, "Next buffer", []string{"Ctrl+PageDown"}, CatBuffers},
 		{ActionPrevBuffer, "Previous buffer", []string{"Ctrl+PageUp"}, CatBuffers},
-
-		// File
-		{ActionReloadFile, "Reload file from disk", []string{"Ctrl+Shift+R"}, CatFile},
 
 		// Code Intelligence
 		{ActionGoToDefinition, "Go to definition", []string{"F12"}, CatLSP},

@@ -88,6 +88,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		Headless:          a.interactionMode == Headless,
 		DistributedMemory: a.distributedMemory,
 		CodingStyle:       a.currentCodingStyle(),
+		Terse:             a.currentTerse(),
 	}
 	systemPrompt := a.prompts.SystemPrompt(sysData)
 	if mode == ModePlanning {
@@ -109,6 +110,7 @@ func (a *Agent) rebuildSystemPrompt(mode Mode) string {
 		Headless:          a.interactionMode == Headless,
 		DistributedMemory: a.distributedMemory,
 		CodingStyle:       a.currentCodingStyle(),
+		Terse:             a.currentTerse(),
 	}
 	if mode == ModePlanning {
 		return a.prompts.PlanningSystemPrompt(sysData)

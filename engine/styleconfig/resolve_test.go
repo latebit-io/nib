@@ -18,8 +18,9 @@ type resolveTestCase struct {
 
 var resolveTests = []resolveTestCase{
 	{
-		name:    "no active style returns nil",
-		wantNil: true,
+		name:         "default active style is clean-code",
+		wantName:     "Clean Code",
+		wantRulesCnt: 12,
 	},
 	{
 		name:         "env var selects builtin style",
@@ -165,23 +166,35 @@ func TestResolve_malformedJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Malformed JSON is skipped, so the default builtin style is used.
 	_, resolved := resolveWithPaths(globalPath, "")
-	if resolved != nil {
-		t.Errorf("expected nil Resolved for malformed JSON, got %+v", resolved)
+	if resolved == nil {
+		t.Fatal("expected default style from builtins, got nil")
+	}
+	if resolved.Name != "Clean Code" {
+		t.Errorf("Name = %q, want default Clean Code", resolved.Name)
 	}
 }
 
 func TestResolve_missingFile(t *testing.T) {
+	// Missing files are skipped, so the default builtin style is used.
 	_, resolved := resolveWithPaths("/nonexistent/style.json", "/nonexistent/project")
-	if resolved != nil {
-		t.Errorf("expected nil Resolved for missing files, got %+v", resolved)
+	if resolved == nil {
+		t.Fatal("expected default style from builtins, got nil")
+	}
+	if resolved.Name != "Clean Code" {
+		t.Errorf("Name = %q, want default Clean Code", resolved.Name)
 	}
 }
 
 func TestLoadBuiltins(t *testing.T) {
 	cfg := loadBuiltins()
 
-	expected := []string{"bdd", "clean-architecture", "ddd", "idiomatic-go", "solid-hexagonal"}
+	if cfg.Active != "clean-code" {
+		t.Fatalf("Active = %q, want %q", cfg.Active, "clean-code")
+	}
+
+	expected := []string{"bdd", "clean-architecture", "clean-code", "ddd", "idiomatic-go", "solid-hexagonal"}
 	names := cfg.StyleNames()
 	if len(names) != len(expected) {
 		t.Fatalf("StyleNames() = %v, want %v", names, expected)

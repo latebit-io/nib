@@ -66,6 +66,9 @@ type SystemPromptData struct {
 	DistributedMemory []string
 	// CodingStyle holds the active style rules. Nil when no style is configured.
 	CodingStyle *CodingStyleData
+	// Terse enables terse output mode. When true, the template injects
+	// instructions to minimize explanatory text, reducing output tokens.
+	Terse bool
 }
 
 // UserPromptData holds the template variables for the user message.

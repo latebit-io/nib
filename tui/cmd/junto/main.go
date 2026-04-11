@@ -142,6 +142,7 @@ func run() error {
 			MemorySummary:     mem.Summary,
 			DistributedMemory: distributed,
 			CodingStyle:       styleResult.AgentStyle,
+			Terse:             true,
 		}
 		if styleResult.Resolved != nil {
 			opts.StyleLintCmd = styleResult.Resolved.LintCmd
@@ -316,6 +317,21 @@ func run() error {
 			evaluatorActive = false
 			slog.Info("evaluator: disabled")
 			return false
+		}
+	}
+
+	// Wire terse toggle — Alt+T enables/disables terse output mode at runtime.
+	// Terse is enabled by default to reduce output token costs.
+	if ag != nil {
+		app.SetTerse(true)
+		app.ToggleTerse = func(enabled bool) bool {
+			ag.SetTerse(enabled)
+			if enabled {
+				slog.Info("terse mode: enabled")
+			} else {
+				slog.Info("terse mode: disabled")
+			}
+			return enabled
 		}
 	}
 

@@ -495,6 +495,44 @@ func TestBuildMessagesCodingStyleInPlanningMode(t *testing.T) {
 	}
 }
 
+func TestBuildMessagesTerseInSystemPrompt(t *testing.T) {
+	a := testAgent()
+	a.SetTerse(true)
+	msgs := a.buildMessages("main.go", "package main", "fix bug", nil, "", ModeExecution)
+
+	system := msgs[0].Content
+	if !strings.Contains(system, "Output Style — Terse") {
+		t.Error("system prompt should include terse section when terse is enabled")
+	}
+	if !strings.Contains(system, "Minimize text") {
+		t.Error("system prompt should contain terse instructions")
+	}
+}
+
+func TestBuildMessagesNoTerse(t *testing.T) {
+	a := testAgent()
+	msgs := a.buildMessages("main.go", "package main", "fix bug", nil, "", ModeExecution)
+
+	system := msgs[0].Content
+	if strings.Contains(system, "Output Style — Terse") {
+		t.Error("system prompt should not include terse section when terse is disabled")
+	}
+}
+
+func TestBuildMessagesTerseInPlanningMode(t *testing.T) {
+	a := testAgent()
+	a.SetTerse(true)
+	msgs := a.buildMessages("main.go", "package main", "plan feature", nil, "", ModePlanning)
+
+	system := msgs[0].Content
+	if !strings.Contains(system, "Output Style — Terse") {
+		t.Error("planning prompt should include terse section when terse is enabled")
+	}
+	if !strings.Contains(system, "Plans and task lists should still be complete") {
+		t.Error("planning terse should note that plans remain complete")
+	}
+}
+
 func mkdirAll(path string) error {
 	return os.MkdirAll(path, 0o755)
 }

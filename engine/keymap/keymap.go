@@ -74,6 +74,8 @@ const (
 	ActionStyleCycle
 	// ActionEvaluatorToggle toggles the style evaluator on/off.
 	ActionEvaluatorToggle
+	// ActionTerseToggle toggles terse output mode on/off.
+	ActionTerseToggle
 
 	// ActionOpenPalette opens the command palette.
 	ActionOpenPalette
@@ -188,6 +190,7 @@ func DefaultBindings() []Binding {
 		{ActionModelSelector, "Select model", []string{"Alt+M"}, CatAgent},
 		{ActionStyleCycle, "Cycle coding style", []string{"Alt+S"}, CatAgent},
 		{ActionEvaluatorToggle, "Toggle style evaluator", []string{"Alt+V", "Alt+R"}, CatAgent},
+		{ActionTerseToggle, "Toggle terse mode", []string{"Alt+T"}, CatAgent},
 
 		// View
 		{ActionOpenPalette, "Open file palette", []string{"Ctrl+P"}, CatView},

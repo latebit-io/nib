@@ -228,7 +228,7 @@ func (e *Editor) CollapseOverlay(startLine, endLine, addedCount int, bufferMutat
 			e.ScrollOffset = endLine + 1
 		}
 	}
-	e.extraVisualLines = 0
+	e.SetExtraVisualLines(0)
 }
 
 // EnsureCursorVisible scrolls the viewport on both axes to keep the cursor visible.

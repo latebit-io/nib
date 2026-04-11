@@ -77,7 +77,9 @@ You have a `bash` tool to execute shell commands in the project directory. Use i
 After making edits, run the build command to verify correctness. If a build or test fails, read the error and fix it immediately.
 
 Do NOT use bash for searching code — use `search_project` instead.
-Do NOT use bash for destructive operations (rm -rf, git push, etc.) unless the developer explicitly asked for it.
+Do NOT use bash to modify source files — use `edit_file` or `write_file` instead. Commands like `cat >>`, `sed -i`, `mv`, `echo >`, and heredocs corrupt editor buffers because bash bypasses the edit approval flow. If `edit_file` fails, fix your search text — do not fall back to bash.
+Do NOT use bash for destructive operations (rm -rf, git push, git checkout, etc.) unless the developer explicitly asked for it.
+Do NOT assume git is available — the project may not be a git repository.
 
 ## Diagnostics
 {{if .Headless}}

@@ -350,3 +350,111 @@ func TestNonCachingRequestOmitsCacheControl(t *testing.T) {
 		t.Errorf("non-caching request should not contain cache_control: %s", s)
 	}
 }
+
+func TestParseUsage(t *testing.T) {
+	t.Run("nil input", func(t *testing.T) {
+		if got := parseUsage(nil); got != nil {
+			t.Errorf("parseUsage(nil) = %+v, want nil", got)
+		}
+	})
+
+	t.Run("basic usage", func(t *testing.T) {
+		u := &sseUsage{PromptTokens: 100, CompletionTokens: 50}
+		got := parseUsage(u)
+		if got == nil {
+			t.Fatal("parseUsage returned nil")
+		}
+		if got.PromptTokens != 100 {
+			t.Errorf("PromptTokens = %d, want 100", got.PromptTokens)
+		}
+		if got.CompletionTokens != 50 {
+			t.Errorf("CompletionTokens = %d, want 50", got.CompletionTokens)
+		}
+		if got.CachedTokens != 0 {
+			t.Errorf("CachedTokens = %d, want 0", got.CachedTokens)
+		}
+	})
+
+	t.Run("with cached tokens", func(t *testing.T) {
+		// Parse from JSON to correctly populate the anonymous struct with JSON tags.
+		raw := `{"prompt_tokens":1000,"completion_tokens":200,"prompt_tokens_details":{"cached_tokens":800}}`
+		var u sseUsage
+		if err := json.Unmarshal([]byte(raw), &u); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		got := parseUsage(&u)
+		if got == nil {
+			t.Fatal("parseUsage returned nil")
+		}
+		if got.CachedTokens != 800 {
+			t.Errorf("CachedTokens = %d, want 800", got.CachedTokens)
+		}
+	})
+}
+
+func TestStreamOptionsInRequest(t *testing.T) {
+	t.Run("non-caching request includes stream_options", func(t *testing.T) {
+		req := chatRequest{
+			Model:         "test",
+			Messages:      []Message{{Role: "user", Content: "hi"}},
+			Stream:        true,
+			StreamOptions: includeUsage,
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(data), `"stream_options"`) {
+			t.Error("request should include stream_options")
+		}
+		if !strings.Contains(string(data), `"include_usage":true`) {
+			t.Error("stream_options should have include_usage:true")
+		}
+	})
+
+	t.Run("caching request includes stream_options", func(t *testing.T) {
+		req := cachingChatRequest{
+			Model:         "test",
+			Messages:      []cachingMessage{{Role: "user", Content: "hi"}},
+			Stream:        true,
+			StreamOptions: includeUsage,
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(data), `"include_usage":true`) {
+			t.Error("caching request should have include_usage:true")
+		}
+	})
+}
+
+func TestSSEUsageParsing(t *testing.T) {
+	// Simulate an SSE chunk with usage data embedded.
+	raw := `{"choices":[{"delta":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":1234,"completion_tokens":567,"prompt_tokens_details":{"cached_tokens":1000}}}`
+
+	var chunk sseChunk
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if chunk.Usage == nil {
+		t.Fatal("Usage should be parsed from SSE chunk")
+	}
+	if chunk.Usage.PromptTokens != 1234 {
+		t.Errorf("PromptTokens = %d, want 1234", chunk.Usage.PromptTokens)
+	}
+	if chunk.Usage.CompletionTokens != 567 {
+		t.Errorf("CompletionTokens = %d, want 567", chunk.Usage.CompletionTokens)
+	}
+	if chunk.Usage.PromptDetails == nil {
+		t.Fatal("PromptDetails should be parsed")
+	}
+	if chunk.Usage.PromptDetails.CachedTokens != 1000 {
+		t.Errorf("CachedTokens = %d, want 1000", chunk.Usage.PromptDetails.CachedTokens)
+	}
+
+	usage := parseUsage(chunk.Usage)
+	if usage.CachedTokens != 1000 {
+		t.Errorf("parsed CachedTokens = %d, want 1000", usage.CachedTokens)
+	}
+}

@@ -51,20 +51,31 @@ func agentTransport() *http.Transport {
 	}
 }
 
+// streamOptions requests usage data in streaming responses.
+type streamOptions struct {
+	// IncludeUsage asks the provider to include token counts on the final chunk.
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// includeUsage is the shared stream_options value — always request usage data.
+var includeUsage = &streamOptions{IncludeUsage: true}
+
 type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
-	Tools    []ToolDef `json:"tools,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []Message      `json:"messages"`
+	Stream        bool           `json:"stream"`
+	Tools         []ToolDef      `json:"tools,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 }
 
 // cachingChatRequest is the JSON wire format when prompt caching is enabled.
 // Messages and tools use extended types that support cache_control annotations.
 type cachingChatRequest struct {
-	Model    string           `json:"model"`
-	Messages []cachingMessage `json:"messages"`
-	Stream   bool             `json:"stream"`
-	Tools    []cachingToolDef `json:"tools,omitempty"`
+	Model         string           `json:"model"`
+	Messages      []cachingMessage `json:"messages"`
+	Stream        bool             `json:"stream"`
+	Tools         []cachingToolDef `json:"tools,omitempty"`
+	StreamOptions *streamOptions   `json:"stream_options,omitempty"`
 }
 
 // cachingMessage extends Message with support for content blocks.
@@ -163,6 +174,16 @@ type sseChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *sseUsage `json:"usage,omitempty"`
+}
+
+// sseUsage is the token consumption data from the provider.
+type sseUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	PromptDetails    *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details,omitempty"`
 }
 
 // sseDeltaCall is a partial tool call from an SSE delta.
@@ -186,17 +207,19 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 	if a.promptCaching {
 		cms, cts := annotateCacheBreakpoints(messages, tools)
 		body, err = json.Marshal(cachingChatRequest{
-			Model:    a.model,
-			Messages: cms,
-			Stream:   true,
-			Tools:    cts,
+			Model:         a.model,
+			Messages:      cms,
+			Stream:        true,
+			Tools:         cts,
+			StreamOptions: includeUsage,
 		})
 	} else {
 		body, err = json.Marshal(chatRequest{
-			Model:    a.model,
-			Messages: messages,
-			Stream:   true,
-			Tools:    tools,
+			Model:         a.model,
+			Messages:      messages,
+			Stream:        true,
+			Tools:         tools,
+			StreamOptions: includeUsage,
 		})
 	}
 	if err != nil {
@@ -268,11 +291,28 @@ func (tc *toolCallAccumulator) finalize() []ToolCall {
 	return tc.calls
 }
 
+// parseUsage converts provider-reported usage into our Usage type.
+// Returns nil when the provider didn't report usage.
+func parseUsage(u *sseUsage) *Usage {
+	if u == nil {
+		return nil
+	}
+	usage := &Usage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+	}
+	if u.PromptDetails != nil {
+		usage.CachedTokens = u.PromptDetails.CachedTokens
+	}
+	return usage
+}
+
 func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- StreamEvent) {
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // 10MB — large file content in tool results
 
 	var tc toolCallAccumulator
+	var usage *Usage // accumulated across chunks — may arrive before or with finish_reason
 
 	for scanner.Scan() {
 		select {
@@ -287,7 +327,7 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
-			ch <- StreamEvent{Done: true, ToolCalls: tc.finalize()}
+			ch <- StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage}
 			return
 		}
 
@@ -296,6 +336,12 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 			slog.Warn("SSE unmarshal error", "err", err, "data", data[:min(len(data), 200)])
 			continue
 		}
+
+		// Usage may appear on any chunk (often the last or a trailing chunk).
+		if parsed := parseUsage(chunk.Usage); parsed != nil {
+			usage = parsed
+		}
+
 		if len(chunk.Choices) == 0 {
 			continue
 		}
@@ -313,7 +359,7 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 		}
 
 		if choice.FinishReason != nil {
-			ch <- StreamEvent{Done: true, ToolCalls: tc.finalize()}
+			ch <- StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage}
 			return
 		}
 	}
@@ -325,6 +371,6 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 
 	// Stream ended without [DONE] or finish_reason (EOF or scanner error).
 	if ctx.Err() == nil {
-		ch <- StreamEvent{Done: true, ToolCalls: tc.finalize()}
+		ch <- StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage}
 	}
 }

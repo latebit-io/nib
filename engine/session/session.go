@@ -1627,7 +1627,11 @@ func (s *Session) HandleEvent(ev event.Event) {
 		// Agent finished its turn, waiting for developer input.
 		// No session state changes — intent stays active.
 	case event.AgentToken, event.AgentStatus, event.AgentToolCall, event.AgentNavigate:
-		// No session state changes — frontend renders these directly
+		// No session state changes — frontend renders these directly.
+	case event.AgentTurnUsage, event.AgentInputEstimate:
+		// Telemetry — no session state changes, frontend renders these.
+	case event.FlushBuffers, event.ReloadBuffers:
+		// Handled by the frontend directly — no session state to mutate.
 	case event.DiagnosticsUpdated:
 		// Frontend-only notification; no session state to mutate.
 	default:

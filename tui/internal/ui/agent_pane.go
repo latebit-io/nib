@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -13,6 +14,146 @@ import (
 	"github.com/latebit-io/junto/tui/internal/ui/textarea"
 	"github.com/mattn/go-runewidth"
 )
+
+// usageState tracks cumulative token consumption for display.
+// Per-turn, the best available value is used: provider-reported if non-zero,
+// otherwise client-side estimate. This handles mixed runs correctly.
+type usageState struct {
+	totalIn           int  // best-available input tokens (provider or estimate per turn)
+	totalOut          int  // best-available output tokens (provider or estimate per turn)
+	totalCached       int  // provider-reported cached tokens (exact, 0 if unavailable)
+	hasExact          bool // true if any turn reported provider data
+	turns             int
+	streamingChars    int // characters received via AppendToken since last turn completed
+	streamingInputEst int // current LLM call's input estimate (set before Stream, cleared on turn end)
+}
+
+// SetStreamingInput updates the current LLM call's input estimate.
+// Called right before Stream() starts so the status bar can show input cost
+// in real-time while the response is streaming.
+func (m *AgentPaneModel) SetStreamingInput(e event.AgentInputEstimate) {
+	m.usage.streamingInputEst = e.System + e.Tools + e.History + e.New
+}
+
+// UpdateUsage accumulates token counts from a turn usage event.
+// Uses provider-reported values when available, falls back to client-side
+// estimates. Resets the streaming counters since the turn data supersedes them.
+func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
+	turnHasProvider := u.PromptTokens > 0 || u.CompletionTokens > 0
+	if turnHasProvider {
+		m.usage.totalIn += u.PromptTokens
+		m.usage.totalOut += u.CompletionTokens
+		m.usage.totalCached += u.CachedTokens
+		m.usage.hasExact = true
+	} else {
+		m.usage.totalIn += u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
+		m.usage.totalOut += u.CompletionEst
+	}
+	m.usage.streamingChars = 0
+	m.usage.streamingInputEst = 0
+	m.usage.turns++
+}
+
+// UsageIndicator returns a compact string for the main editor status bar.
+// Updates in real-time: shows streaming input/output estimates while tokens
+// arrive. Uses ~ prefix when only estimates are available.
+func (m *AgentPaneModel) UsageIndicator() string {
+	streamOut := (m.usage.streamingChars + 3) / 4
+	streamIn := m.usage.streamingInputEst
+
+	in := m.usage.totalIn + streamIn
+	out := m.usage.totalOut + streamOut
+
+	if in == 0 && out == 0 {
+		return ""
+	}
+
+	prefix := "~"
+	if m.usage.hasExact {
+		prefix = ""
+	}
+	s := prefix + formatTokenCount(in) + "↓"
+	if m.usage.totalCached > 0 && m.usage.totalIn > 0 {
+		pct := m.usage.totalCached * 100 / m.usage.totalIn
+		s += fmt.Sprintf("(%d%%⚡)", pct)
+	}
+	s += " " + prefix + formatTokenCount(out) + "↑"
+	return s
+}
+
+// ResetUsage clears accumulated usage for a new agent run.
+func (m *AgentPaneModel) ResetUsage() {
+	m.usage = usageState{}
+}
+
+// formatTokenCount renders a token count as a compact string.
+// < 1000 → "847", ≥ 1000 → "12.3k", ≥ 999950 → "1.0M".
+func formatTokenCount(n int) string {
+	switch {
+	case n >= 999_950: // %.1f rounds 999950+ to 1000.0k — use M instead
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// formatTurnUsage produces a dim metadata line for a single turn.
+// Uses provider data when available, otherwise falls back to estimates.
+func formatTurnUsage(u event.AgentTurnUsage) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n[turn %d", u.Turn)
+
+	hasProvider := u.PromptTokens > 0 || u.CompletionTokens > 0
+	if hasProvider {
+		fmt.Fprintf(&b, ": %s in", formatTokenCount(u.PromptTokens))
+		if u.CachedTokens > 0 {
+			fmt.Fprintf(&b, " (%s cached)", formatTokenCount(u.CachedTokens))
+		}
+		fmt.Fprintf(&b, " · %s out", formatTokenCount(u.CompletionTokens))
+	}
+	if u.ToolCalls > 0 {
+		fmt.Fprintf(&b, " · %d tools", u.ToolCalls)
+	}
+
+	// Composition estimate — always available.
+	total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
+	if total > 0 {
+		if !hasProvider {
+			fmt.Fprintf(&b, ": ~%s in · ~%s out", formatTokenCount(total), formatTokenCount(u.CompletionEst))
+		}
+		fmt.Fprintf(&b, " | sys:%s tools:%s hist:%s new:%s",
+			formatTokenCount(u.SystemEst),
+			formatTokenCount(u.ToolsEst),
+			formatTokenCount(u.HistoryEst),
+			formatTokenCount(u.NewEst))
+	}
+	b.WriteString("]\n")
+	return b.String()
+}
+
+// formatSessionSummary produces the summary shown when the agent finishes.
+func formatSessionSummary(u usageState) string {
+	if u.turns == 0 {
+		return ""
+	}
+	prefix := "~"
+	if u.hasExact {
+		prefix = ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Session: %d turns", u.turns)
+	if u.totalIn > 0 || u.totalOut > 0 {
+		fmt.Fprintf(&b, " · %s%s in", prefix, formatTokenCount(u.totalIn))
+		if u.totalCached > 0 && u.totalIn > 0 {
+			pct := u.totalCached * 100 / u.totalIn
+			fmt.Fprintf(&b, " (%s cached, %d%%)", formatTokenCount(u.totalCached), pct)
+		}
+		fmt.Fprintf(&b, " · %s%s out", prefix, formatTokenCount(u.totalOut))
+	}
+	return b.String()
+}
 
 // inputHeight returns the number of rows reserved for the input area
 // (separator + input + status). Uses 1/6 of the pane height, minimum 5.
@@ -95,6 +236,9 @@ type AgentPaneModel struct {
 	// modelLabel is the display name of the active LLM model (e.g. "gemini-2.5-flash").
 	// Shown on the left side of the status line. Set via SetModelLabel.
 	modelLabel string
+
+	// usage tracks cumulative token consumption for the status line display.
+	usage usageState
 
 	// modelSelector state — when active, replaces the input area with a model list.
 	modelSelActive   bool
@@ -366,8 +510,11 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 
 // AppendToken sanitizes and appends streaming text from the agent.
 // Uses the stateful sanitizer to handle escape sequences split across chunks.
+// Counts sanitized bytes for real-time output token estimation.
 func (m *AgentPaneModel) AppendToken(text string) {
-	m.AppendText(m.sanitizer.Sanitize(text))
+	clean := m.sanitizer.Sanitize(text)
+	m.usage.streamingChars += len(clean)
+	m.AppendText(clean)
 }
 
 // AppendMeta sanitizes and appends non-stream text (edit proposals, errors, status).
@@ -891,6 +1038,7 @@ func (m *AgentPaneModel) Clear() {
 	m.cursorCol = 0
 	m.status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
+	m.usage = usageState{}
 }
 
 // VisibleLines returns the number of content lines visible above the input area.
@@ -1207,6 +1355,23 @@ func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string
 	left := ""
 	if m.modelLabel != "" {
 		left = " " + sanitizeInlineDisplay(m.modelLabel)
+	}
+	// Append usage summary to the left section when data is available.
+	if m.usage.turns > 0 && (m.usage.totalIn > 0 || m.usage.totalOut > 0) {
+		sep := " "
+		if left != "" {
+			sep = " | "
+		}
+		prefix := "~"
+		if m.usage.hasExact {
+			prefix = ""
+		}
+		usage := fmt.Sprintf("%s%s%s in", sep, prefix, formatTokenCount(m.usage.totalIn))
+		if m.usage.totalCached > 0 && m.usage.totalIn > 0 {
+			usage += fmt.Sprintf(" (%s cached)", formatTokenCount(m.usage.totalCached))
+		}
+		usage += fmt.Sprintf(" · %s%s out", prefix, formatTokenCount(m.usage.totalOut))
+		left += usage
 	}
 	right := ""
 	if statusMsg != "" {

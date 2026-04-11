@@ -122,6 +122,60 @@ func (AgentError) eventTag()   {}
 func (AgentStatus) eventTag()  {}
 func (AgentWaiting) eventTag() {}
 
+// AgentTurnUsage reports token consumption for a single agent turn
+// (one or more LLM calls within processLLMTurn). Combines provider-reported
+// exact counts with client-side composition estimates.
+type AgentTurnUsage struct {
+	// Turn is the 1-indexed turn number within this agent run.
+	Turn int
+	// PromptTokens is the provider-reported total input tokens (0 if unavailable).
+	PromptTokens int
+	// CompletionTokens is the provider-reported output tokens (0 if unavailable).
+	CompletionTokens int
+	// CachedTokens is the provider-reported cached input tokens (0 if unavailable).
+	CachedTokens int
+	// ToolCalls is the number of tool calls dispatched in this turn.
+	ToolCalls int
+
+	// Client-side estimates (always available).
+	// SystemEst is the estimated system prompt tokens.
+	SystemEst int
+	// ToolsEst is the estimated tool definition tokens.
+	ToolsEst int
+	// HistoryEst is the estimated conversation history tokens.
+	HistoryEst int
+	// NewEst is the estimated new input tokens.
+	NewEst int
+	// CompletionEst is the estimated output tokens (from streamed content length).
+	CompletionEst int
+}
+
+func (AgentTurnUsage) eventTag() {}
+
+// AgentInputEstimate signals the estimated input token composition before
+// an LLM call starts. Sent right before Stream() so the frontend can show
+// real-time input cost while the response is streaming.
+type AgentInputEstimate struct {
+	// System is the estimated system prompt tokens.
+	System int
+	// Tools is the estimated tool definition tokens.
+	Tools int
+	// History is the estimated conversation history tokens.
+	History int
+	// New is the estimated new input tokens.
+	New int
+}
+
+func (AgentInputEstimate) eventTag() {}
+
+// ReloadBuffers requests the frontend to re-read all open buffers from disk.
+// Sent after bash tool calls that may have modified files outside the edit
+// approval flow. The frontend should reload buffers whose on-disk content
+// differs from the in-memory content.
+type ReloadBuffers struct{}
+
+func (ReloadBuffers) eventTag() {}
+
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {
 	// ID uniquely identifies this edit proposal.

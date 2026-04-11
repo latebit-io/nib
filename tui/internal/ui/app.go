@@ -761,7 +761,12 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		cmd = m.reloadWorkTreeCmd()
 	case event.AgentDone:
 		m.AgentPane.SetStatus(event.StatusIdle)
-		m.AgentPane.AppendText("\n--- Done ---\n")
+		summary := formatSessionSummary(m.AgentPane.usage)
+		if summary != "" {
+			m.AgentPane.AppendText("\n--- Done ---\n" + summary + "\n")
+		} else {
+			m.AgentPane.AppendText("\n--- Done ---\n")
+		}
 		m.AgentPane.SetInputActive(false)
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = m.reloadWorkTreeCmd()
@@ -772,6 +777,13 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		e.Result <- event.FlushResult{Saved: saved, Err: err}
 	case event.DiagnosticsUpdated:
 		m.refreshDiagnostics(e.Path)
+	case event.ReloadBuffers:
+		m.reloadAllBuffers()
+	case event.AgentInputEstimate:
+		m.AgentPane.SetStreamingInput(e)
+	case event.AgentTurnUsage:
+		m.AgentPane.AppendMeta(formatTurnUsage(e))
+		m.AgentPane.UpdateUsage(e)
 	}
 	return cmd
 }
@@ -1055,7 +1067,7 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		extra := 4 // dial + style + evaluator + terse always shown
+		extra := 5 // dial + style + evaluator + terse + usage always shown
 		indicators := make([]string, len(mem)+extra)
 		copy(indicators, mem)
 		idx := len(mem)
@@ -1078,6 +1090,8 @@ func (m *AppModel) View() tea.View {
 		} else {
 			indicators[idx] = "terse:off"
 		}
+		idx++
+		indicators[idx] = m.AgentPane.UsageIndicator()
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
 		if m.Dialog.Active {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
@@ -1173,6 +1187,15 @@ func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
 	m.refreshDiagnostics(m.Session.ActiveFile())
 	m.refreshProjectPane()
 	return m, nil
+}
+
+// reloadAllBuffers reloads all open buffers from disk. Called after bash
+// tool calls that may have modified files outside the edit approval flow.
+// Skips buffers the user has modified in-editor to avoid clobbering unsaved work.
+func (m *AppModel) reloadAllBuffers() {
+	for _, path := range m.Session.OpenFiles() {
+		m.handleFileChanged(path)
+	}
 }
 
 // handleFileChanged reloads a file that was modified externally.

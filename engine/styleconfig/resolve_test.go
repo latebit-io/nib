@@ -190,6 +190,10 @@ func TestResolve_missingFile(t *testing.T) {
 func TestLoadBuiltins(t *testing.T) {
 	cfg := loadBuiltins()
 
+	if cfg.Active != "clean-code" {
+		t.Fatalf("Active = %q, want %q", cfg.Active, "clean-code")
+	}
+
 	expected := []string{"bdd", "clean-architecture", "clean-code", "ddd", "idiomatic-go", "solid-hexagonal"}
 	names := cfg.StyleNames()
 	if len(names) != len(expected) {

@@ -81,7 +81,7 @@ const defaultActiveStyle = "clean-code"
 
 // loadBuiltins reads all embedded style JSON files into a Config.
 func loadBuiltins() *Config {
-	cfg := &Config{Styles: make(map[string]Style), Active: defaultActiveStyle}
+	cfg := &Config{Styles: make(map[string]Style)}
 
 	entries, err := builtinStyles.ReadDir("styles")
 	if err != nil {
@@ -110,6 +110,16 @@ func loadBuiltins() *Config {
 		// Key is the filename without extension: "solid-hexagonal.json" → "solid-hexagonal".
 		key := strings.TrimSuffix(entry.Name(), ".json")
 		cfg.Styles[key] = s
+	}
+
+	// Activate the default style if it was loaded successfully.
+	// Fall back to the first available style (sorted) if the default is missing.
+	if _, ok := cfg.Styles[defaultActiveStyle]; ok {
+		cfg.Active = defaultActiveStyle
+	} else if names := cfg.StyleNames(); len(names) > 0 {
+		cfg.Active = names[0]
+		slog.Warn("styleconfig: default active style missing; falling back",
+			"default", defaultActiveStyle, "fallback", cfg.Active)
 	}
 
 	return cfg

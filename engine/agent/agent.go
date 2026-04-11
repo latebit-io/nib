@@ -162,6 +162,9 @@ type Agent struct {
 	sessionUsage SessionUsage
 	// turnCounter is the 1-indexed turn number within the current run.
 	turnCounter int
+	// runID is a generation token incremented on each RunWithMode call.
+	// recordTurnUsage checks this to ignore late updates from canceled runs.
+	runID uint64
 }
 
 // SessionUsage holds accumulated token consumption across an agent run.
@@ -404,6 +407,9 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.waiting = false
 	a.pendingLint = ""
 	a.turnEdits = nil
+	a.runID++
+	a.sessionUsage = SessionUsage{}
+	a.turnCounter = 0
 
 	// Reset tools with state
 	for _, t := range a.tools {
@@ -411,9 +417,10 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 			r.Reset()
 		}
 	}
+	runID := a.runID
 	a.mu.Unlock()
 
-	go a.run(ctx, fileName, fileContent, goal, contextFiles, mode)
+	go a.run(ctx, runID, fileName, fileContent, goal, contextFiles, mode)
 }
 
 // Reply sends a follow-up message to an ongoing conversation.
@@ -523,9 +530,15 @@ func (a *Agent) SetEvaluator(eval *StyleEvaluator) {
 }
 
 // recordTurnUsage accumulates turn-level usage into the session total and
-// sends an AgentTurnUsage event to the frontend.
-func (a *Agent) recordTurnUsage(tu turnUsage) {
+// sends an AgentTurnUsage event to the frontend. The runID parameter is
+// checked against the current run — late updates from canceled runs are
+// silently ignored to prevent pollution of the new run's totals.
+func (a *Agent) recordTurnUsage(runID uint64, tu turnUsage) {
 	a.mu.Lock()
+	if runID != a.runID {
+		a.mu.Unlock()
+		return
+	}
 	a.turnCounter++
 	turn := a.turnCounter
 	a.sessionUsage.TotalPromptTokens += tu.promptTokens
@@ -540,10 +553,11 @@ func (a *Agent) recordTurnUsage(tu turnUsage) {
 		CompletionTokens: tu.completionTokens,
 		CachedTokens:     tu.cachedTokens,
 		ToolCalls:        tu.toolCalls,
-		SystemEst:        tu.estimate.System,
-		ToolsEst:         tu.estimate.Tools,
-		HistoryEst:       tu.estimate.History,
-		NewEst:           tu.estimate.New,
+		SystemEst:        tu.lastEstimate.System,
+		ToolsEst:         tu.lastEstimate.Tools,
+		HistoryEst:       tu.lastEstimate.History,
+		NewEst:           tu.lastEstimate.New,
+		CompletionEst:    tu.completionEst,
 	})
 }
 
@@ -658,7 +672,7 @@ func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
 	}
 }
 
-func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
+func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
 	success := true // false only on actual errors, not user-initiated cancel
 	defer func() {
 		a.mu.Lock()
@@ -686,12 +700,6 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		a.send(event.AgentStatus{Status: event.StatusThinking})
 	}
 
-	// Reset session usage and turn counter at the start of each run.
-	a.mu.Lock()
-	a.sessionUsage = SessionUsage{}
-	a.turnCounter = 0
-	a.mu.Unlock()
-
 	thinkState := false
 	for {
 		// Process one LLM turn: stream, dispatch tools, repeat until
@@ -701,7 +709,8 @@ func (a *Agent) run(ctx context.Context, fileName, fileContent, goal string, con
 		messages, tu, err = a.processLLMTurn(ctx, messages, &thinkState, activeDefs)
 
 		// Record usage regardless of error — partial data is still valuable.
-		a.recordTurnUsage(tu)
+		// Pass runID so late updates from canceled runs are ignored.
+		a.recordTurnUsage(runID, tu)
 
 		if err != nil {
 			success = false
@@ -763,13 +772,17 @@ func (a *Agent) planningToolDefs() []llm.ToolDef {
 
 // turnUsage accumulates token consumption across multiple LLM calls within
 // a single agent turn (the inner loop may call Stream multiple times due to
-// tool-call iterations).
+// tool-call iterations). Provider counts are summed across all calls in the
+// turn. lastEstimate reflects the final LLM call only — it shows the current
+// input composition, which is the most meaningful snapshot (summing estimates
+// across iterations would double-count the system prompt and tools).
 type turnUsage struct {
 	promptTokens     int
 	completionTokens int
 	cachedTokens     int
+	completionEst    int               // client-side output estimate (summed across calls)
 	toolCalls        int
-	estimate         llm.InputEstimate // from the last LLM call (most recent composition)
+	lastEstimate     llm.InputEstimate // from the final LLM call (current input composition)
 }
 
 // addUsage incorporates provider-reported usage from one LLM call.
@@ -798,7 +811,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 		}
 
 		// Client-side input composition estimate (before the call).
-		tu.estimate = llm.EstimateMessageTokens(messages, toolDefs)
+		tu.lastEstimate = llm.EstimateMessageTokens(messages, toolDefs)
 
 		ch, err := a.currentProvider().Stream(ctx, messages, toolDefs)
 		if err != nil {
@@ -823,6 +836,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			}
 		}
 		tu.addUsage(streamUsage)
+		tu.completionEst += llm.EstimateTokens(contentBuf.String())
 
 		if ctx.Err() != nil {
 			return messages, tu, ctx.Err()

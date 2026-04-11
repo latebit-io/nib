@@ -17,10 +17,17 @@ import (
 
 // usageState tracks cumulative token consumption for display.
 type usageState struct {
-	totalPrompt     int
-	totalCompletion int
-	totalCached     int
+	totalPrompt     int // provider-reported (exact, 0 if unavailable)
+	totalCompletion int // provider-reported (exact, 0 if unavailable)
+	totalCached     int // provider-reported (exact, 0 if unavailable)
+	totalInputEst   int // client-side estimate (always available)
+	totalOutputEst  int // estimated from completion tokens or content length
 	turns           int
+}
+
+// hasProviderData reports whether any provider-reported usage has been received.
+func (u *usageState) hasProviderData() bool {
+	return u.totalPrompt > 0 || u.totalCompletion > 0
 }
 
 // UpdateUsage accumulates token counts from a turn usage event.
@@ -28,6 +35,8 @@ func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
 	m.usage.totalPrompt += u.PromptTokens
 	m.usage.totalCompletion += u.CompletionTokens
 	m.usage.totalCached += u.CachedTokens
+	m.usage.totalInputEst += u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
+	m.usage.totalOutputEst += u.CompletionEst
 	m.usage.turns++
 }
 
@@ -37,10 +46,10 @@ func (m *AgentPaneModel) ResetUsage() {
 }
 
 // formatTokenCount renders a token count as a compact string.
-// < 1000 → "847", ≥ 1000 → "12.3k", ≥ 1000000 → "1.2M".
+// < 1000 → "847", ≥ 1000 → "12.3k", ≥ 999950 → "1.0M".
 func formatTokenCount(n int) string {
 	switch {
-	case n >= 1_000_000:
+	case n >= 999_950: // %.1f rounds 999950+ to 1000.0k — use M instead
 		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 	case n >= 1000:
 		return fmt.Sprintf("%.1fk", float64(n)/1000)
@@ -50,11 +59,13 @@ func formatTokenCount(n int) string {
 }
 
 // formatTurnUsage produces a dim metadata line for a single turn.
+// Uses provider data when available, otherwise falls back to estimates.
 func formatTurnUsage(u event.AgentTurnUsage) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n[turn %d", u.Turn)
 
-	if u.PromptTokens > 0 || u.CompletionTokens > 0 {
+	hasProvider := u.PromptTokens > 0 || u.CompletionTokens > 0
+	if hasProvider {
 		fmt.Fprintf(&b, ": %s in", formatTokenCount(u.PromptTokens))
 		if u.CachedTokens > 0 {
 			fmt.Fprintf(&b, " (%s cached)", formatTokenCount(u.CachedTokens))
@@ -68,6 +79,9 @@ func formatTurnUsage(u event.AgentTurnUsage) string {
 	// Composition estimate — always available.
 	total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
 	if total > 0 {
+		if !hasProvider {
+			fmt.Fprintf(&b, ": ~%s in · ~%s out", formatTokenCount(total), formatTokenCount(u.CompletionEst))
+		}
 		fmt.Fprintf(&b, " | sys:%s tools:%s hist:%s new:%s",
 			formatTokenCount(u.SystemEst),
 			formatTokenCount(u.ToolsEst),
@@ -79,19 +93,22 @@ func formatTurnUsage(u event.AgentTurnUsage) string {
 }
 
 // formatSessionSummary produces the summary shown when the agent finishes.
+// Uses provider data when available, otherwise falls back to estimates.
 func formatSessionSummary(u usageState) string {
 	if u.turns == 0 {
 		return ""
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Session: %d turns", u.turns)
-	if u.totalPrompt > 0 || u.totalCompletion > 0 {
+	if u.hasProviderData() {
 		fmt.Fprintf(&b, " · %s in", formatTokenCount(u.totalPrompt))
 		if u.totalCached > 0 {
 			pct := u.totalCached * 100 / u.totalPrompt
 			fmt.Fprintf(&b, " (%s cached, %d%%)", formatTokenCount(u.totalCached), pct)
 		}
 		fmt.Fprintf(&b, " · %s out", formatTokenCount(u.totalCompletion))
+	} else if u.totalInputEst > 0 {
+		fmt.Fprintf(&b, " · ~%s in · ~%s out", formatTokenCount(u.totalInputEst), formatTokenCount(u.totalOutputEst))
 	}
 	return b.String()
 }
@@ -1295,12 +1312,18 @@ func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string
 		left = " " + sanitizeInlineDisplay(m.modelLabel)
 	}
 	// Append usage summary to the left section when data is available.
-	if m.usage.turns > 0 && (m.usage.totalPrompt > 0 || m.usage.totalCompletion > 0) {
-		usage := fmt.Sprintf(" | %s in", formatTokenCount(m.usage.totalPrompt))
-		if m.usage.totalCached > 0 {
-			usage += fmt.Sprintf(" (%s cached)", formatTokenCount(m.usage.totalCached))
+	// Prefer provider-reported data; fall back to client-side estimates.
+	if m.usage.turns > 0 {
+		var usage string
+		if m.usage.hasProviderData() {
+			usage = fmt.Sprintf(" | %s in", formatTokenCount(m.usage.totalPrompt))
+			if m.usage.totalCached > 0 {
+				usage += fmt.Sprintf(" (%s cached)", formatTokenCount(m.usage.totalCached))
+			}
+			usage += fmt.Sprintf(" · %s out", formatTokenCount(m.usage.totalCompletion))
+		} else if m.usage.totalInputEst > 0 {
+			usage = fmt.Sprintf(" | ~%s in · ~%s out", formatTokenCount(m.usage.totalInputEst), formatTokenCount(m.usage.totalOutputEst))
 		}
-		usage += fmt.Sprintf(" · %s out", formatTokenCount(m.usage.totalCompletion))
 		left += usage
 	}
 	right := ""

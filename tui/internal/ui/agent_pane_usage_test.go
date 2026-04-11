@@ -23,7 +23,7 @@ func TestFormatTokenCount(t *testing.T) {
 		{1000, "1.0k"},
 		{1234, "1.2k"},
 		{12345, "12.3k"},
-		{999999, "1000.0k"},
+		{999999, "1.0M"},
 		{1000000, "1.0M"},
 		{1234567, "1.2M"},
 	}
@@ -73,21 +73,25 @@ func TestFormatTurnUsage(t *testing.T) {
 
 func TestFormatTurnUsageNoProviderData(t *testing.T) {
 	u := event.AgentTurnUsage{
-		Turn:       1,
-		SystemEst:  500,
-		ToolsEst:   300,
-		HistoryEst: 0,
-		NewEst:     200,
+		Turn:          1,
+		SystemEst:     500,
+		ToolsEst:      300,
+		HistoryEst:    0,
+		NewEst:        200,
+		CompletionEst: 150,
 	}
 	got := formatTurnUsage(u)
 	if !strings.Contains(got, "turn 1") {
 		t.Error("should contain turn number")
 	}
-	// No provider data — should not contain "in" or "out"
-	if strings.Contains(got, " in") {
-		t.Error("should not contain input tokens when provider reports 0")
+	// Should show estimated values with ~ prefix
+	if !strings.Contains(got, "~1.0k in") {
+		t.Errorf("should contain estimated input with ~ prefix, got: %s", got)
 	}
-	// Should still contain estimates
+	if !strings.Contains(got, "~150 out") {
+		t.Errorf("should contain estimated output with ~ prefix, got: %s", got)
+	}
+	// Should still contain composition estimates
 	if !strings.Contains(got, "sys:500") {
 		t.Error("should contain system estimate")
 	}
@@ -115,6 +119,24 @@ func TestFormatSessionSummary(t *testing.T) {
 	}
 	if !strings.Contains(got, "3.4k out") {
 		t.Error("should contain total completion tokens")
+	}
+}
+
+func TestFormatSessionSummaryEstimateOnly(t *testing.T) {
+	u := usageState{
+		totalInputEst:  5000,
+		totalOutputEst: 1000,
+		turns:          3,
+	}
+	got := formatSessionSummary(u)
+	if !strings.Contains(got, "3 turns") {
+		t.Error("should contain turn count")
+	}
+	if !strings.Contains(got, "~5.0k in") {
+		t.Errorf("should contain estimated input with ~ prefix, got: %s", got)
+	}
+	if !strings.Contains(got, "~1.0k out") {
+		t.Errorf("should contain estimated output with ~ prefix, got: %s", got)
 	}
 }
 

@@ -146,6 +146,8 @@ type AgentTurnUsage struct {
 	HistoryEst int
 	// NewEst is the estimated new input tokens.
 	NewEst int
+	// CompletionEst is the estimated output tokens (from streamed content length).
+	CompletionEst int
 }
 
 func (AgentTurnUsage) eventTag() {}

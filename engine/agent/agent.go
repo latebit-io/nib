@@ -638,7 +638,7 @@ func (a *Agent) Cancel() {
 // to prevent indefinite blocking if the frontend stops draining.
 func (a *Agent) send(ev event.Event) {
 	switch ev.(type) {
-	case event.AgentToken, event.AgentStatus, event.AgentTurnUsage, event.AgentInputEstimate:
+	case event.AgentToken, event.AgentStatus, event.AgentTurnUsage, event.AgentInputEstimate, event.AgentCompacted:
 		select {
 		case a.events <- ev:
 		default:

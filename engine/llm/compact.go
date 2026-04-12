@@ -3,6 +3,7 @@ package llm
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // CompactMessages returns a copy of messages with old tool results truncated
@@ -87,7 +88,7 @@ func buildToolNameMap(messages []Message) map[string]string {
 // or command output start), then appends a size note.
 func truncateToolResult(toolName, content string) string {
 	lines := strings.Count(content, "\n") + 1
-	chars := len(content)
+	chars := utf8.RuneCountInString(content)
 
 	var b strings.Builder
 	if toolName != "" {
@@ -97,7 +98,10 @@ func truncateToolResult(toolName, content string) string {
 	}
 	fmt.Fprintf(&b, "%d lines, %d chars, truncated]\n", lines, chars)
 
-	// Keep first line as a preview.
+	// Keep the first line as a preview when the content spans multiple lines
+	// and the first line is short enough to be useful. Single-line content
+	// that exceeds minBytes is typically a long blob (base64, minified JSON)
+	// where a partial preview adds no value.
 	if first, _, ok := strings.Cut(content, "\n"); ok && len(first) <= 200 {
 		b.WriteString(first)
 	}

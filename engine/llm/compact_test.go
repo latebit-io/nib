@@ -11,13 +11,12 @@ func TestCompactMessages_NoCompactionWhenFewTurns(t *testing.T) {
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "hi"},
 	}
-	got := CompactMessages(msgs, 2, 100)
+	got, changed := CompactMessages(msgs, 2, 100)
+	if changed {
+		t.Error("expected changed=false when not enough turns to compact")
+	}
 	if len(got) != len(msgs) {
 		t.Fatalf("expected %d messages, got %d", len(msgs), len(got))
-	}
-	// Should return original slice when nothing to compact.
-	if &got[0] != &msgs[0] {
-		t.Error("expected original slice returned when no compaction needed")
 	}
 }
 
@@ -44,7 +43,10 @@ func TestCompactMessages_TruncatesOldToolResults(t *testing.T) {
 		{Role: "assistant", Content: "sure"},
 	}
 
-	got := CompactMessages(msgs, 2, 100)
+	got, changed := CompactMessages(msgs, 2, 100)
+	if !changed {
+		t.Fatal("expected changed=true when old tool results are truncated")
+	}
 	if len(got) != len(msgs) {
 		t.Fatalf("expected %d messages, got %d", len(msgs), len(got))
 	}
@@ -86,14 +88,13 @@ func TestCompactMessages_PreservesSmallToolResults(t *testing.T) {
 		{Role: "assistant", Content: "sure"},
 	}
 
-	got := CompactMessages(msgs, 1, 100)
+	got, changed := CompactMessages(msgs, 1, 100)
+	if changed {
+		t.Error("expected changed=false when no tool results exceed minBytes")
+	}
 	// Small tool result (19 bytes < 100) should not be truncated.
 	if got[3].Content != "navigated to line 5" {
 		t.Errorf("small tool result should be preserved, got %q", got[3].Content)
-	}
-	// Returns original slice since nothing was actually compacted.
-	if &got[0] != &msgs[0] {
-		t.Error("should return original slice when no content was truncated")
 	}
 }
 
@@ -120,7 +121,10 @@ func TestCompactMessages_KeepTurnsOne(t *testing.T) {
 		{Role: "assistant", Content: "a5"},
 	}
 
-	got := CompactMessages(msgs, 1, 100)
+	got, changed := CompactMessages(msgs, 1, 100)
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
 
 	// Both old tool results should be truncated.
 	if !strings.Contains(got[3].Content, "truncated") {
@@ -154,7 +158,10 @@ func TestCompactMessages_MultipleToolCallsPerTurn(t *testing.T) {
 		{Role: "assistant", Content: "done"},
 	}
 
-	got := CompactMessages(msgs, 1, 50)
+	got, changed := CompactMessages(msgs, 1, 50)
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
 	if !strings.Contains(got[3].Content, "read_file") {
 		t.Error("tool a stub should mention read_file")
 	}
@@ -181,7 +188,10 @@ func TestCompactMessages_PreservesAssistantContent(t *testing.T) {
 		{Role: "assistant", Content: "answer"},
 	}
 
-	got := CompactMessages(msgs, 1, 100)
+	got, changed := CompactMessages(msgs, 1, 100)
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
 	// Old assistant content should be preserved (not truncated).
 	if got[2].Content != "detailed reasoning about the problem" {
 		t.Error("assistant content should be preserved")
@@ -200,7 +210,10 @@ func TestCompactMessages_EmptyOrMinimal(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := CompactMessages(tt.msgs, 2, 100)
+			got, changed := CompactMessages(tt.msgs, 2, 100)
+			if changed {
+				t.Error("expected changed=false for minimal input")
+			}
 			if len(got) != len(tt.msgs) {
 				t.Errorf("expected %d messages, got %d", len(tt.msgs), len(got))
 			}

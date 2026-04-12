@@ -819,9 +819,9 @@ func (a *Agent) maybeCompact(messages []llm.Message, toolDefs []llm.ToolDef) []l
 	if est.History < compactHistoryThreshold {
 		return messages
 	}
-	compacted := llm.CompactMessages(messages, compactKeepTurns, compactMinBytes)
-	if &compacted[0] == &messages[0] {
-		return messages // nothing was actually compacted
+	compacted, changed := llm.CompactMessages(messages, compactKeepTurns, compactMinBytes)
+	if !changed {
+		return messages
 	}
 	afterEst := llm.EstimateMessageTokens(compacted, toolDefs)
 	a.send(event.AgentCompacted{

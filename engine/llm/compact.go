@@ -16,11 +16,12 @@ import (
 // the next user message. keepTurns=2 means the last two user messages and
 // all subsequent assistant/tool messages are kept verbatim.
 //
-// Returns the original slice unmodified if compaction is not needed
-// (fewer turns than keepTurns, or no tool results to truncate).
-func CompactMessages(messages []Message, keepTurns, minBytes int) []Message {
+// Returns the (possibly compacted) message slice and a bool indicating
+// whether any content was actually truncated. When false, the returned
+// slice is the original unmodified input.
+func CompactMessages(messages []Message, keepTurns, minBytes int) ([]Message, bool) {
 	if len(messages) < 3 || keepTurns < 1 {
-		return messages
+		return messages, false
 	}
 
 	// Find user message indices (skip system message at 0).
@@ -33,7 +34,7 @@ func CompactMessages(messages []Message, keepTurns, minBytes int) []Message {
 
 	// Not enough turns to compact — keep everything.
 	if len(userIndices) <= keepTurns {
-		return messages
+		return messages, false
 	}
 
 	// The keep boundary: everything from this index onward is preserved.
@@ -66,9 +67,9 @@ func CompactMessages(messages []Message, keepTurns, minBytes int) []Message {
 	}
 
 	if !compacted {
-		return messages
+		return messages, false
 	}
-	return result
+	return result, true
 }
 
 // buildToolNameMap extracts tool call IDs and their function names from

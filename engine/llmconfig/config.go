@@ -24,6 +24,10 @@ type Profile struct {
 	// Use a pointer to distinguish "not set" from "explicitly false" during
 	// config merging — nil means inherit from the lower-priority layer.
 	PromptCaching *bool `json:"prompt_caching,omitempty"`
+	// OAuthProvider identifies the OAuth provider for subscription-based auth
+	// (e.g., "openai" for ChatGPT, "copilot" for GitHub Copilot).
+	// When set, auth uses OAuth tokens instead of the APIKeyEnv static key.
+	OAuthProvider string `json:"oauth_provider,omitempty"`
 }
 
 // Config represents the on-disk shape of an LLM configuration file.
@@ -54,6 +58,13 @@ type Resolved struct {
 	// PromptCaching indicates whether cache_control annotations should be
 	// added to LLM requests.
 	PromptCaching bool
+	// OAuthProvider identifies the OAuth provider when using subscription-based
+	// auth (e.g., "openai", "copilot"). Empty means static API key auth.
+	OAuthProvider string
+	// Auth is an optional pre-configured authenticator. When set, NewProvider
+	// uses it instead of creating a StaticKeyAuth from apiKey. This is set
+	// by the OAuth wiring layer after a successful login.
+	Auth llm.Auth
 }
 
 // DisplayModel returns a short display name for the model.
@@ -66,16 +77,19 @@ func (r *Resolved) DisplayModel() string {
 }
 
 // HasProvider reports whether enough configuration exists to create
-// an LLM provider (at minimum, a non-empty API key).
-func (r *Resolved) HasProvider() bool { return r.apiKey != "" }
+// an LLM provider (either a static API key or an OAuth authenticator).
+func (r *Resolved) HasProvider() bool { return r.apiKey != "" || r.Auth != nil }
 
 // NewProvider creates an LLM provider from the resolved configuration.
-// Returns nil if no API key is available.
+// Returns nil if no API key is available and no OAuth auth is set.
 func (r *Resolved) NewProvider() llm.Provider {
+	if r.Auth != nil {
+		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching)
+	}
 	if r.apiKey == "" {
 		return nil
 	}
-	return llm.NewAgentAPI(r.BaseURL, r.Model, r.apiKey, r.PromptCaching)
+	return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching)
 }
 
 // ProfileNames returns the sorted list of profile names in the config.

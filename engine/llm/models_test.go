@@ -20,12 +20,14 @@ func newModelServer(t *testing.T, status int, body, wantAuth string) *AgentAPI {
 		_, _ = w.Write([]byte(body)) // test server, error irrelevant
 	}))
 	t.Cleanup(srv.Close)
-	key := ""
+	var auth Auth
 	if wantAuth != "" {
 		// Extract key from "Bearer <key>".
-		key = wantAuth[len("Bearer "):]
+		auth = StaticKeyAuth(wantAuth[len("Bearer "):])
+	} else {
+		auth = StaticKeyAuth("")
 	}
-	return NewAgentAPI(srv.URL, "test-model", key, false)
+	return NewAgentAPI(srv.URL, "test-model", auth, false)
 }
 
 func TestListModels(t *testing.T) {

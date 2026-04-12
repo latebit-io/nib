@@ -17,6 +17,7 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
+	"github.com/latebit-io/junto/engine/oauth"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/styleconfig"
 	"github.com/latebit-io/junto/engine/wire"
@@ -126,7 +127,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	// Create LLM provider and agent from configuration.
-	provider, llmCfg, llmResolved := wire.NewProvider(projectRoot)
+	pr := wire.NewProvider(projectRoot)
+	provider, llmCfg, llmResolved := pr.Provider, pr.Config, pr.Resolved
 	if llmResolved != nil {
 		sess.SetLLMInfo(llmResolved.Model, llmResolved.Profile)
 	}
@@ -169,9 +171,41 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if llmResolved != nil && llmResolved.HasProvider() {
 		app.AgentPane.SetModelLabel(llmResolved.Profile + ": " + llmResolved.DisplayModel())
 	}
+
+	// Wire OAuth detection — always available, even without an initial provider.
+	if pr.OAuthStore != nil {
+		app.IsOAuthProfile = func(profile string) string {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return ""
+			}
+			return resolved.OAuthProvider
+		}
+
+		app.ConnectOAuth = func(profile string) (string, func() error, error) {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return "", nil, fmt.Errorf("unknown profile %q", profile)
+			}
+
+			providerID := oauth.ProviderID(resolved.OAuthProvider)
+			switch providerID {
+			case oauth.ProviderOpenAI:
+				return connectOpenAI(pr.OAuthStore)
+			case oauth.ProviderCopilot:
+				return connectCopilot(pr.OAuthStore)
+			default:
+				return "", nil, fmt.Errorf("unknown OAuth provider: %s", resolved.OAuthProvider)
+			}
+		}
+	}
+
+	// Profile names are always available — even without a provider,
+	// the user can browse profiles and connect OAuth ones.
+	app.LLMProfileNames = llmCfg.ProfileNames
+
 	// Wire model listing and switching — closures capture ag, llmCfg, and llmResolved.
 	if provider != nil && ag != nil {
-		app.LLMProfileNames = llmCfg.ProfileNames
 
 		app.ListModels = func(profile string) ([]ui.ModelSelectorItem, error) {
 			// Resolve the profile to get its base_url and key.
@@ -180,6 +214,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				// Fallback: use current provider (env-only config).
 				resolved = llmResolved
 			}
+			wire.WireOAuthProfile(resolved, pr.OAuthStore)
 			p := resolved.NewProvider()
 			if p == nil {
 				return nil, fmt.Errorf("no API key for profile %q", profile)
@@ -208,6 +243,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				resolved = llmResolved
 			}
 			resolved.Model = modelID
+			wire.WireOAuthProfile(resolved, pr.OAuthStore)
 			newProvider := resolved.NewProvider()
 			if newProvider == nil {
 				return "", fmt.Errorf("no API key available for profile %q", profile)
@@ -365,4 +401,38 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	_, err := p.Run()
 	shutdown()
 	return err
+}
+
+// connectOpenAI starts the OpenAI browser-based OAuth flow.
+// Returns the instruction to show the user, a wait function that blocks until
+// auth completes, and an error if the flow couldn't be started.
+func connectOpenAI(store *oauth.Store) (string, func() error, error) {
+	instruction := "Opening browser for OpenAI authentication..."
+	wait := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		return oauth.OpenAIBrowserFlow(ctx, store, nil)
+	}
+	return instruction, wait, nil
+}
+
+// connectCopilot starts the GitHub Copilot device code flow.
+// Requests the device code synchronously, returns the instruction with the code,
+// then the wait function polls until the user authorizes.
+func connectCopilot(store *oauth.Store) (string, func() error, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dc, err := oauth.RequestCopilotDeviceCode(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("request device code: %w", err)
+	}
+
+	instruction := fmt.Sprintf("Visit %s and enter code: %s", dc.VerificationURI, dc.UserCode)
+	wait := func() error {
+		pollCtx, pollCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer pollCancel()
+		return oauth.CompleteCopilotDeviceFlow(pollCtx, store, dc)
+	}
+	return instruction, wait, nil
 }

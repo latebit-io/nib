@@ -166,7 +166,8 @@ func run() error {
 	}
 
 	// Create LLM provider — required for headless mode.
-	provider, llmCfg, llmResolved := wire.NewProvider(projectRoot)
+	pr := wire.NewProvider(projectRoot)
+	provider, llmCfg, llmResolved := pr.Provider, pr.Config, pr.Resolved
 	if provider == nil {
 		hint := "set LLM_API_KEY or configure ~/.config/junto/llm.json"
 		if llmResolved != nil && llmResolved.APIKeyEnv != "" {

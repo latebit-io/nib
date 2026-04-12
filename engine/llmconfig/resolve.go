@@ -36,6 +36,16 @@ var builtinProfiles = map[string]Profile{
 		Model:     "MiniMax-M2.7",
 		APIKeyEnv: "MINIMAX_API_KEY",
 	},
+	"chatgpt": {
+		BaseURL:       "https://chatgpt.com/backend-api/codex",
+		Model:         "gpt-4.1",
+		OAuthProvider: "openai",
+	},
+	"copilot": {
+		BaseURL:       "https://api.githubcopilot.com/v1",
+		Model:         "gpt-4.1",
+		OAuthProvider: "copilot",
+	},
 }
 
 // builtinFallbackOrder is the priority when auto-selecting a built-in profile
@@ -90,10 +100,11 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 		return nil
 	}
 	r := &Resolved{
-		BaseURL:   p.BaseURL,
-		Model:     p.Model,
-		APIKeyEnv: p.APIKeyEnv,
-		Profile:   name,
+		BaseURL:       p.BaseURL,
+		Model:         p.Model,
+		APIKeyEnv:     p.APIKeyEnv,
+		Profile:       name,
+		OAuthProvider: p.OAuthProvider,
 	}
 	if p.PromptCaching != nil {
 		r.PromptCaching = *p.PromptCaching
@@ -138,6 +149,7 @@ func applyProfile(r *Resolved, p Profile, name string) {
 		r.APIKeyEnv = p.APIKeyEnv
 	}
 	r.PromptCaching = p.PromptCaching != nil && *p.PromptCaching
+	r.OAuthProvider = p.OAuthProvider
 }
 
 // resolve converts a merged Config into a Resolved by looking up the active
@@ -240,6 +252,9 @@ func mergeConfigs(dst, src *Config) {
 		}
 		if sp.PromptCaching != nil {
 			dp.PromptCaching = sp.PromptCaching
+		}
+		if sp.OAuthProvider != "" {
+			dp.OAuthProvider = sp.OAuthProvider
 		}
 		dst.Profiles[name] = dp
 	}

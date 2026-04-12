@@ -41,6 +41,12 @@ type goToDefResultMsg struct {
 	originLine, originCol int
 }
 
+// oauthConnectResultMsg delivers the result of an OAuth connection flow.
+type oauthConnectResultMsg struct {
+	profile string
+	err     error
+}
+
 // completionResultMsg delivers completion results from an async LSP request.
 type completionResultMsg struct {
 	items        []lang.CompletionItem
@@ -126,6 +132,17 @@ type AppModel struct {
 	// LLMProfileNames returns the available profile names.
 	// Set by the entry point — nil when no LLM is configured.
 	LLMProfileNames func() []string
+
+	// ConnectOAuth starts an OAuth connection flow for the given profile.
+	// Blocks until authentication completes or the context is cancelled.
+	// Returns a user-facing instruction string (e.g., "Visit URL and enter code: XXXX")
+	// via the instruction channel before blocking on the poll.
+	// Set by the entry point — nil when OAuth is not available.
+	ConnectOAuth func(profile string) (instruction string, wait func() error, err error)
+
+	// IsOAuthProfile reports whether a profile uses OAuth authentication.
+	// Returns the oauth provider ID (e.g., "openai", "copilot") or "" if not OAuth.
+	IsOAuthProfile func(profile string) string
 
 	// CycleStyle advances to the next available coding style and returns its
 	// display name (or "" if styles are exhausted and cycling disables enforcement).
@@ -434,6 +451,27 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// OAuth connection completed — re-trigger model list for the profile
+	case oauthConnectResultMsg:
+		if msg.err != nil {
+			m.AgentPane.AppendMeta("\n[connection failed: " + msg.err.Error() + "]\n")
+			return m, nil
+		}
+		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
+		// Re-fetch models now that we're authenticated.
+		profile := msg.profile
+		m.pendingModelProfile = profile
+		listFn := m.ListModels
+		if listFn != nil {
+			return m, func() tea.Msg {
+				items, err := listFn(profile)
+				return modelListMsg{profile: profile, items: items, err: err}
+			}
+		}
+		// No agent running — user needs to restart to pick up the new auth.
+		m.AgentPane.AppendMeta("[restart Junto to use " + msg.profile + " — token saved for next launch]\n")
+		return m, nil
+
 	// Model list fetched — open the inline selector in the agent pane
 	case modelListMsg:
 		// Drop stale responses from superseded requests.
@@ -441,6 +479,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
+			// If this is an OAuth profile that needs connection, offer to connect.
+			if m.IsOAuthProfile != nil && m.ConnectOAuth != nil {
+				if providerID := m.IsOAuthProfile(msg.profile); providerID != "" {
+					return m.startOAuthConnect(msg.profile)
+				}
+			}
 			m.AgentPane.AppendMeta("\n[failed to list models: " + msg.err.Error() + "]\n")
 			return m, nil
 		}
@@ -1038,8 +1082,20 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // openModelSelector opens the model selector overlay.
 // If multiple profiles exist, shows profile picker first.
 // If one profile, fetches models directly.
+// If no LLM is configured but OAuth profiles exist, offers connection.
 func (m *AppModel) openModelSelector() tea.Cmd {
 	if m.ListModels == nil {
+		// No provider configured — check if we can offer OAuth connection.
+		if m.ConnectOAuth != nil && m.IsOAuthProfile != nil && m.LLMProfileNames != nil {
+			profiles := m.LLMProfileNames()
+			for _, p := range profiles {
+				if providerID := m.IsOAuthProfile(p); providerID != "" {
+					m.AgentPane.AppendMeta("\n[no LLM configured — connecting to " + p + "...]\n")
+					_, cmd := m.startOAuthConnect(p)
+					return cmd
+				}
+			}
+		}
 		globalPath := llmconfig.GlobalConfigPath()
 		if globalPath == "" {
 			globalPath = "<user-config-dir>/junto/llm.json"
@@ -1055,6 +1111,22 @@ func (m *AppModel) openModelSelector() tea.Cmd {
 	return func() tea.Msg {
 		items, err := listFn(profile)
 		return modelListMsg{profile: profile, items: items, err: err}
+	}
+}
+
+// startOAuthConnect initiates an OAuth connection flow for the given profile.
+// Shows the auth instruction in the agent pane, then polls in the background.
+func (m *AppModel) startOAuthConnect(profile string) (tea.Model, tea.Cmd) {
+	connectFn := m.ConnectOAuth
+	instruction, wait, err := connectFn(profile)
+	if err != nil {
+		m.AgentPane.AppendMeta("\n[connection failed: " + err.Error() + "]\n")
+		return m, nil
+	}
+	m.AgentPane.AppendMeta("\n[" + instruction + "]\n")
+	m.AgentPane.AppendMeta("[waiting for authorization...]\n")
+	return m, func() tea.Msg {
+		return oauthConnectResultMsg{profile: profile, err: wait()}
 	}
 }
 

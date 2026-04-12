@@ -29,9 +29,9 @@ var (
 	redirectRe = regexp.MustCompile(`>(?:>|\|)?\s*(\S+)`)
 
 	// inPlaceEditRe matches sed/perl in-place flags: -i, combined short flags
-	// like -pi/-ni/-Ei, and the GNU long form --in-place. [^|;&]* prevents
-	// matching flags in a different command after a pipe or semicolon.
-	inPlaceEditRe = regexp.MustCompile(`\b(sed|perl)\b[^|;&]*(?:--in-place|-[a-zA-Z]*i)\b`)
+	// like -pi/-ni/-Ei/-0777pi, and the GNU long form --in-place. [^|;&]*
+	// prevents matching flags in a different command after a pipe or semicolon.
+	inPlaceEditRe = regexp.MustCompile(`\b(sed|perl)\b[^|;&]*(?:--in-place|-[a-zA-Z0-9]*i)\b`)
 
 	// teeRe matches tee with an optional -a flag followed by a file target.
 	teeRe = regexp.MustCompile(`\btee\s+(?:-a\s+)?(\S+)`)
@@ -41,6 +41,9 @@ var (
 // project file. Targets like /dev/null, fd dups (&1), /tmp/, and process
 // substitutions are considered safe.
 func safeRedirectTarget(target string) bool {
+	// Strip shell quotes so > "/tmp/file" is recognized as a /tmp/ target.
+	target = strings.Trim(target, `"'`)
+
 	switch {
 	case strings.HasPrefix(target, "&"):
 		return true // fd dup: >&1, >&2

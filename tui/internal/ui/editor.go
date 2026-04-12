@@ -2125,7 +2125,7 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Edito
 	return nil
 }
 
-// styleForTokenKind maps engine editor.TokenKind to a pre-allocated lipgloss.Style.
+// styleForTokenKind maps highlight.TokenKind to a pre-allocated lipgloss.Style.
 func styleForTokenKind(kind highlight.TokenKind) lipgloss.Style {
 	if s, ok := tokenKindStyles[kind]; ok {
 		return s

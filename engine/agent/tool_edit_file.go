@@ -261,7 +261,14 @@ func (t *EditFileTool) resolveContent(path string) (content, canon string, err e
 	content, err = t.cache.LoadOrRead(canon, func() (string, error) {
 		return t.workspace.ReadFile(path)
 	})
-	return content, canon, err
+	if err != nil {
+		return "", canon, err
+	}
+	if len(content) > maxDiffInputBytes {
+		t.cache.Invalidate(canon) // don't retain oversized files in cache
+		return "", canon, fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxDiffInputBytes)
+	}
+	return content, canon, nil
 }
 
 // validateSearchMatch checks that the search text appears exactly once in

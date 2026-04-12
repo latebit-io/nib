@@ -356,14 +356,13 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	)
 	app.SetProgram(p)
 
-	if _, err := p.Run(); err != nil {
+	shutdown := func() {
 		app.CloseWatcher()
 		appCancel() // signal agent goroutines before teardown
 		sess.Close()
-		return err
 	}
-	app.CloseWatcher()
-	appCancel() // signal agent goroutines before teardown
-	sess.Close()
-	return nil
+
+	_, err := p.Run()
+	shutdown()
+	return err
 }

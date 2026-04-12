@@ -50,7 +50,10 @@ func (w *WorkTreeManager) SetStore(store memoryStore) {
 		return
 	}
 	if err := w.load(); err != nil {
-		slog.Warn("work tree: failed to load", "err", err)
+		// Log but don't fail startup — work tree is optional. tree=nil is
+		// a valid state; mutation methods (SetActiveGoal, etc.) return
+		// "not loaded" errors if the tree is absent.
+		slog.Warn("work tree: initial load failed", "err", err)
 	}
 }
 
@@ -185,6 +188,9 @@ func (w *WorkTreeManager) ApplySnapshot(snap WorkTreeSnapshot) bool {
 }
 
 // load fetches project.md from demarkus and parses it into the work tree.
+// Note: there is a small TOCTOU window between capturing store (under RLock)
+// and updating state (under Lock). In practice SetStore is called once at
+// session init, so a concurrent store swap cannot happen.
 func (w *WorkTreeManager) load() error {
 	w.mu.RLock()
 	store := w.store

@@ -88,6 +88,11 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 		return textResult("Error: command is required")
 	}
 
+	if msg := fileWriteGuard(args.Command); msg != "" {
+		slog.Warn("bash: blocked file-writing command", "command", args.Command)
+		return textResult(msg)
+	}
+
 	timeout := defaultBashTimeout
 	if args.Timeout > 0 {
 		timeout = time.Duration(args.Timeout) * time.Second

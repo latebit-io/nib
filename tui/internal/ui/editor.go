@@ -1121,7 +1121,11 @@ func (m *EditorModel) renderAddedLine(
 			aTagCursor = -1
 			aTagSel    = -2
 		)
-		aColTags := make([]int, contentW)
+		if cap(m.colTags) < contentW {
+			m.colTags = make([]int, contentW)
+		}
+		aColTags := m.colTags[:contentW]
+		clear(aColTags)
 		for j := range contentW {
 			switch {
 			case j == displayCursorCol:

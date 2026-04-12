@@ -52,27 +52,32 @@ var (
 )
 
 // ModelSelectorModel encapsulates the inline model selector widget.
-// It replaces the agent pane input area when active.
+// It replaces the agent pane input area when active. All state is
+// unexported — mutations go through Open/Close/Update to preserve
+// invariants (e.g. Selected always in range, layout recomputation).
 type ModelSelectorModel struct {
-	Active   bool
-	Items    []ModelSelectorItem
-	Selected int
-	Current  string   // current model ID (highlighted with ●)
-	Profile  string   // profile name shown in title
-	Profiles []string // all available profiles (for Tab cycling)
+	active   bool
+	items    []ModelSelectorItem
+	selected int
+	current  string   // current model ID (highlighted with ●)
+	profile  string   // profile name shown in title
+	profiles []string // all available profiles (for Tab cycling)
 }
+
+// IsActive reports whether the model selector is currently open.
+func (s *ModelSelectorModel) IsActive() bool { return s.active }
 
 // Open activates the model selector with the given items and context.
 func (s *ModelSelectorModel) Open(items []ModelSelectorItem, profile, currentModel string, profiles []string) {
-	s.Active = true
-	s.Items = items
-	s.Profile = profile
-	s.Current = currentModel
-	s.Profiles = profiles
-	s.Selected = 0
+	s.active = true
+	s.items = items
+	s.profile = profile
+	s.current = currentModel
+	s.profiles = profiles
+	s.selected = 0
 	for i, item := range items {
 		if item.ID == currentModel {
-			s.Selected = i
+			s.selected = i
 			break
 		}
 	}
@@ -80,8 +85,8 @@ func (s *ModelSelectorModel) Open(items []ModelSelectorItem, profile, currentMod
 
 // Close deactivates the model selector and clears items.
 func (s *ModelSelectorModel) Close() {
-	s.Active = false
-	s.Items = nil
+	s.active = false
+	s.items = nil
 }
 
 // Update handles key input for the model selector.
@@ -92,9 +97,9 @@ func (s *ModelSelectorModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 		s.Close()
 		return func() tea.Msg { return ModelSelectorResultMsg{Cancelled: true} }
 	case tea.KeyEnter:
-		if s.Selected < len(s.Items) {
-			item := s.Items[s.Selected]
-			profile := s.Profile
+		if s.selected < len(s.items) {
+			item := s.items[s.selected]
+			profile := s.profile
 			s.Close()
 			return func() tea.Msg {
 				return ModelSelectorResultMsg{Profile: profile, ModelID: item.ID}
@@ -102,27 +107,27 @@ func (s *ModelSelectorModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case tea.KeyTab:
-		if len(s.Profiles) > 1 {
+		if len(s.profiles) > 1 {
 			next := s.nextProfile()
-			s.Profile = next
-			s.Items = nil
-			s.Selected = 0
+			s.profile = next
+			s.items = nil
+			s.selected = 0
 			return func() tea.Msg {
 				return modelSelSwitchProfileMsg{profile: next}
 			}
 		}
 		return nil
 	case tea.KeyUp:
-		if s.Selected > 0 {
-			s.Selected--
+		if s.selected > 0 {
+			s.selected--
 		}
 		return nil
 	case tea.KeyDown:
-		if len(s.Items) == 0 {
+		if len(s.items) == 0 {
 			return nil
 		}
-		if s.Selected < len(s.Items)-1 {
-			s.Selected++
+		if s.selected < len(s.items)-1 {
+			s.selected++
 		}
 		return nil
 	}
@@ -131,12 +136,12 @@ func (s *ModelSelectorModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 
 // nextProfile returns the profile after the current one, wrapping around.
 func (s *ModelSelectorModel) nextProfile() string {
-	for i, p := range s.Profiles {
-		if p == s.Profile {
-			return s.Profiles[(i+1)%len(s.Profiles)]
+	for i, p := range s.profiles {
+		if p == s.profile {
+			return s.profiles[(i+1)%len(s.profiles)]
 		}
 	}
-	return s.Profiles[0]
+	return s.profiles[0]
 }
 
 // Height returns the number of rows the selector needs, given the pane height.
@@ -165,8 +170,8 @@ func (s *ModelSelectorModel) Render(output []string, row *int, width, height, st
 	// Title row showing provider/profile.
 	if totalRows > 0 && *row < height {
 		title := " Select Model"
-		if s.Profile != "" {
-			title = " " + sanitizeInlineDisplay(s.Profile) + " — Select Model"
+		if s.profile != "" {
+			title = " " + sanitizeInlineDisplay(s.profile) + " — Select Model"
 		}
 		title = runewidth.Truncate(title, width, "…")
 		padW := width - runewidth.StringWidth(title)
@@ -191,8 +196,8 @@ func (s *ModelSelectorModel) Render(output []string, row *int, width, height, st
 		return
 	}
 	scrollOff := 0
-	if s.Selected >= visible {
-		scrollOff = s.Selected - visible + 1
+	if s.selected >= visible {
+		scrollOff = s.selected - visible + 1
 	}
 
 	for i := range visible {
@@ -200,10 +205,10 @@ func (s *ModelSelectorModel) Render(output []string, row *int, width, height, st
 			break
 		}
 		idx := scrollOff + i
-		if idx < len(s.Items) {
-			item := s.Items[idx]
+		if idx < len(s.items) {
+			item := s.items[idx]
 			indicator := "  "
-			if item.ID == s.Current {
+			if item.ID == s.current {
 				indicator = "● "
 			}
 			label := indicator + sanitizeInlineDisplay(item.Name)
@@ -212,9 +217,9 @@ func (s *ModelSelectorModel) Render(output []string, row *int, width, height, st
 			if padW > 0 {
 				label += strings.Repeat(" ", padW)
 			}
-			if idx == s.Selected {
+			if idx == s.selected {
 				output[*row] = modelSelSelectedStyle.Render(label)
-			} else if item.ID == s.Current {
+			} else if item.ID == s.current {
 				output[*row] = modelSelCurrentStyle.Render(label)
 			} else {
 				output[*row] = modelSelNormalStyle.Render(label)
@@ -228,7 +233,7 @@ func (s *ModelSelectorModel) Render(output []string, row *int, width, height, st
 	// Hint row.
 	if hintRows > 0 && *row < height {
 		hint := " ↑↓ navigate · Enter select · Esc cancel"
-		if len(s.Profiles) > 1 {
+		if len(s.profiles) > 1 {
 			hint = " ↑↓ navigate · Tab provider · Enter select · Esc cancel"
 		}
 		hint = runewidth.Truncate(hint, width, "")

@@ -163,14 +163,21 @@ func (w *WorkTreeManager) FetchSnapshot() WorkTreeSnapshot {
 	}
 }
 
-// ApplySnapshot applies a previously fetched snapshot.
-// Must be called from the caller's goroutine.
-func (w *WorkTreeManager) ApplySnapshot(snap WorkTreeSnapshot) {
+// ApplySnapshot applies a previously fetched snapshot, unless local
+// modifications occurred between the fetch and apply (detected via dirty
+// flag). Returns true if the snapshot was applied, false if skipped to
+// preserve local changes.
+func (w *WorkTreeManager) ApplySnapshot(snap WorkTreeSnapshot) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.dirty {
+		// Local mutation happened since the fetch — don't clobber it.
+		return false
+	}
 	w.tree = snap.Tree
 	w.ver = snap.Version
 	w.dirty = false
+	return true
 }
 
 // load fetches project.md from demarkus and parses it into the work tree.

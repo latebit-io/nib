@@ -91,9 +91,13 @@ func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 const maxFileSize = 10 * 1024 * 1024 // 10 MB
 
 // loadContent returns file content from cache or disk, populating the cache on miss.
+// The closure captures the original relative path so ReadFile receives the
+// documented relative-path input while the cache is keyed by canonical path.
 func (t *ReadFileTool) loadContent(path string) (string, error) {
 	canon := t.workspace.CanonPath(path)
-	content, err := t.cache.LoadOrRead(canon, t.workspace.ReadFile)
+	content, err := t.cache.LoadOrRead(canon, func(_ string) (string, error) {
+		return t.workspace.ReadFile(path)
+	})
 	if err != nil {
 		return "", err
 	}

@@ -316,6 +316,7 @@ func (m *AgentPaneModel) SetModelLabel(label string) { m.modelLabel = label }
 // profiles is the full list of available profiles (for Tab cycling); may be nil.
 func (m *AgentPaneModel) OpenModelSelector(items []ModelSelectorItem, profile, currentModel string, profiles []string) {
 	m.ModelSel.Open(items, profile, currentModel, profiles)
+	m.inputActive = false // selector replaces input area — deactivate textarea
 	m.recomputeInputLayout()
 }
 
@@ -327,13 +328,13 @@ func (m *AgentPaneModel) CloseModelSelector() {
 }
 
 // IsModelSelectorActive reports whether the inline model selector is open.
-func (m *AgentPaneModel) IsModelSelectorActive() bool { return m.ModelSel.Active }
+func (m *AgentPaneModel) IsModelSelectorActive() bool { return m.ModelSel.IsActive() }
 
 // UpdateModelSelector handles key input for the inline model selector.
 // Returns a tea.Cmd if a selection or cancellation occurred.
 func (m *AgentPaneModel) UpdateModelSelector(msg tea.KeyPressMsg) tea.Cmd {
 	cmd := m.ModelSel.Update(msg)
-	if !m.ModelSel.Active {
+	if !m.ModelSel.IsActive() {
 		// Selector was closed by the update — recompute layout.
 		m.recomputeInputLayout()
 		m.clampScroll()
@@ -388,7 +389,7 @@ func (m *AgentPaneModel) SetSize(width, height int) {
 func (m *AgentPaneModel) recomputeInputLayout() {
 	// Input area sits between the separator line and the status line.
 	bottomH := m.inputHeight()
-	if m.ModelSel.Active {
+	if m.ModelSel.IsActive() {
 		bottomH = m.modelSelHeight()
 	}
 	contentEnd := m.height - bottomH
@@ -973,12 +974,16 @@ func (m *AgentPaneModel) Clear() {
 	m.status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
 	m.usage = usageState{}
+	if m.ModelSel.IsActive() {
+		m.ModelSel.Close()
+		m.recomputeInputLayout()
+	}
 }
 
 // VisibleLines returns the number of content lines visible above the input area.
 func (m *AgentPaneModel) VisibleLines() int {
 	bottomH := m.inputHeight()
-	if m.ModelSel.Active {
+	if m.ModelSel.IsActive() {
 		bottomH = m.modelSelHeight()
 	}
 	h := m.height - bottomH
@@ -1323,7 +1328,7 @@ func (m *AgentPaneModel) Render() string {
 
 	// Fill remaining content area
 	bottomH := m.inputHeight()
-	if m.ModelSel.Active {
+	if m.ModelSel.IsActive() {
 		bottomH = m.modelSelHeight()
 	}
 	contentEnd := m.height - bottomH
@@ -1339,7 +1344,7 @@ func (m *AgentPaneModel) Render() string {
 	}
 
 	// Model selector replaces the input area when active.
-	if m.ModelSel.Active {
+	if m.ModelSel.IsActive() {
 		m.renderModelSelector(output, &row)
 	} else {
 		m.renderInputArea(output, &row)

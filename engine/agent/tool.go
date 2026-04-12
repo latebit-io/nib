@@ -129,7 +129,7 @@ type FileReader interface {
 	ProjectRoot() string
 
 	// ReadFile returns a file's content from disk.
-	// Path is relative to the project root.
+	// Path should be relative to the project root.
 	ReadFile(path string) (string, error)
 
 	// ListFiles returns all project files (respects .gitignore).

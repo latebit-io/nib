@@ -1,6 +1,8 @@
 package session
 
 import (
+	"log/slog"
+
 	"github.com/latebit-io/junto/engine/project"
 )
 
@@ -57,6 +59,9 @@ func (s *Session) FetchWorkTreeSnapshot() WorkTreeSnapshot {
 }
 
 // ApplyWorkTreeSnapshot applies a previously fetched snapshot.
+// Skipped if local modifications occurred between the fetch and apply.
 func (s *Session) ApplyWorkTreeSnapshot(snap WorkTreeSnapshot) {
-	s.workTree.ApplySnapshot(snap)
+	if !s.workTree.ApplySnapshot(snap) {
+		slog.Debug("session: skipped stale work tree snapshot (local modifications pending)")
+	}
 }

@@ -32,9 +32,9 @@ func main() {
 
 // run wires together the engine, optional agent/LSP services, and the TUI.
 func run() error { //nolint:gocognit // wiring function — inherently sequential
-	// Application-level context — cancelled on SIGINT/SIGTERM so agent
-	// goroutines shut down cleanly instead of running until their next
-	// HTTP round-trip times out.
+	// Application-level context — cancelled when run() returns (after the
+	// TUI exits) so in-flight agent goroutines shut down promptly instead
+	// of running until their next HTTP round-trip times out.
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 	// Parse args: [--debug] [file]

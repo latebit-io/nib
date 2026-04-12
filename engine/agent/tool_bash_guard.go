@@ -14,13 +14,19 @@ import (
 // sed -i behavior, etc.). This guard catches the common accidental patterns
 // and returns an error message that steers the model toward the right tool.
 //
-// This is a heuristic, not a sandbox. A sufficiently creative command can
-// evade it (variable indirection, eval, etc.). Defense-in-depth comes from
-// the system prompt + this guard + the approval flow on edit_file.
+// This is a heuristic, not a sandbox. Known bypass vectors that require a
+// full shell parser to detect (accepted risks):
+//   - Command substitution: sed $(echo -i) 's/x/y/' file.go
+//   - Variable indirection: f=file.go; echo x > $f
+//   - eval / source: eval "echo x > file.go"
+//   - tee with safe first arg: tee /dev/null file2 (only first target checked)
+//
+// Defense-in-depth comes from the system prompt + this guard + the approval
+// flow on edit_file.
 
 var (
-	// redirectRe matches output redirects: > or >> followed by a target token.
-	redirectRe = regexp.MustCompile(`>{1,2}\s*(\S+)`)
+	// redirectRe matches output redirects: >, >>, or >| followed by a target token.
+	redirectRe = regexp.MustCompile(`>(?:>|\|)?\s*(\S+)`)
 
 	// inPlaceEditRe matches sed -i or perl -i (in-place file modification).
 	// [^|;&]* prevents matching -i in a different command after a pipe or semicolon.

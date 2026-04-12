@@ -47,6 +47,16 @@ func TestFileWriteGuard(t *testing.T) {
 		{name: "tee append to file", command: "echo test | tee -a build.log", blocked: true},
 		{name: "redirect to relative path", command: "ls > listing.txt", blocked: true},
 		{name: "redirect to subdir", command: "echo test > src/file.go", blocked: true},
+		{name: "clobber redirect", command: "echo test >| file.txt", blocked: true},
+		{name: "clobber no space", command: "echo test >|file.txt", blocked: true},
+
+		// --- Heuristic catches these despite indirect intent ---
+		{name: "sed with command sub containing -i", command: "sed $(echo -i) 's/x/y/' file.go", blocked: true},
+		{name: "redirect to variable", command: "f=file.go; echo x > $f", blocked: true},
+
+		// --- Known bypass vectors (accepted risk, documented) ---
+		// Only genuine bypasses that require a full shell parser to detect.
+		{name: "bypass: tee safe then unsafe", command: "cmd | tee /dev/null file2.go", blocked: false},
 	}
 
 	for _, tt := range tests {
@@ -67,9 +77,6 @@ func TestFileWriteGuardErrorMessage(t *testing.T) {
 	result := fileWriteGuard("echo hello > output.txt")
 	if result == "" {
 		t.Fatal("expected non-empty error")
-	}
-	if got := result; got == "" {
-		t.Fatal("expected error to mention target file")
 	}
 	// Should mention the file and the alternative tools.
 	for _, want := range []string{"output.txt", "edit_file", "write_file"} {

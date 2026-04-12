@@ -195,18 +195,18 @@ func openAIRequestDeviceCode(ctx context.Context) (*openAIDeviceCodeResp, error)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	var result struct {
@@ -248,13 +248,13 @@ func openAIPollDeviceAuth(ctx context.Context, deviceAuthID, userCode string, in
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := oauthClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
 
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		_ = resp.Body.Close()
+		_ = resp.Body.Close() // body already read; close error is not actionable
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -300,15 +300,19 @@ func openAIExchangeDeviceCode(ctx context.Context, authCode, codeVerifier string
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if err != nil {
 		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token exchange: HTTP %d", resp.StatusCode)
 	}
 
 	var tr tokenResponse
@@ -321,6 +325,9 @@ func openAIExchangeDeviceCode(ctx context.Context, authCode, codeVerifier string
 			desc = tr.Error
 		}
 		return nil, fmt.Errorf("token error: %s", desc)
+	}
+	if tr.AccessToken == "" {
+		return nil, fmt.Errorf("token exchange returned empty access token")
 	}
 	return &tr, nil
 }

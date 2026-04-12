@@ -38,6 +38,15 @@ type pkce struct {
 	challenge string
 }
 
+// randomState generates a cryptographically random state string for CSRF protection.
+func randomState() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // newPKCE generates a random PKCE verifier and its S256 challenge.
 func newPKCE() (*pkce, error) {
 	b := make([]byte, 32)
@@ -53,35 +62,36 @@ func newPKCE() (*pkce, error) {
 // BrowserFlow runs the Authorization Code + PKCE flow.
 // It starts a local HTTP server, opens the browser, waits for the callback,
 // and exchanges the auth code for tokens.
-func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCallbacks) (*tokenResponse, error) {
-	p, err := newPKCE()
+// callbackServer manages a local HTTP server that receives the OAuth callback.
+type callbackServer struct {
+	srv         *http.Server
+	redirectURI string
+	codeCh      chan string
+	errCh       chan error
+}
+
+// startCallbackServer binds a local listener and starts serving the callback handler.
+// Returns the server (for shutdown) and the redirect URI with the actual bound port.
+func startCallbackServer(port int, state string) (*callbackServer, error) {
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		return nil, err
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, fmt.Errorf("listen for OAuth callback: %w", err)
+		}
 	}
+	actualPort := listener.Addr().(*net.TCPAddr).Port
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/auth/callback", cfg.RedirectPort)
-
-	// Build authorization URL.
-	params := url.Values{
-		"client_id":             {cfg.ClientID},
-		"redirect_uri":          {redirectURI},
-		"response_type":         {"code"},
-		"scope":                 {strings.Join(cfg.Scopes, " ")},
-		"code_challenge":        {p.challenge},
-		"code_challenge_method": {"S256"},
-	}
-	for k, v := range cfg.ExtraParams {
-		params.Set(k, v)
-	}
-	authURL := cfg.AuthURL + "?" + params.Encode()
-
-	// Channel to receive the auth code from the callback.
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 
-	// Start local callback server.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != state {
+			errCh <- fmt.Errorf("oauth callback: state mismatch (possible CSRF)")
+			_, _ = fmt.Fprint(w, "<html><body><h1>Authentication failed</h1><p>State mismatch.</p></body></html>")
+			return
+		}
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			errMsg := r.URL.Query().Get("error")
@@ -96,15 +106,55 @@ func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCall
 		_, _ = fmt.Fprint(w, "<html><body><h1>Authentication successful!</h1><p>You can close this tab and return to Junto.</p></body></html>")
 	})
 
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.RedirectPort))
-	if err != nil {
-		return nil, fmt.Errorf("listen on port %d: %w", cfg.RedirectPort, err)
-	}
 	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(listener) }()
-	defer func() { _ = srv.Close() }()
+	go func() {
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			errCh <- fmt.Errorf("oauth callback server: %w", err)
+		}
+	}()
 
-	// Open browser.
+	return &callbackServer{
+		srv:         srv,
+		redirectURI: fmt.Sprintf("http://127.0.0.1:%d/auth/callback", actualPort),
+		codeCh:      codeCh,
+		errCh:       errCh,
+	}, nil
+}
+
+func (s *callbackServer) close() { _ = s.srv.Close() }
+
+func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCallbacks) (*tokenResponse, error) {
+	p, err := newPKCE()
+	if err != nil {
+		return nil, err
+	}
+
+	state, err := randomState()
+	if err != nil {
+		return nil, err
+	}
+
+	cb, err := startCallbackServer(cfg.RedirectPort, state)
+	if err != nil {
+		return nil, err
+	}
+	defer cb.close()
+
+	// Build authorization URL with the actual redirect URI.
+	params := url.Values{
+		"client_id":             {cfg.ClientID},
+		"redirect_uri":          {cb.redirectURI},
+		"response_type":         {"code"},
+		"scope":                 {strings.Join(cfg.Scopes, " ")},
+		"code_challenge":        {p.challenge},
+		"code_challenge_method": {"S256"},
+		"state":                 {state},
+	}
+	for k, v := range cfg.ExtraParams {
+		params.Set(k, v)
+	}
+	authURL := cfg.AuthURL + "?" + params.Encode()
+
 	if callbacks != nil && callbacks.OnBrowserOpen != nil {
 		callbacks.OnBrowserOpen(authURL)
 	}
@@ -115,15 +165,15 @@ func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCall
 	// Wait for callback or context cancellation.
 	var code string
 	select {
-	case code = <-codeCh:
-	case err := <-errCh:
+	case code = <-cb.codeCh:
+	case err := <-cb.errCh:
 		return nil, err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 
 	// Exchange auth code for tokens.
-	return exchangeCode(ctx, cfg.TokenURL, cfg.ClientID, code, redirectURI, p.verifier)
+	return exchangeCode(ctx, cfg.TokenURL, cfg.ClientID, code, cb.redirectURI, p.verifier)
 }
 
 // exchangeCode exchanges an authorization code for tokens.
@@ -143,11 +193,11 @@ func exchangeCode(ctx context.Context, tokenURL, clientID, code, redirectURI, co
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if err != nil {
@@ -166,7 +216,7 @@ func exchangeCode(ctx context.Context, tokenURL, clientID, code, redirectURI, co
 		return nil, fmt.Errorf("token error: %s", desc)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange: HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("token exchange: HTTP %d", resp.StatusCode)
 	}
 	return &tr, nil
 }

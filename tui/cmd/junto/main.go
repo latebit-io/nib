@@ -182,20 +182,46 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			return resolved.OAuthProvider
 		}
 
-		app.ConnectOAuth = func(profile string) (string, func() error, error) {
+		app.StoreAPIKey = func(profile, key string) error {
+			return pr.KeyStore.Put(profile, key)
+		}
+
+		app.HasAPIKey = func(profile string) bool {
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
-				return "", nil, fmt.Errorf("unknown profile %q", profile)
+				return false
 			}
+			// Has env var key or stored key.
+			return resolved.HasProvider() || pr.KeyStore.HasKey(profile)
+		}
 
-			providerID := oauth.ProviderID(resolved.OAuthProvider)
-			switch providerID {
+		app.HasOAuthToken = func(profile string) bool {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return false
+			}
+			if resolved.OAuthProvider == "" {
+				return false
+			}
+			return pr.OAuthStore.HasToken(oauth.ProviderID(resolved.OAuthProvider))
+		}
+
+		app.ConnectOAuth = func(profile string) tea.Cmd {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return func() tea.Msg {
+					return ui.OAuthConnectResult(profile, fmt.Errorf("unknown profile %q", profile))
+				}
+			}
+			switch oauth.ProviderID(resolved.OAuthProvider) {
 			case oauth.ProviderOpenAI:
-				return connectOpenAI(pr.OAuthStore)
+				return connectOpenAICmd(profile, pr.OAuthStore)
 			case oauth.ProviderCopilot:
-				return connectCopilot(pr.OAuthStore)
+				return connectCopilotCmd(profile, pr.OAuthStore, app.Program())
 			default:
-				return "", nil, fmt.Errorf("unknown OAuth provider: %s", resolved.OAuthProvider)
+				return func() tea.Msg {
+					return ui.OAuthConnectResult(profile, fmt.Errorf("unknown OAuth provider: %s", resolved.OAuthProvider))
+				}
 			}
 		}
 	}
@@ -212,9 +238,32 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
 				// Fallback: use current provider (env-only config).
+				slog.Warn("llm: ListModels profile not found, falling back", "profile", profile)
 				resolved = llmResolved
 			}
 			wire.WireOAuthProfile(resolved, pr.OAuthStore)
+			wire.WireStoredKey(resolved, pr.KeyStore)
+
+			// OAuth profiles — try API model listing, fall back to hardcoded.
+			if resolved.OAuthProvider != "" {
+				p := resolved.NewProvider()
+				if p != nil {
+					if lister, ok := p.(llm.ModelLister); ok {
+						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						defer cancel()
+						if models, err := lister.ListModels(ctx); err == nil && len(models) > 0 {
+							items := make([]ui.ModelSelectorItem, len(models))
+							for i, m := range models {
+								items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
+							}
+							return items, nil
+						}
+					}
+				}
+				// Fallback to hardcoded list.
+				return oauthModels(resolved.OAuthProvider, profile, resolved.Model), nil
+			}
+
 			p := resolved.NewProvider()
 			if p == nil {
 				return nil, fmt.Errorf("no API key for profile %q", profile)
@@ -240,10 +289,16 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			// Resolve the target profile.
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
+				slog.Warn("llm: profile not found, falling back", "profile", profile)
 				resolved = llmResolved
 			}
-			resolved.Model = modelID
+			slog.Debug("llm: switch resolving", "profile", profile, "modelID", modelID, "resolvedModel", resolved.Model)
+			// Empty modelID means use the profile's default model.
+			if modelID != "" {
+				resolved.Model = modelID
+			}
 			wire.WireOAuthProfile(resolved, pr.OAuthStore)
+			wire.WireStoredKey(resolved, pr.KeyStore)
 			newProvider := resolved.NewProvider()
 			if newProvider == nil {
 				return "", fmt.Errorf("no API key available for profile %q", profile)
@@ -403,36 +458,73 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	return err
 }
 
-// connectOpenAI starts the OpenAI browser-based OAuth flow.
-// Returns the instruction to show the user, a wait function that blocks until
-// auth completes, and an error if the flow couldn't be started.
-func connectOpenAI(store *oauth.Store) (string, func() error, error) {
-	instruction := "Opening browser for OpenAI authentication..."
-	wait := func() error {
+// connectOpenAICmd returns a tea.Cmd that runs the OpenAI browser OAuth flow.
+func connectOpenAICmd(profile string, store *oauth.Store) tea.Cmd {
+	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
-		return oauth.OpenAIBrowserFlow(ctx, store, nil)
+		err := oauth.OpenAIBrowserFlow(ctx, store, nil)
+		return ui.OAuthConnectResult(profile, err)
 	}
-	return instruction, wait, nil
 }
 
-// connectCopilot starts the GitHub Copilot device code flow.
-// Requests the device code synchronously, returns the instruction with the code,
-// then the wait function polls until the user authorizes.
-func connectCopilot(store *oauth.Store) (string, func() error, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// connectCopilotCmd returns a tea.Cmd that runs the GitHub Copilot device code
+// flow. The device code request, instruction delivery, and polling all run
+// off the TUI thread.
+func connectCopilotCmd(profile string, store *oauth.Store, p *tea.Program) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		dc, err := oauth.RequestCopilotDeviceCode(ctx)
+		cancel()
+		if err != nil {
+			return ui.OAuthConnectResult(profile, fmt.Errorf("request device code: %w", err))
+		}
 
-	dc, err := oauth.RequestCopilotDeviceCode(ctx)
-	if err != nil {
-		return "", nil, fmt.Errorf("request device code: %w", err)
-	}
+		// Deliver the instruction to the TUI via Program.Send so the user
+		// sees the code immediately while we poll in the background.
+		instruction := fmt.Sprintf("Visit %s and enter code: %s", dc.VerificationURI, dc.UserCode)
+		p.Send(ui.OAuthInstruction(profile, instruction))
 
-	instruction := fmt.Sprintf("Visit %s and enter code: %s", dc.VerificationURI, dc.UserCode)
-	wait := func() error {
 		pollCtx, pollCancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer pollCancel()
-		return oauth.CompleteCopilotDeviceFlow(pollCtx, store, dc)
+		err = oauth.CompleteCopilotDeviceFlow(pollCtx, store, dc)
+		return ui.OAuthConnectResult(profile, err)
 	}
-	return instruction, wait, nil
+}
+
+// codexModels are available via the ChatGPT Codex subscription endpoint.
+var codexModels = []string{
+	"gpt-5.1-codex",
+	"gpt-5.1-codex-max",
+	"gpt-5.1-codex-mini",
+	"gpt-5.2",
+	"gpt-5.2-codex",
+	"gpt-5.3-codex",
+	"gpt-5.4",
+	"gpt-5.4-mini",
+}
+
+// oauthModels returns the known model list for an OAuth provider.
+// OAuth endpoints don't support /models, so we maintain the list statically.
+func oauthModels(provider, profile, defaultModel string) []ui.ModelSelectorItem {
+	var models []string
+	switch provider {
+	case "openai":
+		models = codexModels
+	default:
+		models = []string{defaultModel}
+	}
+
+	items := make([]ui.ModelSelectorItem, 0, len(models))
+	for _, m := range models {
+		if m == defaultModel {
+			items = append([]ui.ModelSelectorItem{{ID: m, Name: m, Profile: profile}}, items...)
+		} else {
+			items = append(items, ui.ModelSelectorItem{ID: m, Name: m, Profile: profile})
+		}
+	}
+	if len(items) == 0 {
+		items = append(items, ui.ModelSelectorItem{ID: defaultModel, Name: defaultModel, Profile: profile})
+	}
+	return items
 }

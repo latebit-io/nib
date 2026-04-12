@@ -64,6 +64,7 @@ type chatRequest struct {
 	Model         string         `json:"model"`
 	Messages      []Message      `json:"messages"`
 	Stream        bool           `json:"stream"`
+	Store         bool           `json:"store"`
 	Tools         []ToolDef      `json:"tools,omitempty"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 }
@@ -74,6 +75,7 @@ type cachingChatRequest struct {
 	Model         string           `json:"model"`
 	Messages      []cachingMessage `json:"messages"`
 	Stream        bool             `json:"stream"`
+	Store         bool             `json:"store"`
 	Tools         []cachingToolDef `json:"tools,omitempty"`
 	StreamOptions *streamOptions   `json:"stream_options,omitempty"`
 }

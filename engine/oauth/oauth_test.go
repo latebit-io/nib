@@ -38,9 +38,12 @@ func TestExtractAccountIDFromJWT(t *testing.T) {
 		{"not a JWT", "not-a-jwt", ""},
 		{"empty", "", ""},
 		{"invalid base64", "header.!!!invalid!!!.sig", ""},
-		// A JWT with {"chatgpt_account_id":"acct-123"} payload:
-		// base64url("eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0LTEyMyJ9")
+		// chatgpt_account_id (direct claim)
 		{"direct claim", "header.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0LTEyMyJ9.sig", "acct-123"},
+		// https://api.openai.com/auth.chatgpt_account_id (URI-form claim)
+		{"uri claim", "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGguY2hhdGdwdF9hY2NvdW50X2lkIjogImFjY3QtNDU2In0.sig", "acct-456"},
+		// organizations[0].id (fallback)
+		{"orgs claim", "header.eyJvcmdhbml6YXRpb25zIjogW3siaWQiOiAib3JnLTc4OSJ9XX0.sig", "org-789"},
 	}
 
 	for _, tt := range tests {

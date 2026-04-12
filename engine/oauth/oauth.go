@@ -10,6 +10,7 @@ package oauth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -70,6 +71,9 @@ func (a *Authenticator) Authenticate(ctx context.Context, req *http.Request) err
 	tok, err := a.source.Token(ctx)
 	if err != nil {
 		return err
+	}
+	if tok == nil || tok.AccessToken == "" {
+		return fmt.Errorf("oauth: token source returned empty token")
 	}
 	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	if tok.AccountID != "" {

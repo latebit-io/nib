@@ -88,24 +88,22 @@ func CompleteCopilotDeviceFlow(ctx context.Context, store *Store, dc *DeviceCode
 		return fmt.Errorf("device code poll: %w", err)
 	}
 
-	// Store the GitHub token (long-lived).
-	tok := &Token{
-		AccessToken: tr.AccessToken,
-	}
-	// GitHub tokens don't typically expire, but set a far-future expiry.
-	tok.ExpiresAt = time.Now().Add(365 * 24 * time.Hour)
-
-	if err := store.Put(ProviderCopilot, tok); err != nil {
-		return fmt.Errorf("store token: %w", err)
-	}
-
-	// Verify the token works with Copilot.
-	session, err := exchangeCopilotToken(ctx, tok.AccessToken)
-	if err != nil {
+	// Verify the token works with Copilot before persisting.
+	// If the account has no Copilot access, we don't want a stored token
+	// that makes the profile appear connected while every request fails.
+	if _, err := exchangeCopilotToken(ctx, tr.AccessToken); err != nil {
 		slog.Warn("oauth: GitHub auth succeeded but Copilot token exchange failed", "err", err)
 		return fmt.Errorf("GitHub auth succeeded but Copilot access failed: %w (do you have a Copilot subscription?)", err)
 	}
-	_ = session // verified it works
+
+	tok := &Token{
+		AccessToken: tr.AccessToken,
+		// GitHub tokens don't typically expire, but set a far-future expiry.
+		ExpiresAt: time.Now().Add(365 * 24 * time.Hour),
+	}
+	if err := store.Put(ProviderCopilot, tok); err != nil {
+		return fmt.Errorf("store token: %w", err)
+	}
 
 	return nil
 }
@@ -159,18 +157,18 @@ func exchangeCopilotToken(ctx context.Context, githubToken string) (*copilotSess
 	req.Header.Set("Authorization", "token "+githubToken)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	var result struct {

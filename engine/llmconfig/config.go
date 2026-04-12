@@ -80,10 +80,20 @@ func (r *Resolved) DisplayModel() string {
 // an LLM provider (either a static API key or an OAuth authenticator).
 func (r *Resolved) HasProvider() bool { return r.apiKey != "" || r.Auth != nil }
 
+// SetAPIKey sets the API key on the resolved configuration.
+// Used by the key store to inject TUI-entered keys.
+func (r *Resolved) SetAPIKey(key string) { r.apiKey = key }
+
 // NewProvider creates an LLM provider from the resolved configuration.
 // Returns nil if no API key is available and no OAuth auth is set.
+// For OAuth profiles with OAuthProvider == "openai", creates a CodexAPI
+// (Responses API format) instead of AgentAPI (Chat Completions format).
 func (r *Resolved) NewProvider() llm.Provider {
 	if r.Auth != nil {
+		// OpenAI OAuth uses the Codex Responses API, not Chat Completions.
+		if r.OAuthProvider == "openai" {
+			return llm.NewCodexAPI(r.Model, r.Auth)
+		}
 		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching)
 	}
 	if r.apiKey == "" {

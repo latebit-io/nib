@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,13 +30,13 @@ func NewStore(path string) (*Store, error) {
 }
 
 // DefaultStorePath returns ~/.config/junto/auth.json (or platform equivalent).
-func DefaultStorePath() string {
+// Returns empty string and an error if the config directory cannot be resolved.
+func DefaultStorePath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		slog.Warn("oauth: cannot resolve user config dir", "err", err)
-		return ""
+		return "", fmt.Errorf("oauth: resolve config dir: %w", err)
 	}
-	return filepath.Join(dir, "junto", "auth.json")
+	return filepath.Join(dir, "junto", "auth.json"), nil
 }
 
 // Get returns the stored token for a provider, or nil if none exists.

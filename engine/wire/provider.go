@@ -21,6 +21,8 @@ type ProviderResult struct {
 	Resolved *llmconfig.Resolved
 	// OAuthStore is the token store for OAuth-based providers.
 	OAuthStore *oauth.Store
+	// KeyStore holds API keys entered via the TUI.
+	KeyStore *oauth.KeyStore
 }
 
 // NewProvider creates an LLM provider from the merged configuration.
@@ -32,25 +34,35 @@ func NewProvider(projectRoot string) *ProviderResult {
 	cfg, resolved := llmconfig.Resolve(projectRoot)
 
 	// Create OAuth store for subscription-based providers.
-	store, err := oauth.NewStore(oauth.DefaultStorePath())
-	if err != nil {
+	var store *oauth.Store
+	if storePath, err := oauth.DefaultStorePath(); err != nil {
+		slog.Warn("wire: OAuth store unavailable", "err", err)
+	} else if store, err = oauth.NewStore(storePath); err != nil {
 		slog.Warn("wire: failed to create OAuth store", "err", err)
-		// Continue without OAuth — API key profiles still work.
-		return &ProviderResult{
-			Provider: resolved.NewProvider(),
-			Config:   cfg,
-			Resolved: resolved,
-		}
+	}
+
+	// Create key store for TUI-entered API keys.
+	var keyStore *oauth.KeyStore
+	if keyPath, err := oauth.DefaultKeyStorePath(); err != nil {
+		slog.Warn("wire: key store unavailable", "err", err)
+	} else if keyStore, err = oauth.NewKeyStore(keyPath); err != nil {
+		slog.Warn("wire: failed to create key store", "err", err)
 	}
 
 	// If the resolved profile uses OAuth, wire up the authenticator.
 	wireOAuth(resolved, store)
+
+	// If no provider yet, check the key store for a stored API key.
+	if !resolved.HasProvider() && keyStore != nil {
+		WireStoredKey(resolved, keyStore)
+	}
 
 	return &ProviderResult{
 		Provider:   resolved.NewProvider(),
 		Config:     cfg,
 		Resolved:   resolved,
 		OAuthStore: store,
+		KeyStore:   keyStore,
 	}
 }
 
@@ -58,6 +70,20 @@ func NewProvider(projectRoot string) *ProviderResult {
 // if it has stored tokens. Returns true if auth was wired.
 func WireOAuthProfile(resolved *llmconfig.Resolved, store *oauth.Store) bool {
 	return wireOAuth(resolved, store)
+}
+
+// WireStoredKey sets the API key on a resolved profile from the key store.
+// Returns true if a stored key was found and applied.
+func WireStoredKey(resolved *llmconfig.Resolved, keyStore *oauth.KeyStore) bool {
+	if resolved == nil || keyStore == nil || resolved.Profile == "" {
+		return false
+	}
+	key := keyStore.Get(resolved.Profile)
+	if key == "" {
+		return false
+	}
+	resolved.SetAPIKey(key)
+	return true
 }
 
 // wireOAuth checks if a resolved profile needs OAuth and has stored tokens.

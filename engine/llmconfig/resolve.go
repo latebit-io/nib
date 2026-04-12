@@ -38,7 +38,7 @@ var builtinProfiles = map[string]Profile{
 	},
 	"chatgpt": {
 		BaseURL:       "https://chatgpt.com/backend-api/codex",
-		Model:         "gpt-4.1",
+		Model:         "gpt-5.1-codex",
 		OAuthProvider: "openai",
 	},
 	"copilot": {
@@ -120,16 +120,19 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 	}
 	r.apiKey = os.Getenv(r.APIKeyEnv)
 
-	// Environment variable overrides — same precedence as Resolve().
-	if v := os.Getenv("LLM_BASE_URL"); v != "" {
-		r.BaseURL = v
-	}
-	if v := os.Getenv("LLM_MODEL"); v != "" {
-		r.Model = v
-	}
-	if v := os.Getenv("LLM_API_KEY"); v != "" {
-		r.APIKeyEnv = DefaultKeyEnv
-		r.apiKey = v
+	// Environment variable overrides — skip for OAuth profiles since their
+	// base URL and model are fixed to the subscription endpoint.
+	if r.OAuthProvider == "" {
+		if v := os.Getenv("LLM_BASE_URL"); v != "" {
+			r.BaseURL = v
+		}
+		if v := os.Getenv("LLM_MODEL"); v != "" {
+			r.Model = v
+		}
+		if v := os.Getenv("LLM_API_KEY"); v != "" {
+			r.APIKeyEnv = DefaultKeyEnv
+			r.apiKey = v
+		}
 	}
 	return r
 }

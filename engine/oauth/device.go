@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// oauthClient is a shared HTTP client with a timeout for OAuth requests.
+// Prevents indefinite hangs if the auth server is unresponsive.
+var oauthClient = &http.Client{Timeout: 30 * time.Second}
+
 // DeviceFlowConfig holds the endpoint configuration for a device code flow.
 type DeviceFlowConfig struct {
 	// ClientID is the OAuth client identifier.
@@ -64,18 +68,18 @@ func RequestDeviceCode(ctx context.Context, cfg DeviceFlowConfig) (*DeviceCode, 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthClient.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("device code request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read device code response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("device code request: HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("device code request: HTTP %d", resp.StatusCode)
 	}
 
 	var dcr deviceCodeResponse
@@ -122,13 +126,13 @@ func pollOnce(ctx context.Context, cfg DeviceFlowConfig, dc *DeviceCode) (*token
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthClient.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("token request: %w", err)
 	}
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	_ = resp.Body.Close()
+	_ = resp.Body.Close() // body already read; close error is not actionable
 	if readErr != nil {
 		return nil, 0, fmt.Errorf("read token response: %w", readErr)
 	}
@@ -205,11 +209,11 @@ func RefreshAccessToken(ctx context.Context, tokenURL, clientID, refreshToken st
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("refresh request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if err != nil {
@@ -228,7 +232,7 @@ func RefreshAccessToken(ctx context.Context, tokenURL, clientID, refreshToken st
 		return nil, fmt.Errorf("refresh error: %s", desc)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh: HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("refresh: HTTP %d", resp.StatusCode)
 	}
 	return &tr, nil
 }

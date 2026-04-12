@@ -264,6 +264,11 @@ type AgentPaneModel struct {
 	inputDragging     bool               // true while dragging inside the input area
 	inputPadLeft      int                // cell offset from pane left edge to textarea content
 
+	// API key input mode
+	apiKeyInputActive bool   // true when collecting an API key from the user
+	apiKeyProfile     string // profile the key is for
+	apiKeyBuffer      string // accumulated key text (masked in display)
+
 	// Shared services
 	services *Services
 
@@ -333,6 +338,49 @@ func (m *AgentPaneModel) CloseModelSelector() {
 
 // IsModelSelectorActive reports whether the inline model selector is open.
 func (m *AgentPaneModel) IsModelSelectorActive() bool { return m.ModelSel.IsActive() }
+
+// StartAPIKeyInput activates the API key input mode for a profile.
+// Shows a masked input field where the user can type their API key.
+func (m *AgentPaneModel) StartAPIKeyInput(profile string) {
+	m.apiKeyInputActive = true
+	m.apiKeyProfile = profile
+	m.apiKeyBuffer = ""
+	m.inputActive = false
+}
+
+// IsAPIKeyInputActive reports whether the API key input mode is active.
+func (m *AgentPaneModel) IsAPIKeyInputActive() bool { return m.apiKeyInputActive }
+
+// handleAPIKeyInput processes key events during API key input.
+func (m *AgentPaneModel) handleAPIKeyInput(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.Code {
+	case tea.KeyEscape:
+		m.apiKeyInputActive = false
+		m.apiKeyBuffer = ""
+		m.inputActive = true
+		return nil
+	case tea.KeyEnter:
+		profile := m.apiKeyProfile
+		key := m.apiKeyBuffer
+		m.apiKeyInputActive = false
+		m.apiKeyBuffer = ""
+		m.apiKeyProfile = ""
+		m.inputActive = true
+		return func() tea.Msg {
+			return apiKeyEnteredMsg{profile: profile, key: key}
+		}
+	case tea.KeyBackspace:
+		if len(m.apiKeyBuffer) > 0 {
+			m.apiKeyBuffer = m.apiKeyBuffer[:len(m.apiKeyBuffer)-1]
+		}
+		return nil
+	default:
+		if msg.Text != "" {
+			m.apiKeyBuffer += msg.Text
+		}
+		return nil
+	}
+}
 
 // UpdateModelSelector handles key input for the inline model selector.
 // Returns a tea.Cmd if a selection or cancellation occurred.
@@ -440,6 +488,9 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 	case tea.MouseWheelMsg:
 		return m.handleMouseWheel(msg)
 	case tea.KeyPressMsg:
+		if m.apiKeyInputActive {
+			return m.handleAPIKeyInput(msg)
+		}
 		if m.inputActive {
 			return m.handleInput(msg)
 		}
@@ -1209,6 +1260,33 @@ func (m *AgentPaneModel) renderInputArea(output []string, row *int) {
 	}
 }
 
+// renderAPIKeyInput renders the API key input prompt.
+func (m *AgentPaneModel) renderAPIKeyInput(output []string, row *int) {
+	inputRows := m.inputAreaEndRow - m.inputAreaStartRow
+	if inputRows < 1 {
+		inputRows = 1
+	}
+	prompt := fmt.Sprintf(" API key for %s: ", m.apiKeyProfile)
+	masked := strings.Repeat("*", len(m.apiKeyBuffer))
+	cursor := agentCursorStyle.Render(" ")
+
+	for i := range inputRows {
+		if *row >= m.height {
+			break
+		}
+		switch i {
+		case 0:
+			line := prompt + masked + cursor
+			output[*row] = agentInputStyle.Render(m.padLine(line))
+		case inputRows - 1:
+			output[*row] = agentInputDim.Render(m.padLine(" Enter confirm · Esc cancel"))
+		default:
+			output[*row] = strings.Repeat(" ", m.width)
+		}
+		*row++
+	}
+}
+
 // renderModelSelector delegates to the extracted ModelSelectorModel.
 func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 	m.ModelSel.Render(output, row, m.width, m.height, m.inputAreaStartRow, m.inputAreaEndRow)
@@ -1348,9 +1426,11 @@ func (m *AgentPaneModel) Render() string {
 		row++
 	}
 
-	// Model selector replaces the input area when active.
+	// Model selector and API key input replace the normal input area.
 	if m.ModelSel.IsActive() {
 		m.renderModelSelector(output, &row)
+	} else if m.apiKeyInputActive {
+		m.renderAPIKeyInput(output, &row)
 	} else {
 		m.renderInputArea(output, &row)
 	}

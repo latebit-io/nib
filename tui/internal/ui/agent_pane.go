@@ -133,6 +133,17 @@ func formatTurnUsage(u event.AgentTurnUsage) string {
 	return b.String()
 }
 
+// formatCompacted produces a dim metadata line when conversation history
+// is compacted. Shows tokens before and after so the developer can see
+// how much was saved.
+func formatCompacted(e event.AgentCompacted) string {
+	saved := e.BeforeTokens - e.AfterTokens
+	return fmt.Sprintf("\n[compacted: %s → %s history (saved %s)]\n",
+		formatTokenCount(e.BeforeTokens),
+		formatTokenCount(e.AfterTokens),
+		formatTokenCount(saved))
+}
+
 // formatSessionSummary produces the summary shown when the agent finishes.
 func formatSessionSummary(u usageState) string {
 	if u.turns == 0 {

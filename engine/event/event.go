@@ -168,6 +168,17 @@ type AgentInputEstimate struct {
 
 func (AgentInputEstimate) eventTag() {}
 
+// AgentCompacted signals that conversation history was compacted to reduce
+// token usage. Emitted once per compaction pass, before the next LLM call.
+type AgentCompacted struct {
+	// BeforeTokens is the estimated history tokens before compaction.
+	BeforeTokens int
+	// AfterTokens is the estimated history tokens after compaction.
+	AfterTokens int
+}
+
+func (AgentCompacted) eventTag() {}
+
 // ReloadBuffers requests the frontend to re-read all open buffers from disk.
 // Sent after bash tool calls that may have modified files outside the edit
 // approval flow. The frontend should reload buffers whose on-disk content

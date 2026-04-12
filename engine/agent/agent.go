@@ -638,7 +638,7 @@ func (a *Agent) Cancel() {
 // to prevent indefinite blocking if the frontend stops draining.
 func (a *Agent) send(ev event.Event) {
 	switch ev.(type) {
-	case event.AgentToken, event.AgentStatus, event.AgentTurnUsage, event.AgentInputEstimate:
+	case event.AgentToken, event.AgentStatus, event.AgentTurnUsage, event.AgentInputEstimate, event.AgentCompacted:
 		select {
 		case a.events <- ev:
 		default:
@@ -705,8 +705,9 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 
 	thinkState := false
 	for {
-		// Process one LLM turn: stream, dispatch tools, repeat until
-		// the LLM responds with no tool calls.
+		// Compact old tool results if history is large enough.
+		messages = a.maybeCompact(messages, activeDefs)
+
 		var err error
 		var tu turnUsage
 		messages, tu, err = a.processLLMTurn(ctx, messages, &thinkState, activeDefs)
@@ -796,6 +797,43 @@ func (a *Agent) afterToolDispatch(toolName string) {
 		a.cache.Reset("", "")
 		a.send(event.ReloadBuffers{})
 	}
+}
+
+const (
+	// compactHistoryThreshold is the estimated history token count above
+	// which old tool results are truncated to reduce input cost.
+	compactHistoryThreshold = 30_000
+	// compactKeepTurns is the number of recent user turns whose tool
+	// results are preserved verbatim during compaction.
+	compactKeepTurns = 3
+	// compactMinBytes is the minimum tool result size (bytes) to truncate.
+	// Smaller results are kept as-is since they cost little.
+	compactMinBytes = 200
+)
+
+// maybeCompact checks whether conversation history is large enough to
+// warrant compaction. If so, truncates old tool results and emits an
+// AgentCompacted event. Returns the (possibly compacted) message slice.
+func (a *Agent) maybeCompact(messages []llm.Message, toolDefs []llm.ToolDef) []llm.Message {
+	est := llm.EstimateMessageTokens(messages, toolDefs)
+	if est.History < compactHistoryThreshold {
+		return messages
+	}
+	compacted, changed := llm.CompactMessages(messages, compactKeepTurns, compactMinBytes)
+	if !changed {
+		return messages
+	}
+	afterEst := llm.EstimateMessageTokens(compacted, toolDefs)
+	a.send(event.AgentCompacted{
+		BeforeTokens: est.History,
+		AfterTokens:  afterEst.History,
+	})
+	slog.Info("conversation compacted",
+		"before", est.History,
+		"after", afterEst.History,
+		"saved", est.History-afterEst.History,
+	)
+	return compacted
 }
 
 // estimateAndBroadcast computes a client-side input estimate and sends it

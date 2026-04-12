@@ -38,7 +38,7 @@ type Editor struct {
 	ScrollOffset int
 
 	// ScrollCol is the horizontal scroll offset in display-column space
-	// (post tab-expansion). The TUI slices rendered content starting at
+	// (post tab-expansion). The frontend slices rendered content starting at
 	// this column. Adjusted automatically by EnsureCursorVisible.
 	ScrollCol int
 
@@ -155,7 +155,7 @@ func (e *Editor) ClampScrollCol() {
 
 // BufferColToDisplayCol converts a buffer column on the given line to a
 // display column, accounting for tab expansion and wide characters.
-// This is the engine-side equivalent of the TUI's expandTabs mapping.
+// This is the engine-side equivalent of the frontend's tab-expansion mapping.
 func (e *Editor) BufferColToDisplayCol(line, bufCol int) int {
 	if line < 0 || line >= e.Buf.LineCount() {
 		return bufCol
@@ -168,7 +168,7 @@ func (e *Editor) BufferColToDisplayCol(line, bufCol int) int {
 		case '\t':
 			dispCol += TabWidth
 		case '\uFE0F':
-			// VS16 is skipped in the display buffer (see TUI expandTabs),
+			// VS16 is skipped in the display buffer (see frontend tab-expansion),
 			// so it contributes 0 display columns.
 		default:
 			dispCol++
@@ -249,7 +249,7 @@ func (e *Editor) EnsureCursorVisible() {
 	dispCol := e.BufferColToDisplayCol(e.CursorLine, e.CursorCol)
 	margin := scrollMarginCols
 	if margin >= cw {
-		margin = 0 // terminal too narrow for margin
+		margin = 0 // viewport too narrow for margin
 	}
 
 	if dispCol < e.ScrollCol {
@@ -1152,23 +1152,6 @@ func CursorInRegion(cursorLine, cursorCol, startLine, startCol, endLine, endCol 
 
 // --- Highlight ---
 
-// Token re-exports highlight.Token for frontends that need token data.
-type Token = highlight.Token
-
-// TokenKind re-exports highlight.TokenKind for frontends that map to styles.
-type TokenKind = highlight.TokenKind
-
-// Token kind constants — re-exported for frontend use.
-const (
-	KindKeyword  = highlight.KindKeyword
-	KindString   = highlight.KindString
-	KindComment  = highlight.KindComment
-	KindNumber   = highlight.KindNumber
-	KindType     = highlight.KindType
-	KindOperator = highlight.KindOperator
-	KindNone     = highlight.KindNone
-)
-
 // MarkDirty flags the highlighter for reparse on next ReparseIfNeeded call.
 func (e *Editor) MarkDirty() {
 	e.needsReparse = true
@@ -1185,7 +1168,7 @@ func (e *Editor) ReparseIfNeeded() {
 // HighlightLine returns syntax tokens for the given line.
 // Returns nil if no highlighter is configured.
 // Calls ReparseIfNeeded internally so the caller doesn't have to.
-func (e *Editor) HighlightLine(line int) []Token {
+func (e *Editor) HighlightLine(line int) []highlight.Token {
 	e.ReparseIfNeeded()
 	if e.highlighter == nil {
 		return nil

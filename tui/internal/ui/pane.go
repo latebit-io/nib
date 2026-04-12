@@ -34,3 +34,15 @@ type PlanningGoalSubmittedMsg struct {
 	// Goal is the user-entered text for the planning-mode goal.
 	Goal string
 }
+
+// clampScrollOffset returns the scroll offset needed to keep selected visible
+// within a list that shows maxVisible items at a time.
+func clampScrollOffset(selected, current, maxVisible int) int {
+	if selected < current {
+		return selected
+	}
+	if selected >= current+maxVisible {
+		return selected - maxVisible + 1
+	}
+	return current
+}

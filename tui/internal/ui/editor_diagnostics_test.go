@@ -114,7 +114,7 @@ func TestDiagnosticStatusBarMessage(t *testing.T) {
 		{StartLine: 0, EndLine: 0, Severity: lang.SeverityError, Message: "undefined: foo"},
 	})
 	// Cursor is on line 0 by default — status bar rendered separately.
-	bar := m.renderStatusBar(80)
+	bar := renderStatusBar(m.statusInfo(), 80)
 	if !strings.Contains(bar, "error: undefined: foo") {
 		t.Errorf("status bar missing diagnostic message, got: %s", bar)
 	}
@@ -122,7 +122,7 @@ func TestDiagnosticStatusBarMessage(t *testing.T) {
 	// Move cursor to line 1 — should not show diagnostic.
 	m.eng.CursorLine = 1
 	m.eng.CursorCol = 0
-	bar = m.renderStatusBar(80)
+	bar = renderStatusBar(m.statusInfo(), 80)
 	if strings.Contains(bar, "undefined: foo") {
 		t.Errorf("status bar should not show diagnostic for line 1")
 	}
@@ -134,7 +134,7 @@ func TestDiagnosticStatusBarNotShownWithStatusMsg(t *testing.T) {
 		{StartLine: 0, EndLine: 0, Severity: lang.SeverityError, Message: "undefined: foo"},
 	})
 	m.StatusMsg = "Saved!"
-	bar := m.renderStatusBar(80)
+	bar := renderStatusBar(m.statusInfo(), 80)
 	if strings.Contains(bar, "undefined: foo") {
 		t.Errorf("diagnostic should not show when StatusMsg is set")
 	}

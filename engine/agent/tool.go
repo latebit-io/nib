@@ -2,12 +2,40 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
+
+// lspTimeout is the default timeout for LSP requests made by tools.
+const lspTimeout = 10 * time.Second
+
+// posArgs holds the JSON-decoded position arguments shared by LSP tools
+// (go_to_definition, find_references).
+type posArgs struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Col  int    `json:"col"`
+}
+
+// validatePosArgs returns an error string if the position arguments are invalid,
+// or empty string on success.
+func validatePosArgs(args posArgs) string {
+	if args.Path == "" {
+		return "Error: path is required"
+	}
+	if args.Line < 1 {
+		return "Error: line must be >= 1 (1-indexed)"
+	}
+	if args.Col < 0 {
+		return "Error: col must be >= 0"
+	}
+	return ""
+}
 
 // ToolEffect classifies what the agent loop must do after a tool returns.
 // Pure tools return EffectNone; tools with side effects return a specific
@@ -188,6 +216,22 @@ func (c *FileCache) Set(path, content string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.files[path] = content
+}
+
+// LoadOrRead returns cached content for canon, or reads from disk via reader
+// and populates the cache on miss. Both read_file and edit_file share this path.
+func (c *FileCache) LoadOrRead(canon string, reader func(string) (string, error)) (string, error) {
+	if content, ok := c.Get(canon); ok {
+		slog.Debug("file cache: hit", "path", canon, "content_len", len(content))
+		return content, nil
+	}
+	content, err := reader(canon)
+	if err != nil {
+		return "", err
+	}
+	slog.Debug("file cache: read from disk", "path", canon, "content_len", len(content))
+	c.Set(canon, content)
+	return content, nil
 }
 
 // Reset clears the cache and seeds it with the given file.

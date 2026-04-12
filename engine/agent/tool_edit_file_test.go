@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 )
 
 type testWorkspace struct {
+	root            string // project root; empty means CanonPath is identity
 	files           map[string]string
 	inContext       map[string]bool
 	addContextCalls int
@@ -25,7 +27,12 @@ func (w *testWorkspace) ReadFile(path string) (string, error) {
 
 func (w *testWorkspace) ListFiles() ([]string, error) { return nil, nil }
 func (w *testWorkspace) WriteFile(_, _ string) error  { return nil }
-func (w *testWorkspace) CanonPath(p string) string    { return p }
+func (w *testWorkspace) CanonPath(p string) string {
+	if w.root != "" && !filepath.IsAbs(p) {
+		return filepath.Clean(filepath.Join(w.root, p))
+	}
+	return p
+}
 
 func (w *testWorkspace) InContext(path string) bool {
 	return w.inContext[w.CanonPath(path)]
@@ -36,7 +43,7 @@ func (w *testWorkspace) AddContext(path string) {
 	w.inContext[w.CanonPath(path)] = true
 }
 
-func (w *testWorkspace) ProjectRoot() string { return "" }
+func (w *testWorkspace) ProjectRoot() string { return w.root }
 
 func mustMarshal(t *testing.T, v any) []byte {
 	t.Helper()

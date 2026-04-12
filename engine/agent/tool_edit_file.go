@@ -250,18 +250,8 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 // cache first and falling back to disk.
 func (t *EditFileTool) resolveContent(path string) (content, canon string, err error) {
 	canon = t.workspace.CanonPath(path)
-	content, ok := t.cache.Get(canon)
-	if ok {
-		slog.Debug("edit_file: cache hit", "path", path, "content_len", len(content))
-		return content, canon, nil
-	}
-	content, err = t.workspace.ReadFile(path)
-	if err != nil {
-		return "", canon, err
-	}
-	t.cache.Set(canon, content)
-	slog.Debug("edit_file: read from disk", "path", path, "content_len", len(content))
-	return content, canon, nil
+	content, err = t.cache.LoadOrRead(canon, t.workspace.ReadFile)
+	return content, canon, err
 }
 
 // validateSearchMatch checks that the search text appears exactly once in

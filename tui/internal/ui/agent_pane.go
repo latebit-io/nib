@@ -177,20 +177,9 @@ func (m *AgentPaneModel) inputHeight() int {
 }
 
 // modelSelHeight returns the number of rows reserved for the bottom area
-// when the model selector is active — uses half the pane, minimum 10 rows.
+// when the model selector is active. Delegates to ModelSelectorModel.Height.
 func (m *AgentPaneModel) modelSelHeight() int {
-	maxH := m.height - 2
-	if maxH < 0 {
-		maxH = 0
-	}
-	h := m.height / 2
-	if h < 10 {
-		h = 10
-	}
-	if h > maxH {
-		h = maxH
-	}
-	return h
+	return m.ModelSel.Height(m.height)
 }
 
 // inlineDisplayReplacer strips newlines/carriage returns that would break
@@ -251,13 +240,9 @@ type AgentPaneModel struct {
 	// usage tracks cumulative token consumption for the status line display.
 	usage usageState
 
-	// modelSelector state — when active, replaces the input area with a model list.
-	modelSelActive   bool
-	modelSelItems    []ModelSelectorItem
-	modelSelSelected int
-	modelSelCurrent  string   // current model ID (highlighted with ●)
-	modelSelProfile  string   // profile name shown in title
-	modelSelProfiles []string // all available profiles (for Tab cycling)
+	// ModelSel holds the inline model selector state — when active,
+	// replaces the input area with a model list.
+	ModelSel ModelSelectorModel
 
 	// Output selection — fully internal, driven by mouse events on the
 	// output region. Not accessed outside agent_pane.go.
@@ -330,92 +315,30 @@ func (m *AgentPaneModel) SetModelLabel(label string) { m.modelLabel = label }
 // OpenModelSelector activates the inline model selector, replacing the input area.
 // profiles is the full list of available profiles (for Tab cycling); may be nil.
 func (m *AgentPaneModel) OpenModelSelector(items []ModelSelectorItem, profile, currentModel string, profiles []string) {
-	m.modelSelActive = true
-	m.modelSelItems = items
-	m.modelSelProfile = profile
-	m.modelSelCurrent = currentModel
-	m.modelSelProfiles = profiles
-	m.modelSelSelected = 0
-	for i, item := range items {
-		if item.ID == currentModel {
-			m.modelSelSelected = i
-			break
-		}
-	}
+	m.ModelSel.Open(items, profile, currentModel, profiles)
 	m.recomputeInputLayout()
 }
 
 // CloseModelSelector deactivates the inline model selector.
 func (m *AgentPaneModel) CloseModelSelector() {
-	m.modelSelActive = false
-	m.modelSelItems = nil
+	m.ModelSel.Close()
 	m.recomputeInputLayout()
 	m.clampScroll()
 }
 
 // IsModelSelectorActive reports whether the inline model selector is open.
-func (m *AgentPaneModel) IsModelSelectorActive() bool { return m.modelSelActive }
-
-// modelSelSwitchProfileMsg requests fetching models for a different profile.
-type modelSelSwitchProfileMsg struct {
-	profile string
-}
+func (m *AgentPaneModel) IsModelSelectorActive() bool { return m.ModelSel.Active }
 
 // UpdateModelSelector handles key input for the inline model selector.
 // Returns a tea.Cmd if a selection or cancellation occurred.
 func (m *AgentPaneModel) UpdateModelSelector(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.Code {
-	case tea.KeyEscape:
-		m.CloseModelSelector()
-		return func() tea.Msg { return ModelSelectorResultMsg{Cancelled: true} }
-	case tea.KeyEnter:
-		if m.modelSelSelected < len(m.modelSelItems) {
-			item := m.modelSelItems[m.modelSelSelected]
-			profile := m.modelSelProfile
-			m.CloseModelSelector()
-			return func() tea.Msg {
-				return ModelSelectorResultMsg{Profile: profile, ModelID: item.ID}
-			}
-		}
-		return nil
-	case tea.KeyTab:
-		// Cycle to next provider profile. Clear items so stale models
-		// can't be selected while the async fetch is in flight.
-		if len(m.modelSelProfiles) > 1 {
-			next := m.nextProfile()
-			m.modelSelProfile = next
-			m.modelSelItems = nil
-			m.modelSelSelected = 0
-			return func() tea.Msg {
-				return modelSelSwitchProfileMsg{profile: next}
-			}
-		}
-		return nil
-	case tea.KeyUp:
-		if m.modelSelSelected > 0 {
-			m.modelSelSelected--
-		}
-		return nil
-	case tea.KeyDown:
-		if len(m.modelSelItems) == 0 {
-			return nil
-		}
-		if m.modelSelSelected < len(m.modelSelItems)-1 {
-			m.modelSelSelected++
-		}
-		return nil
+	cmd := m.ModelSel.Update(msg)
+	if !m.ModelSel.Active {
+		// Selector was closed by the update — recompute layout.
+		m.recomputeInputLayout()
+		m.clampScroll()
 	}
-	return nil
-}
-
-// nextProfile returns the profile after the current one, wrapping around.
-func (m *AgentPaneModel) nextProfile() string {
-	for i, p := range m.modelSelProfiles {
-		if p == m.modelSelProfile {
-			return m.modelSelProfiles[(i+1)%len(m.modelSelProfiles)]
-		}
-	}
-	return m.modelSelProfiles[0]
+	return cmd
 }
 
 // SetInputActive sets keyboard focus on or off for the input textarea.
@@ -465,7 +388,7 @@ func (m *AgentPaneModel) SetSize(width, height int) {
 func (m *AgentPaneModel) recomputeInputLayout() {
 	// Input area sits between the separator line and the status line.
 	bottomH := m.inputHeight()
-	if m.modelSelActive {
+	if m.ModelSel.Active {
 		bottomH = m.modelSelHeight()
 	}
 	contentEnd := m.height - bottomH
@@ -1055,7 +978,7 @@ func (m *AgentPaneModel) Clear() {
 // VisibleLines returns the number of content lines visible above the input area.
 func (m *AgentPaneModel) VisibleLines() int {
 	bottomH := m.inputHeight()
-	if m.modelSelActive {
+	if m.ModelSel.Active {
 		bottomH = m.modelSelHeight()
 	}
 	h := m.height - bottomH
@@ -1276,90 +1199,9 @@ func (m *AgentPaneModel) renderInputArea(output []string, row *int) {
 	}
 }
 
-// renderModelSelector renders the inline model list in place of the input area.
+// renderModelSelector delegates to the extracted ModelSelectorModel.
 func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
-	totalRows := m.inputAreaEndRow - m.inputAreaStartRow
-	if totalRows < 0 {
-		totalRows = 0
-	}
-
-	// Title row showing provider/profile.
-	if totalRows > 0 && *row < m.height {
-		title := " Select Model"
-		if m.modelSelProfile != "" {
-			title = " " + sanitizeInlineDisplay(m.modelSelProfile) + " — Select Model"
-		}
-		title = runewidth.Truncate(title, m.width, "…")
-		padW := m.width - runewidth.StringWidth(title)
-		if padW > 0 {
-			title += strings.Repeat(" ", padW)
-		}
-		output[*row] = agentDimStyle.Render(title)
-		*row++
-		totalRows--
-	}
-
-	// Hint row at the bottom.
-	hintRows := 0
-	if totalRows > 2 {
-		hintRows = 1
-		totalRows--
-	}
-
-	// Model list with scroll.
-	visible := totalRows
-	if visible <= 0 {
-		return
-	}
-	scrollOff := 0
-	if m.modelSelSelected >= visible {
-		scrollOff = m.modelSelSelected - visible + 1
-	}
-
-	for i := range visible {
-		if *row >= m.height {
-			break
-		}
-		idx := scrollOff + i
-		if idx < len(m.modelSelItems) {
-			item := m.modelSelItems[idx]
-			indicator := "  "
-			if item.ID == m.modelSelCurrent {
-				indicator = "● "
-			}
-			label := indicator + sanitizeInlineDisplay(item.Name)
-			label = runewidth.Truncate(label, m.width, "…")
-			padW := m.width - runewidth.StringWidth(label)
-			if padW > 0 {
-				label += strings.Repeat(" ", padW)
-			}
-			if idx == m.modelSelSelected {
-				output[*row] = modelSelSelectedStyle.Render(label)
-			} else if item.ID == m.modelSelCurrent {
-				output[*row] = modelSelCurrentStyle.Render(label)
-			} else {
-				output[*row] = modelSelNormalStyle.Render(label)
-			}
-		} else {
-			output[*row] = strings.Repeat(" ", m.width)
-		}
-		*row++
-	}
-
-	// Hint row.
-	if hintRows > 0 && *row < m.height {
-		hint := " ↑↓ navigate · Enter select · Esc cancel"
-		if len(m.modelSelProfiles) > 1 {
-			hint = " ↑↓ navigate · Tab provider · Enter select · Esc cancel"
-		}
-		hint = runewidth.Truncate(hint, m.width, "")
-		padW := m.width - runewidth.StringWidth(hint)
-		if padW > 0 {
-			hint += strings.Repeat(" ", padW)
-		}
-		output[*row] = agentDimStyle.Render(hint)
-		*row++
-	}
+	m.ModelSel.Render(output, row, m.width, m.height, m.inputAreaStartRow, m.inputAreaEndRow)
 }
 
 func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string) string {
@@ -1481,7 +1323,7 @@ func (m *AgentPaneModel) Render() string {
 
 	// Fill remaining content area
 	bottomH := m.inputHeight()
-	if m.modelSelActive {
+	if m.ModelSel.Active {
 		bottomH = m.modelSelHeight()
 	}
 	contentEnd := m.height - bottomH
@@ -1497,7 +1339,7 @@ func (m *AgentPaneModel) Render() string {
 	}
 
 	// Model selector replaces the input area when active.
-	if m.modelSelActive {
+	if m.ModelSel.Active {
 		m.renderModelSelector(output, &row)
 	} else {
 		m.renderInputArea(output, &row)

@@ -173,13 +173,7 @@ func (s *SearchOverlayModel) runSearch() tea.Cmd {
 }
 
 func (s *SearchOverlayModel) ensureVisible() {
-	maxVis := s.maxVisible()
-	if s.Selected < s.ScrollOffset {
-		s.ScrollOffset = s.Selected
-	}
-	if s.Selected >= s.ScrollOffset+maxVis {
-		s.ScrollOffset = s.Selected - maxVis + 1
-	}
+	s.ScrollOffset = clampScrollOffset(s.Selected, s.ScrollOffset, s.maxVisible())
 }
 
 func (s *SearchOverlayModel) maxVisible() int {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
@@ -58,7 +57,7 @@ func (t *WorkspaceSymbolsTool) Execute(ctx context.Context, call llm.ToolCall) T
 		return textResult("Error: query is required")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, lspTimeout)
 	defer cancel()
 
 	symbols, err := t.provider.WorkspaceSymbols(ctx, args.Query)
@@ -80,9 +79,5 @@ func (t *WorkspaceSymbolsTool) Execute(ctx context.Context, call llm.ToolCall) T
 		fmt.Fprintf(&sb, "[%s] %s — %s:%d\n", sym.Kind, sym.Name, relPath, sym.Line+1)
 	}
 
-	out := sb.String()
-	if len(out) > maxContentPreview {
-		out = out[:maxContentPreview] + "\n... (truncated)"
-	}
-	return textResult(out)
+	return textResult(truncateForPreview(sb.String()))
 }

@@ -193,7 +193,9 @@ func NewMemoryPublishTool(store memory.Store) *MemoryPublishTool {
 	return &MemoryPublishTool{store: store}
 }
 
-type memoryPublishArgs struct {
+// memoryWriteArgs holds the JSON-decoded arguments shared by memory_publish
+// and memory_append (identical field sets).
+type memoryWriteArgs struct {
 	Path            string `json:"path"`
 	Body            string `json:"body"`
 	ExpectedVersion int    `json:"expected_version"`
@@ -235,7 +237,7 @@ func (t *MemoryPublishTool) Execute(ctx context.Context, call llm.ToolCall) Tool
 	if ctx.Err() != nil {
 		return textResult("Error: agent canceled")
 	}
-	var args memoryPublishArgs
+	var args memoryWriteArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
@@ -267,12 +269,6 @@ type MemoryAppendTool struct {
 // NewMemoryAppendTool creates a MemoryAppendTool backed by the given store.
 func NewMemoryAppendTool(store memory.Store) *MemoryAppendTool {
 	return &MemoryAppendTool{store: store}
-}
-
-type memoryAppendArgs struct {
-	Path            string `json:"path"`
-	Body            string `json:"body"`
-	ExpectedVersion int    `json:"expected_version"`
 }
 
 // Definition returns the tool schema for the LLM.
@@ -310,7 +306,7 @@ func (t *MemoryAppendTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 	if ctx.Err() != nil {
 		return textResult("Error: agent canceled")
 	}
-	var args memoryAppendArgs
+	var args memoryWriteArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}

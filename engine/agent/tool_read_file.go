@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/latebit-io/junto/engine/llm"
@@ -94,25 +93,13 @@ const maxFileSize = 10 * 1024 * 1024 // 10 MB
 // loadContent returns file content from cache or disk, populating the cache on miss.
 func (t *ReadFileTool) loadContent(path string) (string, error) {
 	canon := t.workspace.CanonPath(path)
-
-	if content, ok := t.cache.Get(canon); ok {
-		slog.Debug("read_file: cache hit", "path", path, "content_len", len(content))
-		if len(content) > maxFileSize {
-			return "", fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxFileSize)
-		}
-		return content, nil
-	}
-
-	content, err := t.workspace.ReadFile(path)
+	content, err := t.cache.LoadOrRead(canon, t.workspace.ReadFile)
 	if err != nil {
 		return "", err
 	}
 	if len(content) > maxFileSize {
 		return "", fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxFileSize)
 	}
-
-	slog.Debug("read_file: read from disk", "path", path, "content_len", len(content))
-	t.cache.Set(canon, content)
 	return content, nil
 }
 

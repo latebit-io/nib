@@ -202,13 +202,7 @@ func (p *PaletteModel) findItem(label string) PaletteItem {
 
 // ensureSelectedVisible adjusts scroll so the selected item is visible.
 func (p *PaletteModel) ensureSelectedVisible() {
-	maxVis := p.maxVisible()
-	if p.Selected < p.ScrollOffset {
-		p.ScrollOffset = p.Selected
-	}
-	if p.Selected >= p.ScrollOffset+maxVis {
-		p.ScrollOffset = p.Selected - maxVis + 1
-	}
+	p.ScrollOffset = clampScrollOffset(p.Selected, p.ScrollOffset, p.maxVisible())
 }
 
 func (p *PaletteModel) maxVisible() int {

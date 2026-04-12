@@ -28,9 +28,10 @@ var (
 	// redirectRe matches output redirects: >, >>, or >| followed by a target token.
 	redirectRe = regexp.MustCompile(`>(?:>|\|)?\s*(\S+)`)
 
-	// inPlaceEditRe matches sed -i or perl -i (in-place file modification).
-	// [^|;&]* prevents matching -i in a different command after a pipe or semicolon.
-	inPlaceEditRe = regexp.MustCompile(`\b(sed|perl)\b[^|;&]*-i\b`)
+	// inPlaceEditRe matches sed/perl in-place flags: -i, combined short flags
+	// like -pi/-ni/-Ei, and the GNU long form --in-place. [^|;&]* prevents
+	// matching flags in a different command after a pipe or semicolon.
+	inPlaceEditRe = regexp.MustCompile(`\b(sed|perl)\b[^|;&]*(?:--in-place|-[a-zA-Z]*i)\b`)
 
 	// teeRe matches tee with an optional -a flag followed by a file target.
 	teeRe = regexp.MustCompile(`\btee\s+(?:-a\s+)?(\S+)`)
@@ -45,8 +46,7 @@ func safeRedirectTarget(target string) bool {
 		return true // fd dup: >&1, >&2
 	case strings.HasPrefix(target, "/dev/"):
 		return true // /dev/null, /dev/stdout, /dev/stderr, /dev/fd/N
-	case strings.HasPrefix(target, "/tmp/"),
-		strings.HasPrefix(target, "$TMPDIR"):
+	case strings.HasPrefix(target, "/tmp/"):
 		return true // scratch space outside the project
 	case strings.HasPrefix(target, "("),
 		strings.HasPrefix(target, ">("):

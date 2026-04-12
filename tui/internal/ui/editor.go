@@ -1283,7 +1283,7 @@ type statusBarInfo struct {
 // statusInfo gathers editor state into a statusBarInfo for rendering.
 func (m *EditorModel) statusInfo() statusBarInfo {
 	info := statusBarInfo{
-		FileName: m.eng.Buf.Path,
+		FileName: sanitizeStatusText(m.eng.Buf.Path),
 		Modified: m.eng.Buf.Modified,
 	}
 	if info.FileName == "" {
@@ -1291,7 +1291,7 @@ func (m *EditorModel) statusInfo() statusBarInfo {
 	}
 
 	if m.StatusMsg != "" {
-		info.StatusMsg = m.StatusMsg
+		info.StatusMsg = sanitizeStatusText(m.StatusMsg)
 	} else if diag := m.diagnosticForLine(m.eng.CursorLine); diag != nil {
 		var prefix string
 		switch diag.Severity {

@@ -258,7 +258,7 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 // while the cache is keyed by canonical absolute path.
 func (t *EditFileTool) resolveContent(path string) (content, canon string, err error) {
 	canon = t.workspace.CanonPath(path)
-	content, err = t.cache.LoadOrRead(canon, func(_ string) (string, error) {
+	content, err = t.cache.LoadOrRead(canon, func() (string, error) {
 		return t.workspace.ReadFile(path)
 	})
 	return content, canon, err

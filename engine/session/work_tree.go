@@ -165,13 +165,17 @@ func (w *WorkTreeManager) FetchSnapshot() WorkTreeSnapshot {
 
 // ApplySnapshot applies a previously fetched snapshot, unless local
 // modifications occurred between the fetch and apply (detected via dirty
-// flag). Returns true if the snapshot was applied, false if skipped to
-// preserve local changes.
+// flag) or a newer version was loaded since the fetch (version guard).
+// Returns true if the snapshot was applied, false if skipped.
 func (w *WorkTreeManager) ApplySnapshot(snap WorkTreeSnapshot) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.dirty {
 		// Local mutation happened since the fetch — don't clobber it.
+		return false
+	}
+	if snap.Version > 0 && snap.Version <= w.ver {
+		// Stale snapshot — a newer version was loaded since fetch.
 		return false
 	}
 	w.tree = snap.Tree

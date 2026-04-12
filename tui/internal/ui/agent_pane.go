@@ -242,7 +242,8 @@ type AgentPaneModel struct {
 
 	// ModelSel holds the inline model selector state — when active,
 	// replaces the input area with a model list.
-	ModelSel ModelSelectorModel
+	ModelSel                ModelSelectorModel
+	modelSelPrevInputActive bool // input focus state before selector opened
 
 	// Output selection — fully internal, driven by mouse events on the
 	// output region. Not accessed outside agent_pane.go.
@@ -315,14 +316,17 @@ func (m *AgentPaneModel) SetModelLabel(label string) { m.modelLabel = label }
 // OpenModelSelector activates the inline model selector, replacing the input area.
 // profiles is the full list of available profiles (for Tab cycling); may be nil.
 func (m *AgentPaneModel) OpenModelSelector(items []ModelSelectorItem, profile, currentModel string, profiles []string) {
+	m.modelSelPrevInputActive = m.inputActive
 	m.ModelSel.Open(items, profile, currentModel, profiles)
 	m.inputActive = false // selector replaces input area — deactivate textarea
 	m.recomputeInputLayout()
 }
 
-// CloseModelSelector deactivates the inline model selector.
+// CloseModelSelector deactivates the inline model selector and restores
+// the input focus state that was active before the selector opened.
 func (m *AgentPaneModel) CloseModelSelector() {
 	m.ModelSel.Close()
+	m.inputActive = m.modelSelPrevInputActive
 	m.recomputeInputLayout()
 	m.clampScroll()
 }
@@ -335,7 +339,8 @@ func (m *AgentPaneModel) IsModelSelectorActive() bool { return m.ModelSel.IsActi
 func (m *AgentPaneModel) UpdateModelSelector(msg tea.KeyPressMsg) tea.Cmd {
 	cmd := m.ModelSel.Update(msg)
 	if !m.ModelSel.IsActive() {
-		// Selector was closed by the update — recompute layout.
+		// Selector was closed by the update — restore input focus and recompute layout.
+		m.inputActive = m.modelSelPrevInputActive
 		m.recomputeInputLayout()
 		m.clampScroll()
 	}

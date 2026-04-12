@@ -219,13 +219,15 @@ func (c *FileCache) Set(path, content string) {
 }
 
 // LoadOrRead returns cached content for canon, or reads from disk via reader
-// and populates the cache on miss. Both read_file and edit_file share this path.
-func (c *FileCache) LoadOrRead(canon string, reader func(string) (string, error)) (string, error) {
+// and populates the cache on miss. The reader is zero-arg so callers capture
+// the read path in a closure — this prevents accidental conflation of the
+// cache key (canonical absolute path) with the reader's input path contract.
+func (c *FileCache) LoadOrRead(canon string, reader func() (string, error)) (string, error) {
 	if content, ok := c.Get(canon); ok {
 		slog.Debug("file cache: hit", "path", canon, "content_len", len(content))
 		return content, nil
 	}
-	content, err := reader(canon)
+	content, err := reader()
 	if err != nil {
 		return "", err
 	}

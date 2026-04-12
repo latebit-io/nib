@@ -95,13 +95,14 @@ const maxFileSize = 10 * 1024 * 1024 // 10 MB
 // documented relative-path input while the cache is keyed by canonical path.
 func (t *ReadFileTool) loadContent(path string) (string, error) {
 	canon := t.workspace.CanonPath(path)
-	content, err := t.cache.LoadOrRead(canon, func(_ string) (string, error) {
+	content, err := t.cache.LoadOrRead(canon, func() (string, error) {
 		return t.workspace.ReadFile(path)
 	})
 	if err != nil {
 		return "", err
 	}
 	if len(content) > maxFileSize {
+		t.cache.Invalidate(canon) // don't retain oversized files in cache
 		return "", fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxFileSize)
 	}
 	return content, nil

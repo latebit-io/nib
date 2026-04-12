@@ -48,7 +48,8 @@ func safeRedirectTarget(target string) bool {
 	case strings.HasPrefix(target, "/tmp/"),
 		strings.HasPrefix(target, "$TMPDIR"):
 		return true // scratch space outside the project
-	case strings.HasPrefix(target, "("):
+	case strings.HasPrefix(target, "("),
+		strings.HasPrefix(target, ">("):
 		return true // process substitution: >(cmd)
 	default:
 		return false

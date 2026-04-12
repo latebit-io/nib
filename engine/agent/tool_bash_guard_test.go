@@ -29,6 +29,7 @@ func TestFileWriteGuard(t *testing.T) {
 		{name: "tee to devnull", command: "go test ./... | tee /dev/null", blocked: false},
 		{name: "tee to tmp", command: "go test ./... | tee /tmp/out.log", blocked: false},
 		{name: "process substitution", command: "diff <(cmd1) <(cmd2)", blocked: false},
+		{name: "output process substitution", command: "cmd > >(tee /dev/null)", blocked: false},
 		{name: "git diff", command: "git diff HEAD~1", blocked: false},
 		{name: "make target", command: "make build", blocked: false},
 		{name: "fd redirect devfd", command: "cmd > /dev/fd/1", blocked: false},

@@ -784,6 +784,8 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentTurnUsage:
 		m.AgentPane.AppendMeta(formatTurnUsage(e))
 		m.AgentPane.UpdateUsage(e)
+	case event.AgentCompacted:
+		m.AgentPane.AppendMeta(formatCompacted(e))
 	}
 	return cmd
 }

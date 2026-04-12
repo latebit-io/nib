@@ -171,6 +171,10 @@ func (w *WorkTreeManager) FetchSnapshot() WorkTreeSnapshot {
 // flag) or a newer version was loaded since the fetch (version guard).
 // Returns true if the snapshot was applied, false if skipped.
 func (w *WorkTreeManager) ApplySnapshot(snap WorkTreeSnapshot) bool {
+	if snap.Err != nil {
+		// Failed fetch — never overwrite current state with error result.
+		return false
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.dirty {

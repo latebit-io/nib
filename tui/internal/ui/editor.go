@@ -271,9 +271,10 @@ func (m *EditorModel) Title() string {
 }
 
 // ShowHover displays a hover overlay with the given text at the current cursor.
-// Strips markdown formatting (code fences, horizontal rules) from LSP hover output.
+// Strips ANSI escapes (defense-in-depth) and markdown formatting from LSP hover output.
 func (m *EditorModel) ShowHover(text string) {
-	m.hoverText = renderHoverMarkdown(text)
+	var san sanitize.Sanitizer
+	m.hoverText = renderHoverMarkdown(san.Sanitize(text))
 	m.hoverLine = m.eng.CursorLine
 	m.hoverCol = m.eng.CursorCol
 }

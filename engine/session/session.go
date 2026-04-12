@@ -22,7 +22,6 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/engine/project"
 )
 
 // agentPort is the narrow interface Session needs from an agent implementation.
@@ -48,6 +47,10 @@ type Session struct {
 	// Editor points to the active editor. Updated on file switch.
 	// Kept public for backward compatibility with frontends.
 	Editor *editor.Editor
+
+	// ctx is the application-level context. Agent runs derive a child
+	// context so they are cancelled when the application shuts down.
+	ctx context.Context
 
 	agent  agentPort
 	events <-chan event.Event // frontend reads engine events from here
@@ -120,13 +123,9 @@ type Session struct {
 	// DidChange interleaving when multiple requests race.
 	completionMu sync.Mutex
 
-	// Work tree — structured project hierarchy loaded from demarkus memory.
-	// See work.go for loading, querying, and persistence.
-	memoryStore    memoryStore   // optional demarkus store (nil when not configured)
-	workTree       *project.Tree // parsed work hierarchy (nil when not loaded)
-	workTreeVer    int           // demarkus version for optimistic concurrency
-	workTreeDirty  bool          // true when in-memory changes need persisting
-	workTreeModGen uint64        // incremented on each mutation; detects concurrent changes during save
+	// workTree manages the structured project hierarchy loaded from demarkus
+	// memory. Owns its own lock — see work_tree.go.
+	workTree WorkTreeManager
 
 	// distributedMemory lists MCP server names classified as shared/team memory.
 	// Set once during startup, read by frontends for status display.
@@ -211,29 +210,54 @@ func (s *Session) SetAgent(ag agentPort, events <-chan event.Event) {
 }
 
 // SetDistributedMemory records which MCP servers are classified as distributed
-// (team/shared) memory. Called once during startup. The frontend reads this
-// via DistributedMemory() for status display.
+// (team/shared) memory. The frontend reads this via DistributedMemory() for
+// status display. Guarded by mu for safe cross-goroutine access.
 func (s *Session) SetDistributedMemory(names []string) {
+	s.mu.Lock()
 	s.distributedMemory = names
+	s.mu.Unlock()
 }
 
 // DistributedMemory returns the names of MCP servers classified as distributed memory.
 func (s *Session) DistributedMemory() []string {
-	return s.distributedMemory
+	s.mu.RLock()
+	dm := s.distributedMemory
+	s.mu.RUnlock()
+	return dm
 }
 
 // SetLLMInfo stores the active LLM model ID and profile name.
-// Called during startup and after model switches.
+// Called during startup and after model switches. Guarded by mu
+// for safe cross-goroutine access.
 func (s *Session) SetLLMInfo(modelID, profile string) {
+	s.mu.Lock()
 	s.llmModel = modelID
 	s.llmProfile = profile
+	s.mu.Unlock()
 }
 
 // LLMModel returns the full model ID (e.g. "google/gemini-2.5-flash").
-func (s *Session) LLMModel() string { return s.llmModel }
+func (s *Session) LLMModel() string {
+	s.mu.RLock()
+	m := s.llmModel
+	s.mu.RUnlock()
+	return m
+}
 
 // LLMProfile returns the active LLM profile name.
-func (s *Session) LLMProfile() string { return s.llmProfile }
+func (s *Session) LLMProfile() string {
+	s.mu.RLock()
+	p := s.llmProfile
+	s.mu.RUnlock()
+	return p
+}
+
+// SetContext sets the application-level context. Agent runs derive a child
+// context so they are cancelled when the application shuts down. Call this
+// before starting any agent conversations.
+func (s *Session) SetContext(ctx context.Context) {
+	s.ctx = ctx
+}
 
 // SetEvents sets the event channel for frontends to read.
 // Used when there is no agent but other event sources (e.g. LSP) need
@@ -560,8 +584,13 @@ func (s *Session) unwireBufferSync(e *editor.Editor) {
 }
 
 // ActiveFile returns the path of the currently active file.
+// Safe to call from any goroutine — reads under mu.RLock to
+// avoid racing with SwitchTo.
 func (s *Session) ActiveFile() string {
-	return s.activeFile
+	s.mu.RLock()
+	f := s.activeFile
+	s.mu.RUnlock()
+	return f
 }
 
 // ActiveEditor returns the currently active editor. Safe to call from
@@ -1138,7 +1167,7 @@ func (s *Session) handlePlanningInput(input string) bool {
 		s.agent.Cancel()
 		// Reload work tree — the planning agent may have published
 		// or updated /project.md during the conversation.
-		if err := s.loadWorkTree(); err != nil {
+		if err := s.workTree.Reload(); err != nil {
 			slog.Warn("session: reload work tree after planning", "err", err)
 		}
 		s.startNewConversation(originalGoal, event.ModeExecution)
@@ -1171,7 +1200,11 @@ func (s *Session) startNewConversation(goal string, mode event.Mode) {
 	s.editReviewed = false
 	s.currentIntent = goal
 	s.intentDone = false
-	s.agent.RunWithMode(context.Background(), s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles(), mode)
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.agent.RunWithMode(ctx, s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles(), mode)
 }
 
 // ArchiveIntent marks the current intent as done.

@@ -221,3 +221,91 @@ func findRuneSeq(runes []rune, start int, r rune, count int) int {
 	}
 	return -1
 }
+
+// --- Hover markdown rendering (used by the editor's hover overlay) ---
+
+// renderHoverMarkdown converts gopls markdown hover output into styled
+// terminal text. Handles code fences (colored), horizontal rules (dim
+// separator), bold markers, and inline code spans.
+func renderHoverMarkdown(s string) string {
+	lines := strings.Split(s, "\n")
+	var out []string
+	inCode := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Code fence toggle.
+		if strings.HasPrefix(trimmed, "```") {
+			inCode = !inCode
+			continue
+		}
+
+		// Horizontal rule → dim separator.
+		if trimmed == "---" || trimmed == "___" || trimmed == "***" {
+			out = append(out, hoverDimStyle.Render("─────"))
+			continue
+		}
+
+		if inCode {
+			out = append(out, hoverCodeStyle.Render(line))
+		} else if trimmed == "" {
+			out = append(out, "")
+		} else {
+			// Render inline markdown: **bold** and `code`.
+			rendered := renderInlineMarkdown(line)
+			out = append(out, rendered)
+		}
+	}
+
+	// Trim leading/trailing blank lines.
+	for len(out) > 0 && strings.TrimSpace(out[0]) == "" {
+		out = out[1:]
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
+// renderInlineMarkdown handles **bold** and `code` spans in a single line.
+func renderInlineMarkdown(s string) string {
+	var b strings.Builder
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		// Bold: **text**
+		if i+1 < len(runes) && runes[i] == '*' && runes[i+1] == '*' {
+			end := -1
+			for j := i + 2; j+1 < len(runes); j++ {
+				if runes[j] == '*' && runes[j+1] == '*' {
+					end = j
+					break
+				}
+			}
+			if end >= 0 {
+				b.WriteString(hoverBoldStyle.Render(string(runes[i+2 : end])))
+				i = end + 2
+				continue
+			}
+		}
+		// Inline code: `text`
+		if runes[i] == '`' {
+			end := -1
+			for j := i + 1; j < len(runes); j++ {
+				if runes[j] == '`' {
+					end = j
+					break
+				}
+			}
+			if end >= 0 {
+				b.WriteString(hoverCodeStyle.Render(string(runes[i+1 : end])))
+				i = end + 1
+				continue
+			}
+		}
+		b.WriteRune(runes[i])
+		i++
+	}
+	return b.String()
+}

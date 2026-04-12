@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1094,7 +1094,7 @@ func (m *AppModel) View() tea.View {
 		}
 		idx++
 		indicators[idx] = m.AgentPane.UsageIndicator()
-		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + m.Editor.renderStatusBar(m.Width, indicators...)
+		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + renderStatusBar(m.Editor.statusInfo(), m.Width, indicators...)
 		if m.Dialog.Active {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Help.Active {
@@ -1132,7 +1132,7 @@ func (m *AppModel) switchBuffer(delta int) (tea.Model, tea.Cmd) {
 	if len(files) <= 1 {
 		return m, nil
 	}
-	sort.Strings(files)
+	slices.Sort(files)
 	active := m.Session.ActiveFile()
 	idx := 0
 	for i, f := range files {

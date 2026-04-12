@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
@@ -52,26 +51,14 @@ func (t *FindReferencesTool) Definition() llm.ToolDef {
 	}
 }
 
-type refArgs struct {
-	Path string `json:"path"`
-	Line int    `json:"line"`
-	Col  int    `json:"col"`
-}
-
 // Execute runs the references lookup.
 func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
-	var args refArgs
+	var args posArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
-	if args.Path == "" {
-		return textResult("Error: path is required")
-	}
-	if args.Line < 1 {
-		return textResult("Error: line must be >= 1 (1-indexed)")
-	}
-	if args.Col < 0 {
-		return textResult("Error: col must be >= 0")
+	if errMsg := validatePosArgs(args); errMsg != "" {
+		return textResult(errMsg)
 	}
 
 	canon := t.workspace.CanonPath(args.Path)
@@ -79,7 +66,7 @@ func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) Too
 		return textResult("Error: path is outside the project root")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, lspTimeout)
 	defer cancel()
 
 	locs, err := t.provider.References(ctx, canon, args.Line-1, args.Col)
@@ -100,9 +87,5 @@ func (t *FindReferencesTool) Execute(ctx context.Context, call llm.ToolCall) Too
 		}
 		fmt.Fprintf(&sb, "%s:%d:%d\n", relPath, loc.Line+1, loc.Col)
 	}
-	out := sb.String()
-	if len(out) > maxContentPreview {
-		out = out[:maxContentPreview] + "\n... (truncated)"
-	}
-	return textResult(out)
+	return textResult(truncateForPreview(sb.String()))
 }

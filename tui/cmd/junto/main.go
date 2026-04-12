@@ -31,7 +31,12 @@ func main() {
 }
 
 // run wires together the engine, optional agent/LSP services, and the TUI.
-func run() error {
+func run() error { //nolint:gocognit // wiring function — inherently sequential
+	// Application-level context — cancelled when run() returns (after the
+	// TUI exits) so in-flight agent goroutines shut down promptly instead
+	// of running until their next HTTP round-trip times out.
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
 	// Parse args: [--debug] [file]
 	args := os.Args[1:]
 	debug := false
@@ -93,6 +98,7 @@ func run() error {
 
 	// Create session first (editor-only mode) — it serves as the agent's Workspace.
 	sess := session.New(e, projectRoot)
+	sess.SetContext(appCtx)
 
 	// Discover MCP tools from .mcp.json or JUNTO_MCP env var.
 	mcpResult := wire.DiscoverMCPTools(projectRoot)
@@ -350,12 +356,13 @@ func run() error {
 	)
 	app.SetProgram(p)
 
-	if _, err := p.Run(); err != nil {
+	shutdown := func() {
 		app.CloseWatcher()
+		appCancel() // signal agent goroutines before teardown
 		sess.Close()
-		return err
 	}
-	app.CloseWatcher()
-	sess.Close()
-	return nil
+
+	_, err := p.Run()
+	shutdown()
+	return err
 }

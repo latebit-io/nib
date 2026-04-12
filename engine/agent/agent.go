@@ -389,10 +389,11 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, con
 // disabled and a planning-focused prompt is used.
 func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
 	a.mu.Lock()
-	// Cancel any previous conversation
-	if a.cancel != nil {
-		a.cancel()
-	}
+	// Save previous cancel so we can call it after releasing the lock.
+	// Calling cancel under mu risks contention: the previous run's defer
+	// acquires mu.Lock, and cancel may unblock it immediately.
+	prevCancel := a.cancel
+
 	// Drain stale signals from previous run
 	drain(a.approveCh)
 	drain(a.continueCh)
@@ -419,6 +420,11 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	}
 	runID := a.runID
 	a.mu.Unlock()
+
+	// Cancel the previous run after releasing mu to avoid lock contention.
+	if prevCancel != nil {
+		prevCancel()
+	}
 
 	go a.run(ctx, runID, fileName, fileContent, goal, contextFiles, mode)
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"time"
 
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
@@ -20,13 +19,6 @@ type GoToDefinitionTool struct {
 // NewGoToDefinitionTool creates a GoToDefinitionTool.
 func NewGoToDefinitionTool(ws FileReader, provider lang.DefinitionProvider) *GoToDefinitionTool {
 	return &GoToDefinitionTool{workspace: ws, provider: provider}
-}
-
-// defArgs holds the JSON-decoded arguments for go_to_definition.
-type defArgs struct {
-	Path string `json:"path"`
-	Line int    `json:"line"`
-	Col  int    `json:"col"`
 }
 
 // Definition returns the tool schema for the LLM.
@@ -60,18 +52,12 @@ func (t *GoToDefinitionTool) Definition() llm.ToolDef {
 
 // Execute resolves the definition location for the symbol at the given position.
 func (t *GoToDefinitionTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
-	var args defArgs
+	var args posArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
-	if args.Path == "" {
-		return textResult("Error: path is required")
-	}
-	if args.Line < 1 {
-		return textResult("Error: line must be >= 1 (1-indexed)")
-	}
-	if args.Col < 0 {
-		return textResult("Error: col must be >= 0")
+	if errMsg := validatePosArgs(args); errMsg != "" {
+		return textResult(errMsg)
 	}
 
 	canon := t.workspace.CanonPath(args.Path)
@@ -79,7 +65,7 @@ func (t *GoToDefinitionTool) Execute(ctx context.Context, call llm.ToolCall) Too
 		return textResult("Error: path is outside the project root")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, lspTimeout)
 	defer cancel()
 
 	loc, err := t.provider.Definition(ctx, canon, args.Line-1, args.Col)

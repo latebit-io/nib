@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,23 +10,14 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 )
 
-// defWorkspace is a Workspace stub with configurable root and realistic CanonPath.
-type defWorkspace struct {
-	root string
-}
-
-func (w *defWorkspace) ProjectRoot() string { return w.root }
-func (w *defWorkspace) CanonPath(p string) string {
-	if filepath.IsAbs(p) {
-		return filepath.Clean(p)
+// defWorkspace returns a testWorkspace configured with a project root.
+func defWorkspace(root string) *testWorkspace {
+	return &testWorkspace{
+		root:      root,
+		files:     make(map[string]string),
+		inContext: make(map[string]bool),
 	}
-	return filepath.Clean(filepath.Join(w.root, p))
 }
-func (w *defWorkspace) ReadFile(_ string) (string, error) { return "", nil }
-func (w *defWorkspace) ListFiles() ([]string, error)      { return nil, nil }
-func (w *defWorkspace) WriteFile(_, _ string) error       { return nil }
-func (w *defWorkspace) InContext(_ string) bool           { return true }
-func (w *defWorkspace) AddContext(_ string)               {}
 
 // mockDefinitionProvider is a stub that returns a fixed location or error.
 type mockDefinitionProvider struct {
@@ -39,7 +29,7 @@ func (m *mockDefinitionProvider) Definition(_ context.Context, _ string, _, _ in
 	return m.loc, m.err
 }
 
-func makeDefCall(t *testing.T, args defArgs) llm.ToolCall {
+func makeDefCall(t *testing.T, args posArgs) llm.ToolCall {
 	t.Helper()
 	return llm.ToolCall{
 		ID:       "1",
@@ -58,7 +48,7 @@ func TestGoToDefinitionTool_Success(t *testing.T) {
 	}
 
 	tool := NewGoToDefinitionTool(ws, provider)
-	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+	result := tool.Execute(context.Background(), makeDefCall(t, posArgs{
 		Path: "engine/agent/agent.go",
 		Line: 10,
 		Col:  5,
@@ -84,7 +74,7 @@ func TestGoToDefinitionTool_NotFound(t *testing.T) {
 	}
 
 	tool := NewGoToDefinitionTool(ws, provider)
-	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+	result := tool.Execute(context.Background(), makeDefCall(t, posArgs{
 		Path: "main.go",
 		Line: 1,
 		Col:  0,
@@ -106,7 +96,7 @@ func TestGoToDefinitionTool_ProviderError(t *testing.T) {
 	}
 
 	tool := NewGoToDefinitionTool(ws, provider)
-	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+	result := tool.Execute(context.Background(), makeDefCall(t, posArgs{
 		Path: "main.go",
 		Line: 1,
 		Col:  0,
@@ -125,7 +115,7 @@ func TestGoToDefinitionTool_MissingPath(t *testing.T) {
 
 	provider := &mockDefinitionProvider{}
 	tool := NewGoToDefinitionTool(ws, provider)
-	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+	result := tool.Execute(context.Background(), makeDefCall(t, posArgs{
 		Path: "",
 		Line: 1,
 		Col:  0,
@@ -144,7 +134,7 @@ func TestGoToDefinitionTool_InvalidPosition(t *testing.T) {
 	provider := &mockDefinitionProvider{}
 	tool := NewGoToDefinitionTool(ws, provider)
 
-	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+	result := tool.Execute(context.Background(), makeDefCall(t, posArgs{
 		Path: "main.go",
 		Line: 0,
 		Col:  0,
@@ -153,7 +143,7 @@ func TestGoToDefinitionTool_InvalidPosition(t *testing.T) {
 		t.Errorf("expected line validation error, got:\n%s", result.Content)
 	}
 
-	result = tool.Execute(context.Background(), makeDefCall(t, defArgs{
+	result = tool.Execute(context.Background(), makeDefCall(t, posArgs{
 		Path: "main.go",
 		Line: 1,
 		Col:  -1,
@@ -183,11 +173,11 @@ func TestGoToDefinitionTool_InvalidJSON(t *testing.T) {
 }
 
 func TestGoToDefinitionTool_PathTraversal(t *testing.T) {
-	ws := &defWorkspace{root: "/project"}
+	ws := defWorkspace("/project")
 	provider := &mockDefinitionProvider{}
 	tool := NewGoToDefinitionTool(ws, provider)
 
-	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+	result := tool.Execute(context.Background(), makeDefCall(t, posArgs{
 		Path: "../../etc/passwd",
 		Line: 1,
 		Col:  0,
@@ -199,13 +189,13 @@ func TestGoToDefinitionTool_PathTraversal(t *testing.T) {
 }
 
 func TestGoToDefinitionTool_SiblingDirTraversal(t *testing.T) {
-	ws := &defWorkspace{root: "/project"}
+	ws := defWorkspace("/project")
 	provider := &mockDefinitionProvider{}
 	tool := NewGoToDefinitionTool(ws, provider)
 
 	// "/project-secrets/file.txt" shares the prefix "/project" but is
 	// a sibling directory — must be rejected.
-	result := tool.Execute(context.Background(), makeDefCall(t, defArgs{
+	result := tool.Execute(context.Background(), makeDefCall(t, posArgs{
 		Path: "/project-secrets/file.txt",
 		Line: 1,
 		Col:  0,

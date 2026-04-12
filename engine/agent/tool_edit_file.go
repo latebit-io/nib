@@ -20,12 +20,18 @@ const maxContentPreview = 8 * 1024
 // messages. Caps the simpleDiff output to avoid blowing token budgets.
 const maxDiffPreview = 4 * 1024
 
-// truncateForPreview returns content truncated for LLM error messages.
+// truncateForPreview returns content truncated for LLM context windows.
+// The suffix hints the LLM how to retrieve the full content.
 func truncateForPreview(content string) string {
+	return truncateWithHint(content, "use read_file for full content")
+}
+
+// truncateWithHint truncates content at maxContentPreview with a custom hint.
+func truncateWithHint(content, hint string) string {
 	if len(content) <= maxContentPreview {
 		return content
 	}
-	return content[:maxContentPreview] + "\n\n[... truncated — use read_file for full content]"
+	return content[:maxContentPreview] + "\n\n[... truncated — " + hint + "]"
 }
 
 // maxDiffInputBytes caps the combined input size to simpleDiff.
@@ -247,20 +253,21 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 }
 
 // resolveContent returns the file content and canonical path, reading from
-// cache first and falling back to disk.
+// cache first and falling back to disk. The closure captures the original
+// relative path so ReadFile receives the documented relative-path input
+// while the cache is keyed by canonical absolute path.
 func (t *EditFileTool) resolveContent(path string) (content, canon string, err error) {
 	canon = t.workspace.CanonPath(path)
-	content, ok := t.cache.Get(canon)
-	if ok {
-		slog.Debug("edit_file: cache hit", "path", path, "content_len", len(content))
-		return content, canon, nil
-	}
-	content, err = t.workspace.ReadFile(path)
+	content, err = t.cache.LoadOrRead(canon, func() (string, error) {
+		return t.workspace.ReadFile(path)
+	})
 	if err != nil {
 		return "", canon, err
 	}
-	t.cache.Set(canon, content)
-	slog.Debug("edit_file: read from disk", "path", path, "content_len", len(content))
+	if len(content) > maxDiffInputBytes {
+		t.cache.Invalidate(canon) // don't retain oversized files in cache
+		return "", canon, fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxDiffInputBytes)
+	}
 	return content, canon, nil
 }
 

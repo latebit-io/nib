@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/latebit-io/junto/engine/llm"
@@ -92,27 +91,20 @@ func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 const maxFileSize = 10 * 1024 * 1024 // 10 MB
 
 // loadContent returns file content from cache or disk, populating the cache on miss.
+// The closure captures the original relative path so ReadFile receives the
+// documented relative-path input while the cache is keyed by canonical path.
 func (t *ReadFileTool) loadContent(path string) (string, error) {
 	canon := t.workspace.CanonPath(path)
-
-	if content, ok := t.cache.Get(canon); ok {
-		slog.Debug("read_file: cache hit", "path", path, "content_len", len(content))
-		if len(content) > maxFileSize {
-			return "", fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxFileSize)
-		}
-		return content, nil
-	}
-
-	content, err := t.workspace.ReadFile(path)
+	content, err := t.cache.LoadOrRead(canon, func() (string, error) {
+		return t.workspace.ReadFile(path)
+	})
 	if err != nil {
 		return "", err
 	}
 	if len(content) > maxFileSize {
+		t.cache.Invalidate(canon) // don't retain oversized files in cache
 		return "", fmt.Errorf("file too large (%d bytes, max %d)", len(content), maxFileSize)
 	}
-
-	slog.Debug("read_file: read from disk", "path", path, "content_len", len(content))
-	t.cache.Set(canon, content)
 	return content, nil
 }
 

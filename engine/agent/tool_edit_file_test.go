@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 )
 
 type testWorkspace struct {
+	root            string // project root; empty means CanonPath is identity
 	files           map[string]string
 	inContext       map[string]bool
 	addContextCalls int
@@ -25,7 +27,12 @@ func (w *testWorkspace) ReadFile(path string) (string, error) {
 
 func (w *testWorkspace) ListFiles() ([]string, error) { return nil, nil }
 func (w *testWorkspace) WriteFile(_, _ string) error  { return nil }
-func (w *testWorkspace) CanonPath(p string) string    { return p }
+func (w *testWorkspace) CanonPath(p string) string {
+	if w.root != "" && !filepath.IsAbs(p) {
+		return filepath.Clean(filepath.Join(w.root, p))
+	}
+	return p
+}
 
 func (w *testWorkspace) InContext(path string) bool {
 	return w.inContext[w.CanonPath(path)]
@@ -36,7 +43,7 @@ func (w *testWorkspace) AddContext(path string) {
 	w.inContext[w.CanonPath(path)] = true
 }
 
-func (w *testWorkspace) ProjectRoot() string { return "" }
+func (w *testWorkspace) ProjectRoot() string { return w.root }
 
 func mustMarshal(t *testing.T, v any) []byte {
 	t.Helper()
@@ -89,6 +96,48 @@ func TestEditFileTool_ReturnsEditProposal(t *testing.T) {
 	if proposal.ExpectedContent != "package foo" {
 		t.Errorf("expected content 'package foo', got %q", proposal.ExpectedContent)
 	}
+}
+
+func TestEditFileTool_RootedCanonPath(t *testing.T) {
+	// Exercises the root-aware CanonPath branch: relative paths are resolved
+	// against the workspace root, and the canonical key is used for cache
+	// lookups and context tracking.
+	ws := &testWorkspace{
+		root: "/repo",
+		// File keyed by original relative path — the closure in resolveContent
+		// passes the original path to ReadFile, not the canonical key.
+		files:     map[string]string{"src/main.go": "package main"},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	tool := NewEditFileTool(ws, cache)
+
+	args := mustMarshal(t, editArgs{
+		Path:    "src/main.go",
+		Search:  "package main",
+		Replace: "package foo",
+		Reason:  "rename",
+	})
+	call := llm.ToolCall{
+		ID:       "1",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	}
+
+	result := tool.Execute(context.Background(), call)
+	if result.Effect != EffectEditProposed {
+		t.Fatalf("expected EffectEditProposed, got %d", result.Effect)
+	}
+
+	proposal := result.Payload.(EditProposal)
+	if proposal.CanonPath != "/repo/src/main.go" {
+		t.Errorf("expected canon path /repo/src/main.go, got %q", proposal.CanonPath)
+	}
+
+	// Cache should be populated under the canonical key.
+	if _, ok := cache.Get("/repo/src/main.go"); !ok {
+		t.Error("expected cache hit for canonical path /repo/src/main.go")
+	}
+
 }
 
 func TestEditFileTool_ValidationFailsNoMatch(t *testing.T) {

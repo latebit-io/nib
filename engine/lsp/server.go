@@ -160,7 +160,7 @@ func (s *Server) DidOpen(uri, languageID string, version int, content string) {
 			Text:       content,
 		},
 	}); err != nil {
-		slog.Debug("lsp server: didOpen notify failed", "uri", uri, "err", err)
+		slog.Warn("lsp server: didOpen notify failed", "uri", uri, "err", err)
 	}
 }
 
@@ -188,7 +188,7 @@ func (s *Server) DidChange(uri string, version int, changes []lang.TextChange) {
 		},
 		ContentChanges: lspChanges,
 	}); err != nil {
-		slog.Debug("lsp server: didChange notify failed", "uri", uri, "err", err)
+		slog.Warn("lsp server: didChange notify failed", "uri", uri, "err", err)
 	}
 }
 
@@ -197,7 +197,7 @@ func (s *Server) DidSave(uri string) {
 	if err := s.transport.Notify("textDocument/didSave", lspDidSaveParams{
 		TextDocument: lspTextDocumentIdentifier{URI: uri},
 	}); err != nil {
-		slog.Debug("lsp server: didSave notify failed", "uri", uri, "err", err)
+		slog.Warn("lsp server: didSave notify failed", "uri", uri, "err", err)
 	}
 }
 
@@ -206,7 +206,7 @@ func (s *Server) DidClose(uri string) {
 	if err := s.transport.Notify("textDocument/didClose", lspDidCloseParams{
 		TextDocument: lspTextDocumentIdentifier{URI: uri},
 	}); err != nil {
-		slog.Debug("lsp server: didClose notify failed", "uri", uri, "err", err)
+		slog.Warn("lsp server: didClose notify failed", "uri", uri, "err", err)
 	}
 }
 

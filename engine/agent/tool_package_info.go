@@ -113,11 +113,7 @@ func (t *PackageInfoTool) goPackageInfo(ctx context.Context, args packageInfoArg
 	doc := t.runGoDoc(ctx, modDir, target)
 	result.WriteString(doc)
 
-	out := result.String()
-	if len(out) > maxContentPreview {
-		out = out[:maxContentPreview] + "\n... (truncated)"
-	}
-	return textResult(out)
+	return textResult(truncateWithHint(result.String(), "query a specific symbol for full docs"))
 }
 
 // findGoModule searches go.mod files for a dependency matching the given package.

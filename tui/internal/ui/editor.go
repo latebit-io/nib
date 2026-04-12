@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/junto/engine/highlight"
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/mattn/go-runewidth"
@@ -72,6 +73,30 @@ var (
 	diagInfoGutterStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // blue
 	diagUnderlineStyle     = lipgloss.NewStyle().Underline(true)
 )
+
+// Editor rendering styles — hoisted to package level to avoid per-frame allocation.
+var (
+	gutterStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle     = lipgloss.NewStyle().Reverse(true)
+	selectionStyle  = lipgloss.NewStyle().Background(lipgloss.Color("24"))
+	removedBgColor  = lipgloss.Color("52") // dark red
+	removedBgStyle  = lipgloss.NewStyle().Background(removedBgColor)
+	removedGutterSt = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Background(removedBgColor)
+	addedBgColor    = lipgloss.Color("22") // dark green
+	addedBgStyle    = lipgloss.NewStyle().Background(addedBgColor)
+	addedGutterSt   = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Background(addedBgColor)
+)
+
+// Syntax highlight styles — one per TokenKind, map lookup avoids per-token allocation.
+var tokenKindStyles = map[highlight.TokenKind]lipgloss.Style{
+	highlight.KindKeyword:  lipgloss.NewStyle().Foreground(lipgloss.Color("5")), // magenta
+	highlight.KindString:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")), // green
+	highlight.KindComment:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")), // gray
+	highlight.KindNumber:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")), // yellow
+	highlight.KindType:     lipgloss.NewStyle().Foreground(lipgloss.Color("6")), // cyan
+	highlight.KindOperator: lipgloss.NewStyle().Foreground(lipgloss.Color("9")), // bright red
+}
+var tokenKindDefault = lipgloss.NewStyle()
 
 // Diagnostic gutter icons by severity.
 const (
@@ -246,97 +271,12 @@ func (m *EditorModel) Title() string {
 }
 
 // ShowHover displays a hover overlay with the given text at the current cursor.
-// Strips markdown formatting (code fences, horizontal rules) from LSP hover output.
+// Strips ANSI escapes (defense-in-depth) and markdown formatting from LSP hover output.
 func (m *EditorModel) ShowHover(text string) {
-	m.hoverText = renderHoverMarkdown(text)
+	var san sanitize.Sanitizer
+	m.hoverText = renderHoverMarkdown(san.Sanitize(text))
 	m.hoverLine = m.eng.CursorLine
 	m.hoverCol = m.eng.CursorCol
-}
-
-// renderHoverMarkdown converts gopls markdown hover output into styled
-// terminal text. Handles code fences (colored), horizontal rules (dim
-// separator), bold markers, and inline code spans.
-func renderHoverMarkdown(s string) string {
-	lines := strings.Split(s, "\n")
-	var out []string
-	inCode := false
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Code fence toggle.
-		if strings.HasPrefix(trimmed, "```") {
-			inCode = !inCode
-			continue
-		}
-
-		// Horizontal rule → dim separator.
-		if trimmed == "---" || trimmed == "___" || trimmed == "***" {
-			out = append(out, hoverDimStyle.Render("─────"))
-			continue
-		}
-
-		if inCode {
-			out = append(out, hoverCodeStyle.Render(line))
-		} else if trimmed == "" {
-			out = append(out, "")
-		} else {
-			// Render inline markdown: **bold** and `code`.
-			rendered := renderInlineMarkdown(line)
-			out = append(out, rendered)
-		}
-	}
-
-	// Trim leading/trailing blank lines.
-	for len(out) > 0 && strings.TrimSpace(out[0]) == "" {
-		out = out[1:]
-	}
-	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
-		out = out[:len(out)-1]
-	}
-	return strings.Join(out, "\n")
-}
-
-// renderInlineMarkdown handles **bold** and `code` spans in a single line.
-func renderInlineMarkdown(s string) string {
-	var b strings.Builder
-	runes := []rune(s)
-	i := 0
-	for i < len(runes) {
-		// Bold: **text**
-		if i+1 < len(runes) && runes[i] == '*' && runes[i+1] == '*' {
-			end := -1
-			for j := i + 2; j+1 < len(runes); j++ {
-				if runes[j] == '*' && runes[j+1] == '*' {
-					end = j
-					break
-				}
-			}
-			if end >= 0 {
-				b.WriteString(hoverBoldStyle.Render(string(runes[i+2 : end])))
-				i = end + 2
-				continue
-			}
-		}
-		// Inline code: `text`
-		if runes[i] == '`' {
-			end := -1
-			for j := i + 1; j < len(runes); j++ {
-				if runes[j] == '`' {
-					end = j
-					break
-				}
-			}
-			if end >= 0 {
-				b.WriteString(hoverCodeStyle.Render(string(runes[i+1 : end])))
-				i = end + 1
-				continue
-			}
-		}
-		b.WriteRune(runes[i])
-		i++
-	}
-	return b.String()
 }
 
 // DismissHover clears the hover overlay.
@@ -542,10 +482,6 @@ func (m *EditorModel) Render() string {
 	contentW := m.eng.ContentWidth()
 	vis := m.eng.VisibleLines()
 
-	gutterStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	cursorStyle := lipgloss.NewStyle().Reverse(true)
-	selectionStyle := lipgloss.NewStyle().Background(lipgloss.Color("24"))
-
 	// Compute agent cursor info for this render pass.
 	var agentCursor *agentCursorInfo
 	if anim := m.Anim; anim != nil && anim.state != animIdle {
@@ -560,14 +496,6 @@ func (m *EditorModel) Render() string {
 			style: style,
 		}
 	}
-
-	removedBgColor := lipgloss.Color("52") // dark red
-	removedBg := lipgloss.NewStyle().Background(removedBgColor)
-	removedGutterSt := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Background(removedBgColor)
-
-	addedBgColor := lipgloss.Color("22") // dark green
-	addedBg := lipgloss.NewStyle().Background(addedBgColor)
-	addedGutterSt := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Background(addedBgColor)
 
 	output := make([]string, m.eng.Height)
 	m.viewportMap = m.viewportMap[:0]
@@ -609,13 +537,13 @@ func (m *EditorModel) Render() string {
 
 		case vLine <= overlay.EndLine:
 			// Removed (red) line.
-			output[visualRow] = m.renderRemovedLine(vLine, gutterW, contentW, removedBg, removedBgColor, removedGutterSt, cursorStyle, showBufferCursor)
+			output[visualRow] = m.renderRemovedLine(vLine, gutterW, contentW, removedBgStyle, removedBgColor, removedGutterSt, cursorStyle, showBufferCursor)
 			m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineRemoved, bufLine: vLine})
 
 		case vLine >= addedStart && vLine <= addedEnd:
 			// Added (green) overlay line.
 			addedIdx := vLine - addedStart
-			output[visualRow] = m.renderAddedLine(addedIdx, gutterW, contentW, cursorStyle, selectionStyle, addedBg, addedGutterSt)
+			output[visualRow] = m.renderAddedLine(addedIdx, gutterW, contentW, cursorStyle, selectionStyle, addedBgStyle, addedGutterSt)
 			m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineAdded, overlayLine: addedIdx})
 
 		default:
@@ -1194,7 +1122,11 @@ func (m *EditorModel) renderAddedLine(
 			aTagCursor = -1
 			aTagSel    = -2
 		)
-		aColTags := make([]int, contentW)
+		if cap(m.colTags) < contentW {
+			m.colTags = make([]int, contentW)
+		}
+		aColTags := m.colTags[:contentW]
+		clear(aColTags)
 		for j := range contentW {
 			switch {
 			case j == displayCursorCol:
@@ -1339,22 +1271,28 @@ func sanitizeStatusText(s string) string {
 	return b.String()
 }
 
-// renderStatusBar renders the full-width status bar. Called by AppModel.View().
-// indicators is an optional list of short labels displayed on the right side
-// before the cursor position (e.g. distributed memory server names).
-func (m *EditorModel) renderStatusBar(width int, indicators ...string) string {
-	name := m.eng.Buf.Path
-	if name == "" {
-		name = "[new]"
+// statusBarInfo holds the editor-specific data needed to render the status bar.
+// Separates editor state gathering from bar layout/rendering.
+type statusBarInfo struct {
+	FileName  string // file path or "[new]"
+	Modified  bool
+	StatusMsg string // transient status text (e.g. "saved")
+	DiagMsg   string // diagnostic on current line (e.g. "error: ...")
+	CursorPos string // formatted cursor position
+}
+
+// statusInfo gathers editor state into a statusBarInfo for rendering.
+func (m *EditorModel) statusInfo() statusBarInfo {
+	info := statusBarInfo{
+		FileName: sanitizeStatusText(m.eng.Buf.Path),
+		Modified: m.eng.Buf.Modified,
 	}
-	modified := ""
-	if m.eng.Buf.Modified {
-		modified = " [+]"
+	if info.FileName == "" {
+		info.FileName = "[new]"
 	}
 
-	left := fmt.Sprintf(" %s%s", name, modified)
 	if m.StatusMsg != "" {
-		left += "  " + m.StatusMsg
+		info.StatusMsg = sanitizeStatusText(m.StatusMsg)
 	} else if diag := m.diagnosticForLine(m.eng.CursorLine); diag != nil {
 		var prefix string
 		switch diag.Severity {
@@ -1365,27 +1303,41 @@ func (m *EditorModel) renderStatusBar(width int, indicators ...string) string {
 		default:
 			prefix = "info"
 		}
-		left += "  " + prefix + ": " + sanitizeStatusText(diag.Message)
+		info.DiagMsg = prefix + ": " + sanitizeStatusText(diag.Message)
 	}
 
-	// Show cursor position: overlay, agent animation, or buffer.
-	var right string
 	switch {
 	case m.Overlay != nil && m.Overlay.Active:
-		right = fmt.Sprintf(" +%d:%d ", m.Overlay.Editor.CursorLine+1, m.Overlay.Editor.CursorCol+1)
+		info.CursorPos = fmt.Sprintf(" +%d:%d ", m.Overlay.Editor.CursorLine+1, m.Overlay.Editor.CursorCol+1)
 	case m.Anim != nil && m.Anim.state == animTyping:
 		al, ac := m.Anim.edit.Position()
-		right = fmt.Sprintf(" %d:%d  agent:%d:%d ", m.eng.CursorLine+1, m.eng.CursorCol+1, al+1, ac+1)
+		info.CursorPos = fmt.Sprintf(" %d:%d  agent:%d:%d ", m.eng.CursorLine+1, m.eng.CursorCol+1, al+1, ac+1)
 	default:
-		right = fmt.Sprintf(" %d:%d ", m.eng.CursorLine+1, m.eng.CursorCol+1)
+		info.CursorPos = fmt.Sprintf(" %d:%d ", m.eng.CursorLine+1, m.eng.CursorCol+1)
+	}
+	return info
+}
+
+// renderStatusBar renders the full-width status bar from editor info and
+// app-level indicators. Standalone function so the rendering concern is
+// not bound to either EditorModel or AppModel.
+func renderStatusBar(info statusBarInfo, width int, indicators ...string) string {
+	modified := ""
+	if info.Modified {
+		modified = " [+]"
 	}
 
-	// Append indicators (e.g. distributed memory) before cursor position.
-	var indicator string
-	if len(indicators) > 0 {
-		indicator = strings.Join(indicators, " | ") + " | "
+	left := fmt.Sprintf(" %s%s", info.FileName, modified)
+	if info.StatusMsg != "" {
+		left += "  " + info.StatusMsg
+	} else if info.DiagMsg != "" {
+		left += "  " + info.DiagMsg
 	}
-	right = indicator + right
+
+	right := info.CursorPos
+	if len(indicators) > 0 {
+		right = strings.Join(indicators, " | ") + " | " + right
+	}
 
 	leftW := runewidth.StringWidth(left)
 	rightW := runewidth.StringWidth(right)
@@ -2174,22 +2126,10 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Edito
 	return nil
 }
 
-// styleForTokenKind maps engine editor.TokenKind to lipgloss.Style for TUI rendering.
-func styleForTokenKind(kind editor.TokenKind) lipgloss.Style {
-	switch kind {
-	case editor.KindKeyword:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("5")) // magenta
-	case editor.KindString:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
-	case editor.KindComment:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray
-	case editor.KindNumber:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
-	case editor.KindType:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
-	case editor.KindOperator:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")) // bright red
-	default:
-		return lipgloss.NewStyle()
+// styleForTokenKind maps highlight.TokenKind to a pre-allocated lipgloss.Style.
+func styleForTokenKind(kind highlight.TokenKind) lipgloss.Style {
+	if s, ok := tokenKindStyles[kind]; ok {
+		return s
 	}
+	return tokenKindDefault
 }

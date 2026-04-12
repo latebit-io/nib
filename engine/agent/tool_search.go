@@ -89,10 +89,5 @@ func (t *SearchProjectTool) Execute(_ context.Context, call llm.ToolCall) ToolRe
 		fmt.Fprintf(&sb, "%s:%d: %s\n", r.Path, r.Line, r.Text)
 	}
 
-	// Cap output to avoid token blow-up.
-	out := sb.String()
-	if len(out) > maxContentPreview {
-		out = out[:maxContentPreview] + "\n... (truncated)"
-	}
-	return textResult(out)
+	return textResult(truncateForPreview(sb.String()))
 }

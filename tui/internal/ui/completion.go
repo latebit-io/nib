@@ -5,6 +5,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -103,12 +104,7 @@ func (c *CompletionPopup) SelectedItem() *lang.CompletionItem {
 
 // clampScroll ensures the selected item is visible.
 func (c *CompletionPopup) clampScroll() {
-	if c.Selected < c.ScrollOffset {
-		c.ScrollOffset = c.Selected
-	}
-	if c.Selected >= c.ScrollOffset+maxCompletionVisible {
-		c.ScrollOffset = c.Selected - maxCompletionVisible + 1
-	}
+	c.ScrollOffset = clampScrollOffset(c.Selected, c.ScrollOffset, maxCompletionVisible)
 }
 
 // Render returns the popup as a styled string block.
@@ -168,27 +164,11 @@ func (c *CompletionPopup) Render(width int) string {
 }
 
 // sanitizeCompletionText strips ANSI escapes and control characters from
-// language service text to prevent terminal injection.
+// language service text to prevent terminal injection. Delegates to the
+// shared sanitize package to avoid duplicating the ANSI state machine.
 func sanitizeCompletionText(s string) string {
-	var b strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if inEscape {
-			if r >= 0x40 && r <= 0x7e {
-				inEscape = false
-			}
-			continue
-		}
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if r < ' ' && r != '\t' {
-			continue // strip control chars except tab
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
+	var san sanitize.Sanitizer
+	return san.Sanitize(s)
 }
 
 // completionKindIcon returns a single-char icon for a completion kind.

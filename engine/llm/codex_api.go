@@ -370,6 +370,17 @@ func extractOutputIndex(raw []byte) int {
 
 // readCodexSSE parses the Responses API SSE stream into StreamEvents.
 func (c *CodexAPI) readCodexSSE(ctx context.Context, resp *http.Response, ch chan<- StreamEvent) {
+	// send writes an event to the channel or returns false if ctx is cancelled.
+	// Prevents blocking indefinitely if the consumer stops reading.
+	send := func(ev StreamEvent) bool {
+		select {
+		case ch <- ev:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
@@ -388,7 +399,7 @@ func (c *CodexAPI) readCodexSSE(ctx context.Context, resp *http.Response, ch cha
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
-			ch <- StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage}
+			send(StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage})
 			return
 		}
 
@@ -400,7 +411,9 @@ func (c *CodexAPI) readCodexSSE(ctx context.Context, resp *http.Response, ch cha
 		}
 
 		if emitted, done := state.handleEvent(evt, raw); emitted != nil {
-			ch <- *emitted
+			if !send(*emitted) {
+				return
+			}
 			if done {
 				return
 			}
@@ -411,7 +424,7 @@ func (c *CodexAPI) readCodexSSE(ctx context.Context, resp *http.Response, ch cha
 		slog.Warn("codex SSE scanner error", "err", err)
 	}
 	if ctx.Err() == nil {
-		ch <- StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage}
+		send(StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage})
 	}
 }
 

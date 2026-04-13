@@ -172,32 +172,32 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		app.AgentPane.SetModelLabel(llmResolved.Profile + ": " + llmResolved.DisplayModel())
 	}
 
-	// Wire OAuth detection — always available, even without an initial provider.
+	// Profile detection and API key storage — always available, independent of OAuth.
+	app.IsOAuthProfile = func(profile string) string {
+		resolved := llmconfig.ResolveProfile(llmCfg, profile)
+		if resolved == nil {
+			return ""
+		}
+		return resolved.OAuthProvider
+	}
+
+	app.StoreAPIKey = func(profile, key string) error {
+		if pr.KeyStore == nil {
+			return fmt.Errorf("key storage not available")
+		}
+		return pr.KeyStore.Put(profile, key)
+	}
+
+	app.HasAPIKey = func(profile string) bool {
+		resolved := llmconfig.ResolveProfile(llmCfg, profile)
+		if resolved == nil {
+			return false
+		}
+		return resolved.HasProvider() || (pr.KeyStore != nil && pr.KeyStore.HasKey(profile))
+	}
+
+	// OAuth-specific callbacks — only available when the token store exists.
 	if pr.OAuthStore != nil {
-		app.IsOAuthProfile = func(profile string) string {
-			resolved := llmconfig.ResolveProfile(llmCfg, profile)
-			if resolved == nil {
-				return ""
-			}
-			return resolved.OAuthProvider
-		}
-
-		app.StoreAPIKey = func(profile, key string) error {
-			if pr.KeyStore == nil {
-				return fmt.Errorf("key storage not available")
-			}
-			return pr.KeyStore.Put(profile, key)
-		}
-
-		app.HasAPIKey = func(profile string) bool {
-			resolved := llmconfig.ResolveProfile(llmCfg, profile)
-			if resolved == nil {
-				return false
-			}
-			// Has env var key or stored key.
-			return resolved.HasProvider() || (pr.KeyStore != nil && pr.KeyStore.HasKey(profile))
-		}
-
 		app.HasOAuthToken = func(profile string) bool {
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {

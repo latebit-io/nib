@@ -90,7 +90,7 @@ func startCallbackServer(port int, state string) (*callbackServer, error) {
 	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("state") != state {
 			errCh <- fmt.Errorf("oauth callback: state mismatch (possible CSRF)")
-			_, _ = fmt.Fprint(w, "<html><body><h1>Authentication failed</h1><p>State mismatch.</p></body></html>")
+			_, _ = fmt.Fprint(w, "<html><body><h1>Authentication failed</h1><p>State mismatch.</p></body></html>") // client may have disconnected; not actionable
 			return
 		}
 		code := r.URL.Query().Get("code")
@@ -100,11 +100,11 @@ func startCallbackServer(port int, state string) (*callbackServer, error) {
 				errMsg = "no code in callback"
 			}
 			errCh <- fmt.Errorf("oauth callback: %s", errMsg)
-			_, _ = fmt.Fprintf(w, "<html><body><h1>Authentication failed</h1><p>%s</p><p>You can close this tab.</p></body></html>", html.EscapeString(errMsg))
+			_, _ = fmt.Fprintf(w, "<html><body><h1>Authentication failed</h1><p>%s</p><p>You can close this tab.</p></body></html>", html.EscapeString(errMsg)) // client may have disconnected; not actionable
 			return
 		}
 		codeCh <- code
-		_, _ = fmt.Fprint(w, "<html><body><h1>Authentication successful!</h1><p>You can close this tab and return to Junto.</p></body></html>")
+		_, _ = fmt.Fprint(w, "<html><body><h1>Authentication successful!</h1><p>You can close this tab and return to Junto.</p></body></html>") // client may have disconnected; not actionable
 	})
 
 	srv := &http.Server{Handler: mux}
@@ -122,7 +122,7 @@ func startCallbackServer(port int, state string) (*callbackServer, error) {
 	}, nil
 }
 
-func (s *callbackServer) close() { _ = s.srv.Close() }
+func (s *callbackServer) close() { _ = s.srv.Close() } // error not actionable during shutdown
 
 func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCallbacks) (*tokenResponse, error) {
 	p, err := newPKCE()

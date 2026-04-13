@@ -90,10 +90,11 @@ func (s *KeyStore) Delete(profile string) error {
 }
 
 // HasKey reports whether a non-empty key exists for the profile.
+// Trims whitespace to stay consistent with Put's validation.
 func (s *KeyStore) HasKey(profile string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.keys[profile] != ""
+	return strings.TrimSpace(s.keys[profile]) != ""
 }
 
 // load reads the store from disk. Missing files are silently ignored.

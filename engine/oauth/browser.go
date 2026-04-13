@@ -152,6 +152,9 @@ func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCall
 		"state":                 {state},
 	}
 	for k, v := range cfg.ExtraParams {
+		if params.Has(k) {
+			continue // do not overwrite security-critical params (state, redirect_uri, etc.)
+		}
 		params.Set(k, v)
 	}
 	authURL := cfg.AuthURL + "?" + params.Encode()
@@ -231,7 +234,7 @@ func openBrowser(u string) error {
 	case "linux":
 		return exec.Command("xdg-open", u).Start()
 	case "windows":
-		return exec.Command("cmd", "/c", "start", u).Start()
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", u).Start()
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}

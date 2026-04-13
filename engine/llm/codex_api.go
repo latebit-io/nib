@@ -64,7 +64,7 @@ func (c *CodexAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	if resp.StatusCode != http.StatusOK {
-		_, _ = io.ReadAll(io.LimitReader(resp.Body, 1024))
+		// Body drained by deferred Close; no need to read it.
 		return nil, fmt.Errorf("codex: list models: HTTP %d", resp.StatusCode)
 	}
 
@@ -272,8 +272,11 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		return nil, fmt.Errorf("codex request: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048)) // best-effort read for error message
-		_ = resp.Body.Close()                                      // body drained above; close error is not actionable
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		_ = resp.Body.Close() // body drained above; close error is not actionable
+		if readErr != nil {
+			return nil, fmt.Errorf("codex error: status %d (body unreadable: %w)", resp.StatusCode, readErr)
+		}
 		return nil, fmt.Errorf("codex error: status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -328,21 +331,39 @@ func (s *codexStreamState) handleItemAdded(evt codexSSEEvent, raw []byte) {
 	}
 }
 
+// maxToolArgsBytes caps accumulated tool-call arguments to prevent unbounded
+// growth from streamed model output. Matches the SSE scanner's 10MB limit.
+const maxToolArgsBytes = 10 * 1024 * 1024
+
 func (s *codexStreamState) handleCallDelta(evt codexSSEEvent, raw []byte) {
 	idx := extractOutputIndex(raw)
-	if pc, ok := s.calls[idx]; ok {
-		pc.args.WriteString(evt.Delta)
+	pc, ok := s.calls[idx]
+	if !ok {
+		return
 	}
+	if pc.args.Len()+len(evt.Delta) > maxToolArgsBytes {
+		slog.Warn("codex: tool args exceeded cap, dropping call", "output_index", idx)
+		delete(s.calls, idx)
+		return
+	}
+	pc.args.WriteString(evt.Delta)
 }
 
 func (s *codexStreamState) handleItemDone(evt codexSSEEvent, raw []byte) {
 	var item codexOutputItem
 	if err := json.Unmarshal(evt.Item, &item); err == nil && item.Type == "function_call" && item.Arguments != "" {
 		idx := extractOutputIndex(raw)
-		if pc, ok := s.calls[idx]; ok {
-			pc.args.Reset()
-			pc.args.WriteString(item.Arguments)
+		pc, ok := s.calls[idx]
+		if !ok {
+			return
 		}
+		if len(item.Arguments) > maxToolArgsBytes {
+			slog.Warn("codex: tool args exceeded cap, dropping call", "output_index", idx)
+			delete(s.calls, idx)
+			return
+		}
+		pc.args.Reset()
+		pc.args.WriteString(item.Arguments)
 	}
 }
 

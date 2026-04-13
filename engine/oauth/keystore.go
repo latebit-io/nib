@@ -124,6 +124,7 @@ func (s *KeyStore) save() error {
 		return fmt.Errorf("write %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp) // best-effort cleanup of orphaned temp file
 		return fmt.Errorf("rename %s → %s: %w", tmp, s.path, err)
 	}
 	return nil

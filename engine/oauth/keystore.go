@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -49,7 +50,12 @@ func (s *KeyStore) Get(profile string) string {
 
 // Put stores an API key for a profile and persists to disk.
 // The in-memory map is only updated after the write succeeds.
+// Returns an error if the key is empty or whitespace-only.
 func (s *KeyStore) Put(profile, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("keystore: empty key for profile %q", profile)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, existed := s.keys[profile]

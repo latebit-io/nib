@@ -250,17 +250,20 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			// OAuth profiles — try API model listing, fall back to hardcoded.
 			if resolved.OAuthProvider != "" {
 				p := resolved.NewProvider()
-				if p != nil {
-					if lister, ok := p.(llm.ModelLister); ok {
-						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-						defer cancel()
-						if models, err := lister.ListModels(ctx); err == nil && len(models) > 0 {
-							items := make([]ui.ModelSelectorItem, len(models))
-							for i, m := range models {
-								items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
-							}
-							return items, nil
+				if p == nil {
+					slog.Debug("llm: OAuth provider not ready, using static model list", "profile", profile)
+				} else if lister, ok := p.(llm.ModelLister); ok {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					models, err := lister.ListModels(ctx)
+					if err != nil {
+						slog.Debug("llm: OAuth model listing failed, using static list", "profile", profile, "err", err)
+					} else if len(models) > 0 {
+						items := make([]ui.ModelSelectorItem, len(models))
+						for i, m := range models {
+							items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
 						}
+						return items, nil
 					}
 				}
 				// Fallback to hardcoded list.

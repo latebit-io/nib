@@ -205,6 +205,10 @@ func exchangeCode(ctx context.Context, tokenURL, clientID, code, redirectURI, co
 		return nil, fmt.Errorf("read token response: %w", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token exchange: HTTP %d", resp.StatusCode)
+	}
+
 	var tr tokenResponse
 	if err := json.Unmarshal(body, &tr); err != nil {
 		return nil, fmt.Errorf("decode token response: %w", err)
@@ -215,9 +219,6 @@ func exchangeCode(ctx context.Context, tokenURL, clientID, code, redirectURI, co
 			desc = tr.Error
 		}
 		return nil, fmt.Errorf("token error: %s", desc)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange: HTTP %d", resp.StatusCode)
 	}
 	return &tr, nil
 }

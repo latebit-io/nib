@@ -61,7 +61,7 @@ func (c *CodexAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("codex: list models: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -272,14 +272,14 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		return nil, fmt.Errorf("codex request: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		_ = resp.Body.Close()
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048)) // best-effort read for error message
+		_ = resp.Body.Close()                                      // body drained above; close error is not actionable
 		return nil, fmt.Errorf("codex error: status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	ch := make(chan StreamEvent, 16)
 	go func() {
-		defer func() { _ = resp.Body.Close() }()
+		defer func() { _ = resp.Body.Close() }() // SSE stream done; close error is not actionable
 		defer close(ch)
 		c.readCodexSSE(ctx, resp, ch)
 	}()
@@ -309,7 +309,7 @@ func (s *codexStreamState) handleEvent(evt codexSSEEvent, raw []byte) (emitted *
 			return &StreamEvent{Token: evt.Delta}, false
 		}
 	case "response.output_item.added":
-		s.handleItemAdded(evt)
+		s.handleItemAdded(evt, raw)
 	case "response.function_call_arguments.delta":
 		s.handleCallDelta(evt, raw)
 	case "response.output_item.done":
@@ -320,10 +320,11 @@ func (s *codexStreamState) handleEvent(evt codexSSEEvent, raw []byte) (emitted *
 	return nil, false
 }
 
-func (s *codexStreamState) handleItemAdded(evt codexSSEEvent) {
+func (s *codexStreamState) handleItemAdded(evt codexSSEEvent, raw []byte) {
 	var item codexOutputItem
 	if err := json.Unmarshal(evt.Item, &item); err == nil && item.Type == "function_call" {
-		s.calls[len(s.calls)] = &pendingCall{id: item.CallID, name: item.Name}
+		idx := extractOutputIndex(raw)
+		s.calls[idx] = &pendingCall{id: item.CallID, name: item.Name}
 	}
 }
 
@@ -361,7 +362,9 @@ func extractOutputIndex(raw []byte) int {
 	var v struct {
 		OutputIndex int `json:"output_index"`
 	}
-	_ = json.Unmarshal(raw, &v)
+	if err := json.Unmarshal(raw, &v); err != nil {
+		slog.Debug("codex: extractOutputIndex unmarshal failed", "err", err)
+	}
 	return v.OutputIndex
 }
 

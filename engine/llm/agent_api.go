@@ -15,7 +15,7 @@ import (
 
 // AgentAPI implements Provider using an OpenAI-compatible chat completions API.
 type AgentAPI struct {
-	apiKey        string
+	auth          Auth
 	baseURL       string
 	model         string
 	promptCaching bool
@@ -23,11 +23,11 @@ type AgentAPI struct {
 }
 
 // NewAgentAPI creates an AgentAPI provider with the given base URL, model,
-// API key, and prompt caching flag. When promptCaching is true, messages are
-// annotated with cache_control breakpoints for Anthropic-style prompt caching.
-func NewAgentAPI(baseURL, model, apiKey string, promptCaching bool) *AgentAPI {
+// authenticator, and prompt caching flag. When promptCaching is true, messages
+// are annotated with cache_control breakpoints for Anthropic-style prompt caching.
+func NewAgentAPI(baseURL, model string, auth Auth, promptCaching bool) *AgentAPI {
 	return &AgentAPI{
-		apiKey:        apiKey,
+		auth:          auth,
 		baseURL:       baseURL,
 		model:         model,
 		promptCaching: promptCaching,
@@ -64,6 +64,7 @@ type chatRequest struct {
 	Model         string         `json:"model"`
 	Messages      []Message      `json:"messages"`
 	Stream        bool           `json:"stream"`
+	Store         bool           `json:"store"`
 	Tools         []ToolDef      `json:"tools,omitempty"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 }
@@ -74,6 +75,7 @@ type cachingChatRequest struct {
 	Model         string           `json:"model"`
 	Messages      []cachingMessage `json:"messages"`
 	Stream        bool             `json:"stream"`
+	Store         bool             `json:"store"`
 	Tools         []cachingToolDef `json:"tools,omitempty"`
 	StreamOptions *streamOptions   `json:"stream_options,omitempty"`
 }
@@ -232,7 +234,9 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	if err := a.auth.Authenticate(ctx, req); err != nil {
+		return nil, fmt.Errorf("authenticate: %w", err)
+	}
 
 	resp, err := a.client.Do(req)
 	if err != nil {

@@ -39,8 +39,8 @@ func (a *AgentAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}
-	if a.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	if err := a.auth.Authenticate(ctx, req); err != nil {
+		return nil, fmt.Errorf("llm: authenticate: %w", err)
 	}
 
 	resp, err := a.client.Do(req)

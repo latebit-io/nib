@@ -17,6 +17,7 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
+	"github.com/latebit-io/junto/engine/oauth"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/styleconfig"
 	"github.com/latebit-io/junto/engine/wire"
@@ -126,7 +127,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	// Create LLM provider and agent from configuration.
-	provider, llmCfg, llmResolved := wire.NewProvider(projectRoot)
+	pr := wire.NewProvider(projectRoot)
+	provider, llmCfg, llmResolved := pr.Provider, pr.Config, pr.Resolved
 	if llmResolved != nil {
 		sess.SetLLMInfo(llmResolved.Model, llmResolved.Profile)
 	}
@@ -169,17 +171,105 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if llmResolved != nil && llmResolved.HasProvider() {
 		app.AgentPane.SetModelLabel(llmResolved.Profile + ": " + llmResolved.DisplayModel())
 	}
+
+	// Profile detection and API key storage — always available, independent of OAuth.
+	app.IsOAuthProfile = func(profile string) string {
+		resolved := llmconfig.ResolveProfile(llmCfg, profile)
+		if resolved == nil {
+			return ""
+		}
+		return resolved.OAuthProvider
+	}
+
+	app.StoreAPIKey = func(profile, key string) error {
+		if pr.KeyStore == nil {
+			return fmt.Errorf("key storage not available")
+		}
+		return pr.KeyStore.Put(profile, key)
+	}
+
+	app.HasAPIKey = func(profile string) bool {
+		resolved := llmconfig.ResolveProfile(llmCfg, profile)
+		if resolved == nil {
+			return false
+		}
+		return resolved.HasProvider() || (pr.KeyStore != nil && pr.KeyStore.HasKey(profile))
+	}
+
+	// OAuth-specific callbacks — only available when the token store exists.
+	if pr.OAuthStore != nil {
+		app.HasOAuthToken = func(profile string) bool {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return false
+			}
+			if resolved.OAuthProvider == "" {
+				return false
+			}
+			return pr.OAuthStore.HasToken(oauth.ProviderID(resolved.OAuthProvider))
+		}
+
+		app.ConnectOAuth = func(profile string) tea.Cmd {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return func() tea.Msg {
+					return ui.OAuthConnectResult(profile, fmt.Errorf("unknown profile %q", profile))
+				}
+			}
+			switch oauth.ProviderID(resolved.OAuthProvider) {
+			case oauth.ProviderOpenAI:
+				return connectOpenAICmd(profile, pr.OAuthStore)
+			case oauth.ProviderCopilot:
+				return connectCopilotCmd(profile, pr.OAuthStore, app.Program())
+			default:
+				return func() tea.Msg {
+					return ui.OAuthConnectResult(profile, fmt.Errorf("unknown OAuth provider: %s", resolved.OAuthProvider))
+				}
+			}
+		}
+	}
+
+	// Profile names are always available — even without a provider,
+	// the user can browse profiles and connect OAuth ones.
+	app.LLMProfileNames = llmCfg.ProfileNames
+
 	// Wire model listing and switching — closures capture ag, llmCfg, and llmResolved.
 	if provider != nil && ag != nil {
-		app.LLMProfileNames = llmCfg.ProfileNames
 
 		app.ListModels = func(profile string) ([]ui.ModelSelectorItem, error) {
 			// Resolve the profile to get its base_url and key.
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
 				// Fallback: use current provider (env-only config).
+				slog.Warn("llm: ListModels profile not found, falling back", "profile", profile)
 				resolved = llmResolved
 			}
+			wire.WireOAuthProfile(resolved, pr.OAuthStore)
+			wire.WireStoredKey(resolved, pr.KeyStore)
+
+			// OAuth profiles — try API model listing, fall back to hardcoded.
+			if resolved.OAuthProvider != "" {
+				p := resolved.NewProvider()
+				if p == nil {
+					slog.Debug("llm: OAuth provider not ready, using static model list", "profile", profile)
+				} else if lister, ok := p.(llm.ModelLister); ok {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					models, err := lister.ListModels(ctx)
+					if err != nil {
+						slog.Debug("llm: OAuth model listing failed, using static list", "profile", profile, "err", err)
+					} else if len(models) > 0 {
+						items := make([]ui.ModelSelectorItem, len(models))
+						for i, m := range models {
+							items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
+						}
+						return items, nil
+					}
+				}
+				// Fallback to hardcoded list.
+				return oauthModels(resolved.OAuthProvider, profile, resolved.Model), nil
+			}
+
 			p := resolved.NewProvider()
 			if p == nil {
 				return nil, fmt.Errorf("no API key for profile %q", profile)
@@ -205,9 +295,16 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			// Resolve the target profile.
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
+				slog.Warn("llm: profile not found, falling back", "profile", profile)
 				resolved = llmResolved
 			}
-			resolved.Model = modelID
+			slog.Debug("llm: switch resolving", "profile", profile, "modelID", modelID, "resolvedModel", resolved.Model)
+			// Empty modelID means use the profile's default model.
+			if modelID != "" {
+				resolved.Model = modelID
+			}
+			wire.WireOAuthProfile(resolved, pr.OAuthStore)
+			wire.WireStoredKey(resolved, pr.KeyStore)
 			newProvider := resolved.NewProvider()
 			if newProvider == nil {
 				return "", fmt.Errorf("no API key available for profile %q", profile)
@@ -365,4 +462,78 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	_, err := p.Run()
 	shutdown()
 	return err
+}
+
+// connectOpenAICmd returns a tea.Cmd that runs the OpenAI browser OAuth flow.
+func connectOpenAICmd(profile string, store *oauth.Store) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		err := oauth.OpenAIBrowserFlow(ctx, store, nil)
+		return ui.OAuthConnectResult(profile, err)
+	}
+}
+
+// connectCopilotCmd returns a tea.Cmd that runs the GitHub Copilot device code
+// flow. The device code request, instruction delivery, and polling all run
+// off the TUI thread.
+func connectCopilotCmd(profile string, store *oauth.Store, p *tea.Program) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		dc, err := oauth.RequestCopilotDeviceCode(ctx)
+		cancel()
+		if err != nil {
+			return ui.OAuthConnectResult(profile, fmt.Errorf("request device code: %w", err))
+		}
+
+		// Deliver the instruction to the TUI via Program.Send so the user
+		// sees the code immediately while we poll in the background.
+		instruction := fmt.Sprintf("Visit %s and enter code: %s", dc.VerificationURI, dc.UserCode)
+		p.Send(ui.OAuthInstruction(profile, instruction))
+
+		pollCtx, pollCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer pollCancel()
+		err = oauth.CompleteCopilotDeviceFlow(pollCtx, store, dc)
+		return ui.OAuthConnectResult(profile, err)
+	}
+}
+
+// codexModels are available via the ChatGPT Codex subscription endpoint.
+var codexModels = []string{
+	"gpt-5.1-codex",
+	"gpt-5.1-codex-max",
+	"gpt-5.1-codex-mini",
+	"gpt-5.2",
+	"gpt-5.2-codex",
+	"gpt-5.3-codex",
+	"gpt-5.4",
+	"gpt-5.4-mini",
+}
+
+// oauthModels returns the known model list for an OAuth provider.
+// OAuth endpoints don't support /models, so we maintain the list statically.
+func oauthModels(provider, profile, defaultModel string) []ui.ModelSelectorItem {
+	var models []string
+	switch provider {
+	case "openai":
+		models = codexModels
+	default:
+		models = []string{defaultModel}
+	}
+
+	items := make([]ui.ModelSelectorItem, 0, len(models))
+	defaultIdx := -1
+	for i, m := range models {
+		items = append(items, ui.ModelSelectorItem{ID: m, Name: m, Profile: profile})
+		if m == defaultModel {
+			defaultIdx = i
+		}
+	}
+	if defaultIdx > 0 {
+		items[0], items[defaultIdx] = items[defaultIdx], items[0]
+	}
+	if len(items) == 0 {
+		items = append(items, ui.ModelSelectorItem{ID: defaultModel, Name: defaultModel, Profile: profile})
+	}
+	return items
 }

@@ -41,6 +41,25 @@ type goToDefResultMsg struct {
 	originLine, originCol int
 }
 
+// oauthInstructionMsg delivers an intermediate instruction from an OAuth flow
+// (e.g., "Visit URL and enter code: XXXX") before the flow completes.
+type oauthInstructionMsg struct {
+	profile     string
+	instruction string
+}
+
+// oauthConnectResultMsg delivers the result of an OAuth connection flow.
+type oauthConnectResultMsg struct {
+	profile string
+	err     error
+}
+
+// apiKeyEnteredMsg delivers a user-entered API key for a profile.
+type apiKeyEnteredMsg struct {
+	profile string
+	key     string
+}
+
 // completionResultMsg delivers completion results from an async LSP request.
 type completionResultMsg struct {
 	items        []lang.CompletionItem
@@ -127,6 +146,27 @@ type AppModel struct {
 	// Set by the entry point — nil when no LLM is configured.
 	LLMProfileNames func() []string
 
+	// ConnectOAuth starts an OAuth connection flow for the given profile.
+	// Returns a tea.Cmd that runs the flow asynchronously and delivers
+	// oauthConnectResultMsg when complete. The flow may emit intermediate
+	// messages (e.g., oauthInstructionMsg with the device code).
+	// Set by the entry point — nil when OAuth is not available.
+	ConnectOAuth func(profile string) tea.Cmd
+
+	// IsOAuthProfile reports whether a profile uses OAuth authentication.
+	// Returns the oauth provider ID (e.g., "openai", "copilot") or "" if not OAuth.
+	IsOAuthProfile func(profile string) string
+
+	// HasOAuthToken reports whether a valid token exists for an OAuth profile.
+	HasOAuthToken func(profile string) bool
+
+	// StoreAPIKey saves an API key for a profile to disk.
+	// Set by the entry point — nil when key storage is not available.
+	StoreAPIKey func(profile, key string) error
+
+	// HasAPIKey reports whether a stored or env-based API key exists for a profile.
+	HasAPIKey func(profile string) bool
+
 	// CycleStyle advances to the next available coding style and returns its
 	// display name (or "" if styles are exhausted and cycling disables enforcement).
 	// Set by the entry point — nil when no styles are configured.
@@ -168,6 +208,19 @@ func (m *AppModel) CloseWatcher() {
 // SetProgram sets the tea.Program reference.
 func (m *AppModel) SetProgram(p *tea.Program) {
 	m.program = p
+}
+
+// Program returns the tea.Program reference for sending async messages.
+func (m *AppModel) Program() *tea.Program { return m.program }
+
+// OAuthInstruction creates an oauthInstructionMsg for delivery via Program.Send.
+func OAuthInstruction(profile, instruction string) tea.Msg {
+	return oauthInstructionMsg{profile: profile, instruction: instruction}
+}
+
+// OAuthConnectResult creates an oauthConnectResultMsg for delivery via tea.Cmd.
+func OAuthConnectResult(profile string, err error) tea.Msg {
+	return oauthConnectResultMsg{profile: profile, err: err}
 }
 
 // SetStyleName sets the current coding style display name for the status bar.
@@ -434,6 +487,61 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	// OAuth intermediate instruction (e.g., device code to display)
+	case oauthInstructionMsg:
+		m.AgentPane.AppendMeta("[" + msg.instruction + "]\n")
+		m.AgentPane.AppendMeta("[waiting for authorization...]\n")
+		return m, nil
+
+	// API key entered — store and switch to the profile
+	case apiKeyEnteredMsg:
+		if msg.key == "" {
+			return m, nil // cancelled
+		}
+		if m.StoreAPIKey != nil {
+			if err := m.StoreAPIKey(msg.profile, msg.key); err != nil {
+				m.AgentPane.AppendMeta("\n[failed to save key: " + err.Error() + "]\n")
+				return m, nil
+			}
+			m.AgentPane.AppendMeta("\n[API key saved for " + msg.profile + "]\n")
+			// Switch to this profile's default model.
+			if m.SwitchModel != nil {
+				displayModel, err := m.SwitchModel(msg.profile, "")
+				if err != nil {
+					m.AgentPane.AppendMeta("[switch failed: " + err.Error() + "]\n")
+				} else {
+					label := msg.profile + ": " + displayModel
+					m.AgentPane.SetModelLabel(label)
+					m.AgentPane.AppendMeta("[switched to " + label + "]\n")
+				}
+			}
+		}
+		return m, nil
+
+	// OAuth connection completed — switch to the connected profile
+	case oauthConnectResultMsg:
+		if msg.err != nil {
+			m.AgentPane.AppendMeta("\n[connection failed: " + msg.err.Error() + "]\n")
+			return m, nil
+		}
+		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
+		// Try to switch directly to the profile's default model.
+		// OAuth providers often don't support /models listing, so skip it.
+		if m.SwitchModel != nil {
+			displayModel, err := m.SwitchModel(msg.profile, "")
+			if err != nil {
+				m.AgentPane.AppendMeta("[switch failed: " + err.Error() + "]\n")
+			} else {
+				label := msg.profile + ": " + displayModel
+				m.AgentPane.SetModelLabel(label)
+				m.AgentPane.AppendMeta("[switched to " + label + "]\n")
+			}
+			return m, nil
+		}
+		// No agent running — user needs to restart to pick up the new auth.
+		m.AgentPane.AppendMeta("[restart Junto to use " + msg.profile + " — token saved for next launch]\n")
+		return m, nil
+
 	// Model list fetched — open the inline selector in the agent pane
 	case modelListMsg:
 		// Drop stale responses from superseded requests.
@@ -441,6 +549,26 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
+			var profiles []string
+			if m.LLMProfileNames != nil {
+				profiles = m.LLMProfileNames()
+			}
+			// OAuth profile without token → offer to connect.
+			if m.IsOAuthProfile != nil && m.HasOAuthToken != nil {
+				if providerID := m.IsOAuthProfile(msg.profile); providerID != "" && !m.HasOAuthToken(msg.profile) {
+					m.AgentPane.OpenModelSelector([]ModelSelectorItem{{
+						ID: "_connect", Name: "Connect to " + msg.profile, Profile: msg.profile,
+					}}, msg.profile, "", profiles)
+					return m, nil
+				}
+			}
+			// API key profile without key → offer to enter one.
+			if m.StoreAPIKey != nil && m.HasAPIKey != nil && !m.HasAPIKey(msg.profile) {
+				m.AgentPane.OpenModelSelector([]ModelSelectorItem{{
+					ID: "_enter_key", Name: "Enter API key for " + msg.profile, Profile: msg.profile,
+				}}, msg.profile, "", profiles)
+				return m, nil
+			}
 			m.AgentPane.AppendMeta("\n[failed to list models: " + msg.err.Error() + "]\n")
 			return m, nil
 		}
@@ -470,6 +598,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				items, err := listFn(profile)
 				return modelListMsg{profile: profile, items: items, err: err}
 			}
+		}
+		// OAuth connect action — user selected "Connect to [provider]".
+		if msg.ModelID == "_connect" && m.ConnectOAuth != nil {
+			return m.startOAuthConnect(msg.Profile)
+		}
+		// API key entry action — switch to key input mode.
+		if msg.ModelID == "_enter_key" {
+			m.AgentPane.StartAPIKeyInput(msg.Profile)
+			return m, nil
 		}
 		// Model selection — switch to the chosen model.
 		if msg.ModelID != "" && m.SwitchModel != nil {
@@ -1038,8 +1175,27 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // openModelSelector opens the model selector overlay.
 // If multiple profiles exist, shows profile picker first.
 // If one profile, fetches models directly.
+// If no LLM is configured but OAuth profiles exist, offers connection.
 func (m *AppModel) openModelSelector() tea.Cmd {
 	if m.ListModels == nil {
+		// No provider configured — check if we can offer OAuth profiles to connect.
+		if m.IsOAuthProfile != nil && m.HasOAuthToken != nil && m.LLMProfileNames != nil {
+			profiles := m.LLMProfileNames()
+			var connectItems []ModelSelectorItem
+			for _, p := range profiles {
+				if providerID := m.IsOAuthProfile(p); providerID != "" && !m.HasOAuthToken(p) {
+					connectItems = append(connectItems, ModelSelectorItem{
+						ID:      "_connect",
+						Name:    "Connect to " + p,
+						Profile: p,
+					})
+				}
+			}
+			if len(connectItems) > 0 {
+				m.AgentPane.OpenModelSelector(connectItems, connectItems[0].Profile, "", profiles)
+				return nil
+			}
+		}
 		globalPath := llmconfig.GlobalConfigPath()
 		if globalPath == "" {
 			globalPath = "<user-config-dir>/junto/llm.json"
@@ -1056,6 +1212,13 @@ func (m *AppModel) openModelSelector() tea.Cmd {
 		items, err := listFn(profile)
 		return modelListMsg{profile: profile, items: items, err: err}
 	}
+}
+
+// startOAuthConnect initiates an OAuth connection flow for the given profile.
+// The flow runs fully async — no blocking on the TUI thread.
+func (m *AppModel) startOAuthConnect(profile string) (tea.Model, tea.Cmd) {
+	m.AgentPane.AppendMeta("\n[connecting to " + profile + "...]\n")
+	return m, m.ConnectOAuth(profile)
 }
 
 func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {

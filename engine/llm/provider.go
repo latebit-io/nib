@@ -65,6 +65,10 @@ type CacheControl struct {
 	Type string `json:"type"`
 }
 
+// maxToolArgBytes is the maximum cumulative size of streamed tool call
+// arguments. Matches the SSE scanner's 10MB cap to prevent unbounded growth.
+const maxToolArgBytes = 10 * 1024 * 1024
+
 // trySend sends an event on ch, returning false if ctx is cancelled.
 // Prevents SSE goroutines from blocking indefinitely when the downstream
 // reader stalls or abandons the stream.

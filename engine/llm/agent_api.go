@@ -266,7 +266,8 @@ type toolCallAccumulator struct {
 	args  []*strings.Builder
 }
 
-func (tc *toolCallAccumulator) merge(deltas []sseDeltaCall) {
+// merge returns false if a tool argument exceeds maxToolArgBytes.
+func (tc *toolCallAccumulator) merge(deltas []sseDeltaCall) bool {
 	for _, d := range deltas {
 		// Grow slices if needed
 		for d.Index >= len(tc.calls) {
@@ -283,9 +284,14 @@ func (tc *toolCallAccumulator) merge(deltas []sseDeltaCall) {
 			tc.calls[d.Index].Function.Name = d.Function.Name
 		}
 		if d.Function.Arguments != "" {
+			if tc.args[d.Index].Len()+len(d.Function.Arguments) > maxToolArgBytes {
+				slog.Warn("SSE tool args exceeded limit", "index", d.Index, "limit", maxToolArgBytes)
+				return false
+			}
 			tc.args[d.Index].WriteString(d.Function.Arguments)
 		}
 	}
+	return true
 }
 
 func (tc *toolCallAccumulator) finalize() []ToolCall {
@@ -311,12 +317,50 @@ func parseUsage(u *sseUsage) *Usage {
 	return usage
 }
 
+// sseStreamState accumulates state across OpenAI-compatible SSE chunks.
+type sseStreamState struct {
+	tc    toolCallAccumulator
+	usage *Usage
+}
+
+// handleChunk processes one SSE data line. Returns true to stop the stream.
+func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<- StreamEvent) bool {
+	var chunk sseChunk
+	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		slog.Warn("SSE unmarshal error", "err", err, "data", data[:min(len(data), 200)])
+		return false
+	}
+
+	if parsed := parseUsage(chunk.Usage); parsed != nil {
+		s.usage = parsed
+	}
+	if len(chunk.Choices) == 0 {
+		return false
+	}
+
+	choice := chunk.Choices[0]
+	if delta := choice.Delta.Content; delta != "" {
+		if !trySend(ctx, ch, StreamEvent{Token: delta}) {
+			return true
+		}
+	}
+	if len(choice.Delta.ToolCalls) > 0 {
+		if !s.tc.merge(choice.Delta.ToolCalls) {
+			return true // tool args exceeded limit
+		}
+	}
+	if choice.FinishReason != nil {
+		trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: s.tc.finalize(), Usage: s.usage})
+		return true
+	}
+	return false
+}
+
 func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- StreamEvent) {
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // 10MB — large file content in tool results
 
-	var tc toolCallAccumulator
-	var usage *Usage // accumulated across chunks — may arrive before or with finish_reason
+	var state sseStreamState
 
 	for scanner.Scan() {
 		select {
@@ -331,50 +375,22 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
-			trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage})
+			trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: state.tc.finalize(), Usage: state.usage})
 			return
 		}
-
-		var chunk sseChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			slog.Warn("SSE unmarshal error", "err", err, "data", data[:min(len(data), 200)])
-			continue
-		}
-
-		// Usage may appear on any chunk (often the last or a trailing chunk).
-		if parsed := parseUsage(chunk.Usage); parsed != nil {
-			usage = parsed
-		}
-
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-
-		choice := chunk.Choices[0]
-
-		// Text content
-		if delta := choice.Delta.Content; delta != "" {
-			if !trySend(ctx, ch, StreamEvent{Token: delta}) {
-				return
-			}
-		}
-
-		// Tool call deltas
-		if len(choice.Delta.ToolCalls) > 0 {
-			tc.merge(choice.Delta.ToolCalls)
-		}
-
-		if choice.FinishReason != nil {
-			trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage})
+		if state.handleChunk(ctx, data, ch) {
 			return
 		}
 	}
 
-	// Check for scanner errors (I/O failures, buffer overflow)
-	if err := scanner.Err(); err != nil && ctx.Err() == nil {
-		slog.Warn("SSE scanner error", "err", err)
+	// Check for scanner errors (I/O failures, buffer overflow).
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("SSE scanner error", "err", err)
+		}
+		return // truncated stream — don't synthesize a successful Done event
 	}
 
-	// Stream ended without [DONE] or finish_reason (EOF or scanner error).
-	trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage})
+	// Clean EOF without [DONE] or finish_reason.
+	trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: state.tc.finalize(), Usage: state.usage})
 }

@@ -89,10 +89,26 @@ func startCallbackServer(port int, state, callbackPath string) (*callbackServer,
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 
+	// trySendCode and trySendErr are non-blocking sends that drop duplicates.
+	// The channels are buffered at 1; a second callback (browser retry) or
+	// a server error racing with a successful callback must not block.
+	trySendCode := func(code string) {
+		select {
+		case codeCh <- code:
+		default:
+		}
+	}
+	trySendErr := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("state") != state {
-			errCh <- fmt.Errorf("oauth callback: state mismatch (possible CSRF)")
+			trySendErr(fmt.Errorf("oauth callback: state mismatch (possible CSRF)"))
 			_, _ = fmt.Fprint(w, "<html><body><h1>Authentication failed</h1><p>State mismatch.</p></body></html>") // client may have disconnected; not actionable
 			return
 		}
@@ -102,18 +118,18 @@ func startCallbackServer(port int, state, callbackPath string) (*callbackServer,
 			if errMsg == "" {
 				errMsg = "no code in callback"
 			}
-			errCh <- fmt.Errorf("oauth callback: %s", errMsg)
+			trySendErr(fmt.Errorf("oauth callback: %s", errMsg))
 			_, _ = fmt.Fprintf(w, "<html><body><h1>Authentication failed</h1><p>%s</p><p>You can close this tab.</p></body></html>", html.EscapeString(errMsg)) // client may have disconnected; not actionable
 			return
 		}
-		codeCh <- code
+		trySendCode(code)
 		_, _ = fmt.Fprint(w, "<html><body><h1>Authentication successful!</h1><p>You can close this tab and return to Junto.</p></body></html>") // client may have disconnected; not actionable
 	})
 
 	srv := &http.Server{Handler: mux}
 	go func() {
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("oauth callback server: %w", err)
+			trySendErr(fmt.Errorf("oauth callback server: %w", err))
 		}
 	}()
 

@@ -334,25 +334,29 @@ func (s *anthropicStreamState) handleBlockStart(data string) {
 }
 
 // handleBlockDelta processes a content_block_delta event.
-// Returns a non-empty token string for text deltas.
-func (s *anthropicStreamState) handleBlockDelta(data string) string {
+// Returns a token string for text deltas and an abort flag if limits are exceeded.
+func (s *anthropicStreamState) handleBlockDelta(data string) (token string, abort bool) {
 	var evt anthropicContentBlockDelta
 	if err := json.Unmarshal([]byte(data), &evt); err != nil {
 		slog.Warn("anthropic: unmarshal content_block_delta", "err", err, "data", data[:min(len(data), 200)])
-		return ""
+		return "", false
 	}
 	block, ok := s.blocks[evt.Index]
 	if !ok {
 		slog.Warn("anthropic: delta for unknown block", "index", evt.Index)
-		return ""
+		return "", false
 	}
 	switch evt.Delta.Type {
 	case "text_delta":
-		return evt.Delta.Text
+		return evt.Delta.Text, false
 	case "input_json_delta":
+		if block.args.Len()+len(evt.Delta.PartialJSON) > maxToolArgBytes {
+			slog.Warn("anthropic: tool args exceeded limit", "index", evt.Index, "limit", maxToolArgBytes)
+			return "", true
+		}
 		block.args.WriteString(evt.Delta.PartialJSON)
 	}
-	return ""
+	return "", false
 }
 
 // handleMessageDelta processes a message_delta event.
@@ -393,7 +397,11 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 	case "content_block_start":
 		s.handleBlockStart(data)
 	case "content_block_delta":
-		if token := s.handleBlockDelta(data); token != "" {
+		token, abort := s.handleBlockDelta(data)
+		if abort {
+			return anthropicDone
+		}
+		if token != "" {
 			if !trySend(ctx, ch, StreamEvent{Token: token}) {
 				return anthropicDone
 			}
@@ -405,8 +413,7 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 		return anthropicDone
 	case "error":
 		slog.Warn("anthropic: stream error event", "data", data[:min(len(data), 500)])
-		trySend(ctx, ch, s.finalEvent())
-		return anthropicDone
+		return anthropicDone // don't send finalEvent — partial data is not a valid response
 	}
 	return anthropicContinue
 }
@@ -442,9 +449,15 @@ func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, resp *http.Response
 		}
 	}
 
-	if err := scanner.Err(); err != nil && ctx.Err() == nil {
-		slog.Warn("anthropic: SSE scanner error", "err", err)
+	// Check for scanner errors (I/O failures, buffer overflow).
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("anthropic: SSE scanner error", "err", err)
+		}
+		return // truncated stream — don't synthesize a successful Done event
 	}
+
+	// Clean EOF without message_stop.
 	trySend(ctx, ch, state.finalEvent())
 }
 

@@ -31,6 +31,9 @@ type BrowserFlowConfig struct {
 	Scopes []string
 	// ExtraParams are additional query parameters for the authorization URL.
 	ExtraParams map[string]string
+	// CallbackPath is the HTTP path for the local callback server.
+	// Defaults to "/auth/callback" if empty.
+	CallbackPath string
 }
 
 // pkce holds a PKCE code verifier and its S256 challenge.
@@ -73,10 +76,10 @@ type callbackServer struct {
 
 // startCallbackServer binds a local listener and starts serving the callback handler.
 // Returns the server (for shutdown) and the redirect URI with the actual bound port.
-func startCallbackServer(port int, state string) (*callbackServer, error) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+func startCallbackServer(port int, state, callbackPath string) (*callbackServer, error) {
+	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
-		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		listener, err = net.Listen("tcp", "localhost:0")
 		if err != nil {
 			return nil, fmt.Errorf("listen for OAuth callback: %w", err)
 		}
@@ -87,7 +90,7 @@ func startCallbackServer(port int, state string) (*callbackServer, error) {
 	errCh := make(chan error, 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("state") != state {
 			errCh <- fmt.Errorf("oauth callback: state mismatch (possible CSRF)")
 			_, _ = fmt.Fprint(w, "<html><body><h1>Authentication failed</h1><p>State mismatch.</p></body></html>") // client may have disconnected; not actionable
@@ -116,7 +119,7 @@ func startCallbackServer(port int, state string) (*callbackServer, error) {
 
 	return &callbackServer{
 		srv:         srv,
-		redirectURI: fmt.Sprintf("http://127.0.0.1:%d/auth/callback", actualPort),
+		redirectURI: fmt.Sprintf("http://localhost:%d%s", actualPort, callbackPath),
 		codeCh:      codeCh,
 		errCh:       errCh,
 	}, nil
@@ -135,7 +138,11 @@ func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCall
 		return nil, err
 	}
 
-	cb, err := startCallbackServer(cfg.RedirectPort, state)
+	callbackPath := cfg.CallbackPath
+	if callbackPath == "" {
+		callbackPath = "/auth/callback"
+	}
+	cb, err := startCallbackServer(cfg.RedirectPort, state, callbackPath)
 	if err != nil {
 		return nil, err
 	}

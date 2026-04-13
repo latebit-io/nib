@@ -46,11 +46,17 @@ var builtinProfiles = map[string]Profile{
 		Model:         "gpt-4.1",
 		OAuthProvider: "copilot",
 	},
+	"anthropic": {
+		BaseURL:       "https://api.anthropic.com",
+		Model:         "claude-sonnet-4-20250514",
+		APIKeyEnv:     "ANTHROPIC_API_KEY",
+		PromptCaching: ptrBool(true),
+	},
 }
 
 // builtinFallbackOrder is the priority when auto-selecting a built-in profile
 // because the active profile has no API key. First match wins.
-var builtinFallbackOrder = []string{"gemini", "minimax", "openrouter"}
+var builtinFallbackOrder = []string{"anthropic", "gemini", "minimax", "openrouter"}
 
 // ptrBool returns a pointer to a bool value.
 func ptrBool(b bool) *bool { return &b }
@@ -120,9 +126,10 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 	}
 	r.apiKey = os.Getenv(r.APIKeyEnv)
 
-	// Environment variable overrides — skip for OAuth profiles since their
-	// base URL and model are fixed to the subscription endpoint.
-	if r.OAuthProvider == "" {
+	// Environment variable overrides — skip for OAuth-only profiles
+	// (OAuthProvider set, no APIKeyEnv) since their endpoints are fixed.
+	oauthOnly := r.OAuthProvider != "" && p.APIKeyEnv == ""
+	if !oauthOnly {
 		if v := os.Getenv("LLM_BASE_URL"); v != "" {
 			r.BaseURL = v
 		}
@@ -174,14 +181,17 @@ func resolve(cfg *Config) *Resolved {
 		}
 	}
 
-	// OAuth profiles use token-based auth — skip API key resolution,
-	// fallback, and env overrides so the profile's endpoint isn't rewritten.
-	if r.OAuthProvider != "" {
+	// OAuth-only profiles (no APIKeyEnv, e.g. chatgpt, copilot) use
+	// token-based auth exclusively — skip key resolution and env overrides.
+	oauthOnly := r.OAuthProvider != "" && r.APIKeyEnv == ""
+	if oauthOnly {
 		return r
 	}
 
 	// Resolve API key from the named env var.
-	r.apiKey = os.Getenv(r.APIKeyEnv)
+	if r.APIKeyEnv != "" {
+		r.apiKey = os.Getenv(r.APIKeyEnv)
+	}
 
 	// Resolve API key from LLM_API_KEY override.
 	if v := os.Getenv("LLM_API_KEY"); v != "" {
@@ -189,9 +199,10 @@ func resolve(cfg *Config) *Resolved {
 		r.apiKey = v
 	}
 
-	// Auto-fallback: if no API key yet, try built-in profiles in priority order.
-	// Uses cfg.Profiles (not builtinProfiles) so file overrides are respected.
-	if r.apiKey == "" {
+	// Auto-fallback: if no API key yet and no OAuth available, try built-in
+	// profiles in priority order. Uses cfg.Profiles (not builtinProfiles)
+	// so file overrides are respected.
+	if r.apiKey == "" && r.OAuthProvider == "" {
 		for _, name := range builtinFallbackOrder {
 			p, ok := cfg.Profiles[name]
 			if !ok {

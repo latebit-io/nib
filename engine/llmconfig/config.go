@@ -77,12 +77,12 @@ func (r *Resolved) DisplayModel() string {
 }
 
 // HasProvider reports whether enough configuration exists to create
-// an LLM provider. OAuth profiles require Auth; API-key profiles require apiKey.
+// an LLM provider. API key takes priority; OAuth is the fallback.
 func (r *Resolved) HasProvider() bool {
-	if r.OAuthProvider != "" {
-		return r.Auth != nil
+	if r.apiKey != "" {
+		return true
 	}
-	return r.apiKey != ""
+	return r.OAuthProvider != "" && r.Auth != nil
 }
 
 // SetAPIKey sets the API key on the resolved configuration.
@@ -94,24 +94,37 @@ func (r *Resolved) SetAPIKey(key string) {
 }
 
 // NewProvider creates an LLM provider from the resolved configuration.
-// OAuth profiles require Auth and use their subscription endpoint.
-// API-key profiles use AgentAPI with the static key.
+// Profiles with both OAuthProvider and APIKeyEnv prefer the API key when
+// available, falling back to OAuth. OAuth-only profiles require Auth.
 // Returns nil if insufficient configuration exists.
 func (r *Resolved) NewProvider() llm.Provider {
-	if r.OAuthProvider != "" {
-		if r.Auth == nil {
-			return nil
+	// Try API key first — works for both pure API-key profiles and
+	// dual-mode profiles (like anthropic) where the key takes priority.
+	if r.apiKey != "" {
+		if r.isAnthropicEndpoint() {
+			return llm.NewAnthropicAPI(r.BaseURL, r.Model, llm.AnthropicKeyAuth(r.apiKey), r.PromptCaching)
 		}
-		// OpenAI OAuth uses the Codex Responses API, not Chat Completions.
+		return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching)
+	}
+
+	// Fall back to OAuth if configured and authenticated.
+	if r.OAuthProvider != "" && r.Auth != nil {
 		if r.OAuthProvider == "openai" {
 			return llm.NewCodexAPI(r.Model, r.Auth)
 		}
+		if r.OAuthProvider == "anthropic" {
+			return llm.NewAnthropicAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching)
+		}
 		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching)
 	}
-	if r.apiKey == "" {
-		return nil
-	}
-	return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching)
+
+	return nil
+}
+
+// isAnthropicEndpoint reports whether the resolved base URL points to
+// the Anthropic API, which requires the Messages API wire format.
+func (r *Resolved) isAnthropicEndpoint() bool {
+	return strings.Contains(r.BaseURL, "anthropic.com")
 }
 
 // ProfileNames returns the sorted list of profile names in the config.

@@ -174,6 +174,12 @@ func resolve(cfg *Config) *Resolved {
 		}
 	}
 
+	// OAuth profiles use token-based auth — skip API key resolution,
+	// fallback, and env overrides so the profile's endpoint isn't rewritten.
+	if r.OAuthProvider != "" {
+		return r
+	}
+
 	// Resolve API key from the named env var.
 	r.apiKey = os.Getenv(r.APIKeyEnv)
 

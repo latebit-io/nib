@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -412,16 +413,20 @@ func (c *CodexAPI) readCodexSSE(ctx context.Context, resp *http.Response, ch cha
 }
 
 // finalizeCalls converts accumulated pending calls to ToolCall slice.
+// Sorts by output_index for deterministic order — does not assume contiguous indices.
 func finalizeCalls(calls map[int]*pendingCall) []ToolCall {
 	if len(calls) == 0 {
 		return nil
 	}
-	result := make([]ToolCall, 0, len(calls))
-	for i := range len(calls) {
-		pc, ok := calls[i]
-		if !ok {
-			continue
-		}
+	indices := make([]int, 0, len(calls))
+	for i := range calls {
+		indices = append(indices, i)
+	}
+	slices.Sort(indices)
+
+	result := make([]ToolCall, 0, len(indices))
+	for _, i := range indices {
+		pc := calls[i]
 		result = append(result, ToolCall{
 			ID:   pc.id,
 			Type: "function",

@@ -183,6 +183,9 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 
 		app.StoreAPIKey = func(profile, key string) error {
+			if pr.KeyStore == nil {
+				return fmt.Errorf("key storage not available")
+			}
 			return pr.KeyStore.Put(profile, key)
 		}
 
@@ -192,7 +195,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				return false
 			}
 			// Has env var key or stored key.
-			return resolved.HasProvider() || pr.KeyStore.HasKey(profile)
+			return resolved.HasProvider() || (pr.KeyStore != nil && pr.KeyStore.HasKey(profile))
 		}
 
 		app.HasOAuthToken = func(profile string) bool {
@@ -516,12 +519,15 @@ func oauthModels(provider, profile, defaultModel string) []ui.ModelSelectorItem 
 	}
 
 	items := make([]ui.ModelSelectorItem, 0, len(models))
-	for _, m := range models {
+	defaultIdx := -1
+	for i, m := range models {
+		items = append(items, ui.ModelSelectorItem{ID: m, Name: m, Profile: profile})
 		if m == defaultModel {
-			items = append([]ui.ModelSelectorItem{{ID: m, Name: m, Profile: profile}}, items...)
-		} else {
-			items = append(items, ui.ModelSelectorItem{ID: m, Name: m, Profile: profile})
+			defaultIdx = i
 		}
+	}
+	if defaultIdx > 0 {
+		items[0], items[defaultIdx] = items[defaultIdx], items[0]
 	}
 	if len(items) == 0 {
 		items = append(items, ui.ModelSelectorItem{ID: defaultModel, Name: defaultModel, Profile: profile})

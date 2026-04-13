@@ -77,19 +77,31 @@ func (r *Resolved) DisplayModel() string {
 }
 
 // HasProvider reports whether enough configuration exists to create
-// an LLM provider (either a static API key or an OAuth authenticator).
-func (r *Resolved) HasProvider() bool { return r.apiKey != "" || r.Auth != nil }
+// an LLM provider. OAuth profiles require Auth; API-key profiles require apiKey.
+func (r *Resolved) HasProvider() bool {
+	if r.OAuthProvider != "" {
+		return r.Auth != nil
+	}
+	return r.apiKey != ""
+}
 
 // SetAPIKey sets the API key on the resolved configuration.
-// Used by the key store to inject TUI-entered keys.
-func (r *Resolved) SetAPIKey(key string) { r.apiKey = key }
+// Used by the key store to inject TUI-entered keys. No-op for OAuth profiles.
+func (r *Resolved) SetAPIKey(key string) {
+	if r.OAuthProvider == "" {
+		r.apiKey = key
+	}
+}
 
 // NewProvider creates an LLM provider from the resolved configuration.
-// Returns nil if no API key is available and no OAuth auth is set.
-// For OAuth profiles with OAuthProvider == "openai", creates a CodexAPI
-// (Responses API format) instead of AgentAPI (Chat Completions format).
+// OAuth profiles require Auth and use their subscription endpoint.
+// API-key profiles use AgentAPI with the static key.
+// Returns nil if insufficient configuration exists.
 func (r *Resolved) NewProvider() llm.Provider {
-	if r.Auth != nil {
+	if r.OAuthProvider != "" {
+		if r.Auth == nil {
+			return nil
+		}
 		// OpenAI OAuth uses the Codex Responses API, not Chat Completions.
 		if r.OAuthProvider == "openai" {
 			return llm.NewCodexAPI(r.Model, r.Auth)

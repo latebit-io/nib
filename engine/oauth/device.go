@@ -220,6 +220,10 @@ func RefreshAccessToken(ctx context.Context, tokenURL, clientID, refreshToken st
 		return nil, fmt.Errorf("read refresh response: %w", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("refresh: HTTP %d", resp.StatusCode)
+	}
+
 	var tr tokenResponse
 	if err := json.Unmarshal(body, &tr); err != nil {
 		return nil, fmt.Errorf("decode refresh response: %w", err)
@@ -230,9 +234,6 @@ func RefreshAccessToken(ctx context.Context, tokenURL, clientID, refreshToken st
 			desc = tr.Error
 		}
 		return nil, fmt.Errorf("refresh error: %s", desc)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh: HTTP %d", resp.StatusCode)
 	}
 	return &tr, nil
 }

@@ -5,6 +5,7 @@ package wire
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
@@ -78,7 +79,7 @@ func WireStoredKey(resolved *llmconfig.Resolved, keyStore *oauth.KeyStore) bool 
 	if resolved == nil || keyStore == nil || resolved.Profile == "" {
 		return false
 	}
-	key := keyStore.Get(resolved.Profile)
+	key := strings.TrimSpace(keyStore.Get(resolved.Profile))
 	if key == "" {
 		return false
 	}

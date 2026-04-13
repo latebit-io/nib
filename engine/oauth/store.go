@@ -53,19 +53,38 @@ func (s *Store) Get(id ProviderID) *Token {
 }
 
 // Put stores a token for a provider and persists to disk.
+// The in-memory map is only updated after the write succeeds.
 func (s *Store) Put(id ProviderID, tok *Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev, existed := s.data[id]
 	s.data[id] = tok
-	return s.save()
+	if err := s.save(); err != nil {
+		if existed {
+			s.data[id] = prev
+		} else {
+			delete(s.data, id)
+		}
+		return err
+	}
+	return nil
 }
 
 // Delete removes a token for a provider and persists to disk.
+// The in-memory map is only updated after the write succeeds.
 func (s *Store) Delete(id ProviderID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev, existed := s.data[id]
+	if !existed {
+		return nil
+	}
 	delete(s.data, id)
-	return s.save()
+	if err := s.save(); err != nil {
+		s.data[id] = prev // roll back
+		return err
+	}
+	return nil
 }
 
 // HasToken reports whether a valid (non-expired) token exists for the provider.

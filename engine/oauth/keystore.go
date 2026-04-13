@@ -48,19 +48,39 @@ func (s *KeyStore) Get(profile string) string {
 }
 
 // Put stores an API key for a profile and persists to disk.
+// The in-memory map is only updated after the write succeeds.
 func (s *KeyStore) Put(profile, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev, existed := s.keys[profile]
 	s.keys[profile] = key
-	return s.save()
+	if err := s.save(); err != nil {
+		// Roll back.
+		if existed {
+			s.keys[profile] = prev
+		} else {
+			delete(s.keys, profile)
+		}
+		return err
+	}
+	return nil
 }
 
 // Delete removes an API key for a profile and persists to disk.
+// The in-memory map is only updated after the write succeeds.
 func (s *KeyStore) Delete(profile string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev, existed := s.keys[profile]
+	if !existed {
+		return nil
+	}
 	delete(s.keys, profile)
-	return s.save()
+	if err := s.save(); err != nil {
+		s.keys[profile] = prev // roll back
+		return err
+	}
+	return nil
 }
 
 // HasKey reports whether a non-empty key exists for the profile.

@@ -154,7 +154,7 @@ func exchangeCopilotToken(ctx context.Context, githubToken string) (*copilotSess
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "token "+githubToken)
+	req.Header.Set("Authorization", "Bearer "+githubToken)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := oauthClient.Do(req)

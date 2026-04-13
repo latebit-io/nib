@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -99,7 +100,7 @@ func startCallbackServer(port int, state string) (*callbackServer, error) {
 				errMsg = "no code in callback"
 			}
 			errCh <- fmt.Errorf("oauth callback: %s", errMsg)
-			_, _ = fmt.Fprintf(w, "<html><body><h1>Authentication failed</h1><p>%s</p><p>You can close this tab.</p></body></html>", errMsg)
+			_, _ = fmt.Fprintf(w, "<html><body><h1>Authentication failed</h1><p>%s</p><p>You can close this tab.</p></body></html>", html.EscapeString(errMsg))
 			return
 		}
 		codeCh <- code

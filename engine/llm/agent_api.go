@@ -331,7 +331,7 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
-			ch <- StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage}
+			trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage})
 			return
 		}
 
@@ -354,7 +354,9 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 
 		// Text content
 		if delta := choice.Delta.Content; delta != "" {
-			ch <- StreamEvent{Token: delta}
+			if !trySend(ctx, ch, StreamEvent{Token: delta}) {
+				return
+			}
 		}
 
 		// Tool call deltas
@@ -363,7 +365,7 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 		}
 
 		if choice.FinishReason != nil {
-			ch <- StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage}
+			trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage})
 			return
 		}
 	}
@@ -374,7 +376,5 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 	}
 
 	// Stream ended without [DONE] or finish_reason (EOF or scanner error).
-	if ctx.Err() == nil {
-		ch <- StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage}
-	}
+	trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: tc.finalize(), Usage: usage})
 }

@@ -246,21 +246,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			wire.WireOAuthProfile(resolved, pr.OAuthStore)
 			wire.WireStoredKey(resolved, pr.KeyStore)
 
-			// Dual-mode profiles (both API key and OAuth, e.g. anthropic):
-			// try API key first, fall back to OAuth, then error.
-			if resolved.OAuthProvider != "" && resolved.APIKeyEnv != "" {
-				p := resolved.NewProvider()
-				if p == nil {
-					return nil, fmt.Errorf("no API key or OAuth token for profile %q", profile)
-				}
-				if lister, ok := p.(llm.ModelLister); ok {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					return listModelItems(lister, ctx, profile)
-				}
-				return nil, fmt.Errorf("provider does not support model listing")
-			}
-
 			// OAuth-only profiles — try API model listing, fall back to hardcoded.
 			if resolved.OAuthProvider != "" {
 				p := resolved.NewProvider()
@@ -510,19 +495,6 @@ func connectCopilotCmd(profile string, store *oauth.Store, p *tea.Program) tea.C
 		err = oauth.CompleteCopilotDeviceFlow(pollCtx, store, dc)
 		return ui.OAuthConnectResult(profile, err)
 	}
-}
-
-// listModelItems calls ListModels and converts the result to ModelSelectorItems.
-func listModelItems(lister llm.ModelLister, ctx context.Context, profile string) ([]ui.ModelSelectorItem, error) {
-	models, err := lister.ListModels(ctx)
-	if err != nil {
-		return nil, err
-	}
-	items := make([]ui.ModelSelectorItem, len(models))
-	for i, m := range models {
-		items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
-	}
-	return items, nil
 }
 
 // codexModels are available via the ChatGPT Codex subscription endpoint.

@@ -112,11 +112,11 @@ type anthropicMessageStart struct {
 type anthropicContentBlockStart struct {
 	Index        int `json:"index"`
 	ContentBlock struct {
-		Type  string `json:"type"`
-		ID    string `json:"id,omitempty"`
-		Name  string `json:"name,omitempty"`
-		Text  string `json:"text,omitempty"`
-		Input string `json:"input,omitempty"`
+		Type  string          `json:"type"`
+		ID    string          `json:"id,omitempty"`
+		Name  string          `json:"name,omitempty"`
+		Text  string          `json:"text,omitempty"`
+		Input json.RawMessage `json:"input,omitempty"`
 	} `json:"content_block"`
 }
 
@@ -289,14 +289,14 @@ func (a *AnthropicAPI) Stream(ctx context.Context, messages []Message, tools []T
 		return nil, fmt.Errorf("http request: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		_ = resp.Body.Close()
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048)) // best-effort read for error message
+		_ = resp.Body.Close()                                      // body already read; close error is not actionable
 		return nil, fmt.Errorf("api error: status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	ch := make(chan StreamEvent, 16)
 	go func() {
-		defer func() { _ = resp.Body.Close() }()
+		defer func() { _ = resp.Body.Close() }() // body consumed by SSE reader; close error is not actionable
 		defer close(ch)
 		a.readAnthropicSSE(ctx, resp, ch)
 	}()
@@ -380,7 +380,8 @@ const (
 
 // dispatchEvent processes a single SSE event, returning whether the stream
 // should continue or is done. Sends text tokens to ch as they arrive.
-func (s *anthropicStreamState) dispatchEvent(eventType, data string, ch chan<- StreamEvent) anthropicEventResult {
+// Returns anthropicDone if the stream is complete or ctx is cancelled.
+func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, data string, ch chan<- StreamEvent) anthropicEventResult {
 	switch eventType {
 	case "message_start":
 		var evt anthropicMessageStart
@@ -393,16 +394,18 @@ func (s *anthropicStreamState) dispatchEvent(eventType, data string, ch chan<- S
 		s.handleBlockStart(data)
 	case "content_block_delta":
 		if token := s.handleBlockDelta(data); token != "" {
-			ch <- StreamEvent{Token: token}
+			if !trySend(ctx, ch, StreamEvent{Token: token}) {
+				return anthropicDone
+			}
 		}
 	case "message_delta":
 		s.handleMessageDelta(data)
 	case "message_stop":
-		ch <- s.finalEvent()
+		trySend(ctx, ch, s.finalEvent())
 		return anthropicDone
 	case "error":
 		slog.Warn("anthropic: stream error event", "data", data[:min(len(data), 500)])
-		ch <- s.finalEvent()
+		trySend(ctx, ch, s.finalEvent())
 		return anthropicDone
 	}
 	return anthropicContinue
@@ -434,7 +437,7 @@ func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, resp *http.Response
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 
-		if state.dispatchEvent(eventType, data, ch) == anthropicDone {
+		if state.dispatchEvent(ctx, eventType, data, ch) == anthropicDone {
 			return
 		}
 	}
@@ -442,9 +445,7 @@ func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, resp *http.Response
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		slog.Warn("anthropic: SSE scanner error", "err", err)
 	}
-	if ctx.Err() == nil {
-		ch <- state.finalEvent()
-	}
+	trySend(ctx, ch, state.finalEvent())
 }
 
 // mergeAnthropicUsage combines input usage (from message_start) with output
@@ -517,7 +518,7 @@ func (a *AnthropicAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	defer func() { _ = resp.Body.Close() }() // HTTP response body close rarely fails
 
 	if resp.StatusCode != http.StatusOK {
-		_, _ = io.ReadAll(io.LimitReader(resp.Body, 1024))
+		_, _ = io.ReadAll(io.LimitReader(resp.Body, 1024)) // drain body for connection reuse; content not needed
 		return nil, fmt.Errorf("llm: list models: HTTP %d", resp.StatusCode)
 	}
 

@@ -142,6 +142,9 @@ func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCall
 	if callbackPath == "" {
 		callbackPath = "/auth/callback"
 	}
+	if !strings.HasPrefix(callbackPath, "/") || strings.ContainsAny(callbackPath, "?#") {
+		return nil, fmt.Errorf("invalid callback path %q", callbackPath)
+	}
 	cb, err := startCallbackServer(cfg.RedirectPort, state, callbackPath)
 	if err != nil {
 		return nil, err

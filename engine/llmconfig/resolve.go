@@ -121,15 +121,17 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 	if r.Model == "" {
 		r.Model = DefaultModel
 	}
-	if r.APIKeyEnv == "" {
-		r.APIKeyEnv = DefaultKeyEnv
-	}
-	r.apiKey = os.Getenv(r.APIKeyEnv)
-
-	// Environment variable overrides — skip for OAuth-only profiles
-	// (OAuthProvider set, no APIKeyEnv) since their endpoints are fixed.
+	// OAuth-only profiles (no APIKeyEnv, e.g. chatgpt, copilot) use
+	// token-based auth exclusively — skip key resolution and env overrides
+	// so ambient LLM_API_KEY can't leak into an OAuth endpoint.
 	oauthOnly := r.OAuthProvider != "" && p.APIKeyEnv == ""
 	if !oauthOnly {
+		if r.APIKeyEnv == "" {
+			r.APIKeyEnv = DefaultKeyEnv
+		}
+		if r.APIKeyEnv != "" {
+			r.apiKey = os.Getenv(r.APIKeyEnv)
+		}
 		if v := os.Getenv("LLM_BASE_URL"); v != "" {
 			r.BaseURL = v
 		}
@@ -172,9 +174,13 @@ func resolve(cfg *Config) *Resolved {
 		Profile:   "env",
 	}
 
-	// Look up active profile.
+	// Look up active profile. Determine oauthOnly from the profile definition
+	// before applyProfile runs — applyProfile doesn't clear APIKeyEnv, so
+	// checking r.APIKeyEnv after would always see the DefaultKeyEnv default.
+	oauthOnly := false
 	if cfg.Active != "" {
 		if p, ok := cfg.Profiles[cfg.Active]; ok {
+			oauthOnly = p.OAuthProvider != "" && p.APIKeyEnv == ""
 			applyProfile(r, p, cfg.Active)
 		} else {
 			slog.Warn("llmconfig: active profile not found", "profile", cfg.Active)
@@ -183,7 +189,6 @@ func resolve(cfg *Config) *Resolved {
 
 	// OAuth-only profiles (no APIKeyEnv, e.g. chatgpt, copilot) use
 	// token-based auth exclusively — skip key resolution and env overrides.
-	oauthOnly := r.OAuthProvider != "" && r.APIKeyEnv == ""
 	if oauthOnly {
 		return r
 	}

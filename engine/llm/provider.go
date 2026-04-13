@@ -65,6 +65,18 @@ type CacheControl struct {
 	Type string `json:"type"`
 }
 
+// trySend sends an event on ch, returning false if ctx is cancelled.
+// Prevents SSE goroutines from blocking indefinitely when the downstream
+// reader stalls or abandons the stream.
+func trySend(ctx context.Context, ch chan<- StreamEvent, evt StreamEvent) bool {
+	select {
+	case ch <- evt:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Provider abstracts an LLM backend for streaming chat completions.
 type Provider interface {
 	// Stream sends messages with the given tool definitions and returns

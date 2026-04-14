@@ -103,6 +103,13 @@ type Agent struct {
 	// waiting for the developer's next message.
 	inputCh chan string
 	waiting bool // true when blocked on inputCh
+	running bool // true while the run() goroutine is alive
+
+	// savedMessages and savedMode preserve the conversation when a run
+	// exits (cancel, fatal error). Resume picks these up to continue
+	// from where the conversation left off instead of starting fresh.
+	savedMessages []llm.Message
+	savedMode     Mode
 
 	// diagProvider is optionally set to auto-inject diagnostics after edits.
 	diagProvider lang.DiagnosticProvider
@@ -408,6 +415,8 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.waiting = false
 	a.pendingLint = ""
 	a.turnEdits = nil
+	a.savedMessages = nil
+	a.savedMode = 0
 	a.runID++
 	a.sessionUsage = SessionUsage{}
 	a.turnCounter = 0
@@ -430,28 +439,72 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 }
 
 // Reply sends a follow-up message to an ongoing conversation.
-// The agent must be in the waiting state (IsWaiting() == true).
-// If the agent is not waiting, the message is dropped.
+// If the agent is running (waiting or mid-turn), the message is queued
+// in the buffered channel. If the run has exited but saved messages
+// exist, it resumes the conversation from where it left off. Returns
+// false only when there is no conversation to continue.
 //
-// The check-and-send is atomic under mu to prevent a TOCTOU race where
-// the agent exits the waiting state between the check and the send.
-// Safe because inputCh is buffered(1) so the send never blocks under lock.
-// Returns true if the input was accepted, false if the agent is not waiting
-// or the channel is full.
-func (a *Agent) Reply(input string) bool {
+// The ctx parameter is used only for the resume path (starting a new
+// goroutine). It is ignored when the agent is already running.
+func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if !a.waiting {
-		slog.Warn("agent.Reply called but agent is not waiting")
+	if a.running {
+		defer a.mu.Unlock()
+		select {
+		case a.inputCh <- input:
+			return true
+		default:
+			slog.Warn("agent.Reply: inputCh full, dropping message")
+			return false
+		}
+	}
+
+	// Agent not running — try to resume from saved conversation.
+	if len(a.savedMessages) == 0 {
+		a.mu.Unlock()
 		return false
 	}
-	select {
-	case a.inputCh <- input:
-		return true
-	default:
-		slog.Warn("agent.Reply: inputCh full, dropping message")
-		return false
+
+	messages := a.savedMessages
+	mode := a.savedMode
+
+	prevCancel := a.cancel
+	drain(a.approveCh)
+	drain(a.continueCh)
+	drain(a.inputCh)
+
+	ctx, cancel := context.WithCancel(ctx)
+	a.cancel = cancel
+	a.waiting = false
+	a.pendingLint = ""
+	a.turnEdits = nil
+	a.savedMessages = nil
+	a.savedMode = 0
+	a.runID++
+	a.sessionUsage = SessionUsage{}
+	a.turnCounter = 0
+	a.intent = input
+
+	for _, t := range a.tools {
+		if r, ok := t.(Resettable); ok {
+			r.Reset()
+		}
 	}
+	runID := a.runID
+	a.mu.Unlock()
+
+	if prevCancel != nil {
+		prevCancel()
+	}
+
+	messages[0].Content = a.rebuildSystemPrompt(mode)
+	messages = append(messages, llm.Message{
+		Role:    "user",
+		Content: input,
+	})
+
+	go a.resumeRun(ctx, runID, messages, mode)
+	return true
 }
 
 // IsWaiting returns true when the agent has finished its turn and is
@@ -460,6 +513,15 @@ func (a *Agent) IsWaiting() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.waiting
+}
+
+// IsRunning returns true while the agent's run goroutine is alive.
+// A running agent may be processing a turn (not yet waiting) or
+// blocked waiting for input.
+func (a *Agent) IsRunning() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.running
 }
 
 func drain[T any](ch chan T) {
@@ -679,10 +741,19 @@ func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
 }
 
 func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
+	a.mu.Lock()
+	a.running = true
+	a.mu.Unlock()
+
 	success := true // false only on actual errors, not user-initiated cancel
+	var messages []llm.Message
 	defer func() {
 		a.mu.Lock()
 		a.waiting = false
+		a.running = false
+		// Preserve conversation for Resume — cleared by RunWithMode on new session.
+		a.savedMessages = messages
+		a.savedMode = mode
 		stale := runID != a.runID
 		a.mu.Unlock()
 		if !stale {
@@ -695,12 +766,7 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 	}
 
 	memorySummary := a.fetchMemorySummary(ctx)
-	activeDefs := a.toolDefs // planning mode blocks write tools
-	if mode == ModePlanning {
-		activeDefs = a.planningToolDefs()
-	}
-
-	messages := a.buildMessages(fileName, fileContent, goal, contextFiles, memorySummary, mode)
+	messages = a.buildMessages(fileName, fileContent, goal, contextFiles, memorySummary, mode)
 	if mode == ModePlanning {
 		a.send(event.AgentToken{Text: "Planning...\n\n"})
 		a.send(event.AgentStatus{Status: event.StatusPlanning})
@@ -710,26 +776,63 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 	}
 
 	thinkState := false
+	a.runLoop(ctx, runID, &messages, &success, mode, &thinkState)
+}
+
+// resumeRun is the entry point for Resume — starts the run loop with
+// pre-existing messages instead of building them from scratch.
+func (a *Agent) resumeRun(ctx context.Context, runID uint64, initial []llm.Message, mode Mode) {
+	a.mu.Lock()
+	a.running = true
+	a.mu.Unlock()
+
+	success := true
+	messages := initial
+	defer func() {
+		a.mu.Lock()
+		a.waiting = false
+		a.running = false
+		a.savedMessages = messages
+		a.savedMode = mode
+		stale := runID != a.runID
+		a.mu.Unlock()
+		if !stale {
+			a.send(event.AgentDone{Success: success})
+		}
+	}()
+
+	a.send(event.AgentToken{Text: "Resuming...\n\n"})
+	a.send(event.AgentStatus{Status: event.StatusThinking})
+
+	thinkState := false
+	a.runLoop(ctx, runID, &messages, &success, mode, &thinkState)
+}
+
+// runLoop is the shared agent loop used by both run and resumeRun.
+func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Message, success *bool, mode Mode, thinkState *bool) {
+	activeDefs := a.toolDefs
+	if mode == ModePlanning {
+		activeDefs = a.planningToolDefs()
+	}
+
 	for {
 		// Compact old tool results if history is large enough.
-		messages = a.maybeCompact(messages, activeDefs)
+		*messages = a.maybeCompact(*messages, activeDefs)
 
-		var err error
 		var tu turnUsage
-		messages, tu, err = a.processLLMTurn(ctx, messages, &thinkState, activeDefs)
+		*messages, tu, _ = a.processLLMTurn(ctx, *messages, thinkState, activeDefs)
 
 		// Record usage regardless of error — partial data is still valuable.
 		// Pass runID so late updates from canceled runs are ignored.
 		a.recordTurnUsage(runID, tu)
 
-		if err != nil {
-			success = false
-			return
-		}
 		if ctx.Err() != nil {
-			success = false
+			*success = false
 			return
 		}
+		// Non-fatal LLM error: stay in the loop and enter waiting state
+		// so the developer can adjust and retry. The error was already
+		// reported via AgentError inside processLLMTurn.
 
 		// Agent's turn is done — wait for the developer's next message.
 		// AgentWaiting is critical: if the frontend never sees it, the
@@ -739,7 +842,7 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 		a.mu.Unlock()
 		if err := a.sendCritical(ctx, event.AgentWaiting{}); err != nil {
 			slog.Error("agent waiting delivery failed", "err", err)
-			success = false
+			*success = false
 			return
 		}
 
@@ -752,16 +855,16 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 
 			// Refresh the system prompt so runtime changes (e.g. coding
 			// style switched via SetCodingStyle) take effect immediately.
-			messages[0].Content = a.rebuildSystemPrompt(mode)
+			(*messages)[0].Content = a.rebuildSystemPrompt(mode)
 
-			messages = append(messages, llm.Message{
+			*messages = append(*messages, llm.Message{
 				Role:    "user",
 				Content: input,
 			})
 			a.send(event.AgentStatus{Status: event.StatusThinking})
 			a.send(event.AgentToken{Text: "\n\n"})
 		case <-ctx.Done():
-			success = false
+			*success = false
 			return
 		}
 	}

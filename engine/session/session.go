@@ -29,7 +29,7 @@ import (
 // not a concrete type (DIP).
 type agentPort interface {
 	RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode event.Mode)
-	Reply(input string) bool
+	Reply(ctx context.Context, input string) bool
 	Cancel()
 	Approve()
 	Reject()
@@ -1127,14 +1127,18 @@ func (s *Session) SubmitGoal(goal string) bool {
 		return s.handlePlanningInput(goal)
 	}
 
-	// Continue existing conversation if the agent is waiting for input.
-	// Reply returns false if the agent raced out of the waiting state
-	// or the channel is full — fall through to start a new conversation.
-	if s.agent.Reply(goal) {
+	// Continue existing conversation or resume a saved one.
+	// Reply handles both: queuing to a running agent, and resuming
+	// from saved messages when the run has exited.
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.agent.Reply(ctx, goal) {
 		return true
 	}
 
-	// Start a new conversation. Archive any previous intent.
+	// No conversation to continue or resume — start fresh.
 	s.startNewConversation(goal, event.ModeExecution)
 	s.phase = PhaseExecution
 	return false
@@ -1184,7 +1188,11 @@ func (s *Session) handlePlanningInput(input string) bool {
 
 	default:
 		// Continue planning conversation.
-		return s.agent.Reply(input)
+		ctx := s.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return s.agent.Reply(ctx, input)
 	}
 }
 

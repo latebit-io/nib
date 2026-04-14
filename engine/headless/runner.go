@@ -16,7 +16,7 @@ import (
 // Matches the methods on *agent.Agent used during a headless run.
 type agentPort interface {
 	Run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string)
-	Reply(input string) bool
+	Reply(ctx context.Context, input string) bool
 	Approve()
 	Continue(path, bufferContent string)
 	Cancel()
@@ -240,7 +240,7 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 	// the last turn only — prior turns were already streamed to stderr.
 	summary.Reset()
 	*truncated = false
-	if !r.agent.Reply(input) {
+	if !r.agent.Reply(ctx, input) {
 		slog.Warn("agent not accepting input, ending conversation")
 		result.Success = true
 		return true

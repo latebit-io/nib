@@ -47,7 +47,7 @@ func (m *mockAgent) Run(_ context.Context, fileName, fileContent, goal string, c
 	}
 }
 
-func (m *mockAgent) Reply(_ string) bool {
+func (m *mockAgent) Reply(_ context.Context, _ string) bool {
 	m.replied = true
 	return true
 }

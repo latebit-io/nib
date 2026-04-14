@@ -266,9 +266,14 @@ type toolCallAccumulator struct {
 	args  []*strings.Builder
 }
 
-// merge returns false if a tool argument exceeds maxToolArgBytes.
+// merge returns false if a tool argument exceeds maxToolArgBytes or
+// the index is out of bounds.
 func (tc *toolCallAccumulator) merge(deltas []sseDeltaCall) bool {
 	for _, d := range deltas {
+		if d.Index < 0 || d.Index >= maxToolCalls {
+			slog.Warn("SSE tool call index out of bounds", "index", d.Index, "max", maxToolCalls)
+			return false
+		}
 		// Grow slices if needed
 		for d.Index >= len(tc.calls) {
 			tc.calls = append(tc.calls, ToolCall{})

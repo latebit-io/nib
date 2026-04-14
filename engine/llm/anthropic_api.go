@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -320,17 +321,23 @@ type anthropicStreamState struct {
 }
 
 // handleBlockStart processes a content_block_start event.
-func (s *anthropicStreamState) handleBlockStart(data string) {
+// Returns false if the block index is out of bounds.
+func (s *anthropicStreamState) handleBlockStart(data string) bool {
 	var evt anthropicContentBlockStart
 	if err := json.Unmarshal([]byte(data), &evt); err != nil {
 		slog.Warn("anthropic: unmarshal content_block_start", "err", err, "data", data[:min(len(data), 200)])
-		return
+		return true
+	}
+	if evt.Index < 0 || evt.Index >= maxToolCalls {
+		slog.Warn("anthropic: block index out of bounds", "index", evt.Index, "max", maxToolCalls)
+		return false
 	}
 	s.blocks[evt.Index] = &anthropicBlockState{
 		blockType: evt.ContentBlock.Type,
 		toolID:    evt.ContentBlock.ID,
 		toolName:  evt.ContentBlock.Name,
 	}
+	return true
 }
 
 // handleBlockDelta processes a content_block_delta event.
@@ -395,7 +402,9 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 		}
 		s.inputUsage = evt.Message.Usage
 	case "content_block_start":
-		s.handleBlockStart(data)
+		if !s.handleBlockStart(data) {
+			return anthropicDone
+		}
 	case "content_block_delta":
 		token, abort := s.handleBlockDelta(data)
 		if abort {
@@ -481,13 +490,16 @@ func mergeAnthropicUsage(input, output *anthropicUsage) *Usage {
 
 // finalizeAnthropicBlocks extracts completed tool calls from the block state.
 func finalizeAnthropicBlocks(blocks map[int]*anthropicBlockState) []ToolCall {
+	// Collect and sort keys for deterministic output with sparse indices.
+	indices := make([]int, 0, len(blocks))
+	for i := range blocks {
+		indices = append(indices, i)
+	}
+	slices.Sort(indices)
+
 	var calls []ToolCall
-	// Iterate in index order for deterministic output.
-	for i := 0; i < len(blocks); i++ {
-		block, ok := blocks[i]
-		if !ok {
-			continue
-		}
+	for _, i := range indices {
+		block := blocks[i]
 		if block.blockType != "tool_use" {
 			continue
 		}

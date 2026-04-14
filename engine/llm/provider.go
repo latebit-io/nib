@@ -69,6 +69,10 @@ type CacheControl struct {
 // arguments. Matches the SSE scanner's 10MB cap to prevent unbounded growth.
 const maxToolArgBytes = 10 * 1024 * 1024
 
+// maxToolCalls is the maximum number of concurrent tool calls in a single
+// response. Prevents unbounded slice/map growth from malformed SSE payloads.
+const maxToolCalls = 128
+
 // trySend sends an event on ch, returning false if ctx is cancelled.
 // Prevents SSE goroutines from blocking indefinitely when the downstream
 // reader stalls or abandons the stream.

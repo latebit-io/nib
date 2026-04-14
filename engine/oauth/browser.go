@@ -34,6 +34,10 @@ type BrowserFlowConfig struct {
 	// CallbackPath is the HTTP path for the local callback server.
 	// Defaults to "/auth/callback" if empty.
 	CallbackPath string
+	// RedirectHost is the hostname used in the redirect_uri and for binding
+	// the local callback server. Defaults to "127.0.0.1" if empty.
+	// Must match the host registered with the OAuth provider.
+	RedirectHost string
 }
 
 // pkce holds a PKCE code verifier and its S256 challenge.
@@ -76,10 +80,10 @@ type callbackServer struct {
 
 // startCallbackServer binds a local listener and starts serving the callback handler.
 // Returns the server (for shutdown) and the redirect URI with the actual bound port.
-func startCallbackServer(port int, state, callbackPath string) (*callbackServer, error) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+func startCallbackServer(host string, port int, state, callbackPath string) (*callbackServer, error) {
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
 	if err != nil {
-		listener, err = net.Listen("tcp", "localhost:0")
+		listener, err = net.Listen("tcp", host+":0")
 		if err != nil {
 			return nil, fmt.Errorf("listen for OAuth callback: %w", err)
 		}
@@ -135,7 +139,7 @@ func startCallbackServer(port int, state, callbackPath string) (*callbackServer,
 
 	return &callbackServer{
 		srv:         srv,
-		redirectURI: fmt.Sprintf("http://localhost:%d%s", actualPort, callbackPath),
+		redirectURI: fmt.Sprintf("http://%s:%d%s", host, actualPort, callbackPath),
 		codeCh:      codeCh,
 		errCh:       errCh,
 	}, nil
@@ -143,6 +147,25 @@ func startCallbackServer(port int, state, callbackPath string) (*callbackServer,
 
 func (s *callbackServer) close() { _ = s.srv.Close() } // error not actionable during shutdown
 
+// resolvedCallback returns the callback path and redirect host with defaults applied.
+func (cfg *BrowserFlowConfig) resolvedCallback() (path, host string, err error) {
+	path = cfg.CallbackPath
+	if path == "" {
+		path = "/auth/callback"
+	}
+	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#") {
+		return "", "", fmt.Errorf("invalid callback path %q", path)
+	}
+	host = cfg.RedirectHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return path, host, nil
+}
+
+// BrowserFlow runs the Authorization Code + PKCE flow.
+// It starts a local HTTP server, opens the browser, waits for the callback,
+// and exchanges the auth code for tokens.
 func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCallbacks) (*tokenResponse, error) {
 	p, err := newPKCE()
 	if err != nil {
@@ -154,14 +177,11 @@ func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCall
 		return nil, err
 	}
 
-	callbackPath := cfg.CallbackPath
-	if callbackPath == "" {
-		callbackPath = "/auth/callback"
+	callbackPath, host, err := cfg.resolvedCallback()
+	if err != nil {
+		return nil, err
 	}
-	if !strings.HasPrefix(callbackPath, "/") || strings.ContainsAny(callbackPath, "?#") {
-		return nil, fmt.Errorf("invalid callback path %q", callbackPath)
-	}
-	cb, err := startCallbackServer(cfg.RedirectPort, state, callbackPath)
+	cb, err := startCallbackServer(host, cfg.RedirectPort, state, callbackPath)
 	if err != nil {
 		return nil, err
 	}

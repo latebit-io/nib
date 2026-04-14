@@ -820,7 +820,8 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 		*messages = a.maybeCompact(*messages, activeDefs)
 
 		var tu turnUsage
-		*messages, tu, _ = a.processLLMTurn(ctx, *messages, thinkState, activeDefs)
+		var err error
+		*messages, tu, err = a.processLLMTurn(ctx, *messages, thinkState, activeDefs)
 
 		// Record usage regardless of error — partial data is still valuable.
 		// Pass runID so late updates from canceled runs are ignored.
@@ -833,6 +834,9 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 		// Non-fatal LLM error: stay in the loop and enter waiting state
 		// so the developer can adjust and retry. The error was already
 		// reported via AgentError inside processLLMTurn.
+		if err != nil {
+			slog.Debug("LLM turn error, entering wait state for retry", "err", err)
+		}
 
 		// Agent's turn is done — wait for the developer's next message.
 		// AgentWaiting is critical: if the frontend never sees it, the

@@ -180,7 +180,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		return resolved.OAuthProvider
 	}
-
 	app.StoreAPIKey = func(profile, key string) error {
 		if pr.KeyStore == nil {
 			return fmt.Errorf("key storage not available")
@@ -247,7 +246,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			wire.WireOAuthProfile(resolved, pr.OAuthStore)
 			wire.WireStoredKey(resolved, pr.KeyStore)
 
-			// OAuth profiles — try API model listing, fall back to hardcoded.
+			// OAuth-only profiles — try API model listing, fall back to hardcoded.
 			if resolved.OAuthProvider != "" {
 				p := resolved.NewProvider()
 				if p == nil {

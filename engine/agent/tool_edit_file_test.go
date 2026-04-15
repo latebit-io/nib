@@ -280,3 +280,82 @@ func TestEditFileTool_ProposalPendingEditFields(t *testing.T) {
 		t.Errorf("PendingEdit mismatch:\n got  %+v\n want %+v", proposal.Edit, want)
 	}
 }
+
+func TestFuzzyWhitespaceMatch(t *testing.T) {
+	t.Run("tabs vs spaces", func(t *testing.T) {
+		content := "func main() {\n\tfmt.Println(\"hello\")\n}"
+		search := "func main() {\n    fmt.Println(\"hello\")\n}"
+		got := fuzzyWhitespaceMatch(search, content)
+		if got != "func main() {\n\tfmt.Println(\"hello\")\n}" {
+			t.Errorf("expected file text, got %q", got)
+		}
+	})
+
+	t.Run("wrong indentation depth", func(t *testing.T) {
+		content := "\t\tif err != nil {\n\t\t\treturn err\n\t\t}"
+		search := "\tif err != nil {\n\t\treturn err\n\t}"
+		got := fuzzyWhitespaceMatch(search, content)
+		if got != content {
+			t.Errorf("expected file text, got %q", got)
+		}
+	})
+
+	t.Run("exact match returns empty", func(t *testing.T) {
+		content := "line one\nline two"
+		search := "line one\nline two"
+		got := fuzzyWhitespaceMatch(search, content)
+		if got != "" {
+			t.Errorf("exact match should return empty, got %q", got)
+		}
+	})
+
+	t.Run("multiple matches returns empty", func(t *testing.T) {
+		content := "\tfoo\n\tbar\n\tfoo\n\tbar"
+		search := "  foo\n  bar"
+		got := fuzzyWhitespaceMatch(search, content)
+		if got != "" {
+			t.Errorf("multiple matches should return empty, got %q", got)
+		}
+	})
+
+	t.Run("no match returns empty", func(t *testing.T) {
+		content := "func main() {}"
+		search := "func other() {}"
+		got := fuzzyWhitespaceMatch(search, content)
+		if got != "" {
+			t.Errorf("no match should return empty, got %q", got)
+		}
+	})
+}
+
+func TestEditFileTool_FuzzyWhitespaceCorrection(t *testing.T) {
+	content := "package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n"
+	ws := &testWorkspace{
+		files:     map[string]string{"main.go": content},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	tool := NewEditFileTool(ws, cache)
+
+	// LLM sends spaces instead of tabs — fuzzy match should correct it.
+	args := mustMarshal(t, editArgs{
+		Path:    "main.go",
+		Search:  "func main() {\n    fmt.Println(\"hello\")\n}",
+		Replace: "func main() {\n\tfmt.Println(\"goodbye\")\n}",
+		Reason:  "test",
+	})
+	call := llm.ToolCall{
+		ID:       "1",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	}
+
+	result := tool.Execute(context.Background(), call)
+	if result.Effect != EffectEditProposed {
+		t.Fatalf("expected EffectEditProposed, got %d (content: %s)", result.Effect, result.Content)
+	}
+	proposal := result.Payload.(EditProposal)
+	// The search should have been corrected to the actual file text.
+	if proposal.Edit.Search != "func main() {\n\tfmt.Println(\"hello\")\n}" {
+		t.Errorf("search not corrected: %q", proposal.Edit.Search)
+	}
+}

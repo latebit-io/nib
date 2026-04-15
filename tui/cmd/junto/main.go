@@ -310,11 +310,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			provider = newProvider
 			llmResolved = resolved
 			sess.SetLLMInfo(resolved.Model, resolved.Profile)
-			if err := llmconfig.SaveSelection(profile, modelID); err != nil {
-				slog.Warn("llm: failed to persist selection", "err", err)
-			}
 			slog.Info("llm: switched model", "profile", profile, "model", modelID)
-			return resolved.DisplayModel(), nil
+			displayModel := resolved.DisplayModel()
+			if err := llmconfig.SaveSelection(profile, modelID); err != nil {
+				return displayModel, fmt.Errorf("switched but failed to persist: %w", err)
+			}
+			return displayModel, nil
 		})
 	}
 

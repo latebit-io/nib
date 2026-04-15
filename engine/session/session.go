@@ -265,8 +265,9 @@ func (s *Session) SetModelSwitcher(fn func(profile, modelID string) (string, err
 	s.switchModel = fn
 }
 
-// SwitchModel switches the active LLM provider and model. Updates session
-// state and persists the selection to disk. Returns the display model name.
+// SwitchModel switches the active LLM provider and model via the injected
+// switcher callback. Returns the display model name. Persistence behavior
+// (if any) is determined by the callback implementation.
 func (s *Session) SwitchModel(profile, modelID string) (string, error) {
 	if s.switchModel == nil {
 		return "", fmt.Errorf("model switching not available")

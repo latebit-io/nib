@@ -499,14 +499,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.AgentPane.AppendMeta("\n[API key saved for " + msg.profile + "]\n")
 			// Switch to this profile's default model.
-			displayModel, err := m.Session.SwitchModel(msg.profile, "")
-			if err != nil {
-				m.AgentPane.AppendMeta("[switch failed: " + err.Error() + "]\n")
-			} else {
-				label := msg.profile + ": " + displayModel
-				m.AgentPane.SetModelLabel(label)
-				m.AgentPane.AppendMeta("[switched to " + label + "]\n")
-			}
+			dm, switchErr := m.Session.SwitchModel(msg.profile, "")
+			m.applySwitchResult(msg.profile, dm, switchErr)
 		}
 		return m, nil
 
@@ -519,14 +513,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
 		// Try to switch directly to the profile's default model.
 		// OAuth providers often don't support /models listing, so skip it.
-		displayModel, switchErr := m.Session.SwitchModel(msg.profile, "")
-		if switchErr != nil {
-			m.AgentPane.AppendMeta("[restart Junto to use " + msg.profile + " — token saved for next launch]\n")
-		} else {
-			label := msg.profile + ": " + displayModel
-			m.AgentPane.SetModelLabel(label)
-			m.AgentPane.AppendMeta("[switched to " + label + "]\n")
-		}
+		dm, switchErr := m.Session.SwitchModel(msg.profile, "")
+		m.applySwitchResult(msg.profile, dm, switchErr)
 		return m, nil
 
 	// Model list fetched — open the inline selector in the agent pane
@@ -597,17 +585,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Model selection — switch to the chosen model.
 		if msg.ModelID != "" {
-			displayModel, err := m.Session.SwitchModel(msg.Profile, msg.ModelID)
-			if err != nil {
-				m.AgentPane.AppendMeta("\n[model switch failed: " + err.Error() + "]\n")
-			} else {
-				label := displayModel
-				if msg.Profile != "" {
-					label = msg.Profile + ": " + displayModel
-				}
-				m.AgentPane.SetModelLabel(label)
-				m.AgentPane.AppendMeta("\n[switched to " + label + "]\n")
-			}
+			dm, switchErr := m.Session.SwitchModel(msg.Profile, msg.ModelID)
+			m.applySwitchResult(msg.Profile, dm, switchErr)
 		}
 		return m, nil
 
@@ -1163,6 +1142,26 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // If multiple profiles exist, shows profile picker first.
 // If one profile, fetches models directly.
 // If no LLM is configured but OAuth profiles exist, offers connection.
+// applySwitchResult updates the agent pane after a model switch attempt.
+// Handles three outcomes: full success, success with persistence warning
+// (displayModel non-empty but err non-nil), and outright failure.
+func (m *AppModel) applySwitchResult(profile, displayModel string, err error) {
+	if displayModel == "" && err != nil {
+		m.AgentPane.AppendMeta("\n[switch failed: " + err.Error() + "]\n")
+		return
+	}
+	label := displayModel
+	if profile != "" {
+		label = profile + ": " + displayModel
+	}
+	m.AgentPane.SetModelLabel(label)
+	if err != nil {
+		m.AgentPane.AppendMeta("\n[switched to " + label + " — selection may not persist]\n")
+	} else {
+		m.AgentPane.AppendMeta("\n[switched to " + label + "]\n")
+	}
+}
+
 func (m *AppModel) openModelSelector() tea.Cmd {
 	if m.ListModels == nil {
 		// No provider configured — check if we can offer OAuth profiles to connect.

@@ -218,6 +218,9 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 	if args.Path == "" {
 		return textResult("Error: path is required")
 	}
+	if len(args.Search) > maxDiffInputBytes || len(args.Replace) > maxDiffInputBytes {
+		return textResult(fmt.Sprintf("Error: search/replace too large (max %d bytes each). Use a narrower edit.", maxDiffInputBytes))
+	}
 
 	content, canon, err := t.resolveContent(args.Path)
 	if err != nil {

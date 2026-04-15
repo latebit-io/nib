@@ -333,9 +333,6 @@ func (t *EditFileTool) validateSearchMatch(path, search, content string) (string
 // if no match or multiple matches.
 func fuzzyWhitespaceMatch(search, content string) string {
 	searchLines := strings.Split(search, "\n")
-	if len(searchLines) == 0 {
-		return ""
-	}
 
 	// Build a pattern from the search text with leading whitespace stripped.
 	stripped := make([]string, len(searchLines))
@@ -357,6 +354,9 @@ func fuzzyWhitespaceMatch(search, content string) string {
 			}
 		}
 		if match {
+			if len(matches) == 1 {
+				return ""
+			}
 			actual := strings.Join(contentLines[i:i+len(searchLines)], "\n")
 			matches = append(matches, actual)
 		}

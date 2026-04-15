@@ -228,8 +228,12 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 		return textResult("Error: search field cannot be empty (file is not empty — copy existing text to anchor your edit)")
 	}
 
-	if errMsg := t.validateSearchMatch(args.Path, args.Search, content); errMsg != "" {
+	correctedSearch, errMsg := t.validateSearchMatch(args.Path, args.Search, content)
+	if errMsg != "" {
 		return textResult(errMsg)
+	}
+	if correctedSearch != "" {
+		args.Search = correctedSearch
 	}
 
 	expectedContent := strings.Replace(content, args.Search, args.Replace, 1)
@@ -271,16 +275,31 @@ func (t *EditFileTool) resolveContent(path string) (content, canon string, err e
 	return content, canon, nil
 }
 
-// validateSearchMatch checks that the search text appears exactly once in
-// the file content. On failure it manages the silent retry counter and
-// returns the error message to send back to the LLM. Returns "" on success.
-func (t *EditFileTool) validateSearchMatch(path, search, content string) string {
+// validateSearchMatch checks that the search text appears exactly once in the
+// file content. Returns (correctedSearch, "") on success — correctedSearch is
+// non-empty when a whitespace-normalized fallback matched and the caller
+// should use it instead of the original search text. Returns ("", errMsg)
+// on failure, managing the silent retry counter.
+func (t *EditFileTool) validateSearchMatch(path, search, content string) (string, string) {
 	matchCount := strings.Count(content, search)
 	if matchCount == 1 {
 		t.mu.Lock()
 		t.silentRetries = 0
 		t.mu.Unlock()
-		return ""
+		return "", ""
+	}
+
+	// Exact match failed — try whitespace-normalized fallback.
+	// Normalizes leading whitespace on each line so tab/space mismatches
+	// and wrong indentation depth don't block the edit.
+	if matchCount == 0 {
+		if corrected := fuzzyWhitespaceMatch(search, content); corrected != "" {
+			slog.Info("edit_file: whitespace-normalized match", "path", path)
+			t.mu.Lock()
+			t.silentRetries = 0
+			t.mu.Unlock()
+			return corrected, ""
+		}
 	}
 
 	t.mu.Lock()
@@ -296,7 +315,7 @@ func (t *EditFileTool) validateSearchMatch(path, search, content string) string 
 		}
 		slog.Info("edit_file: silent retry", "reason", errMsg,
 			"attempt", attempt, "path", path, "search_len", len(search))
-		return fmt.Sprintf("Error: %s. You have %d retries left. Read the file content carefully and copy the exact text.\n\nCurrent file (%s):\n\n%s",
+		return "", fmt.Sprintf("Error: %s. You have %d retries left. Read the file content carefully and copy the exact text.\n\nCurrent file (%s):\n\n%s",
 			errMsg, remaining, path, truncateForPreview(content))
 	}
 
@@ -304,6 +323,47 @@ func (t *EditFileTool) validateSearchMatch(path, search, content string) string 
 	t.mu.Unlock()
 	slog.Warn("edit_file: validation failed after max retries",
 		"matches", matchCount, "path", path, "search_len", len(search))
-	return fmt.Sprintf("Error: search text validation failed after %d retries. Use read_file to re-read the file and copy the exact text.\n\nCurrent file (%s):\n\n%s",
+	return "", fmt.Sprintf("Error: search text validation failed after %d retries. Use read_file to re-read the file and copy the exact text.\n\nCurrent file (%s):\n\n%s",
 		t.maxSilentRetries, path, truncateForPreview(content))
+}
+
+// fuzzyWhitespaceMatch attempts to find the search text in content by
+// normalizing leading whitespace on each line. If exactly one match is
+// found, returns the actual text from the file that matched. Returns ""
+// if no match or multiple matches.
+func fuzzyWhitespaceMatch(search, content string) string {
+	searchLines := strings.Split(search, "\n")
+	if len(searchLines) == 0 {
+		return ""
+	}
+
+	// Build a pattern from the search text with leading whitespace stripped.
+	stripped := make([]string, len(searchLines))
+	for i, line := range searchLines {
+		stripped[i] = strings.TrimLeft(line, " \t")
+	}
+
+	// Scan content lines for a contiguous block that matches when
+	// leading whitespace is stripped.
+	contentLines := strings.Split(content, "\n")
+	var matches []string
+	for i := 0; i <= len(contentLines)-len(searchLines); i++ {
+		match := true
+		for j, want := range stripped {
+			got := strings.TrimLeft(contentLines[i+j], " \t")
+			if got != want {
+				match = false
+				break
+			}
+		}
+		if match {
+			actual := strings.Join(contentLines[i:i+len(searchLines)], "\n")
+			matches = append(matches, actual)
+		}
+	}
+
+	if len(matches) == 1 && matches[0] != search {
+		return matches[0]
+	}
+	return ""
 }

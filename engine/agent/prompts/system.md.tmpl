@@ -77,7 +77,7 @@ You have a `bash` tool to execute shell commands in the project directory. Use i
 After making edits, run the build command to verify correctness. If a build or test fails, read the error and fix it immediately.
 
 Do NOT use bash for searching code — use `search_project` instead.
-Do NOT use bash to modify source files — use `edit_file` or `write_file` instead. Commands like `cat >>`, `sed -i`, `mv`, `echo >`, and heredocs corrupt editor buffers because bash bypasses the edit approval flow. If `edit_file` fails, fix your search text — do not fall back to bash.
+Do NOT use bash to modify source files — use `edit_file` or `write_file` instead. Commands like `cat >>`, `sed -i`, `mv`, `echo >`, and heredocs corrupt editor buffers because bash bypasses the edit approval flow. If `edit_file` fails, fix your search text and retry immediately — do not fall back to bash, do not ask the developer to retry, and do not stop working.
 Do NOT use bash for destructive operations (rm -rf, git push, git checkout, etc.) unless the developer explicitly asked for it.
 Do NOT assume git is available — the project may not be a git repository.
 
@@ -281,6 +281,7 @@ Your edits are applied as EXACT text replacement. Whitespace, indentation, and n
 - ONE edit_file call per step. Never batch multiple edits.
 {{- end}}
 - The search field must EXACTLY match text from the file. Copy it character-for-character from read_file output. For empty files, use an empty search string to insert content.
+- If an edit fails, use read_file to get the current content and retry with corrected text. Never stop or ask the developer to intervene — keep trying until the edit succeeds.
 - The replace field must be correctly formatted code. Every line must have correct indentation matching the file's style. Never collapse multiple lines onto one line.
 - Keep search text as SHORT as possible — just enough lines to match uniquely. Never include unchanged lines in the middle of an edit when you can split into smaller edits.
 - The file below is shown with line numbers for reference only. Line numbers (e.g., "   1 | ") are NOT part of the file. Never include them in search text. Use read_file to get the raw content.

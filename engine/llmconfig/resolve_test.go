@@ -467,6 +467,124 @@ func TestResolveProfile(t *testing.T) {
 	})
 }
 
+func TestSaveSelection_ProfileOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "junto", "llm.json")
+
+	if err := saveSelectionToPath(path, "gemini", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadFile(path)
+	if cfg == nil {
+		t.Fatal("config file not created")
+	}
+	if cfg.Active != "gemini" {
+		t.Errorf("Active = %q, want %q", cfg.Active, "gemini")
+	}
+	if _, ok := cfg.Profiles["gemini"]; ok {
+		t.Error("profile entry should not be created when modelID is empty")
+	}
+}
+
+func TestSaveSelection_ProfileAndModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "junto", "llm.json")
+
+	if err := saveSelectionToPath(path, "openrouter", "anthropic/claude-sonnet-4"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadFile(path)
+	if cfg == nil {
+		t.Fatal("config file not created")
+	}
+	if cfg.Active != "openrouter" {
+		t.Errorf("Active = %q, want %q", cfg.Active, "openrouter")
+	}
+	p, ok := cfg.Profiles["openrouter"]
+	if !ok {
+		t.Fatal("profile entry not created")
+	}
+	if p.Model != "anthropic/claude-sonnet-4" {
+		t.Errorf("Model = %q, want %q", p.Model, "anthropic/claude-sonnet-4")
+	}
+}
+
+func TestSaveSelection_PreservesExisting(t *testing.T) {
+	dir := t.TempDir()
+	juntoDir := filepath.Join(dir, "junto")
+	if err := os.MkdirAll(juntoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(juntoDir, "llm.json")
+	existing := `{
+		"profiles": {
+			"custom": {
+				"base_url": "https://custom.example",
+				"api_key_env": "CUSTOM_KEY"
+			}
+		},
+		"active": "custom"
+	}`
+	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := saveSelectionToPath(path, "gemini", "gemini-2.5-pro"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadFile(path)
+	if cfg == nil {
+		t.Fatal("config file lost")
+	}
+	if cfg.Active != "gemini" {
+		t.Errorf("Active = %q, want %q", cfg.Active, "gemini")
+	}
+	custom, ok := cfg.Profiles["custom"]
+	if !ok {
+		t.Fatal("custom profile lost")
+	}
+	if custom.BaseURL != "https://custom.example" {
+		t.Errorf("custom BaseURL = %q", custom.BaseURL)
+	}
+	gemini, ok := cfg.Profiles["gemini"]
+	if !ok {
+		t.Fatal("gemini profile not created")
+	}
+	if gemini.Model != "gemini-2.5-pro" {
+		t.Errorf("gemini Model = %q, want %q", gemini.Model, "gemini-2.5-pro")
+	}
+}
+
+func TestSaveSelection_RoundtripWithResolve(t *testing.T) {
+	for _, key := range []string{"LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"} {
+		t.Setenv(key, "")
+	}
+	for _, p := range builtinProfiles {
+		if p.APIKeyEnv != "" {
+			t.Setenv(p.APIKeyEnv, "")
+		}
+	}
+	t.Setenv("OPENROUTER_API_KEY", "or-key")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "junto", "llm.json")
+
+	if err := saveSelectionToPath(path, "openrouter", "anthropic/claude-sonnet-4"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, resolved := resolveWithPaths(path, "")
+	if resolved.Profile != "openrouter" {
+		t.Errorf("Profile = %q, want %q", resolved.Profile, "openrouter")
+	}
+	if resolved.Model != "anthropic/claude-sonnet-4" {
+		t.Errorf("Model = %q, want %q", resolved.Model, "anthropic/claude-sonnet-4")
+	}
+}
+
 // setupResolveTest creates temp config files and sets env vars for a resolve test.
 func setupResolveTest(t *testing.T, globalJSON, projectJSON string, env map[string]string) (globalPath, projectRoot string) {
 	t.Helper()

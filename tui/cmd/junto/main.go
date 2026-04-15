@@ -290,15 +290,13 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			return items, nil
 		}
 
-		app.SwitchModel = func(profile, modelID string) (string, error) {
-			// Resolve the target profile.
+		sess.SetModelSwitcher(func(profile, modelID string) (string, error) {
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
 				slog.Warn("llm: profile not found, falling back", "profile", profile)
 				resolved = llmResolved
 			}
 			slog.Debug("llm: switch resolving", "profile", profile, "modelID", modelID, "resolvedModel", resolved.Model)
-			// Empty modelID means use the profile's default model.
 			if modelID != "" {
 				resolved.Model = modelID
 			}
@@ -313,8 +311,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			llmResolved = resolved
 			sess.SetLLMInfo(resolved.Model, resolved.Profile)
 			slog.Info("llm: switched model", "profile", profile, "model", modelID)
-			return resolved.DisplayModel(), nil
-		}
+			displayModel := resolved.DisplayModel()
+			if err := llmconfig.SaveSelection(profile, modelID); err != nil {
+				return displayModel, fmt.Errorf("switched but failed to persist: %w", err)
+			}
+			return displayModel, nil
+		})
 	}
 
 	// Wire coding style cycling — closures capture ag, styleResult, and the style config.

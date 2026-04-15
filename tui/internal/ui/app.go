@@ -132,12 +132,6 @@ type AppModel struct {
 	terse               bool          // true when terse output mode is active
 	pendingModelProfile string        // profile of the in-flight ListModels request (stale detection)
 
-	// SwitchModel is called to switch the active LLM model at runtime.
-	// Set by the entry point (main.go) — nil when no LLM is configured.
-	// The profile parameter selects which provider to use.
-	// Returns the display model name on success.
-	SwitchModel func(profile, modelID string) (displayModel string, err error)
-
 	// ListModels returns available models for the given profile.
 	// Set by the entry point — nil when no LLM is configured.
 	ListModels func(profile string) ([]ModelSelectorItem, error)
@@ -505,15 +499,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.AgentPane.AppendMeta("\n[API key saved for " + msg.profile + "]\n")
 			// Switch to this profile's default model.
-			if m.SwitchModel != nil {
-				displayModel, err := m.SwitchModel(msg.profile, "")
-				if err != nil {
-					m.AgentPane.AppendMeta("[switch failed: " + err.Error() + "]\n")
-				} else {
-					label := msg.profile + ": " + displayModel
-					m.AgentPane.SetModelLabel(label)
-					m.AgentPane.AppendMeta("[switched to " + label + "]\n")
-				}
+			displayModel, err := m.Session.SwitchModel(msg.profile, "")
+			if err != nil {
+				m.AgentPane.AppendMeta("[switch failed: " + err.Error() + "]\n")
+			} else {
+				label := msg.profile + ": " + displayModel
+				m.AgentPane.SetModelLabel(label)
+				m.AgentPane.AppendMeta("[switched to " + label + "]\n")
 			}
 		}
 		return m, nil
@@ -527,19 +519,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
 		// Try to switch directly to the profile's default model.
 		// OAuth providers often don't support /models listing, so skip it.
-		if m.SwitchModel != nil {
-			displayModel, err := m.SwitchModel(msg.profile, "")
-			if err != nil {
-				m.AgentPane.AppendMeta("[switch failed: " + err.Error() + "]\n")
-			} else {
-				label := msg.profile + ": " + displayModel
-				m.AgentPane.SetModelLabel(label)
-				m.AgentPane.AppendMeta("[switched to " + label + "]\n")
-			}
-			return m, nil
+		displayModel, switchErr := m.Session.SwitchModel(msg.profile, "")
+		if switchErr != nil {
+			m.AgentPane.AppendMeta("[restart Junto to use " + msg.profile + " — token saved for next launch]\n")
+		} else {
+			label := msg.profile + ": " + displayModel
+			m.AgentPane.SetModelLabel(label)
+			m.AgentPane.AppendMeta("[switched to " + label + "]\n")
 		}
-		// No agent running — user needs to restart to pick up the new auth.
-		m.AgentPane.AppendMeta("[restart Junto to use " + msg.profile + " — token saved for next launch]\n")
 		return m, nil
 
 	// Model list fetched — open the inline selector in the agent pane
@@ -609,8 +596,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Model selection — switch to the chosen model.
-		if msg.ModelID != "" && m.SwitchModel != nil {
-			displayModel, err := m.SwitchModel(msg.Profile, msg.ModelID)
+		if msg.ModelID != "" {
+			displayModel, err := m.Session.SwitchModel(msg.Profile, msg.ModelID)
 			if err != nil {
 				m.AgentPane.AppendMeta("\n[model switch failed: " + err.Error() + "]\n")
 			} else {

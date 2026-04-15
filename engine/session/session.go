@@ -137,6 +137,12 @@ type Session struct {
 
 	// llmProfile is the active profile name.
 	llmProfile string
+
+	// switchModel is the injected model-switching function. It resolves the
+	// profile, wires auth, creates a new provider, and hot-swaps it on the
+	// agent. Set via SetModelSwitcher at startup. Returns the display model
+	// name and any error. Nil means model switching is not available.
+	switchModel func(profile, modelID string) (displayModel string, err error)
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -250,6 +256,26 @@ func (s *Session) LLMProfile() string {
 	p := s.llmProfile
 	s.mu.RUnlock()
 	return p
+}
+
+// SetModelSwitcher injects the model-switching function. The function should
+// resolve the profile, wire auth (OAuth/stored keys), create a new provider,
+// and hot-swap it on the agent. Called once during startup wiring.
+func (s *Session) SetModelSwitcher(fn func(profile, modelID string) (string, error)) {
+	s.switchModel = fn
+}
+
+// SwitchModel switches the active LLM provider and model. Updates session
+// state and persists the selection to disk. Returns the display model name.
+func (s *Session) SwitchModel(profile, modelID string) (string, error) {
+	if s.switchModel == nil {
+		return "", fmt.Errorf("model switching not available")
+	}
+	displayModel, err := s.switchModel(profile, modelID)
+	if err != nil {
+		return "", err
+	}
+	return displayModel, nil
 }
 
 // SetContext sets the application-level context. Agent runs derive a child

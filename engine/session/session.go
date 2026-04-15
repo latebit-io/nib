@@ -262,17 +262,22 @@ func (s *Session) LLMProfile() string {
 // resolve the profile, wire auth (OAuth/stored keys), create a new provider,
 // and hot-swap it on the agent. Called once during startup wiring.
 func (s *Session) SetModelSwitcher(fn func(profile, modelID string) (string, error)) {
+	s.mu.Lock()
 	s.switchModel = fn
+	s.mu.Unlock()
 }
 
 // SwitchModel switches the active LLM provider and model via the injected
 // switcher callback. Returns the display model name. Persistence behavior
 // (if any) is determined by the callback implementation.
 func (s *Session) SwitchModel(profile, modelID string) (string, error) {
-	if s.switchModel == nil {
+	s.mu.RLock()
+	switcher := s.switchModel
+	s.mu.RUnlock()
+	if switcher == nil {
 		return "", fmt.Errorf("model switching not available")
 	}
-	return s.switchModel(profile, modelID)
+	return switcher(profile, modelID)
 }
 
 // SetContext sets the application-level context. Agent runs derive a child

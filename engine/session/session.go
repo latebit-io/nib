@@ -272,11 +272,7 @@ func (s *Session) SwitchModel(profile, modelID string) (string, error) {
 	if s.switchModel == nil {
 		return "", fmt.Errorf("model switching not available")
 	}
-	displayModel, err := s.switchModel(profile, modelID)
-	if err != nil {
-		return "", err
-	}
-	return displayModel, nil
+	return s.switchModel(profile, modelID)
 }
 
 // SetContext sets the application-level context. Agent runs derive a child

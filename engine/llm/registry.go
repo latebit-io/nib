@@ -94,6 +94,9 @@ func composeFilters(filters []ModelFilter) ModelFilter {
 func (r *ModelRegistry) Models(ctx context.Context, providerID string, filters ...ModelFilter) ([]ModelInfo, error) {
 	filter := composeFilters(filters)
 	cache := r.resolveCache(ctx)
+	if cache == nil {
+		return nil, fmt.Errorf("model registry: no cache available (network, disk, and snapshot all failed)")
+	}
 
 	models := r.filterModels(cache, providerID, filter)
 	if len(models) == 0 {

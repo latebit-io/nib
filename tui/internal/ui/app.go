@@ -524,7 +524,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// OAuth connection completed — switch to the connected profile
+	// OAuth connection completed — switch to the connected profile.
+	// The switcher builds the agent on first successful connect, so the
+	// connection is live without restart.
 	case oauthConnectResultMsg:
 		if msg.err != nil {
 			m.AgentPane.AppendMeta("\n[connection failed: " + msg.err.Error() + "]\n")
@@ -532,11 +534,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
 		dm, switchErr := m.Session.SwitchModel(msg.profile, "")
-		if switchErr != nil && !m.Session.HasAgent() {
-			m.AgentPane.AppendMeta("[restart junto to use " + msg.profile + "]\n")
-		} else {
-			m.applySwitchResult(msg.profile, dm, switchErr)
-		}
+		m.applySwitchResult(msg.profile, dm, switchErr)
 		return m, nil
 
 	// Model list fetched — open the inline selector in the agent pane

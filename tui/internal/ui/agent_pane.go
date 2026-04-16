@@ -1343,7 +1343,7 @@ func (m *AgentPaneModel) Render() string {
 	// Use package-level style vars directly — no local copies needed
 	// since lipgloss styles are immutable value types.
 
-	// No LLM configured — show message and fill remaining rows
+	// No LLM configured — show message, but still render model selector if active.
 	if !m.hasAgent {
 		if row < m.height {
 			output[row] = agentDimStyle.Render(m.padLine(""))
@@ -1357,9 +1357,27 @@ func (m *AgentPaneModel) Render() string {
 			output[row] = agentDimStyle.Render(m.padLine(" Set LLM_API_KEY to enable"))
 			row++
 		}
-		for row < m.height {
-			output[row] = agentDimStyle.Render(m.padLine(""))
-			row++
+		if m.ModelSel.IsActive() {
+			bottomH := m.modelSelHeight()
+			contentEnd := m.height - bottomH
+			for row < contentEnd {
+				output[row] = agentDimStyle.Render(m.padLine(""))
+				row++
+			}
+			if row < m.height-1 {
+				output[row] = agentDimStyle.Render(m.padLine(strings.Repeat("─", m.width)))
+				row++
+			}
+			m.renderModelSelector(output, &row)
+			for row < m.height {
+				output[row] = agentDimStyle.Render(m.padLine(""))
+				row++
+			}
+		} else {
+			for row < m.height {
+				output[row] = agentDimStyle.Render(m.padLine(""))
+				row++
+			}
 		}
 		return strings.Join(output, "\n")
 	}

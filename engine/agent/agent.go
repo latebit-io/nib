@@ -159,6 +159,10 @@ type Agent struct {
 	// explanatory text, reducing output tokens by ~65%.
 	terse bool
 
+	// autonomous relaxes one-edit-at-a-time constraints so the agent
+	// works continuously without stopping between edits.
+	autonomous bool
+
 	// evaluator is the optional style evaluator that reviews edits after
 	// each turn completes. Nil when the feature is disabled.
 	evaluator *StyleEvaluator
@@ -587,6 +591,20 @@ func (a *Agent) currentTerse() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.terse
+}
+
+// SetAutonomous enables or disables autonomous mode. When true, the system
+// prompt allows multiple edits per turn without stopping.
+func (a *Agent) SetAutonomous(on bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.autonomous = on
+}
+
+func (a *Agent) currentAutonomous() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.autonomous
 }
 
 // SetEvaluator replaces the style evaluator. Pass nil to disable.

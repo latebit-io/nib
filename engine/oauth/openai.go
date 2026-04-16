@@ -140,6 +140,7 @@ func OpenAIBrowserFlow(ctx context.Context, store *Store, callbacks *FlowCallbac
 		AuthURL:      openAIAuthURL,
 		TokenURL:     openAITokenURL,
 		RedirectPort: openAICallbackPort,
+		RedirectHost: "localhost",
 		Scopes:       openAIScopes,
 		ExtraParams: map[string]string{
 			"id_token_add_organizations": "true",

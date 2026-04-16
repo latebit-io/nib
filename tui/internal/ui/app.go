@@ -23,6 +23,7 @@ import (
 
 // engineEventMsg wraps an engine event.Event for delivery through Bubble Tea.
 type engineEventMsg struct{ event event.Event }
+type initDoneMsg struct{}
 
 // paletteFilesMsg delivers file listing results from async Walk.
 type paletteFilesMsg struct{ items []PaletteItem }
@@ -175,6 +176,10 @@ type AppModel struct {
 	// Returns the new state (true = enabled). Set by the entry point.
 	ToggleTerse func(enabled bool) bool
 
+	// OnDialChange is called when the autonomy dial changes.
+	// Set by the entry point — nil when no agent is configured.
+	OnDialChange func(level AutonomyLevel)
+
 	// Services holds shared runtime services (clipboard, LSP, etc.).
 	Services *Services
 	// Keymap holds the active key-binding configuration.
@@ -261,6 +266,13 @@ func (m *AppModel) toggleTerse() {
 	m.terse = m.ToggleTerse(!m.terse)
 }
 
+func (m *AppModel) cycleDial() {
+	m.dial = m.dial.Cycle()
+	if m.OnDialChange != nil {
+		m.OnDialChange(m.dial)
+	}
+}
+
 // NewApp creates the application model.
 func NewApp(sess *session.Session) AppModel {
 	km := DefaultKeymap()
@@ -309,6 +321,9 @@ func (m *AppModel) Init() tea.Cmd {
 	if m.fileWatcher != nil {
 		cmds = append(cmds, m.listenForFileChanges())
 	}
+	if len(cmds) == 0 {
+		cmds = append(cmds, func() tea.Msg { return initDoneMsg{} })
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -351,10 +366,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Model selector is modal — captures all input when active
+	// Model selector is modal — captures most input when active.
+	// Ctrl+Q always quits regardless of modal state.
 	if m.AgentPane.IsModelSelectorActive() {
 		switch typed := msg.(type) {
 		case tea.KeyPressMsg:
+			if m.Keymap.Match(typed) == ActionQuit {
+				m.Quit = true
+				return m, tea.Quit
+			}
 			cmd := m.AgentPane.UpdateModelSelector(typed)
 			return m, cmd
 		case tea.MouseMsg:
@@ -511,10 +531,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
-		// Try to switch directly to the profile's default model.
-		// OAuth providers often don't support /models listing, so skip it.
 		dm, switchErr := m.Session.SwitchModel(msg.profile, "")
-		m.applySwitchResult(msg.profile, dm, switchErr)
+		if switchErr != nil && !m.Session.HasAgent() {
+			m.AgentPane.AppendMeta("[restart junto to use " + msg.profile + "]\n")
+		} else {
+			m.applySwitchResult(msg.profile, dm, switchErr)
+		}
 		return m, nil
 
 	// Model list fetched — open the inline selector in the agent pane
@@ -757,9 +779,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
-		if msg.Text == "" {
-			slog.Debug("key event", "string", msg.String())
-		}
+		slog.Debug("key event", "code", msg.Code, "mod", msg.Mod)
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -940,7 +960,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case ActionModelSelector:
 			return m, m.openModelSelector()
 		case ActionDialCycle:
-			m.dial = m.dial.Cycle()
+			m.cycleDial()
 			return m, nil
 		case ActionStyleCycle:
 			m.cycleStyle()
@@ -1026,7 +1046,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ActionDialCycle:
-		m.dial = m.dial.Cycle()
+		m.cycleDial()
 		return m, nil
 
 	case ActionStyleCycle:
@@ -1167,6 +1187,7 @@ func (m *AppModel) openModelSelector() tea.Cmd {
 		// No provider configured — check if we can offer OAuth profiles to connect.
 		if m.IsOAuthProfile != nil && m.HasOAuthToken != nil && m.LLMProfileNames != nil {
 			profiles := m.LLMProfileNames()
+			slog.Debug("model selector: no provider, checking profiles", "count", len(profiles))
 			var connectItems []ModelSelectorItem
 			for _, p := range profiles {
 				if providerID := m.IsOAuthProfile(p); providerID != "" && !m.HasOAuthToken(p) {
@@ -1177,10 +1198,14 @@ func (m *AppModel) openModelSelector() tea.Cmd {
 					})
 				}
 			}
+			slog.Debug("model selector: connect items", "count", len(connectItems))
 			if len(connectItems) > 0 {
 				m.AgentPane.OpenModelSelector(connectItems, connectItems[0].Profile, "", profiles)
+				slog.Debug("model selector: opened", "active", m.AgentPane.IsModelSelectorActive())
 				return nil
 			}
+		} else {
+			slog.Debug("model selector: callbacks missing", "isOAuth", m.IsOAuthProfile != nil, "hasToken", m.HasOAuthToken != nil, "profiles", m.LLMProfileNames != nil)
 		}
 		globalPath := llmconfig.GlobalConfigPath()
 		if globalPath == "" {

@@ -294,6 +294,15 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			if err != nil {
 				return nil, err
 			}
+			if profile == "chatgpt" {
+				filtered := models[:0]
+				for _, m := range models {
+					if strings.Contains(m.ID, "codex") || strings.HasPrefix(m.ID, "gpt-5") {
+						filtered = append(filtered, m)
+					}
+				}
+				models = filtered
+			}
 			return modelsToItems(models, profile, resolved.Model), nil
 		}
 
@@ -438,7 +447,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		ag.SetAutonomous(true)
 
 		app.OnDialChange = func(level ui.AutonomyLevel) {
-			ag.SetAutonomous(level.AutoApproveEdits())
+			ag.SetAutonomous(level.AutoContinue())
 		}
 
 		app.SetTerse(true)

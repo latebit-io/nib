@@ -69,60 +69,83 @@ func NewModelRegistry(cacheDir string, ttl time.Duration) *ModelRegistry {
 // Return true to include the model in results.
 type ModelFilter func(m RegistryModel) bool
 
+// composeFilters combines variadic filters into a single predicate.
+func composeFilters(filters []ModelFilter) ModelFilter {
+	switch len(filters) {
+	case 0:
+		return nil
+	case 1:
+		return filters[0]
+	default:
+		return func(m RegistryModel) bool {
+			for _, f := range filters {
+				if f != nil && !f(m) {
+					return false
+				}
+			}
+			return true
+		}
+	}
+}
+
 // Models returns the cached models for a provider, refreshing if the cache
 // is stale or missing. Only models with tool_call support are returned.
 // An optional filter further narrows results (e.g. codex-family only).
 func (r *ModelRegistry) Models(ctx context.Context, providerID string, filters ...ModelFilter) ([]ModelInfo, error) {
-	var filter ModelFilter
-	if len(filters) > 0 {
-		filter = filters[0]
-	}
-
-	r.mu.RLock()
-	cache := r.cache
-	r.mu.RUnlock()
-
-	if cache == nil {
-		loaded, err := r.loadDiskCache()
-		if err != nil {
-			slog.Debug("model registry: disk cache load failed", "err", err)
-		} else if loaded != nil {
-			r.mu.Lock()
-			r.cache = loaded
-			cache = loaded
-			r.mu.Unlock()
-		}
-	}
-
-	if cache == nil || r.isStale(cache) {
-		fetched, err := r.fetch(ctx)
-		if err != nil {
-			if cache != nil {
-				if models := r.filterModels(cache, providerID, filter); len(models) > 0 {
-					return models, nil
-				}
-			}
-			if snap := loadSnapshot(); snap != nil {
-				if models := r.filterModels(snap, providerID, filter); len(models) > 0 {
-					return models, nil
-				}
-			}
-			return nil, fmt.Errorf("model registry: %w", err)
-		}
-		r.mu.Lock()
-		r.cache = fetched
-		cache = fetched
-		if err := r.saveDiskCache(fetched); err != nil {
-			slog.Warn("model registry: cache write failed", "err", err)
-		}
-		r.mu.Unlock()
-	}
+	filter := composeFilters(filters)
+	cache := r.resolveCache(ctx)
 
 	models := r.filterModels(cache, providerID, filter)
 	if len(models) == 0 {
 		return nil, fmt.Errorf("model registry: no models for provider %q", providerID)
 	}
 	return models, nil
+}
+
+// resolveCache returns the best available cache: memory, disk, network, or snapshot.
+func (r *ModelRegistry) resolveCache(ctx context.Context) *registryCache {
+	r.mu.RLock()
+	cache := r.cache
+	r.mu.RUnlock()
+
+	if cache == nil {
+		cache = r.tryLoadDiskCache()
+	}
+
+	if cache == nil || r.isStale(cache) {
+		if fetched, err := r.fetch(ctx); err != nil {
+			slog.Debug("model registry: fetch failed, using fallback", "err", err)
+		} else {
+			r.mu.Lock()
+			r.cache = fetched
+			cache = fetched
+			if err := r.saveDiskCache(fetched); err != nil {
+				slog.Warn("model registry: cache write failed", "err", err)
+			}
+			r.mu.Unlock()
+		}
+	}
+
+	if cache == nil {
+		cache = loadSnapshot()
+	}
+	return cache
+}
+
+// tryLoadDiskCache attempts to load the disk cache into memory.
+func (r *ModelRegistry) tryLoadDiskCache() *registryCache {
+	loaded, err := r.loadDiskCache()
+	if err != nil {
+		slog.Debug("model registry: disk cache load failed", "err", err)
+		return nil
+	}
+	if loaded == nil {
+		return nil
+	}
+	r.mu.Lock()
+	r.cache = loaded
+	r.mu.Unlock()
+	return loaded
 }
 
 // Refresh forces a network fetch regardless of TTL. Returns an error if the

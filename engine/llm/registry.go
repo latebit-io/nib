@@ -190,7 +190,7 @@ func (r *ModelRegistry) fetch(ctx context.Context) (*registryCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch models.dev: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() // body fully consumed by decoder; close error is not actionable
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("models.dev: HTTP %d", resp.StatusCode)
@@ -254,7 +254,7 @@ func (r *ModelRegistry) saveDiskCache(c *registryCache) error {
 		return fmt.Errorf("write cache: %w", err)
 	}
 	if err := os.Rename(tmp, r.cachePath()); err != nil {
-		_ = os.Remove(tmp)
+		_ = os.Remove(tmp) // best-effort cleanup of orphaned temp file
 		return fmt.Errorf("rename cache: %w", err)
 	}
 	return nil

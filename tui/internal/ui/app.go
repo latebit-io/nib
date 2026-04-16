@@ -266,6 +266,13 @@ func (m *AppModel) toggleTerse() {
 	m.terse = m.ToggleTerse(!m.terse)
 }
 
+func (m *AppModel) cycleDial() {
+	m.dial = m.dial.Cycle()
+	if m.OnDialChange != nil {
+		m.OnDialChange(m.dial)
+	}
+}
+
 // NewApp creates the application model.
 func NewApp(sess *session.Session) AppModel {
 	km := DefaultKeymap()
@@ -953,10 +960,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case ActionModelSelector:
 			return m, m.openModelSelector()
 		case ActionDialCycle:
-			m.dial = m.dial.Cycle()
-			if m.OnDialChange != nil {
-				m.OnDialChange(m.dial)
-			}
+			m.cycleDial()
 			return m, nil
 		case ActionStyleCycle:
 			m.cycleStyle()
@@ -1042,7 +1046,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ActionDialCycle:
-		m.dial = m.dial.Cycle()
+		m.cycleDial()
 		return m, nil
 
 	case ActionStyleCycle:

@@ -261,6 +261,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			wire.WireOAuthProfile(resolved, pr.OAuthStore)
 			wire.WireStoredKey(resolved, pr.KeyStore)
 
+			// Don't show models for profiles that lack credentials —
+			// returning an error lets app.go trigger the connect/key-entry flow.
+			if !resolved.HasProvider() {
+				return nil, fmt.Errorf("no credentials for profile %q", profile)
+			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 

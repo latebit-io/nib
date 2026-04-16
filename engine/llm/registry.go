@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -104,10 +106,10 @@ func (r *ModelRegistry) Models(ctx context.Context, providerID string, filters .
 		r.mu.Lock()
 		r.cache = fetched
 		cache = fetched
-		r.mu.Unlock()
 		if err := r.saveDiskCache(fetched); err != nil {
-			_ = err // caller cannot act on cache write failure
+			slog.Warn("model registry: cache write failed", "err", err)
 		}
+		r.mu.Unlock()
 	}
 
 	models := r.filterModels(cache, providerID, filter)
@@ -188,8 +190,9 @@ func (r *ModelRegistry) fetch(ctx context.Context) (*registryCache, error) {
 		return nil, fmt.Errorf("models.dev: HTTP %d", resp.StatusCode)
 	}
 
+	const maxResponseBytes = 10 << 20 // 10 MB
 	var raw map[string]json.RawMessage
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 
@@ -197,6 +200,7 @@ func (r *ModelRegistry) fetch(ctx context.Context) (*registryCache, error) {
 	for providerID, data := range raw {
 		var p modelsDevProvider
 		if err := json.Unmarshal(data, &p); err != nil {
+			slog.Debug("model registry: skip provider", "id", providerID, "err", err)
 			continue
 		}
 		if len(p.Models) == 0 {

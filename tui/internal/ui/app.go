@@ -23,6 +23,7 @@ import (
 
 // engineEventMsg wraps an engine event.Event for delivery through Bubble Tea.
 type engineEventMsg struct{ event event.Event }
+type initDoneMsg struct{}
 
 // paletteFilesMsg delivers file listing results from async Walk.
 type paletteFilesMsg struct{ items []PaletteItem }
@@ -309,6 +310,9 @@ func (m *AppModel) Init() tea.Cmd {
 	if m.fileWatcher != nil {
 		cmds = append(cmds, m.listenForFileChanges())
 	}
+	if len(cmds) == 0 {
+		cmds = append(cmds, func() tea.Msg { return initDoneMsg{} })
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -351,10 +355,15 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Model selector is modal — captures all input when active
+	// Model selector is modal — captures most input when active.
+	// Ctrl+Q always quits regardless of modal state.
 	if m.AgentPane.IsModelSelectorActive() {
 		switch typed := msg.(type) {
 		case tea.KeyPressMsg:
+			if m.Keymap.Match(typed) == ActionQuit {
+				m.Quit = true
+				return m, tea.Quit
+			}
 			cmd := m.AgentPane.UpdateModelSelector(typed)
 			return m, cmd
 		case tea.MouseMsg:
@@ -757,9 +766,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
-		if msg.Text == "" {
-			slog.Debug("key event", "string", msg.String())
-		}
+		slog.Debug("key event", "string", msg.String(), "text", msg.Text, "code", msg.Code, "mod", msg.Mod)
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -1167,6 +1174,7 @@ func (m *AppModel) openModelSelector() tea.Cmd {
 		// No provider configured — check if we can offer OAuth profiles to connect.
 		if m.IsOAuthProfile != nil && m.HasOAuthToken != nil && m.LLMProfileNames != nil {
 			profiles := m.LLMProfileNames()
+			slog.Debug("model selector: no provider, checking profiles", "count", len(profiles))
 			var connectItems []ModelSelectorItem
 			for _, p := range profiles {
 				if providerID := m.IsOAuthProfile(p); providerID != "" && !m.HasOAuthToken(p) {
@@ -1177,10 +1185,14 @@ func (m *AppModel) openModelSelector() tea.Cmd {
 					})
 				}
 			}
+			slog.Debug("model selector: connect items", "count", len(connectItems))
 			if len(connectItems) > 0 {
 				m.AgentPane.OpenModelSelector(connectItems, connectItems[0].Profile, "", profiles)
+				slog.Debug("model selector: opened", "active", m.AgentPane.IsModelSelectorActive())
 				return nil
 			}
+		} else {
+			slog.Debug("model selector: callbacks missing", "isOAuth", m.IsOAuthProfile != nil, "hasToken", m.HasOAuthToken != nil, "profiles", m.LLMProfileNames != nil)
 		}
 		globalPath := llmconfig.GlobalConfigPath()
 		if globalPath == "" {

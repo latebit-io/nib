@@ -137,15 +137,18 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Resolve coding style — injected into the agent's system prompt.
 	styleResult := wire.NewStyle(projectRoot)
 
+	slog.Debug("startup: provider resolved", "hasProvider", provider != nil)
+
+	// Start memory server — always needed for project plans, independent of LLM.
+	mem, err := wire.StartMemory(projectRoot)
+	if err != nil {
+		return fmt.Errorf("memory: %w", err)
+	}
+	defer mem.Cleanup()
+	sess.SetMemoryStore(mem.Store)
+
 	var ag *agent.Agent
 	if provider != nil {
-		// Start memory server — only needed when agent is active.
-		mem, err := wire.StartMemory(projectRoot)
-		if err != nil {
-			return fmt.Errorf("memory: %w", err)
-		}
-		defer mem.Cleanup()
-
 		opts := &agent.NewOptions{
 			MemoryStore:       mem.Store,
 			MemorySummary:     mem.Summary,
@@ -162,13 +165,14 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		ag = agent.New(provider, sess, events, opts, mcpResult.Tools...)
 		sess.SetAgent(ag, events)
-		sess.SetMemoryStore(mem.Store)
-	} else if lspMgr != nil {
-		// No agent, but LSP events still need to reach the frontend.
+	} else {
+		// No agent — wire events channel so the frontend event loop stays active.
 		sess.SetEvents(events)
 	}
 
+	slog.Debug("startup: creating app")
 	app := ui.NewApp(sess)
+	slog.Debug("startup: app created")
 	if llmResolved != nil && llmResolved.HasProvider() {
 		app.AgentPane.SetModelLabel(llmResolved.Profile + ": " + llmResolved.DisplayModel())
 	}
@@ -234,7 +238,15 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	app.LLMProfileNames = llmCfg.ProfileNames
 
 	// Model registry — fetches from models.dev, caches locally, refreshes hourly.
-	registryCacheDir := filepath.Dir(llmconfig.GlobalConfigPath())
+	var registryCacheDir string
+	if cfgPath := llmconfig.GlobalConfigPath(); cfgPath != "" {
+		registryCacheDir = filepath.Dir(cfgPath)
+	} else if cacheDir, err := os.UserCacheDir(); err == nil {
+		registryCacheDir = filepath.Join(cacheDir, "junto")
+	} else {
+		slog.Warn("model registry: cannot resolve cache directory, using temp")
+		registryCacheDir = filepath.Join(os.TempDir(), "junto")
+	}
 	modelRegistry := llm.NewModelRegistry(registryCacheDir, time.Hour)
 
 	// Wire model listing and switching — closures capture ag, llmCfg, and llmResolved.
@@ -449,7 +461,9 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		sess.Close()
 	}
 
-	_, err := p.Run()
+	slog.Debug("startup: running TUI")
+	_, err = p.Run()
+	slog.Debug("startup: TUI exited")
 	shutdown()
 	return err
 }

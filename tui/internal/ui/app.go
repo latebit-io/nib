@@ -176,6 +176,10 @@ type AppModel struct {
 	// Returns the new state (true = enabled). Set by the entry point.
 	ToggleTerse func(enabled bool) bool
 
+	// OnDialChange is called when the autonomy dial changes.
+	// Set by the entry point — nil when no agent is configured.
+	OnDialChange func(level AutonomyLevel)
+
 	// Services holds shared runtime services (clipboard, LSP, etc.).
 	Services *Services
 	// Keymap holds the active key-binding configuration.
@@ -520,10 +524,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
-		// Try to switch directly to the profile's default model.
-		// OAuth providers often don't support /models listing, so skip it.
 		dm, switchErr := m.Session.SwitchModel(msg.profile, "")
-		m.applySwitchResult(msg.profile, dm, switchErr)
+		if switchErr != nil && !m.Session.HasAgent() {
+			m.AgentPane.AppendMeta("[restart junto to use " + msg.profile + "]\n")
+		} else {
+			m.applySwitchResult(msg.profile, dm, switchErr)
+		}
 		return m, nil
 
 	// Model list fetched — open the inline selector in the agent pane
@@ -766,7 +772,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
-		slog.Debug("key event", "string", msg.String(), "text", msg.Text, "code", msg.Code, "mod", msg.Mod)
+		slog.Debug("key event", "code", msg.Code, "mod", msg.Mod)
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -948,6 +954,9 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.openModelSelector()
 		case ActionDialCycle:
 			m.dial = m.dial.Cycle()
+			if m.OnDialChange != nil {
+				m.OnDialChange(m.dial)
+			}
 			return m, nil
 		case ActionStyleCycle:
 			m.cycleStyle()

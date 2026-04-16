@@ -86,6 +86,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 
 	sysData := SystemPromptData{
 		Headless:          a.interactionMode == Headless,
+		Autonomous:        a.currentAutonomous(),
 		DistributedMemory: a.distributedMemory,
 		CodingStyle:       a.currentCodingStyle(),
 		Terse:             a.currentTerse(),
@@ -108,6 +109,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 func (a *Agent) rebuildSystemPrompt(mode Mode) string {
 	sysData := SystemPromptData{
 		Headless:          a.interactionMode == Headless,
+		Autonomous:        a.currentAutonomous(),
 		DistributedMemory: a.distributedMemory,
 		CodingStyle:       a.currentCodingStyle(),
 		Terse:             a.currentTerse(),

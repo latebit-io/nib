@@ -83,7 +83,10 @@ func (r *ModelRegistry) Models(ctx context.Context, providerID string, filters .
 	r.mu.RUnlock()
 
 	if cache == nil {
-		if loaded, err := r.loadDiskCache(); err == nil && loaded != nil {
+		loaded, err := r.loadDiskCache()
+		if err != nil {
+			slog.Debug("model registry: disk cache load failed", "err", err)
+		} else if loaded != nil {
 			r.mu.Lock()
 			r.cache = loaded
 			cache = loaded
@@ -95,11 +98,14 @@ func (r *ModelRegistry) Models(ctx context.Context, providerID string, filters .
 		fetched, err := r.fetch(ctx)
 		if err != nil {
 			if cache != nil {
-				return r.filterModels(cache, providerID, filter), nil
+				if models := r.filterModels(cache, providerID, filter); len(models) > 0 {
+					return models, nil
+				}
 			}
-			// Network and disk both failed — use the embedded snapshot.
 			if snap := loadSnapshot(); snap != nil {
-				return r.filterModels(snap, providerID, filter), nil
+				if models := r.filterModels(snap, providerID, filter); len(models) > 0 {
+					return models, nil
+				}
 			}
 			return nil, fmt.Errorf("model registry: %w", err)
 		}
@@ -259,6 +265,7 @@ func (r *ModelRegistry) saveDiskCache(c *registryCache) error {
 func loadSnapshot() *registryCache {
 	var providers map[string][]RegistryModel
 	if err := json.Unmarshal(modelsSnapshot, &providers); err != nil {
+		slog.Warn("model registry: embedded snapshot corrupt", "err", err)
 		return nil
 	}
 	return &registryCache{

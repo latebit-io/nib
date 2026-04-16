@@ -428,6 +428,13 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Wire terse toggle — Alt+T enables/disables terse output mode at runtime.
 	// Terse is enabled by default to reduce output token costs.
 	if ag != nil {
+		// Default is trust mode — agent works autonomously.
+		ag.SetAutonomous(true)
+
+		app.OnDialChange = func(level ui.AutonomyLevel) {
+			ag.SetAutonomous(level.AutoApproveEdits())
+		}
+
 		app.SetTerse(true)
 		app.ToggleTerse = func(enabled bool) bool {
 			ag.SetTerse(enabled)

@@ -61,6 +61,9 @@ type SystemPromptData struct {
 	// Headless is true when the agent runs without a TUI (autonomous mode).
 	// Controls prompt framing: approval flow vs direct edit application.
 	Headless bool
+	// Autonomous is true when the autonomy dial is set to trust mode.
+	// Relaxes one-edit-at-a-time constraints so the agent works continuously.
+	Autonomous bool
 	// DistributedMemory lists MCP server names recognized as shared/team memory.
 	// When non-empty, the template renders a section explaining local vs shared usage.
 	DistributedMemory []string

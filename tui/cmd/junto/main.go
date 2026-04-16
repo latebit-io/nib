@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -232,43 +233,37 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// the user can browse profiles and connect OAuth ones.
 	app.LLMProfileNames = llmCfg.ProfileNames
 
+	// Model registry — fetches from models.dev, caches locally, refreshes hourly.
+	registryCacheDir := filepath.Dir(llmconfig.GlobalConfigPath())
+	modelRegistry := llm.NewModelRegistry(registryCacheDir, time.Hour)
+
 	// Wire model listing and switching — closures capture ag, llmCfg, and llmResolved.
 	if provider != nil && ag != nil {
 
 		app.ListModels = func(profile string) ([]ui.ModelSelectorItem, error) {
-			// Resolve the profile to get its base_url and key.
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
-				// Fallback: use current provider (env-only config).
 				slog.Warn("llm: ListModels profile not found, falling back", "profile", profile)
 				resolved = llmResolved
 			}
 			wire.WireOAuthProfile(resolved, pr.OAuthStore)
 			wire.WireStoredKey(resolved, pr.KeyStore)
 
-			// OAuth-only profiles — try API model listing, fall back to hardcoded.
-			if resolved.OAuthProvider != "" {
-				p := resolved.NewProvider()
-				if p == nil {
-					slog.Debug("llm: OAuth provider not ready, using static model list", "profile", profile)
-				} else if lister, ok := p.(llm.ModelLister); ok {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					models, err := lister.ListModels(ctx)
-					if err != nil {
-						slog.Debug("llm: OAuth model listing failed, using static list", "profile", profile, "err", err)
-					} else if len(models) > 0 {
-						items := make([]ui.ModelSelectorItem, len(models))
-						for i, m := range models {
-							items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
-						}
-						return items, nil
-					}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			// Try model registry (models.dev) first — works for all known providers.
+			if regID := registryProvider(profile); regID != "" {
+				filter := registryFilter(profile)
+				models, err := modelRegistry.Models(ctx, regID, filter)
+				if err != nil {
+					slog.Debug("llm: registry lookup failed, trying provider API", "profile", profile, "err", err)
+				} else {
+					return modelsToItems(models, profile, resolved.Model), nil
 				}
-				// Fallback to hardcoded list.
-				return oauthModels(resolved.OAuthProvider, profile, resolved.Model), nil
 			}
 
+			// Fallback: provider's own model listing API.
 			p := resolved.NewProvider()
 			if p == nil {
 				return nil, fmt.Errorf("no API key for profile %q", profile)
@@ -277,17 +272,11 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			if !ok {
 				return nil, fmt.Errorf("provider does not support model listing")
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
 			models, err := lister.ListModels(ctx)
 			if err != nil {
 				return nil, err
 			}
-			items := make([]ui.ModelSelectorItem, len(models))
-			for i, m := range models {
-				items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
-			}
-			return items, nil
+			return modelsToItems(models, profile, resolved.Model), nil
 		}
 
 		sess.SetModelSwitcher(func(profile, modelID string) (string, error) {
@@ -499,42 +488,47 @@ func connectCopilotCmd(profile string, store *oauth.Store, p *tea.Program) tea.C
 	}
 }
 
-// codexModels are available via the ChatGPT Codex subscription endpoint.
-var codexModels = []string{
-	"gpt-5.1-codex",
-	"gpt-5.1-codex-max",
-	"gpt-5.1-codex-mini",
-	"gpt-5.2",
-	"gpt-5.2-codex",
-	"gpt-5.3-codex",
-	"gpt-5.4",
-	"gpt-5.4-mini",
+// profileToRegistry maps a Junto profile name to the models.dev provider key.
+// Returns empty string for custom/unknown profiles (fall back to provider API).
+var profileToRegistry = map[string]string{
+	"chatgpt":    "openai",
+	"copilot":    "github-copilot",
+	"gemini":     "google",
+	"minimax":    "minimax",
+	"openrouter": "openrouter",
+	"anthropic":  "anthropic",
 }
 
-// oauthModels returns the known model list for an OAuth provider.
-// OAuth endpoints don't support /models, so we maintain the list statically.
-func oauthModels(provider, profile, defaultModel string) []ui.ModelSelectorItem {
-	var models []string
-	switch provider {
-	case "openai":
-		models = codexModels
-	default:
-		models = []string{defaultModel}
-	}
+// registryProvider returns the models.dev provider ID for a profile, or empty
+// string if the profile has no known registry mapping.
+func registryProvider(profile string) string {
+	return profileToRegistry[profile]
+}
 
-	items := make([]ui.ModelSelectorItem, 0, len(models))
+// registryFilter returns a ModelFilter for the given profile.
+// For the chatgpt profile, only codex/gpt-5 families work with the Codex endpoint.
+func registryFilter(profile string) llm.ModelFilter {
+	if profile != "chatgpt" {
+		return nil
+	}
+	return func(m llm.RegistryModel) bool {
+		return strings.Contains(m.Family, "codex") ||
+			strings.HasPrefix(m.ID, "gpt-5")
+	}
+}
+
+// modelsToItems converts ModelInfo to UI items, placing defaultModel first.
+func modelsToItems(models []llm.ModelInfo, profile, defaultModel string) []ui.ModelSelectorItem {
+	items := make([]ui.ModelSelectorItem, len(models))
 	defaultIdx := -1
 	for i, m := range models {
-		items = append(items, ui.ModelSelectorItem{ID: m, Name: m, Profile: profile})
-		if m == defaultModel {
+		items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
+		if m.ID == defaultModel {
 			defaultIdx = i
 		}
 	}
 	if defaultIdx > 0 {
 		items[0], items[defaultIdx] = items[defaultIdx], items[0]
-	}
-	if len(items) == 0 {
-		items = append(items, ui.ModelSelectorItem{ID: defaultModel, Name: defaultModel, Profile: profile})
 	}
 	return items
 }

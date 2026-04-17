@@ -318,6 +318,11 @@ func (m *AgentPaneModel) StatusKind() event.StatusKind { return m.status }
 // SetModelLabel sets the display name shown in the agent pane status line.
 func (m *AgentPaneModel) SetModelLabel(label string) { m.modelLabel = label }
 
+// SetHasAgent updates the pane's cached agent-present flag. Called when the
+// agent is constructed mid-session (e.g. first OAuth connect) so the pane
+// leaves "No LLM configured" mode without a restart.
+func (m *AgentPaneModel) SetHasAgent(has bool) { m.hasAgent = has }
+
 // OpenModelSelector activates the inline model selector, replacing the input area.
 // profiles is the full list of available profiles (for Tab cycling); may be nil.
 func (m *AgentPaneModel) OpenModelSelector(items []ModelSelectorItem, profile, currentModel string, profiles []string) {

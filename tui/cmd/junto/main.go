@@ -444,15 +444,20 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		if newProvider == nil {
 			return "", fmt.Errorf("no credentials for profile %q", profile)
 		}
+		// Update the outer provider before building the agent so wireAgentHandlers
+		// (called synchronously below on first build) sees the new provider when
+		// it constructs the style evaluator. Otherwise the agent gets an evaluator
+		// from buildAgent but evaluatorActive stays false, desyncing the status bar.
+		provider = newProvider
 		if ag == nil {
-			ag = buildAgent(newProvider)
+			ag = buildAgent(provider)
 			sess.SetAgent(ag, events)
+			app.AgentPane.SetHasAgent(true)
 			wireAgentHandlers()
 			slog.Info("llm: agent constructed", "profile", profile, "model", resolved.Model)
 		} else {
-			ag.SetProvider(newProvider)
+			ag.SetProvider(provider)
 		}
-		provider = newProvider
 		llmResolved = resolved
 		sess.SetLLMInfo(resolved.Model, resolved.Profile)
 		slog.Info("llm: switched model", "profile", profile, "model", modelID)
@@ -467,6 +472,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if provider != nil {
 		ag = buildAgent(provider)
 		sess.SetAgent(ag, events)
+		app.AgentPane.SetHasAgent(true)
 		wireAgentHandlers()
 	}
 

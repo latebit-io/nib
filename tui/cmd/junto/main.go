@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -152,6 +153,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	sess.SetEvents(events)
 
 	var ag *agent.Agent
+	// switchMu serializes the model switcher closure. Today the only caller is
+	// AppModel.Update on the Bubble Tea main goroutine, so calls are already
+	// serial — this guard is defensive, protecting the build-or-swap logic
+	// against any future path that invokes Session.SwitchModel from a tea.Cmd
+	// or an engine-side goroutine.
+	var switchMu sync.Mutex
 
 	// buildAgent constructs an agent with the pre-resolved wiring (memory,
 	// MCP tools, LSP, coding style). Called either at startup when credentials
@@ -270,7 +277,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			return nil, fmt.Errorf("no credentials for profile %q", profile)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(appCtx, 10*time.Second)
 		defer cancel()
 
 		// Try model registry (models.dev) first — works for all known providers.
@@ -430,6 +437,9 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// credentials constructs the agent (OAuth hot-reload path); subsequent
 	// calls hot-swap the provider on the existing agent.
 	sess.SetModelSwitcher(func(profile, modelID string) (string, error) {
+		switchMu.Lock()
+		defer switchMu.Unlock()
+
 		resolved := llmconfig.ResolveProfile(llmCfg, profile)
 		if resolved == nil {
 			return "", fmt.Errorf("unknown profile %q", profile)

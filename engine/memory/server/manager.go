@@ -297,6 +297,15 @@ const mcpInitTimeout = 10 * time.Second
 // Start and EnsureToken. The subprocess is owned by the Manager — Stop closes
 // it. Any partially-started subprocess is torn down on error.
 func (m *Manager) NewStore(token string) (memory.Store, error) {
+	// Guard against double-call without an intervening Stop(). Stop() clears
+	// mcpClient, so this only fires if a caller accidentally re-invokes
+	// NewStore on the same live Manager.
+	if m.mcpClient != nil {
+		if err := m.mcpClient.Close(); err != nil {
+			slog.Debug("memory: closing stale mcp client before rebuild", "err", err)
+		}
+		m.mcpClient = nil
+	}
 	binPath := filepath.Join(m.binDir, "demarkus-mcp")
 	args := []string{
 		"-host", m.Address(),

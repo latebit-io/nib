@@ -457,6 +457,18 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			slog.Info("llm: agent constructed", "profile", profile, "model", resolved.Model)
 		} else {
 			ag.SetProvider(provider)
+			// Rebind the style evaluator — it holds its own llm.Provider that
+			// Agent.SetProvider does not touch, so without this it would keep
+			// calling the old provider (possibly stale OAuth token / deprecated
+			// model) for style checks.
+			if evaluatorActive && currentResolved != nil {
+				eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
+				ag.SetEvaluator(eval)
+				if eval == nil {
+					evaluatorActive = false
+					app.SetEvaluatorEnabled(false)
+				}
+			}
 		}
 		llmResolved = resolved
 		sess.SetLLMInfo(resolved.Model, resolved.Profile)

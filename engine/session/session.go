@@ -210,9 +210,13 @@ func New(e *editor.Editor, projectRoot string) *Session {
 
 // SetAgent wires an agent into the session. The agent is typically created
 // with the session as its Workspace, so this must be called after New.
+// Safe to call more than once — later calls replace the bound agent (used
+// when the first agent is constructed after startup, e.g. after OAuth).
 func (s *Session) SetAgent(ag agentPort, events <-chan event.Event) {
+	s.mu.Lock()
 	s.agent = ag
 	s.events = events
+	s.mu.Unlock()
 }
 
 // SetDistributedMemory records which MCP servers are classified as distributed
@@ -291,17 +295,25 @@ func (s *Session) SetContext(ctx context.Context) {
 // Used when there is no agent but other event sources (e.g. LSP) need
 // to reach the frontend.
 func (s *Session) SetEvents(events <-chan event.Event) {
+	s.mu.Lock()
 	s.events = events
+	s.mu.Unlock()
 }
 
 // Events returns the event channel for the frontend to read.
 func (s *Session) Events() <-chan event.Event {
-	return s.events
+	s.mu.RLock()
+	ch := s.events
+	s.mu.RUnlock()
+	return ch
 }
 
 // HasAgent returns true if the session has an active agent.
 func (s *Session) HasAgent() bool {
-	return s.agent != nil
+	s.mu.RLock()
+	has := s.agent != nil
+	s.mu.RUnlock()
+	return has
 }
 
 // Phase returns the current workflow phase (planning vs execution).

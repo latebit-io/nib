@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -147,8 +148,23 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	defer mem.Cleanup()
 	sess.SetMemoryStore(mem.Store)
 
+	// Wire events on the session unconditionally. The frontend event loop
+	// reads from here; the agent (once constructed) writes to the same channel.
+	sess.SetEvents(events)
+
 	var ag *agent.Agent
-	if provider != nil {
+	// switchMu serializes the model switcher closure. Today the only caller is
+	// AppModel.Update on the Bubble Tea main goroutine, so calls are already
+	// serial — this guard is defensive, protecting the build-or-swap logic
+	// against any future path that invokes Session.SwitchModel from a tea.Cmd
+	// or an engine-side goroutine.
+	var switchMu sync.Mutex
+
+	// buildAgent constructs an agent with the pre-resolved wiring (memory,
+	// MCP tools, LSP, coding style). Called either at startup when credentials
+	// already exist, or inside the model switcher on the first successful
+	// connect — the OAuth hot-reload path.
+	buildAgent := func(p llm.Provider) *agent.Agent {
 		opts := &agent.NewOptions{
 			MemoryStore:       mem.Store,
 			MemorySummary:     mem.Summary,
@@ -158,16 +174,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		if styleResult.Resolved != nil {
 			opts.StyleLintCmd = styleResult.Resolved.LintCmd
-			opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, provider, llmCfg)
+			opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, p, llmCfg)
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
 		}
-		ag = agent.New(provider, sess, events, opts, mcpResult.Tools...)
-		sess.SetAgent(ag, events)
-	} else {
-		// No agent — wire events channel so the frontend event loop stays active.
-		sess.SetEvents(events)
+		return agent.New(p, sess, events, opts, mcpResult.Tools...)
 	}
 
 	slog.Debug("startup: creating app")
@@ -249,110 +261,98 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 	modelRegistry := llm.NewModelRegistry(registryCacheDir, time.Hour)
 
-	// Wire model listing and switching — closures capture ag, llmCfg, and llmResolved.
-	if provider != nil && ag != nil {
+	// Install ListModels unconditionally — it does not require a live agent.
+	// Credentials are resolved per-call so newly-connected profiles work without
+	// restart. A missing-credential error surfaces through modelListMsg and
+	// triggers the connect/key-entry flow in app.go.
+	app.ListModels = func(profile string) ([]ui.ModelSelectorItem, error) {
+		resolved := llmconfig.ResolveProfile(llmCfg, profile)
+		if resolved == nil {
+			return nil, fmt.Errorf("unknown profile %q", profile)
+		}
+		wire.WireOAuthProfile(resolved, pr.OAuthStore)
+		wire.WireStoredKey(resolved, pr.KeyStore)
 
-		app.ListModels = func(profile string) ([]ui.ModelSelectorItem, error) {
-			resolved := llmconfig.ResolveProfile(llmCfg, profile)
-			if resolved == nil {
-				slog.Warn("llm: ListModels profile not found, falling back", "profile", profile)
-				resolved = llmResolved
-			}
-			wire.WireOAuthProfile(resolved, pr.OAuthStore)
-			wire.WireStoredKey(resolved, pr.KeyStore)
-
-			// Don't show models for profiles that lack credentials —
-			// returning an error lets app.go trigger the connect/key-entry flow.
-			if !resolved.HasProvider() {
-				return nil, fmt.Errorf("no credentials for profile %q", profile)
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			// Try model registry (models.dev) first — works for all known providers.
-			if regID := registryProvider(profile); regID != "" {
-				filter := registryFilter(profile)
-				models, err := modelRegistry.Models(ctx, regID, filter)
-				if err != nil {
-					slog.Debug("llm: registry lookup failed, trying provider API", "profile", profile, "err", err)
-				} else {
-					return modelsToItems(models, profile, resolved.Model), nil
-				}
-			}
-
-			// Fallback: provider's own model listing API.
-			p := resolved.NewProvider()
-			if p == nil {
-				return nil, fmt.Errorf("no API key for profile %q", profile)
-			}
-			lister, ok := p.(llm.ModelLister)
-			if !ok {
-				return nil, fmt.Errorf("provider does not support model listing")
-			}
-			models, err := lister.ListModels(ctx)
-			if err != nil {
-				return nil, err
-			}
-			if profile == "chatgpt" {
-				filtered := models[:0]
-				for _, m := range models {
-					if strings.Contains(m.ID, "codex") || strings.HasPrefix(m.ID, "gpt-5") {
-						filtered = append(filtered, m)
-					}
-				}
-				models = filtered
-			}
-			return modelsToItems(models, profile, resolved.Model), nil
+		if !resolved.HasProvider() {
+			return nil, fmt.Errorf("no credentials for profile %q", profile)
 		}
 
-		sess.SetModelSwitcher(func(profile, modelID string) (string, error) {
-			resolved := llmconfig.ResolveProfile(llmCfg, profile)
-			if resolved == nil {
-				slog.Warn("llm: profile not found, falling back", "profile", profile)
-				resolved = llmResolved
+		ctx, cancel := context.WithTimeout(appCtx, 10*time.Second)
+		defer cancel()
+
+		// Try model registry (models.dev) first — works for all known providers.
+		if regID := registryProvider(profile); regID != "" {
+			filter := registryFilter(profile)
+			models, err := modelRegistry.Models(ctx, regID, filter)
+			if err != nil {
+				slog.Debug("llm: registry lookup failed, trying provider API", "profile", profile, "err", err)
+			} else {
+				return modelsToItems(models, profile, resolved.Model), nil
 			}
-			slog.Debug("llm: switch resolving", "profile", profile, "modelID", modelID, "resolvedModel", resolved.Model)
-			if modelID != "" {
-				resolved.Model = modelID
+		}
+
+		// Fallback: provider's own model listing API.
+		p := resolved.NewProvider()
+		if p == nil {
+			return nil, fmt.Errorf("no API key for profile %q", profile)
+		}
+		lister, ok := p.(llm.ModelLister)
+		if !ok {
+			return nil, fmt.Errorf("provider does not support model listing")
+		}
+		models, err := lister.ListModels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if profile == "chatgpt" {
+			filtered := models[:0]
+			for _, m := range models {
+				if strings.Contains(m.ID, "codex") || strings.HasPrefix(m.ID, "gpt-5") {
+					filtered = append(filtered, m)
+				}
 			}
-			wire.WireOAuthProfile(resolved, pr.OAuthStore)
-			wire.WireStoredKey(resolved, pr.KeyStore)
-			newProvider := resolved.NewProvider()
-			if newProvider == nil {
-				return "", fmt.Errorf("no API key available for profile %q", profile)
-			}
-			ag.SetProvider(newProvider)
-			provider = newProvider
-			llmResolved = resolved
-			sess.SetLLMInfo(resolved.Model, resolved.Profile)
-			slog.Info("llm: switched model", "profile", profile, "model", modelID)
-			displayModel := resolved.DisplayModel()
-			if err := llmconfig.SaveSelection(profile, modelID); err != nil {
-				return displayModel, fmt.Errorf("switched but failed to persist: %w", err)
-			}
-			return displayModel, nil
-		})
+			models = filtered
+		}
+		return modelsToItems(models, profile, resolved.Model), nil
 	}
 
-	// Wire coding style cycling — closures capture ag, styleResult, and the style config.
-	if styleResult.Resolved != nil {
-		app.SetStyleName(styleResult.Resolved.Name)
-	}
 	// Shared state for style cycling and evaluator toggle — both closures
 	// need to know the current resolved style to stay in sync.
 	currentResolved := styleResult.Resolved
 	evaluatorActive := false
 
-	if ag != nil {
+	// wireAgentHandlers installs the UI callbacks that require a live agent.
+	// Called once — on startup (when credentials exist) or on the first
+	// successful connect via the model switcher.
+	wireAgentHandlers := func() {
+		// Default is trust mode — agent works autonomously.
+		ag.SetAutonomous(true)
+
+		app.OnDialChange = func(level ui.AutonomyLevel) {
+			ag.SetAutonomous(level.AutoContinue())
+		}
+
+		app.SetTerse(true)
+		app.ToggleTerse = func(enabled bool) bool {
+			ag.SetTerse(enabled)
+			if enabled {
+				slog.Info("terse mode: enabled")
+			} else {
+				slog.Info("terse mode: disabled")
+			}
+			return enabled
+		}
+
+		if styleResult.Resolved != nil {
+			app.SetStyleName(styleResult.Resolved.Name)
+		}
 		styleNames := styleResult.Config.StyleNames()
 		if len(styleNames) > 0 {
-			currentStyleKey := "" // track the current style key for cycling
+			currentStyleKey := ""
 			if styleResult.Config.Active != "" {
 				currentStyleKey = styleResult.Config.Active
 			}
 			app.CycleStyle = func() string {
-				// Find current index, advance to next (with "none" after the last).
 				idx := -1
 				for i, name := range styleNames {
 					if name == currentStyleKey {
@@ -362,7 +362,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				}
 				idx++
 				if idx >= len(styleNames) {
-					// Wrap to "none" — disable style enforcement.
 					currentStyleKey = ""
 					currentResolved = nil
 					ag.SetStyle(nil, nil)
@@ -383,7 +382,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				}
 				ag.SetStyle(data, lintCmd)
 
-				// Update the resolved style for the evaluator.
 				currentResolved = &styleconfig.Resolved{
 					Name:           s.Name,
 					Rules:          s.Rules,
@@ -392,10 +390,9 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 					EvaluatorModel: s.EvaluatorModel,
 				}
 
-				// Rebuild evaluator if it's active, using the new style's rules.
 				if evaluatorActive {
 					eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
-					ag.SetEvaluator(eval) // nil is fine — disables if no provider
+					ag.SetEvaluator(eval)
 					if eval == nil {
 						evaluatorActive = false
 						app.SetEvaluatorEnabled(false)
@@ -406,11 +403,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				return s.Name
 			}
 		}
-	}
 
-	// Wire evaluator toggle — Alt+V enables/disables the style evaluator at runtime.
-	if ag != nil {
-		// If the config has evaluator enabled at startup, set the initial state.
 		if currentResolved != nil && currentResolved.Evaluator {
 			eval := wire.NewStyleEvaluator(currentResolved, provider, llmCfg)
 			if eval != nil {
@@ -421,12 +414,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		app.ToggleEvaluator = func(enabled bool) bool {
 			if currentResolved == nil {
-				return false // no style active
+				return false
 			}
 			if enabled {
 				eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
 				if eval == nil {
-					return false // no provider available
+					return false
 				}
 				ag.SetEvaluator(eval)
 				evaluatorActive = true
@@ -440,26 +433,69 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 	}
 
-	// Wire terse toggle — Alt+T enables/disables terse output mode at runtime.
-	// Terse is enabled by default to reduce output token costs.
-	if ag != nil {
-		// Default is trust mode — agent works autonomously.
-		ag.SetAutonomous(true)
+	// Install the model switcher unconditionally. The first call with valid
+	// credentials constructs the agent (OAuth hot-reload path); subsequent
+	// calls hot-swap the provider on the existing agent.
+	sess.SetModelSwitcher(func(profile, modelID string) (string, error) {
+		switchMu.Lock()
+		defer switchMu.Unlock()
 
-		app.OnDialChange = func(level ui.AutonomyLevel) {
-			ag.SetAutonomous(level.AutoContinue())
+		resolved := llmconfig.ResolveProfile(llmCfg, profile)
+		if resolved == nil {
+			return "", fmt.Errorf("unknown profile %q", profile)
 		}
-
-		app.SetTerse(true)
-		app.ToggleTerse = func(enabled bool) bool {
-			ag.SetTerse(enabled)
-			if enabled {
-				slog.Info("terse mode: enabled")
-			} else {
-				slog.Info("terse mode: disabled")
+		slog.Debug("llm: switch resolving", "profile", profile, "modelID", modelID, "resolvedModel", resolved.Model)
+		if modelID != "" {
+			resolved.Model = modelID
+		}
+		wire.WireOAuthProfile(resolved, pr.OAuthStore)
+		wire.WireStoredKey(resolved, pr.KeyStore)
+		newProvider := resolved.NewProvider()
+		if newProvider == nil {
+			return "", fmt.Errorf("no credentials for profile %q", profile)
+		}
+		// Update the outer provider before building the agent so wireAgentHandlers
+		// (called synchronously below on first build) sees the new provider when
+		// it constructs the style evaluator. Otherwise the agent gets an evaluator
+		// from buildAgent but evaluatorActive stays false, desyncing the status bar.
+		provider = newProvider
+		if ag == nil {
+			ag = buildAgent(provider)
+			sess.SetAgent(ag, events)
+			app.AgentPane.SetHasAgent(true)
+			wireAgentHandlers()
+			slog.Info("llm: agent constructed", "profile", profile, "model", resolved.Model)
+		} else {
+			ag.SetProvider(provider)
+			// Rebind the style evaluator — it holds its own llm.Provider that
+			// Agent.SetProvider does not touch, so without this it would keep
+			// calling the old provider (possibly stale OAuth token / deprecated
+			// model) for style checks.
+			if evaluatorActive && currentResolved != nil {
+				eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
+				ag.SetEvaluator(eval)
+				if eval == nil {
+					evaluatorActive = false
+					app.SetEvaluatorEnabled(false)
+				}
 			}
-			return enabled
 		}
+		llmResolved = resolved
+		sess.SetLLMInfo(resolved.Model, resolved.Profile)
+		slog.Info("llm: switched model", "profile", profile, "model", modelID)
+		displayModel := resolved.DisplayModel()
+		if err := llmconfig.SaveSelection(profile, modelID); err != nil {
+			return displayModel, fmt.Errorf("switched but failed to persist: %w", err)
+		}
+		return displayModel, nil
+	})
+
+	// Build the agent now if credentials were already available at startup.
+	if provider != nil {
+		ag = buildAgent(provider)
+		sess.SetAgent(ag, events)
+		app.AgentPane.SetHasAgent(true)
+		wireAgentHandlers()
 	}
 
 	// Agent typing speed (words per minute)

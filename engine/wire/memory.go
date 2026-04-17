@@ -58,13 +58,16 @@ func StartMemory(projectRoot string) (*MemoryResult, error) {
 		return nil, fmt.Errorf("start server: %w", err)
 	}
 
-	store := mgr.NewStore(token)
-
 	stopAndFail := func(reason string, err error) (*MemoryResult, error) {
 		if stopErr := mgr.Stop(); stopErr != nil {
 			slog.Warn("memory: stop failed during rollback", "stopErr", stopErr)
 		}
 		return nil, fmt.Errorf("%s: %w", reason, err)
+	}
+
+	store, err := mgr.NewStore(token)
+	if err != nil {
+		return stopAndFail("new store", err)
 	}
 
 	if err := seedMemory(store, projectRoot); err != nil {

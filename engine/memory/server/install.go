@@ -23,8 +23,8 @@ const (
 	githubRepo = "latebit-io/demarkus"
 	// requiredBins lists the binaries that must be present for memory to work.
 	// Server release: demarkus-server, demarkus-token.
-	// Client release: demarkus.
-	requiredBins = "demarkus-server,demarkus-token,demarkus"
+	// Client release: demarkus, demarkus-mcp.
+	requiredBins = "demarkus-server,demarkus-token,demarkus,demarkus-mcp"
 
 	// httpTimeout bounds all GitHub API and download requests.
 	httpTimeout = 60 * time.Second
@@ -54,20 +54,30 @@ func install(binDir, versionFile string) error {
 		return fmt.Errorf("create bin dir: %w", err)
 	}
 
-	// Server release: demarkus-server + demarkus-token.
+	// Server release: demarkus-server + demarkus-token in one archive.
 	slog.Info("memory install: downloading server", "version", version, "platform", platform, "arch", arch)
-	if err := downloadRelease("server", version, platform, arch, binDir, []string{"demarkus-server", "demarkus-token"}); err != nil {
+	serverTag := "server/v" + version
+	serverArchive := fmt.Sprintf("demarkus-server_%s_%s_%s.tar.gz", version, platform, arch)
+	if err := downloadRelease(serverTag, serverArchive, "demarkus-server_checksums.txt", binDir, []string{"demarkus-server", "demarkus-token"}); err != nil {
 		return fmt.Errorf("server release: %w", err)
 	}
 
-	// Client release: demarkus CLI.
+	// Client release: demarkus CLI and demarkus-mcp live in separate archives
+	// under a single release tag and share one checksums file.
 	clientVersion, err := fetchLatestVersion("client")
 	if err != nil {
 		return fmt.Errorf("fetch client version: %w", err)
 	}
 	slog.Info("memory install: downloading client", "version", clientVersion, "platform", platform, "arch", arch)
-	if err := downloadRelease("client", clientVersion, platform, arch, binDir, []string{"demarkus"}); err != nil {
+	clientTag := "client/v" + clientVersion
+	clientChecksums := "demarkus-client_checksums.txt"
+	clientArchive := fmt.Sprintf("demarkus-client_%s_%s_%s.tar.gz", clientVersion, platform, arch)
+	if err := downloadRelease(clientTag, clientArchive, clientChecksums, binDir, []string{"demarkus"}); err != nil {
 		return fmt.Errorf("client release: %w", err)
+	}
+	mcpArchive := fmt.Sprintf("demarkus-mcp_%s_%s_%s.tar.gz", clientVersion, platform, arch)
+	if err := downloadRelease(clientTag, mcpArchive, clientChecksums, binDir, []string{"demarkus-mcp"}); err != nil {
+		return fmt.Errorf("mcp release: %w", err)
 	}
 
 	// Pin version.
@@ -157,12 +167,11 @@ func fetchLatestVersion(component string) (string, error) {
 	return "", fmt.Errorf("no %s release found", component)
 }
 
-// downloadRelease fetches, verifies, and extracts specific binaries from a release.
-func downloadRelease(component, version, platform, arch, binDir string, wantBins []string) error {
-	tag := component + "/v" + version
-	archiveName := fmt.Sprintf("demarkus-%s_%s_%s_%s.tar.gz", component, version, platform, arch)
-	checksumsName := fmt.Sprintf("demarkus-%s_checksums.txt", component)
-
+// downloadRelease fetches, verifies, and extracts specific binaries from a
+// release asset. tag is the git tag (e.g. "client/v1.2.3"). archiveName and
+// checksumsName are the asset filenames; multiple archives in the same release
+// may share a single checksums file.
+func downloadRelease(tag, archiveName, checksumsName, binDir string, wantBins []string) error {
 	// Download archive.
 	archiveData, err := downloadAsset(tag, archiveName)
 	if err != nil {

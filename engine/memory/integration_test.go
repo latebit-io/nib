@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/latebit-io/junto/engine/mcp"
 	"github.com/latebit-io/junto/engine/memory"
-	"github.com/latebit-io/junto/engine/memory/demarkus"
+	"github.com/latebit-io/junto/engine/memory/mcpadapter"
 	"github.com/latebit-io/junto/engine/memory/server"
 )
 
@@ -53,9 +55,34 @@ func setupIntegration(t *testing.T) *integrationEnv {
 	t.Logf("server running on port %d", port)
 
 	binDir := filepath.Join(root, ".project", "bin")
-	store := demarkus.New(filepath.Join(binDir, "demarkus"), mgr.Address(), token)
+	store, err := mgr.NewStore(token)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
 
 	return &integrationEnv{store: store, binDir: binDir, mgr: mgr}
+}
+
+// newAuxStore spawns a separate demarkus-mcp subprocess with a specific
+// token (empty for unauthenticated). The returned store is closed via
+// t.Cleanup. Used when a test needs a second adapter bound to different
+// credentials than the env's primary store.
+func newAuxStore(t *testing.T, binDir, serverAddress, token string) memory.Store {
+	t.Helper()
+	binPath := filepath.Join(binDir, "demarkus-mcp")
+	args := []string{"-host", serverAddress, "-token", token, "-insecure", "-no-cache"}
+	client, err := mcp.NewStdioClient(binPath, args, nil)
+	if err != nil {
+		t.Fatalf("spawn demarkus-mcp: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		_ = client.Close()
+		t.Fatalf("initialize demarkus-mcp: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return mcpadapter.New(client)
 }
 
 // TestIntegrationInstall verifies binary download, version pinning, and idempotency.
@@ -72,7 +99,7 @@ func TestIntegrationInstall(t *testing.T) {
 	}
 
 	binDir := filepath.Join(root, ".project", "bin")
-	for _, name := range []string{"demarkus-server", "demarkus-token", "demarkus"} {
+	for _, name := range []string{"demarkus-server", "demarkus-token", "demarkus", "demarkus-mcp"} {
 		info, err := os.Stat(filepath.Join(binDir, name))
 		if err != nil {
 			t.Fatalf("binary %s not found: %v", name, err)
@@ -235,7 +262,10 @@ func TestIntegrationList(t *testing.T) {
 func TestIntegrationUnauthenticated(t *testing.T) {
 	env := setupIntegration(t)
 
-	noAuth := demarkus.New(filepath.Join(env.binDir, "demarkus"), env.mgr.Address(), "")
+	// Use an invalid token so the request reaches the server's auth check.
+	// An empty token would be rejected client-side by demarkus-mcp before
+	// ever hitting the server, which tests a different layer.
+	noAuth := newAuxStore(t, env.binDir, env.mgr.Address(), "invalid-token-does-not-exist")
 	_, err := noAuth.Publish(context.Background(), "/unauth.md", "# Fail", 0)
 	if err == nil {
 		t.Fatal("expected auth error")

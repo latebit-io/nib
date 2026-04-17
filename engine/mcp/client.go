@@ -25,6 +25,15 @@ type ToolInfo struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
+// ToolResult is the outcome of a tool invocation. Text is the concatenated
+// content of all text blocks from the MCP response; IsError reflects the
+// server-side isError flag, which MCP servers set when a tool handler
+// reports a semantic failure (distinct from a transport error).
+type ToolResult struct {
+	Text    string
+	IsError bool
+}
+
 // Client communicates with an MCP server over stdio using JSON-RPC 2.0.
 type Client struct {
 	cmd    *exec.Cmd
@@ -252,14 +261,30 @@ func (c *Client) ListTools(ctx context.Context) ([]ToolInfo, error) {
 }
 
 // CallTool invokes a tool on the MCP server and returns the text result.
+// The server-side isError flag is ignored — callers that need to distinguish
+// a handler-reported failure from a successful response should use
+// CallToolResult instead.
 func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	r, err := c.CallToolResult(ctx, name, args)
+	if err != nil {
+		return "", err
+	}
+	return r.Text, nil
+}
+
+// CallToolResult invokes a tool and returns the text plus the isError flag.
+// isError is true when the MCP server's tool handler reported a semantic
+// failure (e.g. invalid arguments, downstream error) — the transport itself
+// succeeded, so err is nil. Callers that map handler errors onto sentinel
+// errors (like the memory adapter) should use this method.
+func (c *Client) CallToolResult(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
 	params := map[string]any{
 		"name":      name,
 		"arguments": args,
 	}
 	result, err := c.call(ctx, "tools/call", params)
 	if err != nil {
-		return "", err
+		return ToolResult{}, err
 	}
 
 	var resp struct {
@@ -267,9 +292,10 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		IsError bool `json:"isError"`
 	}
 	if err := json.Unmarshal(result, &resp); err != nil {
-		return "", fmt.Errorf("mcp: unmarshal tool result: %w", err)
+		return ToolResult{}, fmt.Errorf("mcp: unmarshal tool result: %w", err)
 	}
 
 	// Concatenate all text content blocks, capped at maxLineSize.
@@ -283,7 +309,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 			sb.WriteString(block.Text)
 		}
 	}
-	return sb.String(), nil
+	return ToolResult{Text: sb.String(), IsError: resp.IsError}, nil
 }
 
 // Close terminates the MCP server subprocess and waits for the

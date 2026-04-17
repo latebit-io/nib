@@ -17,11 +17,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/latebit-io/junto/engine/mcp"
 	"github.com/latebit-io/junto/engine/memory"
-	"github.com/latebit-io/junto/engine/memory/demarkus"
+	"github.com/latebit-io/junto/engine/memory/mcpadapter"
 )
 
-// Manager manages the demarkus-server child process.
+// Manager manages the demarkus-server child process and the demarkus-mcp
+// client subprocess that fronts it.
 type Manager struct {
 	projectRoot string
 	binDir      string // .project/bin/
@@ -33,6 +35,10 @@ type Manager struct {
 
 	port    int
 	process *os.Process
+
+	// mcpClient is the demarkus-mcp subprocess created by NewStore. Closed by
+	// Stop so the subprocess doesn't outlive the server it talks to.
+	mcpClient *mcp.Client
 }
 
 // New creates a Manager for the given project root.
@@ -137,8 +143,17 @@ func (m *Manager) Start() (int, error) {
 	return port, nil
 }
 
-// Stop kills the server process and cleans up PID and port files.
+// Stop kills the server process and cleans up PID and port files. Also
+// closes the demarkus-mcp subprocess if one was started via NewStore — we
+// shut down the MCP client before the server it depends on.
 func (m *Manager) Stop() error {
+	if m.mcpClient != nil {
+		if err := m.mcpClient.Close(); err != nil {
+			slog.Debug("memory: mcp client close", "err", err)
+		}
+		m.mcpClient = nil
+	}
+
 	pid := m.processPID()
 	if pid == 0 {
 		return nil
@@ -272,15 +287,35 @@ func (m *Manager) EnsureToken() (string, error) {
 	return rawToken, nil
 }
 
-// NewStore creates a memory.Store backed by the running demarkus server.
-// Must be called after Start and EnsureToken. The returned store uses the
-// demarkus CLI adapter — callers only see the memory.Store interface.
-func (m *Manager) NewStore(token string) memory.Store {
-	return demarkus.New(
-		filepath.Join(m.binDir, "demarkus"),
-		m.Address(),
-		token,
-	)
+// mcpInitTimeout bounds the demarkus-mcp handshake. Large enough that a
+// slow-to-start subprocess doesn't spuriously fail, small enough that we
+// don't block startup indefinitely if the binary is broken.
+const mcpInitTimeout = 10 * time.Second
+
+// NewStore spawns a demarkus-mcp subprocess pointed at this manager's server
+// and returns a memory.Store backed by the MCP adapter. Must be called after
+// Start and EnsureToken. The subprocess is owned by the Manager — Stop closes
+// it. Any partially-started subprocess is torn down on error.
+func (m *Manager) NewStore(token string) (memory.Store, error) {
+	binPath := filepath.Join(m.binDir, "demarkus-mcp")
+	args := []string{
+		"-host", m.Address(),
+		"-token", token,
+		"-insecure",
+		"-no-cache",
+	}
+	client, err := mcp.NewStdioClient(binPath, args, nil)
+	if err != nil {
+		return nil, fmt.Errorf("memory: spawn demarkus-mcp: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), mcpInitTimeout)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		_ = client.Close() // best-effort cleanup; primary error is init
+		return nil, fmt.Errorf("memory: demarkus-mcp initialize: %w", err)
+	}
+	m.mcpClient = client
+	return mcpadapter.New(client), nil
 }
 
 // errNoExistingServer indicates no running server was found (PID file absent,

@@ -1730,17 +1730,20 @@ func (s *Session) Continue() {
 	if !s.HasAgent() {
 		return
 	}
+	// Resolve path+editor atomically: cleanupDeletedPath and SwitchTo mutate
+	// lastEditedFile, activeFile, activeEditor, and editors under mu.Lock, so
+	// all four reads must happen together under mu.RLock.
+	s.mu.RLock()
 	path := s.lastEditedFile
 	if path == "" {
 		path = s.activeFile
 	}
-	s.mu.RLock()
 	e, ok := s.editors[path]
-	s.mu.RUnlock()
 	if !ok {
 		e = s.activeEditor
 		path = s.activeFile
 	}
+	s.mu.RUnlock()
 	s.agent.Continue(path, e.Buf.Content())
 }
 
@@ -1812,12 +1815,15 @@ func (s *Session) HandleEvent(ev event.Event) {
 // If the target file isn't open yet, auto-opens it from disk — the agent
 // may have read the file via read_file (which doesn't create a buffer)
 // and then proposed an edit_file on it.
+//
+// Callers must hold a non-nil s.pendingEdit — all public entry points
+// (ReviewEdit, ApproveEdit, PrepareApproval) early-return before reaching
+// here, so the nil case is not defended against.
 func (s *Session) editorForEdit() *editor.Editor {
-	if s.pendingEdit == nil {
-		return s.activeEditor
-	}
 	path := s.pendingEdit.Path
 	if path == "" {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
 		return s.activeEditor
 	}
 	canon := s.CanonPath(path)

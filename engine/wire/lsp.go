@@ -95,5 +95,14 @@ func defaultLSPConfigs() []lsp.ServerConfig {
 		})
 	}
 
+	// lua-language-server (sumneko) for Lua.
+	if luaLSPath, err := exec.LookPath("lua-language-server"); err == nil {
+		slog.Debug("lsp: auto-detected lua-language-server", "path", luaLSPath)
+		configs = append(configs, lsp.ServerConfig{
+			Command:    luaLSPath,
+			LanguageID: "lua",
+		})
+	}
+
 	return configs
 }

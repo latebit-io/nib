@@ -1,6 +1,12 @@
 BIN_DIR := $(HOME)/.local/bin
 
-.PHONY: build clean install uninstall test fmt vet
+# Tree-sitter grammars whose highlights.scm we vendor into engine/highlight/queries/<lang>/.
+# Format: <lang>:<module-path>. Add a new language by appending one line.
+QUERY_LANGS := \
+	go:github.com/tree-sitter/tree-sitter-go \
+	lua:github.com/tree-sitter-grammars/tree-sitter-lua
+
+.PHONY: build clean install uninstall test fmt vet sync-queries
 
 build:
 	cd engine && go build ./...
@@ -36,3 +42,19 @@ vet:
 clean:
 	rm -f tui/bin/*
 	rm -f cmd/junto-agent/bin/*
+
+# Re-vendor highlights.scm for every language in QUERY_LANGS, resolving the
+# exact on-disk path from each module's current pinned version. Run after
+# bumping a tree-sitter grammar dependency.
+sync-queries:
+	@set -e; for pair in $(QUERY_LANGS); do \
+		lang=$${pair%%:*}; \
+		mod=$${pair#*:}; \
+		dir=$$(cd engine && go list -m -f '{{.Dir}}' $$mod); \
+		src=$$dir/queries/highlights.scm; \
+		dst=engine/highlight/queries/$$lang/highlights.scm; \
+		if [ ! -f "$$src" ]; then echo "missing: $$src" >&2; exit 1; fi; \
+		mkdir -p "engine/highlight/queries/$$lang"; \
+		install -m 644 "$$src" "$$dst"; \
+		echo "synced $$mod@$$(cd engine && go list -m -f '{{.Version}}' $$mod) -> $$dst"; \
+	done

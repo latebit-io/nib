@@ -472,7 +472,10 @@ func (s *Session) GoBack() *lang.Location {
 			return nil
 		}
 	}
-	s.activeEditor.MoveCursorTo(loc.Line, loc.Col)
+	s.mu.RLock()
+	e := s.activeEditor
+	s.mu.RUnlock()
+	e.MoveCursorTo(loc.Line, loc.Col)
 	s.navStack = s.navStack[:len(s.navStack)-1]
 	return &loc
 }

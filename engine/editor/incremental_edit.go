@@ -1,7 +1,5 @@
 package editor
 
-import "github.com/latebit-io/junto/engine/buffer"
-
 // IncrementalEdit manages a character-by-character edit on a buffer.
 // It encapsulates the undo group lifecycle, position tracking, and
 // per-tick advancement so that frontends only need to call Advance on
@@ -29,7 +27,7 @@ type IncrementalEdit struct {
 	// lineOrigins holds per-line provenance for the replacement text.
 	// Index 0 = startLine, index 1 = startLine+1, etc. Nil slice means
 	// no change. A nil entry within the slice means "keep current origin."
-	lineOrigins []*buffer.Origin
+	lineOrigins []*LineOrigin
 
 	groupOpen bool
 	completed bool
@@ -49,7 +47,7 @@ type AdvanceResult struct {
 // lineOrigins is a per-line origin slice for the replacement text (index 0 =
 // first replacement line). Nil slice means no origin changes on Complete.
 // A nil entry within the slice means "keep current origin" (unchanged line).
-func (e *Editor) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, replace string, lineOrigins []*buffer.Origin) *IncrementalEdit {
+func (e *Editor) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, replace string, lineOrigins []*LineOrigin) *IncrementalEdit {
 	e.Buf.BeginGroup()
 	e.Buf.Delete(line, col, searchRunes)
 	e.MarkDirty()

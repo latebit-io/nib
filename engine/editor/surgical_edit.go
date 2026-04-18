@@ -1,10 +1,6 @@
 package editor
 
-import (
-	"strings"
-
-	"github.com/latebit-io/junto/engine/buffer"
-)
+import "strings"
 
 // NarrowedEdit describes the narrowed change region for surgical animation.
 // It contains only the lines that actually differ — unchanged prefix and
@@ -20,7 +16,7 @@ type NarrowedEdit struct {
 	Replace string
 	// LineOrigins holds provenance for the replacement lines.
 	// Indexed relative to the change region (not the full replace).
-	LineOrigins []*buffer.Origin
+	LineOrigins []*LineOrigin
 	// PrefixLines is the number of unchanged lines skipped at the top.
 	PrefixLines int
 	// SuffixLines is the number of unchanged lines skipped at the bottom.
@@ -37,7 +33,7 @@ func NarrowEdit(
 	editLine, editCol int,
 	search, replace string,
 	hunks []Hunk,
-	lineOrigins []*buffer.Origin,
+	lineOrigins []*LineOrigin,
 ) NarrowedEdit {
 	searchLines := strings.Split(search, "\n")
 	replaceLines := strings.Split(replace, "\n")
@@ -64,7 +60,7 @@ func NarrowEdit(
 	narrowReplace := strings.Join(replaceLines[prefix:len(replaceLines)-suffix], "\n")
 
 	// Narrow the line origins.
-	var narrowOrigins []*buffer.Origin
+	var narrowOrigins []*LineOrigin
 	if len(lineOrigins) > 0 {
 		end := max(len(lineOrigins)-suffix, 0)
 		if prefix < end {

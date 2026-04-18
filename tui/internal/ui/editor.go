@@ -10,7 +10,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/highlight"
 	"github.com/latebit-io/junto/engine/lang"
@@ -224,11 +223,68 @@ func NewEditorModel(e *editor.Editor, km *Keymap, svc *Services) *EditorModel {
 	}
 }
 
-// Engine returns the underlying engine editor. Use this for direct engine
-// access from AppModel (e.g., BeginIncrementalEdit, cursor queries).
+// Engine returns the underlying engine editor. Prefer the forwarder methods
+// below for common operations — Engine() is reserved for places that genuinely
+// need the full editor surface (e.g., Find bar wiring, read-only preview editors).
 func (m *EditorModel) Engine() *editor.Editor {
 	return m.eng
 }
+
+// CursorPosition returns the current cursor line and column (0-indexed).
+func (m *EditorModel) CursorPosition() (line, col int) {
+	return m.eng.CursorLine, m.eng.CursorCol
+}
+
+// ScrollOffset returns the current vertical scroll offset in visual-line space.
+func (m *EditorModel) ScrollOffset() int { return m.eng.ScrollOffset }
+
+// SetScrollOffset sets the vertical scroll offset. Callers should typically
+// follow this with ClampScroll() unless they already computed a valid target.
+func (m *EditorModel) SetScrollOffset(offset int) { m.eng.ScrollOffset = offset }
+
+// ClampScroll clamps the vertical scroll offset to valid bounds.
+func (m *EditorModel) ClampScroll() { m.eng.ClampScroll() }
+
+// VisibleLines returns the number of content lines visible in the viewport.
+func (m *EditorModel) VisibleLines() int { return m.eng.VisibleLines() }
+
+// MoveCursorTo moves the cursor to (line, col), clamped to buffer bounds.
+func (m *EditorModel) MoveCursorTo(line, col int) { m.eng.MoveCursorTo(line, col) }
+
+// EnsureCursorVisible scrolls the viewport so the cursor is in view.
+func (m *EditorModel) EnsureCursorVisible() { m.eng.EnsureCursorVisible() }
+
+// CollapseOverlay removes overlay-added visual lines and clamps scroll.
+func (m *EditorModel) CollapseOverlay(startLine, endLine, addedCount int, bufferMutated bool) {
+	m.eng.CollapseOverlay(startLine, endLine, addedCount, bufferMutated)
+}
+
+// ApplyEdit atomically replaces the first occurrence of search with replace.
+// Returns (true, "") on success, (false, reason) if the edit cannot be applied.
+// lineOrigins assigns provenance to replacement lines (index 0 = first line).
+func (m *EditorModel) ApplyEdit(search, replace string, lineOrigins []*editor.LineOrigin) (bool, string) {
+	return m.eng.ApplyEdit(search, replace, lineOrigins)
+}
+
+// BeginIncrementalEdit starts an animated edit. See editor.Editor.BeginIncrementalEdit.
+func (m *EditorModel) BeginIncrementalEdit(line, col, searchRunes, charsPerTick int, replace string, lineOrigins []*editor.LineOrigin) *editor.IncrementalEdit {
+	return m.eng.BeginIncrementalEdit(line, col, searchRunes, charsPerTick, replace, lineOrigins)
+}
+
+// LineCount returns the number of lines in the active buffer.
+func (m *EditorModel) LineCount() int { return m.eng.LineCount() }
+
+// LineText returns the text of line i.
+func (m *EditorModel) LineText(i int) string { return m.eng.LineText(i) }
+
+// Content returns the full buffer content.
+func (m *EditorModel) Content() string { return m.eng.Content() }
+
+// FilePath returns the absolute path of the active buffer. Empty for unsaved buffers.
+func (m *EditorModel) FilePath() string { return m.eng.FilePath() }
+
+// IsModified reports whether the active buffer has unsaved changes.
+func (m *EditorModel) IsModified() bool { return m.eng.IsModified() }
 
 // SetDiagnostics updates the diagnostic list and precomputes the per-line
 // lookup map. Use this instead of assigning diagnostics directly.
@@ -239,7 +295,7 @@ func (m *EditorModel) SetDiagnostics(diags []lang.Diagnostic) {
 		return
 	}
 	m.diagByLine = make(map[int]*lang.Diagnostic, len(diags))
-	lineCount := m.eng.Buf.LineCount()
+	lineCount := m.eng.LineCount()
 	for i := range m.diagnostics {
 		d := &m.diagnostics[i]
 		startLine := max(d.StartLine, 0)
@@ -263,7 +319,7 @@ func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
 
 // Title returns the filename for display in the pane border. Implements Titled.
 func (m *EditorModel) Title() string {
-	name := m.eng.Buf.Path
+	name := m.eng.FilePath()
 	if name == "" {
 		return "[new]"
 	}
@@ -309,7 +365,7 @@ func (m *EditorModel) acceptCompletion() tea.Cmd {
 	// Find the start of the partial identifier by scanning backward.
 	line := e.CursorLine
 	col := e.CursorCol
-	lineText := []rune(e.Buf.LineText(line))
+	lineText := []rune(e.LineText(line))
 	identStart := col
 	for identStart > 0 && lang.IsIdentChar(lineText[identStart-1]) {
 		identStart--
@@ -318,13 +374,13 @@ func (m *EditorModel) acceptCompletion() tea.Cmd {
 	// Replace partial identifier with completion as one atomic undo group.
 	// Use editor methods for proper cursor positioning, origin tracking,
 	// and dirty state — handles multi-line insertions correctly.
-	e.Buf.BeginGroup()
+	e.BeginGroup()
 	if col > identStart {
-		e.Buf.Delete(line, identStart, col-identStart)
+		e.DeleteRange(line, identStart, col-identStart)
 		e.CursorCol = identStart
 	}
 	e.PasteText(insertText)
-	e.Buf.EndGroup()
+	e.EndGroup()
 
 	m.Completion.Dismiss()
 	m.cursorMoved = true
@@ -515,7 +571,7 @@ func (m *EditorModel) Render() string {
 
 		if overlay == nil {
 			// No overlay — visual line == buffer line.
-			if vLine >= m.eng.Buf.LineCount() {
+			if vLine >= m.eng.LineCount() {
 				output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
 			} else {
@@ -549,7 +605,7 @@ func (m *EditorModel) Render() string {
 		default:
 			// Normal line after diff — subtract added lines to get buffer line.
 			bufLine := vLine - addedCount
-			if bufLine >= m.eng.Buf.LineCount() {
+			if bufLine >= m.eng.LineCount() {
 				output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
 				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
 			} else {
@@ -592,7 +648,7 @@ func (m *EditorModel) Render() string {
 		if !dismiss && curCol > m.Completion.TriggerCol {
 			// Verify text between trigger and cursor is all identifier chars.
 			// Dismisses on mouse click or End key past the identifier.
-			lineText := []rune(e.Buf.LineText(e.CursorLine))
+			lineText := []rune(e.LineText(e.CursorLine))
 			for c := m.Completion.TriggerCol; c < curCol && c < len(lineText); c++ {
 				if !lang.IsIdentChar(lineText[c]) {
 					dismiss = true
@@ -663,10 +719,10 @@ func (m *EditorModel) renderNormalLine(
 ) string {
 	var line strings.Builder
 
-	isAgentLine := m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent
+	isAgentLine := m.eng.LineOrigin(lineIdx) == editor.OriginAgent
 
 	// Sanitize agent-origin lines to prevent ANSI injection from LLM output.
-	lineText := m.eng.Buf.LineText(lineIdx)
+	lineText := m.eng.LineText(lineIdx)
 	if isAgentLine {
 		var san sanitize.Sanitizer
 		lineText = san.Sanitize(lineText)
@@ -964,8 +1020,8 @@ func (m *EditorModel) renderRemovedLine(
 	line.WriteString(gutterSt.Render(gutterText))
 
 	// Sanitize agent-origin lines to prevent ANSI injection from LLM output.
-	removedText := m.eng.Buf.LineText(lineIdx)
-	if m.eng.Buf.LineOrigin(lineIdx) == buffer.OriginAgent {
+	removedText := m.eng.LineText(lineIdx)
+	if m.eng.LineOrigin(lineIdx) == editor.OriginAgent {
 		var san sanitize.Sanitizer
 		removedText = san.Sanitize(removedText)
 	}
@@ -1083,7 +1139,7 @@ func (m *EditorModel) renderAddedLine(
 	line.WriteString(gutterSt.Render(gutterText))
 
 	oe := m.Overlay.Editor
-	rawRunes := []rune(oe.Buf.LineText(overlayIdx))
+	rawRunes := []rune(oe.LineText(overlayIdx))
 	expanded, bufToDisp := expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
 	displayed := m.fillDisplay(expanded, contentW, scrollCol)
@@ -1284,8 +1340,8 @@ type statusBarInfo struct {
 // statusInfo gathers editor state into a statusBarInfo for rendering.
 func (m *EditorModel) statusInfo() statusBarInfo {
 	info := statusBarInfo{
-		FileName: sanitizeStatusText(m.eng.Buf.Path),
-		Modified: m.eng.Buf.Modified,
+		FileName: sanitizeStatusText(m.eng.FilePath()),
+		Modified: m.eng.IsModified(),
 	}
 	if info.FileName == "" {
 		info.FileName = "[new]"
@@ -1403,7 +1459,7 @@ func (m *EditorModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 	case lineAdded:
 		if m.Overlay != nil {
 			oe := m.Overlay.Editor
-			_, bufToDisp := expandTabs([]rune(oe.Buf.LineText(entry.overlayLine)))
+			_, bufToDisp := expandTabs([]rune(oe.LineText(entry.overlayLine)))
 			col := displayColToBufCol(bufToDisp, displayCol)
 			slog.Debug("overlay click", "overlayLine", entry.overlayLine, "col", col)
 			m.Overlay.Active = true
@@ -1428,7 +1484,7 @@ func (m *EditorModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 		if m.Overlay != nil && m.Overlay.Active {
 			m.Overlay.Active = false
 		}
-		m.normalLinePress(m.eng.Buf.LineCount(), displayCol)
+		m.normalLinePress(m.eng.LineCount(), displayCol)
 	}
 
 	return nil
@@ -1446,7 +1502,7 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 		oe := m.Overlay.Editor
 		switch entry.kind {
 		case lineAdded:
-			_, bufToDisp := expandTabs([]rune(oe.Buf.LineText(entry.overlayLine)))
+			_, bufToDisp := expandTabs([]rune(oe.LineText(entry.overlayLine)))
 			col := displayColToBufCol(bufToDisp, displayCol)
 			oe.MoveCursorTo(entry.overlayLine, col)
 		case lineNormal:
@@ -1454,16 +1510,16 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 			if entry.bufLine < m.Overlay.StartLine {
 				oe.MoveCursorTo(0, 0)
 			} else {
-				lastLine := oe.Buf.LineCount() - 1
-				oe.MoveCursorTo(lastLine, oe.Buf.LineLen(lastLine))
+				lastLine := oe.LineCount() - 1
+				oe.MoveCursorTo(lastLine, oe.LineLen(lastLine))
 			}
 		case lineRemoved:
 			// Removed lines sit visually above the added lines — clamp to top.
 			oe.MoveCursorTo(0, 0)
 		case lineEmpty:
 			// Below all content — clamp to end.
-			lastLine := oe.Buf.LineCount() - 1
-			oe.MoveCursorTo(lastLine, oe.Buf.LineLen(lastLine))
+			lastLine := oe.LineCount() - 1
+			oe.MoveCursorTo(lastLine, oe.LineLen(lastLine))
 		}
 		return nil
 	}
@@ -1479,11 +1535,11 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 			// Dragged into overlay added lines — clamp to the line just
 			// after the overlay's removed range (overlay.EndLine + 1 in
 			// the original buffer doesn't exist visually, so use EndLine).
-			m.eng.MoveCursorTo(m.Overlay.EndLine, m.eng.Buf.LineLen(m.Overlay.EndLine))
+			m.eng.MoveCursorTo(m.Overlay.EndLine, m.eng.LineLen(m.Overlay.EndLine))
 		case lineEmpty:
 			// Past end of buffer — clamp to last line.
-			lastLine := m.eng.Buf.LineCount() - 1
-			m.eng.MoveCursorTo(lastLine, m.eng.Buf.LineLen(lastLine))
+			lastLine := m.eng.LineCount() - 1
+			m.eng.MoveCursorTo(lastLine, m.eng.LineLen(lastLine))
 		}
 	}
 	return nil
@@ -1535,12 +1591,12 @@ func (m *EditorModel) normalLinePress(bufLine, displayCol int) {
 // resolveBufferPos converts a display position to a buffer position,
 // clamping to valid bounds.
 func (m *EditorModel) resolveBufferPos(bufLine, displayCol int) (int, int) {
-	if bufLine >= m.eng.Buf.LineCount() {
-		bufLine = m.eng.Buf.LineCount() - 1
+	if bufLine >= m.eng.LineCount() {
+		bufLine = m.eng.LineCount() - 1
 		if bufLine < 0 {
 			bufLine = 0
 		}
-		return bufLine, m.eng.Buf.LineLen(bufLine)
+		return bufLine, m.eng.LineLen(bufLine)
 	}
 	return bufLine, m.eng.DisplayColToBufferCol(bufLine, displayCol)
 }
@@ -1563,7 +1619,7 @@ func (m *EditorModel) overlapsRemovedRange() bool {
 	}
 	// Cursor on the line just before the removed range, at end of line:
 	// Delete would join into StartLine.
-	if m.eng.CursorLine == start-1 && m.eng.CursorCol >= m.eng.Buf.LineLen(m.eng.CursorLine) {
+	if m.eng.CursorLine == start-1 && m.eng.CursorCol >= m.eng.LineLen(m.eng.CursorLine) {
 		return true
 	}
 	// Cursor on the line just after the removed range, at col 0:
@@ -1603,7 +1659,7 @@ func (m *EditorModel) handleKey(keyMsg tea.KeyPressMsg) tea.Cmd {
 
 	// Track line count so we can adjust overlay position if the user
 	// inserts/deletes lines above the diff.
-	linesBefore := m.eng.Buf.LineCount()
+	linesBefore := m.eng.LineCount()
 
 	readOnly := m.overlapsRemovedRange()
 	cmd := m.handleEditorKeyFor(keyMsg, m.eng, readOnly)
@@ -1637,7 +1693,7 @@ func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyPressMsg) bool {
 		// Cursor just below removed range → enter overlay at last line.
 		if m.eng.CursorLine == o.EndLine+1 {
 			o.Active = true
-			lastLine := o.Editor.Buf.LineCount() - 1
+			lastLine := o.Editor.LineCount() - 1
 			o.Editor.MoveCursorTo(lastLine, m.eng.CursorCol)
 			m.eng.ClearSelection()
 			return true
@@ -1652,7 +1708,7 @@ func (m *EditorModel) adjustOverlayPosition(linesBefore int) {
 	if m.Overlay == nil {
 		return
 	}
-	delta := m.eng.Buf.LineCount() - linesBefore
+	delta := m.eng.LineCount() - linesBefore
 	if delta == 0 {
 		return
 	}
@@ -1685,7 +1741,7 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyPressMsg) tea.Cmd {
 		o.Active = false
 		if o.StartLine > 0 {
 			m.eng.MoveCursorTo(o.StartLine-1, oe.CursorCol)
-		} else if o.EndLine+1 < m.eng.Buf.LineCount() {
+		} else if o.EndLine+1 < m.eng.LineCount() {
 			m.eng.MoveCursorTo(o.EndLine+1, oe.CursorCol)
 		}
 		return nil
@@ -1705,8 +1761,8 @@ func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyPressMsg) tea.Cmd {
 	}
 
 	// Down at bottom of overlay — exit downward if there's a safe line below.
-	if keyMsg.Code == tea.KeyDown && keyMsg.Mod == 0 && oe.CursorLine >= oe.Buf.LineCount()-1 {
-		if o.EndLine+1 >= m.eng.Buf.LineCount() {
+	if keyMsg.Code == tea.KeyDown && keyMsg.Mod == 0 && oe.CursorLine >= oe.LineCount()-1 {
+		if o.EndLine+1 >= m.eng.LineCount() {
 			// No buffer line below the overlay — stay in overlay.
 			return nil
 		}
@@ -1842,7 +1898,7 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Edito
 
 	case ActionToggleComment:
 		if !readOnly {
-			if prefix := lang.LineCommentPrefix(e.Buf.Path); prefix != "" {
+			if prefix := lang.LineCommentPrefix(e.FilePath()); prefix != "" {
 				e.ToggleLineComment(prefix)
 			}
 		}

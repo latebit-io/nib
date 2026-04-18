@@ -44,9 +44,11 @@ type agentPort interface {
 // (ReadFile, WriteFile, ListFiles, CanonPath). The mu field guards the
 // editors map and activeFile so both goroutines can safely access them.
 type Session struct {
-	// Editor points to the active editor. Updated on file switch.
-	// Kept public for backward compatibility with frontends.
-	Editor *editor.Editor
+	// activeEditor points to the currently-focused editor. Updated on file
+	// switch. Callers outside this package read via ActiveEditor(); direct
+	// field access is reserved for session internals so the workflow-enforcing
+	// methods remain the only mutation path.
+	activeEditor *editor.Editor
 
 	// ctx is the application-level context. Agent runs derive a child
 	// context so they are cancelled when the application shuts down.
@@ -98,6 +100,12 @@ type Session struct {
 	// This enforces the contract: every frontend must compute and present
 	// the diff before approving — no blind approvals.
 	editReviewed bool
+
+	// awaitingContinue is set when the agent emits StatusEditing and
+	// cleared when the agent moves past the continue gate. Frontends call
+	// CanContinue() instead of sampling their own status widgets so the
+	// gate stays authoritative even when UI state lags.
+	awaitingContinue bool
 
 	// modifiedFiles tracks files changed by agent edits this session.
 	// Canonical absolute paths as keys. Guarded by mu.
@@ -170,7 +178,15 @@ func ResolveProjectRoot(startDir string) string {
 // agent after construction (this breaks the circular dependency between
 // session-as-workspace and agent-needing-workspace).
 // The projectRoot is used for file listing and resolving relative paths.
+//
+// If e is nil, a fresh empty editor is installed so activeEditor is never
+// nil — the same invariant cleanupDeletedPath enforces on file deletion.
+// Callers that pass nil (e.g. tests for non-editor subsystems) get a sound
+// session instead of one that panics on the first agent turn.
 func New(e *editor.Editor, projectRoot string) *Session {
+	if e == nil {
+		e = editor.New(buffer.New())
+	}
 	// Normalize to absolute so CanonPath/resolvePath work regardless of
 	// whether the caller passes ".", a relative path, or an absolute path.
 	if absRoot, err := filepath.Abs(projectRoot); err == nil {
@@ -181,13 +197,13 @@ func New(e *editor.Editor, projectRoot string) *Session {
 	editors := make(map[string]*editor.Editor)
 	contextSet := make(map[string]bool)
 	s := &Session{
-		Editor:        e,
+		activeEditor:  e,
 		editors:       editors,
 		contextSet:    contextSet,
 		modifiedFiles: make(map[string]bool),
 		projectRoot:   projectRoot,
 	}
-	if e != nil && e.Buf.Path != "" {
+	if e.Buf.Path != "" {
 		if _, err := s.resolvePath(e.Buf.Path); err != nil {
 			slog.Warn("New: initial editor path rejected", "path", e.Buf.Path, "err", err)
 		} else {
@@ -383,7 +399,11 @@ func (s *Session) LookupDefinition(line, col int) (*lang.Location, error) {
 	if !ok {
 		return nil, errors.New("language service does not support go-to-definition")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	parent := s.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 
 	path := s.ActiveFile()
@@ -412,6 +432,32 @@ func (s *Session) PopNav() {
 	}
 }
 
+// NavigateAgent handles an agent-initiated navigation: switches to the
+// requested file if it is not already active, then positions the cursor at
+// (line, 0) with selection cleared and the viewport scrolled to make the
+// position visible. Returns an error from SwitchTo on failure.
+//
+// The frontend remains responsible for updating its own UI state (editor
+// model, file watchers, diagnostics, project pane) when ActiveEditor()
+// changes as a side effect of the switch.
+func (s *Session) NavigateAgent(path string, line int) error {
+	if s.CanonPath(path) != s.ActiveFile() {
+		if err := s.SwitchTo(path); err != nil {
+			return err
+		}
+	}
+	s.mu.RLock()
+	e := s.activeEditor
+	s.mu.RUnlock()
+	if e == nil {
+		return errors.New("no active editor")
+	}
+	e.ClearSelection()
+	e.MoveCursorTo(line, 0)
+	e.EnsureCursorVisible()
+	return nil
+}
+
 // GoBack pops the navigation stack and returns to the previous location.
 // Returns the location jumped to, or nil if the stack is empty.
 func (s *Session) GoBack() *lang.Location {
@@ -426,7 +472,10 @@ func (s *Session) GoBack() *lang.Location {
 			return nil
 		}
 	}
-	s.Editor.MoveCursorTo(loc.Line, loc.Col)
+	s.mu.RLock()
+	e := s.activeEditor
+	s.mu.RUnlock()
+	e.MoveCursorTo(loc.Line, loc.Col)
 	s.navStack = s.navStack[:len(s.navStack)-1]
 	return &loc
 }
@@ -438,7 +487,11 @@ func (s *Session) HoverInfo(line, col int) (string, error) {
 	if !ok {
 		return "", errors.New("language service does not support hover")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	parent := s.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 
 	path := s.ActiveFile()
@@ -465,7 +518,11 @@ func (s *Session) RequestCompletion(path string, line, col int) (*lang.Completio
 	s.completionMu.Lock()
 	defer s.completionMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	parent := s.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 
 	return cp.Complete(ctx, path, line, col)
@@ -493,7 +550,11 @@ func (s *Session) RequestCompletionInContext(path, tempContent, originalContent 
 	// Sync temporary content so LSP sees the overlay code.
 	s.langSyncer.DidChange(path, []lang.TextChange{{Text: tempContent, FullContent: true}})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	parent := s.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	result, err := cp.Complete(ctx, path, line, col)
 
@@ -637,7 +698,7 @@ func (s *Session) ActiveFile() string {
 // any goroutine — reads under mu.RLock to avoid racing with SwitchTo.
 func (s *Session) ActiveEditor() *editor.Editor {
 	s.mu.RLock()
-	e := s.Editor
+	e := s.activeEditor
 	s.mu.RUnlock()
 	return e
 }
@@ -731,12 +792,12 @@ func (s *Session) FileStatus(path string) (inContext, agentModified bool) {
 	return s.contextSet[canon], s.modifiedFiles[canon]
 }
 
-// AgentModifiedFiles returns paths of files modified by agent edits this
 // Search runs a project-wide text search from the project root.
 func (s *Session) Search(pattern string, opts search.Options) ([]search.Result, error) {
 	return search.Search(s.projectRoot, pattern, opts)
 }
 
+// AgentModifiedFiles returns paths of files modified by agent edits this
 // session, as sorted relative paths.
 func (s *Session) AgentModifiedFiles() []string {
 	s.mu.RLock()
@@ -1062,23 +1123,23 @@ func (s *Session) cleanupDeletedPath(canon string) []*editor.Editor {
 			delete(s.editors, p)
 			if s.activeFile == p {
 				s.activeFile = ""
-				s.Editor = nil
+				s.activeEditor = nil
 			}
 		}
 	}
 	deleteMatching(s.contextSet, matches)
 	deleteMatching(s.modifiedFiles, matches)
 
-	// Ensure s.Editor is never nil.
-	if s.Editor == nil {
+	// Ensure s.activeEditor is never nil.
+	if s.activeEditor == nil {
 		for p, ed := range s.editors {
-			s.Editor = ed
+			s.activeEditor = ed
 			s.activeFile = p
 			break
 		}
-		if s.Editor == nil {
+		if s.activeEditor == nil {
 			e := editor.New(buffer.New())
-			s.Editor = e
+			s.activeEditor = e
 			// Track the empty editor so Session.Close() can release its resources.
 			s.editors[""] = e
 			s.activeFile = ""
@@ -1252,7 +1313,7 @@ func (s *Session) startNewConversation(goal string, mode event.Mode) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	s.agent.RunWithMode(ctx, s.activeFile, s.Editor.Buf.Content(), goal, s.ContextFiles(), mode)
+	s.agent.RunWithMode(ctx, s.activeFile, s.activeEditor.Buf.Content(), goal, s.ContextFiles(), mode)
 }
 
 // ArchiveIntent marks the current intent as done.
@@ -1315,7 +1376,7 @@ func (s *Session) SwitchTo(path string) error {
 
 	// Check if already open
 	if e, ok := s.editors[canon]; ok {
-		s.Editor = e
+		s.activeEditor = e
 		s.activeFile = canon
 		s.mu.Unlock()
 		if !s.isProjectMeta(canon) && !s.InContext(canon) {
@@ -1341,7 +1402,7 @@ func (s *Session) SwitchTo(path string) error {
 	if addToContext {
 		s.contextSet[canon] = true
 	}
-	s.Editor = e
+	s.activeEditor = e
 	s.activeFile = canon
 	s.mu.Unlock()
 
@@ -1435,7 +1496,7 @@ func (s *Session) ReviewEdit() (diff *editor.DiffResult, switched bool) {
 		canon := s.CanonPath(s.pendingEdit.Path)
 		s.mu.Lock()
 		if canon != s.activeFile {
-			s.Editor = e
+			s.activeEditor = e
 			s.activeFile = canon
 			switched = true
 		}
@@ -1515,7 +1576,9 @@ type AnimationPlan struct {
 	// Index 0 corresponds to the buffer line at Line, index 1 to Line+1, etc.
 	// A nil entry means "don't change this line's origin" (the line was
 	// unchanged from the search text — the agent just re-included it as context).
-	LineOrigins []*buffer.Origin
+	// Use the editor.LineOrigin alias; the buffer type is equivalent and
+	// preserved here for backward compatibility with engine consumers.
+	LineOrigins []*editor.LineOrigin
 	// Narrowed contains the change region with unchanged prefix/suffix lines
 	// excluded. When IsSurgical() is true, the frontend should use these
 	// narrowed values instead of the full Search/Replace for animation —
@@ -1617,6 +1680,11 @@ func computeLineOrigins(search, originalReplace, finalReplace string) []*buffer.
 // CompleteApproval signals the agent that the animated edit has been applied.
 // Call this after the animation finishes (or after a yield). Promotes the
 // staged edit path to lastEditedFile so Continue sends the right content.
+//
+// Sets awaitingContinue eagerly — the agent will shortly emit
+// StatusEditing on the best-effort event path, but that event can be dropped
+// under channel pressure. Gating on our own action keeps CanContinue honest
+// even when the event is lost.
 func (s *Session) CompleteApproval() {
 	if s.HasAgent() {
 		s.lastEditedFile = s.stagedEditFile
@@ -1626,6 +1694,9 @@ func (s *Session) CompleteApproval() {
 			s.mu.Unlock()
 		}
 		s.stagedEditFile = ""
+		s.mu.Lock()
+		s.awaitingContinue = true
+		s.mu.Unlock()
 		s.agent.Approve()
 	}
 }
@@ -1664,22 +1735,44 @@ func (s *Session) ApproveAndContinue() {
 // Continue signals the agent to proceed after the developer has finished editing.
 // Sends the content of the file that was last edited (not necessarily the
 // currently active file, in case the user switched files after approving).
+//
+// Clears awaitingContinue eagerly so a second press during the same agent
+// turn is a no-op. agent.Continue uses a non-blocking send on a cap-1 channel,
+// so the first call either lands or coincides with an already-pending message
+// the agent will read — retrying adds no value and can leave a stale message
+// buffered for the next waitForContinue.
 func (s *Session) Continue() {
 	if !s.HasAgent() {
 		return
 	}
+	// Resolve path+editor atomically: cleanupDeletedPath and SwitchTo mutate
+	// lastEditedFile, activeFile, activeEditor, and editors under mu.Lock, so
+	// all four reads must happen together under a single lock scope.
+	s.mu.Lock()
 	path := s.lastEditedFile
 	if path == "" {
 		path = s.activeFile
 	}
-	s.mu.RLock()
 	e, ok := s.editors[path]
-	s.mu.RUnlock()
 	if !ok {
-		e = s.Editor
+		e = s.activeEditor
 		path = s.activeFile
 	}
+	s.awaitingContinue = false
+	s.mu.Unlock()
 	s.agent.Continue(path, e.Buf.Content())
+}
+
+// CanContinue reports whether the agent has applied an edit and is waiting
+// for the developer to press Continue. Use this to gate the continue hotkey
+// rather than sampling frontend status widgets — Session owns the truth.
+func (s *Session) CanContinue() bool {
+	if !s.HasAgent() {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.awaitingContinue
 }
 
 // --- Agent Event Handling ---
@@ -1693,10 +1786,16 @@ func (s *Session) HandleEvent(ev event.Event) {
 	case event.AgentError:
 		s.pendingEdit = nil
 		s.editReviewed = false
+		s.mu.Lock()
+		s.awaitingContinue = false
+		s.mu.Unlock()
 		_ = e // error text is in the event for the frontend to display
 	case event.AgentDone:
 		s.pendingEdit = nil
 		s.editReviewed = false
+		s.mu.Lock()
+		s.awaitingContinue = false
+		s.mu.Unlock()
 		if e.Success {
 			s.ArchiveIntent()
 		}
@@ -1707,7 +1806,14 @@ func (s *Session) HandleEvent(ev event.Event) {
 	case event.AgentWaiting:
 		// Agent finished its turn, waiting for developer input.
 		// No session state changes — intent stays active.
-	case event.AgentToken, event.AgentStatus, event.AgentToolCall, event.AgentNavigate:
+	case event.AgentStatus:
+		// Track the continue gate: StatusEditing means the agent applied the
+		// edit and is blocked on the developer's Continue signal. Any other
+		// status clears the flag so CanContinue reflects the live state.
+		s.mu.Lock()
+		s.awaitingContinue = e.Status == event.StatusEditing
+		s.mu.Unlock()
+	case event.AgentToken, event.AgentToolCall, event.AgentNavigate:
 		// No session state changes — frontend renders these directly.
 	case event.AgentTurnUsage, event.AgentInputEstimate:
 		// Telemetry — no session state changes, frontend renders these.
@@ -1725,13 +1831,16 @@ func (s *Session) HandleEvent(ev event.Event) {
 // If the target file isn't open yet, auto-opens it from disk — the agent
 // may have read the file via read_file (which doesn't create a buffer)
 // and then proposed an edit_file on it.
+//
+// Callers must hold a non-nil s.pendingEdit — all public entry points
+// (ReviewEdit, ApproveEdit, PrepareApproval) early-return before reaching
+// here, so the nil case is not defended against.
 func (s *Session) editorForEdit() *editor.Editor {
-	if s.pendingEdit == nil {
-		return s.Editor
-	}
 	path := s.pendingEdit.Path
 	if path == "" {
-		return s.Editor
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.activeEditor
 	}
 	canon := s.CanonPath(path)
 

@@ -46,40 +46,37 @@ func NewDiffOverlay(diff *editor.DiffResult) *DiffOverlay {
 
 // LineCount returns the number of replacement lines.
 func (o *DiffOverlay) LineCount() int {
-	return o.Editor.Buf.LineCount()
+	return o.Editor.LineCount()
 }
 
 // LineText returns replacement line i as a string.
 func (o *DiffOverlay) LineText(i int) string {
-	if i < 0 || i >= o.Editor.Buf.LineCount() {
+	if i < 0 || i >= o.Editor.LineCount() {
 		return ""
 	}
-	return o.Editor.Buf.LineText(i)
+	return o.Editor.LineText(i)
 }
 
 // Content returns the full replacement text.
 func (o *DiffOverlay) Content() string {
-	return o.Editor.Buf.Content()
+	return o.Editor.Content()
 }
 
 // MergedContent returns the full file content as if the overlay were applied.
-// Combines buffer lines [0, StartLine) + overlay content + buffer lines [EndLine+1, end).
-func (o *DiffOverlay) MergedContent(mainBuf *buffer.Buffer) string {
+// Combines main-buffer lines [0, StartLine) + overlay content + main-buffer lines [EndLine+1, end).
+func (o *DiffOverlay) MergedContent(mainEd *editor.Editor) string {
 	var parts []string
 
-	// Lines before the overlay.
-	for i := 0; i < o.StartLine && i < mainBuf.LineCount(); i++ {
-		parts = append(parts, mainBuf.LineText(i))
+	for i := 0; i < o.StartLine && i < mainEd.LineCount(); i++ {
+		parts = append(parts, mainEd.LineText(i))
 	}
 
-	// Overlay replacement lines.
-	for i := 0; i < o.Editor.Buf.LineCount(); i++ {
-		parts = append(parts, o.Editor.Buf.LineText(i))
+	for i := 0; i < o.Editor.LineCount(); i++ {
+		parts = append(parts, o.Editor.LineText(i))
 	}
 
-	// Lines after the overlay.
-	for i := o.EndLine + 1; i < mainBuf.LineCount(); i++ {
-		parts = append(parts, mainBuf.LineText(i))
+	for i := o.EndLine + 1; i < mainEd.LineCount(); i++ {
+		parts = append(parts, mainEd.LineText(i))
 	}
 
 	return strings.Join(parts, "\n")

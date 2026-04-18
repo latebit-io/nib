@@ -407,8 +407,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.openFile(filepath.Join(m.Session.ProjectRoot(), typed.Path))
 			if cmd == nil {
 				// Navigate to the specific line.
-				m.Editor.eng.MoveCursorTo(typed.Line-1, 0)
-				m.Editor.eng.EnsureCursorVisible()
+				m.Editor.MoveCursorTo(typed.Line-1, 0)
+				m.Editor.EnsureCursorVisible()
 			}
 			return model, cmd
 		case tea.MouseMsg:
@@ -622,8 +622,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SearchOpenFileMsg:
 		model, cmd := m.openFile(filepath.Join(m.Session.ProjectRoot(), msg.Path))
 		if cmd == nil {
-			m.Editor.eng.MoveCursorTo(msg.Line-1, 0)
-			m.Editor.eng.EnsureCursorVisible()
+			m.Editor.MoveCursorTo(msg.Line-1, 0)
+			m.Editor.EnsureCursorVisible()
 		}
 		return model, cmd
 
@@ -651,8 +651,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			curLine = m.Editor.Overlay.StartLine + oe.CursorLine
 			curCol = oe.CursorCol
 		} else {
-			curLine = m.Editor.eng.CursorLine
-			curCol = m.Editor.eng.CursorCol
+			curLine, curCol = m.Editor.CursorPosition()
 		}
 		if msg.path == m.Session.ActiveFile() &&
 			msg.line == curLine &&
@@ -668,10 +667,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Hover result — display if still relevant, drop stale responses.
 	case hoverResultMsg:
+		curLine, curCol := m.Editor.CursorPosition()
 		if msg.text != "" &&
 			msg.path == m.Session.ActiveFile() &&
-			msg.line == m.Editor.eng.CursorLine &&
-			msg.col == m.Editor.eng.CursorCol {
+			msg.line == curLine &&
+			msg.col == curCol {
 			m.Editor.ShowHover(msg.text)
 		}
 		return m, nil
@@ -832,9 +832,9 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 				if target < 0 {
 					target = 0
 				}
-				m.Editor.eng.ScrollOffset = target
+				m.Editor.SetScrollOffset(target)
 				m.Editor.syncExtraVisualLines()
-				m.Editor.eng.ClampScroll()
+				m.Editor.ClampScroll()
 			}
 		} else {
 			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
@@ -858,13 +858,21 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshProjectPane()
 		}
 	case event.AgentNavigate:
-		m.openFile(e.Path)
-		// Only navigate if we successfully switched to the target file.
-		if m.Session.ActiveFile() == m.Session.CanonPath(e.Path) {
-			ae := m.Session.ActiveEditor()
-			ae.ClearSelection()
-			ae.MoveCursorTo(e.Line-1, 0)
-			ae.EnsureCursorVisible()
+		prevActive := m.Session.ActiveEditor()
+		if err := m.Session.NavigateAgent(e.Path, e.Line-1); err != nil {
+			slog.Warn("agent navigate failed", "path", e.Path, "err", err)
+			m.AgentPane.AppendMeta("[navigate failed: " + err.Error() + "]\n")
+			break
+		}
+		// If the session switched files, update TUI-owned state to match.
+		if m.Session.ActiveEditor() != prevActive {
+			m.cancelAnimation()
+			if m.fileWatcher != nil {
+				m.fileWatcher.Watch(m.Session.ActiveFile())
+			}
+			m.rebuildEditorModel()
+			m.refreshDiagnostics(m.Session.ActiveFile())
+			m.refreshProjectPane()
 		}
 	case event.AgentError:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
@@ -922,7 +930,7 @@ func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
 	if o == nil {
 		return
 	}
-	m.Editor.eng.CollapseOverlay(o.StartLine, o.EndLine, o.LineCount(), bufferMutated)
+	m.Editor.CollapseOverlay(o.StartLine, o.EndLine, o.LineCount(), bufferMutated)
 	m.Editor.Overlay = nil
 }
 
@@ -1037,7 +1045,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
 			return m, nil
 		}
-		if m.Session.HasAgent() && m.AgentPane.StatusKind() == event.StatusEditing {
+		if m.Session.CanContinue() {
 			m.cancelAnimation()
 			m.Session.Continue()
 		}
@@ -1122,12 +1130,12 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionFind:
 		m.Regions.FocusByName("editor")
-		m.Editor.Find.Open(m.Editor.eng, false)
+		m.Editor.Find.Open(m.Editor.Engine(), false)
 		return m, nil
 
 	case ActionFindReplace:
 		m.Regions.FocusByName("editor")
-		m.Editor.Find.Open(m.Editor.eng, true)
+		m.Editor.Find.Open(m.Editor.Engine(), true)
 		return m, nil
 
 	case ActionHelp:
@@ -1377,7 +1385,7 @@ func (m *AppModel) reloadAllBuffers() {
 func (m *AppModel) handleFileChanged(path string) {
 	// Don't reload buffers the user has modified in-editor.
 	ed := m.Session.EditorForPath(path)
-	if ed != nil && ed.Buf.Modified {
+	if ed != nil && ed.IsModified() {
 		slog.Debug("skip external reload (buffer modified)", "path", path)
 		return
 	}
@@ -1463,7 +1471,7 @@ func (m *AppModel) handleGoToDefinition() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	originPath := m.Session.ActiveFile()
-	originLine, originCol := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	originLine, originCol := m.Editor.CursorPosition()
 	return m, func() tea.Msg {
 		loc, err := m.Session.LookupDefinition(originLine, originCol)
 		if err != nil {
@@ -1502,7 +1510,7 @@ func (m *AppModel) applyGoToDefinition(msg goToDefResultMsg) (tea.Model, tea.Cmd
 	}
 
 	// Rebuild EditorModel if session switched files.
-	if m.Session.ActiveEditor() != m.Editor.eng {
+	if m.Session.ActiveEditor() != m.Editor.Engine() {
 		m.rebuildEditorModel()
 		m.refreshDiagnostics(m.Session.ActiveFile())
 	}
@@ -1520,7 +1528,7 @@ func (m *AppModel) handleGoBack() (tea.Model, tea.Cmd) {
 	}
 
 	// Session may have switched files — rebuild EditorModel if needed.
-	if m.Session.ActiveEditor() != m.Editor.eng {
+	if m.Session.ActiveEditor() != m.Editor.Engine() {
 		m.rebuildEditorModel()
 		m.refreshDiagnostics(m.Session.ActiveFile())
 	}
@@ -1539,7 +1547,7 @@ func (m *AppModel) handleHover() (tea.Model, tea.Cmd) {
 	m.Editor.DismissHover()
 
 	path := m.Session.ActiveFile()
-	line, col := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	line, col := m.Editor.CursorPosition()
 	return m, func() tea.Msg {
 		text, err := m.Session.HoverInfo(line, col)
 		if err != nil {
@@ -1572,7 +1580,7 @@ func (m *AppModel) scheduleCompletion() tea.Cmd {
 		line = m.Editor.Overlay.StartLine + oe.CursorLine
 		col = oe.CursorCol
 	} else {
-		line, col = m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+		line, col = m.Editor.CursorPosition()
 	}
 	return tea.Tick(completionDebounce, func(_ time.Time) tea.Msg {
 		return completionTickMsg{path: path, line: line, col: col}
@@ -1590,8 +1598,7 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 		curLine = m.Editor.Overlay.StartLine + oe.CursorLine
 		curCol = oe.CursorCol
 	} else {
-		curLine = m.Editor.eng.CursorLine
-		curCol = m.Editor.eng.CursorCol
+		curLine, curCol = m.Editor.CursorPosition()
 	}
 	if msg.path != m.Session.ActiveFile() ||
 		msg.line != curLine ||
@@ -1606,8 +1613,8 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 	// to temporarily sync the proposed code to LSP and revert afterward.
 	var tempContent, originalContent string
 	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
-		originalContent = m.Editor.eng.Buf.Content()
-		tempContent = m.Editor.Overlay.MergedContent(m.Editor.eng.Buf)
+		originalContent = m.Editor.Content()
+		tempContent = m.Editor.Overlay.MergedContent(m.Editor.Engine())
 	}
 
 	return m, func() tea.Msg {
@@ -1698,7 +1705,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	o := m.Editor.Overlay
 	var oldLines []string
 	for i := o.StartLine; i <= o.EndLine; i++ {
-		oldLines = append(oldLines, m.Editor.eng.Buf.LineText(i))
+		oldLines = append(oldLines, m.Editor.LineText(i))
 	}
 	search := strings.Join(oldLines, "\n")
 	replace := o.Content()
@@ -1734,14 +1741,14 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	if target < 0 {
 		target = 0
 	}
-	m.Editor.eng.ScrollOffset = target
-	m.Editor.eng.ClampScroll()
+	m.Editor.SetScrollOffset(target)
+	m.Editor.ClampScroll()
 
 	// Instant-apply: skip animation, apply the full edit atomically,
 	// and auto-continue so the agent proceeds without Ctrl+N.
 	// LevelTrusted behaves identically to InstantApply.
 	if m.Editor.InstantApply || m.dial.AutoApproveEdits() {
-		ok, reason := m.Editor.eng.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
+		ok, reason := m.Editor.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
 		if !ok {
 			slog.Warn("instant apply failed", "reason", reason)
 			m.AgentPane.AppendText("\n[instant apply failed: " + reason + "]\n")
@@ -1758,7 +1765,7 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	// Engine handles undo group, deletion, position tracking, and per-tick
 	// advancement. TUI only owns the tick schedule and visual state.
 	cpt := charsPerTick(m.Editor.TypingWPM)
-	devStartLine, devStartCol := m.Editor.eng.CursorLine, m.Editor.eng.CursorCol
+	devStartLine, devStartCol := m.Editor.CursorPosition()
 
 	// Surgical path: narrow the edit to only the changed lines.
 	// Unchanged prefix and suffix lines stay in the buffer — they never
@@ -1767,13 +1774,13 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 	if plan.IsSurgical() {
 		ne := plan.Narrowed
 		searchRunes := utf8.RuneCountInString(ne.Search)
-		edit = m.Editor.eng.BeginIncrementalEdit(ne.Line, ne.Col, searchRunes, cpt, ne.Replace, ne.LineOrigins)
+		edit = m.Editor.BeginIncrementalEdit(ne.Line, ne.Col, searchRunes, cpt, ne.Replace, ne.LineOrigins)
 		slog.Debug("surgical animation",
 			"prefix", ne.PrefixLines, "suffix", ne.SuffixLines,
 			"narrowSearch", len(ne.Search), "narrowReplace", len(ne.Replace))
 	} else {
 		searchRunes := utf8.RuneCountInString(plan.Search)
-		edit = m.Editor.eng.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
+		edit = m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
 	}
 
 	m.Editor.Anim = &animationContext{
@@ -1810,9 +1817,9 @@ func (m *AppModel) handleAnimTick() tea.Cmd {
 	// Scroll down to follow the agent cursor as it advances. Only scrolls
 	// downward — if the user scrolled past the agent, we don't pull them back.
 	line, _ := anim.edit.Position()
-	vis := m.Editor.eng.VisibleLines()
-	if vis > 0 && line >= m.Editor.eng.ScrollOffset+vis {
-		m.Editor.eng.ScrollOffset = line - vis + 1
+	vis := m.Editor.VisibleLines()
+	if vis > 0 && line >= m.Editor.ScrollOffset()+vis {
+		m.Editor.SetScrollOffset(line - vis + 1)
 	}
 
 	if result.Done {
@@ -1833,8 +1840,9 @@ func (m *AppModel) animCollision() bool {
 		return false
 	}
 	// Detect first move — sticky once set.
+	curLine, curCol := m.Editor.CursorPosition()
 	if !anim.devMoved {
-		if m.Editor.eng.CursorLine != anim.devStartLine || m.Editor.eng.CursorCol != anim.devStartCol {
+		if curLine != anim.devStartLine || curCol != anim.devStartCol {
 			anim.devMoved = true
 		} else {
 			return false
@@ -1843,7 +1851,7 @@ func (m *AppModel) animCollision() bool {
 	startLine, startCol := anim.edit.StartPosition()
 	endLine, endCol := anim.edit.Position()
 	return editor.CursorInRegion(
-		m.Editor.eng.CursorLine, m.Editor.eng.CursorCol,
+		curLine, curCol,
 		startLine, startCol,
 		endLine, endCol,
 	)

@@ -17,6 +17,17 @@ import (
 // in sync with the engine's column calculations.
 const TabWidth = 4
 
+// LineOrigin is the provenance of a buffer line (developer vs agent).
+// Re-exported from the buffer package so frontends only depend on editor.
+type LineOrigin = buffer.Origin
+
+// OriginDeveloper marks a line the developer wrote (or loaded from disk).
+const OriginDeveloper = buffer.OriginDeveloper
+
+// OriginAgent marks a line the agent wrote (set after edit approval).
+// Frontends render agent-written lines differently to highlight provenance.
+const OriginAgent = buffer.OriginAgent
+
 // scrollMarginCols is the horizontal lookahead margin. When the cursor
 // approaches the viewport edge, we scroll early so the developer can
 // see surrounding context rather than typing blind at the edge.
@@ -80,6 +91,42 @@ func (e *Editor) Close() {
 		e.highlighter.Close()
 	}
 }
+
+// LineCount returns the number of lines in the underlying buffer.
+func (e *Editor) LineCount() int { return e.Buf.LineCount() }
+
+// LineText returns the text of the given line (0-indexed).
+func (e *Editor) LineText(line int) string { return e.Buf.LineText(line) }
+
+// LineLen returns the rune length of the given line.
+func (e *Editor) LineLen(line int) int { return e.Buf.LineLen(line) }
+
+// LineOrigin returns the provenance of the given line (developer vs agent).
+func (e *Editor) LineOrigin(line int) buffer.Origin { return e.Buf.LineOrigin(line) }
+
+// ResetLineOriginToDeveloper clears agent provenance from a line after the
+// developer takes ownership (e.g., by typing on it or re-indenting).
+func (e *Editor) ResetLineOriginToDeveloper(line int) { e.Buf.ResetOriginToDeveloper(line) }
+
+// Content returns the full buffer content as a single string.
+func (e *Editor) Content() string { return e.Buf.Content() }
+
+// FilePath returns the absolute file path associated with the buffer.
+// Empty for unsaved buffers.
+func (e *Editor) FilePath() string { return e.Buf.Path }
+
+// IsModified reports whether the buffer has unsaved changes.
+func (e *Editor) IsModified() bool { return e.Buf.Modified }
+
+// BeginGroup starts an undo group so a sequence of edits is undone as one.
+func (e *Editor) BeginGroup() { e.Buf.BeginGroup() }
+
+// EndGroup closes the current undo group.
+func (e *Editor) EndGroup() { e.Buf.EndGroup() }
+
+// DeleteRange removes count runes starting at (line, col) and returns the
+// deleted text. Use BeginGroup/EndGroup to make multi-step edits atomic.
+func (e *Editor) DeleteRange(line, col, count int) string { return e.Buf.Delete(line, col, count) }
 
 // SetSize updates the editor dimensions and clamps scroll on both axes.
 func (e *Editor) SetSize(width, height int) {

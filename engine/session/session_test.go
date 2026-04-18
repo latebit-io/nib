@@ -202,7 +202,7 @@ func TestPrepareApprovalDoesNotMutateBuffer(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	got := s.Editor.Buf.Content()
+	got := s.activeEditor.Buf.Content()
 	if got != "hello world" {
 		t.Errorf("buffer mutated: got %q, want %q", got, "hello world")
 	}
@@ -248,7 +248,7 @@ func TestSwitchTo(t *testing.T) {
 	}
 
 	// New editor is active.
-	got := s.Editor.Buf.Content()
+	got := s.activeEditor.Buf.Content()
 	if got != "new content" && got != "new content\n" {
 		t.Errorf("new editor content = %q, want %q", got, "new content")
 	}
@@ -289,8 +289,8 @@ func TestSwitchToExistingBuffer(t *testing.T) {
 	if err := s.SwitchTo(pathB); err != nil {
 		t.Fatal(err)
 	}
-	if s.Editor.Buf.Content() != "file B content" {
-		t.Errorf("after switch to B: got %q", s.Editor.Buf.Content())
+	if s.activeEditor.Buf.Content() != "file B content" {
+		t.Errorf("after switch to B: got %q", s.activeEditor.Buf.Content())
 	}
 
 	// Switch back to A — should reuse the existing buffer, not re-read disk.
@@ -298,7 +298,7 @@ func TestSwitchToExistingBuffer(t *testing.T) {
 	if err := s.SwitchTo(pathA); err != nil {
 		t.Fatal(err)
 	}
-	got := s.Editor.Buf.Content()
+	got := s.activeEditor.Buf.Content()
 	if got == "file A content" {
 		t.Error("expected modified buffer A, got original disk content — buffer was not reused")
 	}
@@ -332,7 +332,7 @@ func TestMultiBufferModifiedTracking(t *testing.T) {
 	}
 
 	// Modify file B.
-	s.Editor.InsertChar('X')
+	s.activeEditor.InsertChar('X')
 	modified := s.ModifiedFiles()
 	if len(modified) != 1 {
 		t.Fatalf("expected 1 modified file, got %v", modified)
@@ -573,7 +573,7 @@ func TestApproveEditMarksAgentOrigin(t *testing.T) {
 	}
 
 	// Line should be marked as agent-written
-	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Errorf("line 0 origin = %d, want OriginAgent", got)
 	}
 }
@@ -656,18 +656,18 @@ func TestDeveloperEditResetsAgentOrigin(t *testing.T) {
 	s := newTestSession("agent line")
 
 	// Simulate agent writing a line
-	s.Editor.Buf.SetLineOrigin(0, buffer.OriginAgent)
-	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+	s.activeEditor.Buf.SetLineOrigin(0, buffer.OriginAgent)
+	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Fatalf("setup: origin = %d, want OriginAgent", got)
 	}
 
 	// Developer types on the agent line
-	s.Editor.CursorLine = 0
-	s.Editor.CursorCol = 5
-	s.Editor.InsertChar('X')
+	s.activeEditor.CursorLine = 0
+	s.activeEditor.CursorCol = 5
+	s.activeEditor.InsertChar('X')
 
 	// Origin should flip to Developer
-	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
 		t.Errorf("after developer edit: origin = %d, want OriginDeveloper", got)
 	}
 }
@@ -676,27 +676,27 @@ func TestAgentOriginSurvivesUndoRedo(t *testing.T) {
 	s := newTestSession("original")
 
 	// Simulate a grouped agent edit with origin
-	s.Editor.Buf.BeginGroup()
-	s.Editor.Buf.Delete(0, 0, 8)
-	s.Editor.Buf.InsertWithOrigin(0, 0, "replaced", buffer.OriginAgent)
-	s.Editor.Buf.EndGroup()
+	s.activeEditor.Buf.BeginGroup()
+	s.activeEditor.Buf.Delete(0, 0, 8)
+	s.activeEditor.Buf.InsertWithOrigin(0, 0, "replaced", buffer.OriginAgent)
+	s.activeEditor.Buf.EndGroup()
 
-	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Fatalf("after edit: origin = %d, want OriginAgent", got)
 	}
 
 	// Undo should restore Developer origin
-	s.Editor.Undo()
-	if s.Editor.Buf.LineText(0) != "original" {
-		t.Fatalf("after undo: text = %q", s.Editor.Buf.LineText(0))
+	s.activeEditor.Undo()
+	if s.activeEditor.Buf.LineText(0) != "original" {
+		t.Fatalf("after undo: text = %q", s.activeEditor.Buf.LineText(0))
 	}
-	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
 		t.Errorf("after undo: origin = %d, want OriginDeveloper", got)
 	}
 
 	// Redo should restore Agent origin
-	s.Editor.Redo()
-	if got := s.Editor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+	s.activeEditor.Redo()
+	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Errorf("after redo: origin = %d, want OriginAgent", got)
 	}
 }
@@ -851,7 +851,7 @@ func TestDeleteFile_ActiveFile(t *testing.T) {
 		t.Errorf("ActiveFile should be empty after deleting active file, got %q", s.ActiveFile())
 	}
 	// Editor must never be nil — a fresh empty editor is installed as fallback
-	if s.Editor == nil {
+	if s.ActiveEditor() == nil {
 		t.Fatal("Editor should not be nil after deleting active file")
 	}
 }

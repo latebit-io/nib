@@ -62,7 +62,7 @@ func newNavTestSession(t *testing.T, content string) *Session {
 func lookupAndNavigate(t *testing.T, sess *Session, line, col int) *lang.Location {
 	t.Helper()
 	originPath := sess.ActiveFile()
-	originLine, originCol := sess.Editor.CursorLine, sess.Editor.CursorCol
+	originLine, originCol := sess.activeEditor.CursorLine, sess.activeEditor.CursorCol
 
 	loc, err := sess.LookupDefinition(line, col)
 	if err != nil {
@@ -77,7 +77,7 @@ func lookupAndNavigate(t *testing.T, sess *Session, line, col int) *lang.Locatio
 			t.Fatalf("SwitchTo failed: %v", err)
 		}
 	}
-	sess.Editor.MoveCursorTo(loc.Line, loc.Col)
+	sess.activeEditor.MoveCursorTo(loc.Line, loc.Col)
 	return loc
 }
 
@@ -121,15 +121,15 @@ func TestLookupDefinition(t *testing.T) {
 func TestNavigateAndGoBack(t *testing.T) {
 	t.Run("same file jump and go-back", func(t *testing.T) {
 		sess := newNavTestSession(t, "line0\nline1\nline2\n")
-		sess.Editor.MoveCursorTo(1, 2)
+		sess.activeEditor.MoveCursorTo(1, 2)
 		mock := &mockDefinitionProvider{
 			loc: lang.Location{Path: sess.ActiveFile(), Line: 2, Col: 0},
 		}
 		sess.SetLanguageService(mock)
 
 		lookupAndNavigate(t, sess, 1, 2)
-		if sess.Editor.CursorLine != 2 {
-			t.Fatalf("cursor should be at line 2, got %d", sess.Editor.CursorLine)
+		if sess.activeEditor.CursorLine != 2 {
+			t.Fatalf("cursor should be at line 2, got %d", sess.activeEditor.CursorLine)
 		}
 
 		loc := sess.GoBack()
@@ -139,8 +139,8 @@ func TestNavigateAndGoBack(t *testing.T) {
 		if loc.Line != 1 || loc.Col != 2 {
 			t.Errorf("GoBack returned %d:%d, want 1:2", loc.Line, loc.Col)
 		}
-		if sess.Editor.CursorLine != 1 || sess.Editor.CursorCol != 2 {
-			t.Errorf("cursor at %d:%d, want 1:2", sess.Editor.CursorLine, sess.Editor.CursorCol)
+		if sess.activeEditor.CursorLine != 1 || sess.activeEditor.CursorCol != 2 {
+			t.Errorf("cursor at %d:%d, want 1:2", sess.activeEditor.CursorLine, sess.activeEditor.CursorCol)
 		}
 	})
 
@@ -157,7 +157,7 @@ func TestNavigateAndGoBack(t *testing.T) {
 		sess.SetLanguageService(mock)
 
 		// Jump 0:0 → 1:0
-		sess.Editor.MoveCursorTo(0, 0)
+		sess.activeEditor.MoveCursorTo(0, 0)
 		mock.loc = lang.Location{Path: sess.ActiveFile(), Line: 1, Col: 0}
 		lookupAndNavigate(t, sess, 0, 0)
 

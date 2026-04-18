@@ -102,7 +102,7 @@ func (e *Editor) LineText(line int) string { return e.Buf.LineText(line) }
 func (e *Editor) LineLen(line int) int { return e.Buf.LineLen(line) }
 
 // LineOrigin returns the provenance of the given line (developer vs agent).
-func (e *Editor) LineOrigin(line int) buffer.Origin { return e.Buf.LineOrigin(line) }
+func (e *Editor) LineOrigin(line int) LineOrigin { return e.Buf.LineOrigin(line) }
 
 // ResetLineOriginToDeveloper clears agent provenance from a line after the
 // developer takes ownership (e.g., by typing on it or re-indenting).
@@ -1151,7 +1151,7 @@ func (e *Editor) LocateEdit(search string) (*EditLocation, string) {
 // lineOrigins is a per-line origin slice for the replacement text (index 0 =
 // first replacement line). Nil slice means no origin changes. A nil entry
 // within the slice means "don't change this line's origin" (unchanged line).
-func (e *Editor) ApplyEdit(search, replace string, lineOrigins []*buffer.Origin) (bool, string) {
+func (e *Editor) ApplyEdit(search, replace string, lineOrigins []*LineOrigin) (bool, string) {
 	loc, reason := e.LocateEdit(search)
 	if loc == nil {
 		return false, reason

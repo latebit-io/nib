@@ -178,7 +178,15 @@ func ResolveProjectRoot(startDir string) string {
 // agent after construction (this breaks the circular dependency between
 // session-as-workspace and agent-needing-workspace).
 // The projectRoot is used for file listing and resolving relative paths.
+//
+// If e is nil, a fresh empty editor is installed so activeEditor is never
+// nil — the same invariant cleanupDeletedPath enforces on file deletion.
+// Callers that pass nil (e.g. tests for non-editor subsystems) get a sound
+// session instead of one that panics on the first agent turn.
 func New(e *editor.Editor, projectRoot string) *Session {
+	if e == nil {
+		e = editor.New(buffer.New())
+	}
 	// Normalize to absolute so CanonPath/resolvePath work regardless of
 	// whether the caller passes ".", a relative path, or an absolute path.
 	if absRoot, err := filepath.Abs(projectRoot); err == nil {
@@ -195,7 +203,7 @@ func New(e *editor.Editor, projectRoot string) *Session {
 		modifiedFiles: make(map[string]bool),
 		projectRoot:   projectRoot,
 	}
-	if e != nil && e.Buf.Path != "" {
+	if e.Buf.Path != "" {
 		if _, err := s.resolvePath(e.Buf.Path); err != nil {
 			slog.Warn("New: initial editor path rejected", "path", e.Buf.Path, "err", err)
 		} else {

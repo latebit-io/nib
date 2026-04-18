@@ -1680,6 +1680,11 @@ func computeLineOrigins(search, originalReplace, finalReplace string) []*buffer.
 // CompleteApproval signals the agent that the animated edit has been applied.
 // Call this after the animation finishes (or after a yield). Promotes the
 // staged edit path to lastEditedFile so Continue sends the right content.
+//
+// Sets awaitingContinue eagerly — the agent will shortly emit
+// StatusEditing on the best-effort event path, but that event can be dropped
+// under channel pressure. Gating on our own action keeps CanContinue honest
+// even when the event is lost.
 func (s *Session) CompleteApproval() {
 	if s.HasAgent() {
 		s.lastEditedFile = s.stagedEditFile
@@ -1689,6 +1694,9 @@ func (s *Session) CompleteApproval() {
 			s.mu.Unlock()
 		}
 		s.stagedEditFile = ""
+		s.mu.Lock()
+		s.awaitingContinue = true
+		s.mu.Unlock()
 		s.agent.Approve()
 	}
 }
@@ -1727,16 +1735,20 @@ func (s *Session) ApproveAndContinue() {
 // Continue signals the agent to proceed after the developer has finished editing.
 // Sends the content of the file that was last edited (not necessarily the
 // currently active file, in case the user switched files after approving).
-// Does not eagerly clear awaitingContinue — the agent's next StatusThinking
-// event does that, so repeated presses remain safe if the signal was dropped.
+//
+// Clears awaitingContinue eagerly so a second press during the same agent
+// turn is a no-op. agent.Continue uses a non-blocking send on a cap-1 channel,
+// so the first call either lands or coincides with an already-pending message
+// the agent will read — retrying adds no value and can leave a stale message
+// buffered for the next waitForContinue.
 func (s *Session) Continue() {
 	if !s.HasAgent() {
 		return
 	}
 	// Resolve path+editor atomically: cleanupDeletedPath and SwitchTo mutate
 	// lastEditedFile, activeFile, activeEditor, and editors under mu.Lock, so
-	// all four reads must happen together under mu.RLock.
-	s.mu.RLock()
+	// all four reads must happen together under a single lock scope.
+	s.mu.Lock()
 	path := s.lastEditedFile
 	if path == "" {
 		path = s.activeFile
@@ -1746,7 +1758,8 @@ func (s *Session) Continue() {
 		e = s.activeEditor
 		path = s.activeFile
 	}
-	s.mu.RUnlock()
+	s.awaitingContinue = false
+	s.mu.Unlock()
 	s.agent.Continue(path, e.Buf.Content())
 }
 

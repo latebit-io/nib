@@ -327,6 +327,66 @@ func TestReleaseLock_Idempotent(t *testing.T) {
 	m.releaseLock()
 }
 
+func TestReuseExisting_DoesNotKillRecycledUnrelatedPID(t *testing.T) {
+	// reuseExisting must not terminate an adopted PID whose port probe
+	// fails unless the PID is actually a demarkus-server for this
+	// content dir. Otherwise a stale .memory-pid whose PID got recycled
+	// by an unrelated process (editor, shell, etc.) would be SIGKILL'd
+	// on the next junto launch — a real data-loss risk for the user.
+	m := New(t.TempDir())
+
+	// Set up state-files pointing at a live but unrelated PID.
+	if err := os.MkdirAll(filepath.Join(m.projectRoot, ".project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// `sleep` stands in for "unrelated process we happen to share a PID with."
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn bystander: %v", err)
+	}
+	bystanderPID := cmd.Process.Pid
+	bystanderDone := make(chan struct{})
+	go func() {
+		defer close(bystanderDone)
+		// Wait error is discarded: we kill the bystander ourselves in
+		// the test cleanup below, so the non-nil exit status is the
+		// documented outcome, not a failure condition.
+		_ = cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill() // best-effort — test is done with this process
+		<-bystanderDone
+	})
+
+	if err := os.WriteFile(m.pidFile, []byte(strconv.Itoa(bystanderPID)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Port far above any real demarkus-server range to guarantee probe fail.
+	if err := os.WriteFile(m.portFile, []byte("1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// reuseExisting will: signal(0) bystanderPID → alive; probe port 1 → fail.
+	// Old code (or unfixed code) would SIGKILL bystanderPID here. New code
+	// must NOT, because bystanderPID is not a demarkus-server for contentDir.
+	_, err := m.reuseExisting()
+	if err == nil {
+		t.Fatal("expected errNoExistingServer")
+	}
+	if !errors.Is(err, errNoExistingServer) {
+		t.Errorf("expected errNoExistingServer, got: %v", err)
+	}
+
+	// The bystander must still be alive — proof we didn't kill it.
+	proc, ferr := os.FindProcess(bystanderPID)
+	if ferr != nil {
+		t.Fatalf("FindProcess: %v", ferr)
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		t.Errorf("bystander PID %d was killed by reuseExisting — this is the recycled-PID safety bug", bystanderPID)
+	}
+}
+
 func TestStop_ReapsOwnedChildWithoutZombie(t *testing.T) {
 	// Stop() on a Manager that owns a live child must fully reap the
 	// child — not just signal it. Regression test for a prior bug where

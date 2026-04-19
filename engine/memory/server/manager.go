@@ -386,6 +386,31 @@ func (m *Manager) reapOrphans(sparePID int) {
 	}
 }
 
+// pidOwnsDemarkusServer reports whether pid is currently a demarkus-
+// server process for this manager's content directory. Used before
+// terminating an adopted PID whose port probe failed — signal(0) alone
+// cannot distinguish between "our server is wedged" and "our PID got
+// recycled by an unrelated process after the original server exited."
+// Without this check, blind termination on probe failure could SIGKILL
+// the user's unrelated process.
+//
+// Scan errors are logged and treated as "not ours" — failing closed on
+// a best-effort identity check is the safer default. The caller still
+// cleans up stale state files and proceeds to launch a fresh server.
+func (m *Manager) pidOwnsDemarkusServer(pid int) bool {
+	matches, err := findDemarkusServerPIDs(m.contentDir)
+	if err != nil {
+		slog.Warn("memory server: PID ownership check failed", "pid", pid, "err", err)
+		return false
+	}
+	for _, match := range matches {
+		if match == pid {
+			return true
+		}
+	}
+	return false
+}
+
 // findDemarkusServerPIDs returns PIDs of demarkus-server processes whose
 // `-root <contentDir>` argument matches the given path. Uses ps since
 // junto already depends on POSIX process semantics. The `-ww` flag
@@ -631,13 +656,25 @@ func (m *Manager) reuseExisting() (int, error) {
 	probe.Stdout = io.Discard
 	probe.Stderr = io.Discard
 	if err := probe.Run(); err != nil {
-		// Live PID, unresponsive QUIC endpoint — the server is wedged.
-		// Terminate it here so Start() can launch a healthy replacement;
-		// otherwise cleanupFiles() below would drop the PID reference and
-		// next junto launch would orphan this process permanently.
-		slog.Warn("memory server: adopting PID probe failed; terminating", "pid", pid, "port", port, "err", err)
-		if termErr := terminatePID(pid, 5*time.Second); termErr != nil {
-			slog.Warn("memory server: terminate unresponsive server failed", "pid", pid, "err", termErr)
+		// Probe failed. Two distinct scenarios must be distinguished —
+		// conflating them risks killing an unrelated process:
+		//   a) demarkus-server is wedged (original bug we're guarding).
+		//      Terminate it so Start() can launch a healthy replacement;
+		//      without this, cleanupFiles() below drops the PID reference
+		//      and the next junto launch orphans it permanently.
+		//   b) PID was recycled by an unrelated process after the prior
+		//      demarkus-server exited (e.g. the user's editor now holds
+		//      this PID). signal(0) earlier proved "a process exists";
+		//      it did NOT prove "that process is our server." Killing
+		//      blindly here could SIGKILL the user's unrelated work.
+		// Verify identity via ps before terminating.
+		if m.pidOwnsDemarkusServer(pid) {
+			slog.Warn("memory server: adopting PID probe failed; terminating", "pid", pid, "port", port, "err", err)
+			if termErr := terminatePID(pid, 5*time.Second); termErr != nil {
+				slog.Warn("memory server: terminate unresponsive server failed", "pid", pid, "err", termErr)
+			}
+		} else {
+			slog.Info("memory server: PID recycled by unrelated process; skipping terminate", "pid", pid, "port", port)
 		}
 		m.cleanupFiles()
 		return 0, fmt.Errorf("%w: PID %d alive but port %d not responding", errNoExistingServer, pid, port)

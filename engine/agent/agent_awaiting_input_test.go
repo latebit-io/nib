@@ -243,24 +243,53 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 
 	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
 
-	// Drain until we see the abandon-turn AgentError. Earlier AgentErrors
-	// (per-truncation recovery messages) are emitted too, so match on the
-	// specific substring identifying the exhaustion path.
-	errEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		ae, ok := ev.(event.AgentError)
-		return ok && strings.Contains(ae.Err, "abandoning turn")
-	})
-	if errEv == nil {
-		t.Fatal("expected AgentError abandoning turn after retry limit")
+	// Non-fatal errors (including the abort) leave runLoop in AgentWaiting
+	// rather than exiting — wait for that, then cancel ctx to force the
+	// run goroutine to return so its defer populates savedMessages.
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentWaiting after truncation retry exhaustion")
+	}
+	cancel()
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentDone)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentDone after ctx cancel")
 	}
 
 	// The provider should have been called exactly maxTruncationRetries+1
 	// times — retries capped, no infinite loop.
 	provider.mu.Lock()
-	defer provider.mu.Unlock()
 	wantCalls := maxTruncationRetries + 1
 	if provider.call != wantCalls {
 		t.Errorf("provider calls = %d, want %d", provider.call, wantCalls)
+	}
+	provider.mu.Unlock()
+
+	// Every assistant message with ToolCalls must have a matching tool-role
+	// reply in the saved transcript — including the final abort attempt.
+	// Without this, Resume from savedMessages would send a malformed
+	// request (dangling tool_calls) that the provider rejects on validation.
+	ag.mu.Lock()
+	saved := ag.savedMessages
+	ag.mu.Unlock()
+
+	toolCallsEmitted := 0
+	toolRepliesSeen := 0
+	for _, msg := range saved {
+		if msg.Role == "assistant" {
+			toolCallsEmitted += len(msg.ToolCalls)
+		}
+		if msg.Role == "tool" && msg.ToolCallID == "call-trunc" {
+			toolRepliesSeen++
+		}
+	}
+	if toolCallsEmitted != toolRepliesSeen {
+		t.Errorf("dangling tool_calls in saved transcript: %d assistant ToolCalls, %d tool-role replies",
+			toolCallsEmitted, toolRepliesSeen)
 	}
 }
 

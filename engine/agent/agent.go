@@ -1236,8 +1236,16 @@ func (a *Agent) drainStream(ctx context.Context, ch <-chan llm.StreamEvent, thin
 // messages. Returns the updated messages, the incremented retry counter, and
 // a terminal error if the cap was reached (caller returns the error so the
 // turn ends instead of looping against a model that will not fit in-budget).
+//
+// Both paths append a tool-role reply for every pending tool call — the
+// assistant message with ToolCalls has already been committed by the caller,
+// and leaving it unanswered would produce a malformed transcript that the
+// next provider request (including a Resume from saved messages) would
+// reject on validation.
 func (a *Agent) handleTruncationRetry(messages []llm.Message, toolCalls []llm.ToolCall, retries int) ([]llm.Message, int, error) {
 	if retries >= maxTruncationRetries {
+		const abortReply = "Error: your response was truncated at the model's max output token limit, and the agent has exhausted its truncation-recovery retries. The turn is being abandoned to avoid looping against a model that cannot fit its answer in the available budget."
+		messages = appendTruncationRejections(messages, toolCalls, abortReply)
 		err := fmt.Errorf("agent: abandoning turn after %d consecutive truncated responses", retries+1)
 		slog.Error("agent: truncation retries exhausted", "retries", retries)
 		a.send(event.AgentError{Err: err.Error()})
@@ -1245,6 +1253,23 @@ func (a *Agent) handleTruncationRetry(messages []llm.Message, toolCalls []llm.To
 	}
 	messages = a.handleTruncatedTurn(messages, toolCalls)
 	return messages, retries + 1, nil
+}
+
+// appendTruncationRejections appends a tool-role reply for each pending
+// tool call from a truncated assistant message. Chat-completion transcripts
+// require a tool-role message for every tool_calls entry before the next
+// assistant turn — skipping them leaves dangling references that providers
+// validate and reject on the following request. No-op when toolCalls is
+// empty (the assistant message had no tool calls to answer).
+func appendTruncationRejections(messages []llm.Message, toolCalls []llm.ToolCall, reply string) []llm.Message {
+	for _, tc := range toolCalls {
+		messages = append(messages, llm.Message{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Content:    reply,
+		})
+	}
+	return messages
 }
 
 // handleTruncatedTurn rejects tool calls from a turn whose output was cut
@@ -1263,13 +1288,7 @@ func (a *Agent) handleTruncatedTurn(messages []llm.Message, toolCalls []llm.Tool
 
 	toolMsg, userMsg, uiMsg := truncationRecoveryMessages(from, to, escalated)
 	a.send(event.AgentError{Err: uiMsg})
-	for _, tc := range toolCalls {
-		messages = append(messages, llm.Message{
-			Role:       "tool",
-			ToolCallID: tc.ID,
-			Content:    toolMsg,
-		})
-	}
+	messages = appendTruncationRejections(messages, toolCalls, toolMsg)
 	if len(toolCalls) == 0 {
 		messages = append(messages, llm.Message{
 			Role:    "user",

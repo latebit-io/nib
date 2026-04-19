@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/event"
@@ -15,9 +16,9 @@ import (
 // tag (which may never arrive) was seen.
 func TestDrainStream_ResetsThinkStateOnReturn(t *testing.T) {
 	tests := []struct {
-		name   string
-		events []llm.StreamEvent
-		close  bool // if true, close channel without a Done event (EOF path)
+		name    string
+		events  []llm.StreamEvent
+		wantErr error // nil for Done-event paths, errStreamClosedEarly for EOF
 	}{
 		{
 			name: "clean think block closes state",
@@ -38,7 +39,7 @@ func TestDrainStream_ResetsThinkStateOnReturn(t *testing.T) {
 			events: []llm.StreamEvent{
 				{Token: "<think>incomplete"},
 			},
-			close: true,
+			wantErr: errStreamClosedEarly,
 		},
 	}
 
@@ -54,7 +55,10 @@ func TestDrainStream_ResetsThinkStateOnReturn(t *testing.T) {
 			close(ch) // safe for both paths — Done-event tests still read their event first
 
 			thinkState := true // start dirty to prove defer reset fires
-			_, _ = ag.drainStream(context.Background(), ch, &thinkState)
+			_, err := ag.drainStream(context.Background(), ch, &thinkState)
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("drainStream error = %v, want %v", err, tc.wantErr)
+			}
 			if thinkState {
 				t.Error("thinkState should be false after drainStream returns")
 			}
@@ -76,7 +80,13 @@ func TestDrainStream_ResetsThinkStateOnCtxCancel(t *testing.T) {
 	cancel() // cancel immediately so the select races to ctx.Done
 
 	thinkState := true
-	_, _ = ag.drainStream(ctx, ch, &thinkState)
+	// ctx cancellation has its own handling path in processLLMTurn (via
+	// ctx.Err() check), so drainStream returns nil on this path — see
+	// the function's doc comment.
+	_, err := ag.drainStream(ctx, ch, &thinkState)
+	if err != nil {
+		t.Errorf("drainStream error on ctx cancel = %v, want nil", err)
+	}
 	if thinkState {
 		t.Error("thinkState should be false after drainStream returns on ctx cancel")
 	}

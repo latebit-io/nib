@@ -56,7 +56,9 @@ linters:
             - pkg: "github.com/latebit-io/junto/tui"
               desc: "engine must never import tui"
 
-        # editor depends on buffer + highlight only.
+        # editor depends on buffer only. Highlighting is provided via the
+        # editor.Highlighter interface so binaries that never render (e.g.
+        # junto-agent) don't pull in tree-sitter grammar blobs transitively.
         editor-isolation:
           files:
             - "**/editor/*.go"
@@ -67,6 +69,8 @@ linters:
               desc: "editor must not import session (dependency inversion)"
             - pkg: "github.com/latebit-io/junto/engine/llm"
               desc: "editor must not import llm"
+            - pkg: "github.com/latebit-io/junto/engine/highlight"
+              desc: "editor must not import highlight — highlighting is injected via the Highlighter interface so junto-agent stays grammar-free"
             - pkg: "github.com/latebit-io/junto/engine/filelist"
               desc: "editor must not import filelist"
             - pkg: "github.com/latebit-io/junto/engine/fuzzy"
@@ -116,6 +120,8 @@ linters:
 
         # session is the top of the engine — can import agent, editor, buffer, filelist.
         # Must not import tui or llm directly (uses Provider interface via agent).
+        # Must not import highlight — highlighting is injected via a HighlighterFactory
+        # set by the frontend, so junto-agent doesn't link in grammar blobs.
         # Test files excluded: tests need llm to construct mock providers.
         session-isolation:
           files:
@@ -125,7 +131,7 @@ linters:
             - pkg: "github.com/latebit-io/junto/engine/llm"
               desc: "session must not import llm directly (uses agent which abstracts Provider)"
             - pkg: "github.com/latebit-io/junto/engine/highlight"
-              desc: "session must not import highlight"
+              desc: "session must not import highlight — frontend injects the factory via SetHighlighterFactory"
             - pkg: "github.com/latebit-io/junto/engine/fuzzy"
               desc: "session must not import fuzzy"
             - pkg: "github.com/latebit-io/junto/tui"

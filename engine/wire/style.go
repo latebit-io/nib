@@ -119,7 +119,32 @@ func detectLintCommands(projectRoot string) []string {
 		}
 	}
 
+	// Lua project: detected by .luacheckrc, main.lua (LÖVE convention), or any
+	// .lua file at the root. Luacheck is the de facto standard linter; it
+	// operates per-file cleanly, so {file} (not {dir}) is the right expansion.
+	if isLuaProject(projectRoot) {
+		if _, err := exec.LookPath("luacheck"); err == nil {
+			slog.Info("wire: auto-detected luacheck for Lua project")
+			return []string{"luacheck {file}"}
+		}
+		slog.Debug("wire: Lua project detected but luacheck not on PATH — no lint configured")
+	}
+
 	return nil
+}
+
+// isLuaProject reports whether projectRoot looks like a Lua project. The
+// check is shallow (root-level only) — a deep walk would be wasted work
+// for a signal the developer can override via explicit style config.
+func isLuaProject(projectRoot string) bool {
+	if _, err := os.Stat(filepath.Join(projectRoot, ".luacheckrc")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(projectRoot, "main.lua")); err == nil {
+		return true
+	}
+	matches, _ := filepath.Glob(filepath.Join(projectRoot, "*.lua"))
+	return len(matches) > 0
 }
 
 // ConvertRules translates styleconfig rules into agent-ready StyleRule values.

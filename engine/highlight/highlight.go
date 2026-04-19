@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/latebit-io/junto/engine/editor"
 	tree_sitter_lua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
@@ -25,44 +26,31 @@ var goHighlightsSCM string
 //go:embed queries/lua/highlights.scm
 var luaHighlightsSCM string
 
-// TokenKind identifies the syntactic role of a token.
-// Frontends map these to their own styling (lipgloss, CSS, etc.).
-type TokenKind string
-
-const (
-	// KindKeyword marks language keywords (if, for, func, etc.).
-	KindKeyword TokenKind = "keyword"
-	// KindString marks string literals and escape sequences.
-	KindString TokenKind = "string"
-	// KindComment marks comments.
-	KindComment TokenKind = "comment"
-	// KindNumber marks numeric literals.
-	KindNumber TokenKind = "number"
-	// KindType marks type names and type identifiers.
-	KindType TokenKind = "type"
-	// KindOperator marks arithmetic, comparison, and logical operators.
-	// Brackets and delimiters (@punctuation.*) are intentionally left
-	// unstyled so the output isn't dominated by punctuation coloring.
-	KindOperator TokenKind = "operator"
-	// KindFunction marks function and method names at both definition
-	// and call sites.
-	KindFunction TokenKind = "function"
-	// KindConstant marks constant identifiers and built-in constants
-	// (true, false, nil, etc.).
-	KindConstant TokenKind = "constant"
-	// KindNone is the zero value — plain text with no syntax role.
-	KindNone TokenKind = ""
+// Re-export the editor types so existing references to e.g. highlight.Token
+// continue to resolve. Everything below is a thin alias — the canonical
+// definitions live in the editor package so binaries that never render
+// (junto-agent) can skip the tree-sitter grammar imports entirely.
+type (
+	// TokenKind aliases [editor.TokenKind].
+	TokenKind = editor.TokenKind
+	// Token aliases [editor.Token].
+	Token = editor.Token
 )
 
-// Token represents a highlighted range on a single line.
-type Token struct {
-	// Col is the start column (0-indexed, in runes).
-	Col int
-	// Len is the length in runes.
-	Len int
-	// Kind is the syntactic role of this token.
-	Kind TokenKind
-}
+// Token-kind constants re-exported from the editor package. Use these
+// aliases for readability inside highlighter internals; external callers
+// can reference either `editor.KindKeyword` or `highlight.KindKeyword`.
+const (
+	KindKeyword  = editor.KindKeyword
+	KindString   = editor.KindString
+	KindComment  = editor.KindComment
+	KindNumber   = editor.KindNumber
+	KindType     = editor.KindType
+	KindOperator = editor.KindOperator
+	KindFunction = editor.KindFunction
+	KindConstant = editor.KindConstant
+	KindNone     = editor.KindNone
+)
 
 // langSpec describes one supported language: its tree-sitter grammar and
 // the vendored highlight query.
@@ -126,6 +114,19 @@ type Highlighter struct {
 	captureKinds []TokenKind // indexed by capture id
 	tree         *sitter.Tree
 	cache        [][]Token // per-line tokens, computed on Parse()
+}
+
+// NewHighlighter is the [editor.HighlighterFactory]-shaped constructor.
+// It delegates to [New] and converts a nil concrete result into a true
+// nil interface value — callers that compare `h != nil` on the returned
+// [editor.Highlighter] get the answer they expect, avoiding the typed-nil
+// gotcha that bites naive conversions.
+func NewHighlighter(filename string) editor.Highlighter {
+	h := New(filename)
+	if h == nil {
+		return nil
+	}
+	return h
 }
 
 // New creates a highlighter for the given file extension.

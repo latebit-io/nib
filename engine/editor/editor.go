@@ -9,7 +9,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/highlight"
 )
 
 // TabWidth is the display width of a tab character. Frontends must use
@@ -64,28 +63,42 @@ type Editor struct {
 	SelectStartLine int
 	SelectStartCol  int
 
-	// Syntax highlighting (internal — use HighlightLine to access)
-	highlighter  *highlight.Highlighter
+	// Syntax highlighting (internal — use HighlightLine to access).
+	// Nil when the editor has no highlighter wired in (e.g. headless mode,
+	// tests). Install one via SetHighlighter; install a default via a
+	// factory configured on the parent Session.
+	highlighter  Highlighter
 	needsReparse bool
 }
 
-// New creates an editor wrapping the given buffer.
+// New creates an editor wrapping the given buffer. The returned editor
+// has no syntax highlighter attached — callers that want highlighting
+// should call [Editor.SetHighlighter] with a concrete implementation
+// (e.g. the one from the highlight package), or configure a
+// [HighlighterFactory] on the parent [Session].
 func New(buf *buffer.Buffer) *Editor {
-	e := &Editor{
+	return &Editor{
 		Buf:    buf,
 		Width:  80,
 		Height: 24,
 	}
-	if buf.Path != "" {
-		e.highlighter = highlight.New(buf.Path)
-		if e.highlighter != nil {
-			e.highlighter.Parse(buf.Content())
-		}
-	}
-	return e
 }
 
-// Close frees native tree-sitter resources. Call on shutdown.
+// SetHighlighter attaches a Highlighter to this editor, replacing any
+// existing one (the old one is closed). Pass nil to remove highlighting.
+// On install the current buffer content is parsed immediately so
+// HighlightLine returns meaningful tokens on the next call.
+func (e *Editor) SetHighlighter(h Highlighter) {
+	if e.highlighter != nil {
+		e.highlighter.Close()
+	}
+	e.highlighter = h
+	if h != nil && e.Buf != nil {
+		h.Parse(e.Buf.Content())
+	}
+}
+
+// Close frees any resources held by the highlighter. Call on shutdown.
 func (e *Editor) Close() {
 	if e.highlighter != nil {
 		e.highlighter.Close()
@@ -1215,7 +1228,7 @@ func (e *Editor) ReparseIfNeeded() {
 // HighlightLine returns syntax tokens for the given line.
 // Returns nil if no highlighter is configured.
 // Calls ReparseIfNeeded internally so the caller doesn't have to.
-func (e *Editor) HighlightLine(line int) []highlight.Token {
+func (e *Editor) HighlightLine(line int) []Token {
 	e.ReparseIfNeeded()
 	if e.highlighter == nil {
 		return nil

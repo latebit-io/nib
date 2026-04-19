@@ -64,6 +64,33 @@ func TestProjectTaskAddTool_NilTracker(t *testing.T) {
 	assertContains(t, result.Content, "task tracking not available")
 }
 
+func TestProjectTaskAddTool_NormalizesWhitespace(t *testing.T) {
+	tracker := &stubTracker{}
+	tool := NewProjectTaskAddTool(tracker)
+	// Whitespace-padded args must reach the tracker trimmed so lookups
+	// against "Phase 1" / "Render" succeed.
+	args := `{"phase": "  Phase 1  ", "feature": "\tRender\n", "task": "  draw  ", "link": "  /x.md  "}`
+	result := tool.Execute(context.Background(), toolCall("project_task_add", args))
+	assertContains(t, result.Content, "Added: Phase 1 > Render > draw")
+
+	if len(tracker.addCalls) != 1 {
+		t.Fatalf("expected 1 AddTask call, got %d", len(tracker.addCalls))
+	}
+	call := tracker.addCalls[0]
+	if call.phase != "Phase 1" {
+		t.Errorf("phase not trimmed: %q", call.phase)
+	}
+	if call.feature != "Render" {
+		t.Errorf("feature not trimmed: %q", call.feature)
+	}
+	if call.task != "draw" {
+		t.Errorf("task not trimmed: %q", call.task)
+	}
+	if call.link != "/x.md" {
+		t.Errorf("link not trimmed: %q", call.link)
+	}
+}
+
 func TestProjectTaskAddTool_TrackerError(t *testing.T) {
 	tool := NewProjectTaskAddTool(&stubTracker{addErr: errors.New("no such phase")})
 	args := `{"phase": "P", "feature": "F", "task": "t"}`

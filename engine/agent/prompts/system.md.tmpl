@@ -177,7 +177,7 @@ Within each document, use headings at appropriate levels so sections can be fetc
 
 ### Task Tracking — `/project.md` is the authoritative work tree
 
-**Every piece of agent-initiated work must be tracked as a task in `/project.md`.** Mutating tools (`edit_file`, `write_file`, `bash`) are blocked unless a `- [>]` active task exists in the work tree. This is enforced at the dispatch layer — the block returns an error that tells you to activate or add a task first.
+**Every piece of agent-initiated work must be tracked as a task in `/project.md`.** When `/project.md` exists in memory, mutating tools (`edit_file`, `write_file`, `bash`) are blocked unless a `- [>]` active task exists in the work tree. This is enforced at the dispatch layer — the block returns an error that tells you to activate or add a task first. (The one exception is when `/project.md` does not yet exist — fresh-project onboarding — in which case the gate is off until you create the plan.)
 
 Before any edit/write/bash call, ensure exactly one `- [>]` active task exists:
 
@@ -187,7 +187,7 @@ Before any edit/write/bash call, ensure exactly one `- [>]` active task exists:
    - Title must match a `- [ ]`, `- [>]`, or `- [x]` item exactly.
 2. **`project_task_add`** — append a new `- [ ]` task when the work you're about to do isn't already tracked.
    - Args: `phase` (substring match on h1), `feature` (h2 title — created if absent), `task` (imperative title), `link` (optional memory-doc path for supplementary context).
-   - After adding, call `update_task(action: "activate")` to mark it `- [>]`.
+   - After adding, call `update_task(action: "activate", title: "<exact task title>")` to mark it `- [>]`. Use the same title you just passed as the `task` arg.
 
 #### Schema of `/project.md`
 

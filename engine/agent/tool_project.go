@@ -78,27 +78,26 @@ func (t *ProjectTaskAddTool) Execute(_ context.Context, call llm.ToolCall) ToolR
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
-	if strings.TrimSpace(args.Phase) == "" {
+	phase := strings.TrimSpace(args.Phase)
+	feature := strings.TrimSpace(args.Feature)
+	task := strings.TrimSpace(args.Task)
+	link := strings.TrimSpace(args.Link)
+	if phase == "" {
 		return textResult("Error: phase is required")
 	}
-	if strings.TrimSpace(args.Feature) == "" {
+	if feature == "" {
 		return textResult("Error: feature is required")
 	}
-	if strings.TrimSpace(args.Task) == "" {
+	if task == "" {
 		return textResult("Error: task is required")
 	}
 	if t.tracker == nil {
 		return textResult("Error: task tracking not available")
 	}
 
-	if err := t.tracker.AddTask(args.Phase, args.Feature, args.Task, args.Link); err != nil {
+	if err := t.tracker.AddTask(phase, feature, task, link); err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
 
-	return textResult(fmt.Sprintf(
-		"Added: %s > %s > %s",
-		strings.TrimSpace(args.Phase),
-		strings.TrimSpace(args.Feature),
-		strings.TrimSpace(args.Task),
-	))
+	return textResult(fmt.Sprintf("Added: %s > %s > %s", phase, feature, task))
 }

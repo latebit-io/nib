@@ -46,16 +46,17 @@ If no plan exists, create one from scratch.
 
 ## Plan Schema — `/project.md`
 
-The plan is a strict markdown document with exactly four levels. Do NOT add extra headings, prose, descriptions, or any content outside this schema.
+The plan is a strict markdown document with two heading levels and three task markers. Optional frontmatter may carry demarkus metadata. Do NOT add h3+ headings, prose outside `## Goal:` / `## Plan:`, or any content outside this schema — the server rejects malformed publishes.
 
 ```
+---                                 ← frontmatter optional
+version: 1                          ← demarkus metadata allowed
 ---
-project: ProjectName
----
-# Phase N: Title
-## Feature Title
-- [ ] concrete task (imperative verb + what changes)
-- [ ] another task
+# Phase N: Title                    ← h1 only, "Phase N: Name"
+## Feature Title                    ← h2: feature, or "Goal: ...", or "Plan: ..."
+- [ ] concrete task                 ← pending
+- [>] currently active              ← exactly one or zero across doc
+- [x] completed task
 ```
 
 ### Rules

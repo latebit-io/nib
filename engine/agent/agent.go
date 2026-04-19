@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -18,6 +19,11 @@ import (
 	"github.com/latebit-io/junto/engine/memory"
 	"github.com/latebit-io/junto/engine/project"
 )
+
+// activeTaskGateTimeout bounds the work-tree fetch that guards mutating
+// tools. A slow memory backend should not hang the agent goroutine before
+// every edit — we fail loudly on timeout rather than silently.
+const activeTaskGateTimeout = 5 * time.Second
 
 // Mode is an alias for event.Mode so existing callers within the agent
 // package can use the unqualified names. The canonical definition lives
@@ -1431,14 +1437,18 @@ func (a *Agent) fetchMemorySummary(ctx context.Context) string {
 // enforceActiveTaskGate blocks mutating tools in execution mode when
 // /project.md has no active `[>]` task. Returns empty string when the
 // call may proceed, or a user-facing error directing the agent to
-// activate or add a task.
+// activate or add a task (or to surface an infrastructure failure).
 //
 // Cases handled intentionally:
 //   - No memory store → gate off (project.md cannot exist anywhere).
 //   - Non-mutating tool → gate off (reads and LSP queries are free).
 //   - Planning mode → gate off (planning-mode blocklist already rejects these).
-//   - /project.md fetch fails (not found, server down, etc.) → gate off
-//     so the agent isn't blocked by infrastructure issues on fresh projects.
+//   - /project.md does not exist ([memory.ErrNotFound]) → gate off; fresh
+//     project onboarding DX.
+//   - Memory fetch fails with any other error (auth, transport, timeout) →
+//     blocked and logged. Surfacing the failure is safer than fail-open:
+//     if the store is broken, task mutations will fail anyway, so letting
+//     edits through would create untracked work the agent can't record.
 //   - /project.md exists and has no `[>]` task → blocked with guidance.
 //   - /project.md exists and has a `[>]` task → proceed.
 func (a *Agent) enforceActiveTaskGate(ctx context.Context, toolName string) string {
@@ -1451,12 +1461,23 @@ func (a *Agent) enforceActiveTaskGate(ctx context.Context, toolName string) stri
 	if !mutatingTools[toolName] {
 		return ""
 	}
-	doc, err := a.memoryStore.Fetch(ctx, ProjectWorkTreePath)
-	if err != nil {
-		// Treat any fetch error (not-found, server down) as "no project"
-		// so the gate never blocks on infrastructure issues.
+
+	gateCtx, cancel := context.WithTimeout(ctx, activeTaskGateTimeout)
+	defer cancel()
+
+	doc, err := a.memoryStore.Fetch(gateCtx, ProjectWorkTreePath)
+	switch {
+	case errors.Is(err, memory.ErrNotFound):
 		return ""
+	case err != nil:
+		slog.Error("agent: active-task gate fetch failed", "tool", toolName, "err", err)
+		return fmt.Sprintf(
+			"Error: tool %q blocked — could not verify %s: %v. "+
+				"Fix the memory backend (demarkus reachable? token valid?) and retry.",
+			toolName, ProjectWorkTreePath, err,
+		)
 	}
+
 	tree := project.Parse(doc.Body)
 	if goal, _ := tree.ActiveGoal(); goal != nil {
 		return ""

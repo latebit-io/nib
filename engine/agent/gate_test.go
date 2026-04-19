@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -39,13 +40,31 @@ func TestEnforceActiveTaskGate_NonMutatingTool(t *testing.T) {
 	}
 }
 
-func TestEnforceActiveTaskGate_FetchErrorAllows(t *testing.T) {
-	// Fetch failure (e.g. not-found, server down) never blocks — avoids
-	// hard-gating on infrastructure issues and fresh projects.
+func TestEnforceActiveTaskGate_NotFoundAllows(t *testing.T) {
+	// A missing /project.md is the fresh-project onboarding case —
+	// gate must stay off so the developer can start working.
 	store := &mockStore{fetchErr: memory.ErrNotFound}
 	a := newGateTestAgent(store, ModeExecution)
 	if msg := a.enforceActiveTaskGate(context.Background(), "edit_file"); msg != "" {
-		t.Errorf("expected empty on fetch error, got: %s", msg)
+		t.Errorf("expected empty on ErrNotFound, got: %s", msg)
+	}
+}
+
+func TestEnforceActiveTaskGate_OtherFetchErrorBlocks(t *testing.T) {
+	// Any other fetch error (auth, transport, timeout) must be surfaced,
+	// not fail-open. If the memory store is unreachable, task mutations
+	// would fail too, so letting edits through would create untracked work.
+	store := &mockStore{fetchErr: errors.New("demarkus: 503 unreachable")}
+	a := newGateTestAgent(store, ModeExecution)
+	msg := a.enforceActiveTaskGate(context.Background(), "edit_file")
+	if msg == "" {
+		t.Fatal("expected block on non-NotFound fetch error")
+	}
+	if !strings.Contains(msg, "could not verify") {
+		t.Errorf("message should describe the verification failure: %s", msg)
+	}
+	if !strings.Contains(msg, "503 unreachable") {
+		t.Errorf("message should include the underlying error: %s", msg)
 	}
 }
 

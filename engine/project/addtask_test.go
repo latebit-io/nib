@@ -81,11 +81,19 @@ project: X
 	if err := tree.AddTask("Render", "B", "task under B", ""); err != nil {
 		t.Fatalf("AddTask failed: %v", err)
 	}
-	// Tree already has B under phase 2; verify task landed there.
 	body := Serialize(tree)
-	// Phase 1 A must not have the task.
-	if strings.Contains(strings.Split(body, "# Phase 2")[0], "task under B") {
-		t.Errorf("task landed under wrong phase:\n%s", body)
+	parts := strings.SplitN(body, "# Phase 2", 2)
+	if len(parts) != 2 {
+		t.Fatalf("expected Phase 2 heading in output:\n%s", body)
+	}
+	phase1Section, phase2Section := parts[0], parts[1]
+	// Positive: the task must appear under Phase 2.
+	if !strings.Contains(phase2Section, "task under B") {
+		t.Errorf("task did not land under Phase 2:\n%s", body)
+	}
+	// Negative: and must not appear under Phase 1.
+	if strings.Contains(phase1Section, "task under B") {
+		t.Errorf("task leaked into Phase 1:\n%s", body)
 	}
 }
 
@@ -115,8 +123,12 @@ project: X
 - [x] old
 `
 	tree := Parse(src)
-	_ = tree.AddTask("Phase 1", "F", "fresh", "/notes/x.md")
-	_ = tree.AddTask("Phase 1", "F2", "second", "")
+	if err := tree.AddTask("Phase 1", "F", "fresh", "/notes/x.md"); err != nil {
+		t.Fatalf("first AddTask failed: %v", err)
+	}
+	if err := tree.AddTask("Phase 1", "F2", "second", ""); err != nil {
+		t.Fatalf("second AddTask failed: %v", err)
+	}
 
 	body := Serialize(tree)
 	tree2 := Parse(body)

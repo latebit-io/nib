@@ -355,7 +355,16 @@ func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<-
 		}
 	}
 	if choice.FinishReason != nil {
-		trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: s.tc.finalize(), Usage: s.usage})
+		truncated := *choice.FinishReason == "length"
+		if truncated {
+			slog.Warn("openai-compat: output truncated (finish_reason=length)")
+		}
+		trySend(ctx, ch, StreamEvent{
+			Done:      true,
+			ToolCalls: s.tc.finalize(),
+			Usage:     s.usage,
+			Truncated: truncated,
+		})
 		return true
 	}
 	return false

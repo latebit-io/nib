@@ -239,6 +239,13 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 		args.Search = correctedSearch
 	}
 
+	if msg := detectLikelyCorruption(args.Search, args.Replace, content); msg != "" {
+		slog.Warn("edit_file: rejecting likely-corrupting edit",
+			"path", args.Path, "reason", msg,
+			"search_len", len(args.Search), "replace_len", len(args.Replace))
+		return textResult("Error: " + msg)
+	}
+
 	expectedContent := strings.Replace(content, args.Search, args.Replace, 1)
 
 	return ToolResult{
@@ -328,6 +335,60 @@ func (t *EditFileTool) validateSearchMatch(path, search, content string) (string
 		"matches", matchCount, "path", path, "search_len", len(search))
 	return "", fmt.Sprintf("Error: search text validation failed after %d retries. Use read_file to re-read the file and copy the exact text.\n\nCurrent file (%s):\n\n%s",
 		t.maxSilentRetries, path, truncateForPreview(content))
+}
+
+// midLineTruncationFloor is the minimum replace length at which a mid-line
+// end (no trailing newline) is treated as a likely LLM output-token cutoff.
+// Short inline edits legitimately don't end in newlines; long ones almost
+// always do when the surrounding search ends with one.
+const midLineTruncationFloor = 512
+
+// duplicationProbeBytes is the suffix length of replace compared against
+// content-after-search to detect the "agent rewrites an already-present tail"
+// pattern. Must be long enough that coincidental matches are vanishingly rare
+// in real code, short enough that small but real duplications are still caught.
+// 64 bytes comfortably spans several lines of real code while remaining below
+// the typical size of reconstituted file tails the agent tries to "restore".
+const duplicationProbeBytes = 64
+
+// detectLikelyCorruption returns a non-empty error message when the proposed
+// edit matches a known file-corrupting pattern that the LLM almost never
+// intends. Two patterns are caught:
+//
+//  1. Mid-line truncation: search ends with a newline but replace does not,
+//     and replace is long enough that a mid-line end strongly suggests the
+//     LLM hit its output token cap mid-generation. Applying it would silently
+//     shorten the file and fuse two lines.
+//
+//  2. Suffix duplication: a long suffix of replace also appears in the file
+//     content immediately after the search match. Applying the edit would
+//     leave that content present in both the new replace block and the
+//     unchanged tail — the classic cascade that turns one truncation into
+//     repeated duplicated blocks across subsequent repair attempts.
+//
+// Returns "" when the edit looks safe. Callers should surface the returned
+// message back to the LLM so it can retry with a narrower edit.
+func detectLikelyCorruption(search, replace, content string) string {
+	if replace == "" {
+		return "" // plain deletion — neither pattern applies
+	}
+	if strings.HasSuffix(search, "\n") && !strings.HasSuffix(replace, "\n") &&
+		len(replace) >= midLineTruncationFloor {
+		return "replace appears truncated mid-line — search ends with a newline but replace does not, and replace is large (likely an LLM output-token cutoff). Retry with a much narrower edit covering only the lines that actually change."
+	}
+
+	idx := strings.Index(content, search)
+	if idx < 0 {
+		return "" // validateSearchMatch already guarantees a single match
+	}
+	afterSearch := content[idx+len(search):]
+	if len(replace) >= duplicationProbeBytes && len(afterSearch) >= duplicationProbeBytes {
+		probe := replace[len(replace)-duplicationProbeBytes:]
+		if strings.Contains(afterSearch, probe) {
+			return "replace duplicates content that already exists after the match point — applying this edit would leave the same block present twice in the file. Narrow the search/replace to only the lines that actually change instead of rewriting surrounding context that is already there."
+		}
+	}
+	return ""
 }
 
 // fuzzyWhitespaceMatch attempts to find the search text in content by

@@ -146,7 +146,15 @@ type codexSSEEvent struct {
 }
 
 type codexResponse struct {
-	Usage *codexUsage `json:"usage,omitempty"`
+	Usage             *codexUsage             `json:"usage,omitempty"`
+	Status            string                  `json:"status,omitempty"`
+	IncompleteDetails *codexIncompleteDetails `json:"incomplete_details,omitempty"`
+}
+
+// codexIncompleteDetails is populated on a response.incomplete event when
+// the model stopped before finishing. Reason is e.g. "max_output_tokens".
+type codexIncompleteDetails struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 type codexUsage struct {
@@ -323,6 +331,25 @@ func (s *codexStreamState) handleEvent(evt codexSSEEvent, raw []byte) (emitted *
 	return nil, false
 }
 
+// isTruncatedCompletion reports whether a response.completed/response.incomplete
+// event indicates the model hit the output token cap. Covers both the event-type
+// signal (response.incomplete) and the payload signal (status + incomplete_details).
+func isTruncatedCompletion(evt codexSSEEvent) bool {
+	if evt.Type == "response.incomplete" {
+		return true
+	}
+	if evt.Response == nil {
+		return false
+	}
+	if evt.Response.Status == "incomplete" {
+		return true
+	}
+	if d := evt.Response.IncompleteDetails; d != nil && d.Reason == "max_output_tokens" {
+		return true
+	}
+	return false
+}
+
 func (s *codexStreamState) handleItemAdded(evt codexSSEEvent, raw []byte) {
 	var item codexOutputItem
 	if err := json.Unmarshal(evt.Item, &item); err == nil && item.Type == "function_call" {
@@ -374,7 +401,16 @@ func (s *codexStreamState) handleCompleted(evt codexSSEEvent) (*StreamEvent, boo
 			CompletionTokens: evt.Response.Usage.OutputTokens,
 		}
 	}
-	final := StreamEvent{Done: true, ToolCalls: finalizeCalls(s.calls), Usage: s.usage}
+	truncated := isTruncatedCompletion(evt)
+	if truncated {
+		slog.Warn("codex: output truncated (response.incomplete / max_output_tokens)")
+	}
+	final := StreamEvent{
+		Done:      true,
+		ToolCalls: finalizeCalls(s.calls),
+		Usage:     s.usage,
+		Truncated: truncated,
+	}
 	return &final, true
 }
 

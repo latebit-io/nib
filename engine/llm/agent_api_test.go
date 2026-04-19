@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -456,5 +457,46 @@ func TestSSEUsageParsing(t *testing.T) {
 	usage := parseUsage(chunk.Usage)
 	if usage.CachedTokens != 1000 {
 		t.Errorf("parsed CachedTokens = %d, want 1000", usage.CachedTokens)
+	}
+}
+
+// collectStream drains s.handleChunk for a list of JSON chunk strings and
+// returns the first Done event emitted. Tests that only care about the
+// terminal event use this to skip over token deltas.
+func collectFinalEvent(t *testing.T, chunks []string) StreamEvent {
+	t.Helper()
+	ch := make(chan StreamEvent, len(chunks)+1)
+	state := &sseStreamState{}
+	for _, c := range chunks {
+		state.handleChunk(context.Background(), c, ch)
+	}
+	close(ch)
+	for ev := range ch {
+		if ev.Done {
+			return ev
+		}
+	}
+	t.Fatal("no Done event emitted")
+	return StreamEvent{}
+}
+
+func TestSSEChunk_TruncatedFinishReason(t *testing.T) {
+	tests := []struct {
+		name         string
+		finishReason string
+		wantTrunc    bool
+	}{
+		{"length triggers truncated flag", "length", true},
+		{"stop is a clean finish", "stop", false},
+		{"tool_calls is a clean finish", "tool_calls", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			chunk := `{"choices":[{"delta":{"content":"partial"},"finish_reason":"` + tc.finishReason + `"}]}`
+			ev := collectFinalEvent(t, []string{chunk})
+			if ev.Truncated != tc.wantTrunc {
+				t.Errorf("Truncated = %v, want %v", ev.Truncated, tc.wantTrunc)
+			}
+		})
 	}
 }

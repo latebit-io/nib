@@ -1057,23 +1057,10 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			return messages, tu, err
 		}
 
-		var (
-			contentBuf  strings.Builder
-			toolCalls   []llm.ToolCall
-			streamUsage *llm.Usage
-		)
-		for ev := range ch {
-			if ev.Done {
-				toolCalls, streamUsage = ev.ToolCalls, ev.Usage
-				break
-			}
-			if clean := stripThinkTags(ev.Token, thinkState); clean != "" {
-				contentBuf.WriteString(clean)
-				a.send(event.AgentToken{Text: clean})
-			}
-		}
-		tu.addUsage(streamUsage)
-		tu.completionEst += llm.EstimateTokens(contentBuf.String())
+		result := a.drainStream(ch, thinkState)
+		tu.addUsage(result.usage)
+		tu.completionEst += llm.EstimateTokens(result.content)
+		toolCalls, truncated := result.toolCalls, result.truncated
 
 		if ctx.Err() != nil {
 			return messages, tu, ctx.Err()
@@ -1081,12 +1068,17 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 
 		assistantMsg := llm.Message{
 			Role:    "assistant",
-			Content: contentBuf.String(),
+			Content: result.content,
 		}
 		if len(toolCalls) > 0 {
 			assistantMsg.ToolCalls = toolCalls
 		}
 		messages = append(messages, assistantMsg)
+
+		if truncated {
+			messages = a.handleTruncatedTurn(messages, toolCalls)
+			continue
+		}
 
 		// No tool calls — agent's turn is done.
 		if len(toolCalls) == 0 {
@@ -1123,6 +1115,68 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			})
 		}
 	}
+}
+
+// streamResult aggregates the outcome of one LLM streaming response after
+// the Done event is observed. Tokens are forwarded to the event channel as
+// they arrive; only the final accumulated state flows back to the caller.
+type streamResult struct {
+	content   string
+	toolCalls []llm.ToolCall
+	usage     *llm.Usage
+	truncated bool
+}
+
+// drainStream reads the provider stream to completion, forwarding text
+// tokens to the frontend and collecting the terminal Done event. thinkState
+// is mutated in place so <think>...</think> spans that cross chunk
+// boundaries are stripped correctly. A channel closed without a Done event
+// (e.g. on ctx cancel) yields zero fields — the caller checks ctx.Err().
+func (a *Agent) drainStream(ch <-chan llm.StreamEvent, thinkState *bool) streamResult {
+	var (
+		buf strings.Builder
+		out streamResult
+	)
+	for ev := range ch {
+		if ev.Done {
+			out.toolCalls = ev.ToolCalls
+			out.usage = ev.Usage
+			out.truncated = ev.Truncated
+			break
+		}
+		if clean := stripThinkTags(ev.Token, thinkState); clean != "" {
+			buf.WriteString(clean)
+			a.send(event.AgentToken{Text: clean})
+		}
+	}
+	out.content = buf.String()
+	return out
+}
+
+// handleTruncatedTurn rejects tool calls from a turn whose output was cut
+// off by the model's max-token cap. Their accumulated arguments may be
+// incomplete — executing them risks corrupting files (e.g. a truncated
+// edit_file replace that silently shrinks a buffer). Each tool call gets an
+// explicit error reply; a turn with no tool calls gets a user-role nudge so
+// the loop has something to condition the retry on.
+func (a *Agent) handleTruncatedTurn(messages []llm.Message, toolCalls []llm.ToolCall) []llm.Message {
+	slog.Warn("agent: LLM output truncated, rejecting tool calls",
+		"tool_calls", len(toolCalls))
+	a.send(event.AgentError{Err: "LLM output was truncated (hit max output tokens) — rejecting tool calls and asking the model to retry with smaller changes."})
+	for _, tc := range toolCalls {
+		messages = append(messages, llm.Message{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Content:    "Error: your response was truncated because it hit the model's max output token limit. Any arguments accumulated for this tool call are likely incomplete and were NOT executed. Retry with a much smaller change — e.g. for edit_file, narrow the search/replace to only the lines that actually change rather than rewriting large blocks.",
+		})
+	}
+	if len(toolCalls) == 0 {
+		messages = append(messages, llm.Message{
+			Role:    "user",
+			Content: "Your previous response was truncated because it hit the max output token limit. Retry with a more concise response, breaking large edits into smaller pieces.",
+		})
+	}
+	return messages
 }
 
 // flushDirtyBuffers asks the frontend to save all dirty buffers to disk,

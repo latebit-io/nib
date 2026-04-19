@@ -318,6 +318,9 @@ type anthropicStreamState struct {
 	usage      *Usage
 	blocks     map[int]*anthropicBlockState
 	inputUsage *anthropicUsage
+	// truncated is set when the Anthropic message_delta reports
+	// stop_reason="max_tokens", i.e., the model hit the output cap.
+	truncated bool
 }
 
 // handleBlockStart processes a content_block_start event.
@@ -374,11 +377,20 @@ func (s *anthropicStreamState) handleMessageDelta(data string) {
 		return
 	}
 	s.usage = mergeAnthropicUsage(s.inputUsage, evt.Usage)
+	if evt.Delta.StopReason == "max_tokens" {
+		slog.Warn("anthropic: output truncated (stop_reason=max_tokens)")
+		s.truncated = true
+	}
 }
 
 // finalEvent builds the terminal StreamEvent from accumulated state.
 func (s *anthropicStreamState) finalEvent() StreamEvent {
-	return StreamEvent{Done: true, ToolCalls: finalizeAnthropicBlocks(s.blocks), Usage: s.usage}
+	return StreamEvent{
+		Done:      true,
+		ToolCalls: finalizeAnthropicBlocks(s.blocks),
+		Usage:     s.usage,
+		Truncated: s.truncated,
+	}
 }
 
 // anthropicEventResult signals the outcome of processing one SSE event.

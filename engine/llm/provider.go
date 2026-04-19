@@ -55,6 +55,11 @@ type StreamEvent struct {
 	// Usage holds token consumption data, populated on the final event
 	// when the provider reports usage. Nil when unavailable.
 	Usage *Usage
+	// Truncated is true when the provider stopped mid-generation because
+	// the output token limit was reached. Any accumulated ToolCalls on a
+	// truncated event may have incomplete arguments and must not be
+	// executed — silently applying a truncated edit corrupts the file.
+	Truncated bool
 }
 
 // CacheControl marks a message or tool definition for provider-level prompt

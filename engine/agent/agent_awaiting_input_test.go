@@ -156,6 +156,69 @@ func TestAgent_RequestInput_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
+	// When the provider reports Truncated=true on the final stream event,
+	// the agent must not execute the accumulated tool calls — their
+	// arguments may have been cut off mid-generation and silently applying
+	// them would corrupt files. It should instead reply to each tool call
+	// with an error and loop so the LLM can retry smaller.
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			// Turn 1: LLM emits a tool call AND the stream is flagged
+			// truncated (hit max output tokens mid-generation).
+			{
+				{
+					ToolCalls: []llm.ToolCall{{
+						ID:   "call-trunc",
+						Type: "function",
+						Function: llm.FunctionCall{
+							Name:      "edit_file",
+							Arguments: `{"path":"x.lua","search":"foo\n","replace":"bar mid-stream cutoff with no newline",`,
+						},
+					}},
+					Done:      true,
+					Truncated: true,
+				},
+			},
+			// Turn 2: LLM recovers with a plain text answer, no tool calls.
+			{
+				{Token: "sorry, retrying smaller."},
+				{Done: true},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	// Wait for the turn to end.
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentWaiting after truncated turn")
+	}
+
+	// Verify turn 2 saw the rejection message (not a real edit_file result).
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	var found bool
+	for _, msg := range provider.toolInputs {
+		if msg.ToolCallID == "call-trunc" && strings.Contains(msg.Content, "truncated") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("truncation rejection not delivered to LLM for call-trunc; got %+v", provider.toolInputs)
+	}
+}
+
 func TestAgent_RequestInput_CancelDuringAwait(t *testing.T) {
 	provider := &multiTurnProvider{
 		turns: [][]llm.StreamEvent{

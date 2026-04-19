@@ -1057,9 +1057,14 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			return messages, tu, err
 		}
 
-		result := a.drainStream(ctx, ch, thinkState)
+		result, err := a.drainStream(ctx, ch, thinkState)
 		tu.addUsage(result.usage)
 		tu.completionEst += llm.EstimateTokens(result.content)
+		if err != nil {
+			slog.Error("agent: stream closed before completion", "err", err)
+			a.send(event.AgentError{Err: fmt.Sprintf("LLM stream error: %v", err)})
+			return messages, tu, err
+		}
 		toolCalls, truncated := result.toolCalls, result.truncated
 
 		if ctx.Err() != nil {
@@ -1134,13 +1139,25 @@ type streamResult struct {
 // once reached, subsequent tokens are dropped and logged.
 const maxStreamContentBytes = 10 * 1024 * 1024
 
+// errStreamClosedEarly indicates the provider closed its stream channel
+// without first emitting a terminal Done event. This is distinct from ctx
+// cancellation (handled by the caller's ctx.Err() check) and signals a
+// provider-side failure — network drop, SSE parse error, scanner overflow —
+// that must not be mistaken for a clean completion. Silently accepting the
+// partial content would let a truncated turn end in AgentWaiting with no
+// error shown to the developer.
+var errStreamClosedEarly = errors.New("agent: provider closed stream before completion")
+
 // drainStream reads the provider stream to completion, forwarding text
 // tokens to the frontend and collecting the terminal Done event. thinkState
 // is mutated in place so <think>...</think> spans that cross chunk
-// boundaries are stripped correctly. Returns early on ctx cancellation or a
-// channel close without a Done event (e.g. provider EOF before completion)
-// so a hung provider cannot stall the agent goroutine indefinitely.
-func (a *Agent) drainStream(ctx context.Context, ch <-chan llm.StreamEvent, thinkState *bool) streamResult {
+// boundaries are stripped correctly.
+//
+// Returns errStreamClosedEarly when the channel closes without a Done event
+// and ctx is still live; the caller must treat this as a failed turn rather
+// than a clean completion with partial content. A ctx cancellation returns
+// (result, nil) since the caller's existing ctx.Err() check handles it.
+func (a *Agent) drainStream(ctx context.Context, ch <-chan llm.StreamEvent, thinkState *bool) (streamResult, error) {
 	var (
 		buf    strings.Builder
 		out    streamResult
@@ -1150,18 +1167,21 @@ func (a *Agent) drainStream(ctx context.Context, ch <-chan llm.StreamEvent, thin
 		select {
 		case <-ctx.Done():
 			out.content = buf.String()
-			return out
+			return out, nil
 		case ev, ok := <-ch:
 			if !ok {
 				out.content = buf.String()
-				return out
+				if ctx.Err() != nil {
+					return out, nil
+				}
+				return out, errStreamClosedEarly
 			}
 			if ev.Done {
 				out.toolCalls = ev.ToolCalls
 				out.usage = ev.Usage
 				out.truncated = ev.Truncated
 				out.content = buf.String()
-				return out
+				return out, nil
 			}
 			if capped {
 				continue // keep draining so the provider goroutine can exit cleanly

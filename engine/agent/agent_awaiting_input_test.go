@@ -214,6 +214,43 @@ func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
 	}
 }
 
+func TestAgent_StreamClosedBeforeDone_SurfacesError(t *testing.T) {
+	// When the provider closes its stream without ever emitting Done (e.g.
+	// mid-stream connection drop, SSE parse error), the turn must end in a
+	// visible error — NOT a silent AgentWaiting with partial content.
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			// Turn 1: tokens flow, then the channel closes without Done.
+			{
+				{Token: "partial "},
+				{Token: "response"},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	// The agent must emit an AgentError describing the stream failure —
+	// never reach AgentWaiting treating the partial tokens as a clean turn.
+	errEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentError)
+		return ok
+	})
+	if errEv == nil {
+		t.Fatal("expected AgentError for stream closed before Done")
+	}
+	msg := errEv.(event.AgentError).Err
+	if !strings.Contains(msg, "stream") {
+		t.Errorf("AgentError = %q, want substring 'stream'", msg)
+	}
+}
+
 func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 	// When the provider reports Truncated=true on the final stream event,
 	// the agent must not execute the accumulated tool calls — their

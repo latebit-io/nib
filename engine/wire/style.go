@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -133,15 +134,33 @@ func detectLintCommands(projectRoot string) []string {
 	return nil
 }
 
+// statMarker checks whether root/name exists. Returns:
+//   - (true, true)  — marker present
+//   - (false, true) — marker not present (normal "missing" case)
+//   - (false, false) — stat failed for a reason other than not-exist
+//     (permission, I/O, etc.); the caller should fail closed rather than
+//     pretend the file simply wasn't there. Logged at warn level.
+func statMarker(root, name string) (found, ok bool) {
+	_, err := os.Stat(filepath.Join(root, name))
+	if err == nil {
+		return true, true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, true
+	}
+	slog.Warn("wire: stat probe failed", "root", root, "name", name, "err", err)
+	return false, false
+}
+
 // isLuaProject reports whether projectRoot looks like a Lua project. The
 // check is shallow (root-level only) — a deep walk would be wasted work
 // for a signal the developer can override via explicit style config.
 func isLuaProject(projectRoot string) bool {
-	if _, err := os.Stat(filepath.Join(projectRoot, ".luacheckrc")); err == nil {
-		return true
+	if found, ok := statMarker(projectRoot, ".luacheckrc"); found || !ok {
+		return found
 	}
-	if _, err := os.Stat(filepath.Join(projectRoot, "main.lua")); err == nil {
-		return true
+	if found, ok := statMarker(projectRoot, "main.lua"); found || !ok {
+		return found
 	}
 	matches, err := filepath.Glob(filepath.Join(projectRoot, "*.lua"))
 	if err != nil {

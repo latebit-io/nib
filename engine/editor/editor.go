@@ -6,6 +6,7 @@ package editor
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/buffer"
@@ -67,8 +68,14 @@ type Editor struct {
 	// Nil when the editor has no highlighter wired in (e.g. headless mode,
 	// tests). Install one via SetHighlighter; install a default via a
 	// factory configured on the parent Session.
-	highlighter  Highlighter
-	needsReparse bool
+	//
+	// Guarded by highlighterMu. Needed because SetHighlighter may be
+	// called from the Session's factory-swap goroutine concurrently with
+	// HighlightLine reads from the render goroutine, or with another
+	// SetHighlighter call from a parallel decorate path.
+	highlighterMu sync.RWMutex
+	highlighter   Highlighter
+	needsReparse  bool
 }
 
 // New creates an editor wrapping the given buffer. The returned editor
@@ -88,20 +95,41 @@ func New(buf *buffer.Buffer) *Editor {
 // existing one (the old one is closed). Pass nil to remove highlighting.
 // On install the current buffer content is parsed immediately so
 // HighlightLine returns meaningful tokens on the next call.
+//
+// Safe to call concurrently with HighlightLine and itself; the old
+// highlighter is closed outside the lock to avoid blocking readers on
+// tree-sitter teardown.
 func (e *Editor) SetHighlighter(h Highlighter) {
-	if e.highlighter != nil {
-		e.highlighter.Close()
-	}
+	e.highlighterMu.Lock()
+	old := e.highlighter
 	e.highlighter = h
+	e.highlighterMu.Unlock()
+
+	if old != nil {
+		old.Close()
+	}
 	if h != nil && e.Buf != nil {
 		h.Parse(e.Buf.Content())
 	}
 }
 
+// Highlighter returns the currently installed highlighter, or nil if
+// none is attached. Exported for tests and diagnostics; the editor does
+// not expose mutation via this getter.
+func (e *Editor) Highlighter() Highlighter {
+	e.highlighterMu.RLock()
+	defer e.highlighterMu.RUnlock()
+	return e.highlighter
+}
+
 // Close frees any resources held by the highlighter. Call on shutdown.
 func (e *Editor) Close() {
-	if e.highlighter != nil {
-		e.highlighter.Close()
+	e.highlighterMu.Lock()
+	h := e.highlighter
+	e.highlighter = nil
+	e.highlighterMu.Unlock()
+	if h != nil {
+		h.Close()
 	}
 }
 
@@ -1219,9 +1247,15 @@ func (e *Editor) MarkDirty() {
 
 // ReparseIfNeeded reparses the buffer for syntax highlighting.
 func (e *Editor) ReparseIfNeeded() {
-	if e.needsReparse && e.highlighter != nil {
-		e.highlighter.Parse(e.Buf.Content())
+	e.highlighterMu.RLock()
+	h := e.highlighter
+	needs := e.needsReparse
+	e.highlighterMu.RUnlock()
+	if needs && h != nil {
+		h.Parse(e.Buf.Content())
+		e.highlighterMu.Lock()
 		e.needsReparse = false
+		e.highlighterMu.Unlock()
 	}
 }
 
@@ -1230,10 +1264,13 @@ func (e *Editor) ReparseIfNeeded() {
 // Calls ReparseIfNeeded internally so the caller doesn't have to.
 func (e *Editor) HighlightLine(line int) []Token {
 	e.ReparseIfNeeded()
-	if e.highlighter == nil {
+	e.highlighterMu.RLock()
+	h := e.highlighter
+	e.highlighterMu.RUnlock()
+	if h == nil {
 		return nil
 	}
-	return e.highlighter.HighlightLine(line)
+	return h.HighlightLine(line)
 }
 
 // --- Display Helpers ---

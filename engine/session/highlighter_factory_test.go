@@ -1,6 +1,8 @@
 package session
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/buffer"
@@ -86,6 +88,70 @@ func TestSetHighlighterFactory_SwapClosesOld(t *testing.T) {
 	}
 	if len(*paths2) != 1 || (*paths2)[0] != "/tmp/a.go" {
 		t.Errorf("new factory not invoked for open editor; paths=%v", *paths2)
+	}
+}
+
+// TestDecorateEditor_LinearizableWithSwaps hammers SetHighlighterFactory
+// concurrently with decorateEditor and asserts that the editor ends up
+// carrying a highlighter built by the *final* installed factory — i.e.
+// no stale factory wins the race. Run under `go test -race` to catch
+// data races on the shared factory/gen state.
+func TestDecorateEditor_LinearizableWithSwaps(t *testing.T) {
+	s := buildSessionWithOpenFile(t, "/tmp/a.go")
+
+	// Factories tagged with a generation id so we can recover which
+	// factory the editor ended up with.
+	type taggedHighlighter struct {
+		fakeHighlighter
+		id int64
+	}
+	newFactory := func(id int64) editor.HighlighterFactory {
+		return func(string) editor.Highlighter {
+			return &taggedHighlighter{id: id}
+		}
+	}
+
+	var currentID atomic.Int64
+
+	var wg sync.WaitGroup
+	const swaps = 200
+	const decorations = 200
+
+	// Swapper goroutine: flips the factory repeatedly.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := int64(1); i <= swaps; i++ {
+			currentID.Store(i)
+			s.SetHighlighterFactory(newFactory(i))
+		}
+	}()
+
+	// Decorator goroutine: decorates the same editor repeatedly in parallel.
+	e := s.editors["/tmp/a.go"]
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range decorations {
+			s.decorateEditor(e)
+		}
+	}()
+
+	wg.Wait()
+
+	// Do one final swap and decoration to pin the expected state; without
+	// this, the test is racy by construction (the two goroutines above may
+	// finish in either order).
+	final := currentID.Add(1)
+	s.SetHighlighterFactory(newFactory(final))
+	s.decorateEditor(e)
+
+	h, ok := e.Highlighter().(*taggedHighlighter)
+	if !ok {
+		t.Fatalf("expected *taggedHighlighter, got %T", e.Highlighter())
+	}
+	if h.id != final {
+		t.Errorf("editor ended up with stale factory id=%d, expected %d", h.id, final)
 	}
 }
 

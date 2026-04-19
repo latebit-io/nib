@@ -157,6 +157,13 @@ type Session struct {
 	// [SetHighlighterFactory]; headless binaries (junto-agent) leave it nil
 	// so tree-sitter grammar blobs are never linked in. Guarded by mu.
 	highlighterFactory editor.HighlighterFactory
+
+	// highlighterFactoryGen increments on every [SetHighlighterFactory]
+	// call. decorateEditor reads (factory, gen) under RLock, installs the
+	// highlighter outside the lock, then re-checks gen — if it changed, a
+	// concurrent factory swap happened and decoration retries with the new
+	// factory. This makes concurrent decoration linearizable with swaps.
+	highlighterFactoryGen uint64
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -236,12 +243,14 @@ func New(e *editor.Editor, projectRoot string) *Session {
 // headless binaries never call this so no grammar blobs are linked in.
 //
 // All currently-open editors are re-decorated to match the new factory
-// (their old highlighters are closed). This makes the API match the
-// docstring: "nil disables highlighting" actually clears open editors,
-// and a runtime swap produces a consistent state across all editors.
+// (their old highlighters are closed). Concurrent factory swaps and
+// editor decoration are linearized via the highlighterFactoryGen counter:
+// decorateEditor re-checks the generation after installing a highlighter
+// and retries if a swap happened mid-install.
 func (s *Session) SetHighlighterFactory(fn editor.HighlighterFactory) {
 	s.mu.Lock()
 	s.highlighterFactory = fn
+	s.highlighterFactoryGen++
 	// Snapshot under the lock; call SetHighlighter after releasing so the
 	// editor's Close() path on the old highlighter doesn't run while we
 	// hold the session lock.
@@ -252,14 +261,7 @@ func (s *Session) SetHighlighterFactory(fn editor.HighlighterFactory) {
 	s.mu.Unlock()
 
 	for _, e := range open {
-		if e == nil || e.Buf == nil || e.Buf.Path == "" {
-			continue
-		}
-		if fn == nil {
-			e.SetHighlighter(nil)
-			continue
-		}
-		e.SetHighlighter(fn(e.Buf.Path))
+		s.decorateEditor(e)
 	}
 }
 
@@ -277,19 +279,38 @@ func (s *Session) newEditor(buf *buffer.Buffer) *editor.Editor {
 }
 
 // decorateEditor installs a highlighter on an already-constructed editor
-// when a factory is configured. Safe to call on a nil or path-less editor —
-// it no-ops. Must be called with s.mu unlocked.
+// to match the session's current factory. Safe to call on a nil or
+// path-less editor — it no-ops. Must be called with s.mu unlocked.
+//
+// Linearizable w.r.t. concurrent [SetHighlighterFactory] via a
+// generation counter: read (factory, gen) under RLock, install the
+// highlighter outside the lock, then re-read gen — if it changed, the
+// factory was swapped mid-install and we retry with the new one. Each
+// retry overwrites the previous highlighter (SetHighlighter closes the
+// old one), so no resources leak.
 func (s *Session) decorateEditor(e *editor.Editor) {
 	if e == nil || e.Buf == nil || e.Buf.Path == "" {
 		return
 	}
-	s.mu.RLock()
-	factory := s.highlighterFactory
-	s.mu.RUnlock()
-	if factory == nil {
-		return
+	for {
+		s.mu.RLock()
+		factory := s.highlighterFactory
+		gen := s.highlighterFactoryGen
+		s.mu.RUnlock()
+
+		if factory == nil {
+			e.SetHighlighter(nil)
+		} else {
+			e.SetHighlighter(factory(e.Buf.Path))
+		}
+
+		s.mu.RLock()
+		stable := gen == s.highlighterFactoryGen
+		s.mu.RUnlock()
+		if stable {
+			return
+		}
 	}
-	e.SetHighlighter(factory(e.Buf.Path))
 }
 
 // SetAgent wires an agent into the session. The agent is typically created

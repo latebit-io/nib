@@ -17,6 +17,7 @@ import (
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/junto/engine/highlight"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/oauth"
@@ -98,10 +99,18 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	e := editor.New(buf)
+	if buf.Path != "" {
+		e.SetHighlighter(highlight.NewHighlighter(buf.Path))
+	}
 
 	// Create session first (editor-only mode) — it serves as the agent's Workspace.
 	sess := session.New(e, projectRoot)
 	sess.SetContext(appCtx)
+	// Install the highlighter factory so every editor the session creates
+	// (via OpenFile / auto-open / file-switch) gets tree-sitter highlighting.
+	// Headless binaries never make this call, which keeps grammar blobs out
+	// of the junto-agent binary.
+	sess.SetHighlighterFactory(highlight.NewHighlighter)
 
 	// Discover MCP tools from .mcp.json or JUNTO_MCP env var.
 	mcpResult := wire.DiscoverMCPTools(projectRoot)

@@ -683,13 +683,6 @@ func (a *Agent) hasLintPending() bool {
 	return a.pendingLint != ""
 }
 
-// currentStyleLintCmd returns a copy of the active lint commands under lock.
-func (a *Agent) currentStyleLintCmd() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return slices.Clone(a.styleLintCmd)
-}
-
 // currentCodingStyle returns the active coding style under lock.
 func (a *Agent) currentCodingStyle() *CodingStyleData {
 	a.mu.Lock()
@@ -1201,9 +1194,14 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 // runTaskReview runs lint and evaluator on all files edited during the task.
 // Called when update_task(action: "complete") fires. Returns the tool result
 // with any lint/evaluator feedback appended.
+//
+// Emits a status banner even when no checks are configured, so the developer
+// can distinguish "task reviewed clean" from "nothing was set up to review."
 func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 	a.mu.Lock()
 	edits := a.turnEdits
+	lintCmds := slices.Clone(a.styleLintCmd)
+	evalConfigured := a.evaluator != nil
 	a.mu.Unlock()
 
 	var review strings.Builder
@@ -1219,8 +1217,18 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 		}
 	}
 
+	lintWillRun := len(files) > 0 && len(lintCmds) > 0
+	evalWillRun := len(edits) > 0 && evalConfigured
+
+	// Surface "no review configured" when we have work but nothing to check it
+	// with. Silent return used to be indistinguishable from "clean"; now the
+	// developer sees why.
+	if len(files) > 0 && !lintWillRun && !evalWillRun {
+		a.send(event.AgentToken{Text: "\n[Task complete — no lint or style evaluator configured]\n"})
+	}
+
 	// Run lint on each edited file.
-	if len(files) > 0 && len(a.currentStyleLintCmd()) > 0 {
+	if lintWillRun {
 		a.send(event.AgentStatus{Status: event.StatusLinting})
 		a.send(event.AgentToken{Text: "\n[Task complete — running style lint...]\n"})
 		var lintResults []string

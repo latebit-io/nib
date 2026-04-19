@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -119,7 +120,57 @@ func detectLintCommands(projectRoot string) []string {
 		}
 	}
 
+	// Lua project: detected by .luacheckrc, main.lua (LÖVE convention), or any
+	// .lua file at the root. Luacheck is the de facto standard linter; it
+	// operates per-file cleanly, so {file} (not {dir}) is the right expansion.
+	if isLuaProject(projectRoot) {
+		if _, err := exec.LookPath("luacheck"); err == nil {
+			slog.Info("wire: auto-detected luacheck for Lua project")
+			return []string{"luacheck {file}"}
+		}
+		slog.Debug("wire: Lua project detected but luacheck not on PATH — no lint configured")
+	}
+
 	return nil
+}
+
+// statMarker checks whether root/name exists. Returns:
+//   - (true, true)  — marker present
+//   - (false, true) — marker not present (normal "missing" case)
+//   - (false, false) — stat failed for a reason other than not-exist
+//     (permission, I/O, etc.); the caller should fail closed rather than
+//     pretend the file simply wasn't there. Logged at warn level.
+func statMarker(root, name string) (found, ok bool) {
+	_, err := os.Stat(filepath.Join(root, name))
+	if err == nil {
+		return true, true
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, true
+	}
+	slog.Warn("wire: stat probe failed", "root", root, "name", name, "err", err)
+	return false, false
+}
+
+// isLuaProject reports whether projectRoot looks like a Lua project. The
+// check is shallow (root-level only) — a deep walk would be wasted work
+// for a signal the developer can override via explicit style config.
+func isLuaProject(projectRoot string) bool {
+	if found, ok := statMarker(projectRoot, ".luacheckrc"); found || !ok {
+		return found
+	}
+	if found, ok := statMarker(projectRoot, "main.lua"); found || !ok {
+		return found
+	}
+	matches, err := filepath.Glob(filepath.Join(projectRoot, "*.lua"))
+	if err != nil {
+		// filepath.Glob returns ErrBadPattern when the combined pattern is
+		// malformed — possible if projectRoot contains unclosed brackets.
+		// Log and fail closed so we don't silently misclassify the project.
+		slog.Warn("wire: Lua project glob failed", "root", projectRoot, "err", err)
+		return false
+	}
+	return len(matches) > 0
 }
 
 // ConvertRules translates styleconfig rules into agent-ready StyleRule values.

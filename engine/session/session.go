@@ -151,6 +151,19 @@ type Session struct {
 	// agent. Set via SetModelSwitcher at startup. Returns the display model
 	// name and any error. Nil means model switching is not available.
 	switchModel func(profile, modelID string) (displayModel string, err error)
+
+	// highlighterFactory produces a [editor.Highlighter] for a given file
+	// path. Frontends that render source (TUI) install the real factory via
+	// [SetHighlighterFactory]; headless binaries (junto-agent) leave it nil
+	// so tree-sitter grammar blobs are never linked in. Guarded by mu.
+	highlighterFactory editor.HighlighterFactory
+
+	// highlighterFactoryGen increments on every [SetHighlighterFactory]
+	// call. decorateEditor reads (factory, gen) under RLock, installs the
+	// highlighter outside the lock, then re-checks gen — if it changed, a
+	// concurrent factory swap happened and decoration retries with the new
+	// factory. This makes concurrent decoration linearizable with swaps.
+	highlighterFactoryGen uint64
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -222,6 +235,82 @@ func New(e *editor.Editor, projectRoot string) *Session {
 		s.saveContext()
 	}
 	return s
+}
+
+// SetHighlighterFactory installs a factory used to construct highlighters
+// for every editor this session creates. Pass nil to disable highlighting.
+// Typical usage: the TUI wires in [highlight.NewHighlighter] at startup;
+// headless binaries never call this so no grammar blobs are linked in.
+//
+// All currently-open editors are re-decorated to match the new factory
+// (their old highlighters are closed). Concurrent factory swaps and
+// editor decoration are linearized via the highlighterFactoryGen counter:
+// decorateEditor re-checks the generation after installing a highlighter
+// and retries if a swap happened mid-install.
+func (s *Session) SetHighlighterFactory(fn editor.HighlighterFactory) {
+	s.mu.Lock()
+	s.highlighterFactory = fn
+	s.highlighterFactoryGen++
+	// Snapshot under the lock; call SetHighlighter after releasing so the
+	// editor's Close() path on the old highlighter doesn't run while we
+	// hold the session lock.
+	open := make([]*editor.Editor, 0, len(s.editors))
+	for _, e := range s.editors {
+		open = append(open, e)
+	}
+	s.mu.Unlock()
+
+	for _, e := range open {
+		s.decorateEditor(e)
+	}
+}
+
+// newEditor constructs an editor and installs a highlighter when a factory
+// has been configured. Session-internal editor construction goes through
+// this helper so every editor the session manages is decorated uniformly.
+//
+// Caller must NOT hold s.mu — decorateEditor takes RLock. Use editor.New
+// directly at sites that hold s.mu (write), then call decorateEditor after
+// releasing it.
+func (s *Session) newEditor(buf *buffer.Buffer) *editor.Editor {
+	e := editor.New(buf)
+	s.decorateEditor(e)
+	return e
+}
+
+// decorateEditor installs a highlighter on an already-constructed editor
+// to match the session's current factory. Safe to call on a nil or
+// path-less editor — it no-ops. Must be called with s.mu unlocked.
+//
+// Linearizable w.r.t. concurrent [SetHighlighterFactory] via a
+// generation counter: read (factory, gen) under RLock, install the
+// highlighter outside the lock, then re-read gen — if it changed, the
+// factory was swapped mid-install and we retry with the new one. Each
+// retry overwrites the previous highlighter (SetHighlighter closes the
+// old one), so no resources leak.
+func (s *Session) decorateEditor(e *editor.Editor) {
+	if e == nil || e.Buf == nil || e.Buf.Path == "" {
+		return
+	}
+	for {
+		s.mu.RLock()
+		factory := s.highlighterFactory
+		gen := s.highlighterFactoryGen
+		s.mu.RUnlock()
+
+		if factory == nil {
+			e.SetHighlighter(nil)
+		} else {
+			e.SetHighlighter(factory(e.Buf.Path))
+		}
+
+		s.mu.RLock()
+		stable := gen == s.highlighterFactoryGen
+		s.mu.RUnlock()
+		if stable {
+			return
+		}
+	}
 }
 
 // SetAgent wires an agent into the session. The agent is typically created
@@ -1017,7 +1106,7 @@ func (s *Session) WriteFile(path, content string) error {
 	if err != nil {
 		return fmt.Errorf("open after write %s: %w", path, err)
 	}
-	e := editor.New(buf)
+	e := s.newEditor(buf)
 	canon := s.CanonPath(absPath)
 	addToContext := !s.isProjectMeta(canon)
 	s.mu.Lock()
@@ -1405,6 +1494,9 @@ func (s *Session) SwitchTo(path string) error {
 	s.activeEditor = e
 	s.activeFile = canon
 	s.mu.Unlock()
+
+	// Decorate after unlock — decorateEditor takes s.mu.RLock.
+	s.decorateEditor(e)
 
 	// Wire LSP sync for the new editor.
 	s.wireBufferSync(e)
@@ -1860,7 +1952,7 @@ func (s *Session) editorForEdit() *editor.Editor {
 	if err != nil {
 		return nil
 	}
-	e = editor.New(buf)
+	e = s.newEditor(buf)
 	s.mu.Lock()
 	s.editors[canon] = e
 	s.mu.Unlock()

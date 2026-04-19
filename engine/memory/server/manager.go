@@ -221,6 +221,10 @@ func (m *Manager) acquireLock() error {
 		return fmt.Errorf("memory server: open lock: %w", err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		// Close error is intentionally discarded: flock already failed,
+		// so the primary error takes precedence. Close on an un-flocked
+		// regular file can only fail in ways (EBADF) that would indicate
+		// a Go runtime bug, not something the caller can act on.
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return fmt.Errorf("%w (lock: %s)", ErrInstanceAlreadyRunning, m.lockPath)
@@ -678,7 +682,12 @@ func (m *Manager) processPID() int {
 	return pid
 }
 
-// cleanupFiles removes PID and port files.
+// cleanupFiles removes PID and port files. Remove errors are
+// intentionally discarded: the common reason either Remove fails is
+// ENOENT (file already gone), which is the desired end state. Any
+// other error (permission, filesystem) would leave a stale state file
+// that [reuseExisting] already tolerates — it validates liveness
+// before trusting the PID.
 func (m *Manager) cleanupFiles() {
 	_ = os.Remove(m.pidFile)
 	_ = os.Remove(m.portFile)

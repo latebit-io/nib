@@ -235,12 +235,32 @@ func New(e *editor.Editor, projectRoot string) *Session {
 // Typical usage: the TUI wires in [highlight.NewHighlighter] at startup;
 // headless binaries never call this so no grammar blobs are linked in.
 //
-// Editors created before the factory is installed are not back-filled —
-// the caller decorates the initial editor explicitly.
+// All currently-open editors are re-decorated to match the new factory
+// (their old highlighters are closed). This makes the API match the
+// docstring: "nil disables highlighting" actually clears open editors,
+// and a runtime swap produces a consistent state across all editors.
 func (s *Session) SetHighlighterFactory(fn editor.HighlighterFactory) {
 	s.mu.Lock()
 	s.highlighterFactory = fn
+	// Snapshot under the lock; call SetHighlighter after releasing so the
+	// editor's Close() path on the old highlighter doesn't run while we
+	// hold the session lock.
+	open := make([]*editor.Editor, 0, len(s.editors))
+	for _, e := range s.editors {
+		open = append(open, e)
+	}
 	s.mu.Unlock()
+
+	for _, e := range open {
+		if e == nil || e.Buf == nil || e.Buf.Path == "" {
+			continue
+		}
+		if fn == nil {
+			e.SetHighlighter(nil)
+			continue
+		}
+		e.SetHighlighter(fn(e.Buf.Path))
+	}
 }
 
 // newEditor constructs an editor and installs a highlighter when a factory

@@ -143,7 +143,14 @@ func isLuaProject(projectRoot string) bool {
 	if _, err := os.Stat(filepath.Join(projectRoot, "main.lua")); err == nil {
 		return true
 	}
-	matches, _ := filepath.Glob(filepath.Join(projectRoot, "*.lua"))
+	matches, err := filepath.Glob(filepath.Join(projectRoot, "*.lua"))
+	if err != nil {
+		// filepath.Glob returns ErrBadPattern when the combined pattern is
+		// malformed — possible if projectRoot contains unclosed brackets.
+		// Log and fail closed so we don't silently misclassify the project.
+		slog.Warn("wire: Lua project glob failed", "root", projectRoot, "err", err)
+		return false
+	}
 	return len(matches) > 0
 }
 

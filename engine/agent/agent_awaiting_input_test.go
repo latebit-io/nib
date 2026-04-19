@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,9 @@ func (m *multiTurnProvider) Stream(_ context.Context, messages []llm.Message, _ 
 		if msg.Role == "tool" {
 			m.toolInputs = append(m.toolInputs, msg)
 		}
+	}
+	if m.call >= len(m.turns) {
+		panic(fmt.Sprintf("multiTurnProvider: no more turns scripted (call %d, have %d)", m.call, len(m.turns)))
 	}
 	events := m.turns[m.call]
 	m.call++

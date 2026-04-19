@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -92,9 +93,7 @@ func TestRequestInput_TooManyOptions(t *testing.T) {
 		if i > 0 {
 			opts.WriteString(",")
 		}
-		opts.WriteString(`{"id":"a`)
-		opts.WriteString(string(rune('0' + i)))
-		opts.WriteString(`","label":"L"}`)
+		fmt.Fprintf(&opts, `{"id":"a%d","label":"L"}`, i)
 	}
 	opts.WriteString(`]}`)
 	result := execRequestInput(t, opts.String())
@@ -146,6 +145,43 @@ func TestRequestInput_CanceledContext(t *testing.T) {
 	})
 	if !strings.Contains(result.Content, "canceled") {
 		t.Errorf("expected cancel error, got %q", result.Content)
+	}
+}
+
+func TestRequestInput_OversizedPromptRejected(t *testing.T) {
+	big := strings.Repeat("x", maxRequestInputPromptBytes+1)
+	result := execRequestInput(t, fmt.Sprintf(`{"prompt": %q}`, big))
+	if result.Effect != EffectNone {
+		t.Errorf("oversized prompt should return EffectNone, got %d", result.Effect)
+	}
+	if !strings.Contains(result.Content, "prompt exceeds") {
+		t.Errorf("expected prompt-oversize error, got %q", result.Content)
+	}
+}
+
+func TestRequestInput_OversizedReasonRejected(t *testing.T) {
+	big := strings.Repeat("x", maxRequestInputReasonBytes+1)
+	result := execRequestInput(t, fmt.Sprintf(`{"prompt": "ok", "reason": %q}`, big))
+	if !strings.Contains(result.Content, "reason exceeds") {
+		t.Errorf("expected reason-oversize error, got %q", result.Content)
+	}
+}
+
+func TestRequestInput_OversizedOptionIDRejected(t *testing.T) {
+	big := strings.Repeat("a", maxRequestInputOptionIDLen+1)
+	args := fmt.Sprintf(`{"prompt":"ok","options":[{"id":%q,"label":"L"}]}`, big)
+	result := execRequestInput(t, args)
+	if !strings.Contains(result.Content, "option[0].id exceeds") {
+		t.Errorf("expected option-id-oversize error, got %q", result.Content)
+	}
+}
+
+func TestRequestInput_OversizedOptionLabelRejected(t *testing.T) {
+	big := strings.Repeat("x", maxRequestInputLabelBytes+1)
+	args := fmt.Sprintf(`{"prompt":"ok","options":[{"id":"a","label":%q}]}`, big)
+	result := execRequestInput(t, args)
+	if !strings.Contains(result.Content, "option[0].label exceeds") {
+		t.Errorf("expected option-label-oversize error, got %q", result.Content)
 	}
 }
 

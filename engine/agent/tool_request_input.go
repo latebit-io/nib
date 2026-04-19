@@ -15,6 +15,17 @@ import (
 // LLM to collapse nuance into a small set of distinct choices.
 const maxRequestInputOptions = 9
 
+// Per-field byte caps on request_input arguments. Bounds LLM-supplied text so
+// a single malformed or adversarial tool call cannot balloon the event
+// payload, transcript, or status bar. Limits are generous for realistic use
+// (e.g. a two-sentence prompt fits easily) but reject obvious runaway sizes.
+const (
+	maxRequestInputPromptBytes = 2000
+	maxRequestInputReasonBytes = 500
+	maxRequestInputOptionIDLen = 64
+	maxRequestInputLabelBytes  = 200
+)
+
 // RequestInputTool lets the agent pause mid-turn and ask the developer a
 // structured question. The TUI renders a distinct prompt block so the
 // developer can see at a glance that the agent is blocked on a decision
@@ -83,8 +94,16 @@ func (t *RequestInputTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
-	if strings.TrimSpace(args.Prompt) == "" {
+	prompt := strings.TrimSpace(args.Prompt)
+	if prompt == "" {
 		return textResult("Error: prompt is required and must not be empty")
+	}
+	if len(prompt) > maxRequestInputPromptBytes {
+		return textResult(fmt.Sprintf("Error: prompt exceeds %d bytes (got %d)", maxRequestInputPromptBytes, len(prompt)))
+	}
+	reason := strings.TrimSpace(args.Reason)
+	if len(reason) > maxRequestInputReasonBytes {
+		return textResult(fmt.Sprintf("Error: reason exceeds %d bytes (got %d)", maxRequestInputReasonBytes, len(reason)))
 	}
 	if len(args.Options) > maxRequestInputOptions {
 		return textResult(fmt.Sprintf("Error: at most %d options allowed (got %d)", maxRequestInputOptions, len(args.Options)))
@@ -101,6 +120,12 @@ func (t *RequestInputTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 		if label == "" {
 			return textResult(fmt.Sprintf("Error: option[%d].label is required", i))
 		}
+		if len(id) > maxRequestInputOptionIDLen {
+			return textResult(fmt.Sprintf("Error: option[%d].id exceeds %d bytes (got %d)", i, maxRequestInputOptionIDLen, len(id)))
+		}
+		if len(label) > maxRequestInputLabelBytes {
+			return textResult(fmt.Sprintf("Error: option[%d].label exceeds %d bytes (got %d)", i, maxRequestInputLabelBytes, len(label)))
+		}
 		if seen[id] {
 			return textResult(fmt.Sprintf("Error: duplicate option id %q", id))
 		}
@@ -114,9 +139,9 @@ func (t *RequestInputTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 		Content: "",
 		Effect:  EffectAwaitingInput,
 		Payload: AwaitingInputPayload{
-			Prompt:  strings.TrimSpace(args.Prompt),
+			Prompt:  prompt,
 			Options: options,
-			Reason:  strings.TrimSpace(args.Reason),
+			Reason:  reason,
 			CallID:  call.ID,
 		},
 	}

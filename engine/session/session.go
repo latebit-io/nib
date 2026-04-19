@@ -116,6 +116,14 @@ type Session struct {
 	// the diff before approving — no blind approvals.
 	editReviewed bool
 
+	// awaitingInputCallID is the CallID of the current request_input prompt,
+	// or empty when no prompt is pending. Set when HandleEvent processes
+	// AgentAwaitingInput; cleared on AnswerInput, AgentDone, AgentError, or
+	// CancelAgent. Guarded by mu. Used to make AnswerInput a real no-op
+	// after the run has moved on, so a late keystroke cannot leak into the
+	// next prompt.
+	awaitingInputCallID string
+
 	// awaitingContinue is set when the agent emits StatusEditing and
 	// cleared when the agent moves past the continue gate. Frontends call
 	// CanContinue() instead of sampling their own status widgets so the
@@ -1438,11 +1446,20 @@ func (s *Session) ClearIntent() {
 
 // AnswerInput delivers the developer's typed answer to a pending request_input
 // prompt. Text is the verbatim answer — typically an option ID, but free-form
-// is valid. No-op if there is no pending prompt or no agent is attached.
+// is valid. No-op if there is no pending prompt or no agent is attached;
+// this prevents a late keystroke (after cancel / done) from queuing on the
+// agent's answer channel and leaking into a future prompt.
 func (s *Session) AnswerInput(text string) {
 	if !s.HasAgent() {
 		return
 	}
+	s.mu.Lock()
+	if s.awaitingInputCallID == "" {
+		s.mu.Unlock()
+		return
+	}
+	s.awaitingInputCallID = ""
+	s.mu.Unlock()
 	s.agent.AnswerInput(text)
 }
 
@@ -1453,6 +1470,9 @@ func (s *Session) CancelAgent() {
 		s.agent.Cancel()
 		s.pendingEdit = nil
 		s.editReviewed = false
+		s.mu.Lock()
+		s.awaitingInputCallID = ""
+		s.mu.Unlock()
 	}
 }
 
@@ -1905,6 +1925,7 @@ func (s *Session) HandleEvent(ev event.Event) {
 		s.editReviewed = false
 		s.mu.Lock()
 		s.awaitingContinue = false
+		s.awaitingInputCallID = ""
 		s.mu.Unlock()
 		_ = e // error text is in the event for the frontend to display
 	case event.AgentDone:
@@ -1912,6 +1933,7 @@ func (s *Session) HandleEvent(ev event.Event) {
 		s.editReviewed = false
 		s.mu.Lock()
 		s.awaitingContinue = false
+		s.awaitingInputCallID = ""
 		s.mu.Unlock()
 		if e.Success {
 			s.ArchiveIntent()
@@ -1924,9 +1946,14 @@ func (s *Session) HandleEvent(ev event.Event) {
 		// Agent finished its turn, waiting for developer input.
 		// No session state changes — intent stays active.
 	case event.AgentAwaitingInput:
-		// Agent is blocked mid-turn on a request_input prompt.
-		// No session state changes — the frontend renders the prompt
-		// and calls AnswerInput to unblock.
+		// Agent is blocked mid-turn on a request_input prompt. Record the
+		// CallID so AnswerInput only forwards while the prompt is live —
+		// a late answer after cancel/done is a no-op, preventing stale
+		// text from leaking into a future prompt via the agent's cap-1
+		// answer channel.
+		s.mu.Lock()
+		s.awaitingInputCallID = e.CallID
+		s.mu.Unlock()
 	case event.AgentStatus:
 		// Track the continue gate: StatusEditing means the agent applied the
 		// edit and is blocked on the developer's Continue signal. Any other

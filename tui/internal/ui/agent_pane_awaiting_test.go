@@ -197,6 +197,50 @@ func TestStatusBar_AwaitingInputRendersDistinctly(t *testing.T) {
 	}
 }
 
+func TestShowAwaitingInput_DropsPriorDraft(t *testing.T) {
+	m := newAwaitPane(t)
+	// Developer had typed a goal draft before the prompt appeared. It
+	// must not become part of the answer to the new prompt.
+	m.input.SetContent("previous goal draft")
+	m.ShowAwaitingInput(sampleAwaitEvent())
+	if m.input.Content() != "" {
+		t.Errorf("ShowAwaitingInput must reset the textarea; got %q", m.input.Content())
+	}
+}
+
+func TestClearAwaitingInput_DropsDraftAnswer(t *testing.T) {
+	// A stale answer left in the textarea after the run exits would be
+	// submitted as a brand-new goal the next time the input is focused.
+	m := newAwaitPane(t)
+	m.ShowAwaitingInput(sampleAwaitEvent())
+	m.input.SetContent("fix-a") // mid-typing draft
+	m.ClearAwaitingInput()
+	if m.input.Content() != "" {
+		t.Errorf("ClearAwaitingInput must reset the textarea; got %q", m.input.Content())
+	}
+}
+
+func TestClearAwaitingInput_WithNoPendingPromptIsNoOp(t *testing.T) {
+	// If no prompt was pending, ClearAwaitingInput must not nuke a goal
+	// draft the developer was composing.
+	m := newAwaitPane(t)
+	m.input.SetContent("a goal I'm writing")
+	m.ClearAwaitingInput()
+	if m.input.Content() != "a goal I'm writing" {
+		t.Errorf("ClearAwaitingInput must leave unrelated drafts alone; got %q", m.input.Content())
+	}
+}
+
+func TestHandleInput_EscWhileAwaitingDropsDraft(t *testing.T) {
+	m := newAwaitPane(t)
+	m.ShowAwaitingInput(sampleAwaitEvent())
+	m.input.SetContent("fix-a")
+	_ = m.handleInput(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.input.Content() != "" {
+		t.Errorf("Esc while awaiting must reset textarea; got %q", m.input.Content())
+	}
+}
+
 func TestRenderAwaitingInputBlock_PureFunction(t *testing.T) {
 	got := renderAwaitingInputBlock(sampleAwaitEvent())
 	for _, want := range []string{

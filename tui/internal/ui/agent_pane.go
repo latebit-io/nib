@@ -334,7 +334,9 @@ func (m *AgentPaneModel) SetStatus(s event.StatusKind) { m.status = s }
 // ShowAwaitingInput registers a pending request_input prompt. Renders a
 // styled prompt block into the transcript (so it scrolls with content and
 // survives rewrap on resize), focuses the textarea, and flips the pane
-// into awaiting mode so Enter submits an answer instead of a goal.
+// into awaiting mode so Enter submits an answer instead of a goal. The
+// textarea is reset so any lingering draft from a prior mode cannot be
+// accidentally submitted as the answer.
 func (m *AgentPaneModel) ShowAwaitingInput(e event.AgentAwaitingInput) {
 	m.awaitingInput = &awaitingInputState{
 		Prompt:  e.Prompt,
@@ -342,6 +344,7 @@ func (m *AgentPaneModel) ShowAwaitingInput(e event.AgentAwaitingInput) {
 		CallID:  e.CallID,
 	}
 	m.AppendMeta(renderAwaitingInputBlock(e))
+	m.input.Reset()
 	m.inputActive = true
 	m.recomputeInputLayout()
 }
@@ -349,8 +352,15 @@ func (m *AgentPaneModel) ShowAwaitingInput(e event.AgentAwaitingInput) {
 // ClearAwaitingInput drops any pending request_input state without
 // appending transcript output. Called when the agent run ends (AgentDone,
 // AgentError) so a cancel or failure leaves the pane in a clean state.
+// Also drops any draft answer in the textarea — it belonged to the
+// abandoned prompt and must not leak into the next goal submission.
 func (m *AgentPaneModel) ClearAwaitingInput() {
+	if m.awaitingInput == nil {
+		return
+	}
 	m.awaitingInput = nil
+	m.input.Reset()
+	m.recomputeInputLayout()
 }
 
 // IsAwaitingInput reports whether the agent is blocked on a structured
@@ -917,9 +927,12 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	case textarea.CancelMsg:
 		// Esc while awaiting an input answer cancels the whole agent
 		// run (matches Esc-rejects-edit semantics). Any other Esc just
-		// deactivates focus and preserves content.
+		// deactivates focus and preserves content. The draft answer is
+		// dropped — it belonged to the prompt we're abandoning, and
+		// must not leak into the next goal submission.
 		if m.awaitingInput != nil {
 			m.awaitingInput = nil
+			m.input.Reset()
 			m.inputActive = false
 			m.planningMode = false
 			return func() tea.Msg { return CancelAgentMsg{} }

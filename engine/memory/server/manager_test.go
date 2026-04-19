@@ -235,6 +235,96 @@ func TestTerminatePID_AlreadyGone(t *testing.T) {
 	}
 }
 
+func TestAcquireLock_BlocksSecondInstance(t *testing.T) {
+	// Two Managers pointed at the same project directory must not be able
+	// to both hold the lock. This is the single-instance guarantee that
+	// prevents two junto processes from racing on — and clobbering — the
+	// same memory server.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New(root)
+	b := New(root)
+
+	if err := a.acquireLock(); err != nil {
+		t.Fatalf("first acquire should succeed: %v", err)
+	}
+	t.Cleanup(a.releaseLock)
+
+	err := b.acquireLock()
+	if err == nil {
+		b.releaseLock()
+		t.Fatal("second acquire should have failed while first holds lock")
+	}
+	if !errors.Is(err, ErrInstanceAlreadyRunning) {
+		t.Errorf("expected ErrInstanceAlreadyRunning, got: %v", err)
+	}
+}
+
+func TestAcquireLock_SecondSucceedsAfterRelease(t *testing.T) {
+	// After the first holder releases, the second must be able to
+	// acquire. Confirms the lock doesn't leak past release.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New(root)
+	if err := a.acquireLock(); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	a.releaseLock()
+
+	b := New(root)
+	if err := b.acquireLock(); err != nil {
+		t.Fatalf("second acquire after release should succeed: %v", err)
+	}
+	b.releaseLock()
+}
+
+func TestReleaseLock_Idempotent(t *testing.T) {
+	// Stop() unconditionally calls releaseLock; tolerate repeat calls.
+	m := New(t.TempDir())
+	m.releaseLock() // no lock held — must be a no-op, not a panic
+	m.releaseLock()
+}
+
+func TestTerminateOwnedChild_GracefulExit(t *testing.T) {
+	// Spawn our own child and observe exit via the Wait-reap channel.
+	// Unlike signal(0) polling, this path is immune to zombie state: the
+	// Wait goroutine reaps the child as soon as it exits, so the done
+	// channel fires before the graceful timeout even for children that
+	// become momentarily defunct.
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn helper: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// cmd.Wait error is intentionally ignored: the process is killed
+		// on purpose (SIGTERM/SIGKILL from terminateOwnedChild), so Wait
+		// will return a non-nil "signal: terminated" / "signal: killed"
+		// exit status. That is the expected outcome of the test, not a
+		// failure, and the test's assertions are on terminateOwnedChild's
+		// return and elapsed time — not on child exit code.
+		_ = cmd.Wait()
+	}()
+
+	start := time.Now()
+	if err := terminateOwnedChild(cmd.Process, done, 5*time.Second); err != nil {
+		t.Fatalf("terminateOwnedChild: %v", err)
+	}
+	elapsed := time.Since(start)
+	// SIGTERM on sleep exits within milliseconds; 1s ceiling catches
+	// accidental escalation to SIGKILL or unnecessary waits.
+	if elapsed > time.Second {
+		t.Errorf("graceful termination too slow: %v", elapsed)
+	}
+}
+
 func TestTerminatePID_GracefulExit(t *testing.T) {
 	// `sleep` exits promptly on SIGTERM. Release() + a goroutine that
 	// reaps on exit mimics production: demarkus-server is Release()'d at
@@ -249,6 +339,13 @@ func TestTerminatePID_GracefulExit(t *testing.T) {
 	pid := cmd.Process.Pid
 	done := make(chan struct{})
 	go func() {
+		// cmd.Wait error is intentionally ignored: terminatePID sends
+		// SIGTERM/SIGKILL, so the non-nil "signal: terminated" exit
+		// status is the expected outcome. The goroutine exists solely
+		// to reap the child — without it, the zombie keeps signal(0)
+		// returning nil and terminatePID's poll loop would wrongly
+		// escalate to SIGKILL. Test assertions check elapsed time, not
+		// exit status.
 		_ = cmd.Wait()
 		close(done)
 	}()

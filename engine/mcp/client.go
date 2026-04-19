@@ -7,13 +7,21 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
+
+// ErrClientClosed is returned by [Client] methods after [Client.Close]
+// has been called. Callers that hold a cached reference (e.g. memory
+// adapters) can surface this immediately instead of waiting for the
+// underlying RPC to time out.
+var ErrClientClosed = errors.New("mcp: client closed")
 
 // ToolInfo describes a tool exposed by an MCP server.
 type ToolInfo struct {
@@ -46,6 +54,10 @@ type Client struct {
 
 	// pending tracks in-flight requests awaiting responses.
 	pending map[int]chan json.RawMessage
+
+	// closed is set by Close so subsequent RPC calls short-circuit with
+	// [ErrClientClosed] instead of writing to a torn-down pipe.
+	closed atomic.Bool
 }
 
 // jsonRPCRequest is the wire format for a JSON-RPC 2.0 request.
@@ -164,6 +176,17 @@ func (c *Client) readLoop() {
 
 // call sends a JSON-RPC request and waits for the response.
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if c.closed.Load() {
+		return nil, ErrClientClosed
+	}
+	// readLoop closed its done channel — the subprocess is gone (EOF /
+	// error) but Close() hasn't run yet. Surface the failure fast rather
+	// than enqueuing onto pending and waiting for ctx to expire.
+	select {
+	case <-c.done:
+		return nil, ErrClientClosed
+	default:
+	}
 	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
@@ -313,8 +336,15 @@ func (c *Client) CallToolResult(ctx context.Context, name string, args map[strin
 }
 
 // Close terminates the MCP server subprocess and waits for the
-// readLoop goroutine to finish its pending-channel cleanup.
+// readLoop goroutine to finish its pending-channel cleanup. After Close
+// returns, further calls to [Client.CallTool], [Client.CallToolResult],
+// [Client.ListTools], and [Client.Initialize] return [ErrClientClosed]
+// immediately — callers that hold a cached reference (memory adapter,
+// agent store) don't wait for a now-useless RPC to time out.
 func (c *Client) Close() error {
+	// Record closed state first so concurrent RPC calls short-circuit
+	// rather than enqueuing onto pending and then being orphaned.
+	c.closed.Store(true)
 	if err := c.stdin.Close(); err != nil {
 		slog.Debug("mcp: close stdin", "err", err)
 	}

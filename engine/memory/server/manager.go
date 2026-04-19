@@ -32,6 +32,7 @@ type Manager struct {
 	pidFile     string // .project/.memory-pid
 	portFile    string // .project/.memory-port
 	tokenFile   string // .project/.memory-token
+	lockPath    string // .project/.memory-lock (flock target)
 
 	port    int
 	process *os.Process
@@ -39,6 +40,20 @@ type Manager struct {
 	// mcpClient is the demarkus-mcp subprocess created by NewStore. Closed by
 	// Stop so the subprocess doesn't outlive the server it talks to.
 	mcpClient *mcp.Client
+
+	// cmd is the *exec.Cmd for a server we spawned this session. nil when
+	// the server was adopted via reuseExisting (not our child). A background
+	// goroutine calls cmd.Wait() to reap on exit; waitDone is closed when
+	// Wait returns, giving Stop() an accurate exit signal without the
+	// signal(0) zombie-polling pitfall.
+	cmd      *exec.Cmd
+	waitDone chan struct{}
+
+	// lockFile holds the exclusive flock on lockPath while a session is
+	// active. Prevents two concurrent junto instances from sharing — and
+	// clobbering — the same memory server. Released in Stop() or when the
+	// process exits (kernel releases the fd).
+	lockFile *os.File
 }
 
 // New creates a Manager for the given project root.
@@ -52,8 +67,15 @@ func New(projectRoot string) *Manager {
 		pidFile:     filepath.Join(dot, ".memory-pid"),
 		portFile:    filepath.Join(dot, ".memory-port"),
 		tokenFile:   filepath.Join(dot, ".memory-token"),
+		lockPath:    filepath.Join(dot, ".memory-lock"),
 	}
 }
+
+// ErrInstanceAlreadyRunning is returned when another junto process is
+// actively managing this project's memory server. Concurrent instances
+// would race on PID/port files and (worse) kill each other's servers at
+// teardown — the flock prevents that.
+var ErrInstanceAlreadyRunning = errors.New("another junto instance is managing this project")
 
 // Start launches the demarkus-server. Returns the port it's listening on.
 // If a server is already running (detected via PID file), reuses it.
@@ -65,6 +87,16 @@ func (m *Manager) Start() (int, error) {
 	// Ensure content directory exists.
 	if err := os.MkdirAll(m.contentDir, 0755); err != nil {
 		return 0, fmt.Errorf("memory server: create content dir: %w", err)
+	}
+
+	// Acquire the single-instance lock before touching any state files. A
+	// second junto instance that reached this point concurrently would call
+	// reuseExisting, adopt this instance's server, and then kill it at its
+	// own teardown — leaving this instance's MCP client talking to a dead
+	// port for the rest of its session (the exact timeout-storm we've seen
+	// in the field). Crash-safe: kernel releases the flock on exit.
+	if err := m.acquireLock(); err != nil {
+		return 0, err
 	}
 
 	// Check for existing server via PID file.
@@ -80,6 +112,7 @@ func (m *Manager) Start() (int, error) {
 	if !errors.Is(reuseErr, errNoExistingServer) {
 		// A live process was found but something else failed (port file, probe).
 		// Do not launch a second server against the same content root.
+		m.releaseLock()
 		return 0, fmt.Errorf("memory server: existing server detected but unusable: %w", reuseErr)
 	}
 
@@ -88,55 +121,47 @@ func (m *Manager) Start() (int, error) {
 	// leave a zombie that accumulates indefinitely.
 	m.reapOrphans(0)
 
-	// Find a free port.
+	return m.startFresh()
+}
+
+// startFresh launches a new demarkus-server. Precondition: the single-
+// instance lock is already held. Releases the lock on any failure path
+// so callers don't need to track partial state.
+func (m *Manager) startFresh() (int, error) {
 	port, err := freePort()
 	if err != nil {
+		m.releaseLock()
 		return 0, fmt.Errorf("memory server: find free port: %w", err)
 	}
 
-	serverBin := filepath.Join(m.binDir, "demarkus-server")
-
 	// Tokens file must exist — EnsureToken must be called before Start.
 	if _, err := os.Stat(m.tokensFile); err != nil {
+		m.releaseLock()
 		return 0, fmt.Errorf("memory server: tokens file missing (call EnsureToken first): %w", err)
 	}
 
-	args := []string{
+	serverBin := filepath.Join(m.binDir, "demarkus-server")
+	cmd := exec.Command(serverBin,
 		"-root", m.contentDir,
 		"-port", strconv.Itoa(port),
 		"-tokens", m.tokensFile,
-	}
-
-	cmd := exec.Command(serverBin, args...)
+	)
 	// Detach from parent process group so the server survives if Junto crashes.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
+		m.releaseLock()
 		return 0, fmt.Errorf("memory server: start: %w", err)
 	}
 
-	m.process = cmd.Process
-	m.port = port
-
-	// Write PID and port files — these are required for reuse and stop.
-	// If either fails, kill the server to avoid orphaning it.
-	if err := os.WriteFile(m.pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
-		if killErr := cmd.Process.Kill(); killErr != nil {
-			slog.Warn("memory server: kill after PID write failure", "killErr", killErr)
-		}
-		return 0, fmt.Errorf("memory server: write PID file: %w", err)
-	}
-	if err := os.WriteFile(m.portFile, []byte(strconv.Itoa(port)), 0600); err != nil {
-		if killErr := cmd.Process.Kill(); killErr != nil {
-			slog.Warn("memory server: kill after port write failure", "killErr", killErr)
-		}
-		m.cleanupFiles()
-		return 0, fmt.Errorf("memory server: write port file: %w", err)
+	if err := m.writeStateFiles(cmd, port); err != nil {
+		return 0, err
 	}
 
-	// Wait for server to become ready.
+	// Wait for server to become ready. On failure Stop() handles all
+	// cleanup including lock release.
 	if err := m.waitReady(port); err != nil {
 		if stopErr := m.Stop(); stopErr != nil {
 			slog.Warn("memory server: stop after readiness failure", "stopErr", stopErr)
@@ -144,20 +169,94 @@ func (m *Manager) Start() (int, error) {
 		return 0, fmt.Errorf("memory server: not ready: %w", err)
 	}
 
-	// Release the process so we don't leak a zombie if Junto exits without Stop().
-	// The PID file lets us find it again. Release cannot meaningfully fail here —
-	// the process is alive and we just confirmed it's ready.
-	if err := cmd.Process.Release(); err != nil {
-		slog.Warn("memory server: process release", "err", err)
-	}
+	// Keep the *exec.Cmd so Stop() can use it to observe exit directly
+	// (avoiding signal(0) polling, which cannot distinguish a zombie from
+	// a live process). A background goroutine reaps the child when it
+	// exits — on clean Stop, crash (reparented to init), or any other
+	// termination. Replaces the old Release() pattern, which did not
+	// prevent zombies since Release is a Go-runtime bookkeeping call.
+	m.cmd = cmd
+	m.waitDone = make(chan struct{})
+	go func() {
+		defer close(m.waitDone)
+		if err := cmd.Wait(); err != nil {
+			slog.Debug("memory server: wait returned", "pid", cmd.Process.Pid, "err", err)
+		}
+	}()
 
+	m.process = cmd.Process
+	m.port = port
 	slog.Info("memory server: started", "port", port, "pid", cmd.Process.Pid)
 	return port, nil
 }
 
+// writeStateFiles records the newly-spawned server's PID and port for
+// adoption by future junto launches. On any failure the child is killed,
+// reaped, and state files + lock are released so the caller can return
+// cleanly.
+func (m *Manager) writeStateFiles(cmd *exec.Cmd, port int) error {
+	pid := cmd.Process.Pid
+	if err := os.WriteFile(m.pidFile, []byte(strconv.Itoa(pid)), 0600); err != nil {
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			slog.Warn("memory server: kill after PID write failure", "killErr", killErr)
+		}
+		_ = cmd.Wait()
+		m.releaseLock()
+		return fmt.Errorf("memory server: write PID file: %w", err)
+	}
+	if err := os.WriteFile(m.portFile, []byte(strconv.Itoa(port)), 0600); err != nil {
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			slog.Warn("memory server: kill after port write failure", "killErr", killErr)
+		}
+		_ = cmd.Wait()
+		m.cleanupFiles()
+		m.releaseLock()
+		return fmt.Errorf("memory server: write port file: %w", err)
+	}
+	return nil
+}
+
+// acquireLock takes an exclusive, non-blocking flock on lockPath. Fails
+// fast with [ErrInstanceAlreadyRunning] when another junto holds it. The
+// OS releases the flock when the process exits, so crashes don't wedge
+// the next launch.
+func (m *Manager) acquireLock() error {
+	if err := os.MkdirAll(filepath.Dir(m.lockPath), 0755); err != nil {
+		return fmt.Errorf("memory server: lock dir: %w", err)
+	}
+	f, err := os.OpenFile(m.lockPath, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return fmt.Errorf("memory server: open lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("%w (lock: %s)", ErrInstanceAlreadyRunning, m.lockPath)
+		}
+		return fmt.Errorf("memory server: flock: %w", err)
+	}
+	m.lockFile = f
+	return nil
+}
+
+// releaseLock unlocks and closes the flock file. Idempotent.
+func (m *Manager) releaseLock() {
+	if m.lockFile == nil {
+		return
+	}
+	if err := syscall.Flock(int(m.lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		slog.Debug("memory server: flock unlock", "err", err)
+	}
+	if err := m.lockFile.Close(); err != nil {
+		slog.Debug("memory server: lock file close", "err", err)
+	}
+	m.lockFile = nil
+}
+
 // Stop kills the server process and cleans up PID and port files. Also
 // closes the demarkus-mcp subprocess if one was started via NewStore — we
-// shut down the MCP client before the server it depends on.
+// shut down the MCP client before the server it depends on. Releases the
+// single-instance lock on the way out.
 func (m *Manager) Stop() error {
 	if m.mcpClient != nil {
 		if err := m.mcpClient.Close(); err != nil {
@@ -168,24 +267,39 @@ func (m *Manager) Stop() error {
 
 	pid := m.processPID()
 	if pid == 0 {
+		m.releaseLock()
 		return nil
 	}
 
-	if err := terminatePID(pid, 5*time.Second); err != nil {
-		slog.Debug("memory server: terminate", "pid", pid, "err", err)
+	// Spawned child vs. adopted non-child need different exit detection.
+	// Our own child: use waitDone (the Wait goroutine closes it on reap),
+	//   which cannot be fooled by zombie state.
+	// Adopted (reuseExisting) or sweep target: fall back to signal(0)
+	//   polling since we have no Wait() channel for non-children.
+	if m.cmd != nil && m.waitDone != nil {
+		if err := terminateOwnedChild(m.cmd.Process, m.waitDone, 5*time.Second); err != nil {
+			slog.Debug("memory server: terminate child", "pid", pid, "err", err)
+		}
+	} else {
+		if err := terminatePID(pid, 5*time.Second); err != nil {
+			slog.Debug("memory server: terminate", "pid", pid, "err", err)
+		}
 	}
 	m.cleanupFiles()
 	m.process = nil
 	m.port = 0
+	m.cmd = nil
+	m.waitDone = nil
+	m.releaseLock()
 	return nil
 }
 
-// terminatePID sends SIGTERM to pid, polls up to graceful for it to exit,
-// then escalates to SIGKILL. Polling via signal 0 is used because the
-// target is not a child process (servers are Release()'d post-spawn, and
-// orphan sweeps discover PIDs via ps), so Wait() would return immediately
-// without observing exit. Returns an error only if the PID was already
-// gone when the first signal was sent.
+// terminatePID sends SIGTERM to a non-child pid, polls up to graceful for
+// it to exit, then escalates to SIGKILL. Used when we do not own the
+// process (reuseExisting adoption and orphan sweep) and therefore have
+// no Wait channel. Relies on init reaping reparented children for
+// signal(0) → ESRCH to work correctly. Returns an error only if the PID
+// was already gone when the first signal was sent.
 func terminatePID(pid int, graceful time.Duration) error {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -206,6 +320,40 @@ func terminatePID(pid int, graceful time.Duration) error {
 		slog.Debug("memory server: SIGKILL failed (already dead)", "pid", pid, "err", err)
 	} else {
 		time.Sleep(200 * time.Millisecond)
+	}
+	slog.Info("memory server: terminated (killed)", "pid", pid)
+	return nil
+}
+
+// terminateOwnedChild terminates a process we spawned in this session.
+// Unlike [terminatePID], exit is observed via a caller-provided done
+// channel (closed by the Wait goroutine), which is accurate even while
+// the OS briefly leaves the PID as a zombie between exit and reap.
+func terminateOwnedChild(proc *os.Process, done <-chan struct{}, graceful time.Duration) error {
+	if proc == nil {
+		return fmt.Errorf("nil process")
+	}
+	pid := proc.Pid
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("SIGTERM %d: %w", pid, err)
+	}
+	select {
+	case <-done:
+		slog.Info("memory server: terminated gracefully", "pid", pid)
+		return nil
+	case <-time.After(graceful):
+		// Still alive after the grace window — escalate.
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		slog.Debug("memory server: SIGKILL failed (already dead)", "pid", pid, "err", err)
+	}
+	// Wait for the kernel to reap via our Wait goroutine. SIGKILL is
+	// unblockable; the bound is just belt-and-braces against a stuck
+	// reaper (e.g. process stuck in uninterruptible sleep).
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		slog.Warn("memory server: Wait did not return after SIGKILL", "pid", pid)
 	}
 	slog.Info("memory server: terminated (killed)", "pid", pid)
 	return nil

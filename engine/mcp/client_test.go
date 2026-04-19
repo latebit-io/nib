@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,5 +140,44 @@ func TestClient_ContextCancellation(t *testing.T) {
 	err = client.Initialize(ctx)
 	if err == nil {
 		t.Error("expected error on cancelled context")
+	}
+}
+
+func TestClient_AfterCloseFailsFast(t *testing.T) {
+	// After Close, further calls must return ErrClientClosed immediately
+	// rather than hanging until the caller's context expires. This is the
+	// guard that prevents the "closed adapter still being used" timeout
+	// storm when the Manager tears down the server mid-session.
+	script := writeMockServer(t)
+	client, err := NewStdioClient("sh", []string{script}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Use a generous parent ctx; the guard should fire without needing
+	// ctx to expire. If the guard is missing, the call would block on
+	// the (now-closed) pipe write or on the pending channel read.
+	start := time.Now()
+	_, err = client.CallTool(ctx, "mark_fetch", map[string]any{"url": "/x"})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error after Close")
+	}
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected ErrClientClosed, got: %v", err)
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("post-Close call should fail fast; took %v", elapsed)
 	}
 }

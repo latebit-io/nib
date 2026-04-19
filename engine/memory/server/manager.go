@@ -452,11 +452,12 @@ func findDemarkusServerPIDs(contentDir string) ([]int, error) {
 // path may include any prefix (absolute or relative) but must end in the
 // binary name demarkus-server.
 //
-// Argv boundaries are lost in ps output — spaces in flag values
-// (project paths containing a space) collapse with spaces between
-// tokens. The reconstruction rejoins consecutive tokens after `-root`
-// until the next token that looks like a flag (leading `-`) or end of
-// line. This handles realistic paths with single spaces; it does not
+// Argv boundaries are lost in ps output — spaces in both the executable
+// path (project under a path like "/tmp/foo bar/...") and flag values
+// collapse with spaces between tokens. Reconstruction rejoins tokens:
+// argv[0] is everything up to the first flag-looking token (leading
+// `-`); each flag value is everything after it up to the next flag or
+// end of line. Handles realistic paths with single spaces; does not
 // round-trip paths whose components begin with `-` or contain multiple
 // consecutive whitespace characters (both atypical for project dirs).
 // `-root` is matched exactly, not as a substring, so sibling projects
@@ -466,10 +467,28 @@ func demarkusServerMatches(cmdline, contentDir string) bool {
 	if len(tokens) == 0 {
 		return false
 	}
-	if filepath.Base(tokens[0]) != "demarkus-server" {
+
+	// Reconstruct argv[0] before checking the binary name. Without this,
+	// a binary path containing a space (e.g. "/tmp/foo bar/bin/demarkus-
+	// server") tokenises such that tokens[0] is just the prefix
+	// ("/tmp/foo"), causing filepath.Base to return the wrong value and
+	// the match to silently fail — missing live servers for spaced
+	// project roots.
+	firstFlag := len(tokens)
+	for i, tok := range tokens {
+		if strings.HasPrefix(tok, "-") {
+			firstFlag = i
+			break
+		}
+	}
+	if firstFlag == 0 {
 		return false
 	}
-	for i := 0; i < len(tokens)-1; i++ {
+	if filepath.Base(strings.Join(tokens[:firstFlag], " ")) != "demarkus-server" {
+		return false
+	}
+
+	for i := firstFlag; i < len(tokens)-1; i++ {
 		if tokens[i] != "-root" {
 			continue
 		}

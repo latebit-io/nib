@@ -232,6 +232,23 @@ var demarkusServerMatchesCases = []demarkusServerMatchesCase{
 		contentDir: "/tmp/foo bar/memory",
 		want:       true,
 	},
+	{
+		// Argv[0] itself contains a space — a project checked out under
+		// a path like "/tmp/foo bar/...". Without argv[0] reconstruction
+		// the binary-name check fails, so live servers for spaced roots
+		// would be invisible to reapOrphans / pidOwnsDemarkusServer.
+		name:       "matches when executable path contains spaces",
+		cmdline:    "/tmp/foo bar/.project/bin/demarkus-server -root /tmp/foo bar/.project/memory -port 1",
+		contentDir: "/tmp/foo bar/.project/memory",
+		want:       true,
+	},
+	{
+		// Rejects a different binary even when argv[0] has a space.
+		name:       "rejects different binary with spaced path",
+		cmdline:    "/tmp/foo bar/bin/other-tool -root /tmp/foo bar/.project/memory",
+		contentDir: "/tmp/foo bar/.project/memory",
+		want:       false,
+	},
 }
 
 func TestDemarkusServerMatches(t *testing.T) {

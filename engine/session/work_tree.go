@@ -66,6 +66,16 @@ func (w *WorkTreeManager) Tree() *project.Tree {
 	return w.tree
 }
 
+// TreeLoaded reports whether a work tree is currently held. False means
+// /project.md does not exist, no memory store is configured, or the
+// initial fetch failed. Callers that gate behavior on tree presence
+// should use this rather than inspecting Tree() for nil.
+func (w *WorkTreeManager) TreeLoaded() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.tree != nil
+}
+
 // ActiveGoal returns the currently active task and its ancestry path string.
 // Returns nil, "" if no work tree is loaded or no active goal is set.
 func (w *WorkTreeManager) ActiveGoal() (*project.Node, string) {

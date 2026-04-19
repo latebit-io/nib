@@ -7,13 +7,21 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
+
+// ErrClientClosed is returned by [Client] methods after [Client.Close]
+// has been called. Callers that hold a cached reference (e.g. memory
+// adapters) can surface this immediately instead of waiting for the
+// underlying RPC to time out.
+var ErrClientClosed = errors.New("mcp: client closed")
 
 // ToolInfo describes a tool exposed by an MCP server.
 type ToolInfo struct {
@@ -46,6 +54,10 @@ type Client struct {
 
 	// pending tracks in-flight requests awaiting responses.
 	pending map[int]chan json.RawMessage
+
+	// closed is set by Close so subsequent RPC calls short-circuit with
+	// [ErrClientClosed] instead of writing to a torn-down pipe.
+	closed atomic.Bool
 }
 
 // jsonRPCRequest is the wire format for a JSON-RPC 2.0 request.
@@ -164,12 +176,39 @@ func (c *Client) readLoop() {
 
 // call sends a JSON-RPC request and waits for the response.
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	// The closed/done check must be atomic with the pending insertion:
+	// without the mutex, readLoop could purge between the check and the
+	// insert, leaving an orphaned entry in the pending map that nothing
+	// will ever clean up.
 	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		return nil, ErrClientClosed
+	}
+	// readLoop closed its done channel — the subprocess is gone (EOF /
+	// error) but Close() hasn't run yet. Surface the failure fast rather
+	// than enqueuing onto pending and waiting for ctx to expire.
+	select {
+	case <-c.done:
+		c.mu.Unlock()
+		return nil, ErrClientClosed
+	default:
+	}
 	id := c.nextID
 	c.nextID++
 	ch := make(chan json.RawMessage, 1)
 	c.pending[id] = ch
 	c.mu.Unlock()
+
+	// purgePending removes the map entry when call() aborts before the
+	// response would naturally consume it. Without this, every
+	// marshal/write failure leaks the entry; the map would grow
+	// monotonically across the client's lifetime.
+	purgePending := func() {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+	}
 
 	req := jsonRPCRequest{
 		JSONRPC: "2.0",
@@ -179,12 +218,26 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	}
 	data, err := json.Marshal(req)
 	if err != nil {
+		purgePending()
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
 	data = append(data, '\n')
 
 	c.mu.Lock()
+	// readLoop may have exited between our enqueue and this write. If so,
+	// pending was already purged (our entry was added after) and the pipe
+	// is about to EPIPE anyway. Return fast and clean our entry.
+	select {
+	case <-c.done:
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return nil, ErrClientClosed
+	default:
+	}
 	_, err = c.stdin.Write(data)
+	if err != nil {
+		delete(c.pending, id)
+	}
 	c.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("mcp: write request: %w", err)
@@ -313,8 +366,15 @@ func (c *Client) CallToolResult(ctx context.Context, name string, args map[strin
 }
 
 // Close terminates the MCP server subprocess and waits for the
-// readLoop goroutine to finish its pending-channel cleanup.
+// readLoop goroutine to finish its pending-channel cleanup. After Close
+// returns, further calls to [Client.CallTool], [Client.CallToolResult],
+// [Client.ListTools], and [Client.Initialize] return [ErrClientClosed]
+// immediately — callers that hold a cached reference (memory adapter,
+// agent store) don't wait for a now-useless RPC to time out.
 func (c *Client) Close() error {
+	// Record closed state first so concurrent RPC calls short-circuit
+	// rather than enqueuing onto pending and then being orphaned.
+	c.closed.Store(true)
 	if err := c.stdin.Close(); err != nil {
 		slog.Debug("mcp: close stdin", "err", err)
 	}

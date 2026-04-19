@@ -203,6 +203,11 @@ type TaskTracker interface {
 	// is non-empty, it is appended to the task title as a markdown link
 	// to a supplementary memory document.
 	AddTask(phase, feature, task, link string) error
+	// WorkTreeLoaded reports whether the session currently holds a parsed
+	// work tree. False means either /project.md does not exist yet or the
+	// initial fetch failed (e.g. demarkus unreachable). The active-task
+	// gate uses this to distinguish "no active task" from "no tree at all."
+	WorkTreeLoaded() bool
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

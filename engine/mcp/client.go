@@ -176,7 +176,13 @@ func (c *Client) readLoop() {
 
 // call sends a JSON-RPC request and waits for the response.
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	// The closed/done check must be atomic with the pending insertion:
+	// without the mutex, readLoop could purge between the check and the
+	// insert, leaving an orphaned entry in the pending map that nothing
+	// will ever clean up.
+	c.mu.Lock()
 	if c.closed.Load() {
+		c.mu.Unlock()
 		return nil, ErrClientClosed
 	}
 	// readLoop closed its done channel — the subprocess is gone (EOF /
@@ -184,15 +190,25 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	// than enqueuing onto pending and waiting for ctx to expire.
 	select {
 	case <-c.done:
+		c.mu.Unlock()
 		return nil, ErrClientClosed
 	default:
 	}
-	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
 	ch := make(chan json.RawMessage, 1)
 	c.pending[id] = ch
 	c.mu.Unlock()
+
+	// purgePending removes the map entry when call() aborts before the
+	// response would naturally consume it. Without this, every
+	// marshal/write failure leaks the entry; the map would grow
+	// monotonically across the client's lifetime.
+	purgePending := func() {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+	}
 
 	req := jsonRPCRequest{
 		JSONRPC: "2.0",
@@ -202,12 +218,26 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	}
 	data, err := json.Marshal(req)
 	if err != nil {
+		purgePending()
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
 	data = append(data, '\n')
 
 	c.mu.Lock()
+	// readLoop may have exited between our enqueue and this write. If so,
+	// pending was already purged (our entry was added after) and the pipe
+	// is about to EPIPE anyway. Return fast and clean our entry.
+	select {
+	case <-c.done:
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return nil, ErrClientClosed
+	default:
+	}
 	_, err = c.stdin.Write(data)
+	if err != nil {
+		delete(c.pending, id)
+	}
 	c.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("mcp: write request: %w", err)

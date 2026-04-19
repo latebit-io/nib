@@ -156,25 +156,13 @@ func (m *Manager) startFresh() (int, error) {
 		return 0, fmt.Errorf("memory server: start: %w", err)
 	}
 
-	if err := m.writeStateFiles(cmd, port); err != nil {
-		return 0, err
-	}
-
-	// Wait for server to become ready. On failure Stop() handles all
-	// cleanup including lock release.
-	if err := m.waitReady(port); err != nil {
-		if stopErr := m.Stop(); stopErr != nil {
-			slog.Warn("memory server: stop after readiness failure", "stopErr", stopErr)
-		}
-		return 0, fmt.Errorf("memory server: not ready: %w", err)
-	}
-
-	// Keep the *exec.Cmd so Stop() can use it to observe exit directly
-	// (avoiding signal(0) polling, which cannot distinguish a zombie from
-	// a live process). A background goroutine reaps the child when it
-	// exits — on clean Stop, crash (reparented to init), or any other
-	// termination. Replaces the old Release() pattern, which did not
-	// prevent zombies since Release is a Go-runtime bookkeeping call.
+	// Register owned-child bookkeeping immediately so every post-Start
+	// failure path routes through m.Stop() → terminateOwnedChild, which
+	// uses waitDone to reap. Setting m.cmd/m.waitDone later (after
+	// waitReady) would leave an early-failure window where Stop() falls
+	// back to terminatePID — that path signals but cannot reap, so a
+	// server exiting during startup would linger as a zombie until junto
+	// itself exits.
 	m.cmd = cmd
 	m.waitDone = make(chan struct{})
 	go func() {
@@ -183,34 +171,38 @@ func (m *Manager) startFresh() (int, error) {
 			slog.Debug("memory server: wait returned", "pid", cmd.Process.Pid, "err", err)
 		}
 	}()
-
 	m.process = cmd.Process
 	m.port = port
+
+	if err := m.writePIDPortFiles(cmd.Process.Pid, port); err != nil {
+		if stopErr := m.Stop(); stopErr != nil {
+			slog.Warn("memory server: stop after state-file write failure", "stopErr", stopErr)
+		}
+		return 0, err
+	}
+
+	// Wait for server to become ready. On failure Stop() handles all
+	// cleanup including lock release and zombie-free child reaping.
+	if err := m.waitReady(port); err != nil {
+		if stopErr := m.Stop(); stopErr != nil {
+			slog.Warn("memory server: stop after readiness failure", "stopErr", stopErr)
+		}
+		return 0, fmt.Errorf("memory server: not ready: %w", err)
+	}
+
 	slog.Info("memory server: started", "port", port, "pid", cmd.Process.Pid)
 	return port, nil
 }
 
-// writeStateFiles records the newly-spawned server's PID and port for
-// adoption by future junto launches. On any failure the child is killed,
-// reaped, and state files + lock are released so the caller can return
-// cleanly.
-func (m *Manager) writeStateFiles(cmd *exec.Cmd, port int) error {
-	pid := cmd.Process.Pid
+// writePIDPortFiles persists the spawned server's PID and port for
+// adoption by future junto launches. Pure I/O — cleanup on failure is
+// the caller's responsibility (via [Manager.Stop]), so both
+// file-write failures and readiness failures share one cleanup path.
+func (m *Manager) writePIDPortFiles(pid, port int) error {
 	if err := os.WriteFile(m.pidFile, []byte(strconv.Itoa(pid)), 0600); err != nil {
-		if killErr := cmd.Process.Kill(); killErr != nil {
-			slog.Warn("memory server: kill after PID write failure", "killErr", killErr)
-		}
-		_ = cmd.Wait()
-		m.releaseLock()
 		return fmt.Errorf("memory server: write PID file: %w", err)
 	}
 	if err := os.WriteFile(m.portFile, []byte(strconv.Itoa(port)), 0600); err != nil {
-		if killErr := cmd.Process.Kill(); killErr != nil {
-			slog.Warn("memory server: kill after port write failure", "killErr", killErr)
-		}
-		_ = cmd.Wait()
-		m.cleanupFiles()
-		m.releaseLock()
 		return fmt.Errorf("memory server: write port file: %w", err)
 	}
 	return nil
@@ -392,9 +384,11 @@ func (m *Manager) reapOrphans(sparePID int) {
 
 // findDemarkusServerPIDs returns PIDs of demarkus-server processes whose
 // `-root <contentDir>` argument matches the given path. Uses ps since
-// junto already depends on POSIX process semantics.
+// junto already depends on POSIX process semantics. The `-ww` flag
+// disables terminal-width truncation; without it, long project paths
+// get clipped and matches silently fail.
 func findDemarkusServerPIDs(contentDir string) ([]int, error) {
-	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
+	out, err := exec.Command("ps", "-axww", "-o", "pid=,command=").Output()
 	if err != nil {
 		return nil, fmt.Errorf("ps: %w", err)
 	}
@@ -427,9 +421,17 @@ func findDemarkusServerPIDs(contentDir string) ([]int, error) {
 // demarkusServerMatches reports whether the argv-string represents a
 // demarkus-server invocation with `-root <contentDir>`. The executable
 // path may include any prefix (absolute or relative) but must end in the
-// binary name demarkus-server. The `-root` argument must match contentDir
-// exactly — substring matches are rejected to avoid confusing sibling
-// projects whose paths share a prefix.
+// binary name demarkus-server.
+//
+// Argv boundaries are lost in ps output — spaces in flag values
+// (project paths containing a space) collapse with spaces between
+// tokens. The reconstruction rejoins consecutive tokens after `-root`
+// until the next token that looks like a flag (leading `-`) or end of
+// line. This handles realistic paths with single spaces; it does not
+// round-trip paths whose components begin with `-` or contain multiple
+// consecutive whitespace characters (both atypical for project dirs).
+// `-root` is matched exactly, not as a substring, so sibling projects
+// whose paths share a prefix cannot collide.
 func demarkusServerMatches(cmdline, contentDir string) bool {
 	tokens := strings.Fields(cmdline)
 	if len(tokens) == 0 {
@@ -439,7 +441,17 @@ func demarkusServerMatches(cmdline, contentDir string) bool {
 		return false
 	}
 	for i := 0; i < len(tokens)-1; i++ {
-		if tokens[i] == "-root" && tokens[i+1] == contentDir {
+		if tokens[i] != "-root" {
+			continue
+		}
+		root := tokens[i+1]
+		for j := i + 2; j < len(tokens); j++ {
+			if strings.HasPrefix(tokens[j], "-") {
+				break
+			}
+			root += " " + tokens[j]
+		}
+		if root == contentDir {
 			return true
 		}
 	}

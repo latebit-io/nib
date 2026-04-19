@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -150,63 +151,98 @@ func TestReuseExisting(t *testing.T) {
 	})
 }
 
+type demarkusServerMatchesCase struct {
+	name       string
+	cmdline    string
+	contentDir string // empty → use the default test dir
+	want       bool
+}
+
+var demarkusServerMatchesDefaultDir = "/Users/fritz/latebit/NULLRUN/.project/memory"
+
+var demarkusServerMatchesCases = []demarkusServerMatchesCase{
+	{
+		name:    "matches absolute path with exact -root",
+		cmdline: "/Users/fritz/latebit/NULLRUN/.project/bin/demarkus-server -root " + demarkusServerMatchesDefaultDir + " -port 61254 -tokens /x",
+		want:    true,
+	},
+	{
+		name:    "matches relative executable",
+		cmdline: "./demarkus-server -root " + demarkusServerMatchesDefaultDir + " -port 1",
+		want:    true,
+	},
+	{
+		name:    "matches plain binary name",
+		cmdline: "demarkus-server -root " + demarkusServerMatchesDefaultDir,
+		want:    true,
+	},
+	{
+		name:    "rejects different executable",
+		cmdline: "/usr/bin/other-binary -root " + demarkusServerMatchesDefaultDir,
+		want:    false,
+	},
+	{
+		name:    "rejects suffix-stripped executable",
+		cmdline: "/bin/demarkus-server-v2 -root " + demarkusServerMatchesDefaultDir,
+		want:    false,
+	},
+	{
+		name:    "rejects different -root value",
+		cmdline: "demarkus-server -root /tmp/other -port 1",
+		want:    false,
+	},
+	{
+		name:    "rejects path prefix overlap",
+		cmdline: "demarkus-server -root " + demarkusServerMatchesDefaultDir + "-sibling -port 1",
+		want:    false,
+	},
+	{
+		name:    "rejects missing -root flag",
+		cmdline: "demarkus-server -port 1",
+		want:    false,
+	},
+	{
+		name:    "rejects empty cmdline",
+		cmdline: "",
+		want:    false,
+	},
+	{
+		// Paths with spaces are rare but legal. Argv boundaries are
+		// lost in ps output, so demarkusServerMatches reconstructs
+		// -root by joining tokens until the next flag.
+		name:       "matches path containing spaces",
+		cmdline:    "demarkus-server -root /tmp/foo bar/.project/memory -port 1 -tokens /x",
+		contentDir: "/tmp/foo bar/.project/memory",
+		want:       true,
+	},
+	{
+		// Prefix overlap must still be rejected when paths contain
+		// spaces — the sibling with a `-sibling` suffix reconstructs
+		// to a different string than the target.
+		name:       "rejects prefix overlap with spaces",
+		cmdline:    "demarkus-server -root /tmp/foo bar-sibling/.project/memory -port 1",
+		contentDir: "/tmp/foo bar/.project/memory",
+		want:       false,
+	},
+	{
+		// Path at end of argv (no trailing flags). The inner loop
+		// must handle running off the end of tokens without panic.
+		name:       "matches trailing spaced path at end of argv",
+		cmdline:    "demarkus-server -root /tmp/foo bar/memory",
+		contentDir: "/tmp/foo bar/memory",
+		want:       true,
+	},
+}
+
 func TestDemarkusServerMatches(t *testing.T) {
-	contentDir := "/Users/fritz/latebit/NULLRUN/.project/memory"
-	cases := []struct {
-		name    string
-		cmdline string
-		want    bool
-	}{
-		{
-			name:    "matches absolute path with exact -root",
-			cmdline: "/Users/fritz/latebit/NULLRUN/.project/bin/demarkus-server -root " + contentDir + " -port 61254 -tokens /x",
-			want:    true,
-		},
-		{
-			name:    "matches relative executable",
-			cmdline: "./demarkus-server -root " + contentDir + " -port 1",
-			want:    true,
-		},
-		{
-			name:    "matches plain binary name",
-			cmdline: "demarkus-server -root " + contentDir,
-			want:    true,
-		},
-		{
-			name:    "rejects different executable",
-			cmdline: "/usr/bin/other-binary -root " + contentDir,
-			want:    false,
-		},
-		{
-			name:    "rejects suffix-stripped executable",
-			cmdline: "/bin/demarkus-server-v2 -root " + contentDir,
-			want:    false,
-		},
-		{
-			name:    "rejects different -root value",
-			cmdline: "demarkus-server -root /tmp/other -port 1",
-			want:    false,
-		},
-		{
-			name:    "rejects path prefix overlap",
-			cmdline: "demarkus-server -root " + contentDir + "-sibling -port 1",
-			want:    false,
-		},
-		{
-			name:    "rejects missing -root flag",
-			cmdline: "demarkus-server -port 1",
-			want:    false,
-		},
-		{
-			name:    "rejects empty cmdline",
-			cmdline: "",
-			want:    false,
-		},
-	}
-	for _, tc := range cases {
+	for _, tc := range demarkusServerMatchesCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := demarkusServerMatches(tc.cmdline, contentDir); got != tc.want {
-				t.Errorf("got %v, want %v for %q", got, tc.want, tc.cmdline)
+			cd := tc.contentDir
+			if cd == "" {
+				cd = demarkusServerMatchesDefaultDir
+			}
+			if got := demarkusServerMatches(tc.cmdline, cd); got != tc.want {
+				t.Errorf("got %v, want %v for %q (contentDir=%q)", got, tc.want, tc.cmdline, cd)
 			}
 		})
 	}
@@ -289,6 +325,50 @@ func TestReleaseLock_Idempotent(t *testing.T) {
 	m := New(t.TempDir())
 	m.releaseLock() // no lock held — must be a no-op, not a panic
 	m.releaseLock()
+}
+
+func TestStop_ReapsOwnedChildWithoutZombie(t *testing.T) {
+	// Stop() on a Manager that owns a live child must fully reap the
+	// child — not just signal it. Regression test for a prior bug where
+	// owned-child bookkeeping (m.cmd/m.waitDone) was set only after
+	// waitReady returned, so any early-startup failure took the
+	// terminatePID path that signals but cannot reap, leaving a zombie
+	// until junto exited.
+	m := New(t.TempDir())
+
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn helper: %v", err)
+	}
+	pid := cmd.Process.Pid
+
+	// Mirror what startFresh() now does immediately after cmd.Start().
+	m.cmd = cmd
+	m.waitDone = make(chan struct{})
+	go func() {
+		defer close(m.waitDone)
+		// Wait error is discarded: Stop() kills the child with
+		// SIGTERM/SIGKILL, so a non-nil exit status is the documented
+		// outcome. The goroutine's only job is to reap; the test
+		// asserts the reap happened by checking for ESRCH below.
+		_ = cmd.Wait()
+	}()
+	m.process = cmd.Process
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// After reap, signal(0) to the (now-gone) PID must return ESRCH.
+	// If Stop had fallen back to terminatePID without a Wait goroutine,
+	// the child would linger as a zombie and signal(0) would succeed.
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := proc.Signal(syscall.Signal(0)); err == nil {
+		t.Error("child still exists after Stop — zombie or unreaped")
+	}
 }
 
 func TestTerminateOwnedChild_GracefulExit(t *testing.T) {

@@ -143,11 +143,47 @@ func TestClient_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestClient_CallAfterCloseLeavesPendingEmpty(t *testing.T) {
+	// Guards against the TOCTOU race where closed/done is checked before
+	// mu, then readLoop purges pending between the check and the enqueue,
+	// leaving an orphaned pending entry nobody will ever clean up. After
+	// N post-close calls the pending map must still be empty.
+	script := writeMockServer(t)
+	client, err := NewStdioClient("sh", []string{script}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	for i := range 100 {
+		_, err := client.CallTool(ctx, "mark_fetch", map[string]any{"url": "/x"})
+		if !errors.Is(err, ErrClientClosed) {
+			t.Fatalf("call %d: expected ErrClientClosed, got: %v", i, err)
+		}
+	}
+
+	client.mu.Lock()
+	n := len(client.pending)
+	client.mu.Unlock()
+	if n != 0 {
+		t.Errorf("pending must be empty after post-close calls, got %d entries", n)
+	}
+}
+
 func TestClient_AfterCloseFailsFast(t *testing.T) {
-	// After Close, further calls must return ErrClientClosed immediately
-	// rather than hanging until the caller's context expires. This is the
-	// guard that prevents the "closed adapter still being used" timeout
-	// storm when the Manager tears down the server mid-session.
+	// After Close, further calls must return ErrClientClosed rather than
+	// hanging or falling through to EPIPE / ctx-deadline errors. The
+	// sentinel alone establishes this: without the guard, call() would
+	// surface "mcp: write request: ..." (EPIPE on a torn-down pipe) or
+	// ctx.DeadlineExceeded — never ErrClientClosed. A wall-clock bound
+	// is deliberately avoided; timing assertions flake under CI jitter.
 	script := writeMockServer(t)
 	client, err := NewStdioClient("sh", []string{script}, nil)
 	if err != nil {
@@ -164,20 +200,11 @@ func TestClient_AfterCloseFailsFast(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Use a generous parent ctx; the guard should fire without needing
-	// ctx to expire. If the guard is missing, the call would block on
-	// the (now-closed) pipe write or on the pending channel read.
-	start := time.Now()
 	_, err = client.CallTool(ctx, "mark_fetch", map[string]any{"url": "/x"})
-	elapsed := time.Since(start)
-
 	if err == nil {
 		t.Fatal("expected error after Close")
 	}
 	if !errors.Is(err, ErrClientClosed) {
 		t.Errorf("expected ErrClientClosed, got: %v", err)
-	}
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("post-Close call should fail fast; took %v", elapsed)
 	}
 }

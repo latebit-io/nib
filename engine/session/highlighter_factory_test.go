@@ -171,11 +171,14 @@ func TestDecorateEditor_LinearizableWithSwaps(t *testing.T) {
 		t.Errorf("expected all highlighters closed after e.Close(); %d leaked (ids=%v)",
 			len(alive), ids)
 	}
-	// Additionally, every intermediate highlighter must have been closed
-	// exactly once (SetHighlighter's replace path + the final e.Close()).
+	// Additionally, every highlighter must have been closed exactly once:
+	// intermediates closed by SetHighlighter's replace path, and the final
+	// one closed by e.Close() above. A count other than 1 indicates a
+	// double-close (Close called twice on the same instance) or a leak
+	// (an instance never replaced and never reached by e.Close).
 	for _, h := range made {
-		if h.closed < 1 {
-			t.Errorf("highlighter id=%d was never closed", h.id)
+		if h.closed != 1 {
+			t.Errorf("highlighter id=%d closed %d times; want exactly 1", h.id, h.closed)
 		}
 	}
 }

@@ -19,7 +19,14 @@ const maxRequestInputOptions = 9
 // a single malformed or adversarial tool call cannot balloon the event
 // payload, transcript, or status bar. Limits are generous for realistic use
 // (e.g. a two-sentence prompt fits easily) but reject obvious runaway sizes.
+//
+// maxRequestInputArgsBytes caps the raw JSON payload before decoding, so an
+// adversarial caller cannot force Unmarshal to allocate megabytes of slice
+// or string data before the per-field checks run. Sized with headroom over
+// the sum of the per-field caps (prompt + reason + 9 options × (id + label)
+// ≈ 5 KB) plus JSON framing overhead.
 const (
+	maxRequestInputArgsBytes   = 8 * 1024
 	maxRequestInputPromptBytes = 2000
 	maxRequestInputReasonBytes = 500
 	maxRequestInputOptionIDLen = 64
@@ -89,6 +96,12 @@ func (t *RequestInputTool) Definition() llm.ToolDef {
 func (t *RequestInputTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	if ctx.Err() != nil {
 		return textResult("Error: agent canceled")
+	}
+	// Reject oversized raw JSON before Unmarshal — per-field caps below run
+	// too late to prevent a pathological payload from allocating megabytes
+	// of slice/string data during decoding.
+	if len(call.Function.Arguments) > maxRequestInputArgsBytes {
+		return textResult(fmt.Sprintf("Error: arguments exceed %d bytes (got %d)", maxRequestInputArgsBytes, len(call.Function.Arguments)))
 	}
 	var args requestInputArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {

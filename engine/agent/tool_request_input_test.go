@@ -148,6 +148,19 @@ func TestRequestInput_CanceledContext(t *testing.T) {
 	}
 }
 
+func TestRequestInput_OversizedRawArgsRejected(t *testing.T) {
+	// An adversarial caller could ship a payload larger than the sum of all
+	// per-field caps. The raw-args cap must fire before Unmarshal allocates.
+	big := strings.Repeat("x", maxRequestInputArgsBytes+1)
+	result := execRequestInput(t, fmt.Sprintf(`{"prompt":"ok","reason":%q}`, big))
+	if result.Effect != EffectNone {
+		t.Errorf("oversized args should return EffectNone, got %d", result.Effect)
+	}
+	if !strings.Contains(result.Content, "arguments exceed") {
+		t.Errorf("expected args-oversize error, got %q", result.Content)
+	}
+}
+
 func TestRequestInput_OversizedPromptRejected(t *testing.T) {
 	big := strings.Repeat("x", maxRequestInputPromptBytes+1)
 	result := execRequestInput(t, fmt.Sprintf(`{"prompt": %q}`, big))

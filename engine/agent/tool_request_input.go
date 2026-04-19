@@ -4,11 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
+
+// requestInputOptionIDRE enforces kebab-case on option IDs. The ID flows
+// back to the LLM verbatim as the tool-call result when the developer picks
+// an option; restricting it to an opaque token (lowercase alphanumeric plus
+// single-char hyphens) prevents a malicious or confused model from
+// smuggling instructions through what should be a machine identifier while
+// hiding the intent behind an innocent-looking label.
+var requestInputOptionIDRE = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,63})$`)
 
 // maxRequestInputOptions caps the number of options a single request_input
 // call may supply. Keeps the rendered prompt block compact and forces the
@@ -93,6 +102,44 @@ func (t *RequestInputTool) Definition() llm.ToolDef {
 
 // Execute validates the args and returns EffectAwaitingInput so the agent
 // loop can emit AgentAwaitingInput and block on the answer channel.
+// validateRequestInputOptions checks the caller-supplied option list against
+// count, length, format, and uniqueness rules. Returns the validated option
+// slice and an empty error string on success, or (nil, "Error: ...") on the
+// first validation failure. Extracted from Execute to keep that function's
+// cyclomatic complexity under the project cap.
+func validateRequestInputOptions(raw []requestInputOptionArg) ([]event.AwaitingInputOption, string) {
+	if len(raw) > maxRequestInputOptions {
+		return nil, fmt.Sprintf("Error: at most %d options allowed (got %d)", maxRequestInputOptions, len(raw))
+	}
+	seen := make(map[string]bool, len(raw))
+	options := make([]event.AwaitingInputOption, 0, len(raw))
+	for i, opt := range raw {
+		id := strings.TrimSpace(opt.ID)
+		label := strings.TrimSpace(opt.Label)
+		if id == "" {
+			return nil, fmt.Sprintf("Error: option[%d].id is required", i)
+		}
+		if label == "" {
+			return nil, fmt.Sprintf("Error: option[%d].label is required", i)
+		}
+		if len(id) > maxRequestInputOptionIDLen {
+			return nil, fmt.Sprintf("Error: option[%d].id exceeds %d bytes (got %d)", i, maxRequestInputOptionIDLen, len(id))
+		}
+		if !requestInputOptionIDRE.MatchString(id) {
+			return nil, fmt.Sprintf("Error: option[%d].id %q must be kebab-case (lowercase alphanumeric, hyphens allowed, no leading hyphen)", i, id)
+		}
+		if len(label) > maxRequestInputLabelBytes {
+			return nil, fmt.Sprintf("Error: option[%d].label exceeds %d bytes (got %d)", i, maxRequestInputLabelBytes, len(label))
+		}
+		if seen[id] {
+			return nil, fmt.Sprintf("Error: duplicate option id %q", id)
+		}
+		seen[id] = true
+		options = append(options, event.AwaitingInputOption{ID: id, Label: label})
+	}
+	return options, ""
+}
+
 func (t *RequestInputTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	if ctx.Err() != nil {
 		return textResult("Error: agent canceled")
@@ -127,32 +174,9 @@ func (t *RequestInputTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 	if len(reason) > maxRequestInputReasonBytes {
 		return textResult(fmt.Sprintf("Error: reason exceeds %d bytes (got %d)", maxRequestInputReasonBytes, len(reason)))
 	}
-	if len(args.Options) > maxRequestInputOptions {
-		return textResult(fmt.Sprintf("Error: at most %d options allowed (got %d)", maxRequestInputOptions, len(args.Options)))
-	}
-
-	seen := make(map[string]bool, len(args.Options))
-	options := make([]event.AwaitingInputOption, 0, len(args.Options))
-	for i, opt := range args.Options {
-		id := strings.TrimSpace(opt.ID)
-		label := strings.TrimSpace(opt.Label)
-		if id == "" {
-			return textResult(fmt.Sprintf("Error: option[%d].id is required", i))
-		}
-		if label == "" {
-			return textResult(fmt.Sprintf("Error: option[%d].label is required", i))
-		}
-		if len(id) > maxRequestInputOptionIDLen {
-			return textResult(fmt.Sprintf("Error: option[%d].id exceeds %d bytes (got %d)", i, maxRequestInputOptionIDLen, len(id)))
-		}
-		if len(label) > maxRequestInputLabelBytes {
-			return textResult(fmt.Sprintf("Error: option[%d].label exceeds %d bytes (got %d)", i, maxRequestInputLabelBytes, len(label)))
-		}
-		if seen[id] {
-			return textResult(fmt.Sprintf("Error: duplicate option id %q", id))
-		}
-		seen[id] = true
-		options = append(options, event.AwaitingInputOption{ID: id, Label: label})
+	options, errMsg := validateRequestInputOptions(args.Options)
+	if errMsg != "" {
+		return textResult(errMsg)
 	}
 
 	return ToolResult{

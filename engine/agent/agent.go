@@ -1039,6 +1039,7 @@ func (u *turnUsage) addUsage(usage *llm.Usage) {
 // not complete. toolDefs controls which tools the LLM can invoke for this turn.
 func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, turnUsage, error) {
 	var tu turnUsage
+	truncationRetries := 0
 	for {
 		// Inject pending lint violations as a user message so the LLM
 		// treats them as a high-priority instruction. Checked each iteration
@@ -1081,45 +1082,65 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 		messages = append(messages, assistantMsg)
 
 		if truncated {
-			messages = a.handleTruncatedTurn(messages, toolCalls)
+			var retryErr error
+			messages, truncationRetries, retryErr = a.handleTruncationRetry(messages, toolCalls, truncationRetries)
+			if retryErr != nil {
+				return messages, tu, retryErr
+			}
 			continue
 		}
+		truncationRetries = 0
 
 		// No tool calls — agent's turn is done.
 		if len(toolCalls) == 0 {
 			return messages, tu, nil
 		}
-		for _, tc := range toolCalls {
-			if a.hasLintPending() {
-				messages = append(messages, llm.Message{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Content:    "Skipped — fix style lint violations first.",
-				})
-				continue
-			}
-			tu.toolCalls++
+		var toolErr error
+		messages, toolErr = a.executeToolCalls(ctx, messages, toolCalls, &tu)
+		if toolErr != nil {
+			return messages, tu, toolErr
+		}
+	}
+}
 
-			if err := a.flushDirtyBuffers(ctx); err != nil {
-				a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
-				return messages, tu, err
-			}
-			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
-			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
-
-			result := a.dispatchTool(ctx, tc)
-			if ctx.Err() != nil {
-				return messages, tu, ctx.Err()
-			}
-
-			a.afterToolDispatch(tc.Function.Name)
+// executeToolCalls dispatches each tool call from one LLM turn, flushing
+// dirty buffers beforehand and appending the tool result as a tool-role
+// message. Lint-pending calls are skipped with a placeholder reply so the
+// LLM sees the fix-lint-first directive without losing the tool-call ID
+// linkage. Returns an error when autosave fails or ctx is cancelled mid-
+// dispatch so the caller can end the turn visibly.
+func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, toolCalls []llm.ToolCall, tu *turnUsage) ([]llm.Message, error) {
+	for _, tc := range toolCalls {
+		if a.hasLintPending() {
 			messages = append(messages, llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
-				Content:    result,
+				Content:    "Skipped — fix style lint violations first.",
 			})
+			continue
 		}
+		tu.toolCalls++
+
+		if err := a.flushDirtyBuffers(ctx); err != nil {
+			a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
+			return messages, err
+		}
+		slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
+		a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
+
+		result := a.dispatchTool(ctx, tc)
+		if ctx.Err() != nil {
+			return messages, ctx.Err()
+		}
+
+		a.afterToolDispatch(tc.Function.Name)
+		messages = append(messages, llm.Message{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Content:    result,
+		})
 	}
+	return messages, nil
 }
 
 // streamResult aggregates the outcome of one LLM streaming response after
@@ -1158,6 +1179,14 @@ var errStreamClosedEarly = errors.New("agent: provider closed stream before comp
 // than a clean completion with partial content. A ctx cancellation returns
 // (result, nil) since the caller's existing ctx.Err() check handles it.
 func (a *Agent) drainStream(ctx context.Context, ch <-chan llm.StreamEvent, thinkState *bool) (streamResult, error) {
+	// Each provider response is a self-contained turn — chat/completion APIs
+	// don't carry <think> state across responses. If this stream ended with
+	// an unclosed <think> block (truncation, early EOF, ctx cancel), the
+	// next call would start with inThink=true and silently drop real output
+	// waiting for a </think> that will never come. Force-reset on every
+	// return path.
+	defer func() { *thinkState = false }()
+
 	var (
 		buf    strings.Builder
 		out    streamResult
@@ -1200,6 +1229,22 @@ func (a *Agent) drainStream(ctx context.Context, ch <-chan llm.StreamEvent, thin
 			a.send(event.AgentToken{Text: clean})
 		}
 	}
+}
+
+// handleTruncationRetry enforces the consecutive-truncation retry cap and,
+// when under the cap, delegates to handleTruncatedTurn to append recovery
+// messages. Returns the updated messages, the incremented retry counter, and
+// a terminal error if the cap was reached (caller returns the error so the
+// turn ends instead of looping against a model that will not fit in-budget).
+func (a *Agent) handleTruncationRetry(messages []llm.Message, toolCalls []llm.ToolCall, retries int) ([]llm.Message, int, error) {
+	if retries >= maxTruncationRetries {
+		err := fmt.Errorf("agent: abandoning turn after %d consecutive truncated responses", retries+1)
+		slog.Error("agent: truncation retries exhausted", "retries", retries)
+		a.send(event.AgentError{Err: err.Error()})
+		return messages, retries, err
+	}
+	messages = a.handleTruncatedTurn(messages, toolCalls)
+	return messages, retries + 1, nil
 }
 
 // handleTruncatedTurn rejects tool calls from a turn whose output was cut

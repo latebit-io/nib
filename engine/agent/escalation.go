@@ -20,6 +20,14 @@ const maxTokensInitialEscalation = 32768
 // supported by current frontier models as of this writing.
 const maxTokensCeiling = 65536
 
+// maxTruncationRetries bounds consecutive truncated turns before the agent
+// abandons the run. Three total attempts is enough for the usual escalation
+// path (default → 32K → 65K ceiling) plus one final "split the work" nudge;
+// beyond that a looping or malfunctioning model would just burn requests.
+// Reset to zero on the first non-truncated turn so long sessions with
+// occasional truncations don't accumulate toward the limit.
+const maxTruncationRetries = 2
+
 // escalateMaxTokens returns the next max-tokens value for a provider whose
 // previous turn was truncated. Doubles the current value, starting at
 // maxTokensInitialEscalation when unset, capped at maxTokensCeiling.

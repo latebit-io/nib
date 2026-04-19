@@ -214,6 +214,56 @@ func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
 	}
 }
 
+func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
+	// A misbehaving model (or one already at the output-token ceiling) that
+	// keeps returning Truncated=true must not loop forever — the agent
+	// abandons the turn after maxTruncationRetries consecutive truncations.
+	truncatedTurn := []llm.StreamEvent{
+		{
+			ToolCalls: []llm.ToolCall{{
+				ID:       "call-trunc",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"x"`},
+			}},
+			Done:      true,
+			Truncated: true,
+		},
+	}
+	turns := make([][]llm.StreamEvent, 0, maxTruncationRetries+2)
+	for i := 0; i < maxTruncationRetries+2; i++ {
+		turns = append(turns, truncatedTurn)
+	}
+	provider := &multiTurnProvider{turns: turns}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	// Drain until we see the abandon-turn AgentError. Earlier AgentErrors
+	// (per-truncation recovery messages) are emitted too, so match on the
+	// specific substring identifying the exhaustion path.
+	errEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		ae, ok := ev.(event.AgentError)
+		return ok && strings.Contains(ae.Err, "abandoning turn")
+	})
+	if errEv == nil {
+		t.Fatal("expected AgentError abandoning turn after retry limit")
+	}
+
+	// The provider should have been called exactly maxTruncationRetries+1
+	// times — retries capped, no infinite loop.
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	wantCalls := maxTruncationRetries + 1
+	if provider.call != wantCalls {
+		t.Errorf("provider calls = %d, want %d", provider.call, wantCalls)
+	}
+}
+
 func TestAgent_StreamClosedBeforeDone_SurfacesError(t *testing.T) {
 	// When the provider closes its stream without ever emitting Done (e.g.
 	// mid-stream connection drop, SSE parse error), the turn must end in a

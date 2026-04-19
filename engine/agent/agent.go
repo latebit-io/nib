@@ -121,6 +121,12 @@ type Agent struct {
 	waiting bool // true when blocked on inputCh
 	running bool // true while the run() goroutine is alive
 
+	// Structured input request flow: the agent blocks on awaitingInputCh
+	// mid-turn when a request_input tool call is dispatched. The frontend
+	// delivers the developer's typed answer via AnswerInput. Buffered 1
+	// so AnswerInput is non-blocking under normal operation.
+	awaitingInputCh chan string
+
 	// savedMessages and savedMode preserve the conversation when a run
 	// exits (cancel, fatal error). Resume picks these up to continue
 	// from where the conversation left off instead of starting fresh.
@@ -306,6 +312,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		approveCh:         approveCh,
 		continueCh:        continueCh,
 		inputCh:           make(chan string, 1), // capacity 1: Reply() is non-blocking; only one pending reply is meaningful
+		awaitingInputCh:   make(chan string, 1), // capacity 1: AnswerInput is non-blocking; only one pending answer is meaningful
 		diagProvider:      diagProvider,
 		planningBlocklist: merged,
 		interactionMode:   interaction,
@@ -346,6 +353,13 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	builtins = append(builtins, NewGlobTool(workspace))
 	builtins = append(builtins, NewSearchProjectTool(projectRoot))
 	builtins = append(builtins, NewPackageInfoTool(projectRoot))
+
+	// request_input is interactive-only: headless agents have no developer
+	// to ask, so the tool is not registered and the LLM cannot emit a call.
+	// This forces autonomous decisions at the tool-availability layer.
+	if a.interactionMode != Headless {
+		builtins = append(builtins, NewRequestInputTool())
+	}
 
 	// LSP-powered tools — conditionally registered via type assertion.
 	if diagProvider != nil {
@@ -431,6 +445,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	drain(a.approveCh)
 	drain(a.continueCh)
 	drain(a.inputCh)
+	drain(a.awaitingInputCh)
 
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
@@ -498,6 +513,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	drain(a.approveCh)
 	drain(a.continueCh)
 	drain(a.inputCh)
+	drain(a.awaitingInputCh)
 
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
@@ -721,6 +737,18 @@ func (a *Agent) Continue(path, bufferContent string) {
 	select {
 	case a.continueCh <- bufferContent:
 	default:
+	}
+}
+
+// AnswerInput delivers the developer's answer to a pending request_input
+// prompt. Text is the verbatim typed answer — typically an option ID, but
+// free-form is valid. Non-blocking: if no prompt is pending, the answer
+// is dropped (same shape as Approve/Reject/Continue).
+func (a *Agent) AnswerInput(text string) {
+	select {
+	case a.awaitingInputCh <- text:
+	default:
+		slog.Warn("agent.AnswerInput: no pending request_input, dropping answer")
 	}
 }
 
@@ -1186,9 +1214,44 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 
 	case EffectTaskCompleted:
 		return a.runTaskReview(ctx, result.Content)
+
+	case EffectAwaitingInput:
+		payload, ok := result.Payload.(AwaitingInputPayload)
+		if !ok {
+			return fmt.Sprintf("Error: EffectAwaitingInput with unexpected payload type %T", result.Payload) + a.intentReminder()
+		}
+		return a.handleAwaitingInput(ctx, payload) + a.intentReminder()
 	}
 
 	return result.Content + a.intentReminder()
+}
+
+// handleAwaitingInput sends the AgentAwaitingInput event to the frontend and
+// blocks on awaitingInputCh for the developer's typed answer. The answer is
+// returned verbatim as the tool result so the LLM sees it as structured tool
+// output, not as a new user message.
+func (a *Agent) handleAwaitingInput(ctx context.Context, payload AwaitingInputPayload) string {
+	a.send(event.AgentStatus{Status: event.StatusAwaitingInput})
+
+	// The event is critical — if the frontend never sees it, the developer
+	// has no way to answer and the agent blocks forever.
+	if err := a.sendCritical(ctx, event.AgentAwaitingInput{
+		Prompt:  payload.Prompt,
+		Options: payload.Options,
+		Reason:  payload.Reason,
+		CallID:  payload.CallID,
+	}); err != nil {
+		slog.Error("awaiting-input delivery failed", "err", err)
+		return fmt.Sprintf("Error: could not deliver request_input prompt to frontend: %v", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		return "Error: agent canceled"
+	case answer := <-a.awaitingInputCh:
+		a.send(event.AgentStatus{Status: event.StatusThinking})
+		return answer
+	}
 }
 
 // runTaskReview runs lint and evaluator on all files edited during the task.

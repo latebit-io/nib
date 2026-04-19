@@ -53,6 +53,11 @@ func (s *Session) ActiveTaskPath() string {
 	return path
 }
 
+// WorkTreeLoaded implements agent.TaskTracker.
+func (s *Session) WorkTreeLoaded() bool {
+	return s.workTree.TreeLoaded()
+}
+
 // ReloadWorkTree re-fetches the work tree from demarkus.
 func (s *Session) ReloadWorkTree() error {
 	return s.workTree.Reload()

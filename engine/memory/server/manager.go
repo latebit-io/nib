@@ -57,6 +57,10 @@ func New(projectRoot string) *Manager {
 
 // Start launches the demarkus-server. Returns the port it's listening on.
 // If a server is already running (detected via PID file), reuses it.
+// Any orphaned demarkus-server processes bound to this project's content
+// directory are reaped before returning — unresponsive servers from
+// earlier sessions (e.g. junto crashed before Stop() ran, or the PID file
+// was lost) would otherwise accumulate alongside the live one.
 func (m *Manager) Start() (int, error) {
 	// Ensure content directory exists.
 	if err := os.MkdirAll(m.contentDir, 0755); err != nil {
@@ -67,6 +71,9 @@ func (m *Manager) Start() (int, error) {
 	port, reuseErr := m.reuseExisting()
 	if reuseErr == nil {
 		m.port = port
+		// Reuse path: another demarkus-server for this content dir is an
+		// orphan. Spare only the PID we just adopted.
+		m.reapOrphans(m.processPID())
 		slog.Info("memory server: reusing existing", "port", port)
 		return port, nil
 	}
@@ -76,7 +83,12 @@ func (m *Manager) Start() (int, error) {
 		return 0, fmt.Errorf("memory server: existing server detected but unusable: %w", reuseErr)
 	}
 
-	// No existing server — find a free port.
+	// No existing server — reap any untracked orphans before launching
+	// fresh. Without this, a prior session that lost its PID file would
+	// leave a zombie that accumulates indefinitely.
+	m.reapOrphans(0)
+
+	// Find a free port.
 	port, err := freePort()
 	if err != nil {
 		return 0, fmt.Errorf("memory server: find free port: %w", err)
@@ -159,55 +171,131 @@ func (m *Manager) Stop() error {
 		return nil
 	}
 
+	if err := terminatePID(pid, 5*time.Second); err != nil {
+		slog.Debug("memory server: terminate", "pid", pid, "err", err)
+	}
+	m.cleanupFiles()
+	m.process = nil
+	m.port = 0
+	return nil
+}
+
+// terminatePID sends SIGTERM to pid, polls up to graceful for it to exit,
+// then escalates to SIGKILL. Polling via signal 0 is used because the
+// target is not a child process (servers are Release()'d post-spawn, and
+// orphan sweeps discover PIDs via ps), so Wait() would return immediately
+// without observing exit. Returns an error only if the PID was already
+// gone when the first signal was sent.
+func terminatePID(pid int, graceful time.Duration) error {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		m.cleanupFiles()
-		m.process = nil
-		m.port = 0
-		return nil
+		return fmt.Errorf("find process %d: %w", pid, err)
 	}
-
-	// SIGTERM for graceful shutdown.
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		// Process already dead.
-		slog.Debug("memory server: SIGTERM failed (already dead)", "pid", pid, "err", err)
-		m.cleanupFiles()
-		m.process = nil
-		m.port = 0
-		return nil
+		return fmt.Errorf("SIGTERM %d: %w", pid, err)
 	}
-
-	// Poll for exit. We cannot use proc.Wait() because the server process
-	// was Release()'d after start (or discovered via PID file from a
-	// previous session), making it a non-child. Wait() returns immediately
-	// for non-children on Unix, which would skip the graceful window.
-	// Instead, poll with signal 0 — it fails with ESRCH when the process exits.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(graceful)
 	for time.Now().Before(deadline) {
 		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			// Process exited.
-			m.cleanupFiles()
-			m.process = nil
-			m.port = 0
-			slog.Info("memory server: stopped gracefully", "pid", pid)
+			slog.Info("memory server: terminated gracefully", "pid", pid)
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-
-	// Still alive after 5s — escalate to SIGKILL.
 	if err := proc.Signal(syscall.SIGKILL); err != nil {
 		slog.Debug("memory server: SIGKILL failed (already dead)", "pid", pid, "err", err)
 	} else {
-		// Give the kernel a moment to reap.
 		time.Sleep(200 * time.Millisecond)
 	}
-
-	m.cleanupFiles()
-	m.process = nil
-	m.port = 0
-	slog.Info("memory server: stopped (killed)", "pid", pid)
+	slog.Info("memory server: terminated (killed)", "pid", pid)
 	return nil
+}
+
+// reapOrphans kills any demarkus-server processes bound to this manager's
+// content directory, except sparePID. sparePID=0 means kill all matches.
+//
+// This exists because demarkus-server, combined with SysProcAttr.Setpgid
+// and Process.Release() at launch, deliberately survives an unclean junto
+// exit. That only works if the next junto launch reliably adopts (via PID
+// file) or reaps (via this sweep) the survivor. The PID file is fragile:
+// reuseExisting deletes it whenever the live PID can't be probed, so a
+// subsequent launch sees no PID reference and would otherwise spawn a
+// fresh server alongside the orphan, accumulating zombies over time.
+//
+// Best-effort: failures to list processes or terminate individual PIDs
+// are logged but do not block Start. Only Unix platforms are supported
+// (matches the rest of this package, which uses POSIX signals).
+func (m *Manager) reapOrphans(sparePID int) {
+	pids, err := findDemarkusServerPIDs(m.contentDir)
+	if err != nil {
+		slog.Debug("memory server: orphan scan failed", "err", err)
+		return
+	}
+	for _, pid := range pids {
+		if pid == sparePID {
+			continue
+		}
+		slog.Warn("memory server: reaping orphan", "pid", pid, "contentDir", m.contentDir)
+		if err := terminatePID(pid, 5*time.Second); err != nil {
+			slog.Warn("memory server: reap failed", "pid", pid, "err", err)
+		}
+	}
+}
+
+// findDemarkusServerPIDs returns PIDs of demarkus-server processes whose
+// `-root <contentDir>` argument matches the given path. Uses ps since
+// junto already depends on POSIX process semantics.
+func findDemarkusServerPIDs(contentDir string) ([]int, error) {
+	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps: %w", err)
+	}
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// First field is PID; rest is the command line (possibly with
+		// spaces, but argv tokens are space-separated).
+		space := strings.IndexByte(line, ' ')
+		if space < 0 {
+			continue
+		}
+		pidStr := line[:space]
+		cmdline := strings.TrimSpace(line[space+1:])
+		if !demarkusServerMatches(cmdline, contentDir) {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids, nil
+}
+
+// demarkusServerMatches reports whether the argv-string represents a
+// demarkus-server invocation with `-root <contentDir>`. The executable
+// path may include any prefix (absolute or relative) but must end in the
+// binary name demarkus-server. The `-root` argument must match contentDir
+// exactly — substring matches are rejected to avoid confusing sibling
+// projects whose paths share a prefix.
+func demarkusServerMatches(cmdline, contentDir string) bool {
+	tokens := strings.Fields(cmdline)
+	if len(tokens) == 0 {
+		return false
+	}
+	if filepath.Base(tokens[0]) != "demarkus-server" {
+		return false
+	}
+	for i := 0; i < len(tokens)-1; i++ {
+		if tokens[i] == "-root" && tokens[i+1] == contentDir {
+			return true
+		}
+	}
+	return false
 }
 
 // Address returns the mark:// URL for the running server.
@@ -379,8 +467,16 @@ func (m *Manager) reuseExisting() (int, error) {
 	probe.Stdout = io.Discard
 	probe.Stderr = io.Discard
 	if err := probe.Run(); err != nil {
+		// Live PID, unresponsive QUIC endpoint — the server is wedged.
+		// Terminate it here so Start() can launch a healthy replacement;
+		// otherwise cleanupFiles() below would drop the PID reference and
+		// next junto launch would orphan this process permanently.
+		slog.Warn("memory server: adopting PID probe failed; terminating", "pid", pid, "port", port, "err", err)
+		if termErr := terminatePID(pid, 5*time.Second); termErr != nil {
+			slog.Warn("memory server: terminate unresponsive server failed", "pid", pid, "err", termErr)
+		}
 		m.cleanupFiles()
-		return 0, fmt.Errorf("PID %d alive but port %d not responding: %w", pid, port, err)
+		return 0, fmt.Errorf("%w: PID %d alive but port %d not responding", errNoExistingServer, pid, port)
 	}
 
 	m.process = proc

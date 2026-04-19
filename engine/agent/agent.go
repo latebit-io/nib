@@ -17,13 +17,7 @@ import (
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/memory"
-	"github.com/latebit-io/junto/engine/project"
 )
-
-// activeTaskGateTimeout bounds the work-tree fetch that guards mutating
-// tools. A slow memory backend should not hang the agent goroutine before
-// every edit — we fail loudly on timeout rather than silently.
-const activeTaskGateTimeout = 5 * time.Second
 
 // Mode is an alias for event.Mode so existing callers within the agent
 // package can use the unqualified names. The canonical definition lives
@@ -1717,52 +1711,43 @@ func (a *Agent) fetchMemorySummary(ctx context.Context) string {
 	return doc.Body
 }
 
-// enforceActiveTaskGate blocks mutating tools in execution mode when
-// /project.md has no active `[>]` task. Returns empty string when the
-// call may proceed, or a user-facing error directing the agent to
-// activate or add a task (or to surface an infrastructure failure).
+// enforceActiveTaskGate blocks mutating tools in execution mode when the
+// session's work tree has no active `[>]` task. Returns empty string
+// when the call may proceed, or a user-facing error directing the agent
+// to activate or add a task.
+//
+// The gate reads session-cached state (via [TaskTracker]) rather than
+// re-fetching /project.md on every call. This both avoids per-tool-call
+// round trips to demarkus and, crucially, breaks the startup deadlock
+// where a flaky memory backend leaves the tree unloaded and the task
+// tools refusing to operate on nil state.
 //
 // Cases handled intentionally:
-//   - No memory store → gate off (project.md cannot exist anywhere).
-//   - Non-mutating tool → gate off (reads and LSP queries are free).
+//   - Workspace does not implement [TaskTracker] → gate off.
 //   - Planning mode → gate off (planning-mode blocklist already rejects these).
-//   - /project.md does not exist ([memory.ErrNotFound]) → gate off; fresh
-//     project onboarding DX.
-//   - Memory fetch fails with any other error (auth, transport, timeout) →
-//     blocked and logged. Surfacing the failure is safer than fail-open:
-//     if the store is broken, task mutations will fail anyway, so letting
-//     edits through would create untracked work the agent can't record.
-//   - /project.md exists and has no `[>]` task → blocked with guidance.
-//   - /project.md exists and has a `[>]` task → proceed.
-func (a *Agent) enforceActiveTaskGate(ctx context.Context, toolName string) string {
-	if a.memoryStore == nil {
-		return ""
-	}
+//   - Non-mutating tool → gate off (reads and LSP queries are free).
+//   - Work tree not loaded (no /project.md, or startup fetch failed) →
+//     gate off. Matches the original fresh-project onboarding carve-out
+//     and prevents an unreachable demarkus from trapping the agent.
+//     The TUI periodically reloads the tree; once it is populated the
+//     gate re-engages automatically.
+//   - Work tree loaded, no active task → blocked with guidance.
+//   - Work tree loaded, active task present → proceed.
+func (a *Agent) enforceActiveTaskGate(_ context.Context, toolName string) string {
 	if a.mode == ModePlanning {
 		return ""
 	}
 	if !mutatingTools[toolName] {
 		return ""
 	}
-
-	gateCtx, cancel := context.WithTimeout(ctx, activeTaskGateTimeout)
-	defer cancel()
-
-	doc, err := a.memoryStore.Fetch(gateCtx, ProjectWorkTreePath)
-	switch {
-	case errors.Is(err, memory.ErrNotFound):
+	tt, ok := a.workspace.(TaskTracker)
+	if !ok {
 		return ""
-	case err != nil:
-		slog.Error("agent: active-task gate fetch failed", "tool", toolName, "err", err)
-		return fmt.Sprintf(
-			"Error: tool %q blocked — could not verify %s: %v. "+
-				"Fix the memory backend (demarkus reachable? token valid?) and retry.",
-			toolName, ProjectWorkTreePath, err,
-		)
 	}
-
-	tree := project.Parse(doc.Body)
-	if goal, _ := tree.ActiveGoal(); goal != nil {
+	if !tt.WorkTreeLoaded() {
+		return ""
+	}
+	if tt.ActiveTaskPath() != "" {
 		return ""
 	}
 	return fmt.Sprintf(

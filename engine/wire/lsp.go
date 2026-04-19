@@ -93,6 +93,8 @@ func defaultLSPConfigs() []lsp.ServerConfig {
 			Args:       []string{"serve"},
 			LanguageID: "go",
 		})
+	} else if !errors.Is(err, exec.ErrNotFound) {
+		slog.Warn("lsp: unexpected error detecting gopls", "err", err)
 	}
 
 	// lua-language-server (sumneko) for Lua.
@@ -102,6 +104,8 @@ func defaultLSPConfigs() []lsp.ServerConfig {
 			Command:    luaLSPath,
 			LanguageID: "lua",
 		})
+	} else if !errors.Is(err, exec.ErrNotFound) {
+		slog.Warn("lsp: unexpected error detecting lua-language-server", "err", err)
 	}
 
 	return configs

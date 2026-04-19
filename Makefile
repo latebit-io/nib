@@ -6,7 +6,9 @@ QUERY_LANGS := \
 	go:github.com/tree-sitter/tree-sitter-go \
 	lua:github.com/tree-sitter-grammars/tree-sitter-lua
 
-.PHONY: build clean install uninstall test fmt vet sync-queries
+.PHONY: all build clean install uninstall test fmt vet sync-queries
+
+all: build
 
 build:
 	cd engine && go build ./...

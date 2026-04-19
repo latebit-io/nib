@@ -3,6 +3,8 @@ package highlight
 import (
 	"strings"
 	"testing"
+
+	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
 // collectKinds flattens every line's tokens into the set of TokenKinds seen.
@@ -31,6 +33,29 @@ func TestNew_SupportedExtensions(t *testing.T) {
 			continue
 		}
 		h.Close()
+	}
+}
+
+// TestRegistry_AllLanguagesCompile ensures every entry in langByExt has a
+// grammar that accepts its vendored highlights.scm. Catches broken queries
+// and grammar/binding version mismatches at CI time rather than silently
+// disabling highlighting at runtime.
+func TestRegistry_AllLanguagesCompile(t *testing.T) {
+	for ext, spec := range langByExt {
+		parser := sitter.NewParser()
+		if err := parser.SetLanguage(spec.lang); err != nil {
+			parser.Close()
+			t.Errorf("%s: SetLanguage failed: %v", ext, err)
+			continue
+		}
+		query, err := sitter.NewQuery(spec.lang, spec.scm)
+		if err != nil {
+			parser.Close()
+			t.Errorf("%s: highlights.scm compile failed: %v", ext, err)
+			continue
+		}
+		query.Close()
+		parser.Close()
 	}
 }
 

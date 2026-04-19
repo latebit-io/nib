@@ -9,6 +9,7 @@ package highlight
 
 import (
 	_ "embed"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -39,7 +40,9 @@ const (
 	KindNumber TokenKind = "number"
 	// KindType marks type names and type identifiers.
 	KindType TokenKind = "type"
-	// KindOperator marks operators and punctuation operators.
+	// KindOperator marks arithmetic, comparison, and logical operators.
+	// Brackets and delimiters (@punctuation.*) are intentionally left
+	// unstyled so the output isn't dominated by punctuation coloring.
 	KindOperator TokenKind = "operator"
 	// KindFunction marks function and method names at both definition
 	// and call sites.
@@ -126,8 +129,11 @@ type Highlighter struct {
 }
 
 // New creates a highlighter for the given file extension.
-// Returns nil if the language is not supported or the highlight query
-// fails to compile.
+// Returns nil if the language is not supported. Setup failures (grammar
+// mismatch, broken vendored query) are logged at Error level and also
+// return nil so the editor falls back to unhighlighted rendering rather
+// than crashing; the registry test in this package catches these before
+// ship.
 func New(filename string) *Highlighter {
 	ext := strings.ToLower(filepath.Ext(filename))
 	spec, ok := langByExt[ext]
@@ -137,12 +143,14 @@ func New(filename string) *Highlighter {
 
 	parser := sitter.NewParser()
 	if err := parser.SetLanguage(spec.lang); err != nil {
+		slog.Error("highlight: SetLanguage failed", "ext", ext, "err", err)
 		parser.Close()
 		return nil
 	}
 
 	query, qerr := sitter.NewQuery(spec.lang, spec.scm)
 	if qerr != nil {
+		slog.Error("highlight: highlights.scm compile failed", "ext", ext, "err", qerr)
 		parser.Close()
 		return nil
 	}

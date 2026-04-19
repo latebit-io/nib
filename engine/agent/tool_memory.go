@@ -8,7 +8,13 @@ import (
 
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/junto/engine/project"
 )
+
+// ProjectWorkTreePath is the canonical demarkus path of the strict
+// project.md document. Writes to this path are validated against the
+// schema in [project.Validate] before reaching the store.
+const ProjectWorkTreePath = "/project.md"
 
 // validateMemoryPath trims whitespace and requires a leading slash.
 // Returns the cleaned path or an error result.
@@ -252,6 +258,16 @@ func (t *MemoryPublishTool) Execute(ctx context.Context, call llm.ToolCall) Tool
 		return textResult("Error: expected_version must be >= 0 (0 = create, >0 = update)")
 	}
 
+	if path == ProjectWorkTreePath {
+		if errs := project.Validate(project.Parse(args.Body)); errs != nil {
+			return textResult(fmt.Sprintf(
+				"Error: %s rejected — schema violations below. Fix all and retry.\n%s",
+				ProjectWorkTreePath,
+				errs.Error(),
+			))
+		}
+	}
+
 	doc, err := t.store.Publish(ctx, path, args.Body, args.ExpectedVersion)
 	if err != nil {
 		return textResult(fmt.Sprintf("Error: %v", err))
@@ -319,6 +335,14 @@ func (t *MemoryAppendTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 	}
 	if args.ExpectedVersion < 1 {
 		return textResult("Error: expected_version must be >= 1 (document must exist)")
+	}
+
+	if path == ProjectWorkTreePath {
+		return textResult(fmt.Sprintf(
+			"Error: raw append to %s is not allowed — it would break the strict schema. "+
+				"Use project_task_add (for new tasks) or update_task (to activate/complete) instead.",
+			ProjectWorkTreePath,
+		))
 	}
 
 	doc, err := t.store.Append(ctx, path, args.Body, args.ExpectedVersion)

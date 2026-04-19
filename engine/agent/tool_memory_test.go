@@ -201,6 +201,24 @@ func TestMemoryPublishTool(t *testing.T) {
 			store:      mockStore{publishErr: memory.ErrConflict},
 			wantSubstr: "Error: memory: version conflict",
 		},
+		{
+			name: "project.md valid body passes through",
+			args: `{"path": "/project.md", "body": "# Phase 1: Setup\n## Feature\n- [ ] task\n", "expected_version": 0}`,
+			store: mockStore{
+				publishDoc: memory.Document{Path: "/project.md", Version: 1},
+			},
+			wantSubstr: "Published /project.md (version=1)",
+		},
+		{
+			name:       "project.md invalid body rejected",
+			args:       `{"path": "/project.md", "body": "# Not a phase\n### too deep\n- [ ] orphan\n", "expected_version": 0}`,
+			wantSubstr: "schema violations",
+		},
+		{
+			name:       "project.md multiple active tasks rejected",
+			args:       `{"path": "/project.md", "body": "# Phase 1: A\n## F\n- [>] one\n- [>] two\n", "expected_version": 1}`,
+			wantSubstr: "multiple-active-tasks",
+		},
 	}
 
 	for _, tt := range tests {
@@ -247,6 +265,11 @@ func TestMemoryAppendTool(t *testing.T) {
 			args:       `{"path": "/j.md", "body": "text", "expected_version": 1}`,
 			store:      mockStore{appendErr: errors.New("boom")},
 			wantSubstr: "Error: boom",
+		},
+		{
+			name:       "project.md append rejected with guidance",
+			args:       `{"path": "/project.md", "body": "- [ ] extra", "expected_version": 1}`,
+			wantSubstr: "project_task_add",
 		},
 	}
 

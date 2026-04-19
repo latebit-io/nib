@@ -19,7 +19,10 @@
 // Task-list items are leaf nodes beneath their nearest heading ancestor.
 package project
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // TaskStatus represents the completion state of a goal item.
 type TaskStatus int
@@ -96,6 +99,43 @@ func (t *Tree) SetActiveGoal(targetTitle string) bool {
 	return true
 }
 
+// AddTask appends a new pending task under the given phase and feature.
+//   - phase: case-insensitive substring matched against h1 titles
+//     (e.g. "Phase 3" or "rendering"); must match exactly one phase.
+//   - feature: case-insensitive exact match against h2 titles under the
+//     phase. Created as a new h2 if no match exists.
+//   - task: the task title (imperative, what changes).
+//   - link: optional memory-doc path; when non-empty, appended to the
+//     task title as a markdown link: "Title ([details](link))".
+//
+// Returns an error if the phase cannot be located.
+func (t *Tree) AddTask(phase, feature, task, link string) error {
+	phaseNode := findPhaseBySubstring(t, phase)
+	if phaseNode == nil {
+		return fmt.Errorf("no phase matching %q", phase)
+	}
+	featureNode := findFeatureByTitle(phaseNode, feature)
+	if featureNode == nil {
+		featureNode = &Node{
+			Title:     strings.TrimSpace(feature),
+			Depth:     1,
+			IsHeading: true,
+		}
+		phaseNode.Children = append(phaseNode.Children, featureNode)
+	}
+	title := strings.TrimSpace(task)
+	if l := strings.TrimSpace(link); l != "" {
+		title = fmt.Sprintf("%s ([details](%s))", title, l)
+	}
+	featureNode.Children = append(featureNode.Children, &Node{
+		Title:     title,
+		Depth:     2,
+		IsHeading: false,
+		Status:    TaskPending,
+	})
+	return nil
+}
+
 // MarkDone marks the task at targetTitle as done (TaskDone).
 // If the task was the active goal, the active marker is simply replaced
 // with done — no new active goal is selected automatically.
@@ -157,6 +197,35 @@ func clearActive(n *Node) {
 	for _, child := range n.Children {
 		clearActive(child)
 	}
+}
+
+// findPhaseBySubstring returns the first root (h1) heading whose title
+// contains the given substring (case-insensitive). Returns nil if no
+// phase matches. Used by AddTask to locate the insertion point.
+func findPhaseBySubstring(t *Tree, search string) *Node {
+	needle := strings.ToLower(strings.TrimSpace(search))
+	if needle == "" {
+		return nil
+	}
+	for _, root := range t.Roots {
+		if root.IsHeading && root.Depth == 0 &&
+			strings.Contains(strings.ToLower(root.Title), needle) {
+			return root
+		}
+	}
+	return nil
+}
+
+// findFeatureByTitle returns the h2 child of phase whose title matches
+// (case-insensitive, trimmed) or nil if none exists.
+func findFeatureByTitle(phase *Node, title string) *Node {
+	want := strings.ToLower(strings.TrimSpace(title))
+	for _, child := range phase.Children {
+		if child.IsHeading && strings.ToLower(child.Title) == want {
+			return child
+		}
+	}
+	return nil
 }
 
 // findTaskByTitle returns the first leaf task node (IsHeading=false) with

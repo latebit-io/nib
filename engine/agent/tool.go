@@ -181,6 +181,11 @@ type TaskTracker interface {
 	// ActiveTaskPath returns the ancestry path of the current active task,
 	// or empty string if no task is active.
 	ActiveTaskPath() string
+	// AddTask appends a new pending task under the given phase and
+	// feature, creating the feature if absent, then persists. If link
+	// is non-empty, it is appended to the task title as a markdown link
+	// to a supplementary memory document.
+	AddTask(phase, feature, task, link string) error
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

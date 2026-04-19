@@ -88,12 +88,14 @@ var (
 
 // Syntax highlight styles — one per TokenKind, map lookup avoids per-token allocation.
 var tokenKindStyles = map[highlight.TokenKind]lipgloss.Style{
-	highlight.KindKeyword:  lipgloss.NewStyle().Foreground(lipgloss.Color("5")), // magenta
-	highlight.KindString:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")), // green
-	highlight.KindComment:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")), // gray
-	highlight.KindNumber:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")), // yellow
-	highlight.KindType:     lipgloss.NewStyle().Foreground(lipgloss.Color("6")), // cyan
-	highlight.KindOperator: lipgloss.NewStyle().Foreground(lipgloss.Color("9")), // bright red
+	highlight.KindKeyword:  lipgloss.NewStyle().Foreground(lipgloss.Color("5")),  // magenta
+	highlight.KindString:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")),  // green
+	highlight.KindComment:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")),  // gray
+	highlight.KindNumber:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")),  // yellow
+	highlight.KindType:     lipgloss.NewStyle().Foreground(lipgloss.Color("6")),  // cyan
+	highlight.KindOperator: lipgloss.NewStyle().Foreground(lipgloss.Color("9")),  // bright red
+	highlight.KindFunction: lipgloss.NewStyle().Foreground(lipgloss.Color("4")),  // blue
+	highlight.KindConstant: lipgloss.NewStyle().Foreground(lipgloss.Color("13")), // bright magenta
 }
 var tokenKindDefault = lipgloss.NewStyle()
 

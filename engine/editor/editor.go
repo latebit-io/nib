@@ -69,11 +69,14 @@ type Editor struct {
 	// tests). Install one via SetHighlighter; install a default via a
 	// factory configured on the parent Session.
 	//
-	// Guarded by highlighterMu. Needed because SetHighlighter may be
-	// called from the Session's factory-swap goroutine concurrently with
-	// HighlightLine reads from the render goroutine, or with another
-	// SetHighlighter call from a parallel decorate path.
-	highlighterMu sync.RWMutex
+	// highlighterMu must be held for the entire duration of any highlighter
+	// method call (Parse / HighlightLine / Close), not just for the pointer
+	// read. A plain Mutex (not RWMutex) is correct here: releasing a read
+	// lock and then calling h.Method would let a concurrent SetHighlighter
+	// Close the same instance while we're mid-call, producing a CGo
+	// use-after-free in tree-sitter memory. Serializing reads on a single
+	// goroutine (the render loop) is cheap in practice.
+	highlighterMu sync.Mutex
 	highlighter   Highlighter
 	needsReparse  bool
 }
@@ -96,20 +99,20 @@ func New(buf *buffer.Buffer) *Editor {
 // On install the current buffer content is parsed immediately so
 // HighlightLine returns meaningful tokens on the next call.
 //
-// Safe to call concurrently with HighlightLine and itself; the old
-// highlighter is closed outside the lock to avoid blocking readers on
-// tree-sitter teardown.
+// The lock is held through Close() and Parse() to serialize with any
+// in-flight HighlightLine / ReparseIfNeeded call — closing the previous
+// tree-sitter instance while another goroutine is calling into it would
+// be a CGo use-after-free.
 func (e *Editor) SetHighlighter(h Highlighter) {
 	e.highlighterMu.Lock()
-	old := e.highlighter
-	e.highlighter = h
-	e.highlighterMu.Unlock()
-
-	if old != nil {
-		old.Close()
+	defer e.highlighterMu.Unlock()
+	if e.highlighter != nil {
+		e.highlighter.Close()
 	}
+	e.highlighter = h
 	if h != nil && e.Buf != nil {
 		h.Parse(e.Buf.Content())
+		e.needsReparse = false
 	}
 }
 
@@ -117,19 +120,18 @@ func (e *Editor) SetHighlighter(h Highlighter) {
 // none is attached. Exported for tests and diagnostics; the editor does
 // not expose mutation via this getter.
 func (e *Editor) Highlighter() Highlighter {
-	e.highlighterMu.RLock()
-	defer e.highlighterMu.RUnlock()
+	e.highlighterMu.Lock()
+	defer e.highlighterMu.Unlock()
 	return e.highlighter
 }
 
 // Close frees any resources held by the highlighter. Call on shutdown.
 func (e *Editor) Close() {
 	e.highlighterMu.Lock()
-	h := e.highlighter
-	e.highlighter = nil
-	e.highlighterMu.Unlock()
-	if h != nil {
-		h.Close()
+	defer e.highlighterMu.Unlock()
+	if e.highlighter != nil {
+		e.highlighter.Close()
+		e.highlighter = nil
 	}
 }
 
@@ -1242,35 +1244,40 @@ func CursorInRegion(cursorLine, cursorCol, startLine, startCol, endLine, endCol 
 
 // MarkDirty flags the highlighter for reparse on next ReparseIfNeeded call.
 func (e *Editor) MarkDirty() {
+	e.highlighterMu.Lock()
 	e.needsReparse = true
+	e.highlighterMu.Unlock()
 }
 
 // ReparseIfNeeded reparses the buffer for syntax highlighting.
+// The full operation runs under the highlighter lock so Parse cannot
+// race with a concurrent SetHighlighter or Close on the same instance.
 func (e *Editor) ReparseIfNeeded() {
-	e.highlighterMu.RLock()
-	h := e.highlighter
-	needs := e.needsReparse
-	e.highlighterMu.RUnlock()
-	if needs && h != nil {
-		h.Parse(e.Buf.Content())
-		e.highlighterMu.Lock()
+	e.highlighterMu.Lock()
+	defer e.highlighterMu.Unlock()
+	if e.needsReparse && e.highlighter != nil {
+		e.highlighter.Parse(e.Buf.Content())
 		e.needsReparse = false
-		e.highlighterMu.Unlock()
 	}
 }
 
 // HighlightLine returns syntax tokens for the given line.
 // Returns nil if no highlighter is configured.
 // Calls ReparseIfNeeded internally so the caller doesn't have to.
+//
+// Holds the highlighter lock for the entire call — the method touches
+// tree-sitter internals that a concurrent Close would free.
 func (e *Editor) HighlightLine(line int) []Token {
-	e.ReparseIfNeeded()
-	e.highlighterMu.RLock()
-	h := e.highlighter
-	e.highlighterMu.RUnlock()
-	if h == nil {
+	e.highlighterMu.Lock()
+	defer e.highlighterMu.Unlock()
+	if e.needsReparse && e.highlighter != nil {
+		e.highlighter.Parse(e.Buf.Content())
+		e.needsReparse = false
+	}
+	if e.highlighter == nil {
 		return nil
 	}
-	return h.HighlightLine(line)
+	return e.highlighter.HighlightLine(line)
 }
 
 // --- Display Helpers ---

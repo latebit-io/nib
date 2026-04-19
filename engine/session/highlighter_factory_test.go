@@ -155,6 +155,53 @@ func TestDecorateEditor_LinearizableWithSwaps(t *testing.T) {
 	}
 }
 
+// TestEditor_HighlightLineRaceWithSetHighlighter stresses the UAF
+// window: one goroutine calls HighlightLine in a tight loop (the render
+// path), another swaps and closes the highlighter. If the editor lock
+// only protected the pointer read and released before the method call,
+// -race would flag the Close() racing with HighlightLine()'s internal
+// tree-sitter access on the freed instance.
+func TestEditor_HighlightLineRaceWithSetHighlighter(t *testing.T) {
+	buf := buffer.New()
+	buf.Path = "/tmp/race.go"
+	buf.Insert(0, 0, "package main\nfunc main() {}\n")
+	e := editor.New(buf)
+
+	// Install an initial highlighter so HighlightLine has something to call.
+	factory := func(string) editor.Highlighter { return &fakeHighlighter{} }
+	e.SetHighlighter(factory("/tmp/race.go"))
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Reader: tight HighlightLine loop — mimics the render path.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = e.HighlightLine(0)
+				_ = e.HighlightLine(1)
+			}
+		}
+	}()
+
+	// Writer: swap highlighter 500 times — each swap closes the previous.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range 500 {
+			e.SetHighlighter(factory("/tmp/race.go"))
+		}
+		close(stop)
+	}()
+
+	wg.Wait()
+}
+
 func TestSetHighlighterFactory_SkipsPathlessEditors(t *testing.T) {
 	// Scratch buffer (no path) must be silently skipped — SetHighlighter
 	// would be a no-op anyway, but the factory shouldn't be invoked with

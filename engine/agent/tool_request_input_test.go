@@ -67,23 +67,11 @@ func TestRequestInput_FreeFormNoOptions(t *testing.T) {
 }
 
 func TestRequestInput_EmptyPromptRejected(t *testing.T) {
-	result := execRequestInput(t, `{"prompt": ""}`)
-	if result.Effect != EffectNone {
-		t.Errorf("empty prompt should return EffectNone, got %d", result.Effect)
-	}
-	if !strings.Contains(result.Content, "prompt is required") {
-		t.Errorf("expected prompt-required error, got %q", result.Content)
-	}
+	assertRejected(t, execRequestInput(t, `{"prompt": ""}`), "prompt is required")
 }
 
 func TestRequestInput_WhitespaceOnlyPromptRejected(t *testing.T) {
-	result := execRequestInput(t, `{"prompt": "   \t  "}`)
-	if result.Effect != EffectNone {
-		t.Errorf("whitespace prompt should return EffectNone, got %d", result.Effect)
-	}
-	if !strings.Contains(result.Content, "prompt is required") {
-		t.Errorf("expected prompt-required error, got %q", result.Content)
-	}
+	assertRejected(t, execRequestInput(t, `{"prompt": "   \t  "}`), "prompt is required")
 }
 
 func TestRequestInput_TooManyOptions(t *testing.T) {
@@ -96,12 +84,19 @@ func TestRequestInput_TooManyOptions(t *testing.T) {
 		fmt.Fprintf(&opts, `{"id":"a%d","label":"L"}`, i)
 	}
 	opts.WriteString(`]}`)
-	result := execRequestInput(t, opts.String())
+	assertRejected(t, execRequestInput(t, opts.String()), "at most")
+}
+
+// assertRejected asserts the tool returned a rejection — empty Effect
+// (so the agent does NOT enter the blocking await-input path) and an
+// error message matching wantContains. Used by negative-path tests.
+func assertRejected(t *testing.T, result ToolResult, wantContains string) {
+	t.Helper()
 	if result.Effect != EffectNone {
-		t.Errorf("too many options should return EffectNone, got %d", result.Effect)
+		t.Errorf("rejection must return EffectNone, got Effect=%d (Content=%q)", result.Effect, result.Content)
 	}
-	if !strings.Contains(result.Content, "at most") {
-		t.Errorf("expected too-many-options error, got %q", result.Content)
+	if !strings.Contains(result.Content, wantContains) {
+		t.Errorf("Content %q does not contain %q", result.Content, wantContains)
 	}
 }
 
@@ -110,30 +105,22 @@ func TestRequestInput_DuplicateOptionID(t *testing.T) {
 		{"id":"a","label":"A"},
 		{"id":"a","label":"B"}
 	]}`)
-	if !strings.Contains(result.Content, "duplicate option id") {
-		t.Errorf("expected duplicate-id error, got %q", result.Content)
-	}
+	assertRejected(t, result, "duplicate option id")
 }
 
 func TestRequestInput_MissingOptionID(t *testing.T) {
 	result := execRequestInput(t, `{"prompt": "pick", "options": [{"label":"no id"}]}`)
-	if !strings.Contains(result.Content, "option[0].id is required") {
-		t.Errorf("expected missing-id error, got %q", result.Content)
-	}
+	assertRejected(t, result, "option[0].id is required")
 }
 
 func TestRequestInput_MissingOptionLabel(t *testing.T) {
 	result := execRequestInput(t, `{"prompt": "pick", "options": [{"id":"a"}]}`)
-	if !strings.Contains(result.Content, "option[0].label is required") {
-		t.Errorf("expected missing-label error, got %q", result.Content)
-	}
+	assertRejected(t, result, "option[0].label is required")
 }
 
 func TestRequestInput_InvalidJSON(t *testing.T) {
 	result := execRequestInput(t, `not json`)
-	if !strings.HasPrefix(result.Content, "Error: invalid arguments:") {
-		t.Errorf("got %q", result.Content)
-	}
+	assertRejected(t, result, "Error: invalid arguments:")
 }
 
 func TestRequestInput_CanceledContext(t *testing.T) {
@@ -143,59 +130,36 @@ func TestRequestInput_CanceledContext(t *testing.T) {
 	result := tool.Execute(ctx, llm.ToolCall{
 		Function: llm.FunctionCall{Name: "request_input", Arguments: `{"prompt":"x"}`},
 	})
-	if !strings.Contains(result.Content, "canceled") {
-		t.Errorf("expected cancel error, got %q", result.Content)
-	}
+	assertRejected(t, result, "canceled")
 }
 
 func TestRequestInput_OversizedRawArgsRejected(t *testing.T) {
 	// An adversarial caller could ship a payload larger than the sum of all
 	// per-field caps. The raw-args cap must fire before Unmarshal allocates.
 	big := strings.Repeat("x", maxRequestInputArgsBytes+1)
-	result := execRequestInput(t, fmt.Sprintf(`{"prompt":"ok","reason":%q}`, big))
-	if result.Effect != EffectNone {
-		t.Errorf("oversized args should return EffectNone, got %d", result.Effect)
-	}
-	if !strings.Contains(result.Content, "arguments exceed") {
-		t.Errorf("expected args-oversize error, got %q", result.Content)
-	}
+	assertRejected(t, execRequestInput(t, fmt.Sprintf(`{"prompt":"ok","reason":%q}`, big)), "arguments exceed")
 }
 
 func TestRequestInput_OversizedPromptRejected(t *testing.T) {
 	big := strings.Repeat("x", maxRequestInputPromptBytes+1)
-	result := execRequestInput(t, fmt.Sprintf(`{"prompt": %q}`, big))
-	if result.Effect != EffectNone {
-		t.Errorf("oversized prompt should return EffectNone, got %d", result.Effect)
-	}
-	if !strings.Contains(result.Content, "prompt exceeds") {
-		t.Errorf("expected prompt-oversize error, got %q", result.Content)
-	}
+	assertRejected(t, execRequestInput(t, fmt.Sprintf(`{"prompt": %q}`, big)), "prompt exceeds")
 }
 
 func TestRequestInput_OversizedReasonRejected(t *testing.T) {
 	big := strings.Repeat("x", maxRequestInputReasonBytes+1)
-	result := execRequestInput(t, fmt.Sprintf(`{"prompt": "ok", "reason": %q}`, big))
-	if !strings.Contains(result.Content, "reason exceeds") {
-		t.Errorf("expected reason-oversize error, got %q", result.Content)
-	}
+	assertRejected(t, execRequestInput(t, fmt.Sprintf(`{"prompt": "ok", "reason": %q}`, big)), "reason exceeds")
 }
 
 func TestRequestInput_OversizedOptionIDRejected(t *testing.T) {
 	big := strings.Repeat("a", maxRequestInputOptionIDLen+1)
 	args := fmt.Sprintf(`{"prompt":"ok","options":[{"id":%q,"label":"L"}]}`, big)
-	result := execRequestInput(t, args)
-	if !strings.Contains(result.Content, "option[0].id exceeds") {
-		t.Errorf("expected option-id-oversize error, got %q", result.Content)
-	}
+	assertRejected(t, execRequestInput(t, args), "option[0].id exceeds")
 }
 
 func TestRequestInput_OversizedOptionLabelRejected(t *testing.T) {
 	big := strings.Repeat("x", maxRequestInputLabelBytes+1)
 	args := fmt.Sprintf(`{"prompt":"ok","options":[{"id":"a","label":%q}]}`, big)
-	result := execRequestInput(t, args)
-	if !strings.Contains(result.Content, "option[0].label exceeds") {
-		t.Errorf("expected option-label-oversize error, got %q", result.Content)
-	}
+	assertRejected(t, execRequestInput(t, args), "option[0].label exceeds")
 }
 
 func TestRequestInput_OptionIDFormat(t *testing.T) {
@@ -224,12 +188,9 @@ func TestRequestInput_OptionIDFormat(t *testing.T) {
 	}
 	for _, tc := range illegal[:len(illegal)-1] { // skip the empty-case sentinel — covered by MissingOptionID
 		result := execRequestInput(t, fmt.Sprintf(`{"prompt":"pick","options":[{"id":%q,"label":"L"}]}`, tc.id))
-		if result.Effect != EffectNone {
-			t.Errorf("%s id %q should be rejected, got Effect=%d", tc.name, tc.id, result.Effect)
-		}
-		if !strings.Contains(result.Content, "kebab-case") {
-			t.Errorf("%s id %q: expected kebab-case error, got %q", tc.name, tc.id, result.Content)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			assertRejected(t, result, "kebab-case")
+		})
 	}
 }
 
@@ -246,12 +207,7 @@ func TestRequestInput_EmptyCallIDRejected(t *testing.T) {
 			Arguments: `{"prompt":"pick"}`,
 		},
 	})
-	if result.Effect != EffectNone {
-		t.Errorf("empty CallID should return EffectNone, got %d", result.Effect)
-	}
-	if !strings.Contains(result.Content, "non-empty tool call ID") {
-		t.Errorf("expected empty-CallID error, got %q", result.Content)
-	}
+	assertRejected(t, result, "non-empty tool call ID")
 }
 
 func TestRequestInput_WhitespaceCallIDRejected(t *testing.T) {
@@ -264,9 +220,7 @@ func TestRequestInput_WhitespaceCallIDRejected(t *testing.T) {
 			Arguments: `{"prompt":"pick"}`,
 		},
 	})
-	if !strings.Contains(result.Content, "non-empty tool call ID") {
-		t.Errorf("expected whitespace-CallID error, got %q", result.Content)
-	}
+	assertRejected(t, result, "non-empty tool call ID")
 }
 
 func TestRequestInput_DefinitionSchema(t *testing.T) {

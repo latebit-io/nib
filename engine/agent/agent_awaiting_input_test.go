@@ -156,6 +156,64 @@ func TestAgent_RequestInput_RoundTrip(t *testing.T) {
 	}
 }
 
+// escalatingProvider wraps multiTurnProvider and also implements
+// maxTokensEscalator, so the agent-loop escalation path fires during the
+// truncation test. Embedding preserves the scripted-stream Stream() method.
+type escalatingProvider struct {
+	*multiTurnProvider
+	maxTokens int
+}
+
+func (p *escalatingProvider) MaxTokens() int     { return p.maxTokens }
+func (p *escalatingProvider) SetMaxTokens(v int) { p.maxTokens = v }
+
+func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
+	inner := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			// Turn 1: truncated tool call — should trigger escalation.
+			{
+				{
+					ToolCalls: []llm.ToolCall{{
+						ID:       "call-trunc",
+						Type:     "function",
+						Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"x"`},
+					}},
+					Done:      true,
+					Truncated: true,
+				},
+			},
+			// Turn 2: plain answer, turn ends.
+			{
+				{Token: "ok retrying smaller"},
+				{Done: true},
+			},
+		},
+	}
+	provider := &escalatingProvider{multiTurnProvider: inner}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentWaiting after truncated turn")
+	}
+
+	// The provider's max_tokens should have been bumped to the initial
+	// escalation value (started at 0 → unset → jumps to the floor).
+	if provider.MaxTokens() != maxTokensInitialEscalation {
+		t.Errorf("MaxTokens after escalation = %d, want %d",
+			provider.MaxTokens(), maxTokensInitialEscalation)
+	}
+}
+
 func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 	// When the provider reports Truncated=true on the final stream event,
 	// the agent must not execute the accumulated tool calls — their

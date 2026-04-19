@@ -328,76 +328,27 @@ func TestFuzzyWhitespaceMatch(t *testing.T) {
 	})
 }
 
-func TestDetectLikelyCorruption(t *testing.T) {
-	// longMidLineReplace mimics an LLM output that hit max_tokens mid-string:
-	// search ends with a newline (as multi-line edits normally do) but the
-	// replacement is long and stops mid-line.
-	longMidLineReplace := strings.Repeat("x ", midLineTruncationFloor/2+10) + "unterminated"
+// corruptionCase describes one scenario for detectLikelyCorruption: the
+// inputs and whether the result is expected to be flagged. wantFlag is true
+// when detectLikelyCorruption should return a non-empty error; matchSub is
+// a substring the returned error must contain when flagged.
+type corruptionCase struct {
+	name     string
+	search   string
+	replace  string
+	content  string
+	wantFlag bool
+	matchSub string
+}
 
-	tests := []struct {
-		name     string
-		search   string
-		replace  string
-		content  string
-		wantErr  bool
-		matchSub string // substring the returned error must contain when wantErr is true
-	}{
-		{
-			name:    "safe small inline edit",
-			search:  "foo",
-			replace: "bar",
-			content: "foo baz",
-			wantErr: false,
-		},
-		{
-			name:    "plain deletion is always allowed",
-			search:  "dead line\n",
-			replace: "",
-			content: "keep\ndead line\ntail\n",
-			wantErr: false,
-		},
-		{
-			name:     "mid-line truncation signature",
-			search:   "old block line\n",
-			replace:  longMidLineReplace,
-			content:  "prefix\nold block line\nsuffix\n",
-			wantErr:  true,
-			matchSub: "truncated mid-line",
-		},
-		{
-			name:    "short mid-line replace is not flagged",
-			search:  "old\n",
-			replace: "new",
-			content: "prefix\nold\nsuffix\n",
-			wantErr: false,
-		},
-		{
-			name: "suffix duplication (agent rewrites existing tail)",
-			// Regression: matches the corrupted src/player.lua pattern where
-			// the agent matched a short prefix and tried to "restore" the
-			// entire tail, duplicating it.
-			search: "return launchRes",
-			replace: "return launchResult\n\tend\n\tspendSeekerSwarmEnergy(activeCardOrder.ship)\n" +
-				"\treturn okResult()\nend\n\nreturn player",
-			content: "header\n" +
-				"return launchResult\n\tend\n\tspendSeekerSwarmEnergy(activeCardOrder.ship)\n" +
-				"\treturn okResult()\nend\n\nreturn player\n",
-			wantErr:  true,
-			matchSub: "duplicates content",
-		},
-		{
-			name:    "non-duplicating tail replace is allowed",
-			search:  "return old\n",
-			replace: "return new with a decently long replacement to clear short-length guards\n",
-			content: "header\nreturn old\nunrelated tail content here\n",
-			wantErr: false,
-		},
-	}
-
-	for _, tc := range tests {
+// runCorruptionCases is the shared table-driven body for every
+// TestDetectLikelyCorruption_* group.
+func runCorruptionCases(t *testing.T, cases []corruptionCase) {
+	t.Helper()
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := detectLikelyCorruption(tc.search, tc.replace, tc.content)
-			if tc.wantErr {
+			if tc.wantFlag {
 				if got == "" {
 					t.Fatalf("expected corruption to be flagged, got clean result")
 				}
@@ -411,6 +362,117 @@ func TestDetectLikelyCorruption(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDetectLikelyCorruption_AllowsSafeEdits(t *testing.T) {
+	runCorruptionCases(t, []corruptionCase{
+		{
+			name:    "safe small inline edit",
+			search:  "foo",
+			replace: "bar",
+			content: "foo baz",
+		},
+		{
+			name:    "plain deletion is always allowed",
+			search:  "dead line\n",
+			replace: "",
+			content: "keep\ndead line\ntail\n",
+		},
+	})
+}
+
+func TestDetectLikelyCorruption_MidLineTruncation(t *testing.T) {
+	// longMidLineReplace mimics an LLM output that hit max_tokens mid-string:
+	// search ends with a newline (as multi-line edits normally do) but the
+	// replacement is long and stops mid-line.
+	longMidLineReplace := strings.Repeat("x ", midLineTruncationFloor/2+10) + "unterminated"
+
+	runCorruptionCases(t, []corruptionCase{
+		{
+			name:     "mid-line truncation signature",
+			search:   "old block line\n",
+			replace:  longMidLineReplace,
+			content:  "prefix\nold block line\nsuffix\n",
+			wantFlag: true,
+			matchSub: "truncated mid-line",
+		},
+		{
+			name:    "short mid-line replace is not flagged",
+			search:  "old\n",
+			replace: "new",
+			content: "prefix\nold\nsuffix\n",
+		},
+		// Exact boundary on midLineTruncationFloor: >= is inclusive.
+		{
+			name:     "replace exactly at mid-line truncation floor flags",
+			search:   "anchor\n",
+			replace:  strings.Repeat("a", midLineTruncationFloor),
+			content:  "prefix\nanchor\nsuffix\n",
+			wantFlag: true,
+			matchSub: "truncated mid-line",
+		},
+		{
+			name:    "replace one byte below mid-line truncation floor does not flag",
+			search:  "anchor\n",
+			replace: strings.Repeat("a", midLineTruncationFloor-1),
+			content: "prefix\nanchor\nsuffix\n",
+		},
+	})
+}
+
+func TestDetectLikelyCorruption_Duplication(t *testing.T) {
+	runCorruptionCases(t, []corruptionCase{
+		{
+			// Regression: matches the corrupted src/player.lua pattern where
+			// the agent matched a short prefix and tried to "restore" the
+			// entire tail, duplicating it.
+			name:   "suffix duplication (agent rewrites existing tail)",
+			search: "return launchRes",
+			replace: "return launchResult\n\tend\n\tspendSeekerSwarmEnergy(activeCardOrder.ship)\n" +
+				"\treturn okResult()\nend\n\nreturn player",
+			content: "header\n" +
+				"return launchResult\n\tend\n\tspendSeekerSwarmEnergy(activeCardOrder.ship)\n" +
+				"\treturn okResult()\nend\n\nreturn player\n",
+			wantFlag: true,
+			matchSub: "duplicates content",
+		},
+		{
+			name:    "non-duplicating tail replace is allowed",
+			search:  "return old\n",
+			replace: "return new with a decently long replacement to clear short-length guards\n",
+			content: "header\nreturn old\nunrelated tail content here\n",
+		},
+		{
+			name:    "replace exactly at duplication probe boundary flags",
+			search:  "X",
+			replace: strings.Repeat("b", duplicationProbeBytes),
+			content: "X" + strings.Repeat("c", 10) +
+				strings.Repeat("b", duplicationProbeBytes) +
+				strings.Repeat("c", 10),
+			wantFlag: true,
+			matchSub: "duplicates content",
+		},
+		{
+			name:    "replace one byte below duplication probe boundary does not flag",
+			search:  "X",
+			replace: strings.Repeat("b", duplicationProbeBytes-1),
+			content: "X" + strings.Repeat("c", 10) +
+				strings.Repeat("b", duplicationProbeBytes-1) +
+				strings.Repeat("c", 10),
+		},
+		{
+			// Regression: the probe must only scan near the match boundary.
+			// A coincidental match far in the file's tail (e.g. a common
+			// error-handling idiom reused in a later function) is not
+			// boundary-crossing duplication and must not be flagged.
+			name:    "far-tail coincidental match does not flag",
+			search:  "X",
+			replace: "return fmt.Errorf(\"something specific: %w\", err)\n\treturn nil\n\t}\n\t}",
+			content: "X" +
+				strings.Repeat("unrelated code line\n", 200) +
+				"return fmt.Errorf(\"something specific: %w\", err)\n\treturn nil\n\t}\n\t}",
+		},
+	})
 }
 
 func TestEditFileTool_RejectsDuplicationEdit(t *testing.T) {

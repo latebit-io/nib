@@ -384,7 +384,13 @@ func detectLikelyCorruption(search, replace, content string) string {
 	afterSearch := content[idx+len(search):]
 	if len(replace) >= duplicationProbeBytes && len(afterSearch) >= duplicationProbeBytes {
 		probe := replace[len(replace)-duplicationProbeBytes:]
-		if strings.Contains(afterSearch, probe) {
+		// Only scan the window immediately adjacent to the match. Real
+		// boundary-crossing duplication puts the duplicated bytes within
+		// ~len(replace) of the seam; matches further out are almost always
+		// coincidental repetitions of common code shapes (e.g. error-return
+		// idioms) and would otherwise produce false positives.
+		lookahead := min(len(afterSearch), len(replace)+duplicationProbeBytes)
+		if strings.Contains(afterSearch[:lookahead], probe) {
 			return "replace duplicates content that already exists after the match point — applying this edit would leave the same block present twice in the file. Narrow the search/replace to only the lines that actually change instead of rewriting surrounding context that is already there."
 		}
 	}

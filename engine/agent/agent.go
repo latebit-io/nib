@@ -1057,7 +1057,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			return messages, tu, err
 		}
 
-		result := a.drainStream(ch, thinkState)
+		result := a.drainStream(ctx, ch, thinkState)
 		tu.addUsage(result.usage)
 		tu.completionEst += llm.EstimateTokens(result.content)
 		toolCalls, truncated := result.toolCalls, result.truncated
@@ -1127,30 +1127,59 @@ type streamResult struct {
 	truncated bool
 }
 
+// maxStreamContentBytes caps the text content accumulated from a single
+// streaming response. Matches the SSE scanner and tool-arg caps used
+// elsewhere in the LLM layer. A misbehaving provider (e.g., one stuck in a
+// regeneration loop) cannot exhaust memory by streaming unbounded tokens;
+// once reached, subsequent tokens are dropped and logged.
+const maxStreamContentBytes = 10 * 1024 * 1024
+
 // drainStream reads the provider stream to completion, forwarding text
 // tokens to the frontend and collecting the terminal Done event. thinkState
 // is mutated in place so <think>...</think> spans that cross chunk
-// boundaries are stripped correctly. A channel closed without a Done event
-// (e.g. on ctx cancel) yields zero fields — the caller checks ctx.Err().
-func (a *Agent) drainStream(ch <-chan llm.StreamEvent, thinkState *bool) streamResult {
+// boundaries are stripped correctly. Returns early on ctx cancellation or a
+// channel close without a Done event (e.g. provider EOF before completion)
+// so a hung provider cannot stall the agent goroutine indefinitely.
+func (a *Agent) drainStream(ctx context.Context, ch <-chan llm.StreamEvent, thinkState *bool) streamResult {
 	var (
-		buf strings.Builder
-		out streamResult
+		buf    strings.Builder
+		out    streamResult
+		capped bool
 	)
-	for ev := range ch {
-		if ev.Done {
-			out.toolCalls = ev.ToolCalls
-			out.usage = ev.Usage
-			out.truncated = ev.Truncated
-			break
-		}
-		if clean := stripThinkTags(ev.Token, thinkState); clean != "" {
+	for {
+		select {
+		case <-ctx.Done():
+			out.content = buf.String()
+			return out
+		case ev, ok := <-ch:
+			if !ok {
+				out.content = buf.String()
+				return out
+			}
+			if ev.Done {
+				out.toolCalls = ev.ToolCalls
+				out.usage = ev.Usage
+				out.truncated = ev.Truncated
+				out.content = buf.String()
+				return out
+			}
+			if capped {
+				continue // keep draining so the provider goroutine can exit cleanly
+			}
+			clean := stripThinkTags(ev.Token, thinkState)
+			if clean == "" {
+				continue
+			}
+			if buf.Len()+len(clean) > maxStreamContentBytes {
+				slog.Warn("agent: content buffer cap reached, dropping subsequent tokens",
+					"cap_bytes", maxStreamContentBytes)
+				capped = true
+				continue
+			}
 			buf.WriteString(clean)
 			a.send(event.AgentToken{Text: clean})
 		}
 	}
-	out.content = buf.String()
-	return out
 }
 
 // handleTruncatedTurn rejects tool calls from a turn whose output was cut
@@ -1158,25 +1187,70 @@ func (a *Agent) drainStream(ch <-chan llm.StreamEvent, thinkState *bool) streamR
 // incomplete — executing them risks corrupting files (e.g. a truncated
 // edit_file replace that silently shrinks a buffer). Each tool call gets an
 // explicit error reply; a turn with no tool calls gets a user-role nudge so
-// the loop has something to condition the retry on.
+// the loop has something to condition the retry on. When the active provider
+// supports runtime escalation, the output-token cap is doubled before the
+// next turn so the retry has more headroom.
 func (a *Agent) handleTruncatedTurn(messages []llm.Message, toolCalls []llm.ToolCall) []llm.Message {
+	from, to, escalated := a.escalateProviderMaxTokens()
 	slog.Warn("agent: LLM output truncated, rejecting tool calls",
-		"tool_calls", len(toolCalls))
-	a.send(event.AgentError{Err: "LLM output was truncated (hit max output tokens) — rejecting tool calls and asking the model to retry with smaller changes."})
+		"tool_calls", len(toolCalls),
+		"max_tokens_from", from, "max_tokens_to", to, "escalated", escalated)
+
+	toolMsg, userMsg, uiMsg := truncationRecoveryMessages(from, to, escalated)
+	a.send(event.AgentError{Err: uiMsg})
 	for _, tc := range toolCalls {
 		messages = append(messages, llm.Message{
 			Role:       "tool",
 			ToolCallID: tc.ID,
-			Content:    "Error: your response was truncated because it hit the model's max output token limit. Any arguments accumulated for this tool call are likely incomplete and were NOT executed. Retry with a much smaller change — e.g. for edit_file, narrow the search/replace to only the lines that actually change rather than rewriting large blocks.",
+			Content:    toolMsg,
 		})
 	}
 	if len(toolCalls) == 0 {
 		messages = append(messages, llm.Message{
 			Role:    "user",
-			Content: "Your previous response was truncated because it hit the max output token limit. Retry with a more concise response, breaking large edits into smaller pieces.",
+			Content: userMsg,
 		})
 	}
 	return messages
+}
+
+// escalateProviderMaxTokens doubles the current max_tokens on the active
+// provider if it implements maxTokensEscalator. Returns the previous and new
+// values plus whether the cap actually moved — false means the provider
+// doesn't support escalation or is already at the ceiling.
+func (a *Agent) escalateProviderMaxTokens() (from, to int, escalated bool) {
+	esc, ok := a.currentProvider().(maxTokensEscalator)
+	if !ok {
+		return 0, 0, false
+	}
+	from = esc.MaxTokens()
+	to = escalateMaxTokens(from)
+	if to == from {
+		return from, to, false
+	}
+	esc.SetMaxTokens(to)
+	return from, to, true
+}
+
+// truncationRecoveryMessages builds the three user-facing strings for a
+// truncation event: the tool-role reply, the user-role nudge (for turns with
+// no tool calls), and the status-bar AgentError text. The phrasing differs
+// based on whether we were able to escalate the provider's cap.
+func truncationRecoveryMessages(from, to int, escalated bool) (toolMsg, userMsg, uiMsg string) {
+	if escalated {
+		toolMsg = fmt.Sprintf(
+			"Error: your response was truncated at the model's max output token limit (was %d, now bumped to %d for the next turn). Any arguments accumulated for this tool call are likely incomplete and were NOT executed. Retry — you now have more output headroom, but still prefer narrow edit_file search/replace over full-file rewrites.",
+			from, to)
+		userMsg = fmt.Sprintf(
+			"Your previous response was truncated at the max output token limit. The cap has been raised from %d to %d for this turn — retry with the same plan.",
+			from, to)
+		uiMsg = fmt.Sprintf("LLM output truncated — bumping max_tokens %d → %d and retrying.", from, to)
+		return
+	}
+	toolMsg = "Error: your response was truncated at the model's max output token limit, and the provider is already at its output-cap ceiling. Any arguments accumulated for this tool call are likely incomplete and were NOT executed. You must break the work into smaller pieces — e.g. for edit_file, narrow the search/replace to only the lines that actually change rather than rewriting large blocks."
+	userMsg = "Your previous response was truncated at the max output token limit, and the provider is already at its output-cap ceiling. Retry by breaking the work into smaller pieces."
+	uiMsg = "LLM output truncated and provider is at max_tokens ceiling — asking the model to split the work."
+	return
 }
 
 // flushDirtyBuffers asks the frontend to save all dirty buffers to disk,

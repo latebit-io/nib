@@ -480,6 +480,104 @@ func collectFinalEvent(t *testing.T, chunks []string) StreamEvent {
 	return StreamEvent{}
 }
 
+func TestAgentAPI_MaxTokensSerialization(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxTokens  int
+		wantField  bool
+		wantValue  int
+		marshaling string
+	}{
+		{"zero omits max_tokens in chatRequest", 0, false, 0, "chat"},
+		{"nonzero includes max_tokens in chatRequest", 32768, true, 32768, "chat"},
+		{"zero omits max_tokens in cachingChatRequest", 0, false, 0, "caching"},
+		{"nonzero includes max_tokens in cachingChatRequest", 65536, true, 65536, "caching"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var data []byte
+			var err error
+			switch tc.marshaling {
+			case "chat":
+				data, err = json.Marshal(chatRequest{Model: "m", MaxTokens: tc.maxTokens})
+			case "caching":
+				data, err = json.Marshal(cachingChatRequest{Model: "m", MaxTokens: tc.maxTokens})
+			}
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			body := string(data)
+			contains := strings.Contains(body, `"max_tokens"`)
+			if contains != tc.wantField {
+				t.Errorf("body=%s contains max_tokens=%v, want %v", body, contains, tc.wantField)
+			}
+			if tc.wantField && !strings.Contains(body, `"max_tokens":`+jsonInt(tc.wantValue)) {
+				t.Errorf("body=%s missing max_tokens=%d", body, tc.wantValue)
+			}
+		})
+	}
+}
+
+func TestAgentAPI_SetMaxTokens(t *testing.T) {
+	a := NewAgentAPI("http://example", "m", StaticKeyAuth("k"), false)
+	if got := a.MaxTokens(); got != 0 {
+		t.Errorf("default MaxTokens = %d, want 0", got)
+	}
+	a.SetMaxTokens(32768)
+	if got := a.MaxTokens(); got != 32768 {
+		t.Errorf("MaxTokens after Set = %d, want 32768", got)
+	}
+}
+
+func TestAnthropicAPI_SetMaxTokens(t *testing.T) {
+	// Anthropic requires max_tokens on every request, so the default is
+	// non-zero; SetMaxTokens overrides it for runtime escalation.
+	a := NewAnthropicAPI("https://example", "m", AnthropicKeyAuth("k"), false)
+	if got := a.MaxTokens(); got != anthropicDefaultMaxTokens {
+		t.Errorf("default MaxTokens = %d, want %d", got, anthropicDefaultMaxTokens)
+	}
+	a.SetMaxTokens(65536)
+	if got := a.MaxTokens(); got != 65536 {
+		t.Errorf("MaxTokens after Set = %d, want 65536", got)
+	}
+}
+
+func TestCodexAPI_SetMaxTokens(t *testing.T) {
+	c := NewCodexAPI("m", StaticKeyAuth("k"))
+	if got := c.MaxTokens(); got != 0 {
+		t.Errorf("default MaxTokens = %d, want 0", got)
+	}
+	c.SetMaxTokens(32768)
+	if got := c.MaxTokens(); got != 32768 {
+		t.Errorf("MaxTokens after Set = %d, want 32768", got)
+	}
+}
+
+func TestCodexRequest_MaxOutputTokensSerialization(t *testing.T) {
+	// Omitted when zero so we preserve the provider default for callers
+	// that never escalate.
+	data, err := json.Marshal(codexRequest{Model: "m"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "max_output_tokens") {
+		t.Errorf("zero value should omit max_output_tokens; got %s", data)
+	}
+	data, err = json.Marshal(codexRequest{Model: "m", MaxOutputTokens: 32768})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"max_output_tokens":32768`) {
+		t.Errorf("nonzero value should include max_output_tokens; got %s", data)
+	}
+}
+
+// jsonInt formats an int the way encoding/json serializes it.
+func jsonInt(v int) string {
+	b, _ := json.Marshal(v) // int never fails to marshal
+	return string(b)
+}
+
 func TestSSEChunk_TruncatedFinishReason(t *testing.T) {
 	tests := []struct {
 		name         string

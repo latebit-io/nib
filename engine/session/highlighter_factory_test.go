@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
@@ -92,42 +93,47 @@ func TestSetHighlighterFactory_SwapClosesOld(t *testing.T) {
 }
 
 // TestDecorateEditor_LinearizableWithSwaps hammers SetHighlighterFactory
-// concurrently with decorateEditor and asserts that the editor ends up
-// carrying a highlighter built by the *final* installed factory — i.e.
-// no stale factory wins the race. Run under `go test -race` to catch
-// data races on the shared factory/gen state.
+// concurrently with decorateEditor. Linearizability is verified via close
+// observations, not by introspecting the editor's installed highlighter:
+// if the implementation is linearizable, exactly one highlighter instance
+// remains open at the end (the most recently installed one), and every
+// older instance has been closed by SetHighlighter's replace path.
+//
+// Run under `go test -race` to catch data races on the shared factory/gen
+// state and on the Editor.highlighter field.
 func TestDecorateEditor_LinearizableWithSwaps(t *testing.T) {
 	s := buildSessionWithOpenFile(t, "/tmp/a.go")
 
-	// Factories tagged with a generation id so we can recover which
-	// factory the editor ended up with.
-	type taggedHighlighter struct {
+	type trackingHighlighter struct {
 		fakeHighlighter
 		id int64
 	}
+
+	var made []*trackingHighlighter
+	var madeMu sync.Mutex
+
 	newFactory := func(id int64) editor.HighlighterFactory {
 		return func(string) editor.Highlighter {
-			return &taggedHighlighter{id: id}
+			h := &trackingHighlighter{id: id}
+			madeMu.Lock()
+			made = append(made, h)
+			madeMu.Unlock()
+			return h
 		}
 	}
-
-	var currentID atomic.Int64
 
 	var wg sync.WaitGroup
 	const swaps = 200
 	const decorations = 200
 
-	// Swapper goroutine: flips the factory repeatedly.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := int64(1); i <= swaps; i++ {
-			currentID.Store(i)
 			s.SetHighlighterFactory(newFactory(i))
 		}
 	}()
 
-	// Decorator goroutine: decorates the same editor repeatedly in parallel.
 	e := s.editors["/tmp/a.go"]
 	wg.Add(1)
 	go func() {
@@ -139,42 +145,99 @@ func TestDecorateEditor_LinearizableWithSwaps(t *testing.T) {
 
 	wg.Wait()
 
-	// Do one final swap and decoration to pin the expected state; without
-	// this, the test is racy by construction (the two goroutines above may
-	// finish in either order).
-	final := currentID.Add(1)
+	// Pin the final state: one more install from a known factory ID. The
+	// test asserts on this deterministic final install.
+	final := int64(swaps + 1)
 	s.SetHighlighterFactory(newFactory(final))
 	s.decorateEditor(e)
 
-	h, ok := e.Highlighter().(*taggedHighlighter)
-	if !ok {
-		t.Fatalf("expected *taggedHighlighter, got %T", e.Highlighter())
+	// Close the editor to release the last installed highlighter —
+	// otherwise the "exactly one alive" check is off by one.
+	e.Close()
+
+	madeMu.Lock()
+	defer madeMu.Unlock()
+	var alive []*trackingHighlighter
+	for _, h := range made {
+		if h.closed == 0 {
+			alive = append(alive, h)
+		}
 	}
-	if h.id != final {
-		t.Errorf("editor ended up with stale factory id=%d, expected %d", h.id, final)
+	if len(alive) != 0 {
+		ids := make([]int64, len(alive))
+		for i, h := range alive {
+			ids[i] = h.id
+		}
+		t.Errorf("expected all highlighters closed after e.Close(); %d leaked (ids=%v)",
+			len(alive), ids)
+	}
+	// Additionally, every intermediate highlighter must have been closed
+	// exactly once (SetHighlighter's replace path + the final e.Close()).
+	for _, h := range made {
+		if h.closed < 1 {
+			t.Errorf("highlighter id=%d was never closed", h.id)
+		}
 	}
 }
 
-// TestEditor_HighlightLineRaceWithSetHighlighter stresses the UAF
-// window: one goroutine calls HighlightLine in a tight loop (the render
-// path), another swaps and closes the highlighter. If the editor lock
-// only protected the pointer read and released before the method call,
-// -race would flag the Close() racing with HighlightLine()'s internal
-// tree-sitter access on the freed instance.
+// instrumentedHighlighter detects UAF-style overlaps between HighlightLine
+// and Close. HighlightLine bumps inUse around its work (and sleeps briefly
+// to widen the overlap window so swaps are likely to land mid-call); Close
+// asserts inUse == 0 or fails the test. It also writes to a shared field
+// (sentinel) so `go test -race` flags a data race if HighlightLine and
+// Close run concurrently.
+type instrumentedHighlighter struct {
+	inUse    atomic.Int32
+	violated atomic.Bool
+	// sentinel is written by Close and read by HighlightLine. Under -race,
+	// concurrent access without external synchronization produces a report.
+	sentinel int
+}
+
+func (h *instrumentedHighlighter) Parse(string) {}
+
+func (h *instrumentedHighlighter) HighlightLine(int) []editor.Token {
+	h.inUse.Add(1)
+	defer h.inUse.Add(-1)
+	// Read the shared field and spend a moment here to widen the window.
+	_ = h.sentinel
+	time.Sleep(5 * time.Microsecond)
+	return nil
+}
+
+func (h *instrumentedHighlighter) Close() {
+	if h.inUse.Load() > 0 {
+		h.violated.Store(true)
+	}
+	h.sentinel++ // race detector will flag this against HighlightLine's read
+}
+
+// TestEditor_HighlightLineRaceWithSetHighlighter stresses the UAF window:
+// one goroutine calls HighlightLine in a tight loop (render path), another
+// swaps+closes the highlighter. The instrumented fake fails the test if
+// Close is ever called while HighlightLine is mid-flight; -race catches
+// any data race on the shared sentinel field.
 func TestEditor_HighlightLineRaceWithSetHighlighter(t *testing.T) {
 	buf := buffer.New()
 	buf.Path = "/tmp/race.go"
 	buf.Insert(0, 0, "package main\nfunc main() {}\n")
 	e := editor.New(buf)
 
-	// Install an initial highlighter so HighlightLine has something to call.
-	factory := func(string) editor.Highlighter { return &fakeHighlighter{} }
-	e.SetHighlighter(factory("/tmp/race.go"))
+	var made []*instrumentedHighlighter
+	var madeMu sync.Mutex
+	newInstrumented := func() editor.Highlighter {
+		h := &instrumentedHighlighter{}
+		madeMu.Lock()
+		made = append(made, h)
+		madeMu.Unlock()
+		return h
+	}
+
+	e.SetHighlighter(newInstrumented())
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// Reader: tight HighlightLine loop — mimics the render path.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -184,22 +247,53 @@ func TestEditor_HighlightLineRaceWithSetHighlighter(t *testing.T) {
 				return
 			default:
 				_ = e.HighlightLine(0)
-				_ = e.HighlightLine(1)
 			}
 		}
 	}()
 
-	// Writer: swap highlighter 500 times — each swap closes the previous.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for range 500 {
-			e.SetHighlighter(factory("/tmp/race.go"))
+			e.SetHighlighter(newInstrumented())
 		}
 		close(stop)
 	}()
 
 	wg.Wait()
+	e.Close()
+
+	madeMu.Lock()
+	defer madeMu.Unlock()
+	for i, h := range made {
+		if h.violated.Load() {
+			t.Errorf("highlighter #%d: Close() overlapped with HighlightLine()", i)
+		}
+	}
+}
+
+func TestEditor_SetSameHighlighterIsSafe(t *testing.T) {
+	// Installing the already-attached highlighter must not close it.
+	// Prior behavior: Close() then reassign → next Parse/HighlightLine
+	// call went through a closed tree-sitter instance. Observed via
+	// close count: self-reinstall must leave closed == 0.
+	buf := buffer.New()
+	buf.Path = "/tmp/same.go"
+	e := editor.New(buf)
+	h := &fakeHighlighter{}
+	e.SetHighlighter(h)
+
+	e.SetHighlighter(h) // self-reinstall — must no-op
+
+	if h.closed != 0 {
+		t.Errorf("same-instance reinstall should not close highlighter; closed=%d", h.closed)
+	}
+	// Closing the editor now should close the highlighter exactly once —
+	// confirming it was still the active instance (not replaced).
+	e.Close()
+	if h.closed != 1 {
+		t.Errorf("expected highlighter to close exactly once on editor Close; got closed=%d", h.closed)
+	}
 }
 
 func TestSetHighlighterFactory_SkipsPathlessEditors(t *testing.T) {

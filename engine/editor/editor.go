@@ -106,6 +106,11 @@ func New(buf *buffer.Buffer) *Editor {
 func (e *Editor) SetHighlighter(h Highlighter) {
 	e.highlighterMu.Lock()
 	defer e.highlighterMu.Unlock()
+	// Same-instance reinstall would Close() the highlighter we're about to
+	// keep, leaving the editor holding a closed (UAF-prone) object.
+	if e.highlighter == h {
+		return
+	}
 	if e.highlighter != nil {
 		e.highlighter.Close()
 	}
@@ -114,15 +119,6 @@ func (e *Editor) SetHighlighter(h Highlighter) {
 		h.Parse(e.Buf.Content())
 		e.needsReparse = false
 	}
-}
-
-// Highlighter returns the currently installed highlighter, or nil if
-// none is attached. Exported for tests and diagnostics; the editor does
-// not expose mutation via this getter.
-func (e *Editor) Highlighter() Highlighter {
-	e.highlighterMu.Lock()
-	defer e.highlighterMu.Unlock()
-	return e.highlighter
 }
 
 // Close frees any resources held by the highlighter. Call on shutdown.

@@ -88,6 +88,20 @@ func (t *RequestInputTool) Definition() llm.ToolDef {
 					"options": {
 						Type:        "array",
 						Description: "Suggested choices. Short kebab-case IDs, human-readable labels. 0–9 allowed. Omit for free-form questions.",
+						Items: &llm.FunctionParam{
+							Type: "object",
+							Properties: map[string]llm.FunctionParam{
+								"id": {
+									Type:        "string",
+									Description: "Kebab-case identifier returned verbatim when this option is chosen (lowercase alphanumeric and hyphens, no leading hyphen).",
+								},
+								"label": {
+									Type:        "string",
+									Description: "Human-readable label shown to the developer.",
+								},
+							},
+							Required: []string{"id", "label"},
+						},
 					},
 					"reason": {
 						Type:        "string",

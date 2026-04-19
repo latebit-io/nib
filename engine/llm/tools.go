@@ -28,10 +28,20 @@ type FunctionParams struct {
 	Required []string `json:"required"`
 }
 
-// FunctionParam describes one parameter.
+// FunctionParam describes one parameter as a JSON Schema fragment.
+// Fields other than Type/Description are optional and omitted when empty so
+// scalar parameters continue to serialize as the minimal `{type, description}`
+// pair. Items is required by strict validators (OpenAI/Codex) whenever Type
+// is "array"; Properties/Required apply when Type is "object".
 type FunctionParam struct {
-	// Type is the JSON Schema type (e.g., "string", "integer").
+	// Type is the JSON Schema type (e.g., "string", "integer", "array", "object").
 	Type string `json:"type"`
 	// Description explains the parameter's purpose (shown to the LLM).
 	Description string `json:"description"`
+	// Items is the schema for array elements. Required when Type is "array".
+	Items *FunctionParam `json:"items,omitempty"`
+	// Properties maps field names to schemas for object-typed parameters.
+	Properties map[string]FunctionParam `json:"properties,omitempty"`
+	// Required lists the required field names for object-typed parameters.
+	Required []string `json:"required,omitempty"`
 }

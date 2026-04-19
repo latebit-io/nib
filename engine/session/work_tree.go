@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -102,6 +103,27 @@ func (w *WorkTreeManager) SetActiveGoal(title string) error {
 	if !w.tree.SetActiveGoal(title) {
 		w.mu.Unlock()
 		return errors.New("work tree: task not found: " + title)
+	}
+	w.dirty = true
+	w.modGen++
+	return w.saveAndUnlock()
+}
+
+// AddTask appends a new pending task to the work tree under the named
+// phase and feature, creating the feature if absent, and persists the
+// change to demarkus. Returns an error if the work tree is not loaded,
+// the phase is not found, or persistence fails. If link is non-empty,
+// it is appended to the task title as a markdown link to a supplementary
+// memory document.
+func (w *WorkTreeManager) AddTask(phase, feature, task, link string) error {
+	w.mu.Lock()
+	if w.tree == nil {
+		w.mu.Unlock()
+		return errors.New("work tree: not loaded")
+	}
+	if err := w.tree.AddTask(phase, feature, task, link); err != nil {
+		w.mu.Unlock()
+		return fmt.Errorf("work tree: %w", err)
 	}
 	w.dirty = true
 	w.modGen++

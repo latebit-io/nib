@@ -16,6 +16,7 @@ import (
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/junto/engine/project"
 )
 
 // Mode is an alias for event.Mode so existing callers within the agent
@@ -77,6 +78,15 @@ var planningBlocklist = map[string]bool{
 	"write_file":  true,
 	"bash":        true,
 	"update_task": true,
+}
+
+// mutatingTools contains tool names that modify filesystem or shell state.
+// In execution mode these require an active `[>]` task in /project.md —
+// the gate enforces "all agent work is tracked in the project tree."
+var mutatingTools = map[string]bool{
+	"edit_file":  true,
+	"write_file": true,
+	"bash":       true,
 }
 
 // Agent drives the multi-turn LLM loop.
@@ -355,8 +365,14 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	}
 
 	// Task tracking — conditionally registered via type assertion on workspace.
+	// update_task handles activate/complete; project_task_add handles new-task
+	// creation. Both share the same TaskTracker instance so all mutations
+	// route through the session's in-memory work tree.
 	if tt, ok := workspace.(TaskTracker); ok {
-		builtins = append(builtins, NewTaskTool(tt))
+		builtins = append(builtins,
+			NewTaskTool(tt),
+			NewProjectTaskAddTool(tt),
+		)
 	}
 
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))
@@ -1133,6 +1149,12 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 		return fmt.Sprintf("Error: tool %q is not available in planning mode", tc.Function.Name)
 	}
 
+	// Execution gate: mutating tools require an active [>] task in
+	// /project.md so every code change is tracked in the work tree.
+	if msg := a.enforceActiveTaskGate(ctx, name); msg != "" {
+		return msg
+	}
+
 	tool, ok := a.tools[name]
 	if !ok {
 		return fmt.Sprintf("Error: unknown tool %q", tc.Function.Name) + a.intentReminder()
@@ -1404,6 +1426,47 @@ func (a *Agent) fetchMemorySummary(ctx context.Context) string {
 		return a.memorySummary
 	}
 	return doc.Body
+}
+
+// enforceActiveTaskGate blocks mutating tools in execution mode when
+// /project.md has no active `[>]` task. Returns empty string when the
+// call may proceed, or a user-facing error directing the agent to
+// activate or add a task.
+//
+// Cases handled intentionally:
+//   - No memory store → gate off (project.md cannot exist anywhere).
+//   - Non-mutating tool → gate off (reads and LSP queries are free).
+//   - Planning mode → gate off (planning-mode blocklist already rejects these).
+//   - /project.md fetch fails (not found, server down, etc.) → gate off
+//     so the agent isn't blocked by infrastructure issues on fresh projects.
+//   - /project.md exists and has no `[>]` task → blocked with guidance.
+//   - /project.md exists and has a `[>]` task → proceed.
+func (a *Agent) enforceActiveTaskGate(ctx context.Context, toolName string) string {
+	if a.memoryStore == nil {
+		return ""
+	}
+	if a.mode == ModePlanning {
+		return ""
+	}
+	if !mutatingTools[toolName] {
+		return ""
+	}
+	doc, err := a.memoryStore.Fetch(ctx, ProjectWorkTreePath)
+	if err != nil {
+		// Treat any fetch error (not-found, server down) as "no project"
+		// so the gate never blocks on infrastructure issues.
+		return ""
+	}
+	tree := project.Parse(doc.Body)
+	if goal, _ := tree.ActiveGoal(); goal != nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Error: tool %q blocked — no active task in /project.md. "+
+			"Call update_task with action=\"activate\" (on an existing task) or project_task_add "+
+			"(to create one) first, then retry.",
+		toolName,
+	)
 }
 
 // intentReminder returns a string reminding the LLM of the current intent.

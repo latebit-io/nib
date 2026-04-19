@@ -60,14 +60,22 @@ project: ProjectName
 
 ### Rules
 
-- **Frontmatter** — required. `project:` must match the project name.
-- **`#` (h1)** — Phase or milestone. Numbered: `Phase 1: Name`. Nothing else at h1.
-- **`##` (h2)** — Feature within a phase. Short noun phrase. Nothing else at h2.
-- **`- [ ]`** — Task. Imperative sentence: what to do, not what it is. One line each.
-- **`- [x]`** — Completed task. **`- [>]`** — Active task (currently in progress).
-- **No h3, h4, h5, h6.** Three levels only: phase → feature → tasks.
-- **No prose, no descriptions, no "Goal" sections.** The hierarchy IS the plan.
+- **Frontmatter** — optional. If present, demarkus metadata (`version:`, `archived:`, etc.) is fine; a `project:` field is not required.
+- **`#` (h1)** — Phase or milestone. Format: `Phase N: Name` (numbered). Nothing else at h1.
+- **`##` (h2)** — Feature within a phase. Three forms are all valid:
+  - `## <Feature Name>` — a concrete piece of work (e.g. `## Priority Field`).
+  - `## Goal: <description>` — the intent of the phase (e.g. `## Goal: Instant visual feedback`).
+  - `## Plan: <approach>` — the approach to a goal (e.g. `## Plan: Cloud Backend`).
+- **`- [ ]`** — Pending task. Imperative sentence: what to do, not what it is. One line each.
+- **`- [>]`** — Active task (currently in progress). **Exactly one or zero across the whole document.**
+- **`- [x]`** — Completed task.
+- **Supplementary link (optional)** — append a markdown link to a memory doc for details:
+  `- [ ] Make renderer ([details](/game/renderer.md))`. The linked doc holds context, design notes, or spec; the task line stays short.
+- **No h3, h4, h5, h6.** Two levels of heading only: phase → feature (or goal/plan).
+- **No prose, no descriptions outside `## Goal:` / `## Plan:` h2s.** The hierarchy IS the plan.
 - **No blank task titles.** Every task must say what code changes.
+
+Publishing a document that violates these rules is rejected by the server with a list of violations — fix all and retry.
 
 ### Good
 
@@ -78,16 +86,23 @@ project: ProjectName
 - [ ] Add `SetPriority(id int, p string)` method
 ## Tag System
 - [ ] Add `Tags []string` field to `Todo` struct
+
+# Phase 2: Rendering
+## Goal: Pixel-accurate tilemap draws
+## Plan: Use batched vertex buffers
+- [>] Build tilemap vertex builder ([details](/game/tilemap.md))
+- [ ] Wire batch renderer into draw loop
 ```
 
 ### Bad
 
 ```markdown
 # Phase 1: Core Data Model
-## Goal                          ← NO: not a feature
-Add priority and tags to todos.  ← NO: prose
+Add priority and tags to todos.  ← NO: prose at phase level
 ### Priority Field               ← NO: h3 not allowed
 - [ ] Add priority               ← NO: too vague
+- [>] first active
+- [>] second active              ← NO: only one active task allowed
 ```
 {{if not .Headless}}
 The developer will type `:done` when the plan is ready to execute, or `:skip` to jump straight to coding.

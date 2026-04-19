@@ -42,6 +42,11 @@ func (s *Session) CompleteTask(title string) error {
 	return s.MarkGoalDone(title)
 }
 
+// AddTask implements agent.TaskTracker.
+func (s *Session) AddTask(phase, feature, task, link string) error {
+	return s.workTree.AddTask(phase, feature, task, link)
+}
+
 // ActiveTaskPath implements agent.TaskTracker.
 func (s *Session) ActiveTaskPath() string {
 	_, path := s.ActiveGoal()

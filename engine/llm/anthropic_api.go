@@ -11,7 +11,15 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 )
+
+// anthropicDefaultMaxTokens is the initial output-token cap for Anthropic
+// requests. Anthropic's API requires max_tokens on every request. 16384 is
+// conservative enough to work across all current Claude models while still
+// leaving plenty of headroom for normal coding turns; the agent escalates
+// via SetMaxTokens when a turn is truncated.
+const anthropicDefaultMaxTokens = 16384
 
 // AnthropicAPI implements Provider using the Anthropic Messages API.
 // It translates junto's OpenAI-shaped Message/ToolCall types to the Anthropic
@@ -22,6 +30,9 @@ type AnthropicAPI struct {
 	model         string
 	promptCaching bool
 	client        *http.Client
+
+	mu        sync.Mutex
+	maxTokens int
 }
 
 // anthropicVersion is the API version header required by the Anthropic API.
@@ -34,11 +45,28 @@ func NewAnthropicAPI(baseURL, model string, auth Auth, promptCaching bool) *Anth
 		baseURL:       baseURL,
 		model:         model,
 		promptCaching: promptCaching,
+		maxTokens:     anthropicDefaultMaxTokens,
 		client: &http.Client{
 			Transport: agentTransport(),
 			// No client-level Timeout — would kill SSE streams mid-flight.
 		},
 	}
+}
+
+// MaxTokens returns the current max_tokens value sent on requests.
+// Anthropic requires this field on every request, so it is always non-zero.
+func (a *AnthropicAPI) MaxTokens() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.maxTokens
+}
+
+// SetMaxTokens updates the max_tokens value used on subsequent requests.
+// Used by the agent loop to escalate after a truncated response.
+func (a *AnthropicAPI) SetMaxTokens(v int) {
+	a.mu.Lock()
+	a.maxTokens = v
+	a.mu.Unlock()
 }
 
 // AnthropicKeyAuth implements Auth by setting the x-api-key header,
@@ -253,9 +281,13 @@ func (a *AnthropicAPI) buildAnthropicRequest(messages []Message, tools []ToolDef
 		}
 	}
 
+	a.mu.Lock()
+	maxTokens := a.maxTokens
+	a.mu.Unlock()
+
 	return &anthropicRequest{
 		Model:     a.model,
-		MaxTokens: 16384,
+		MaxTokens: maxTokens,
 		System:    system,
 		Messages:  anthropicMsgs,
 		Tools:     convertToolDefs(tools, a.promptCaching),
@@ -318,6 +350,9 @@ type anthropicStreamState struct {
 	usage      *Usage
 	blocks     map[int]*anthropicBlockState
 	inputUsage *anthropicUsage
+	// truncated is set when the Anthropic message_delta reports
+	// stop_reason="max_tokens", i.e., the model hit the output cap.
+	truncated bool
 }
 
 // handleBlockStart processes a content_block_start event.
@@ -374,11 +409,20 @@ func (s *anthropicStreamState) handleMessageDelta(data string) {
 		return
 	}
 	s.usage = mergeAnthropicUsage(s.inputUsage, evt.Usage)
+	if evt.Delta.StopReason == "max_tokens" {
+		slog.Warn("anthropic: output truncated (stop_reason=max_tokens)")
+		s.truncated = true
+	}
 }
 
 // finalEvent builds the terminal StreamEvent from accumulated state.
 func (s *anthropicStreamState) finalEvent() StreamEvent {
-	return StreamEvent{Done: true, ToolCalls: finalizeAnthropicBlocks(s.blocks), Usage: s.usage}
+	return StreamEvent{
+		Done:      true,
+		ToolCalls: finalizeAnthropicBlocks(s.blocks),
+		Usage:     s.usage,
+		Truncated: s.truncated,
+	}
 }
 
 // anthropicEventResult signals the outcome of processing one SSE event.

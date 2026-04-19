@@ -156,6 +156,243 @@ func TestAgent_RequestInput_RoundTrip(t *testing.T) {
 	}
 }
 
+// escalatingProvider wraps multiTurnProvider and also implements
+// maxTokensEscalator, so the agent-loop escalation path fires during the
+// truncation test. Embedding preserves the scripted-stream Stream() method.
+type escalatingProvider struct {
+	*multiTurnProvider
+	maxTokens int
+}
+
+func (p *escalatingProvider) MaxTokens() int     { return p.maxTokens }
+func (p *escalatingProvider) SetMaxTokens(v int) { p.maxTokens = v }
+
+func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
+	inner := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			// Turn 1: truncated tool call — should trigger escalation.
+			{
+				{
+					ToolCalls: []llm.ToolCall{{
+						ID:       "call-trunc",
+						Type:     "function",
+						Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"x"`},
+					}},
+					Done:      true,
+					Truncated: true,
+				},
+			},
+			// Turn 2: plain answer, turn ends.
+			{
+				{Token: "ok retrying smaller"},
+				{Done: true},
+			},
+		},
+	}
+	provider := &escalatingProvider{multiTurnProvider: inner}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentWaiting after truncated turn")
+	}
+
+	// The provider's max_tokens should have been bumped to the initial
+	// escalation value (started at 0 → unset → jumps to the floor).
+	if provider.MaxTokens() != maxTokensInitialEscalation {
+		t.Errorf("MaxTokens after escalation = %d, want %d",
+			provider.MaxTokens(), maxTokensInitialEscalation)
+	}
+}
+
+func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
+	// A misbehaving model (or one already at the output-token ceiling) that
+	// keeps returning Truncated=true must not loop forever — the agent
+	// abandons the turn after maxTruncationRetries consecutive truncations.
+	truncatedTurn := []llm.StreamEvent{
+		{
+			ToolCalls: []llm.ToolCall{{
+				ID:       "call-trunc",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"x"`},
+			}},
+			Done:      true,
+			Truncated: true,
+		},
+	}
+	turns := make([][]llm.StreamEvent, 0, maxTruncationRetries+2)
+	for i := 0; i < maxTruncationRetries+2; i++ {
+		turns = append(turns, truncatedTurn)
+	}
+	provider := &multiTurnProvider{turns: turns}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	// Non-fatal errors (including the abort) leave runLoop in AgentWaiting
+	// rather than exiting — wait for that, then cancel ctx to force the
+	// run goroutine to return so its defer populates savedMessages.
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentWaiting after truncation retry exhaustion")
+	}
+	cancel()
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentDone)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentDone after ctx cancel")
+	}
+
+	// The provider should have been called exactly maxTruncationRetries+1
+	// times — retries capped, no infinite loop.
+	provider.mu.Lock()
+	wantCalls := maxTruncationRetries + 1
+	if provider.call != wantCalls {
+		t.Errorf("provider calls = %d, want %d", provider.call, wantCalls)
+	}
+	provider.mu.Unlock()
+
+	// Every assistant message with ToolCalls must have a matching tool-role
+	// reply in the saved transcript — including the final abort attempt.
+	// Without this, Resume from savedMessages would send a malformed
+	// request (dangling tool_calls) that the provider rejects on validation.
+	ag.mu.Lock()
+	saved := ag.savedMessages
+	ag.mu.Unlock()
+
+	toolCallsEmitted := 0
+	toolRepliesSeen := 0
+	for _, msg := range saved {
+		if msg.Role == "assistant" {
+			toolCallsEmitted += len(msg.ToolCalls)
+		}
+		if msg.Role == "tool" && msg.ToolCallID == "call-trunc" {
+			toolRepliesSeen++
+		}
+	}
+	if toolCallsEmitted != toolRepliesSeen {
+		t.Errorf("dangling tool_calls in saved transcript: %d assistant ToolCalls, %d tool-role replies",
+			toolCallsEmitted, toolRepliesSeen)
+	}
+}
+
+func TestAgent_StreamClosedBeforeDone_SurfacesError(t *testing.T) {
+	// When the provider closes its stream without ever emitting Done (e.g.
+	// mid-stream connection drop, SSE parse error), the turn must end in a
+	// visible error — NOT a silent AgentWaiting with partial content.
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			// Turn 1: tokens flow, then the channel closes without Done.
+			{
+				{Token: "partial "},
+				{Token: "response"},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	// The agent must emit an AgentError describing the stream failure —
+	// never reach AgentWaiting treating the partial tokens as a clean turn.
+	errEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentError)
+		return ok
+	})
+	if errEv == nil {
+		t.Fatal("expected AgentError for stream closed before Done")
+	}
+	msg := errEv.(event.AgentError).Err
+	if !strings.Contains(msg, "stream") {
+		t.Errorf("AgentError = %q, want substring 'stream'", msg)
+	}
+}
+
+func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
+	// When the provider reports Truncated=true on the final stream event,
+	// the agent must not execute the accumulated tool calls — their
+	// arguments may have been cut off mid-generation and silently applying
+	// them would corrupt files. It should instead reply to each tool call
+	// with an error and loop so the LLM can retry smaller.
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			// Turn 1: LLM emits a tool call AND the stream is flagged
+			// truncated (hit max output tokens mid-generation).
+			{
+				{
+					ToolCalls: []llm.ToolCall{{
+						ID:   "call-trunc",
+						Type: "function",
+						Function: llm.FunctionCall{
+							Name:      "edit_file",
+							Arguments: `{"path":"x.lua","search":"foo\n","replace":"bar mid-stream cutoff with no newline",`,
+						},
+					}},
+					Done:      true,
+					Truncated: true,
+				},
+			},
+			// Turn 2: LLM recovers with a plain text answer, no tool calls.
+			{
+				{Token: "sorry, retrying smaller."},
+				{Done: true},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	// Wait for the turn to end.
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentWaiting after truncated turn")
+	}
+
+	// Verify turn 2 saw the rejection message (not a real edit_file result).
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	var found bool
+	for _, msg := range provider.toolInputs {
+		if msg.ToolCallID == "call-trunc" && strings.Contains(msg.Content, "truncated") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("truncation rejection not delivered to LLM for call-trunc; got %+v", provider.toolInputs)
+	}
+}
+
 func TestAgent_RequestInput_CancelDuringAwait(t *testing.T) {
 	provider := &multiTurnProvider{
 		turns: [][]llm.StreamEvent{

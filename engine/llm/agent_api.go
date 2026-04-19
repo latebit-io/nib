@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,9 @@ type AgentAPI struct {
 	model         string
 	promptCaching bool
 	client        *http.Client
+
+	mu        sync.Mutex
+	maxTokens int // 0 means "omit from request — use provider default"
 }
 
 // NewAgentAPI creates an AgentAPI provider with the given base URL, model,
@@ -67,6 +71,11 @@ type chatRequest struct {
 	Store         bool           `json:"store"`
 	Tools         []ToolDef      `json:"tools,omitempty"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	// MaxTokens caps the completion length. Omitted (0) means "use the
+	// provider's default"; set after a truncated turn so the retry has
+	// more headroom. Uses omitempty so we only start sending the field
+	// once escalation has happened.
+	MaxTokens int `json:"max_tokens,omitempty"`
 }
 
 // cachingChatRequest is the JSON wire format when prompt caching is enabled.
@@ -78,6 +87,7 @@ type cachingChatRequest struct {
 	Store         bool             `json:"store"`
 	Tools         []cachingToolDef `json:"tools,omitempty"`
 	StreamOptions *streamOptions   `json:"stream_options,omitempty"`
+	MaxTokens     int              `json:"max_tokens,omitempty"`
 }
 
 // cachingMessage extends Message with support for content blocks.
@@ -202,9 +212,30 @@ type sseDeltaCall struct {
 }
 
 // Stream sends a chat completion request and returns a channel of streaming events.
+// MaxTokens returns the current max_tokens value sent on requests. Zero means
+// no value is sent and the provider's default applies. Safe for concurrent use.
+func (a *AgentAPI) MaxTokens() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.maxTokens
+}
+
+// SetMaxTokens updates the max_tokens value used on subsequent requests.
+// Used by the agent loop to escalate after a truncated response. Zero disables
+// the field (falls back to the provider default). Safe for concurrent use.
+func (a *AgentAPI) SetMaxTokens(v int) {
+	a.mu.Lock()
+	a.maxTokens = v
+	a.mu.Unlock()
+}
+
 func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
 	var body []byte
 	var err error
+
+	a.mu.Lock()
+	maxTokens := a.maxTokens
+	a.mu.Unlock()
 
 	if a.promptCaching {
 		cms, cts := annotateCacheBreakpoints(messages, tools)
@@ -214,6 +245,7 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 			Stream:        true,
 			Tools:         cts,
 			StreamOptions: includeUsage,
+			MaxTokens:     maxTokens,
 		})
 	} else {
 		body, err = json.Marshal(chatRequest{
@@ -222,6 +254,7 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 			Stream:        true,
 			Tools:         tools,
 			StreamOptions: includeUsage,
+			MaxTokens:     maxTokens,
 		})
 	}
 	if err != nil {
@@ -355,7 +388,16 @@ func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<-
 		}
 	}
 	if choice.FinishReason != nil {
-		trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: s.tc.finalize(), Usage: s.usage})
+		truncated := *choice.FinishReason == "length"
+		if truncated {
+			slog.Warn("openai-compat: output truncated (finish_reason=length)")
+		}
+		trySend(ctx, ch, StreamEvent{
+			Done:      true,
+			ToolCalls: s.tc.finalize(),
+			Usage:     s.usage,
+			Truncated: truncated,
+		})
 		return true
 	}
 	return false

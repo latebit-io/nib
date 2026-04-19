@@ -1039,6 +1039,7 @@ func (u *turnUsage) addUsage(usage *llm.Usage) {
 // not complete. toolDefs controls which tools the LLM can invoke for this turn.
 func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, turnUsage, error) {
 	var tu turnUsage
+	truncationRetries := 0
 	for {
 		// Inject pending lint violations as a user message so the LLM
 		// treats them as a high-priority instruction. Checked each iteration
@@ -1057,23 +1058,15 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			return messages, tu, err
 		}
 
-		var (
-			contentBuf  strings.Builder
-			toolCalls   []llm.ToolCall
-			streamUsage *llm.Usage
-		)
-		for ev := range ch {
-			if ev.Done {
-				toolCalls, streamUsage = ev.ToolCalls, ev.Usage
-				break
-			}
-			if clean := stripThinkTags(ev.Token, thinkState); clean != "" {
-				contentBuf.WriteString(clean)
-				a.send(event.AgentToken{Text: clean})
-			}
+		result, err := a.drainStream(ctx, ch, thinkState)
+		tu.addUsage(result.usage)
+		tu.completionEst += llm.EstimateTokens(result.content)
+		if err != nil {
+			slog.Error("agent: stream closed before completion", "err", err)
+			a.send(event.AgentError{Err: fmt.Sprintf("LLM stream error: %v", err)})
+			return messages, tu, err
 		}
-		tu.addUsage(streamUsage)
-		tu.completionEst += llm.EstimateTokens(contentBuf.String())
+		toolCalls, truncated := result.toolCalls, result.truncated
 
 		if ctx.Err() != nil {
 			return messages, tu, ctx.Err()
@@ -1081,48 +1074,267 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 
 		assistantMsg := llm.Message{
 			Role:    "assistant",
-			Content: contentBuf.String(),
+			Content: result.content,
 		}
 		if len(toolCalls) > 0 {
 			assistantMsg.ToolCalls = toolCalls
 		}
 		messages = append(messages, assistantMsg)
 
+		if truncated {
+			var retryErr error
+			messages, truncationRetries, retryErr = a.handleTruncationRetry(messages, toolCalls, truncationRetries)
+			if retryErr != nil {
+				return messages, tu, retryErr
+			}
+			continue
+		}
+		truncationRetries = 0
+
 		// No tool calls — agent's turn is done.
 		if len(toolCalls) == 0 {
 			return messages, tu, nil
 		}
-		for _, tc := range toolCalls {
-			if a.hasLintPending() {
-				messages = append(messages, llm.Message{
-					Role:       "tool",
-					ToolCallID: tc.ID,
-					Content:    "Skipped — fix style lint violations first.",
-				})
-				continue
-			}
-			tu.toolCalls++
+		var toolErr error
+		messages, toolErr = a.executeToolCalls(ctx, messages, toolCalls, &tu)
+		if toolErr != nil {
+			return messages, tu, toolErr
+		}
+	}
+}
 
-			if err := a.flushDirtyBuffers(ctx); err != nil {
-				a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
-				return messages, tu, err
-			}
-			slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
-			a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
-
-			result := a.dispatchTool(ctx, tc)
-			if ctx.Err() != nil {
-				return messages, tu, ctx.Err()
-			}
-
-			a.afterToolDispatch(tc.Function.Name)
+// executeToolCalls dispatches each tool call from one LLM turn, flushing
+// dirty buffers beforehand and appending the tool result as a tool-role
+// message. Lint-pending calls are skipped with a placeholder reply so the
+// LLM sees the fix-lint-first directive without losing the tool-call ID
+// linkage. Returns an error when autosave fails or ctx is cancelled mid-
+// dispatch so the caller can end the turn visibly.
+func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, toolCalls []llm.ToolCall, tu *turnUsage) ([]llm.Message, error) {
+	for _, tc := range toolCalls {
+		if a.hasLintPending() {
 			messages = append(messages, llm.Message{
 				Role:       "tool",
 				ToolCallID: tc.ID,
-				Content:    result,
+				Content:    "Skipped — fix style lint violations first.",
 			})
+			continue
+		}
+		tu.toolCalls++
+
+		if err := a.flushDirtyBuffers(ctx); err != nil {
+			a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
+			return messages, err
+		}
+		slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
+		a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
+
+		result := a.dispatchTool(ctx, tc)
+		if ctx.Err() != nil {
+			return messages, ctx.Err()
+		}
+
+		a.afterToolDispatch(tc.Function.Name)
+		messages = append(messages, llm.Message{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Content:    result,
+		})
+	}
+	return messages, nil
+}
+
+// streamResult aggregates the outcome of one LLM streaming response after
+// the Done event is observed. Tokens are forwarded to the event channel as
+// they arrive; only the final accumulated state flows back to the caller.
+type streamResult struct {
+	content   string
+	toolCalls []llm.ToolCall
+	usage     *llm.Usage
+	truncated bool
+}
+
+// maxStreamContentBytes caps the text content accumulated from a single
+// streaming response. Matches the SSE scanner and tool-arg caps used
+// elsewhere in the LLM layer. A misbehaving provider (e.g., one stuck in a
+// regeneration loop) cannot exhaust memory by streaming unbounded tokens;
+// once reached, subsequent tokens are dropped and logged.
+const maxStreamContentBytes = 10 * 1024 * 1024
+
+// errStreamClosedEarly indicates the provider closed its stream channel
+// without first emitting a terminal Done event. This is distinct from ctx
+// cancellation (handled by the caller's ctx.Err() check) and signals a
+// provider-side failure — network drop, SSE parse error, scanner overflow —
+// that must not be mistaken for a clean completion. Silently accepting the
+// partial content would let a truncated turn end in AgentWaiting with no
+// error shown to the developer.
+var errStreamClosedEarly = errors.New("agent: provider closed stream before completion")
+
+// drainStream reads the provider stream to completion, forwarding text
+// tokens to the frontend and collecting the terminal Done event. thinkState
+// is mutated in place so <think>...</think> spans that cross chunk
+// boundaries are stripped correctly.
+//
+// Returns errStreamClosedEarly when the channel closes without a Done event
+// and ctx is still live; the caller must treat this as a failed turn rather
+// than a clean completion with partial content. A ctx cancellation returns
+// (result, nil) since the caller's existing ctx.Err() check handles it.
+func (a *Agent) drainStream(ctx context.Context, ch <-chan llm.StreamEvent, thinkState *bool) (streamResult, error) {
+	// Each provider response is a self-contained turn — chat/completion APIs
+	// don't carry <think> state across responses. If this stream ended with
+	// an unclosed <think> block (truncation, early EOF, ctx cancel), the
+	// next call would start with inThink=true and silently drop real output
+	// waiting for a </think> that will never come. Force-reset on every
+	// return path.
+	defer func() { *thinkState = false }()
+
+	var (
+		buf    strings.Builder
+		out    streamResult
+		capped bool
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			out.content = buf.String()
+			return out, nil
+		case ev, ok := <-ch:
+			if !ok {
+				out.content = buf.String()
+				if ctx.Err() != nil {
+					return out, nil
+				}
+				return out, errStreamClosedEarly
+			}
+			if ev.Done {
+				out.toolCalls = ev.ToolCalls
+				out.usage = ev.Usage
+				out.truncated = ev.Truncated
+				out.content = buf.String()
+				return out, nil
+			}
+			if capped {
+				continue // keep draining so the provider goroutine can exit cleanly
+			}
+			clean := stripThinkTags(ev.Token, thinkState)
+			if clean == "" {
+				continue
+			}
+			if buf.Len()+len(clean) > maxStreamContentBytes {
+				slog.Warn("agent: content buffer cap reached, dropping subsequent tokens",
+					"cap_bytes", maxStreamContentBytes)
+				capped = true
+				continue
+			}
+			buf.WriteString(clean)
+			a.send(event.AgentToken{Text: clean})
 		}
 	}
+}
+
+// handleTruncationRetry enforces the consecutive-truncation retry cap and,
+// when under the cap, delegates to handleTruncatedTurn to append recovery
+// messages. Returns the updated messages, the incremented retry counter, and
+// a terminal error if the cap was reached (caller returns the error so the
+// turn ends instead of looping against a model that will not fit in-budget).
+//
+// Both paths append a tool-role reply for every pending tool call — the
+// assistant message with ToolCalls has already been committed by the caller,
+// and leaving it unanswered would produce a malformed transcript that the
+// next provider request (including a Resume from saved messages) would
+// reject on validation.
+func (a *Agent) handleTruncationRetry(messages []llm.Message, toolCalls []llm.ToolCall, retries int) ([]llm.Message, int, error) {
+	if retries >= maxTruncationRetries {
+		const abortReply = "Error: your response was truncated at the model's max output token limit, and the agent has exhausted its truncation-recovery retries. The turn is being abandoned to avoid looping against a model that cannot fit its answer in the available budget."
+		messages = appendTruncationRejections(messages, toolCalls, abortReply)
+		err := fmt.Errorf("agent: abandoning turn after %d consecutive truncated responses", retries+1)
+		slog.Error("agent: truncation retries exhausted", "retries", retries)
+		a.send(event.AgentError{Err: err.Error()})
+		return messages, retries, err
+	}
+	messages = a.handleTruncatedTurn(messages, toolCalls)
+	return messages, retries + 1, nil
+}
+
+// appendTruncationRejections appends a tool-role reply for each pending
+// tool call from a truncated assistant message. Chat-completion transcripts
+// require a tool-role message for every tool_calls entry before the next
+// assistant turn — skipping them leaves dangling references that providers
+// validate and reject on the following request. No-op when toolCalls is
+// empty (the assistant message had no tool calls to answer).
+func appendTruncationRejections(messages []llm.Message, toolCalls []llm.ToolCall, reply string) []llm.Message {
+	for _, tc := range toolCalls {
+		messages = append(messages, llm.Message{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Content:    reply,
+		})
+	}
+	return messages
+}
+
+// handleTruncatedTurn rejects tool calls from a turn whose output was cut
+// off by the model's max-token cap. Their accumulated arguments may be
+// incomplete — executing them risks corrupting files (e.g. a truncated
+// edit_file replace that silently shrinks a buffer). Each tool call gets an
+// explicit error reply; a turn with no tool calls gets a user-role nudge so
+// the loop has something to condition the retry on. When the active provider
+// supports runtime escalation, the output-token cap is doubled before the
+// next turn so the retry has more headroom.
+func (a *Agent) handleTruncatedTurn(messages []llm.Message, toolCalls []llm.ToolCall) []llm.Message {
+	from, to, escalated := a.escalateProviderMaxTokens()
+	slog.Warn("agent: LLM output truncated, rejecting tool calls",
+		"tool_calls", len(toolCalls),
+		"max_tokens_from", from, "max_tokens_to", to, "escalated", escalated)
+
+	toolMsg, userMsg, uiMsg := truncationRecoveryMessages(from, to, escalated)
+	a.send(event.AgentError{Err: uiMsg})
+	messages = appendTruncationRejections(messages, toolCalls, toolMsg)
+	if len(toolCalls) == 0 {
+		messages = append(messages, llm.Message{
+			Role:    "user",
+			Content: userMsg,
+		})
+	}
+	return messages
+}
+
+// escalateProviderMaxTokens doubles the current max_tokens on the active
+// provider if it implements maxTokensEscalator. Returns the previous and new
+// values plus whether the cap actually moved — false means the provider
+// doesn't support escalation or is already at the ceiling.
+func (a *Agent) escalateProviderMaxTokens() (from, to int, escalated bool) {
+	esc, ok := a.currentProvider().(maxTokensEscalator)
+	if !ok {
+		return 0, 0, false
+	}
+	from = esc.MaxTokens()
+	to = escalateMaxTokens(from)
+	if to == from {
+		return from, to, false
+	}
+	esc.SetMaxTokens(to)
+	return from, to, true
+}
+
+// truncationRecoveryMessages builds the three user-facing strings for a
+// truncation event: the tool-role reply, the user-role nudge (for turns with
+// no tool calls), and the status-bar AgentError text. The phrasing differs
+// based on whether we were able to escalate the provider's cap.
+func truncationRecoveryMessages(from, to int, escalated bool) (toolMsg, userMsg, uiMsg string) {
+	if escalated {
+		toolMsg = fmt.Sprintf(
+			"Error: your response was truncated at the model's max output token limit (was %d, now bumped to %d for the next turn). Any arguments accumulated for this tool call are likely incomplete and were NOT executed. Retry — you now have more output headroom, but still prefer narrow edit_file search/replace over full-file rewrites.",
+			from, to)
+		userMsg = fmt.Sprintf(
+			"Your previous response was truncated at the max output token limit. The cap has been raised from %d to %d for this turn — retry with the same plan.",
+			from, to)
+		uiMsg = fmt.Sprintf("LLM output truncated — bumping max_tokens %d → %d and retrying.", from, to)
+		return
+	}
+	toolMsg = "Error: your response was truncated at the model's max output token limit, and the provider is already at its output-cap ceiling. Any arguments accumulated for this tool call are likely incomplete and were NOT executed. You must break the work into smaller pieces — e.g. for edit_file, narrow the search/replace to only the lines that actually change rather than rewriting large blocks."
+	userMsg = "Your previous response was truncated at the max output token limit, and the provider is already at its output-cap ceiling. Retry by breaking the work into smaller pieces."
+	uiMsg = "LLM output truncated and provider is at max_tokens ceiling — asking the model to split the work."
+	return
 }
 
 // flushDirtyBuffers asks the frontend to save all dirty buffers to disk,

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // CodexAPI implements Provider using the OpenAI Responses API format,
@@ -19,6 +20,9 @@ type CodexAPI struct {
 	auth   Auth
 	model  string
 	client *http.Client
+
+	mu        sync.Mutex
+	maxTokens int // 0 means "omit max_output_tokens — use provider default"
 }
 
 // NewCodexAPI creates a CodexAPI provider for the ChatGPT Codex endpoint.
@@ -98,6 +102,10 @@ type codexRequest struct {
 	Tools        []codexTool `json:"tools,omitempty"`
 	Stream       bool        `json:"stream"`
 	Store        bool        `json:"store"`
+	// MaxOutputTokens caps the response length. Omitted (0) means the
+	// provider's default applies; set after a truncated turn to give the
+	// retry more headroom.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 }
 
 // codexMessageItem is a role-based message in the Responses API input.
@@ -146,7 +154,15 @@ type codexSSEEvent struct {
 }
 
 type codexResponse struct {
-	Usage *codexUsage `json:"usage,omitempty"`
+	Usage             *codexUsage             `json:"usage,omitempty"`
+	Status            string                  `json:"status,omitempty"`
+	IncompleteDetails *codexIncompleteDetails `json:"incomplete_details,omitempty"`
+}
+
+// codexIncompleteDetails is populated on a response.incomplete event when
+// the model stopped before finishing. Reason is e.g. "max_output_tokens".
+type codexIncompleteDetails struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 type codexUsage struct {
@@ -239,18 +255,40 @@ func toolsToCodexTools(tools []ToolDef) []codexTool {
 
 // Stream sends a Responses API request to the Codex endpoint and returns
 // streaming events compatible with Junto's StreamEvent type.
+// MaxTokens returns the current max_output_tokens value sent on requests.
+// Zero means no value is sent and the provider's default applies.
+func (c *CodexAPI) MaxTokens() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.maxTokens
+}
+
+// SetMaxTokens updates the max_output_tokens value used on subsequent
+// requests. Used by the agent loop to escalate after a truncated response.
+// Zero falls back to the provider default.
+func (c *CodexAPI) SetMaxTokens(v int) {
+	c.mu.Lock()
+	c.maxTokens = v
+	c.mu.Unlock()
+}
+
 func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
 	instructions, input := messagesToCodexInput(messages)
 	if instructions == "" {
 		instructions = "You are a helpful coding assistant."
 	}
 	slog.Debug("codex request", "model", c.model, "instructions_len", len(instructions), "input_items", len(input), "tools", len(tools))
+	c.mu.Lock()
+	maxTokens := c.maxTokens
+	c.mu.Unlock()
+
 	reqBody := codexRequest{
-		Model:        c.model,
-		Instructions: instructions,
-		Input:        input,
-		Tools:        toolsToCodexTools(tools),
-		Stream:       true,
+		Model:           c.model,
+		Instructions:    instructions,
+		Input:           input,
+		Tools:           toolsToCodexTools(tools),
+		Stream:          true,
+		MaxOutputTokens: maxTokens,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -323,6 +361,36 @@ func (s *codexStreamState) handleEvent(evt codexSSEEvent, raw []byte) (emitted *
 	return nil, false
 }
 
+// isTruncatedCompletion reports whether a response.completed/response.incomplete
+// event indicates the model specifically hit the output token cap. Requires
+// positive confirmation via incomplete_details.reason == "max_output_tokens";
+// other incomplete reasons (e.g. "content_filter") are not token truncation
+// and must not trigger max_tokens escalation — bumping the cap would not help
+// a content-filter refusal and would waste tokens on retries.
+//
+// Anomalous incomplete events (no incomplete_details, or a non-truncation
+// reason) are logged so we retain observability without silently discarding
+// the signal.
+func isTruncatedCompletion(evt codexSSEEvent) bool {
+	incomplete := evt.Type == "response.incomplete" ||
+		(evt.Response != nil && evt.Response.Status == "incomplete")
+	if !incomplete {
+		return false
+	}
+	if evt.Response == nil || evt.Response.IncompleteDetails == nil {
+		slog.Warn("codex: incomplete response without incomplete_details — cannot classify",
+			"type", evt.Type)
+		return false
+	}
+	reason := evt.Response.IncompleteDetails.Reason
+	if reason == "max_output_tokens" {
+		return true
+	}
+	slog.Warn("codex: incomplete response with non-truncation reason — not escalating",
+		"reason", reason)
+	return false
+}
+
 func (s *codexStreamState) handleItemAdded(evt codexSSEEvent, raw []byte) {
 	var item codexOutputItem
 	if err := json.Unmarshal(evt.Item, &item); err == nil && item.Type == "function_call" {
@@ -374,7 +442,16 @@ func (s *codexStreamState) handleCompleted(evt codexSSEEvent) (*StreamEvent, boo
 			CompletionTokens: evt.Response.Usage.OutputTokens,
 		}
 	}
-	final := StreamEvent{Done: true, ToolCalls: finalizeCalls(s.calls), Usage: s.usage}
+	truncated := isTruncatedCompletion(evt)
+	if truncated {
+		slog.Warn("codex: output truncated (response.incomplete / max_output_tokens)")
+	}
+	final := StreamEvent{
+		Done:      true,
+		ToolCalls: finalizeCalls(s.calls),
+		Usage:     s.usage,
+		Truncated: truncated,
+	}
 	return &final, true
 }
 

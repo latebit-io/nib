@@ -185,6 +185,42 @@ func TestRequestInput_OversizedOptionLabelRejected(t *testing.T) {
 	}
 }
 
+func TestRequestInput_EmptyCallIDRejected(t *testing.T) {
+	// Session uses empty CallID as the "no prompt pending" sentinel, so an
+	// empty ID from the LLM would deadlock: the dev's answer would no-op
+	// and the agent would block forever. The tool must reject it up front.
+	tool := NewRequestInputTool()
+	result := tool.Execute(context.Background(), llm.ToolCall{
+		ID:   "",
+		Type: "function",
+		Function: llm.FunctionCall{
+			Name:      "request_input",
+			Arguments: `{"prompt":"pick"}`,
+		},
+	})
+	if result.Effect != EffectNone {
+		t.Errorf("empty CallID should return EffectNone, got %d", result.Effect)
+	}
+	if !strings.Contains(result.Content, "non-empty tool call ID") {
+		t.Errorf("expected empty-CallID error, got %q", result.Content)
+	}
+}
+
+func TestRequestInput_WhitespaceCallIDRejected(t *testing.T) {
+	tool := NewRequestInputTool()
+	result := tool.Execute(context.Background(), llm.ToolCall{
+		ID:   "   \t  ",
+		Type: "function",
+		Function: llm.FunctionCall{
+			Name:      "request_input",
+			Arguments: `{"prompt":"pick"}`,
+		},
+	})
+	if !strings.Contains(result.Content, "non-empty tool call ID") {
+		t.Errorf("expected whitespace-CallID error, got %q", result.Content)
+	}
+}
+
 func TestRequestInput_DefinitionSchema(t *testing.T) {
 	tool := NewRequestInputTool()
 	def := tool.Definition()

@@ -904,14 +904,27 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	switch result.(type) {
 	case textarea.SubmitMsg:
 		text := m.input.Content()
+		if strings.TrimSpace(text) == "" {
+			if m.awaitingInput != nil {
+				// Empty Enter while a prompt is pending: keep the
+				// prompt visible, keep focus, let the developer keep
+				// typing. Deactivating here would strand them with a
+				// visible prompt and no way to answer without clicking.
+				return nil
+			}
+			// Empty Enter outside awaiting: existing behavior — drop
+			// focus and reset planning bit so the next click doesn't
+			// silently submit as a plan.
+			m.inputActive = false
+			m.planningMode = false
+			m.input.Reset()
+			return nil
+		}
 		planning := m.planningMode
 		awaiting := m.awaitingInput != nil
 		m.inputActive = false
 		m.input.Reset()
 		m.planningMode = false
-		if strings.TrimSpace(text) == "" {
-			return nil
-		}
 		if awaiting {
 			// Answer the pending request_input prompt. Clearing
 			// awaitingInput optimistically keeps state in sync with

@@ -94,6 +94,15 @@ func (t *RequestInputTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
+	// A non-empty CallID is required: Session tracks the live prompt by
+	// CallID and treats empty as "no prompt pending", so an empty ID here
+	// would deadlock — the developer's answer would be dropped as a no-op
+	// and the agent would stay blocked on the answer channel forever.
+	callID := strings.TrimSpace(call.ID)
+	if callID == "" {
+		return textResult("Error: request_input requires a non-empty tool call ID")
+	}
+
 	prompt := strings.TrimSpace(args.Prompt)
 	if prompt == "" {
 		return textResult("Error: prompt is required and must not be empty")
@@ -142,7 +151,7 @@ func (t *RequestInputTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 			Prompt:  prompt,
 			Options: options,
 			Reason:  reason,
-			CallID:  call.ID,
+			CallID:  callID,
 		},
 	}
 }

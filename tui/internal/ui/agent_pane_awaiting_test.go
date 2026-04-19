@@ -143,12 +143,20 @@ func TestHandleInput_EnterSendsFreeFormVerbatim(t *testing.T) {
 func TestHandleInput_EnterWithEmptyContentIsNoOp(t *testing.T) {
 	m := newAwaitPane(t)
 	m.ShowAwaitingInput(sampleAwaitEvent())
-	// Empty content; pressing Enter should drop the event and keep awaiting.
+	// Empty Enter while awaiting must not submit anything, must keep the
+	// prompt visible, and must keep focus so the developer can keep typing
+	// without re-clicking the input.
 	cmd := m.handleInput(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		if _, ok := cmd().(InputAnsweredMsg); ok {
 			t.Error("empty-content Enter should not emit InputAnsweredMsg")
 		}
+	}
+	if !m.IsAwaitingInput() {
+		t.Error("empty-content Enter should keep awaitingInput active")
+	}
+	if !m.IsInputActive() {
+		t.Error("empty-content Enter should keep the textarea focused")
 	}
 }
 

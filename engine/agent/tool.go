@@ -55,7 +55,24 @@ const (
 	// EffectTaskCompleted signals a plan task was marked done. Payload: nil.
 	// The agent loop runs style lint + evaluator on all edited files.
 	EffectTaskCompleted
+	// EffectAwaitingInput pauses the agent on a developer response. Payload:
+	// AwaitingInputPayload. The agent loop emits AgentAwaitingInput and blocks
+	// on awaitingInputCh until Session.AnswerInput delivers the typed answer.
+	EffectAwaitingInput
 )
+
+// AwaitingInputPayload is the payload for EffectAwaitingInput. Carries the
+// question, suggested options, and optional reason.
+type AwaitingInputPayload struct {
+	// Prompt is the question to show the developer.
+	Prompt string
+	// Options are suggested choices. Empty means free-form answer expected.
+	Options []event.AwaitingInputOption
+	// Reason explains why input is needed. Optional.
+	Reason string
+	// CallID correlates the answer back to the originating tool call.
+	CallID string
+}
 
 // ToolResult is what a tool returns to the agent loop.
 // Content is the string fed back to the LLM. Effect tells the loop what

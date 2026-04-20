@@ -19,6 +19,10 @@ const (
 	KindNumber TokenKind = "number"
 	// KindType marks type names and type identifiers.
 	KindType TokenKind = "type"
+	// KindProperty marks object/mapping keys and struct fields.
+	// Distinct from [KindType] because fields and type names are
+	// semantically different (see nvim-treesitter's @property vs @type).
+	KindProperty TokenKind = "property"
 	// KindOperator marks arithmetic, comparison, and logical operators.
 	// Brackets and delimiters are intentionally left unstyled so the output
 	// isn't dominated by punctuation coloring.

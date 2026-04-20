@@ -25,7 +25,7 @@ func TestNew_UnsupportedExtensionReturnsNil(t *testing.T) {
 }
 
 func TestNew_SupportedExtensions(t *testing.T) {
-	cases := []string{"foo.go", "foo.lua", "FOO.LUA"}
+	cases := []string{"foo.go", "foo.lua", "FOO.LUA", "foo.yaml", "foo.yml", "FOO.YML"}
 	for _, name := range cases {
 		h := New(name)
 		if h == nil {
@@ -122,6 +122,36 @@ return M
 	for _, want := range []TokenKind{KindKeyword, KindString, KindComment, KindNumber, KindFunction, KindConstant} {
 		if kinds[want] == 0 {
 			t.Errorf("expected at least one %s token in Lua source, got kinds=%v", want, kinds)
+		}
+	}
+}
+
+func TestParse_YAMLProducesExpectedKinds(t *testing.T) {
+	src := `---
+project: junto
+enabled: true
+count: 42
+name: "Junto"
+tags:
+  - ai
+  - editor
+anchors: &base
+  foo: bar
+alias: *base
+`
+	h := New("config.yaml")
+	if h == nil {
+		t.Fatal("expected highlighter for .yaml")
+	}
+	defer h.Close()
+	h.Parse(src)
+
+	lineCount := strings.Count(src, "\n") + 1
+	kinds := collectKinds(h, lineCount)
+
+	for _, want := range []TokenKind{KindKeyword, KindString, KindNumber, KindConstant, KindProperty} {
+		if kinds[want] == 0 {
+			t.Errorf("expected at least one %s token in YAML source, got kinds=%v", want, kinds)
 		}
 	}
 }

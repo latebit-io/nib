@@ -16,6 +16,7 @@ import (
 
 	"github.com/latebit-io/junto/engine/editor"
 	tree_sitter_lua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
+	tree_sitter_yaml "github.com/tree-sitter-grammars/tree-sitter-yaml/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
 )
@@ -25,6 +26,9 @@ var goHighlightsSCM string
 
 //go:embed queries/lua/highlights.scm
 var luaHighlightsSCM string
+
+//go:embed queries/yaml/highlights.scm
+var yamlHighlightsSCM string
 
 // Re-export the editor types so existing references to e.g. highlight.Token
 // continue to resolve. Everything below is a thin alias — the canonical
@@ -46,6 +50,7 @@ const (
 	KindComment  = editor.KindComment
 	KindNumber   = editor.KindNumber
 	KindType     = editor.KindType
+	KindProperty = editor.KindProperty
 	KindOperator = editor.KindOperator
 	KindFunction = editor.KindFunction
 	KindConstant = editor.KindConstant
@@ -62,8 +67,10 @@ type langSpec struct {
 // langByExt maps file extensions to the language spec used to highlight them.
 // Unsupported extensions produce a nil [Highlighter] from [New].
 var langByExt = map[string]langSpec{
-	".go":  {sitter.NewLanguage(tree_sitter_go.Language()), goHighlightsSCM},
-	".lua": {sitter.NewLanguage(tree_sitter_lua.Language()), luaHighlightsSCM},
+	".go":   {sitter.NewLanguage(tree_sitter_go.Language()), goHighlightsSCM},
+	".lua":  {sitter.NewLanguage(tree_sitter_lua.Language()), luaHighlightsSCM},
+	".yaml": {sitter.NewLanguage(tree_sitter_yaml.Language()), yamlHighlightsSCM},
+	".yml":  {sitter.NewLanguage(tree_sitter_yaml.Language()), yamlHighlightsSCM},
 }
 
 // captureNameToKind maps tree-sitter capture names (nvim-treesitter convention)
@@ -78,6 +85,8 @@ var captureNameToKind = map[string]TokenKind{
 	"include":     KindKeyword,
 	"exception":   KindKeyword,
 	"preproc":     KindKeyword,
+	"attribute":   KindKeyword,
+	"property":    KindProperty,
 	"string":      KindString,
 	"escape":      KindString,
 	"comment":     KindComment,

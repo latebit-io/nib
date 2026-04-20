@@ -76,8 +76,6 @@ const (
 	StatusEditing StatusKind = "editing"
 	// StatusWaiting means the agent is waiting for user input.
 	StatusWaiting StatusKind = "waiting"
-	// StatusTyping means the agent is animating typed text into the editor.
-	StatusTyping StatusKind = "typing"
 	// StatusLinting means the agent is running post-edit style lint commands.
 	StatusLinting StatusKind = "linting"
 	// StatusAwaitingInput means the agent is blocked mid-turn on a developer

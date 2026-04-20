@@ -1685,7 +1685,7 @@ func (m *AppModel) handleToggleProject() (tea.Model, tea.Cmd) {
 // otherwise the user must press Ctrl+N.
 func (m *AppModel) applyApproval() tea.Cmd {
 	o := m.Editor.Overlay
-	var oldLines []string
+	oldLines := make([]string, 0, o.EndLine-o.StartLine+1)
 	for i := o.StartLine; i <= o.EndLine; i++ {
 		oldLines = append(oldLines, m.Editor.LineText(i))
 	}

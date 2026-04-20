@@ -108,5 +108,17 @@ func defaultLSPConfigs() []lsp.ServerConfig {
 		slog.Warn("lsp: unexpected error detecting lua-language-server", "err", err)
 	}
 
+	// yaml-language-server for YAML.
+	if yamlLSPath, err := exec.LookPath("yaml-language-server"); err == nil {
+		slog.Debug("lsp: auto-detected yaml-language-server", "path", yamlLSPath)
+		configs = append(configs, lsp.ServerConfig{
+			Command:    yamlLSPath,
+			Args:       []string{"--stdio"},
+			LanguageID: "yaml",
+		})
+	} else if !errors.Is(err, exec.ErrNotFound) {
+		slog.Warn("lsp: unexpected error detecting yaml-language-server", "err", err)
+	}
+
 	return configs
 }

@@ -4,7 +4,8 @@ BIN_DIR := $(HOME)/.local/bin
 # Format: <lang>:<module-path>. Add a new language by appending one line.
 QUERY_LANGS := \
 	go:github.com/tree-sitter/tree-sitter-go \
-	lua:github.com/tree-sitter-grammars/tree-sitter-lua
+	lua:github.com/tree-sitter-grammars/tree-sitter-lua \
+	yaml:github.com/tree-sitter-grammars/tree-sitter-yaml
 
 .PHONY: all build clean install uninstall test fmt vet sync-queries
 

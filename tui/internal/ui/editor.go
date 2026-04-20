@@ -86,6 +86,7 @@ var tokenKindStyles = map[highlight.TokenKind]lipgloss.Style{
 	highlight.KindComment:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")),  // gray
 	highlight.KindNumber:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")),  // yellow
 	highlight.KindType:     lipgloss.NewStyle().Foreground(lipgloss.Color("6")),  // cyan
+	highlight.KindProperty: lipgloss.NewStyle().Foreground(lipgloss.Color("14")), // bright cyan
 	highlight.KindOperator: lipgloss.NewStyle().Foreground(lipgloss.Color("9")),  // bright red
 	highlight.KindFunction: lipgloss.NewStyle().Foreground(lipgloss.Color("4")),  // blue
 	highlight.KindConstant: lipgloss.NewStyle().Foreground(lipgloss.Color("13")), // bright magenta

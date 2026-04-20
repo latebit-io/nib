@@ -1714,7 +1714,10 @@ func (m *AppModel) applyApproval() tea.Cmd {
 		m.Session.AbortApproval()
 		return nil
 	}
-	m.clearEditorOverlay(false)
+	// bufferMutated=true: ApplyEdit already replaced the lines, so CollapseOverlay
+	// must use the post-mutation coordinate translation (subtract removedCount,
+	// not addedCount) to keep the viewport pointing at the right buffer line.
+	m.clearEditorOverlay(true)
 	m.AgentPane.AppendMeta("[applied]\n")
 	m.refreshProjectPane()
 

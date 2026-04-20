@@ -1705,8 +1705,8 @@ func (m *AppModel) applyApproval() tea.Cmd {
 		return nil
 	}
 
-	m.clearEditorOverlay(false)
-
+	// Try the apply first — ApplyEdit short-circuits on LocateEdit failure
+	// without mutating the buffer, so the overlay can stay visible if it fails.
 	ok, reason := m.Editor.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
 	if !ok {
 		slog.Warn("apply failed", "reason", reason)
@@ -1714,6 +1714,7 @@ func (m *AppModel) applyApproval() tea.Cmd {
 		m.Session.AbortApproval()
 		return nil
 	}
+	m.clearEditorOverlay(false)
 	m.AgentPane.AppendMeta("[applied]\n")
 	m.refreshProjectPane()
 

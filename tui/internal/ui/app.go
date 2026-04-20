@@ -1719,8 +1719,9 @@ func (m *AppModel) applyApproval() tea.Cmd {
 	// not addedCount) to keep the viewport pointing at the right buffer line.
 	m.clearEditorOverlay(true)
 	m.AgentPane.AppendMeta("[applied]\n")
-	m.refreshProjectPane()
 
+	// Refresh after CompleteApproval — that's when modifiedFiles is populated,
+	// which the project pane reads to render the modified badge.
 	if m.dial.AutoContinue() {
 		m.Session.ApproveAndContinue()
 		m.AgentPane.SetStatus(event.StatusThinking)
@@ -1728,5 +1729,6 @@ func (m *AppModel) applyApproval() tea.Cmd {
 		m.Session.CompleteApproval()
 		m.AgentPane.SetStatus(event.StatusEditing)
 	}
+	m.refreshProjectPane()
 	return nil
 }

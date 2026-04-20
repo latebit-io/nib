@@ -12,7 +12,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/lang"
@@ -763,10 +762,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// Animation tick — advance the agent typing animation
-	case animTickMsg:
-		return m, m.handleAnimTick()
-
 	case tea.MouseWheelMsg:
 		m.recentMouse = true
 		// Translate Y for intent bar row
@@ -811,8 +806,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentStatus:
 		m.AgentPane.SetStatus(e.Status)
 	case event.AgentEditProposed:
-		// Clean up any running animation before creating a new overlay.
-		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 
 		// ReviewEdit computes the diff AND marks the edit as reviewed.
@@ -827,15 +820,14 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
 
-			// Build the overlay — startAnimatedApproval reads it for
+			// Build the overlay — applyApproval reads it for
 			// search/replace content even when we skip the visual review.
 			m.Editor.Overlay = NewDiffOverlay(diff)
 
 			if m.dial.AutoApproveEdits() {
 				// At LevelTrusted, skip the visual review step and apply
-				// immediately. No activation, no visual-line sync —
-				// startAnimatedApproval handles its own scroll and apply.
-				cmd = m.startAnimatedApproval()
+				// immediately.
+				cmd = m.applyApproval()
 			} else {
 				m.AgentPane.SetStatus(event.StatusReviewing)
 				m.Editor.Overlay.Active = true
@@ -878,7 +870,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		}
 		// If the session switched files, update TUI-owned state to match.
 		if m.Session.ActiveEditor() != prevActive {
-			m.cancelAnimation()
 			if m.fileWatcher != nil {
 				m.fileWatcher.Watch(m.Session.ActiveFile())
 			}
@@ -889,7 +880,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentError:
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.AgentPane.ClearAwaitingInput()
-		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
 		if m.Session.Phase() == session.PhasePlanning {
@@ -915,7 +905,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		m.AgentPane.SetInputActive(false)
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = m.reloadWorkTreeCmd()
-		m.cancelAnimation()
 		m.clearEditorOverlay(false)
 	case event.FlushBuffers:
 		saved, err := m.Session.SaveDirtyBuffers()
@@ -1020,12 +1009,8 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "agent", m.Session.HasAgent())
-		// Block approve during active animation.
-		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
-			return m, nil
-		}
 		if m.Session.PendingEdit() != nil && m.Editor.Overlay != nil {
-			cmd := m.startAnimatedApproval()
+			cmd := m.applyApproval()
 			return m, cmd
 		}
 		return m, nil
@@ -1034,12 +1019,6 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Completion popup gets priority — dismiss it first.
 		if m.Editor.Completion.Active {
 			m.Editor.Completion.Dismiss()
-			return m, nil
-		}
-		// Cancel running animation (partial edit stays, undoable)
-		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
-			slog.Debug("animation cancelled", "reason", "escape")
-			m.cancelAnimation()
 			return m, nil
 		}
 		if m.Session.PendingEdit() != nil {
@@ -1057,12 +1036,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// No intent either — fall through to focused pane
 
 	case ActionAgentContinue:
-		// Block continue during active animation — wait for it to finish.
-		if m.Editor.Anim != nil && m.Editor.Anim.state == animTyping {
-			return m, nil
-		}
 		if m.Session.CanContinue() {
-			m.cancelAnimation()
 			m.Session.Continue()
 		}
 		return m, nil
@@ -1310,14 +1284,9 @@ func (m *AppModel) View() tea.View {
 	return v
 }
 
-// rebuildEditorModel creates a new EditorModel from the session's active
-// editor, preserving TUI-specific settings (TypingWPM, InstantApply).
+// rebuildEditorModel creates a new EditorModel from the session's active editor.
 func (m *AppModel) rebuildEditorModel() {
-	wpm := m.Editor.TypingWPM
-	instantApply := m.Editor.InstantApply
 	m.Editor = NewEditorModel(m.Session.ActiveEditor(), m.Keymap, m.Services)
-	m.Editor.TypingWPM = wpm
-	m.Editor.InstantApply = instantApply
 	m.Editor.OnSave = func() { m.Session.NotifySaved() }
 	m.Regions.ReplacePane("editor", m.Editor)
 }
@@ -1369,9 +1338,6 @@ func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-
-	// Cancel any running animation.
-	m.cancelAnimation()
 
 	// Watch the newly opened file for external changes.
 	if m.fileWatcher != nil {
@@ -1712,12 +1678,12 @@ func (m *AppModel) handleToggleProject() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// --- Animated Approval ---
+// --- Edit Approval ---
 
-// startAnimatedApproval initiates the animated typing flow.
-// Validates via Session.PrepareApproval, clears the overlay, and starts
-// the delete+type animation via an engine IncrementalEdit.
-func (m *AppModel) startAnimatedApproval() tea.Cmd {
+// applyApproval validates the reviewed edit and applies it atomically.
+// At dial levels with AutoContinue, the agent is also signalled to continue;
+// otherwise the user must press Ctrl+N.
+func (m *AppModel) applyApproval() tea.Cmd {
 	o := m.Editor.Overlay
 	var oldLines []string
 	for i := o.StartLine; i <= o.EndLine; i++ {
@@ -1739,208 +1705,24 @@ func (m *AppModel) startAnimatedApproval() tea.Cmd {
 		return nil
 	}
 
-	slog.Debug("animation starting",
-		"line", plan.Line, "col", plan.Col,
-		"searchLen", len(plan.Search), "replaceLen", len(plan.Replace))
-
-	// Clear the overlay — we're taking over with direct buffer mutations.
-	// Neither clearEditorOverlay(true) nor (false) maps to our state here:
-	// the buffer hasn't been mutated yet but is about to be incrementally.
-	// Clear with false (no mutation), then reset scroll to the edit location
-	// so the user watches the animation from the right place.
 	m.clearEditorOverlay(false)
-	scrollTo := plan.Line
-	if plan.IsSurgical() {
-		scrollTo = plan.Narrowed.Line
-	}
-	target := scrollTo - 3
-	if target < 0 {
-		target = 0
-	}
-	m.Editor.SetScrollOffset(target)
-	m.Editor.ClampScroll()
 
-	// Instant-apply: skip animation, apply the full edit atomically,
-	// and auto-continue so the agent proceeds without Ctrl+N.
-	// LevelTrusted behaves identically to InstantApply.
-	if m.Editor.InstantApply || m.dial.AutoApproveEdits() {
-		ok, reason := m.Editor.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
-		if !ok {
-			slog.Warn("instant apply failed", "reason", reason)
-			m.AgentPane.AppendText("\n[instant apply failed: " + reason + "]\n")
-			m.Session.AbortApproval()
-			return nil
-		}
-		m.AgentPane.AppendMeta("[applied]\n")
-		m.Session.ApproveAndContinue()
-		m.AgentPane.SetStatus(event.StatusThinking)
-		m.refreshProjectPane()
+	ok, reason := m.Editor.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
+	if !ok {
+		slog.Warn("apply failed", "reason", reason)
+		m.AgentPane.AppendText("\n[apply failed: " + reason + "]\n")
+		m.Session.AbortApproval()
 		return nil
 	}
-
-	// Engine handles undo group, deletion, position tracking, and per-tick
-	// advancement. TUI only owns the tick schedule and visual state.
-	cpt := charsPerTick(m.Editor.TypingWPM)
-	devStartLine, devStartCol := m.Editor.CursorPosition()
-
-	// Surgical path: narrow the edit to only the changed lines.
-	// Unchanged prefix and suffix lines stay in the buffer — they never
-	// disappear, making the animation look like a real pair programmer.
-	var edit editor.AnimatedEdit
-	if plan.IsSurgical() {
-		ne := plan.Narrowed
-		searchRunes := utf8.RuneCountInString(ne.Search)
-		edit = m.Editor.BeginIncrementalEdit(ne.Line, ne.Col, searchRunes, cpt, ne.Replace, ne.LineOrigins)
-		slog.Debug("surgical animation",
-			"prefix", ne.PrefixLines, "suffix", ne.SuffixLines,
-			"narrowSearch", len(ne.Search), "narrowReplace", len(ne.Replace))
-	} else {
-		searchRunes := utf8.RuneCountInString(plan.Search)
-		edit = m.Editor.BeginIncrementalEdit(plan.Line, plan.Col, searchRunes, cpt, plan.Replace, plan.LineOrigins)
-	}
-
-	m.Editor.Anim = &animationContext{
-		state:        animTyping,
-		edit:         edit,
-		devStartLine: devStartLine,
-		devStartCol:  devStartCol,
-	}
-	m.AgentPane.SetStatus(event.StatusTyping)
-
-	if edit.Remaining() == 0 {
-		return m.finishAnimation()
-	}
-
-	return scheduleNextTick()
-}
-
-// handleAnimTick advances the animation by one frame. The engine's
-// IncrementalEdit.Advance handles char insertion and pacing.
-func (m *AppModel) handleAnimTick() tea.Cmd {
-	anim := m.Editor.Anim
-	if anim == nil || anim.state != animTyping {
-		return nil
-	}
-
-	// Collision check: dev cursor is sovereign.
-	if m.animCollision() {
-		return m.yieldAnimation()
-	}
-
-	// Engine advances the edit by charsPerTick characters.
-	result := anim.edit.Advance()
-
-	// Scroll down to follow the agent cursor as it advances. Only scrolls
-	// downward — if the user scrolled past the agent, we don't pull them back.
-	line, _ := anim.edit.Position()
-	vis := m.Editor.VisibleLines()
-	if vis > 0 && line >= m.Editor.ScrollOffset()+vis {
-		m.Editor.SetScrollOffset(line - vis + 1)
-	}
-
-	if result.Done {
-		return m.finishAnimation()
-	}
-
-	return scheduleNextTick()
-}
-
-// animCollision returns true if the dev cursor is within the span the agent
-// is actively typing into. Only triggers after the dev has moved their cursor
-// at least once since animation started — a stationary cursor is passive.
-// The moved flag is sticky: once the dev moves, collision detection stays
-// active even if they return to the original position.
-func (m *AppModel) animCollision() bool {
-	anim := m.Editor.Anim
-	if anim == nil {
-		return false
-	}
-	// Detect first move — sticky once set.
-	curLine, curCol := m.Editor.CursorPosition()
-	if !anim.devMoved {
-		if curLine != anim.devStartLine || curCol != anim.devStartCol {
-			anim.devMoved = true
-		} else {
-			return false
-		}
-	}
-	startLine, startCol := anim.edit.StartPosition()
-	endLine, endCol := anim.edit.Position()
-	return editor.CursorInRegion(
-		curLine, curCol,
-		startLine, startCol,
-		endLine, endCol,
-	)
-}
-
-// yieldAnimation pauses the animation because the dev cursor entered the
-// agent's region. Finishes typing through the end of the current line
-// (clean boundary), then transitions to waiting.
-func (m *AppModel) yieldAnimation() tea.Cmd {
-	anim := m.Editor.Anim
-	if anim == nil {
-		return nil
-	}
-
-	// Finish the current line via the engine (clean boundary).
-	anim.edit.FinishLine()
-	anim.edit.Complete()
-	anim.state = animWaiting
-	anim.yielded = true
-	m.AgentPane.SetStatus(event.StatusEditing)
-	m.AgentPane.AppendText("\n[yielded — your line]\n")
-	m.Session.CompleteApproval()
-
-	line, col := anim.edit.Position()
-	remaining := anim.edit.Remaining()
-	slog.Debug("animation yielded", "line", line, "col", col, "remaining", remaining)
-	return nil
-}
-
-// finishAnimation closes the undo group and signals the agent.
-func (m *AppModel) finishAnimation() tea.Cmd {
-	anim := m.Editor.Anim
-	if anim == nil {
-		return nil
-	}
-
-	anim.edit.Complete()
+	m.AgentPane.AppendMeta("[applied]\n")
 	m.refreshProjectPane()
 
-	anim.state = animWaiting
-
-	line, col := anim.edit.Position()
-	slog.Debug("animation complete", "line", line, "col", col)
-
-	// At LevelCollaborate or higher, approve and continue atomically
-	// so the agent proceeds without requiring a manual Ctrl+N.
 	if m.dial.AutoContinue() {
-		m.Editor.Anim = nil
 		m.Session.ApproveAndContinue()
 		m.AgentPane.SetStatus(event.StatusThinking)
-		return nil
+	} else {
+		m.Session.CompleteApproval()
+		m.AgentPane.SetStatus(event.StatusEditing)
 	}
-
-	m.Session.CompleteApproval()
-	m.AgentPane.SetStatus(event.StatusEditing)
 	return nil
-}
-
-// cancelAnimation aborts a running animation, closing the undo group
-// and signaling the agent to reject (so it can try a different approach).
-// The partial edit remains in the buffer (undoable via Ctrl+Z).
-func (m *AppModel) cancelAnimation() {
-	anim := m.Editor.Anim
-	if anim == nil {
-		return
-	}
-	// Signal rejection so the agent isn't left blocked on approveCh.
-	// PrepareApproval already cleared PendingEdit, so RejectEdit won't
-	// work here — use AbortApproval which sends the reject directly.
-	if anim.state == animTyping {
-		anim.edit.Abort()
-		m.Session.AbortApproval()
-		m.AgentPane.SetStatus(event.StatusIdle)
-	}
-	m.Editor.Anim = nil
 }

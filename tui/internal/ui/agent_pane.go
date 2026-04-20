@@ -1602,8 +1602,6 @@ func (m *AgentPaneModel) Render() string {
 		case event.StatusAwaitingInput:
 			statusMsg = "Awaiting your answer | Enter send | Esc cancel"
 			style = agentAwaitStyle
-		case event.StatusTyping:
-			statusMsg = "Agent typing... | Esc cancel"
 		case event.StatusLinting:
 			statusMsg = "Running style lint..."
 		}

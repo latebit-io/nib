@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -507,16 +506,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		wireAgentHandlers()
 	}
 
-	// Agent typing speed (words per minute)
-	if wpmStr := os.Getenv("JUNTO_TYPING_WPM"); wpmStr != "" {
-		if wpm, err := strconv.Atoi(wpmStr); err == nil && wpm > 0 {
-			app.Editor.TypingWPM = wpm
-		}
-	}
-	// Instant-apply mode: skip typing animation, apply edits atomically.
-	if os.Getenv("JUNTO_INSTANT_APPLY") == "1" {
-		app.Editor.InstantApply = true
-	}
 	p := tea.NewProgram(&app,
 		tea.WithoutSignalHandler(), // let Ctrl+C reach us as a key event
 	)

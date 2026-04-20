@@ -1490,10 +1490,9 @@ func (s *Session) SwitchTo(path string) error {
 
 	s.mu.Lock()
 
-	// Block switching while an edit is pending approval or mid-animation.
+	// Block switching while an edit is pending approval.
 	// PendingEdit covers the review phase; stagedEditFile covers the
-	// animation phase (PrepareApproval clears PendingEdit but sets
-	// stagedEditFile until CompleteApproval/AbortApproval).
+	// post-PrepareApproval window before CompleteApproval/AbortApproval.
 	if s.pendingEdit != nil || s.stagedEditFile != "" {
 		s.mu.Unlock()
 		return ErrEditPending
@@ -1687,55 +1686,39 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	return ok, reason
 }
 
-// --- Animated Approval Flow ---
+// --- Two-step Approval Flow ---
 //
-// For frontends that animate edits (character-by-character typing), the
-// approval is split into two steps:
+// Approval is split so the frontend can apply the edit and signal the agent
+// as separate steps:
 //
-//   1. PrepareApproval — validates and returns an AnimationPlan. Clears pending
+//   1. PrepareApproval — validates and returns an ApprovalPlan. Clears pending
 //      edit state but does NOT mutate the buffer or signal the agent.
-//   2. CompleteApproval — signals the agent that the edit was applied.
-//
-// Between these two calls, the frontend owns the buffer mutations (delete old
-// text, insert replacement char-by-char) and can animate at its own pace.
+//   2. CompleteApproval (or ApproveAndContinue) — signals the agent.
 
-// AnimationPlan describes the edit the frontend needs to animate.
-type AnimationPlan struct {
+// ApprovalPlan describes the validated edit the frontend should apply.
+type ApprovalPlan struct {
 	// Line is the buffer line where the edit starts (0-indexed).
 	Line int
 	// Col is the buffer column where the edit starts (0-indexed, rune).
 	Col int
 	// Search is the text to delete from the buffer.
 	Search string
-	// Replace is the text to type into the buffer.
+	// Replace is the text to insert into the buffer.
 	Replace string
 	// LineOrigins holds the provenance for each line of the replacement.
 	// Index 0 corresponds to the buffer line at Line, index 1 to Line+1, etc.
 	// A nil entry means "don't change this line's origin" (the line was
 	// unchanged from the search text — the agent just re-included it as context).
-	// Use the editor.LineOrigin alias; the buffer type is equivalent and
-	// preserved here for backward compatibility with engine consumers.
 	LineOrigins []*editor.LineOrigin
-	// Narrowed contains the change region with unchanged prefix/suffix lines
-	// excluded. When IsSurgical() is true, the frontend should use these
-	// narrowed values instead of the full Search/Replace for animation —
-	// unchanged lines stay in place and are never deleted from the buffer.
-	Narrowed *editor.NarrowedEdit
 }
 
-// IsSurgical returns true if the edit has unchanged prefix or suffix lines
-// that can be preserved during animation.
-func (p *AnimationPlan) IsSurgical() bool {
-	return p.Narrowed != nil && (p.Narrowed.PrefixLines > 0 || p.Narrowed.SuffixLines > 0)
-}
-
-// PrepareApproval validates the reviewed edit and returns an AnimationPlan.
+// PrepareApproval validates the reviewed edit and returns an ApprovalPlan.
 // The frontend provides the final search/replace (possibly modified in the overlay).
 // Clears pending edit state but does NOT mutate the buffer or signal the agent.
 //
 // Returns an error if there is no pending edit, the edit was not reviewed,
 // or the search text cannot be uniquely located in the buffer.
-func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error) {
+func (s *Session) PrepareApproval(search, replace string) (*ApprovalPlan, error) {
 	if s.pendingEdit == nil || !s.HasAgent() {
 		return nil, errors.New("no pending edit")
 	}
@@ -1763,26 +1746,14 @@ func (s *Session) PrepareApproval(search, replace string) (*AnimationPlan, error
 	}
 	lineOrigins := computeLineOrigins(search, s.pendingEdit.Replace, replace)
 
-	// Compute hunks and narrowed edit for surgical animation.
-	searchLines := strings.Split(search, "\n")
-	replaceLines := strings.Split(replace, "\n")
-	hunks := editor.ComputeHunks(searchLines, replaceLines)
-
-	var narrowed *editor.NarrowedEdit
-	if editor.IsSurgical(hunks) {
-		ne := editor.NarrowEdit(loc.Line, loc.Col, search, replace, hunks, lineOrigins)
-		narrowed = &ne
-	}
-
 	s.pendingEdit = nil
 	s.editReviewed = false
-	return &AnimationPlan{
+	return &ApprovalPlan{
 		Line:        loc.Line,
 		Col:         loc.Col,
 		Search:      search,
 		Replace:     replace,
 		LineOrigins: lineOrigins,
-		Narrowed:    narrowed,
 	}, nil
 }
 
@@ -1814,9 +1785,9 @@ func computeLineOrigins(search, originalReplace, finalReplace string) []*buffer.
 	return origins
 }
 
-// CompleteApproval signals the agent that the animated edit has been applied.
-// Call this after the animation finishes (or after a yield). Promotes the
-// staged edit path to lastEditedFile so Continue sends the right content.
+// CompleteApproval signals the agent that the prepared edit has been applied.
+// Call this after the frontend has applied the edit. Promotes the staged
+// edit path to lastEditedFile so Continue sends the right content.
 //
 // Sets awaitingContinue eagerly — the agent will shortly emit
 // StatusEditing on the best-effort event path, but that event can be dropped
@@ -1839,7 +1810,7 @@ func (s *Session) CompleteApproval() {
 }
 
 // AbortApproval rejects a prepared approval that was never completed.
-// Use this when the user cancels an in-progress animation. The agent
+// Use this when the apply step fails after PrepareApproval. The agent
 // receives a rejection and can try a different approach — unlike
 // CancelAgent which kills the entire run.
 func (s *Session) AbortApproval() {

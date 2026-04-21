@@ -1,20 +1,17 @@
 package wire
 
 import (
-	"errors"
 	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
 
 	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/engine/lint"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/styleconfig"
 )
 
-// StyleResult holds the resolved style configuration and an agent-ready
-// CodingStyleData for prompt injection.
+// StyleResult holds the resolved style configuration and the effective
+// linters to run during post-task review.
 type StyleResult struct {
 	// Config is the merged style configuration (all available styles).
 	// Always non-nil — builtins are loaded even when no config files exist.
@@ -23,9 +20,15 @@ type StyleResult struct {
 	Resolved *styleconfig.Resolved
 	// AgentStyle is the prompt-ready data for the agent. Nil when no style is active.
 	AgentStyle *agent.CodingStyleData
-	// DefaultLintCmd holds auto-detected lint commands for the project.
-	// Used as fallback when a style has no explicit lint_cmd configured.
-	DefaultLintCmd []string
+	// Linters is the effective set of linters for the active style. It is
+	// either the style's configured lint_cmd wrapped as raw adapters, or
+	// DefaultLinters when the style has no explicit lint_cmd. Nil when no
+	// style is active or no linter is available.
+	Linters []lint.Linter
+	// DefaultLinters is the auto-detected linter set for the project language.
+	// Used as fallback when a style has no explicit lint_cmd (e.g. during
+	// runtime style cycling).
+	DefaultLinters []lint.Linter
 }
 
 // NewStyle resolves the coding style configuration and converts it to
@@ -33,28 +36,34 @@ type StyleResult struct {
 func NewStyle(projectRoot string) StyleResult {
 	cfg, resolved := styleconfig.Resolve(projectRoot)
 
-	// Auto-detect lint commands for the project language.
-	// Stored on the result so callers can use it as fallback during cycling.
-	defaultLint := detectLintCommands(projectRoot)
+	// Auto-detect project-appropriate linters. Stored on the result so
+	// callers can reuse them during runtime style cycling.
+	defaults := lint.Detect(projectRoot)
 
 	if resolved == nil {
 		slog.Debug("wire: no active coding style")
-		return StyleResult{Config: cfg, DefaultLintCmd: defaultLint}
+		return StyleResult{Config: cfg, DefaultLinters: defaults}
 	}
 
 	slog.Info("wire: coding style active", "style", resolved.Name)
-
-	// Use auto-detected lint commands when none are explicitly configured.
-	if len(resolved.LintCmd) == 0 {
-		resolved.LintCmd = defaultLint
-	}
 
 	return StyleResult{
 		Config:         cfg,
 		Resolved:       resolved,
 		AgentStyle:     agent.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules)),
-		DefaultLintCmd: defaultLint,
+		Linters:        LintersForStyle(resolved.LintCmd, defaults),
+		DefaultLinters: defaults,
 	}
+}
+
+// LintersForStyle returns the effective linters for a style: if lint_cmd is
+// set, each command is wrapped in a raw adapter; otherwise defaults are
+// returned. Used both at startup and during runtime style cycling.
+func LintersForStyle(lintCmd []string, defaults []lint.Linter) []lint.Linter {
+	if len(lintCmd) > 0 {
+		return lint.FromShellCommands(lintCmd)
+	}
+	return defaults
 }
 
 // NewStyleEvaluator creates a StyleEvaluator from the resolved style config
@@ -99,78 +108,6 @@ func ForceStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provid
 
 	slog.Info("wire: style evaluator enabled", "style", resolved.Name, "rules", len(data.Rules))
 	return agent.NewStyleEvaluator(provider, data.Rules, 0) // 0 = default timeout
-}
-
-// detectLintCommands auto-detects appropriate lint commands based on the
-// project language. Returns nil when no linter is detected.
-func detectLintCommands(projectRoot string) []string {
-	// Go project: check for go.mod and a linter on PATH.
-	// Use {dir} (package directory) instead of {file} — Go requires package-level
-	// compilation, so linting a single file misses type definitions from sibling
-	// files and produces false positives.
-	if _, err := os.Stat(filepath.Join(projectRoot, "go.mod")); err == nil {
-		if _, err := exec.LookPath("golangci-lint"); err == nil {
-			slog.Info("wire: auto-detected golangci-lint for Go project")
-			return []string{"golangci-lint run ./{dir}/..."}
-		}
-		// Fallback: go vet is always available in a Go project.
-		if _, err := exec.LookPath("go"); err == nil {
-			slog.Info("wire: auto-detected go vet for Go project (golangci-lint not found)")
-			return []string{"go vet ./{dir}/..."}
-		}
-	}
-
-	// Lua project: detected by .luacheckrc, main.lua (LÖVE convention), or any
-	// .lua file at the root. Luacheck is the de facto standard linter; it
-	// operates per-file cleanly, so {file} (not {dir}) is the right expansion.
-	if isLuaProject(projectRoot) {
-		if _, err := exec.LookPath("luacheck"); err == nil {
-			slog.Info("wire: auto-detected luacheck for Lua project")
-			return []string{"luacheck {file}"}
-		}
-		slog.Debug("wire: Lua project detected but luacheck not on PATH — no lint configured")
-	}
-
-	return nil
-}
-
-// statMarker checks whether root/name exists. Returns:
-//   - (true, true)  — marker present
-//   - (false, true) — marker not present (normal "missing" case)
-//   - (false, false) — stat failed for a reason other than not-exist
-//     (permission, I/O, etc.); the caller should fail closed rather than
-//     pretend the file simply wasn't there. Logged at warn level.
-func statMarker(root, name string) (found, ok bool) {
-	_, err := os.Stat(filepath.Join(root, name))
-	if err == nil {
-		return true, true
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		return false, true
-	}
-	slog.Warn("wire: stat probe failed", "root", root, "name", name, "err", err)
-	return false, false
-}
-
-// isLuaProject reports whether projectRoot looks like a Lua project. The
-// check is shallow (root-level only) — a deep walk would be wasted work
-// for a signal the developer can override via explicit style config.
-func isLuaProject(projectRoot string) bool {
-	if found, ok := statMarker(projectRoot, ".luacheckrc"); found || !ok {
-		return found
-	}
-	if found, ok := statMarker(projectRoot, "main.lua"); found || !ok {
-		return found
-	}
-	matches, err := filepath.Glob(filepath.Join(projectRoot, "*.lua"))
-	if err != nil {
-		// filepath.Glob returns ErrBadPattern when the combined pattern is
-		// malformed — possible if projectRoot contains unclosed brackets.
-		// Log and fail closed so we don't silently misclassify the project.
-		slog.Warn("wire: Lua project glob failed", "root", projectRoot, "err", err)
-		return false
-	}
-	return len(matches) > 0
 }
 
 // ConvertRules translates styleconfig rules into agent-ready StyleRule values.

@@ -196,7 +196,7 @@ func run() error {
 		CodingStyle:       styleResult.AgentStyle,
 	}
 	if styleResult.Resolved != nil {
-		opts.StyleLintCmd = styleResult.Resolved.LintCmd
+		opts.Linters = styleResult.Linters
 		opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, provider, llmCfg)
 	}
 	if lspMgr != nil {

@@ -1,4 +1,4 @@
-package wire
+package lint
 
 import (
 	"os"
@@ -15,7 +15,7 @@ func TestIsLuaProject(t *testing.T) {
 		{"empty directory", nil, false},
 		{"only go files", []string{"main.go", "go.mod"}, false},
 		{".luacheckrc marker", []string{".luacheckrc"}, true},
-		{"LÖVE main.lua", []string{"main.lua"}, true},
+		{"LOVE main.lua", []string{"main.lua"}, true},
 		{"arbitrary .lua at root", []string{"utils.lua"}, true},
 		{"mixed content", []string{"README.md", "script.lua"}, true},
 		{".lua only in subdir is not detected",
@@ -41,10 +41,7 @@ func TestIsLuaProject(t *testing.T) {
 	}
 }
 
-func TestDetectLintCommands_LuaWithoutBinary(t *testing.T) {
-	// Force LookPath to miss by clearing PATH for this test. We can't inject
-	// a stub cleanly, so we assert the "project detected, no binary" branch
-	// returns nil by setting PATH to an empty directory.
+func TestDetect_LuaWithoutBinary(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "main.lua"), []byte(""), 0o644); err != nil {
 		t.Fatal(err)
@@ -52,17 +49,57 @@ func TestDetectLintCommands_LuaWithoutBinary(t *testing.T) {
 	emptyPath := t.TempDir()
 	t.Setenv("PATH", emptyPath)
 
-	if got := detectLintCommands(dir); got != nil {
+	if got := Detect(dir); got != nil {
 		t.Errorf("expected nil when luacheck missing, got %v", got)
 	}
 }
 
-func TestDetectLintCommands_NonLuaNonGo(t *testing.T) {
+func TestDetect_NonLuaNonGo(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := detectLintCommands(dir); got != nil {
+	emptyPath := t.TempDir()
+	t.Setenv("PATH", emptyPath)
+
+	if got := Detect(dir); got != nil {
 		t.Errorf("expected nil for non-Lua non-Go project, got %v", got)
+	}
+}
+
+func TestFromShellCommands(t *testing.T) {
+	if got := FromShellCommands(nil); got != nil {
+		t.Errorf("nil input should return nil, got %+v", got)
+	}
+	if got := FromShellCommands([]string{}); got != nil {
+		t.Errorf("empty slice should return nil, got %+v", got)
+	}
+
+	cmds := []string{"echo a", "echo b"}
+	got := FromShellCommands(cmds)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 linters, got %d", len(got))
+	}
+	for i, l := range got {
+		raw, ok := l.(*RawLinter)
+		if !ok {
+			t.Fatalf("linter %d is not *RawLinter: %T", i, l)
+		}
+		if raw.Command != cmds[i] {
+			t.Errorf("linter %d command: got %q want %q", i, raw.Command, cmds[i])
+		}
+	}
+}
+
+func TestGoModExists(t *testing.T) {
+	tmp := t.TempDir()
+	if goModExists(tmp) {
+		t.Error("empty dir should not report go.mod present")
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !goModExists(tmp) {
+		t.Error("go.mod present but goModExists returned false")
 	}
 }

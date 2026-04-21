@@ -22,6 +22,20 @@ import (
 // load package." The adapter instead parses lines matching
 // `<path>:<line>:<col>: <message>` as findings; a non-zero exit with
 // zero parseable findings is treated as an infrastructure error.
+//
+// Why text parsing instead of `go vet -json`:
+//   - `-json` output is not a clean JSON stream — it interleaves per-analyzer
+//     JSON objects with plain-text `# pkg/path` headers and plain-text
+//     compile errors. A JSON parser would need a text fallback anyway, so
+//     the adapter would maintain two formats instead of one.
+//   - This adapter is a fallback path (used only when golangci-lint is
+//     absent). Investing in a JSON rewrite optimizes secondary code.
+//   - The text format is stable across 10+ years of go vet. The one known
+//     degradation — lines exceeding bufio.Scanner's 1 MiB token cap — is
+//     explicitly logged via slog in parseGoVetOutput with parsed_findings
+//     count, so truncation is observable rather than silent.
+//
+// Revisit only when a concrete bug traceable to the text parser surfaces.
 type GoVetLinter struct {
 	// Binary is the path to the go executable. Empty string defaults to "go".
 	Binary string
@@ -132,8 +146,21 @@ func parseGoVetOutput(baseDir, output string) []Finding {
 		if m == nil {
 			continue
 		}
-		lineNum, _ := strconv.Atoi(m[2])
-		colNum, _ := strconv.Atoi(m[3])
+		// vetLineRE's \d+ guarantees the matched substrings are digit-only,
+		// so Atoi can only fail on overflow (>math.MaxInt, impossible for
+		// any real source file). The check is defensive: a future regex
+		// loosening, or malformed/truncated go vet output, must not surface
+		// a zero-position finding that sends the agent to line 0 of a file.
+		lineNum, err := strconv.Atoi(m[2])
+		if err != nil {
+			slog.Warn("lint: go vet line number out of range", "baseDir", baseDir, "raw", line, "err", err)
+			continue
+		}
+		colNum, err := strconv.Atoi(m[3])
+		if err != nil {
+			slog.Warn("lint: go vet column number out of range", "baseDir", baseDir, "raw", line, "err", err)
+			continue
+		}
 		findings = append(findings, Finding{
 			Path:    normalizePath(baseDir, m[1]),
 			Line:    lineNum,

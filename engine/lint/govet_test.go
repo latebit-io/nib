@@ -92,3 +92,19 @@ func TestParseGoVetOutput_longLines(t *testing.T) {
 		t.Errorf("long message truncated: got %d bytes", len(findings[0].Message))
 	}
 }
+
+func TestParseGoVetOutput_tokenLimitExceeded(t *testing.T) {
+	// A single "line" that exceeds the 1 MiB buffer cap causes the scanner
+	// to stop mid-stream. The parser must not panic, must return whatever
+	// findings it did parse before the overflow, and (per the code contract)
+	// must log the truncation via slog so operators can diagnose.
+	good := "engine/agent/agent.go:1:1: real issue\n"
+	overflow := strings.Repeat("x", 2*1024*1024) + "\n"
+	findings := parseGoVetOutput("", good+overflow)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding parsed before overflow, got %d", len(findings))
+	}
+	if findings[0].Line != 1 {
+		t.Errorf("pre-overflow finding wrong: %+v", findings[0])
+	}
+}

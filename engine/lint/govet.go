@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -139,6 +140,13 @@ func parseGoVetOutput(baseDir, output string) []Finding {
 			Col:     colNum,
 			Message: strings.TrimSpace(m[4]),
 		})
+	}
+	// Scan() can fail mid-stream (e.g. a single "line" exceeding the 1 MiB
+	// token buffer). Log rather than fabricate a synthetic finding — a
+	// truncated parse means trailing diagnostics were silently dropped and
+	// operators need to know to widen the buffer or fix the linter output.
+	if err := scanner.Err(); err != nil {
+		slog.Warn("lint: go vet output scanner truncated", "baseDir", baseDir, "parsed_findings", len(findings), "err", err)
 	}
 	return findings
 }

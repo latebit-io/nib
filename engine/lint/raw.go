@@ -44,6 +44,13 @@ func (*RawLinter) Name() string { return "style lint" }
 
 // Run implements Linter. Substitutes placeholders and invokes the command
 // once per file (when {file} is present) or once per dir (otherwise).
+//
+// Defense-in-depth: the adapter runs via `sh -c`, so any substituted value
+// that reaches the command string is shell-interpreted. Both {file} and
+// {dir} are validated with safeForShell before substitution. Upstream edit
+// approval SHOULD reject exotic paths, but the adapter enforces the
+// invariant locally rather than trusting the caller — a slipped character
+// here is a command-injection primitive.
 func (r *RawLinter) Run(ctx context.Context, projectRoot, dir string, files []string) Result {
 	if r.Command == "" {
 		return Result{Error: errors.New("raw linter: empty command")}
@@ -52,6 +59,14 @@ func (r *RawLinter) Run(ctx context.Context, projectRoot, dir string, files []st
 	timeout := r.Timeout
 	if timeout == 0 {
 		timeout = defaultLintTimeout
+	}
+
+	// filepath.Dir yields "." for root-level files — accepted. Empty dir is
+	// unusual but not exploitable; skip the check so it doesn't mask into a
+	// "contains metacharacters" error.
+	if dir != "" && !safeForShell(dir) {
+		slog.Warn("raw linter: dir contains shell metacharacters", "dir", dir)
+		return Result{Error: fmt.Errorf("raw linter: dir contains shell metacharacters: %q", dir)}
 	}
 
 	hasFilePlaceholder := strings.Contains(r.Command, "{file}")

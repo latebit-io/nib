@@ -99,6 +99,40 @@ func TestRawLinter_perFileDispatch(t *testing.T) {
 	}
 }
 
+func TestRawLinter_unsafeDirRejected(t *testing.T) {
+	// dir flows directly into `sh -c` via {dir} substitution, so shell
+	// metacharacters must be rejected at the adapter boundary. A path like
+	// "foo$(whoami)" in an edit proposal would yield dir = "foo$(whoami)"
+	// after filepath.Dir.
+	r := &RawLinter{Command: `echo "{dir}"`}
+	cases := []string{
+		"foo$(whoami)",
+		"foo; rm -rf /",
+		"foo`id`",
+		"foo|bar",
+	}
+	for _, bad := range cases {
+		t.Run(bad, func(t *testing.T) {
+			res := r.Run(context.Background(), "", bad, nil)
+			if res.Error == nil {
+				t.Errorf("expected rejection for dir=%q, got clean result", bad)
+			}
+			if len(res.Findings) != 0 {
+				t.Errorf("expected no findings for unsafe dir, got %v", res.Findings)
+			}
+		})
+	}
+}
+
+func TestRawLinter_dirDotAccepted(t *testing.T) {
+	// filepath.Dir("root-level.go") returns ".". Must not be rejected.
+	r := &RawLinter{Command: "true"}
+	res := r.Run(context.Background(), "", ".", nil)
+	if res.Error != nil {
+		t.Errorf("'.' should be accepted as dir, got error: %v", res.Error)
+	}
+}
+
 func TestRawLinter_unsafePathSkipped(t *testing.T) {
 	r := &RawLinter{Command: `echo "{file}:1:1: issue"`}
 	res := r.Run(context.Background(), "", "",

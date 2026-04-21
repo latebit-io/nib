@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/junto/engine/lint"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/memory"
 )
@@ -155,15 +157,10 @@ type Agent struct {
 	// Nil when no style is configured.
 	codingStyle *CodingStyleData
 
-	// styleLintCmd lists shell commands for post-edit style validation.
-	// The placeholder {file} is replaced with the edited file's relative path,
-	// and {dir} with the file's directory (for package-level linting).
-	// Nil when no style lint is configured.
-	styleLintCmd []string
-
-	// lintTimeout is the per-command timeout for style lint. Zero uses defaultLintTimeout.
-	// Settable for testing.
-	lintTimeout time.Duration
+	// linters is the set of lint adapters to run at task completion.
+	// Nil when no linter is configured. Each adapter returns a structured
+	// lint.Result distinguishing infrastructure failures from findings.
+	linters []lint.Linter
 
 	// pendingLint holds lint violations from the last edit. When non-empty,
 	// processLLMTurn injects a user message before the next LLM call,
@@ -182,8 +179,12 @@ type Agent struct {
 	// evaluator is the optional style evaluator that reviews edits after
 	// each turn completes. Nil when the feature is disabled.
 	evaluator *StyleEvaluator
-	// turnEdits collects edits made during the current turn for batch review.
-	turnEdits []turnEdit
+	// taskEdits collects edits made during the current task for end-of-task
+	// review. Accumulates across many LLM turns; cleared on RunWithMode and
+	// on task completion. Named for the task boundary (not turn) — lint and
+	// style evaluator fire when the agent marks a task complete, not on
+	// every turn.
+	taskEdits []taskEdit
 
 	// sessionUsage accumulates token consumption across the entire agent run.
 	sessionUsage SessionUsage
@@ -206,8 +207,9 @@ type SessionUsage struct {
 	Turns int
 }
 
-// turnEdit records a single edit made during an agent turn, for batch review.
-type turnEdit struct {
+// taskEdit records a single edit made during an agent task, for end-of-task
+// batch review (lint, style evaluator).
+type taskEdit struct {
 	Path    string
 	Search  string
 	Replace string
@@ -239,10 +241,12 @@ type NewOptions struct {
 	// CodingStyle holds the resolved coding style. When non-nil, style rules
 	// are injected into the system prompt as architectural constraints.
 	CodingStyle *CodingStyleData
-	// StyleLintCmd lists shell commands to run after each approved edit for
-	// style validation. The placeholder {file} is replaced with the edited
-	// file's relative path. Nil when no lint is configured.
-	StyleLintCmd []string
+	// Linters is the set of lint adapters to run at task completion. Each
+	// adapter returns a structured lint.Result (findings or error). Nil
+	// disables post-task lint. Use lint.Detect or lint.FromShellCommands to
+	// populate. The previous StyleLintCmd []string has been replaced — a
+	// shell-command adapter is available via lint.FromShellCommands.
+	Linters []lint.Linter
 	// StyleEvaluator is the optional LLM-based style reviewer. When non-nil,
 	// proposed edits are reviewed against style rules before being shown to
 	// the developer. Nil when the feature is disabled.
@@ -273,7 +277,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var interaction InteractionMode
 	var distributedMemory []string
 	var codingStyle *CodingStyleData
-	var styleLintCmd []string
+	var linters []lint.Linter
 	var evaluator *StyleEvaluator
 	var terse bool
 	if opts != nil {
@@ -284,7 +288,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		interaction = opts.Interaction
 		distributedMemory = opts.DistributedMemory
 		codingStyle = opts.CodingStyle
-		styleLintCmd = slices.Clone(opts.StyleLintCmd)
+		linters = slices.Clone(opts.Linters)
 		evaluator = opts.StyleEvaluator
 		terse = opts.Terse
 	}
@@ -314,7 +318,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		memorySummary:     memorySummary,
 		distributedMemory: distributedMemory,
 		codingStyle:       codingStyle,
-		styleLintCmd:      styleLintCmd,
+		linters:           linters,
 		terse:             terse,
 		evaluator:         evaluator,
 		diagDelay:         500 * time.Millisecond,
@@ -449,7 +453,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.mode = mode
 	a.waiting = false
 	a.pendingLint = ""
-	a.turnEdits = nil
+	a.taskEdits = nil
 	a.savedMessages = nil
 	a.savedMode = 0
 	a.runID++
@@ -513,7 +517,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.cancel = cancel
 	a.waiting = false
 	a.pendingLint = ""
-	a.turnEdits = nil
+	a.taskEdits = nil
 	a.savedMessages = nil
 	a.savedMode = 0
 	a.runID++
@@ -579,15 +583,15 @@ func (a *Agent) SetProvider(p llm.Provider) {
 	a.provider = p
 }
 
-// SetStyle atomically replaces the active coding style and lint commands.
-// Pass nil style and nil lintCmd to disable style enforcement.
+// SetStyle atomically replaces the active coding style and post-task linters.
+// Pass nil style and nil linters to disable style enforcement.
 // Safe to call between turns.
-func (a *Agent) SetStyle(style *CodingStyleData, lintCmd []string) {
+func (a *Agent) SetStyle(style *CodingStyleData, linters []lint.Linter) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.codingStyle = style
-	a.styleLintCmd = slices.Clone(lintCmd)
-	if len(lintCmd) == 0 {
+	a.linters = slices.Clone(linters)
+	if len(linters) == 0 {
 		a.pendingLint = ""
 	}
 }
@@ -1464,56 +1468,45 @@ func (a *Agent) handleAwaitingInput(ctx context.Context, payload AwaitingInputPa
 // Called when update_task(action: "complete") fires. Returns the tool result
 // with any lint/evaluator feedback appended.
 //
+// Implements the three-state lint pipeline:
+//
+//  1. Infrastructure error — the linter itself failed (missing binary, bad
+//     config, timeout). Surface to the developer via status banner; do NOT
+//     inject as "violations found" into the LLM's next turn.
+//  2. Clean — ran successfully, zero findings on edited files. Banner
+//     reports sibling-file counts when present but never blocks.
+//  3. Findings on edited files — inject structured findings into pendingLint
+//     so the next turn fixes them. Craftsmanship policy: any finding on a
+//     file the agent touched is blocking, pre-existing or not.
+//
 // Emits a status banner even when no checks are configured, so the developer
 // can distinguish "task reviewed clean" from "nothing was set up to review."
 func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 	a.mu.Lock()
-	edits := a.turnEdits
-	lintCmds := slices.Clone(a.styleLintCmd)
+	edits := a.taskEdits
+	linters := slices.Clone(a.linters)
 	evalConfigured := a.evaluator != nil
 	a.mu.Unlock()
 
 	var review strings.Builder
 	review.WriteString(toolMsg)
 
-	// Collect unique files that were edited.
-	seen := make(map[string]bool)
-	var files []string
-	for _, e := range edits {
-		if !seen[e.Path] {
-			seen[e.Path] = true
-			files = append(files, e.Path)
-		}
-	}
+	// Collect unique edited files and unique package directories. A task
+	// that edits three files in one package lints one directory, not three.
+	editedFiles, editedDirs, filesByDir := groupEditsByDir(edits)
 
-	lintWillRun := len(files) > 0 && len(lintCmds) > 0
+	lintWillRun := len(editedFiles) > 0 && len(linters) > 0
 	evalWillRun := len(edits) > 0 && evalConfigured
 
 	// Surface "no review configured" when we have work but nothing to check it
 	// with. Silent return used to be indistinguishable from "clean"; now the
 	// developer sees why.
-	if len(files) > 0 && !lintWillRun && !evalWillRun {
+	if len(editedFiles) > 0 && !lintWillRun && !evalWillRun {
 		a.send(event.AgentToken{Text: "\n[Task complete — no lint or style evaluator configured]\n"})
 	}
 
-	// Run lint on each edited file.
 	if lintWillRun {
-		a.send(event.AgentStatus{Status: event.StatusLinting})
-		a.send(event.AgentToken{Text: "\n[Task complete — running style lint...]\n"})
-		var lintResults []string
-		for _, path := range files {
-			if lint := a.runStyleLint(ctx, path); lint != "" {
-				lintResults = append(lintResults, lint)
-			}
-		}
-		if len(lintResults) > 0 {
-			a.send(event.AgentToken{Text: "[Style lint: violations found — fix before next task]\n"})
-			a.mu.Lock()
-			a.pendingLint = strings.Join(lintResults, "\n\n")
-			a.mu.Unlock()
-		} else {
-			a.send(event.AgentToken{Text: "[Style lint: clean ✓]\n"})
-		}
+		a.runLinters(ctx, linters, editedFiles, editedDirs, filesByDir)
 	}
 
 	// Run evaluator on all edits.
@@ -1525,11 +1518,122 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 	return review.String() + a.intentReminder()
 }
 
+// groupEditsByDir returns the unique edited file paths, unique package
+// directories, and a dir→files map. Each is deterministic in insertion
+// order so downstream output is stable across runs.
+func groupEditsByDir(edits []taskEdit) (files, dirs []string, byDir map[string][]string) {
+	seenFile := make(map[string]bool)
+	seenDir := make(map[string]bool)
+	byDir = make(map[string][]string)
+	for _, e := range edits {
+		if !seenFile[e.Path] {
+			seenFile[e.Path] = true
+			files = append(files, e.Path)
+		}
+		dir := filepath.Dir(e.Path)
+		if !seenDir[dir] {
+			seenDir[dir] = true
+			dirs = append(dirs, dir)
+		}
+		byDir[dir] = append(byDir[dir], e.Path)
+	}
+	return files, dirs, byDir
+}
+
+// runLinters executes each configured linter once per edited directory and
+// emits the three-state banner + injects findings into pendingLint when
+// any finding lands on an edited file.
+func (a *Agent) runLinters(ctx context.Context, linters []lint.Linter, editedFiles, editedDirs []string, filesByDir map[string][]string) {
+	a.send(event.AgentStatus{Status: event.StatusLinting})
+	a.send(event.AgentToken{Text: "\n[Task complete — running style lint...]\n"})
+
+	editedSet := make(map[string]bool, len(editedFiles))
+	for _, f := range editedFiles {
+		editedSet[f] = true
+	}
+
+	var (
+		editedFindings []lint.Finding
+		siblingCount   int
+		infraErrors    []infraError
+		projectRoot    = a.workspace.ProjectRoot()
+	)
+
+	for _, dir := range editedDirs {
+		for _, l := range linters {
+			res := l.Run(ctx, projectRoot, dir, filesByDir[dir])
+			if res.Error != nil {
+				slog.Warn("lint: adapter failed", "linter", l.Name(), "dir", dir, "err", res.Error)
+				infraErrors = append(infraErrors, infraError{name: l.Name(), err: res.Error})
+				continue
+			}
+			for _, f := range res.Findings {
+				if editedSet[f.Path] {
+					editedFindings = append(editedFindings, f)
+				} else {
+					siblingCount++
+				}
+			}
+		}
+	}
+
+	for _, ie := range infraErrors {
+		a.send(event.AgentToken{Text: fmt.Sprintf("[Style lint: %s failed — %v — not blocking]\n", ie.name, ie.err)})
+	}
+
+	if len(editedFindings) > 0 {
+		a.send(event.AgentToken{Text: "[Style lint: violations found — fix before next task]\n"})
+		a.mu.Lock()
+		a.pendingLint = formatFindings(editedFindings)
+		a.mu.Unlock()
+		return
+	}
+
+	banner := "[Style lint: clean ✓]"
+	if siblingCount > 0 {
+		banner = fmt.Sprintf("[Style lint: clean ✓ (%d pre-existing in sibling files — not blocking)]", siblingCount)
+	}
+	a.send(event.AgentToken{Text: banner + "\n"})
+}
+
+// infraError pairs an adapter name with the infrastructure error it raised,
+// so the banner text can reference the linter even after aggregation.
+type infraError struct {
+	name string
+	err  error
+}
+
+// formatFindings renders structured lint.Findings as plain text for injection
+// into the LLM's next-turn pendingLint message. One finding per line; ANSI
+// free; deterministic order (caller-supplied).
+func formatFindings(findings []lint.Finding) string {
+	var b strings.Builder
+	for i, f := range findings {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		// path:line:col: [linter] message
+		b.WriteString(f.Path)
+		if f.Line > 0 {
+			fmt.Fprintf(&b, ":%d", f.Line)
+			if f.Col > 0 {
+				fmt.Fprintf(&b, ":%d", f.Col)
+			}
+		}
+		b.WriteString(": ")
+		if f.Linter != "" {
+			fmt.Fprintf(&b, "[%s] ", f.Linter)
+		}
+		b.WriteString(f.Message)
+	}
+	return b.String()
+}
+
 // recordEdit tracks an approved edit for end-of-turn review.
 func (a *Agent) recordEdit(proposal EditProposal) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.turnEdits = append(a.turnEdits, turnEdit{
+	a.taskEdits = append(a.taskEdits, taskEdit{
 		Path:    proposal.Path,
 		Search:  proposal.Edit.Search,
 		Replace: proposal.Edit.Replace,
@@ -1542,8 +1646,8 @@ func (a *Agent) recordEdit(proposal EditProposal) {
 func (a *Agent) evaluateTurn(ctx context.Context) string {
 	a.mu.Lock()
 	eval := a.evaluator
-	edits := a.turnEdits
-	a.turnEdits = nil
+	edits := a.taskEdits
+	a.taskEdits = nil
 	a.mu.Unlock()
 
 	if eval == nil || len(edits) == 0 {

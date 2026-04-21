@@ -181,7 +181,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			Terse:             true,
 		}
 		if styleResult.Resolved != nil {
-			opts.StyleLintCmd = styleResult.Resolved.LintCmd
+			opts.Linters = styleResult.Linters
 			opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, p, llmCfg)
 		}
 		if lspMgr != nil {
@@ -384,16 +384,13 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				currentStyleKey = styleNames[idx]
 				s := styleResult.Config.Styles[currentStyleKey]
 				data := agent.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
-				lintCmd := s.LintCmd
-				if len(lintCmd) == 0 {
-					lintCmd = styleResult.DefaultLintCmd
-				}
-				ag.SetStyle(data, lintCmd)
+				linters := wire.LintersForStyle(s.LintCmd, styleResult.DefaultLinters)
+				ag.SetStyle(data, linters)
 
 				currentResolved = &styleconfig.Resolved{
 					Name:           s.Name,
 					Rules:          s.Rules,
-					LintCmd:        lintCmd,
+					LintCmd:        s.LintCmd,
 					Evaluator:      s.Evaluator,
 					EvaluatorModel: s.EvaluatorModel,
 				}

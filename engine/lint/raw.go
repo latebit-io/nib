@@ -72,6 +72,10 @@ func (r *RawLinter) Run(ctx context.Context, projectRoot, dir string, files []st
 	hasFilePlaceholder := strings.Contains(r.Command, "{file}")
 
 	// Per-file dispatch: one invocation per edited file. Findings aggregate.
+	// Error reporting is first-wins for Result.Error — the agent-facing
+	// banner renders the error inline, so a joined multi-line error would
+	// produce garbled UI. Subsequent errors are logged via slog so they are
+	// not silently swallowed; operators can correlate via timestamps.
 	if hasFilePlaceholder {
 		var agg Result
 		for _, f := range files {
@@ -82,8 +86,12 @@ func (r *RawLinter) Run(ctx context.Context, projectRoot, dir string, files []st
 			cmdStr := strings.ReplaceAll(r.Command, "{file}", f)
 			cmdStr = strings.ReplaceAll(cmdStr, "{dir}", dir)
 			res := runRawCommand(ctx, projectRoot, cmdStr, timeout, f)
-			if res.Error != nil && agg.Error == nil {
-				agg.Error = res.Error
+			if res.Error != nil {
+				if agg.Error == nil {
+					agg.Error = res.Error
+				} else {
+					slog.Warn("raw linter: subsequent file failed (not surfaced)", "path", f, "err", res.Error, "first_err", agg.Error)
+				}
 			}
 			agg.Findings = append(agg.Findings, res.Findings...)
 		}
@@ -124,31 +132,38 @@ func runRawCommand(parent context.Context, projectRoot, cmdStr string, timeout t
 
 	runErr := cmd.Run()
 
-	if runCtx.Err() == context.DeadlineExceeded {
-		return Result{Error: fmt.Errorf("style lint: timed out after %s", timeout)}
+	// Timeout / parent cancellation win over everything. A killed process may
+	// have emitted partial diagnostic lines before SIGKILL; returning those as
+	// "findings" would present incomplete data as complete, the exact class
+	// of misleading signal this package exists to prevent.
+	if runCtx.Err() != nil {
+		if err := classifyRunError("style lint", parent, runCtx, runErr, timeout, &stdout, &stderr); err != nil {
+			return Result{Error: err}
+		}
 	}
 
 	// Parse both streams — user tools have unpredictable stream conventions.
+	// Parseable findings take priority over exit-code classification so raw
+	// linters (which often exit non-zero when findings exist) are not
+	// mis-reported as infrastructure failures.
 	findings := parseGoVetOutput(projectRoot, stdout.String())
 	findings = append(findings, parseGoVetOutput(projectRoot, stderr.String())...)
-
 	if len(findings) > 0 {
 		return Result{Findings: findings}
 	}
 
-	// No parseable findings. Use exit code to disambiguate.
-	combined := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
-	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
-			if combined == "" {
-				return Result{Error: fmt.Errorf("style lint: exit %d with no output", exitErr.ExitCode())}
-			}
-			// Non-parseable output — emit as a single unstructured finding so
-			// the agent still sees it, rather than silently dropping.
+	// No parseable findings and context was not cancelled. Classify any
+	// remaining run error (non-zero exit, exec error).
+	if err := classifyRunError("style lint", parent, runCtx, runErr, timeout, &stdout, &stderr); err != nil {
+		// Unstructured-output fallback: if the exit was non-zero but we DO
+		// have raw output, surface it as a finding rather than discarding.
+		// Parsing already failed above, so we know the text is non-diagnostic
+		// form (a summary, a traceback, etc.).
+		combined := strings.TrimSpace(stdout.String() + "\n" + stderr.String())
+		if combined != "" {
 			return Result{Findings: []Finding{{Path: fallbackPath, Message: firstLine(combined)}}}
 		}
-		return Result{Error: fmt.Errorf("style lint: %w", runErr)}
+		return Result{Error: err}
 	}
 
 	// Zero exit and no parseable findings — clean.

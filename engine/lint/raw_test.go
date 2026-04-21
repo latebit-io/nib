@@ -62,6 +62,65 @@ func TestRawLinter_nonzeroExitNoOutput(t *testing.T) {
 	}
 }
 
+func TestRawLinter_cancelOverridesPartialFindings(t *testing.T) {
+	// Before the fix: a cancelled-mid-output run that had already written
+	// parseable diagnostic lines would return those as "findings," masking
+	// the cancellation. The craftsmanship rule is that incomplete data must
+	// not be presented as complete — cancellation wins over partial findings.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r := &RawLinter{
+		// Command emits a parseable finding immediately, then hangs. After
+		// the parent cancel + SIGKILL, the partial stdout would contain a
+		// valid diagnostic line.
+		Command: `echo "a.go:1:1: issue"; sleep 30`,
+		Timeout: 30 * time.Second,
+	}
+	res := r.Run(ctx, "", "", nil)
+	if res.Error == nil {
+		t.Fatal("cancellation must surface as error, not findings")
+	}
+	if !strings.Contains(res.Error.Error(), "cancel") {
+		t.Errorf("error should mention cancellation, got: %v", res.Error)
+	}
+	if len(res.Findings) != 0 {
+		t.Errorf("cancelled run must not expose partial findings, got: %+v", res.Findings)
+	}
+}
+
+func TestRawLinter_parentCancelled(t *testing.T) {
+	// Pre-cancelled parent: the adapter must return promptly with a clear
+	// cancellation error, not the generic "exit -1 with no output" signal-kill
+	// message. Also verifies no partial findings leak from a killed process.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r := &RawLinter{
+		Command: "sleep 30",
+		Timeout: 30 * time.Second, // far longer than the test deadline
+	}
+
+	start := time.Now()
+	res := r.Run(ctx, "", "", nil)
+	elapsed := time.Since(start)
+
+	// exec.Cmd's WaitDelay is 1s, so a killed process can take up to ~1s
+	// to reap. Allow some slack for CI.
+	if elapsed > 3*time.Second {
+		t.Errorf("cancellation should return promptly, took %s", elapsed)
+	}
+	if res.Error == nil {
+		t.Fatal("cancellation should produce an error result")
+	}
+	if !strings.Contains(res.Error.Error(), "cancel") {
+		t.Errorf("error should mention cancellation, got: %v", res.Error)
+	}
+	if len(res.Findings) != 0 {
+		t.Errorf("cancellation must not produce findings, got: %+v", res.Findings)
+	}
+}
+
 func TestRawLinter_timeout(t *testing.T) {
 	r := &RawLinter{
 		Command: "sleep 5",
@@ -163,6 +222,11 @@ func TestSafeForShell(t *testing.T) {
 		"a&b.go",
 		"a;b.go",
 		"file\nname.go",
+		"file\tname.go", // tab — completes whitespace coverage alongside space/newline
+		"file\rname.go", // CR — same rationale
+		"a>b.go",        // redirect
+		"a<b.go",        // redirect
+		"a*b.go",        // glob expansion
 	}
 	for _, s := range unsafe {
 		if safeForShell(s) {

@@ -3,7 +3,6 @@ package lint
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -82,8 +81,12 @@ func (g *GoVetLinter) Run(ctx context.Context, projectRoot, dir string, _ []stri
 
 	runErr := cmd.Run()
 
-	if runCtx.Err() == context.DeadlineExceeded {
-		return Result{Error: fmt.Errorf("go vet: timed out after %s", timeout)}
+	// Timeout / parent cancellation wins over partial findings. See the
+	// matching comment in raw.go for the rationale.
+	if runCtx.Err() != nil {
+		if err := classifyRunError(g.Name(), ctx, runCtx, runErr, timeout, &stdout, &stderr); err != nil {
+			return Result{Error: err}
+		}
 	}
 
 	// go vet writes findings to stderr; stdout is normally empty. Parse both
@@ -94,26 +97,16 @@ func (g *GoVetLinter) Run(ctx context.Context, projectRoot, dir string, _ []stri
 	findings = append(findings, parseGoVetOutput(workDir, stdout.String())...)
 	findings = reparentFindings(projectRoot, workDir, findings)
 
-	// Non-zero exit with no parseable findings means the linter itself failed
-	// (missing module, malformed package, `go` not on PATH). Surface as
-	// infrastructure error rather than fabricating violations.
-	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) && len(findings) > 0 {
-			// Normal case: vet found issues and exited non-zero.
-			return resultWithLinter(findings, "go vet")
-		}
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = strings.TrimSpace(stdout.String())
-		}
-		if msg == "" {
-			msg = runErr.Error()
-		}
-		return Result{Error: fmt.Errorf("go vet: %s", firstLine(msg))}
+	// Non-zero exit with parseable findings is the normal violations-found
+	// path for go vet; skip classification so we return findings, not an
+	// infrastructure error.
+	if len(findings) > 0 {
+		return resultWithLinter(findings, g.Name())
 	}
-
-	return resultWithLinter(findings, "go vet")
+	if err := classifyRunError(g.Name(), ctx, runCtx, runErr, timeout, &stdout, &stderr); err != nil {
+		return Result{Error: err}
+	}
+	return resultWithLinter(findings, g.Name())
 }
 
 // parseGoVetOutput scans text output for lines matching `<path>:<line>:<col>:

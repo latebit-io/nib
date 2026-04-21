@@ -91,25 +91,10 @@ func (g *GolangciLinter) Run(ctx context.Context, projectRoot, dir string, _ []s
 
 	runErr := cmd.Run()
 
-	if runCtx.Err() == context.DeadlineExceeded {
-		return Result{Error: fmt.Errorf("golangci-lint: timed out after %s", timeout)}
-	}
-
-	// With --issues-exit-code=0, any non-zero exit signals an infrastructure
-	// failure (bad config, parse error, etc.) — never "found violations."
-	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
-			msg := strings.TrimSpace(stderr.String())
-			if msg == "" {
-				msg = strings.TrimSpace(stdout.String())
-			}
-			if msg == "" {
-				msg = runErr.Error()
-			}
-			return Result{Error: fmt.Errorf("golangci-lint: exit %d: %s", exitErr.ExitCode(), firstLine(msg))}
-		}
-		return Result{Error: fmt.Errorf("golangci-lint: %w", runErr)}
+	// With --issues-exit-code=0, any non-zero exit (or timeout/cancel) signals
+	// an infrastructure failure — never "found violations."
+	if err := classifyRunError(g.Name(), ctx, runCtx, runErr, timeout, &stdout, &stderr); err != nil {
+		return Result{Error: err}
 	}
 
 	findings, err := parseGolangciJSON(stdout.Bytes())
@@ -187,6 +172,43 @@ func firstLine(s string) string {
 		}
 	}
 	return ""
+}
+
+// classifyRunError inspects the command result and returns an infrastructure
+// error when one occurred. Covers four sources of failure in order:
+//
+//  1. Timeout (runCtx deadline exceeded) — adapter-specified timeout.
+//  2. Parent cancellation (ctx already cancelled) — caller walked away.
+//  3. Non-zero exit — linter crashed or rejected its config.
+//  4. Non-exit error — process could not start, I/O failed, etc.
+//
+// Returns nil when the process exited successfully; the adapter then parses
+// the output. Shared across first-class and raw adapters so the classification
+// stays consistent.
+func classifyRunError(name string, parent, runCtx context.Context, runErr error, timeout time.Duration, stdout, stderr *cappedBuffer) error {
+	switch runCtx.Err() {
+	case context.DeadlineExceeded:
+		return fmt.Errorf("%s: timed out after %s", name, timeout)
+	case context.Canceled:
+		if parent.Err() != nil {
+			return fmt.Errorf("%s: cancelled: %w", name, parent.Err())
+		}
+	}
+	if runErr == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = strings.TrimSpace(stdout.String())
+		}
+		if msg == "" {
+			msg = runErr.Error()
+		}
+		return fmt.Errorf("%s: exit %d: %s", name, exitErr.ExitCode(), firstLine(msg))
+	}
+	return fmt.Errorf("%s: %w", name, runErr)
 }
 
 // reparentFindings re-roots each Finding.Path so it is relative to

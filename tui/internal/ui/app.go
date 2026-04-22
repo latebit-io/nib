@@ -903,9 +903,9 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		m.AgentPane.ClearAwaitingInput()
 		summary := formatSessionSummary(m.AgentPane.usage)
 		if summary != "" {
-			m.AgentPane.AppendText("\n--- Done ---\n" + summary + "\n")
+			m.AgentPane.AppendMeta("\n--- Done ---\n" + summary + "\n")
 		} else {
-			m.AgentPane.AppendText("\n--- Done ---\n")
+			m.AgentPane.AppendMeta("\n--- Done ---\n")
 		}
 		m.AgentPane.SetInputActive(false)
 		// Agent may have published /project.md — reload async to stay in sync.

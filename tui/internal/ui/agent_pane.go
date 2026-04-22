@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/latebit-io/junto/tui/internal/ui/textarea"
@@ -255,6 +256,11 @@ var (
 	// differently from settled content. Markdown formatting is deferred
 	// until the burst ends — it would flicker during token accumulation.
 	streamingTintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	// scrollbarTrackStyle and scrollbarThumbStyle render the right-edge
+	// scroll indicator. Track uses a very dim ASCII bar; the thumb is a
+	// slightly brighter heavy bar so the eye latches onto it.
+	scrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	scrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 )
 
 // awaitingInputState tracks a pending request_input prompt from the agent.
@@ -316,6 +322,15 @@ type AgentPaneModel struct {
 	// from a streaming status. Lines at or above this index render with
 	// streamingTintStyle instead of markdown.
 	streamingStartRaw int
+
+	// metaRawLines holds raw-line indices that should render as dim chrome
+	// (tool calls, bracketed status updates, proposed/applied markers,
+	// awaiting-input block, session summaries). Populated by AppendMeta.
+	metaRawLines map[int]bool
+	// turnSeparatorRawLines maps the raw-line index of a turn divider
+	// to its label (e.g. "turn 2"). Render substitutes a full-width
+	// centered rendering for these indices.
+	turnSeparatorRawLines map[int]string
 
 	// modelLabel is the display name of the active LLM model (e.g. "gemini-2.5-flash").
 	// Shown on the left side of the status line. Set via SetModelLabel.
@@ -435,7 +450,11 @@ func (m *AgentPaneModel) ShowAwaitingInput(e event.AgentAwaitingInput) {
 		Options: e.Options,
 		CallID:  e.CallID,
 	}
-	m.AppendMeta(renderAwaitingInputBlock(e))
+	// Sanitize + AppendText directly rather than AppendMeta — the block
+	// carries the agent's actual question and must stay at default
+	// foreground, not be dimmed as chrome.
+	var s sanitize.Sanitizer
+	m.AppendText(s.Sanitize(renderAwaitingInputBlock(e)))
 	m.input.Reset()
 	m.inputActive = true
 	m.recomputeInputLayout()
@@ -710,11 +729,35 @@ func (m *AgentPaneModel) AppendToken(text string) {
 	m.AppendText(clean)
 }
 
-// AppendMeta sanitizes and appends non-stream text (edit proposals, errors, status).
-// Uses a one-shot sanitizer so it doesn't interfere with the streaming sanitizer state.
+// AppendMeta sanitizes and appends non-stream chrome text (tool calls, edit
+// markers, errors, bracketed status updates, awaiting-input block). Marks
+// the resulting raw lines so Render can style them dim, separating chrome
+// from the agent's prose. Always begins on a fresh raw line so meta
+// content cannot merge into an in-flight streaming token line.
+//
+// Uses a one-shot sanitizer so it doesn't interfere with the streaming
+// sanitizer state.
 func (m *AgentPaneModel) AppendMeta(text string) {
 	var s sanitize.Sanitizer
-	m.AppendText(s.Sanitize(text))
+	clean := s.Sanitize(text)
+	if !strings.HasPrefix(clean, "\n") {
+		clean = "\n" + clean
+	}
+	firstRaw := len(m.RawLines)
+	m.AppendText(clean)
+	endRaw := len(m.RawLines)
+	// Exclude the trailing empty raw line — AppendText reuses it for the
+	// next incoming chunk, so marking it would dim the first agent token
+	// after this meta block.
+	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
+		endRaw--
+	}
+	if m.metaRawLines == nil {
+		m.metaRawLines = make(map[int]bool)
+	}
+	for i := firstRaw; i < endRaw; i++ {
+		m.metaRawLines[i] = true
+	}
 }
 
 // AppendUserMessage appends the developer's follow-up message as plain text
@@ -731,7 +774,17 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 	// belongs to the new turn (bright), and previous content fades.
 	turnStart := len(m.RawLines)
 	m.turnCounter++
-	m.AppendText(fmt.Sprintf("\n\n── turn %d ──", m.turnCounter))
+	label := fmt.Sprintf("turn %d", m.turnCounter)
+	// Emit a compact placeholder — Render substitutes the full-width rule
+	// using the label from turnSeparatorRawLines. Storing the label (not
+	// parsing the rendered text) keeps the raw content small and stable
+	// across resizes.
+	m.AppendText("\n\n── " + label + " ──")
+	sepRaw := len(m.RawLines) - 1
+	if m.turnSeparatorRawLines == nil {
+		m.turnSeparatorRawLines = make(map[int]string)
+	}
+	m.turnSeparatorRawLines[sepRaw] = label
 
 	// Second AppendText for the actual user text. Tracks its own start
 	// index so the separator lines are NOT marked as user content.
@@ -1283,6 +1336,8 @@ func (m *AgentPaneModel) Clear() {
 	m.turnCounter = 1
 	m.turnStartRaw = 0
 	m.streamingStartRaw = -1
+	m.metaRawLines = nil
+	m.turnSeparatorRawLines = nil
 	m.spinnerFrame = 0
 	// spinnerRunning intentionally not reset: a tick may still be in-flight
 	// from before Clear(); Update drops it on the next fire because
@@ -1424,6 +1479,95 @@ func (m *AgentPaneModel) isStreaming(wrappedIdx int) bool {
 	}
 	rawIdx := m.rawIndexOf(wrappedIdx)
 	return rawIdx >= m.streamingStartRaw
+}
+
+// isMeta reports whether the wrapped line is chrome (tool calls, bracketed
+// status, edit markers, session summaries) and should render dim.
+func (m *AgentPaneModel) isMeta(wrappedIdx int) bool {
+	if len(m.metaRawLines) == 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	return rawIdx >= 0 && m.metaRawLines[rawIdx]
+}
+
+// turnSeparatorLabel returns the label for a wrapped line that represents a
+// turn divider, or "" if it isn't one. Only the FIRST wrapped line of the
+// owning raw line is treated as the separator — subsequent wrapped segments
+// (unlikely at normal widths) render as normal dim meta.
+func (m *AgentPaneModel) turnSeparatorLabel(wrappedIdx int) string {
+	if len(m.turnSeparatorRawLines) == 0 {
+		return ""
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	if rawIdx < 0 {
+		return ""
+	}
+	label, ok := m.turnSeparatorRawLines[rawIdx]
+	if !ok {
+		return ""
+	}
+	if rawIdx < len(m.wrappedIndex) && m.wrappedIndex[rawIdx] != wrappedIdx {
+		return ""
+	}
+	return label
+}
+
+// overlayScrollbar paints the rightmost column of the content region with a
+// track-and-thumb indicator when the transcript exceeds the viewport.
+// Truncates each content row to width-1 cells (ANSI-aware) and appends the
+// scrollbar cell, preserving styling on the truncated prefix.
+//
+// No-op when all lines fit — the column is left as content.
+func (m *AgentPaneModel) overlayScrollbar(output []string, vis int) {
+	total := len(m.Lines)
+	if total <= vis || m.width <= 1 || vis <= 0 {
+		return
+	}
+
+	// Proportional thumb. Keep at least one row visible so the user can
+	// always see there is a scrollbar, even in very large transcripts.
+	thumbStart := m.ScrollOffset * vis / total
+	thumbEnd := (m.ScrollOffset + vis) * vis / total
+	if thumbEnd <= thumbStart {
+		thumbEnd = thumbStart + 1
+	}
+	if thumbEnd > vis {
+		thumbEnd = vis
+		if thumbStart >= thumbEnd {
+			thumbStart = thumbEnd - 1
+		}
+	}
+
+	for i := 0; i < vis; i++ {
+		if i >= len(output) {
+			break
+		}
+		var cell string
+		if i >= thumbStart && i < thumbEnd {
+			cell = scrollbarThumbStyle.Render("┃")
+		} else {
+			cell = scrollbarTrackStyle.Render("│")
+		}
+		output[i] = ansi.Truncate(output[i], m.width-1, "") + cell
+	}
+}
+
+// renderTurnSeparator produces a full-width dim divider centered around the
+// label, using heavy rules on each side. Falls back to the compact label if
+// the pane is too narrow to fit the rules and padding.
+func renderTurnSeparator(label string, width int) string {
+	text := " " + label + " "
+	textW := runewidth.StringWidth(text)
+	if textW+6 > width {
+		// Too narrow for full-width rules — emit the label alone, padded.
+		return agentDimStyle.Render(padToWidth(text, width))
+	}
+	totalRules := width - textW
+	leftRules := totalRules / 2
+	rightRules := totalRules - leftRules
+	line := strings.Repeat("─", leftRules) + text + strings.Repeat("─", rightRules)
+	return agentDimStyle.Render(line)
 }
 
 func (m *AgentPaneModel) isSelected(line, col int) bool {
@@ -1708,8 +1852,12 @@ func (m *AgentPaneModel) Render() string {
 				output[row] = line.String()
 			} else if m.isDim(lineIdx) {
 				output[row] = agentDimStyle.Render(m.padLine(lineText))
+			} else if label := m.turnSeparatorLabel(lineIdx); label != "" {
+				output[row] = renderTurnSeparator(label, m.width)
 			} else if m.isUserLine(lineIdx) {
 				output[row] = userMessageStyle.Render(m.padLine(lineText))
+			} else if m.isMeta(lineIdx) {
+				output[row] = agentDimStyle.Render(m.padLine(lineText))
 			} else if m.isStreaming(lineIdx) {
 				output[row] = streamingTintStyle.Render(m.padLine(lineText))
 			} else {
@@ -1720,6 +1868,10 @@ func (m *AgentPaneModel) Render() string {
 		}
 		row++
 	}
+
+	// Scrollbar overlay spans the rendered content rows only — must run
+	// before the fill loop and separator/input rows consume the slot.
+	m.overlayScrollbar(output, vis)
 
 	// Fill remaining content area
 	bottomH := m.inputHeight()

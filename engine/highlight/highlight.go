@@ -138,6 +138,21 @@ func NewHighlighter(filename string) editor.Highlighter {
 	return h
 }
 
+// LanguageFor returns the tree-sitter language registered for the given
+// filename's extension, or nil when the extension is unsupported.
+//
+// Exposed so other subsystems (e.g. the validate pipeline) can consume
+// the same grammar registry without importing the full highlighter. The
+// returned language is shared — callers must NOT call Close() on it.
+func LanguageFor(filename string) *sitter.Language {
+	ext := strings.ToLower(filepath.Ext(filename))
+	spec, ok := langByExt[ext]
+	if !ok {
+		return nil
+	}
+	return spec.lang
+}
+
 // New creates a highlighter for the given file extension.
 // Returns nil if the language is not supported. Setup failures (grammar
 // mismatch, broken vendored query) are logged at Error level and also

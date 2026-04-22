@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/engine/buffer"
+	"github.com/latebit-io/junto/engine/capture"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/filelist"
@@ -134,6 +135,35 @@ type Session struct {
 	// Canonical absolute paths as keys. Guarded by mu.
 	modifiedFiles map[string]bool
 
+	// sink is the capture port for session events (intent, proposal,
+	// accepted, rejected, validator). Initialised to capture.NoopSink in
+	// New so every call site can dispatch unconditionally. Swapped for a
+	// live adapter via SetEventSink at the composition root.
+	sink capture.SessionEventSink
+
+	// sessionID groups capture events emitted during this Junto process
+	// lifetime. Generated once in New; the demarkus adapter uses it as
+	// the per-process document identifier.
+	sessionID string
+
+	// pendingContinuePath holds the canonical path of the most recent
+	// approved edit awaiting Continue. Paired with pendingContinueExpected
+	// so the "continue" capture event can detect whether the developer
+	// modified the buffer between approve and continue. pendingContinueSet
+	// distinguishes "stashed, expected content may legitimately be empty"
+	// from "no stash" — comparing paths alone would miss edits to the
+	// no-path test buffer or to an empty file.
+	pendingContinuePath     string
+	pendingContinueExpected string
+	pendingContinueSet      bool
+
+	// pendingProposedReplace stores the agent's originally-proposed
+	// replacement text for the active proposal. Compared to the applied
+	// replacement in ApproveEdit so the "accepted" capture event can
+	// include the pre-modification text when the developer edited the
+	// proposal in the diff overlay.
+	pendingProposedReplace string
+
 	// langSyncer is the language service port (optional, nil when no LSP).
 	// Session depends on the interface, never on lsp.Manager directly (DIP).
 	// Set once via SetLanguageService before the TUI starts — effectively
@@ -238,6 +268,8 @@ func New(e *editor.Editor, projectRoot string) *Session {
 		contextSet:    contextSet,
 		modifiedFiles: make(map[string]bool),
 		projectRoot:   projectRoot,
+		sink:          capture.NoopSink{},
+		sessionID:     newSessionID(),
 	}
 	if e.Buf.Path != "" {
 		if _, err := s.resolvePath(e.Buf.Path); err != nil {
@@ -258,6 +290,61 @@ func New(e *editor.Editor, projectRoot string) *Session {
 		s.saveContext()
 	}
 	return s
+}
+
+// SetEventSink installs the capture sink that receives session events
+// (intent, proposal, accepted, rejected, validator). Pass the live
+// adapter at the composition root; passing nil resets to the no-op sink
+// so every internal call site can dispatch without nil checks.
+//
+// Safe to call once during wiring; not designed for hot-path swaps.
+func (s *Session) SetEventSink(sink capture.SessionEventSink) {
+	if sink == nil {
+		sink = capture.NoopSink{}
+	}
+	s.sink = sink
+}
+
+// SessionID returns the identifier that groups this process's capture
+// events. Adapters may use it as a per-session document path component.
+func (s *Session) SessionID() string { return s.sessionID }
+
+// validatorStagesPayload projects the frontend-facing ValidatorSummary
+// slice into a JSON-serialisable form for capture payloads. Kept as a
+// helper so the HandleEvent call site stays readable and future
+// summary-field additions do not ripple through inline map literals.
+func validatorStagesPayload(summaries []event.ValidatorSummary) []map[string]any {
+	out := make([]map[string]any, 0, len(summaries))
+	for _, s := range summaries {
+		entry := map[string]any{
+			"stage":   s.Stage,
+			"verdict": s.Verdict,
+		}
+		if s.Feedback != "" {
+			entry["feedback"] = s.Feedback
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// emitCapture fires a capture event through the configured sink. Errors
+// are logged at warn level — capture failures must never block the
+// session's hot path or surface to the developer.
+func (s *Session) emitCapture(kind string, payload map[string]any) {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ev := capture.Event{
+		Kind:      kind,
+		Timestamp: time.Now(),
+		SessionID: s.sessionID,
+		Payload:   payload,
+	}
+	if err := s.sink.Append(ctx, ev); err != nil {
+		slog.Warn("session capture append failed", "kind", kind, "err", err)
+	}
 }
 
 // SetHighlighterFactory installs a factory used to construct highlighters
@@ -1335,6 +1422,11 @@ func (s *Session) SubmitGoal(goal string) bool {
 		return false
 	}
 
+	s.emitCapture("intent", map[string]any{
+		"goal":  goal,
+		"phase": phaseName(s.phase),
+	})
+
 	// Handle planning phase commands.
 	if s.phase == PhasePlanning {
 		return s.handlePlanningInput(goal)
@@ -1672,16 +1764,43 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	}
 	lineOrigins := computeLineOrigins(search, s.pendingEdit.Replace, replace)
 	ok, reason := e.ApplyEdit(search, replace, lineOrigins)
+	proposedReplace := s.pendingProposedReplace
+	editID := s.pendingEdit.ID
 	if ok {
 		s.lastEditedFile = editPath
 		s.mu.Lock()
 		s.modifiedFiles[editPath] = true
 		s.mu.Unlock()
+		// Stash the post-apply buffer content so the subsequent
+		// Continue() call can detect developer edits made to the
+		// buffer between approval and continue (continue-diff capture).
+		s.pendingContinuePath = editPath
+		s.pendingContinueExpected = e.Buf.Content()
+		s.pendingContinueSet = true
 		s.agent.Approve()
+		modified := replace != proposedReplace
+		accepted := map[string]any{
+			"id":               editID,
+			"path":             editPath,
+			"search":           search,
+			"replace":          replace,
+			"modified_by_user": modified,
+		}
+		if modified {
+			accepted["proposed_replace"] = proposedReplace
+		}
+		s.emitCapture("accepted", accepted)
 	} else {
 		s.agent.Reject()
+		s.emitCapture("rejected", map[string]any{
+			"id":     editID,
+			"path":   editPath,
+			"reason": reason,
+			"source": "apply_failed",
+		})
 	}
 	s.pendingEdit = nil
+	s.pendingProposedReplace = ""
 	s.editReviewed = false
 	return ok, reason
 }
@@ -1825,7 +1944,16 @@ func (s *Session) RejectEdit() {
 	if s.pendingEdit == nil || !s.HasAgent() {
 		return
 	}
+	s.emitCapture("rejected", map[string]any{
+		"id":     s.pendingEdit.ID,
+		"path":   s.pendingEdit.Path,
+		"source": "user",
+	})
 	s.pendingEdit = nil
+	s.pendingProposedReplace = ""
+	s.pendingContinuePath = ""
+	s.pendingContinueExpected = ""
+	s.pendingContinueSet = false
 	s.editReviewed = false
 	s.agent.Reject()
 }
@@ -1867,8 +1995,30 @@ func (s *Session) Continue() {
 		path = s.activeFile
 	}
 	s.awaitingContinue = false
+	// Snapshot the continue-diff tracking state under the same lock.
+	expectedPath := s.pendingContinuePath
+	expectedContent := s.pendingContinueExpected
+	haveExpected := s.pendingContinueSet
+	s.pendingContinuePath = ""
+	s.pendingContinueExpected = ""
+	s.pendingContinueSet = false
 	s.mu.Unlock()
-	s.agent.Continue(path, e.Buf.Content())
+
+	currentContent := e.Buf.Content()
+	if haveExpected && expectedPath == path {
+		modified := currentContent != expectedContent
+		payload := map[string]any{
+			"path":         path,
+			"was_modified": modified,
+		}
+		if modified {
+			payload["proposed_content"] = expectedContent
+			payload["actual_content"] = currentContent
+		}
+		s.emitCapture("continue", payload)
+	}
+
+	s.agent.Continue(path, currentContent)
 }
 
 // CanContinue reports whether the agent has applied an edit and is waiting
@@ -1890,9 +2040,28 @@ func (s *Session) HandleEvent(ev event.Event) {
 	switch e := ev.(type) {
 	case event.AgentEditProposed:
 		s.pendingEdit = &e.Edit
+		s.pendingProposedReplace = e.Edit.Replace
 		s.editReviewed = false
+		s.emitCapture("proposal", map[string]any{
+			"id":      e.Edit.ID,
+			"path":    e.Edit.Path,
+			"search":  e.Edit.Search,
+			"replace": e.Edit.Replace,
+			"reason":  e.Edit.Reason,
+		})
+		if len(e.ValidatorSummaries) > 0 {
+			s.emitCapture("validator", map[string]any{
+				"proposal_id": e.Edit.ID,
+				"path":        e.Edit.Path,
+				"stages":      validatorStagesPayload(e.ValidatorSummaries),
+			})
+		}
 	case event.AgentError:
 		s.pendingEdit = nil
+		s.pendingProposedReplace = ""
+		s.pendingContinuePath = ""
+		s.pendingContinueExpected = ""
+		s.pendingContinueSet = false
 		s.editReviewed = false
 		s.mu.Lock()
 		s.awaitingContinue = false
@@ -1901,6 +2070,10 @@ func (s *Session) HandleEvent(ev event.Event) {
 		_ = e // error text is in the event for the frontend to display
 	case event.AgentDone:
 		s.pendingEdit = nil
+		s.pendingProposedReplace = ""
+		s.pendingContinuePath = ""
+		s.pendingContinueExpected = ""
+		s.pendingContinueSet = false
 		s.editReviewed = false
 		s.mu.Lock()
 		s.awaitingContinue = false

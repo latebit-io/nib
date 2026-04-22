@@ -1,0 +1,351 @@
+// Package demarkus implements capture.SessionEventSink backed by a Mark
+// Protocol document. Events are serialised as append-only markdown entries
+// under a single per-process document so the session log is cheap to stream
+// and easy to grep.
+//
+// The adapter is intentionally decoupled from any specific Mark server
+// implementation — it only depends on the [memory.Store] interface, which
+// the composition root satisfies with the active mcpadapter.
+package demarkus
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/latebit-io/junto/engine/capture"
+	"github.com/latebit-io/junto/engine/memory"
+)
+
+// DefaultBufferSize is the number of pending events the sink buffers before
+// dropping on overflow. Chosen to absorb a typical agent turn (goal +
+// several proposals + accepts) without blocking; the drop path logs a warn
+// so a persistently full buffer becomes visible in debug logs.
+const DefaultBufferSize = 64
+
+// DefaultMaxFieldBytes caps the size of any single payload string to prevent
+// a runaway edit (e.g. a 10 MB buffer paste) from bloating the session doc.
+// 8 KB matches Junto's existing maxContentPreview constant for symmetry
+// with the tools pipeline.
+const DefaultMaxFieldBytes = 8 * 1024
+
+// Config tunes the sink. Zero values fall back to the exported defaults.
+type Config struct {
+	// BufferSize is the maximum number of in-flight events queued between
+	// Append and the dispatch goroutine. Overflow drops with a warn log.
+	BufferSize int
+
+	// MaxFieldBytes caps every string field in Event.Payload before
+	// serialisation. Zero uses DefaultMaxFieldBytes; negative disables.
+	MaxFieldBytes int
+
+	// Redactor is applied to every event before serialisation. nil is
+	// treated as identity.
+	Redactor capture.Redactor
+
+	// DocRoot is the Mark path prefix used for session documents.
+	// Defaults to "/junto/sessions".
+	DocRoot string
+
+	// Clock provides the current time; overridable for tests. nil uses
+	// time.Now.
+	Clock func() time.Time
+}
+
+// Sink is a capture.SessionEventSink that streams events into a single
+// Mark document. Safe for concurrent Append calls from multiple goroutines.
+type Sink struct {
+	store     memory.Store
+	sessionID string
+	path      string
+	cfg       Config
+
+	events chan capture.Event
+	done   chan struct{} // closed when dispatch goroutine exits
+
+	mu        sync.Mutex
+	closed    bool
+	version   int            // current server version of the session doc
+	created   bool           // true once the initial Publish has landed
+	dropCount int            // overflow drops since construction (monotonic)
+	kindCount map[string]int // per-kind event tallies for the close summary
+}
+
+// New returns a Sink that writes session events to the given store under
+// mark://{DocRoot}/{sessionID}.md. The sessionID is opaque from the sink's
+// perspective; callers typically pass [session.Session.SessionID()].
+//
+// New starts a background goroutine that drains the event channel; call
+// Close to stop it and flush pending events.
+func New(store memory.Store, sessionID string, cfg Config) *Sink {
+	if cfg.BufferSize <= 0 {
+		cfg.BufferSize = DefaultBufferSize
+	}
+	if cfg.MaxFieldBytes == 0 {
+		cfg.MaxFieldBytes = DefaultMaxFieldBytes
+	}
+	if cfg.DocRoot == "" {
+		cfg.DocRoot = "/junto/sessions"
+	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
+	s := &Sink{
+		store:     store,
+		sessionID: sessionID,
+		path:      strings.TrimRight(cfg.DocRoot, "/") + "/" + sessionID + ".md",
+		cfg:       cfg,
+		events:    make(chan capture.Event, cfg.BufferSize),
+		done:      make(chan struct{}),
+		kindCount: make(map[string]int),
+	}
+	go s.run()
+	return s
+}
+
+// Path returns the full Mark document path where this sink writes.
+// Exposed primarily for diagnostics and tests.
+func (s *Sink) Path() string { return s.path }
+
+// DropCount returns the number of events dropped due to buffer overflow
+// since the sink was constructed. Thread-safe.
+func (s *Sink) DropCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dropCount
+}
+
+// Append enqueues an event for asynchronous persistence. Never blocks the
+// caller — if the internal buffer is full, the event is dropped and a warn
+// log is emitted. Returns nil even on drop; the drop count is observable
+// via [Sink.DropCount] for tests and diagnostics.
+func (s *Sink) Append(_ context.Context, e capture.Event) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return errors.New("demarkus sink: append after close")
+	}
+	s.mu.Unlock()
+
+	select {
+	case s.events <- e:
+		return nil
+	default:
+		s.mu.Lock()
+		s.dropCount++
+		dropped := s.dropCount
+		s.mu.Unlock()
+		slog.Warn("demarkus capture: event dropped (buffer full)",
+			"kind", e.Kind, "session", s.sessionID, "total_dropped", dropped)
+		return nil
+	}
+}
+
+// Close signals the dispatch goroutine to drain and stop, then appends
+// a Session Summary block with per-kind event counts. Waits up to the
+// deadline on ctx for the drain to complete; if the context fires first,
+// the remaining events are abandoned and no summary is written.
+func (s *Sink) Close(ctx context.Context) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.mu.Unlock()
+
+	close(s.events)
+	select {
+	case <-s.done:
+		s.writeSummary(ctx)
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// run drains the event channel and persists each event. Exits when the
+// channel is closed and empty.
+func (s *Sink) run() {
+	defer close(s.done)
+	for e := range s.events {
+		s.persist(e)
+	}
+}
+
+// persist writes a single event to the Mark document. The first event
+// publishes the document with a YAML front-matter header; subsequent
+// events append markdown entries. Errors are logged and the sink
+// continues — capture must not block the session.
+func (s *Sink) persist(e capture.Event) {
+	if s.cfg.Redactor != nil {
+		e = s.cfg.Redactor(e)
+	}
+	e = capEventFields(e, s.cfg.MaxFieldBytes)
+
+	body, err := formatEvent(e)
+	if err != nil {
+		slog.Warn("demarkus capture: format failed", "kind", e.Kind, "err", err)
+		return
+	}
+
+	// Use a fresh context per write so a cancelled appCtx on shutdown
+	// does not prevent final drain. The dispatch goroutine itself exits
+	// when the events channel closes; Close enforces overall lifetime.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	s.mu.Lock()
+	created := s.created
+	version := s.version
+	s.mu.Unlock()
+
+	var doc memory.Document
+	if !created {
+		header := formatHeader(s.sessionID, s.cfg.Clock())
+		doc, err = s.store.Publish(ctx, s.path, header+body, 0)
+		if errors.Is(err, memory.ErrConflict) {
+			// Doc already exists (maybe from a crashed prior process);
+			// fetch and append instead.
+			existing, fetchErr := s.store.Fetch(ctx, s.path)
+			if fetchErr != nil {
+				slog.Warn("demarkus capture: publish conflict + fetch failed",
+					"path", s.path, "err", fetchErr)
+				return
+			}
+			doc, err = s.store.Append(ctx, s.path, body, existing.Version)
+		}
+	} else {
+		doc, err = s.store.Append(ctx, s.path, body, version)
+	}
+	if err != nil {
+		slog.Warn("demarkus capture: write failed",
+			"path", s.path, "kind", e.Kind, "err", err)
+		return
+	}
+
+	s.mu.Lock()
+	s.created = true
+	s.version = doc.Version
+	s.kindCount[e.Kind]++
+	s.mu.Unlock()
+}
+
+// writeSummary appends a closing "Session Summary" block with per-kind
+// event counts. Called from Close after the event channel has drained.
+// Best-effort: errors are logged and swallowed because the caller is in
+// the shutdown path and cannot meaningfully react to a summary write
+// failure.
+func (s *Sink) writeSummary(ctx context.Context) {
+	s.mu.Lock()
+	if !s.created {
+		// No events were ever written; nothing to summarise.
+		s.mu.Unlock()
+		return
+	}
+	counts := maps.Clone(s.kindCount)
+	dropped := s.dropCount
+	version := s.version
+	s.mu.Unlock()
+
+	body := formatSummary(counts, dropped, s.cfg.Clock())
+	doc, err := s.store.Append(ctx, s.path, body, version)
+	if err != nil {
+		slog.Warn("demarkus capture: summary write failed",
+			"path", s.path, "err", err)
+		return
+	}
+	s.mu.Lock()
+	s.version = doc.Version
+	s.mu.Unlock()
+}
+
+// formatSummary renders the close-time summary block. Stable ordering
+// (sorted kinds) keeps the output deterministic for tests and diffs.
+func formatSummary(counts map[string]int, dropped int, closedAt time.Time) string {
+	kinds := make([]string, 0, len(counts))
+	for k := range counts {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+
+	var b strings.Builder
+	b.WriteString("\n## Session Summary\n\n")
+	b.WriteString("```json\n{")
+	b.WriteString("\"closed_at\":\"")
+	b.WriteString(closedAt.UTC().Format(time.RFC3339))
+	b.WriteString("\",\"dropped\":")
+	fmt.Fprintf(&b, "%d", dropped)
+	b.WriteString(",\"counts\":{")
+	for i, k := range kinds {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, "%q:%d", k, counts[k])
+	}
+	b.WriteString("}}\n```\n")
+	return b.String()
+}
+
+// formatHeader returns the YAML front-matter block written once per document.
+func formatHeader(sessionID string, started time.Time) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("session_id: ")
+	b.WriteString(sessionID)
+	b.WriteString("\n")
+	b.WriteString("started: ")
+	b.WriteString(started.UTC().Format(time.RFC3339))
+	b.WriteString("\n---\n\n# Junto Session\n")
+	return b.String()
+}
+
+// formatEvent renders a single event as a markdown entry. Each entry is
+// wall-clock-timestamped, tagged with the event kind, and followed by a
+// fenced JSON payload so the document is trivially machine-parseable while
+// still being readable.
+func formatEvent(e capture.Event) (string, error) {
+	ts := e.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	payload, err := json.Marshal(e.Payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal payload: %w", err)
+	}
+	var b strings.Builder
+	b.WriteString("\n## ")
+	b.WriteString(ts.UTC().Format("15:04:05"))
+	b.WriteString(" ")
+	b.WriteString(e.Kind)
+	b.WriteString("\n\n```json\n")
+	b.Write(payload)
+	b.WriteString("\n```\n")
+	return b.String(), nil
+}
+
+// capEventFields caps every string value in Payload at maxBytes. Non-string
+// values pass through untouched so structured counts and numbers keep full
+// precision. maxBytes <= 0 disables the cap.
+func capEventFields(e capture.Event, maxBytes int) capture.Event {
+	if maxBytes <= 0 || len(e.Payload) == 0 {
+		return e
+	}
+	capped := make(map[string]any, len(e.Payload))
+	for k, v := range e.Payload {
+		if str, ok := v.(string); ok && len(str) > maxBytes {
+			capped[k] = str[:maxBytes] + "…[truncated]"
+			continue
+		}
+		capped[k] = v
+	}
+	e.Payload = capped
+	return e
+}

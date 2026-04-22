@@ -125,12 +125,12 @@ type AppModel struct {
 	Help HelpModel
 	// SearchOverlay is the project-wide search overlay state.
 	SearchOverlay       SearchOverlayModel
-	recentMouse         bool          // tracks leaked CSI prefix from unparsed mouse events
-	dial                AutonomyLevel // current autonomy level; defaults to LevelTrusted
-	styleName           string        // current coding style display name; empty when disabled
-	evaluatorEnabled    bool          // true when the style evaluator is active
-	terse               bool          // true when terse output mode is active
-	pendingModelProfile string        // profile of the in-flight ListModels request (stale detection)
+	recentMouse         bool                  // tracks leaked CSI prefix from unparsed mouse events
+	dial                session.AutonomyLevel // current autonomy level; defaults to session.LevelTrusted
+	styleName           string                // current coding style display name; empty when disabled
+	evaluatorEnabled    bool                  // true when the style evaluator is active
+	terse               bool                  // true when terse output mode is active
+	pendingModelProfile string                // profile of the in-flight ListModels request (stale detection)
 
 	// ListModels returns available models for the given profile.
 	// Set by the entry point — nil when no LLM is configured.
@@ -177,7 +177,7 @@ type AppModel struct {
 
 	// OnDialChange is called when the autonomy dial changes.
 	// Set by the entry point — nil when no agent is configured.
-	OnDialChange func(level AutonomyLevel)
+	OnDialChange func(level session.AutonomyLevel)
 
 	// Services holds shared runtime services (clipboard, LSP, etc.).
 	Services *Services
@@ -302,7 +302,7 @@ func NewApp(sess *session.Session) AppModel {
 		Regions:     rm,
 		Services:    svc,
 		Keymap:      km,
-		dial:        LevelTrusted,
+		dial:        session.LevelTrusted,
 		fileWatcher: fw,
 		SearchOverlay: SearchOverlayModel{
 			SearchFunc: func(pattern string) ([]search.Result, error) {

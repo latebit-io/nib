@@ -246,7 +246,11 @@ type fenceState struct {
 
 // Package-level styles — allocated once, never in render paths.
 var (
-	userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Bold(true)
+	// userMessageStyle paints "You: ..." lines in a warm magenta-pink so
+	// your turn stands out from the agent's default-foreground prose.
+	// 212 is distinct enough from the ANSWER chip (162) that they don't
+	// read as "the same color" when both are on screen.
+	userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	agentDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	agentSelStyle    = lipgloss.NewStyle().Background(lipgloss.Color("24"))
 	agentInputStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("230"))

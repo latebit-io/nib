@@ -807,7 +807,9 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentToken:
 		m.AgentPane.AppendToken(e.Text)
 	case event.AgentToolCall:
-		m.AgentPane.AppendMeta("\n> " + e.Name + "\n")
+		// Indented bullet reads as a sub-action rather than a sibling of
+		// the agent's prose. Renders dim via the metaRawLines path.
+		m.AgentPane.AppendMeta("\n  ● " + e.Name + "\n")
 	case event.AgentStatus:
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(e.Status))
 	case event.AgentEditProposed:

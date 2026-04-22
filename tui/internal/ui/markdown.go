@@ -14,9 +14,12 @@ var (
 	mdBoldStyle       = lipgloss.NewStyle().Bold(true)
 	mdItalicStyle     = lipgloss.NewStyle().Italic(true)
 	mdBoldItalicStyle = lipgloss.NewStyle().Bold(true).Italic(true)
-	mdHeaderStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	mdHeader2Style    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
-	mdHeader3Style    = lipgloss.NewStyle().Bold(true)
+	// mdHeaderStyle renders # H1 as a filled bar — bright fg on the same
+	// purple bg used by the THINKING status chip so headings read as
+	// structural sections, not just bigger text.
+	mdHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("55"))
+	mdHeader2Style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
+	mdHeader3Style = lipgloss.NewStyle().Bold(true)
 )
 
 // mdKind identifies the kind of an inline markdown span.

@@ -141,37 +141,37 @@ func formatTokenCount(n int) string {
 	}
 }
 
-// formatTurnUsage produces a dim metadata line for a single turn.
-// Uses provider data when available, otherwise falls back to estimates.
-func formatTurnUsage(u event.AgentTurnUsage) string {
+// formatTurnUsage produces a compact per-turn footer: model · turn N ·
+// token counts · tool count. Rendered dim via the AppendMeta path, so the
+// reader skims it as chrome. Model is optional — omitted when empty so
+// the line still reads well before the model label is known.
+func formatTurnUsage(u event.AgentTurnUsage, model string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n[turn %d", u.Turn)
+	b.WriteString("\n◇ ")
+	if model != "" {
+		b.WriteString(sanitizeInlineDisplay(model))
+		b.WriteString(" · ")
+	}
+	fmt.Fprintf(&b, "turn %d", u.Turn)
 
 	hasProvider := u.PromptTokens > 0 || u.CompletionTokens > 0
 	if hasProvider {
-		fmt.Fprintf(&b, ": %s in", formatTokenCount(u.PromptTokens))
-		if u.CachedTokens > 0 {
-			fmt.Fprintf(&b, " (%s cached)", formatTokenCount(u.CachedTokens))
+		fmt.Fprintf(&b, " · %s↓", formatTokenCount(u.PromptTokens))
+		if u.CachedTokens > 0 && u.PromptTokens > 0 {
+			pct := u.CachedTokens * 100 / u.PromptTokens
+			fmt.Fprintf(&b, " (%d%%⚡)", pct)
 		}
-		fmt.Fprintf(&b, " · %s out", formatTokenCount(u.CompletionTokens))
+		fmt.Fprintf(&b, " · %s↑", formatTokenCount(u.CompletionTokens))
+	} else {
+		total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
+		if total > 0 {
+			fmt.Fprintf(&b, " · ~%s↓ · ~%s↑", formatTokenCount(total), formatTokenCount(u.CompletionEst))
+		}
 	}
 	if u.ToolCalls > 0 {
 		fmt.Fprintf(&b, " · %d tools", u.ToolCalls)
 	}
-
-	// Composition estimate — always available.
-	total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
-	if total > 0 {
-		if !hasProvider {
-			fmt.Fprintf(&b, ": ~%s in · ~%s out", formatTokenCount(total), formatTokenCount(u.CompletionEst))
-		}
-		fmt.Fprintf(&b, " | sys:%s tools:%s hist:%s new:%s",
-			formatTokenCount(u.SystemEst),
-			formatTokenCount(u.ToolsEst),
-			formatTokenCount(u.HistoryEst),
-			formatTokenCount(u.NewEst))
-	}
-	b.WriteString("]\n")
+	b.WriteByte('\n')
 	return b.String()
 }
 
@@ -187,6 +187,9 @@ func formatCompacted(e event.AgentCompacted) string {
 }
 
 // formatSessionSummary produces the summary shown when the agent finishes.
+// Matches the per-turn footer's visual language: middle-dot separators and
+// arrow-glyph token counts so session-wide and per-turn metadata feel like
+// one layer of chrome, not two styles.
 func formatSessionSummary(u usageState) string {
 	if u.turns == 0 {
 		return ""
@@ -196,14 +199,14 @@ func formatSessionSummary(u usageState) string {
 		prefix = ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Session: %d turns", u.turns)
+	fmt.Fprintf(&b, "Session · %d turns", u.turns)
 	if u.totalIn > 0 || u.totalOut > 0 {
-		fmt.Fprintf(&b, " · %s%s in", prefix, formatTokenCount(u.totalIn))
+		fmt.Fprintf(&b, " · %s%s↓", prefix, formatTokenCount(u.totalIn))
 		if u.totalCached > 0 && u.totalIn > 0 {
 			pct := u.totalCached * 100 / u.totalIn
-			fmt.Fprintf(&b, " (%s cached, %d%%)", formatTokenCount(u.totalCached), pct)
+			fmt.Fprintf(&b, " (%d%%⚡)", pct)
 		}
-		fmt.Fprintf(&b, " · %s%s out", prefix, formatTokenCount(u.totalOut))
+		fmt.Fprintf(&b, " · %s%s↑", prefix, formatTokenCount(u.totalOut))
 	}
 	return b.String()
 }
@@ -245,8 +248,6 @@ type fenceState struct {
 var (
 	userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Bold(true)
 	agentDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	agentStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-	agentAwaitStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
 	agentSelStyle    = lipgloss.NewStyle().Background(lipgloss.Color("24"))
 	agentInputStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("230"))
 	agentInputDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -261,6 +262,29 @@ var (
 	// slightly brighter heavy bar so the eye latches onto it.
 	scrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	scrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	// Status chips — small colored labels on the right of the status line
+	// communicating the agent's current state. Each chip has distinct
+	// bg/fg so the eye locks on without reading text. Padding(0,1) gives
+	// breathing room inside the color band.
+	chipBase          = lipgloss.NewStyle().Padding(0, 1)
+	chipStyleIdle     = chipBase.Background(lipgloss.Color("238")).Foreground(lipgloss.Color("245"))
+	chipStyleThinking = chipBase.Background(lipgloss.Color("55")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStylePlanning = chipBase.Background(lipgloss.Color("25")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStylePlanWait = chipBase.Background(lipgloss.Color("60")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleReview   = chipBase.Background(lipgloss.Color("136")).Foreground(lipgloss.Color("232")).Bold(true)
+	chipStyleEditing  = chipBase.Background(lipgloss.Color("28")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleWaiting  = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleAnswer   = chipBase.Background(lipgloss.Color("162")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleLinting  = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
+
+	// statusHintStyle renders the trailing keyboard hint next to a chip in
+	// a dim color — it's context, not headline.
+	statusHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	// statusLeftStyle renders the model/usage half of the status line in a
+	// muted tone that reads as metadata.
+	statusLeftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 )
 
 // awaitingInputState tracks a pending request_input prompt from the agent.
@@ -753,6 +777,12 @@ func (m *AgentPaneModel) AppendToken(text string) {
 	clean := m.sanitizer.Sanitize(text)
 	m.usage.streamingChars += len(clean)
 	m.AppendText(clean)
+}
+
+// AppendTurnUsage formats and appends the per-turn footer with the pane's
+// current model label as chrome.
+func (m *AgentPaneModel) AppendTurnUsage(u event.AgentTurnUsage) {
+	m.AppendMeta(formatTurnUsage(u, m.modelLabel))
 }
 
 // AppendMeta sanitizes and appends non-stream chrome text (tool calls, edit
@@ -1767,43 +1797,106 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 	m.ModelSel.Render(output, row, m.width, m.height, m.inputAreaStartRow, m.inputAreaEndRow)
 }
 
-func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string) string {
-	left := ""
-	if m.modelLabel != "" {
-		left = " " + sanitizeInlineDisplay(m.modelLabel)
+// statusChipSpec describes a chip's typography for a given status. Label is
+// the short word that appears in the chip band; hint is the trailing
+// keyboard-hint text rendered next to the chip in dim style.
+type statusChipSpec struct {
+	label string
+	hint  string
+	style lipgloss.Style
+}
+
+// chipFor returns the chip spec for the current status. When the status is
+// animated the label is prefixed with the current spinner frame so the chip
+// itself pulses rather than the spinner floating next to it.
+func (m *AgentPaneModel) chipFor() statusChipSpec {
+	var spec statusChipSpec
+	switch m.status {
+	case event.StatusIdle:
+		spec = statusChipSpec{label: "READY", style: chipStyleIdle}
+	case event.StatusThinking:
+		spec = statusChipSpec{label: "THINKING", style: chipStyleThinking}
+	case event.StatusPlanning:
+		spec = statusChipSpec{label: "PLANNING", style: chipStylePlanning}
+	case event.StatusPlanningWaiting:
+		spec = statusChipSpec{label: "PLAN", hint: ":done execute · :skip", style: chipStylePlanWait}
+	case event.StatusReviewing:
+		spec = statusChipSpec{label: "REVIEW", hint: "Ctrl+O approve · Esc reject", style: chipStyleReview}
+	case event.StatusEditing:
+		spec = statusChipSpec{label: "EDIT", hint: "Ctrl+N continue", style: chipStyleEditing}
+	case event.StatusWaiting:
+		spec = statusChipSpec{label: "REPLY", hint: "Enter send", style: chipStyleWaiting}
+	case event.StatusAwaitingInput:
+		spec = statusChipSpec{label: "ANSWER", hint: "Enter send · Esc cancel", style: chipStyleAnswer}
+	case event.StatusLinting:
+		spec = statusChipSpec{label: "LINTING", style: chipStyleLinting}
+	default:
+		spec = statusChipSpec{label: "READY", style: chipStyleIdle}
 	}
-	// Append usage summary to the left section when data is available.
+	if statusAnimates(m.status) {
+		spec.label = string(spinnerFrames[m.spinnerFrame%len(spinnerFrames)]) + " " + spec.label
+	}
+	return spec
+}
+
+// renderStatusLine composes the final row: model + usage on the left, a
+// colored status chip on the right with an optional dim hint. Falls back
+// gracefully when the pane is narrow: drops the hint first, then the left
+// section, then truncates the chip label.
+func (m *AgentPaneModel) renderStatusLine() string {
+	// Left: model label + cumulative usage, dim.
+	var leftRaw strings.Builder
+	if m.modelLabel != "" {
+		leftRaw.WriteString(" ◇ ")
+		leftRaw.WriteString(sanitizeInlineDisplay(m.modelLabel))
+	}
 	if m.usage.turns > 0 && (m.usage.totalIn > 0 || m.usage.totalOut > 0) {
-		sep := " "
-		if left != "" {
-			sep = " | "
-		}
 		prefix := "~"
 		if m.usage.hasExact {
 			prefix = ""
 		}
-		usage := fmt.Sprintf("%s%s%s in", sep, prefix, formatTokenCount(m.usage.totalIn))
+		sep := " "
+		if leftRaw.Len() > 0 {
+			sep = " · "
+		}
+		fmt.Fprintf(&leftRaw, "%s%s%s↓", sep, prefix, formatTokenCount(m.usage.totalIn))
 		if m.usage.totalCached > 0 && m.usage.totalIn > 0 {
-			usage += fmt.Sprintf(" (%s cached)", formatTokenCount(m.usage.totalCached))
+			pct := m.usage.totalCached * 100 / m.usage.totalIn
+			fmt.Fprintf(&leftRaw, " (%d%%⚡)", pct)
 		}
-		usage += fmt.Sprintf(" · %s%s out", prefix, formatTokenCount(m.usage.totalOut))
-		left += usage
+		fmt.Fprintf(&leftRaw, " · %s%s↑", prefix, formatTokenCount(m.usage.totalOut))
 	}
-	right := ""
-	if statusMsg != "" {
-		right = statusMsg + " "
+	left := statusLeftStyle.Render(leftRaw.String())
+	leftW := lipgloss.Width(left)
+
+	// Right: chip + optional hint.
+	spec := m.chipFor()
+	chip := spec.style.Render(spec.label)
+	chipW := lipgloss.Width(chip)
+	hint := ""
+	hintW := 0
+	if spec.hint != "" {
+		hint = " " + statusHintStyle.Render(spec.hint) + " "
+		hintW = lipgloss.Width(hint)
 	}
-	leftW := runewidth.StringWidth(left)
-	rightW := runewidth.StringWidth(right)
-	padding := m.width - leftW - rightW
-	if padding < 1 {
-		// Not enough space — prefer the status message over the model label.
-		if right != "" {
-			return style.Render(m.padLine(runewidth.Truncate(right, m.width, "…")))
-		}
-		return style.Render(m.padLine(runewidth.Truncate(left, m.width, "…")))
+
+	gap := m.width - leftW - chipW - hintW
+	if gap >= 1 {
+		return left + strings.Repeat(" ", gap) + chip + hint
 	}
-	return style.Render(left + strings.Repeat(" ", padding) + right)
+	// Drop the hint.
+	gap = m.width - leftW - chipW
+	if gap >= 1 {
+		return left + strings.Repeat(" ", gap) + chip
+	}
+	// Drop the left section — keep the chip right-aligned, padded.
+	gap = m.width - chipW
+	if gap >= 0 {
+		return strings.Repeat(" ", gap) + chip
+	}
+	// Chip itself doesn't fit — truncate label with ellipsis.
+	fallback := spec.style.Render(runewidth.Truncate(spec.label, m.width-2, "…"))
+	return m.padLine(fallback)
 }
 
 // Render renders the agent pane as exactly m.height lines joined by \n.
@@ -1945,36 +2038,10 @@ func (m *AgentPaneModel) Render() string {
 		m.renderInputArea(output, &row)
 	}
 
-	// Status line (last row): model label on the left, status on the right.
+	// Status line (last row): model + usage on the left, colored chip
+	// + optional keyboard hint on the right.
 	if row < m.height {
-		var statusMsg string
-		style := agentStatusStyle
-		switch m.status {
-		case event.StatusIdle:
-			statusMsg = "Ready"
-			style = agentDimStyle
-		case event.StatusThinking:
-			statusMsg = "Thinking..."
-		case event.StatusPlanning:
-			statusMsg = "Planning..."
-		case event.StatusPlanningWaiting:
-			statusMsg = "Planning | :done to execute | :skip"
-		case event.StatusReviewing:
-			statusMsg = "Ctrl+O approve | Esc reject"
-		case event.StatusEditing:
-			statusMsg = "Ctrl+N to continue"
-		case event.StatusWaiting:
-			statusMsg = "Type to reply | Enter send"
-		case event.StatusAwaitingInput:
-			statusMsg = "Awaiting your answer | Enter send | Esc cancel"
-			style = agentAwaitStyle
-		case event.StatusLinting:
-			statusMsg = "Running style lint..."
-		}
-		if statusAnimates(m.status) && statusMsg != "" {
-			statusMsg = string(spinnerFrames[m.spinnerFrame%len(spinnerFrames)]) + " " + statusMsg
-		}
-		output[row] = m.renderStatusLine(style, statusMsg)
+		output[row] = m.renderStatusLine()
 	}
 
 	return strings.Join(output, "\n")

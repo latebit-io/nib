@@ -924,7 +924,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentInputEstimate:
 		m.AgentPane.SetStreamingInput(e)
 	case event.AgentTurnUsage:
-		m.AgentPane.AppendMeta(formatTurnUsage(e))
+		m.AgentPane.AppendTurnUsage(e)
 		m.AgentPane.UpdateUsage(e)
 	case event.AgentCompacted:
 		m.AgentPane.AppendMeta(formatCompacted(e))

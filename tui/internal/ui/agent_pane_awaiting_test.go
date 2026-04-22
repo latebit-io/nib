@@ -197,8 +197,10 @@ func TestStatusBar_AwaitingInputRendersDistinctly(t *testing.T) {
 	m.SetStatus(event.StatusAwaitingInput)
 
 	out := m.Render()
-	if !strings.Contains(out, "Awaiting your answer") {
-		t.Errorf("status bar should read 'Awaiting your answer' for StatusAwaitingInput; got:\n%s", out)
+	// Chip label + hint must both render so the developer sees state
+	// and the key bindings without reading a legend.
+	if !strings.Contains(out, "ANSWER") {
+		t.Errorf("status bar should show ANSWER chip for StatusAwaitingInput; got:\n%s", out)
 	}
 	if !strings.Contains(out, "Esc cancel") {
 		t.Errorf("status bar should show Esc hint; got:\n%s", out)

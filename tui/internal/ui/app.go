@@ -883,6 +883,9 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshProjectPane()
 		}
 	case event.AgentError:
+		// Terminal branch — drop pane status to idle so the spinner loop
+		// stops rescheduling and any in-flight streaming tint settles.
+		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.AgentPane.ClearAwaitingInput()
 		m.clearEditorOverlay(false)

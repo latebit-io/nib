@@ -325,8 +325,14 @@ type AgentPaneModel struct {
 
 	// metaRawLines holds raw-line indices that should render as dim chrome
 	// (tool calls, bracketed status updates, proposed/applied markers,
-	// awaiting-input block, session summaries). Populated by AppendMeta.
+	// session summaries). Populated by AppendMeta.
 	metaRawLines map[int]bool
+	// plainRawLines holds raw-line indices whose content must bypass both
+	// the markdown renderer and the code-fence detector — e.g. the
+	// awaiting-input block, which carries attacker-supplied prompt text
+	// that would otherwise be able to open a fence via unmatched
+	// backticks and flip subsequent agent output into code styling.
+	plainRawLines map[int]bool
 	// turnSeparatorRawLines maps the raw-line index of a turn divider
 	// to its label (e.g. "turn 2"). Render substitutes a full-width
 	// centered rendering for these indices.
@@ -450,11 +456,31 @@ func (m *AgentPaneModel) ShowAwaitingInput(e event.AgentAwaitingInput) {
 		Options: e.Options,
 		CallID:  e.CallID,
 	}
-	// Sanitize + AppendText directly rather than AppendMeta — the block
-	// carries the agent's actual question and must stay at default
-	// foreground, not be dimmed as chrome.
+	// The block carries the agent's actual question, so it must stay at
+	// default foreground (not dimmed as meta) AND bypass the markdown /
+	// fence pipeline — an unmatched backtick in Prompt or Reason would
+	// otherwise open a code fence that styles the rest of the turn. We
+	// append through the raw path and mark the new raw lines as plain
+	// so recomputeCodeBlock skips them and Render renders them as-is.
 	var s sanitize.Sanitizer
+	firstRaw := len(m.RawLines)
 	m.AppendText(s.Sanitize(renderAwaitingInputBlock(e)))
+	endRaw := len(m.RawLines)
+	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
+		endRaw--
+	}
+	if m.plainRawLines == nil {
+		m.plainRawLines = make(map[int]bool)
+	}
+	for i := firstRaw; i < endRaw; i++ {
+		m.plainRawLines[i] = true
+	}
+	// Re-run fence detection from firstRaw now that plainRawLines is
+	// populated — AppendText already ran recomputeCodeBlock, but it saw
+	// the block as untagged, so an embedded fence might have leaked into
+	// rawFenceAfter. This call resets that.
+	m.recomputeCodeBlock(firstRaw)
+	m.invalidateMdCache()
 	m.input.Reset()
 	m.inputActive = true
 	m.recomputeInputLayout()
@@ -848,7 +874,10 @@ func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 		// User messages are rendered with userMessageStyle, not markdown.
 		// Skip them so an unmatched fence in user input doesn't bleed into
 		// subsequent agent output.
-		if m.userRawLines[ri] {
+		if m.userRawLines[ri] || m.plainRawLines[ri] {
+			// Both classes bypass fence detection: user messages and
+			// awaiting-input blocks may contain unmatched backticks that
+			// must not flip the state of subsequent agent output.
 			m.rawFenceAfter = append(m.rawFenceAfter, fence)
 			wStart := m.wrappedIndex[ri]
 			wEnd := len(m.Lines)
@@ -1337,6 +1366,7 @@ func (m *AgentPaneModel) Clear() {
 	m.turnStartRaw = 0
 	m.streamingStartRaw = -1
 	m.metaRawLines = nil
+	m.plainRawLines = nil
 	m.turnSeparatorRawLines = nil
 	m.spinnerFrame = 0
 	// spinnerRunning intentionally not reset: a tick may still be in-flight
@@ -1489,6 +1519,17 @@ func (m *AgentPaneModel) isMeta(wrappedIdx int) bool {
 	}
 	rawIdx := m.rawIndexOf(wrappedIdx)
 	return rawIdx >= 0 && m.metaRawLines[rawIdx]
+}
+
+// isPlain reports whether the wrapped line must bypass markdown and streaming
+// styling. Used for agent-supplied content that could otherwise open code
+// fences or trigger inline markdown (e.g. the awaiting-input block).
+func (m *AgentPaneModel) isPlain(wrappedIdx int) bool {
+	if len(m.plainRawLines) == 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	return rawIdx >= 0 && m.plainRawLines[rawIdx]
 }
 
 // turnSeparatorLabel returns the label for a wrapped line that represents a
@@ -1850,14 +1891,19 @@ func (m *AgentPaneModel) Render() string {
 					line.WriteString(strings.Repeat(" ", m.width-cellsUsed))
 				}
 				output[row] = line.String()
+			} else if label := m.turnSeparatorLabel(lineIdx); label != "" {
+				// Separator check wins over dim so past-turn dividers
+				// get the same full-width rule as the current one;
+				// renderTurnSeparator already applies agentDimStyle.
+				output[row] = renderTurnSeparator(label, m.width)
 			} else if m.isDim(lineIdx) {
 				output[row] = agentDimStyle.Render(m.padLine(lineText))
-			} else if label := m.turnSeparatorLabel(lineIdx); label != "" {
-				output[row] = renderTurnSeparator(label, m.width)
 			} else if m.isUserLine(lineIdx) {
 				output[row] = userMessageStyle.Render(m.padLine(lineText))
 			} else if m.isMeta(lineIdx) {
 				output[row] = agentDimStyle.Render(m.padLine(lineText))
+			} else if m.isPlain(lineIdx) {
+				output[row] = m.padLine(lineText)
 			} else if m.isStreaming(lineIdx) {
 				output[row] = streamingTintStyle.Render(m.padLine(lineText))
 			} else {

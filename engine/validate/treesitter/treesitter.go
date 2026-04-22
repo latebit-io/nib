@@ -187,11 +187,10 @@ func visitErrors(n *sitter.Node, visit func(*sitter.Node) bool) {
 }
 
 // findingsFromErrors converts up to limit error positions into
-// lint.Finding values for structured reporting.
+// lint.Finding values for structured reporting. Callers pass a positive
+// limit; no unlimited/zero-means-all convention is supported.
 func findingsFromErrors(path string, errs []errorPos, limit int) []lint.Finding {
-	if limit <= 0 || len(errs) < limit {
-		limit = len(errs)
-	}
+	limit = min(limit, len(errs))
 	out := make([]lint.Finding, 0, limit)
 	for _, e := range errs[:limit] {
 		msg := "unexpected syntax"

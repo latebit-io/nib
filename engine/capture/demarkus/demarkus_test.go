@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/capture"
 	"github.com/latebit-io/junto/engine/memory"
@@ -94,11 +95,20 @@ func (f *fakeStore) Append(_ context.Context, p, body string, expected int) (mem
 
 func (f *fakeStore) List(context.Context, string) ([]string, error) { return nil, nil }
 
+// snapshot returns the recorded publish/append calls and the body of
+// the single tracked document. Every test in this file uses a unique
+// session ID, so the fake never holds more than one document at a
+// time; the guard panics if that assumption is violated so a future
+// multi-doc test fails loudly instead of silently returning one doc's
+// body. Callers that need per-path bodies should switch to a map.
 func (f *fakeStore) snapshot() (pubs []publishCall, appends []appendCall, body string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pubs = append(pubs, f.publish...)
 	appends = append(appends, f.appends...)
+	if len(f.docs) > 1 {
+		panic("fakeStore.snapshot: multiple docs tracked — update the test or return a map")
+	}
 	for _, d := range f.docs {
 		body = d.Body
 	}
@@ -264,6 +274,42 @@ func TestFieldSizeCap(t *testing.T) {
 	}
 }
 
+// TestFieldSizeCapUTF8Safe verifies the rune-aware truncation. Byte-index
+// slicing would split the 2-byte é rune (0xC3 0xA9) mid-sequence when
+// maxBytes lands on the continuation byte; the cut must retreat to the
+// preceding rune boundary so the persisted payload is valid UTF-8.
+func TestFieldSizeCapUTF8Safe(t *testing.T) {
+	t.Parallel()
+
+	// Build a string where byte 5 is a continuation byte. "héllo世界"
+	// layout: h(1) é(2) l(1) l(1) o(1) 世(3) 界(3).
+	// Cap to 6 bytes: naive slice ends mid-"世", which is invalid UTF-8.
+	store := newFakeStore()
+	sink := New(store, "utf8-safe", Config{MaxFieldBytes: 6})
+
+	_ = sink.Append(context.Background(), capture.Event{
+		Kind: "proposal", Payload: map[string]any{"replace": "héllo世界"},
+	})
+	flushSink(t, sink)
+
+	_, _, body := store.snapshot()
+
+	// The persisted JSON must be valid UTF-8. Any mid-rune slice would
+	// leave a stray continuation byte and fail this check.
+	if !utf8.ValidString(body) {
+		t.Errorf("persisted body is not valid UTF-8 — truncation split a rune: %q", body)
+	}
+	if !strings.Contains(body, "héllo") {
+		t.Errorf("body missing the ASCII+é prefix that fits under the cap: %q", body)
+	}
+	// The 世 rune (3 bytes at offsets 6,7,8) cannot fit under maxBytes=6
+	// once the é has consumed bytes 1–2, so it must not appear in the
+	// truncated output.
+	if strings.Contains(body, "世") {
+		t.Errorf("truncated body includes a rune past the cap: %q", body)
+	}
+}
+
 // TestAppendAfterCloseReturnsError verifies Close is a hard boundary —
 // calls that arrive after it must surface an error so callers (usually
 // tests) can detect misuse. The production session path never hits this
@@ -330,6 +376,41 @@ func TestCloseSkipsSummaryWhenNothingWritten(t *testing.T) {
 	if len(pubs) != 0 || len(apps) != 0 {
 		t.Errorf("unexpected writes: publish=%d append=%d", len(pubs), len(apps))
 	}
+}
+
+// TestAppendCloseNoPanicOrRace hammers Append and Close concurrently so
+// the race detector (and the runtime's send-on-closed-channel panic)
+// catch any regression in the Append/Close synchronisation. Without
+// holding s.mu across the non-blocking select in Append, the sequence
+// "Append observes closed=false → Close sets closed=true and closes
+// the channel → Append sends" would panic on closed-channel send.
+func TestAppendCloseNoPanicOrRace(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	sink := New(store, "race-close", Config{BufferSize: 4})
+
+	var wg sync.WaitGroup
+
+	// Spawn many senders so Append is overwhelmingly likely to be
+	// mid-select when Close fires.
+	for range 8 {
+		wg.Go(func() {
+			for range 200 {
+				_ = sink.Append(context.Background(), capture.Event{Kind: "x"})
+			}
+		})
+	}
+
+	// Small head-start so appenders are already in flight before
+	// Close runs.
+	time.Sleep(time.Millisecond)
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := sink.Close(closeCtx); err != nil {
+		t.Errorf("Close returned: %v", err)
+	}
+	wg.Wait()
 }
 
 // TestCloseIdempotent verifies Close can safely be called more than once

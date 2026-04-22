@@ -44,6 +44,12 @@ type Candidate struct {
 }
 
 // Verdict describes a validator's overall judgement on a candidate.
+//
+// Constant order is load-bearing: [WorstVerdict] compares Verdicts
+// numerically on the invariant Pass < Retry < Block. Reordering the
+// iota declarations below silently breaks severity aggregation —
+// TestWorstVerdictOrdering locks the behaviour in, but keep the
+// declaration order stable as the first line of defence.
 type Verdict int
 
 const (

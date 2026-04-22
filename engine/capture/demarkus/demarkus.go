@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/latebit-io/junto/engine/capture"
 	"github.com/latebit-io/junto/engine/memory"
@@ -126,22 +127,24 @@ func (s *Sink) DropCount() int {
 // caller — if the internal buffer is full, the event is dropped and a warn
 // log is emitted. Returns nil even on drop; the drop count is observable
 // via [Sink.DropCount] for tests and diagnostics.
+//
+// The lock is held across the non-blocking select so Close cannot race
+// between the closed-check and the channel send. Close also serialises on
+// s.mu before calling close(s.events), so any Append that observes
+// closed=false completes its send (or hits default) before Close can
+// proceed to close the channel.
 func (s *Sink) Append(_ context.Context, e capture.Event) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
-		s.mu.Unlock()
 		return errors.New("demarkus sink: append after close")
 	}
-	s.mu.Unlock()
-
 	select {
 	case s.events <- e:
 		return nil
 	default:
-		s.mu.Lock()
 		s.dropCount++
 		dropped := s.dropCount
-		s.mu.Unlock()
 		slog.Warn("demarkus capture: event dropped (buffer full)",
 			"kind", e.Kind, "session", s.sessionID, "total_dropped", dropped)
 		return nil
@@ -334,6 +337,11 @@ func formatEvent(e capture.Event) (string, error) {
 // capEventFields caps every string value in Payload at maxBytes. Non-string
 // values pass through untouched so structured counts and numbers keep full
 // precision. maxBytes <= 0 disables the cap.
+//
+// Truncation is rune-aware: if maxBytes would land inside a multi-byte
+// UTF-8 sequence, the cut retreats to the preceding rune boundary so the
+// stored payload is always valid UTF-8. The truncation marker itself
+// contains the "…" rune (U+2026) and is appended after the safe cut.
 func capEventFields(e capture.Event, maxBytes int) capture.Event {
 	if maxBytes <= 0 || len(e.Payload) == 0 {
 		return e
@@ -341,11 +349,22 @@ func capEventFields(e capture.Event, maxBytes int) capture.Event {
 	capped := make(map[string]any, len(e.Payload))
 	for k, v := range e.Payload {
 		if str, ok := v.(string); ok && len(str) > maxBytes {
-			capped[k] = str[:maxBytes] + "…[truncated]"
+			capped[k] = truncateAtRune(str, maxBytes) + "…[truncated]"
 			continue
 		}
 		capped[k] = v
 	}
 	e.Payload = capped
 	return e
+}
+
+// truncateAtRune returns s[:n'] where n' <= n and s[:n'] is valid UTF-8.
+// If n lands on a continuation byte, the function walks backwards up to
+// three bytes (the longest UTF-8 continuation tail) until it reaches a
+// rune-start byte. Callers guarantee n <= len(s).
+func truncateAtRune(s string, n int) string {
+	for n > 0 && n < len(s) && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

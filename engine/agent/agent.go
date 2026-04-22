@@ -1814,11 +1814,17 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 
 	// Retry path: the LLM can likely self-correct. Consume a budget
 	// slot; if exhausted, fall through with the summaries attached so
-	// the developer sees what the validators flagged.
+	// the developer sees what the validators flagged. The map is also
+	// mutated by RunWithMode/Reply/recordEdit, so every access is
+	// guarded by a.mu — matching the existing recordEdit pattern.
+	a.mu.Lock()
 	a.validatorRetries[proposal.CanonPath]++
-	if a.validatorRetries[proposal.CanonPath] > maxValidatorRetries {
+	attempts := a.validatorRetries[proposal.CanonPath]
+	a.mu.Unlock()
+
+	if attempts > maxValidatorRetries {
 		slog.Warn("validator retry budget exhausted; surfacing proposal",
-			"path", proposal.CanonPath, "attempts", a.validatorRetries[proposal.CanonPath])
+			"path", proposal.CanonPath, "attempts", attempts)
 		return summaries, ""
 	}
 	return summaries, aggregateRetryFeedback(results)

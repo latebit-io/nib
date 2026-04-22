@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
@@ -152,5 +155,74 @@ func TestRunValidationPipelineNoOpReturnsNilFast(t *testing.T) {
 	summaries, feedback := ag.runValidationPipeline(context.Background(), sampleProposal())
 	if len(summaries) != 0 || feedback != "" {
 		t.Errorf("NoopPipeline path: summaries=%+v feedback=%q; want both empty", summaries, feedback)
+	}
+}
+
+// alwaysRetryPipeline returns a Retry verdict on every Run call so the
+// race-detector test deterministically exercises the map mutation path
+// in runValidationPipeline. Separate from fakePipeline (which consumes
+// a finite queue) so this test can run for an arbitrary duration.
+type alwaysRetryPipeline struct{ calls atomic.Int64 }
+
+func (p *alwaysRetryPipeline) Run(context.Context, validate.Candidate) []validate.Result {
+	p.calls.Add(1)
+	return []validate.Result{{
+		Verdict: validate.Retry, Stage: "fake", Feedback: "retry",
+	}}
+}
+
+// TestValidatorRetriesNoRace exercises the validatorRetries map
+// concurrently from two mutation paths that lock on a.mu:
+//
+//   - runValidationPipeline (increments the per-path counter on every
+//     Retry verdict)
+//   - recordEdit (deletes the per-path counter on every successful
+//     approval)
+//
+// If either path drops its a.mu guard, `go test -race` fails
+// immediately with a concurrent-map-access fatal. The test is cheap
+// (100 ms of hammering) but the guarantee it provides is exactly the
+// regression CodeRabbit flagged — a run-time fatal if the locking
+// discipline regresses.
+func TestValidatorRetriesNoRace(t *testing.T) {
+	t.Parallel()
+
+	pipe := &alwaysRetryPipeline{}
+	ag, _ := newPipelineTestAgent(t, pipe)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	proposal := sampleProposal()
+
+	// Hammer the increment path — one call per iteration increments
+	// the counter up to maxValidatorRetries, then surfaces.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			ag.runValidationPipeline(context.Background(), proposal)
+		}
+	}()
+
+	// Hammer the delete path — recordEdit takes the lock and removes
+	// the counter. Races with the increment goroutine's map access.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			ag.recordEdit(proposal)
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	wg.Wait()
+
+	// Sanity: the pipeline was actually invoked many times. Otherwise
+	// the test passed trivially (no mutations → no race).
+	if got := pipe.calls.Load(); got < 100 {
+		t.Errorf("pipeline called %d times; test did not exercise enough iterations", got)
 	}
 }

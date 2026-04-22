@@ -313,6 +313,82 @@ func TestAgentPaneModel_isCodeLine_UserFenceNoBleed(t *testing.T) {
 	}
 }
 
+// TestAgentPaneModel_TurnSeparator_NarrowWidthNoBleed verifies that at a
+// pane width narrow enough for the separator placeholder "── turn N ──"
+// to wrap, the continuation wrapped segments render as dim blanks rather
+// than falling through to markdown (which would print "── tu" / "rn 2 ─"
+// fragments under the divider).
+func TestAgentPaneModel_TurnSeparator_NarrowWidthNoBleed(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
+	m.SetSize(8, 20) // narrower than "── turn 2 ──" (12 cells)
+
+	m.AppendText("agent before")
+	m.AppendUserMessage("hello")
+
+	// Locate the separator raw line and any continuation wrapped segments.
+	sepRaw := -1
+	for raw := range m.turnSeparatorRawLines {
+		sepRaw = raw
+		break
+	}
+	if sepRaw < 0 {
+		t.Fatal("expected a separator raw line after AppendUserMessage")
+	}
+	firstWrapped := m.wrappedIndex[sepRaw]
+	nextRawStart := len(m.Lines)
+	if sepRaw+1 < len(m.wrappedIndex) {
+		nextRawStart = m.wrappedIndex[sepRaw+1]
+	}
+	// Every wrapped segment of the separator raw must be classified as
+	// either the separator itself (first) or a continuation.
+	for wi := firstWrapped; wi < nextRawStart; wi++ {
+		isFirst := wi == firstWrapped
+		label := m.turnSeparatorLabel(wi)
+		cont := m.isTurnSeparatorContinuation(wi)
+		if isFirst && (label == "" || cont) {
+			t.Errorf("first wrapped idx %d: label=%q cont=%v; want label set, cont false", wi, label, cont)
+		}
+		if !isFirst && (label != "" || !cont) {
+			t.Errorf("continuation wrapped idx %d: label=%q cont=%v; want label empty, cont true", wi, label, cont)
+		}
+	}
+}
+
+// TestAgentPaneModel_AppendMeta_NoBleedIntoNextChunk verifies that a
+// single-line meta string (no trailing "\n") cannot merge with a
+// subsequent agent token. AppendMeta must force both leading and
+// trailing newlines so the reusable tail raw line stays unclassified.
+func TestAgentPaneModel_AppendMeta_NoBleedIntoNextChunk(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
+	m.SetSize(80, 30)
+
+	m.AppendText("agent line")
+	m.AppendMeta("[applied]") // no trailing "\n"
+	m.AppendText("next agent chunk")
+
+	// The "[applied]" raw line must be marked meta; the following
+	// agent chunk must NOT be.
+	foundApplied, foundNext := false, false
+	for i, raw := range m.RawLines {
+		wi := m.wrappedIndex[i]
+		switch raw {
+		case "[applied]":
+			foundApplied = true
+			if !m.isMeta(wi) {
+				t.Errorf("[applied] line at raw idx %d should be meta", i)
+			}
+		case "next agent chunk":
+			foundNext = true
+			if m.isMeta(wi) {
+				t.Errorf("next agent chunk at raw idx %d must not inherit meta marking", i)
+			}
+		}
+	}
+	if !foundApplied || !foundNext {
+		t.Fatalf("expected both raw lines to be present; got RawLines=%v", m.RawLines)
+	}
+}
+
 // TestAgentPaneModel_isCodeLine_AwaitingInputFenceNoBleed verifies that an
 // unmatched fence inside an awaiting-input prompt (agent-supplied content)
 // does not open a code block for subsequent agent output. Without the

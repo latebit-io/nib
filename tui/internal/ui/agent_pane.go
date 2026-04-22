@@ -803,6 +803,16 @@ func (m *AgentPaneModel) AppendMeta(text string) {
 	if !strings.HasPrefix(clean, "\n") {
 		clean = "\n" + clean
 	}
+	// Force a trailing newline too. Without this, a caller passing a
+	// single-line meta string (no "\n" terminator) would leave the meta
+	// content as the current last raw line. AppendText reuses the last
+	// raw line for the first chunk of the next append, so the first
+	// agent token after the meta block would be merged into that line
+	// and inherit the meta mark — rendering the token dim and leaking
+	// meta fence state into the stream.
+	if !strings.HasSuffix(clean, "\n") {
+		clean += "\n"
+	}
 	firstRaw := len(m.RawLines)
 	m.AppendText(clean)
 	endRaw := len(m.RawLines)
@@ -1568,8 +1578,9 @@ func (m *AgentPaneModel) isPlain(wrappedIdx int) bool {
 
 // turnSeparatorLabel returns the label for a wrapped line that represents a
 // turn divider, or "" if it isn't one. Only the FIRST wrapped line of the
-// owning raw line is treated as the separator — subsequent wrapped segments
-// (unlikely at normal widths) render as normal dim meta.
+// owning raw line returns the label — continuations are handled by
+// isTurnSeparatorContinuation so they render as dim blanks rather than
+// falling through to markdown.
 func (m *AgentPaneModel) turnSeparatorLabel(wrappedIdx int) string {
 	if len(m.turnSeparatorRawLines) == 0 {
 		return ""
@@ -1586,6 +1597,24 @@ func (m *AgentPaneModel) turnSeparatorLabel(wrappedIdx int) string {
 		return ""
 	}
 	return label
+}
+
+// isTurnSeparatorContinuation reports whether the wrapped line is a non-
+// first wrapped segment of a separator raw line. This happens only at
+// widths narrow enough to wrap the placeholder text — we blank those
+// segments rather than let fragments of "── turn N ──" render as markdown.
+func (m *AgentPaneModel) isTurnSeparatorContinuation(wrappedIdx int) bool {
+	if len(m.turnSeparatorRawLines) == 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	if rawIdx < 0 {
+		return false
+	}
+	if _, ok := m.turnSeparatorRawLines[rawIdx]; !ok {
+		return false
+	}
+	return rawIdx < len(m.wrappedIndex) && m.wrappedIndex[rawIdx] != wrappedIdx
 }
 
 // overlayScrollbar paints the rightmost column of the content region with a
@@ -1629,14 +1658,22 @@ func (m *AgentPaneModel) overlayScrollbar(output []string, vis int) {
 }
 
 // renderTurnSeparator produces a full-width dim divider centered around the
-// label, using heavy rules on each side. Falls back to the compact label if
-// the pane is too narrow to fit the rules and padding.
+// label, using heavy rules on each side. Falls back to a truncated label at
+// narrow widths rather than overflowing the pane.
 func renderTurnSeparator(label string, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	text := " " + label + " "
 	textW := runewidth.StringWidth(text)
 	if textW+6 > width {
-		// Too narrow for full-width rules — emit the label alone, padded.
-		return agentDimStyle.Render(padToWidth(text, width))
+		// Not enough room for rules on both sides. Truncate the label
+		// (with ellipsis) so it fits, then pad to width.
+		if textW > width {
+			text = runewidth.Truncate(text, width, "…")
+			textW = runewidth.StringWidth(text)
+		}
+		return agentDimStyle.Render(text + strings.Repeat(" ", width-textW))
 	}
 	totalRules := width - textW
 	leftRules := totalRules / 2
@@ -2007,6 +2044,11 @@ func (m *AgentPaneModel) Render() string {
 				// get the same full-width rule as the current one;
 				// renderTurnSeparator already applies agentDimStyle.
 				output[row] = renderTurnSeparator(label, m.width)
+			} else if m.isTurnSeparatorContinuation(lineIdx) {
+				// Wrapped tail of a separator placeholder at narrow
+				// widths — blank dim row rather than letting the raw
+				// fragment render as markdown garbage.
+				output[row] = agentDimStyle.Render(strings.Repeat(" ", m.width))
 			} else if m.isDim(lineIdx) {
 				output[row] = agentDimStyle.Render(m.padLine(lineText))
 			} else if m.isUserLine(lineIdx) {

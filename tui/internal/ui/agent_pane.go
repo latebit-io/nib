@@ -1898,9 +1898,23 @@ func (m *AgentPaneModel) renderStatusLine() string {
 	if gap >= 0 {
 		return strings.Repeat(" ", gap) + chip
 	}
-	// Chip itself doesn't fit — truncate label with ellipsis.
+	// Chip itself doesn't fit — truncate the label (plain text) first so
+	// runewidth can do it, then style.Render and finish with ANSI-aware
+	// trim + pad. padLine is unsafe here because the input is styled and
+	// its runewidth-based counter would miscount escape bytes.
+	if m.width <= 2 {
+		return strings.Repeat(" ", m.width)
+	}
 	fallback := spec.style.Render(runewidth.Truncate(spec.label, m.width-2, "…"))
-	return m.padLine(fallback)
+	fW := lipgloss.Width(fallback)
+	if fW > m.width {
+		fallback = ansi.Truncate(fallback, m.width, "")
+		fW = lipgloss.Width(fallback)
+	}
+	if fW < m.width {
+		fallback += strings.Repeat(" ", m.width-fW)
+	}
+	return fallback
 }
 
 // Render renders the agent pane as exactly m.height lines joined by \n.

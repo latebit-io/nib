@@ -334,9 +334,12 @@ func formatEvent(e capture.Event) (string, error) {
 	return b.String(), nil
 }
 
-// capEventFields caps every string value in Payload at maxBytes. Non-string
-// values pass through untouched so structured counts and numbers keep full
-// precision. maxBytes <= 0 disables the cap.
+// capEventFields caps every string value in Payload at maxBytes,
+// recursively descending into nested map[string]any and []any containers
+// so a long string nested under a validator or stages payload cannot
+// bypass the size boundary. Non-string leaves pass through untouched so
+// structured counts and numbers keep full precision. maxBytes <= 0
+// disables the cap.
 //
 // Truncation is rune-aware: if maxBytes would land inside a multi-byte
 // UTF-8 sequence, the cut retreats to the preceding rune boundary so the
@@ -348,14 +351,51 @@ func capEventFields(e capture.Event, maxBytes int) capture.Event {
 	}
 	capped := make(map[string]any, len(e.Payload))
 	for k, v := range e.Payload {
-		if str, ok := v.(string); ok && len(str) > maxBytes {
-			capped[k] = truncateAtRune(str, maxBytes) + "…[truncated]"
-			continue
-		}
-		capped[k] = v
+		capped[k] = capValue(v, maxBytes)
 	}
 	e.Payload = capped
 	return e
+}
+
+// capValue returns v with every string leaf truncated to maxBytes,
+// recursing through map[string]any and []any containers. Non-string,
+// non-container values (numbers, bools, nil, structs) pass through
+// unchanged — JSON marshalling handles them as-is and they carry no
+// unbounded-growth risk in the payloads this adapter emits.
+func capValue(v any, maxBytes int) any {
+	switch x := v.(type) {
+	case string:
+		if len(x) > maxBytes {
+			return truncateAtRune(x, maxBytes) + "…[truncated]"
+		}
+		return x
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, child := range x {
+			out[k] = capValue(child, maxBytes)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, child := range x {
+			out[i] = capValue(child, maxBytes)
+		}
+		return out
+	case []map[string]any:
+		// Frequent in our emit paths (e.g. validator stages), so
+		// handle it explicitly — a type switch on []any would miss it.
+		out := make([]map[string]any, len(x))
+		for i, child := range x {
+			capped := make(map[string]any, len(child))
+			for k, v := range child {
+				capped[k] = capValue(v, maxBytes)
+			}
+			out[i] = capped
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // truncateAtRune returns s[:n'] where n' <= n and s[:n'] is valid UTF-8.

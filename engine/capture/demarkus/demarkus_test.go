@@ -127,6 +127,17 @@ func flushSink(t *testing.T, s *Sink) {
 	}
 }
 
+// mustAppend enqueues an event and fatals on any error. Single-threaded
+// Append calls against an open sink are guaranteed to succeed (the only
+// error path is "append after close"), so a non-nil return signals a
+// regression the test must surface immediately.
+func mustAppend(t *testing.T, s *Sink, e capture.Event) {
+	t.Helper()
+	if err := s.Append(context.Background(), e); err != nil {
+		t.Fatalf("Append(%s): %v", e.Kind, err)
+	}
+}
+
 // TestFirstEventPublishesWithVersionZero verifies the initial write creates
 // the document via Publish(expectedVersion=0) with a YAML front-matter
 // header, and that subsequent events are appended with the incrementing
@@ -137,10 +148,10 @@ func TestFirstEventPublishesWithVersionZero(t *testing.T) {
 	store := newFakeStore()
 	sink := New(store, "test-session", Config{})
 
-	_ = sink.Append(context.Background(), capture.Event{
+	mustAppend(t, sink, capture.Event{
 		Kind: "intent", Payload: map[string]any{"goal": "fix bug"},
 	})
-	_ = sink.Append(context.Background(), capture.Event{
+	mustAppend(t, sink, capture.Event{
 		Kind: "proposal", Payload: map[string]any{"id": "e1"},
 	})
 	flushSink(t, sink)
@@ -180,10 +191,12 @@ func TestAppendNeverBlocks(t *testing.T) {
 	// cannot drain the buffer.
 	blocker := &blockingStore{gate: make(chan struct{})}
 	sink := New(blocker, "blocked", Config{BufferSize: 1})
-	defer func() {
+	t.Cleanup(func() {
 		close(blocker.gate)
-		_ = sink.Close(context.Background())
-	}()
+		if err := sink.Close(context.Background()); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 
 	// Buffer holds 1. First Append lands in buffer; second, third, fourth
 	// all overflow because the dispatch goroutine is stuck inside Publish.
@@ -237,7 +250,7 @@ func TestRedactorApplied(t *testing.T) {
 			return e
 		},
 	})
-	_ = sink.Append(context.Background(), capture.Event{
+	mustAppend(t, sink, capture.Event{
 		Kind: "intent", Payload: map[string]any{"goal": "original secret"},
 	})
 	flushSink(t, sink)
@@ -260,7 +273,7 @@ func TestFieldSizeCap(t *testing.T) {
 	sink := New(store, "capped", Config{MaxFieldBytes: 16})
 
 	big := strings.Repeat("A", 1024)
-	_ = sink.Append(context.Background(), capture.Event{
+	mustAppend(t, sink, capture.Event{
 		Kind: "proposal", Payload: map[string]any{"replace": big},
 	})
 	flushSink(t, sink)
@@ -271,6 +284,43 @@ func TestFieldSizeCap(t *testing.T) {
 	}
 	if !strings.Contains(body, "truncated") {
 		t.Errorf("truncation marker missing from body: %q", body)
+	}
+}
+
+// TestFieldSizeCapDescendsIntoNestedContainers verifies the cap reaches
+// strings nested under map[string]any and []map[string]any payloads —
+// the exact shape the "validator" capture kind emits, where a long
+// stage.feedback string would otherwise bypass the size boundary.
+func TestFieldSizeCapDescendsIntoNestedContainers(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	sink := New(store, "nested-cap", Config{MaxFieldBytes: 16})
+
+	big := strings.Repeat("B", 512)
+	mustAppend(t, sink, capture.Event{
+		Kind: "validator",
+		Payload: map[string]any{
+			// Mirrors validatorStagesPayload's shape in session.go.
+			"stages": []map[string]any{
+				{"stage": "go-parse", "verdict": "retry", "feedback": big},
+			},
+			// Also test []any nesting in case callers use that shape.
+			"aux": []any{
+				map[string]any{"note": big},
+			},
+		},
+	})
+	flushSink(t, sink)
+
+	_, _, body := store.snapshot()
+	if strings.Contains(body, big) {
+		t.Errorf("nested string was not truncated; body contains full %d-byte field", len(big))
+	}
+	// The cap applies per field, so both nested fields should carry
+	// the truncation marker.
+	if strings.Count(body, "truncated") < 2 {
+		t.Errorf("truncation marker missing from one or both nested fields: %q", body)
 	}
 }
 
@@ -287,7 +337,7 @@ func TestFieldSizeCapUTF8Safe(t *testing.T) {
 	store := newFakeStore()
 	sink := New(store, "utf8-safe", Config{MaxFieldBytes: 6})
 
-	_ = sink.Append(context.Background(), capture.Event{
+	mustAppend(t, sink, capture.Event{
 		Kind: "proposal", Payload: map[string]any{"replace": "héllo世界"},
 	})
 	flushSink(t, sink)
@@ -337,10 +387,10 @@ func TestCloseWritesSummary(t *testing.T) {
 	store := newFakeStore()
 	sink := New(store, "summary-test", Config{})
 
-	_ = sink.Append(context.Background(), capture.Event{Kind: "intent"})
-	_ = sink.Append(context.Background(), capture.Event{Kind: "proposal"})
-	_ = sink.Append(context.Background(), capture.Event{Kind: "proposal"})
-	_ = sink.Append(context.Background(), capture.Event{Kind: "accepted"})
+	mustAppend(t, sink, capture.Event{Kind: "intent"})
+	mustAppend(t, sink, capture.Event{Kind: "proposal"})
+	mustAppend(t, sink, capture.Event{Kind: "proposal"})
+	mustAppend(t, sink, capture.Event{Kind: "accepted"})
 	flushSink(t, sink)
 
 	_, _, body := store.snapshot()
@@ -397,6 +447,12 @@ func TestAppendCloseNoPanicOrRace(t *testing.T) {
 	for range 8 {
 		wg.Go(func() {
 			for range 200 {
+				// Intentional error suppression: this test deliberately
+				// races Append against Close, so any Append that arrives
+				// after Close wins the race legitimately returns
+				// "append after close". The test's correctness signal
+				// is "no panic and no race detector fatal", not "every
+				// Append succeeds."
 				_ = sink.Append(context.Background(), capture.Event{Kind: "x"})
 			}
 		})

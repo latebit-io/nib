@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -133,7 +134,24 @@ func (s *Sink) DropCount() int {
 // s.mu before calling close(s.events), so any Append that observes
 // closed=false completes its send (or hits default) before Close can
 // proceed to close the channel.
+//
+// Payload snapshotting: the redactor and size-cap transforms run here
+// (not in the dispatch goroutine) so the enqueued event's Payload tree
+// is already a fresh deep-copy by the time it reaches the channel. This
+// closes the window where a caller could mutate Event.Payload between
+// Append and persist and race the dispatch goroutine. Net cost is ~zero
+// because capEventFields was already deep-copying; this moves the work
+// earlier in the pipeline, not adds new allocations.
 func (s *Sink) Append(_ context.Context, e capture.Event) error {
+	// Transform before the lock so the synchronous critical section
+	// stays short. Callers observe the canonical form immediately; the
+	// dispatch goroutine reads from a snapshot that no other goroutine
+	// holds a reference to.
+	if s.cfg.Redactor != nil {
+		e = s.cfg.Redactor(e)
+	}
+	e = capEventFields(e, s.cfg.MaxFieldBytes)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -187,12 +205,12 @@ func (s *Sink) run() {
 // publishes the document with a YAML front-matter header; subsequent
 // events append markdown entries. Errors are logged and the sink
 // continues — capture must not block the session.
+//
+// The event is already redacted and size-capped by Append, so persist
+// just serialises + writes. Keeping transforms out of this goroutine
+// means the dispatch loop has no synchronisation dependency on caller
+// code paths (redactors, etc.) that might mutate shared state.
 func (s *Sink) persist(e capture.Event) {
-	if s.cfg.Redactor != nil {
-		e = s.cfg.Redactor(e)
-	}
-	e = capEventFields(e, s.cfg.MaxFieldBytes)
-
 	body, err := formatEvent(e)
 	if err != nil {
 		slog.Warn("demarkus capture: format failed", "kind", e.Kind, "err", err)
@@ -358,10 +376,16 @@ func capEventFields(e capture.Event, maxBytes int) capture.Event {
 }
 
 // capValue returns v with every string leaf truncated to maxBytes,
-// recursing through map[string]any and []any containers. Non-string,
-// non-container values (numbers, bools, nil, structs) pass through
-// unchanged — JSON marshalling handles them as-is and they carry no
-// unbounded-growth risk in the payloads this adapter emits.
+// recursing through string-keyed maps and slices/arrays of any element
+// type. Non-container, non-string leaves (numbers, bools, nil) pass
+// through unchanged — JSON marshalling handles them as-is and they
+// carry no unbounded-growth risk.
+//
+// The fast paths (string, map[string]any, []any, []map[string]any) cover
+// every shape the session package produces; the reflect fallback
+// catches typed containers a future caller might build (e.g. []string,
+// map[string]string, [][]any) so the size cap remains a true boundary,
+// not a convention.
 func capValue(v any, maxBytes int) any {
 	switch x := v.(type) {
 	case string:
@@ -391,6 +415,49 @@ func capValue(v any, maxBytes int) any {
 				capped[k] = capValue(v, maxBytes)
 			}
 			out[i] = capped
+		}
+		return out
+	case nil, bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		// Scalar fast path — skip the reflect fallback for primitives
+		// since they're the bulk of non-string leaves in real payloads.
+		return v
+	default:
+		return capReflect(v, maxBytes)
+	}
+}
+
+// capReflect handles typed containers (e.g. []string, map[string]string)
+// that the type switch can't match cheaply. Containers are rewritten as
+// []any / map[string]any, which serialises identically via json.Marshal
+// while letting the recursion reach string leaves. Non-container types
+// (structs, funcs, channels, etc.) pass through unchanged — they aren't
+// JSON-meaningful payload values anyway.
+func capReflect(v any, maxBytes int) any {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return v
+	}
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		out := make([]any, rv.Len())
+		for i := range rv.Len() {
+			out[i] = capValue(rv.Index(i).Interface(), maxBytes)
+		}
+		return out
+	case reflect.Map:
+		// Only walk maps with string keys — JSON encodable maps are
+		// always string-keyed, so non-string-keyed maps aren't valid
+		// Payload values and we leave them untouched.
+		if rv.Type().Key().Kind() != reflect.String {
+			return v
+		}
+		out := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			out[iter.Key().String()] = capValue(iter.Value().Interface(), maxBytes)
 		}
 		return out
 	default:

@@ -42,10 +42,19 @@ type Event struct {
 // goroutine and any agent-event dispatch goroutine. Append must not block
 // the hot path — adapters backed by RPC should buffer internally and drop
 // (with a warning log) on overflow rather than stall the session.
+//
+// Ownership contract: Append is expected to snapshot the event before
+// returning, so callers can safely let Event.Payload fall out of scope
+// or even mutate it after Append returns. Adapters that persist events
+// asynchronously MUST deep-copy Payload (and any nested map/slice it
+// references) before releasing the caller, otherwise a post-return
+// mutation races with the dispatch goroutine. The NoopSink and the
+// demarkus Sink both honour this contract.
 type SessionEventSink interface {
 	// Append records an event. Returns an error only on unrecoverable sink
 	// failure; transient issues (buffer full, RPC retry) should be logged
-	// inside the adapter and not surfaced to callers.
+	// inside the adapter and not surfaced to callers. See the interface
+	// docstring for the payload ownership contract.
 	Append(ctx context.Context, e Event) error
 
 	// Close flushes pending events and releases resources. Callers invoke

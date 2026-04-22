@@ -287,6 +287,47 @@ func TestFieldSizeCap(t *testing.T) {
 	}
 }
 
+// TestAppendSnapshotsPayload verifies that mutating the event's payload
+// (including nested maps and slices) AFTER Append returns does not
+// affect what gets persisted. The sink must deep-copy at Append time so
+// caller-side mutations — accidental or intentional — cannot race the
+// dispatch goroutine. Running under -race would additionally catch any
+// shared-reference regression.
+func TestAppendSnapshotsPayload(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	sink := New(store, "snapshot", Config{})
+
+	nested := map[string]any{"feedback": "original"}
+	stages := []map[string]any{
+		{"stage": "go-parse", "verdict": "retry", "feedback": "original"},
+	}
+	payload := map[string]any{
+		"top":    "original",
+		"nested": nested,
+		"stages": stages,
+	}
+	mustAppend(t, sink, capture.Event{Kind: "proposal", Payload: payload})
+
+	// Mutate every reachable string in the caller's copy. If the sink
+	// snapshotted correctly, the persisted document still contains
+	// "original" at every level; otherwise, "tampered" shows up.
+	payload["top"] = "tampered"
+	nested["feedback"] = "tampered"
+	stages[0]["feedback"] = "tampered"
+
+	flushSink(t, sink)
+
+	_, _, body := store.snapshot()
+	if strings.Contains(body, "tampered") {
+		t.Errorf("persisted body reflects post-Append mutation — snapshot failed: %q", body)
+	}
+	if strings.Count(body, "original") < 3 {
+		t.Errorf("persisted body missing original values at one or more levels: %q", body)
+	}
+}
+
 // TestFieldSizeCapDescendsIntoNestedContainers verifies the cap reaches
 // strings nested under map[string]any and []map[string]any payloads —
 // the exact shape the "validator" capture kind emits, where a long
@@ -321,6 +362,59 @@ func TestFieldSizeCapDescendsIntoNestedContainers(t *testing.T) {
 	// the truncation marker.
 	if strings.Count(body, "truncated") < 2 {
 		t.Errorf("truncation marker missing from one or both nested fields: %q", body)
+	}
+}
+
+// TestFieldSizeCapWalksTypedContainers verifies the reflect fallback
+// reaches string leaves inside typed containers (map[string]string,
+// []string, [][]string). Without the fallback, a caller who builds a
+// []string payload field would silently bypass the size cap — the
+// Payload contract (map[string]any) allows any typed value.
+func TestFieldSizeCapWalksTypedContainers(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	sink := New(store, "typed-cap", Config{MaxFieldBytes: 16})
+
+	big := strings.Repeat("C", 512)
+	mustAppend(t, sink, capture.Event{
+		Kind: "weird",
+		Payload: map[string]any{
+			"typed_slice": []string{big},                     // []string
+			"typed_map":   map[string]string{"note": big},    // map[string]string
+			"typed_nest":  []map[string]string{{"msg": big}}, // []map[string]string
+		},
+	})
+	flushSink(t, sink)
+
+	_, _, body := store.snapshot()
+	if strings.Contains(body, big) {
+		t.Errorf("typed-container string was not truncated; body contains full %d-byte field", len(big))
+	}
+	if strings.Count(body, "truncated") < 3 {
+		t.Errorf("truncation marker missing from one or more typed-container fields: %q", body)
+	}
+}
+
+// TestFieldSizeCapScalarsUnchanged guards against the reflect fallback
+// corrupting primitive leaves — numbers, bools, and nil must pass
+// through identity on every walk.
+func TestFieldSizeCapScalarsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	cases := []any{
+		nil, true, false,
+		int(42), int32(-7), int64(1 << 40),
+		uint(7), float64(3.14),
+		"short-string",
+	}
+	for _, tc := range cases {
+		got := capValue(tc, 1024)
+		// string is the only type that can be transformed (truncation),
+		// and "short-string" is under the cap so it should round-trip.
+		if got != tc {
+			t.Errorf("capValue(%v) = %v, want identity", tc, got)
+		}
 	}
 }
 

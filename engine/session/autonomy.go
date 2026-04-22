@@ -1,9 +1,14 @@
-package ui
+package session
 
 import "fmt"
 
 // AutonomyLevel controls how much the agent acts without explicit developer approval.
 // Higher levels reduce interruptions; lower levels maximise developer oversight.
+//
+// The type lives in the engine (not a frontend) because the agent loop consults
+// it when deciding whether to run silent validator retries versus surfacing a
+// failure to the developer. Frontends read and mutate the value; the engine
+// enforces the semantics.
 type AutonomyLevel int
 
 const (

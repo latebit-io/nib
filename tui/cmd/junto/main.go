@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/buffer"
+	"github.com/latebit-io/junto/engine/capture/demarkus"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/highlight"
@@ -22,6 +23,9 @@ import (
 	"github.com/latebit-io/junto/engine/oauth"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/styleconfig"
+	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/junto/engine/validate/goparse"
+	"github.com/latebit-io/junto/engine/validate/treesitter"
 	"github.com/latebit-io/junto/engine/wire"
 	"github.com/latebit-io/junto/tui/internal/ui"
 )
@@ -156,6 +160,21 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	defer mem.Cleanup()
 	sess.SetMemoryStore(mem.Store)
 
+	// Wire session-event capture to a per-process Demarkus document unless
+	// explicitly disabled. The sink runs async with a bounded buffer — the
+	// session's hot path never blocks on it.
+	if os.Getenv("JUNTO_CAPTURE_DISABLED") == "" {
+		captureSink := demarkus.New(mem.Store, sess.SessionID(), demarkus.Config{})
+		sess.SetEventSink(captureSink)
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := captureSink.Close(ctx); err != nil {
+				slog.Warn("capture sink close failed", "err", err)
+			}
+		}()
+	}
+
 	// Wire events on the session unconditionally. The frontend event loop
 	// reads from here; the agent (once constructed) writes to the same channel.
 	sess.SetEvents(events)
@@ -186,6 +205,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
+		}
+		if os.Getenv("JUNTO_VALIDATORS_DISABLED") == "" {
+			opts.ValidationPipeline = validate.NewPipeline(
+				goparse.Validator{},
+				treesitter.New(highlight.LanguageFor),
+			)
 		}
 		return agent.New(p, sess, events, opts, mcpResult.Tools...)
 	}
@@ -336,7 +361,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		// Default is trust mode — agent works autonomously.
 		ag.SetAutonomous(true)
 
-		app.OnDialChange = func(level ui.AutonomyLevel) {
+		app.OnDialChange = func(level session.AutonomyLevel) {
 			ag.SetAutonomous(level.AutoContinue())
 		}
 

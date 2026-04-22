@@ -26,6 +26,8 @@ import (
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/headless"
 	"github.com/latebit-io/junto/engine/session"
+	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/junto/engine/validate/goparse"
 	"github.com/latebit-io/junto/engine/wire"
 )
 
@@ -201,6 +203,9 @@ func run() error {
 	}
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr
+	}
+	if os.Getenv("JUNTO_VALIDATORS_DISABLED") == "" {
+		opts.ValidationPipeline = validate.NewPipeline(goparse.Validator{})
 	}
 	ag := agent.New(provider, workspace, events, opts, mcpResult.Tools...)
 

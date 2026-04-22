@@ -32,10 +32,30 @@ type AgentToken struct {
 	Text string
 }
 
+// ValidatorSummary is the frontend-facing projection of a pre-approval
+// validator result. The full validate.Result type is intentionally NOT
+// exported here — this struct carries only the fields a UI or capture
+// adapter needs, so the event wire does not couple to the validate
+// package's internals.
+type ValidatorSummary struct {
+	// Stage identifies the validator (e.g. "go-parse", "tree-sitter").
+	Stage string
+	// Verdict is the string form ("pass", "retry", "block").
+	Verdict string
+	// Feedback is the LLM-facing retry prompt, empty on pass/block.
+	// Frontends may render it as the reason a proposal was held back.
+	Feedback string
+}
+
 // AgentEditProposed signals the agent wants to apply an edit.
 type AgentEditProposed struct {
 	// Edit is the proposed edit awaiting approval.
 	Edit PendingEdit
+	// ValidatorSummaries reports the pre-approval validator outcomes,
+	// in the order the pipeline executed them. Empty when no validators
+	// ran or when no pipeline is installed. Consumers unaware of the
+	// field continue to work as before.
+	ValidatorSummaries []ValidatorSummary
 }
 
 // AgentFileCreated signals the agent created a new file.

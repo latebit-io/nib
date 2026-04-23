@@ -313,6 +313,35 @@ func TestAgentPaneModel_isCodeLine_UserFenceNoBleed(t *testing.T) {
 	}
 }
 
+// TestAgentPaneModel_isCodeLine_MetaFenceNoBleed verifies that an
+// unmatched fence inside a meta block (LLM-supplied reason/error text)
+// does not open a code block for subsequent agent output. Without the
+// metaRawLines skip in recomputeCodeBlock and the post-mark recompute
+// in AppendMeta, a backtick run in an edit reason or error message
+// would flip the rest of the transcript to code styling.
+func TestAgentPaneModel_isCodeLine_MetaFenceNoBleed(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
+	m.SetSize(80, 30)
+
+	m.AppendText("agent before")
+	// Simulates an LLM-generated edit reason with an unmatched triple
+	// backtick — exactly the sort of string that flows through AppendMeta
+	// verbatim when rendering "--- Proposed: <reason> ---".
+	m.AppendMeta("\n--- Proposed: fix the ``` bug ---\n")
+	m.AppendText("agent after line 1\nagent after line 2")
+
+	for i, line := range m.Lines {
+		// Meta lines are rendered dim regardless; fence state leaking
+		// from meta into agent prose is what this test guards against.
+		if m.isMeta(i) {
+			continue
+		}
+		if m.isCodeLine(i) {
+			t.Errorf("isCodeLine(%d)=true — meta fence bled into agent line %q", i, line)
+		}
+	}
+}
+
 // TestAgentPaneModel_TurnSeparator_NarrowWidthNoBleed verifies that at a
 // pane width narrow enough for the separator placeholder "── turn N ──"
 // to wrap, the continuation wrapped segments render as dim blanks rather

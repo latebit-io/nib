@@ -828,6 +828,12 @@ func (m *AgentPaneModel) AppendMeta(text string) {
 	for i := firstRaw; i < endRaw; i++ {
 		m.metaRawLines[i] = true
 	}
+	// AppendText already ran recomputeCodeBlock, but it saw these lines
+	// as untagged so a stray fence in LLM-supplied reason/error text
+	// may have flipped rawFenceAfter. Recompute from firstRaw now that
+	// metaRawLines is populated — the skip branch resets fence state.
+	m.recomputeCodeBlock(firstRaw)
+	m.invalidateMdCache()
 }
 
 // AppendUserMessage appends the developer's follow-up message as plain text
@@ -918,10 +924,12 @@ func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 		// User messages are rendered with userMessageStyle, not markdown.
 		// Skip them so an unmatched fence in user input doesn't bleed into
 		// subsequent agent output.
-		if m.userRawLines[ri] || m.plainRawLines[ri] {
-			// Both classes bypass fence detection: user messages and
-			// awaiting-input blocks may contain unmatched backticks that
-			// must not flip the state of subsequent agent output.
+		if m.userRawLines[ri] || m.plainRawLines[ri] || m.metaRawLines[ri] {
+			// All three classes bypass fence detection: user messages,
+			// awaiting-input blocks, and meta chrome (tool calls, edit
+			// proposals, errors) may carry LLM-supplied text with
+			// unmatched backticks that must not flip the state of
+			// subsequent agent output.
 			m.rawFenceAfter = append(m.rawFenceAfter, fence)
 			wStart := m.wrappedIndex[ri]
 			wEnd := len(m.Lines)

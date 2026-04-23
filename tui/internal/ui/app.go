@@ -654,6 +654,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case completionTickMsg:
 		return m.handleCompletionTick(msg)
 
+	// Agent spinner advance — forward to the pane so it can advance the
+	// frame and reschedule (or drop the loop if status went idle).
+	case spinnerTickMsg:
+		return m, m.AgentPane.Update(msg)
+
 	// Completion result — show popup if still relevant.
 	case completionResultMsg:
 		var curLine, curCol int
@@ -802,9 +807,11 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentToken:
 		m.AgentPane.AppendToken(e.Text)
 	case event.AgentToolCall:
-		m.AgentPane.AppendMeta("\n> " + e.Name + "\n")
+		// Indented bullet reads as a sub-action rather than a sibling of
+		// the agent's prose. Renders dim via the metaRawLines path.
+		m.AgentPane.AppendMeta("\n  ● " + e.Name + "\n")
 	case event.AgentStatus:
-		m.AgentPane.SetStatus(e.Status)
+		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(e.Status))
 	case event.AgentEditProposed:
 		m.clearEditorOverlay(false)
 
@@ -829,7 +836,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 				// immediately.
 				cmd = m.applyApproval()
 			} else {
-				m.AgentPane.SetStatus(event.StatusReviewing)
+				cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusReviewing))
 				m.Editor.Overlay.Active = true
 				// Auto-scroll so the diff is visible with some context above.
 				target := diff.StartLine - 3
@@ -878,33 +885,36 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshProjectPane()
 		}
 	case event.AgentError:
+		// Terminal branch — drop pane status to idle so the spinner loop
+		// stops rescheduling and any in-flight streaming tint settles.
+		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
 		m.AgentPane.ClearAwaitingInput()
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
 		if m.Session.Phase() == session.PhasePlanning {
-			m.AgentPane.SetStatus(event.StatusPlanningWaiting)
+			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusPlanningWaiting))
 		} else {
-			m.AgentPane.SetStatus(event.StatusWaiting)
+			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusWaiting))
 		}
 		m.AgentPane.SetInputActive(true)
 		m.AgentPane.ResetInput()
 		// Agent may have published /project.md — reload async to stay in sync.
-		cmd = m.reloadWorkTreeCmd()
+		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
 	case event.AgentAwaitingInput:
 		m.AgentPane.ShowAwaitingInput(e)
 	case event.AgentDone:
-		m.AgentPane.SetStatus(event.StatusIdle)
+		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
 		m.AgentPane.ClearAwaitingInput()
 		summary := formatSessionSummary(m.AgentPane.usage)
 		if summary != "" {
-			m.AgentPane.AppendText("\n--- Done ---\n" + summary + "\n")
+			m.AgentPane.AppendMeta("\n--- Done ---\n" + summary + "\n")
 		} else {
-			m.AgentPane.AppendText("\n--- Done ---\n")
+			m.AgentPane.AppendMeta("\n--- Done ---\n")
 		}
 		m.AgentPane.SetInputActive(false)
 		// Agent may have published /project.md — reload async to stay in sync.
-		cmd = m.reloadWorkTreeCmd()
+		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
 		m.clearEditorOverlay(false)
 	case event.FlushBuffers:
 		saved, err := m.Session.SaveDirtyBuffers()
@@ -916,7 +926,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentInputEstimate:
 		m.AgentPane.SetStreamingInput(e)
 	case event.AgentTurnUsage:
-		m.AgentPane.AppendMeta(formatTurnUsage(e))
+		m.AgentPane.AppendTurnUsage(e)
 		m.AgentPane.UpdateUsage(e)
 	case event.AgentCompacted:
 		m.AgentPane.AppendMeta(formatCompacted(e))
@@ -1030,8 +1040,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// No pending edit — cancel agent if active
 		if m.Session.CurrentIntent() != "" && m.Session.HasAgent() {
 			m.Session.CancelAgent()
-			m.AgentPane.SetStatus(event.StatusIdle)
-			return m, nil
+			return m, m.AgentPane.SetStatus(event.StatusIdle)
 		}
 		// No intent either — fall through to focused pane
 
@@ -1722,13 +1731,14 @@ func (m *AppModel) applyApproval() tea.Cmd {
 
 	// Refresh after CompleteApproval — that's when modifiedFiles is populated,
 	// which the project pane reads to render the modified badge.
+	var statusCmd tea.Cmd
 	if m.dial.AutoContinue() {
 		m.Session.ApproveAndContinue()
-		m.AgentPane.SetStatus(event.StatusThinking)
+		statusCmd = m.AgentPane.SetStatus(event.StatusThinking)
 	} else {
 		m.Session.CompleteApproval()
-		m.AgentPane.SetStatus(event.StatusEditing)
+		statusCmd = m.AgentPane.SetStatus(event.StatusEditing)
 	}
 	m.refreshProjectPane()
-	return nil
+	return statusCmd
 }

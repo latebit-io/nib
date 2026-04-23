@@ -42,32 +42,13 @@ func TestFormatTurnUsage(t *testing.T) {
 		CompletionTokens: 312,
 		CachedTokens:     3200,
 		ToolCalls:        2,
-		SystemEst:        1800,
-		ToolsEst:         1200,
-		HistoryEst:       1100,
-		NewEst:           400,
 	}
-	got := formatTurnUsage(u)
-	if !strings.Contains(got, "turn 3") {
-		t.Error("should contain turn number")
-	}
-	if !strings.Contains(got, "4.5k in") {
-		t.Errorf("should contain prompt tokens, got: %s", got)
-	}
-	if !strings.Contains(got, "3.2k cached") {
-		t.Error("should contain cached tokens")
-	}
-	if !strings.Contains(got, "312 out") {
-		t.Error("should contain completion tokens")
-	}
-	if !strings.Contains(got, "2 tools") {
-		t.Error("should contain tool call count")
-	}
-	if !strings.Contains(got, "sys:1.8k") {
-		t.Error("should contain system estimate")
-	}
-	if !strings.Contains(got, "hist:1.1k") {
-		t.Error("should contain history estimate")
+	got := formatTurnUsage(u, "gemini-2.5-flash")
+	checks := []string{"◇", "gemini-2.5-flash", "turn 3", "4.5k↓", "70%⚡", "312↑", "2 tools"}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output: %q", want, got)
+		}
 	}
 }
 
@@ -76,24 +57,19 @@ func TestFormatTurnUsageNoProviderData(t *testing.T) {
 		Turn:          1,
 		SystemEst:     500,
 		ToolsEst:      300,
-		HistoryEst:    0,
 		NewEst:        200,
 		CompletionEst: 150,
 	}
-	got := formatTurnUsage(u)
-	if !strings.Contains(got, "turn 1") {
-		t.Error("should contain turn number")
+	got := formatTurnUsage(u, "")
+	// Estimated values with ~ prefix, arrow separators, no model section.
+	checks := []string{"turn 1", "~1.0k↓", "~150↑"}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output: %q", want, got)
+		}
 	}
-	// Should show estimated values with ~ prefix
-	if !strings.Contains(got, "~1.0k in") {
-		t.Errorf("should contain estimated input with ~ prefix, got: %s", got)
-	}
-	if !strings.Contains(got, "~150 out") {
-		t.Errorf("should contain estimated output with ~ prefix, got: %s", got)
-	}
-	// Should still contain composition estimates
-	if !strings.Contains(got, "sys:500") {
-		t.Error("should contain system estimate")
+	if strings.Contains(got, "◇ ·") {
+		t.Errorf("empty model should not produce leading ◇ · prefix, got: %q", got)
 	}
 }
 
@@ -106,22 +82,12 @@ func TestFormatSessionSummary(t *testing.T) {
 		turns:       5,
 	}
 	got := formatSessionSummary(u)
-	if !strings.Contains(got, "5 turns") {
-		t.Error("should contain turn count")
+	checks := []string{"5 turns", "24.9k↓", "73%⚡", "3.4k↑"}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output: %q", want, got)
+		}
 	}
-	if !strings.Contains(got, "24.9k in") {
-		t.Errorf("should contain total input tokens, got: %s", got)
-	}
-	if !strings.Contains(got, "18.2k cached") {
-		t.Error("should contain cached tokens")
-	}
-	if !strings.Contains(got, "73%") {
-		t.Error("should contain cache hit percentage")
-	}
-	if !strings.Contains(got, "3.4k out") {
-		t.Error("should contain total output tokens")
-	}
-	// Exact data — no ~ prefix.
 	if strings.Contains(got, "~") {
 		t.Errorf("exact data should not have ~ prefix, got: %s", got)
 	}
@@ -134,14 +100,11 @@ func TestFormatSessionSummaryEstimateOnly(t *testing.T) {
 		turns:    3,
 	}
 	got := formatSessionSummary(u)
-	if !strings.Contains(got, "3 turns") {
-		t.Error("should contain turn count")
-	}
-	if !strings.Contains(got, "~5.0k in") {
-		t.Errorf("should contain estimated input with ~ prefix, got: %s", got)
-	}
-	if !strings.Contains(got, "~1.0k out") {
-		t.Errorf("should contain estimated output with ~ prefix, got: %s", got)
+	checks := []string{"3 turns", "~5.0k↓", "~1.0k↑"}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output: %q", want, got)
+		}
 	}
 }
 
@@ -220,10 +183,10 @@ func TestUpdateUsageMixed(t *testing.T) {
 	if strings.Contains(got, "~") {
 		t.Errorf("mixed run with provider data should not have ~ prefix, got: %s", got)
 	}
-	if !strings.Contains(got, "2.0k in") {
+	if !strings.Contains(got, "2.0k↓") {
 		t.Errorf("summary should contain blended input total, got: %s", got)
 	}
-	if !strings.Contains(got, "350 out") {
+	if !strings.Contains(got, "350↑") {
 		t.Errorf("summary should contain blended output total, got: %s", got)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/latebit-io/junto/engine/filelist"
 	"github.com/latebit-io/junto/engine/project"
 	"github.com/latebit-io/junto/tui/internal/ui/textarea"
@@ -86,12 +87,6 @@ var (
 
 	projTaskPendingStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("252"))
-
-	// projClampStyle is a zero-value base style used by clampToWidth and
-	// assembleLine.  Calling .MaxWidth(w) on it is cheaper than NewStyle()
-	// because lipgloss styles are value types — the copy reuses internal
-	// storage instead of allocating from scratch.
-	projClampStyle = lipgloss.NewStyle()
 )
 
 // projectSession is the narrow read-only slice of session that the project pane needs.
@@ -962,7 +957,9 @@ func (p *ProjectPaneModel) renderBadge(badge string) string {
 }
 
 // assembleLine combines left content and right badge, padding in between.
-// Truncates left content if it would exceed the pane width.
+// Truncates left content (with a trailing "…") if it would exceed the pane
+// width so the developer reads the clip as intentional rather than as a
+// broken line.
 func assembleLine(left, right string, width int) string {
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
@@ -977,7 +974,7 @@ func assembleLine(left, right string, width int) string {
 		return clampToWidth(left, width)
 	}
 	if leftW > maxLeft {
-		left = projClampStyle.MaxWidth(maxLeft).Render(left)
+		left = ansi.Truncate(left, maxLeft, "…")
 		leftW = lipgloss.Width(left)
 	}
 
@@ -989,11 +986,12 @@ func assembleLine(left, right string, width int) string {
 }
 
 // clampToWidth truncates or pads a string to exactly the given width.
+// Appends "…" when truncating so the clip reads as intentional.
 // Uses ANSI-aware measurement so styled strings are handled correctly.
 func clampToWidth(s string, width int) string {
 	w := lipgloss.Width(s)
 	if w > width {
-		return projClampStyle.MaxWidth(width).Render(s)
+		return ansi.Truncate(s, width, "…")
 	}
 	if w < width {
 		return s + strings.Repeat(" ", width-w)

@@ -5,15 +5,57 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/tui/internal/sanitize"
 	"github.com/latebit-io/junto/tui/internal/ui/textarea"
 	"github.com/mattn/go-runewidth"
 )
+
+// spinnerFrames are the braille animation glyphs cycled while the agent is
+// actively working. Ten frames gives ~1s per full rotation at spinnerTickRate.
+var spinnerFrames = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+
+// spinnerTickRate is the cadence at which the spinner advances while active.
+// 100ms keeps the cache warm and stays well under a full-frame redraw cost.
+const spinnerTickRate = 100 * time.Millisecond
+
+// spinnerTickMsg advances the agent pane's spinner frame. Scheduled by
+// SetStatus on transition into an animated status, rescheduled from the
+// pane's Update while the status remains animated, dropped when idle.
+type spinnerTickMsg struct{}
+
+// spinnerTickCmd schedules the next spinner advance.
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(spinnerTickRate, func(_ time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
+}
+
+// statusAnimates reports whether s is an "agent is actively working" state
+// that should display the spinner glyph alongside its text. Passive states
+// (idle, waiting for the developer, reviewing) never animate — the spinner
+// is a signal of backgrounded activity, not a generic attention indicator.
+func statusAnimates(s event.StatusKind) bool {
+	switch s {
+	case event.StatusThinking, event.StatusPlanning, event.StatusLinting:
+		return true
+	}
+	return false
+}
+
+// statusStreaming reports whether s is a state during which the LLM is
+// emitting tokens into the pane. Narrower than statusAnimates — linting
+// runs in the engine and never produces AgentToken events, so it must
+// not keep the streaming tint alive.
+func statusStreaming(s event.StatusKind) bool {
+	return s == event.StatusThinking || s == event.StatusPlanning
+}
 
 // usageState tracks cumulative token consumption for display.
 // Per-turn, the best available value is used: provider-reported if non-zero,
@@ -99,37 +141,37 @@ func formatTokenCount(n int) string {
 	}
 }
 
-// formatTurnUsage produces a dim metadata line for a single turn.
-// Uses provider data when available, otherwise falls back to estimates.
-func formatTurnUsage(u event.AgentTurnUsage) string {
+// formatTurnUsage produces a compact per-turn footer: model · turn N ·
+// token counts · tool count. Rendered dim via the AppendMeta path, so the
+// reader skims it as chrome. Model is optional — omitted when empty so
+// the line still reads well before the model label is known.
+func formatTurnUsage(u event.AgentTurnUsage, model string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n[turn %d", u.Turn)
+	b.WriteString("\n◇ ")
+	if model != "" {
+		b.WriteString(sanitizeInlineDisplay(model))
+		b.WriteString(" · ")
+	}
+	fmt.Fprintf(&b, "turn %d", u.Turn)
 
 	hasProvider := u.PromptTokens > 0 || u.CompletionTokens > 0
 	if hasProvider {
-		fmt.Fprintf(&b, ": %s in", formatTokenCount(u.PromptTokens))
-		if u.CachedTokens > 0 {
-			fmt.Fprintf(&b, " (%s cached)", formatTokenCount(u.CachedTokens))
+		fmt.Fprintf(&b, " · %s↓", formatTokenCount(u.PromptTokens))
+		if u.CachedTokens > 0 && u.PromptTokens > 0 {
+			pct := u.CachedTokens * 100 / u.PromptTokens
+			fmt.Fprintf(&b, " (%d%%⚡)", pct)
 		}
-		fmt.Fprintf(&b, " · %s out", formatTokenCount(u.CompletionTokens))
+		fmt.Fprintf(&b, " · %s↑", formatTokenCount(u.CompletionTokens))
+	} else {
+		total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
+		if total > 0 {
+			fmt.Fprintf(&b, " · ~%s↓ · ~%s↑", formatTokenCount(total), formatTokenCount(u.CompletionEst))
+		}
 	}
 	if u.ToolCalls > 0 {
 		fmt.Fprintf(&b, " · %d tools", u.ToolCalls)
 	}
-
-	// Composition estimate — always available.
-	total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
-	if total > 0 {
-		if !hasProvider {
-			fmt.Fprintf(&b, ": ~%s in · ~%s out", formatTokenCount(total), formatTokenCount(u.CompletionEst))
-		}
-		fmt.Fprintf(&b, " | sys:%s tools:%s hist:%s new:%s",
-			formatTokenCount(u.SystemEst),
-			formatTokenCount(u.ToolsEst),
-			formatTokenCount(u.HistoryEst),
-			formatTokenCount(u.NewEst))
-	}
-	b.WriteString("]\n")
+	b.WriteByte('\n')
 	return b.String()
 }
 
@@ -145,6 +187,9 @@ func formatCompacted(e event.AgentCompacted) string {
 }
 
 // formatSessionSummary produces the summary shown when the agent finishes.
+// Matches the per-turn footer's visual language: middle-dot separators and
+// arrow-glyph token counts so session-wide and per-turn metadata feel like
+// one layer of chrome, not two styles.
 func formatSessionSummary(u usageState) string {
 	if u.turns == 0 {
 		return ""
@@ -154,14 +199,14 @@ func formatSessionSummary(u usageState) string {
 		prefix = ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Session: %d turns", u.turns)
+	fmt.Fprintf(&b, "Session · %d turns", u.turns)
 	if u.totalIn > 0 || u.totalOut > 0 {
-		fmt.Fprintf(&b, " · %s%s in", prefix, formatTokenCount(u.totalIn))
+		fmt.Fprintf(&b, " · %s%s↓", prefix, formatTokenCount(u.totalIn))
 		if u.totalCached > 0 && u.totalIn > 0 {
 			pct := u.totalCached * 100 / u.totalIn
-			fmt.Fprintf(&b, " (%s cached, %d%%)", formatTokenCount(u.totalCached), pct)
+			fmt.Fprintf(&b, " (%d%%⚡)", pct)
 		}
-		fmt.Fprintf(&b, " · %s%s out", prefix, formatTokenCount(u.totalOut))
+		fmt.Fprintf(&b, " · %s%s↑", prefix, formatTokenCount(u.totalOut))
 	}
 	return b.String()
 }
@@ -201,14 +246,49 @@ type fenceState struct {
 
 // Package-level styles — allocated once, never in render paths.
 var (
-	userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Bold(true)
+	// userMessageStyle paints "You: ..." lines in a warm magenta-pink so
+	// your turn stands out from the agent's default-foreground prose.
+	// 212 is distinct enough from the ANSWER chip (162) that they don't
+	// read as "the same color" when both are on screen.
+	userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	agentDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	agentStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-	agentAwaitStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
 	agentSelStyle    = lipgloss.NewStyle().Background(lipgloss.Color("24"))
 	agentInputStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("230"))
 	agentInputDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	agentCursorStyle = lipgloss.NewStyle().Reverse(true)
+	// streamingTintStyle renders in-flight agent tokens with a slightly
+	// muted foreground so the "live" portion of the transcript reads
+	// differently from settled content. Markdown formatting is deferred
+	// until the burst ends — it would flicker during token accumulation.
+	streamingTintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	// scrollbarTrackStyle and scrollbarThumbStyle render the right-edge
+	// scroll indicator. Track uses a very dim ASCII bar; the thumb is a
+	// slightly brighter heavy bar so the eye latches onto it.
+	scrollbarTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	scrollbarThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	// Status chips — small colored labels on the right of the status line
+	// communicating the agent's current state. Each chip has distinct
+	// bg/fg so the eye locks on without reading text. Padding(0,1) gives
+	// breathing room inside the color band.
+	chipBase          = lipgloss.NewStyle().Padding(0, 1)
+	chipStyleIdle     = chipBase.Background(lipgloss.Color("238")).Foreground(lipgloss.Color("245"))
+	chipStyleThinking = chipBase.Background(lipgloss.Color("55")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStylePlanning = chipBase.Background(lipgloss.Color("25")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStylePlanWait = chipBase.Background(lipgloss.Color("60")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleReview   = chipBase.Background(lipgloss.Color("136")).Foreground(lipgloss.Color("232")).Bold(true)
+	chipStyleEditing  = chipBase.Background(lipgloss.Color("28")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleWaiting  = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleAnswer   = chipBase.Background(lipgloss.Color("162")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleLinting  = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
+
+	// statusHintStyle renders the trailing keyboard hint next to a chip in
+	// a dim color — it's context, not headline.
+	statusHintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	// statusLeftStyle renders the model/usage half of the status line in a
+	// muted tone that reads as metadata.
+	statusLeftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 )
 
 // awaitingInputState tracks a pending request_input prompt from the agent.
@@ -246,6 +326,45 @@ type AgentPaneModel struct {
 	// status is the current agent status (idle, thinking, reviewing, etc.).
 	// Set via SetStatus, read via StatusKind.
 	status event.StatusKind
+
+	// spinnerFrame is the index into spinnerFrames for the currently rendered
+	// glyph. Advanced by spinnerTickMsg while statusAnimates(status) holds.
+	spinnerFrame int
+	// spinnerRunning is true while a spinner tick loop is in-flight. Prevents
+	// SetStatus from scheduling duplicate ticks when an animated status
+	// transitions to another animated status.
+	spinnerRunning bool
+
+	// turnCounter counts visible user exchanges. Starts at 1 for the implicit
+	// initial turn (the first goal is Clear()'d off the pane, so the first
+	// AppendUserMessage is turn 2). Incremented before emitting the separator.
+	turnCounter int
+	// turnStartRaw is the raw-line index of the first line of the current
+	// turn (the separator line, or the "You:" line for the first turn).
+	// Everything with a raw index below this watermark is rendered dim.
+	turnStartRaw int
+
+	// streamingStartRaw is the raw-line index where the current token
+	// burst began, or -1 when no burst is in flight. Set on the first
+	// AppendToken of a burst, cleared when SetStatus transitions away
+	// from a streaming status. Lines at or above this index render with
+	// streamingTintStyle instead of markdown.
+	streamingStartRaw int
+
+	// metaRawLines holds raw-line indices that should render as dim chrome
+	// (tool calls, bracketed status updates, proposed/applied markers,
+	// session summaries). Populated by AppendMeta.
+	metaRawLines map[int]bool
+	// plainRawLines holds raw-line indices whose content must bypass both
+	// the markdown renderer and the code-fence detector — e.g. the
+	// awaiting-input block, which carries attacker-supplied prompt text
+	// that would otherwise be able to open a fence via unmatched
+	// backticks and flip subsequent agent output into code styling.
+	plainRawLines map[int]bool
+	// turnSeparatorRawLines maps the raw-line index of a turn divider
+	// to its label (e.g. "turn 2"). Render substitutes a full-width
+	// centered rendering for these indices.
+	turnSeparatorRawLines map[int]string
 
 	// modelLabel is the display name of the active LLM model (e.g. "gemini-2.5-flash").
 	// Shown on the left side of the status line. Set via SetModelLabel.
@@ -319,17 +438,39 @@ func NewAgentPaneModel(svc *Services, hasAgent bool) *AgentPaneModel {
 	input := textarea.New(1) // width set properly in SetSize
 	input.SetClipboard(svc.Clipboard)
 	return &AgentPaneModel{
-		status:   event.StatusIdle,
-		services: svc,
-		input:    input,
-		hasAgent: hasAgent,
+		status:            event.StatusIdle,
+		services:          svc,
+		input:             input,
+		hasAgent:          hasAgent,
+		turnCounter:       1,
+		streamingStartRaw: -1,
 	}
 }
 
 // --- Accessors ---
 
-// SetStatus updates the agent status displayed in the status bar.
-func (m *AgentPaneModel) SetStatus(s event.StatusKind) { m.status = s }
+// SetStatus updates the agent status displayed in the status bar. Returns a
+// tea.Cmd to start the spinner loop when transitioning from a non-animated
+// state to an animated one (Thinking/Planning/Linting), otherwise nil. The
+// loop stops itself when Update sees a tick after the status has left the
+// animated set, so callers never need to cancel.
+//
+// Also settles any in-flight streaming burst: when the status leaves the
+// token-producing set (Thinking/Planning), the tint watermark is dropped
+// and the markdown cache is invalidated so settled lines rerender with
+// full markdown styling.
+func (m *AgentPaneModel) SetStatus(s event.StatusKind) tea.Cmd {
+	m.status = s
+	if !statusStreaming(s) && m.streamingStartRaw >= 0 {
+		m.streamingStartRaw = -1
+		m.invalidateMdCache()
+	}
+	if statusAnimates(s) && !m.spinnerRunning {
+		m.spinnerRunning = true
+		return spinnerTickCmd()
+	}
+	return nil
+}
 
 // ShowAwaitingInput registers a pending request_input prompt. Renders a
 // styled prompt block into the transcript (so it scrolls with content and
@@ -343,7 +484,31 @@ func (m *AgentPaneModel) ShowAwaitingInput(e event.AgentAwaitingInput) {
 		Options: e.Options,
 		CallID:  e.CallID,
 	}
-	m.AppendMeta(renderAwaitingInputBlock(e))
+	// The block carries the agent's actual question, so it must stay at
+	// default foreground (not dimmed as meta) AND bypass the markdown /
+	// fence pipeline — an unmatched backtick in Prompt or Reason would
+	// otherwise open a code fence that styles the rest of the turn. We
+	// append through the raw path and mark the new raw lines as plain
+	// so recomputeCodeBlock skips them and Render renders them as-is.
+	var s sanitize.Sanitizer
+	firstRaw := len(m.RawLines)
+	m.AppendText(s.Sanitize(renderAwaitingInputBlock(e)))
+	endRaw := len(m.RawLines)
+	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
+		endRaw--
+	}
+	if m.plainRawLines == nil {
+		m.plainRawLines = make(map[int]bool)
+	}
+	for i := firstRaw; i < endRaw; i++ {
+		m.plainRawLines[i] = true
+	}
+	// Re-run fence detection from firstRaw now that plainRawLines is
+	// populated — AppendText already ran recomputeCodeBlock, but it saw
+	// the block as untagged, so an embedded fence might have leaked into
+	// rawFenceAfter. This call resets that.
+	m.recomputeCodeBlock(firstRaw)
+	m.invalidateMdCache()
 	m.input.Reset()
 	m.inputActive = true
 	m.recomputeInputLayout()
@@ -586,6 +751,13 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 			return m.handleInput(msg)
 		}
 		return m.handleKey(msg)
+	case spinnerTickMsg:
+		if !statusAnimates(m.status) {
+			m.spinnerRunning = false
+			return nil
+		}
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+		return spinnerTickCmd()
 	}
 	return nil
 }
@@ -593,27 +765,106 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 // AppendToken sanitizes and appends streaming text from the agent.
 // Uses the stateful sanitizer to handle escape sequences split across chunks.
 // Counts sanitized bytes for real-time output token estimation.
+// Anchors the streaming tint watermark at the first token of a burst so
+// all lines produced during this burst render with the live style.
 func (m *AgentPaneModel) AppendToken(text string) {
+	if m.streamingStartRaw < 0 {
+		// Capture the raw index the token will land on: AppendText's first
+		// part is merged into the last existing raw line, so the burst's
+		// first line is the current end of RawLines (or 0 when empty).
+		start := len(m.RawLines) - 1
+		if start < 0 {
+			start = 0
+		}
+		m.streamingStartRaw = start
+	}
 	clean := m.sanitizer.Sanitize(text)
 	m.usage.streamingChars += len(clean)
 	m.AppendText(clean)
 }
 
-// AppendMeta sanitizes and appends non-stream text (edit proposals, errors, status).
-// Uses a one-shot sanitizer so it doesn't interfere with the streaming sanitizer state.
+// AppendTurnUsage formats and appends the per-turn footer with the pane's
+// current model label as chrome.
+func (m *AgentPaneModel) AppendTurnUsage(u event.AgentTurnUsage) {
+	m.AppendMeta(formatTurnUsage(u, m.modelLabel))
+}
+
+// AppendMeta sanitizes and appends non-stream chrome text (tool calls, edit
+// markers, errors, bracketed status updates, awaiting-input block). Marks
+// the resulting raw lines so Render can style them dim, separating chrome
+// from the agent's prose. Always begins on a fresh raw line so meta
+// content cannot merge into an in-flight streaming token line.
+//
+// Uses a one-shot sanitizer so it doesn't interfere with the streaming
+// sanitizer state.
 func (m *AgentPaneModel) AppendMeta(text string) {
 	var s sanitize.Sanitizer
-	m.AppendText(s.Sanitize(text))
+	clean := s.Sanitize(text)
+	if !strings.HasPrefix(clean, "\n") {
+		clean = "\n" + clean
+	}
+	// Force a trailing newline too. Without this, a caller passing a
+	// single-line meta string (no "\n" terminator) would leave the meta
+	// content as the current last raw line. AppendText reuses the last
+	// raw line for the first chunk of the next append, so the first
+	// agent token after the meta block would be merged into that line
+	// and inherit the meta mark — rendering the token dim and leaking
+	// meta fence state into the stream.
+	if !strings.HasSuffix(clean, "\n") {
+		clean += "\n"
+	}
+	firstRaw := len(m.RawLines)
+	m.AppendText(clean)
+	endRaw := len(m.RawLines)
+	// Exclude the trailing empty raw line — AppendText reuses it for the
+	// next incoming chunk, so marking it would dim the first agent token
+	// after this meta block.
+	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
+		endRaw--
+	}
+	if m.metaRawLines == nil {
+		m.metaRawLines = make(map[int]bool)
+	}
+	for i := firstRaw; i < endRaw; i++ {
+		m.metaRawLines[i] = true
+	}
+	// AppendText already ran recomputeCodeBlock, but it saw these lines
+	// as untagged so a stray fence in LLM-supplied reason/error text
+	// may have flipped rawFenceAfter. Recompute from firstRaw now that
+	// metaRawLines is populated — the skip branch resets fence state.
+	m.recomputeCodeBlock(firstRaw)
+	m.invalidateMdCache()
 }
 
 // AppendUserMessage appends the developer's follow-up message as plain text
-// and marks the raw lines so Render() can style them distinctly. Tracks raw
-// line indices (not wrapped) so styling survives rewrap on resize.
+// and marks the raw lines so Render() can style them distinctly. Prepends a
+// "── turn N ──" divider and advances the dim watermark so the previous
+// exchange fades into the background. Tracks raw line indices (not wrapped)
+// so styling survives rewrap on resize.
 func (m *AgentPaneModel) AppendUserMessage(text string) {
 	var s sanitize.Sanitizer
 	text = s.Sanitize(text)
 
-	firstRaw := len(m.RawLines)
+	// Watermark for the dim split: everything with a raw index below this
+	// is rendered dim. Captured before any append so the separator itself
+	// belongs to the new turn (bright), and previous content fades.
+	turnStart := len(m.RawLines)
+	m.turnCounter++
+	label := fmt.Sprintf("turn %d", m.turnCounter)
+	// Emit a compact placeholder — Render substitutes the full-width rule
+	// using the label from turnSeparatorRawLines. Storing the label (not
+	// parsing the rendered text) keeps the raw content small and stable
+	// across resizes.
+	m.AppendText("\n\n── " + label + " ──")
+	sepRaw := len(m.RawLines) - 1
+	if m.turnSeparatorRawLines == nil {
+		m.turnSeparatorRawLines = make(map[int]string)
+	}
+	m.turnSeparatorRawLines[sepRaw] = label
+
+	// Second AppendText for the actual user text. Tracks its own start
+	// index so the separator lines are NOT marked as user content.
+	userStart := len(m.RawLines)
 	m.AppendText("\n\nYou: " + text + "\n\n")
 	// Exclude the trailing empty raw line — AppendText reuses the last
 	// raw line for the first chunk of the next append, so marking it
@@ -622,18 +873,20 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 		m.userRawLines = make(map[int]bool)
 	}
 	endRaw := len(m.RawLines)
-	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
+	if endRaw > userStart && m.RawLines[endRaw-1] == "" {
 		endRaw--
 	}
-	for i := firstRaw; i < endRaw; i++ {
+	for i := userStart; i < endRaw; i++ {
 		m.userRawLines[i] = true
 	}
 
 	// AppendText ran recomputeCodeBlock before user lines were marked, so
 	// fence state may have advanced through user content (e.g. an unmatched
-	// "```" in the message). Recompute from firstRaw now that userRawLines
-	// is populated — this skips user lines and resets fence state correctly.
-	m.recomputeCodeBlock(firstRaw)
+	// "```" in the message). Recompute from the turn start now that
+	// userRawLines is populated — this skips user lines and resets fence
+	// state correctly.
+	m.recomputeCodeBlock(turnStart)
+	m.turnStartRaw = turnStart
 	m.invalidateMdCache()
 }
 
@@ -671,7 +924,12 @@ func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 		// User messages are rendered with userMessageStyle, not markdown.
 		// Skip them so an unmatched fence in user input doesn't bleed into
 		// subsequent agent output.
-		if m.userRawLines[ri] {
+		if m.userRawLines[ri] || m.plainRawLines[ri] || m.metaRawLines[ri] {
+			// All three classes bypass fence detection: user messages,
+			// awaiting-input blocks, and meta chrome (tool calls, edit
+			// proposals, errors) may carry LLM-supplied text with
+			// unmatched backticks that must not flip the state of
+			// subsequent agent output.
 			m.rawFenceAfter = append(m.rawFenceAfter, fence)
 			wStart := m.wrappedIndex[ri]
 			wEnd := len(m.Lines)
@@ -1156,6 +1414,16 @@ func (m *AgentPaneModel) Clear() {
 	m.sanitizer = sanitize.Sanitizer{}
 	m.usage = usageState{}
 	m.awaitingInput = nil
+	m.turnCounter = 1
+	m.turnStartRaw = 0
+	m.streamingStartRaw = -1
+	m.metaRawLines = nil
+	m.plainRawLines = nil
+	m.turnSeparatorRawLines = nil
+	m.spinnerFrame = 0
+	// spinnerRunning intentionally not reset: a tick may still be in-flight
+	// from before Clear(); Update drops it on the next fire because
+	// status == StatusIdle.
 	if m.ModelSel.IsActive() {
 		m.ModelSel.Close()
 		m.recomputeInputLayout()
@@ -1245,21 +1513,181 @@ func (m *AgentPaneModel) SelectedText() string {
 	return sb.String()
 }
 
-// isUserLine returns true if the wrapped line index corresponds to a user
-// message. Uses binary search on wrappedIndex (which is sorted by construction)
-// so cost is O(log n) per call instead of O(n).
-func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
-	if len(m.userRawLines) == 0 || len(m.wrappedIndex) == 0 {
-		return false
+// rawIndexOf returns the raw-line index that owns the given wrapped line,
+// or -1 if out of range. Uses binary search on wrappedIndex (sorted by
+// construction) so cost is O(log n).
+func (m *AgentPaneModel) rawIndexOf(wrappedIdx int) int {
+	if len(m.wrappedIndex) == 0 {
+		return -1
 	}
-	// BinarySearch finds the insertion point for wrappedIdx+1.
-	// The owning raw line is one before that.
 	rawIdx, _ := slices.BinarySearch(m.wrappedIndex, wrappedIdx+1)
 	rawIdx--
+	if rawIdx < 0 {
+		return -1
+	}
+	return rawIdx
+}
+
+// isUserLine returns true if the wrapped line index corresponds to a user
+// message.
+func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
+	if len(m.userRawLines) == 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
 	if rawIdx < 0 {
 		return false
 	}
 	return m.userRawLines[rawIdx]
+}
+
+// isDim reports whether the wrapped line belongs to a previous turn and
+// should render with dim styling. Everything at a raw index below the
+// current turn's watermark is faded out so the current exchange stands out.
+func (m *AgentPaneModel) isDim(wrappedIdx int) bool {
+	if m.turnStartRaw <= 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	return rawIdx >= 0 && rawIdx < m.turnStartRaw
+}
+
+// isStreaming reports whether the wrapped line is part of the in-flight
+// token burst and should render with streamingTintStyle. Returns false
+// when no burst is active.
+func (m *AgentPaneModel) isStreaming(wrappedIdx int) bool {
+	if m.streamingStartRaw < 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	return rawIdx >= m.streamingStartRaw
+}
+
+// isMeta reports whether the wrapped line is chrome (tool calls, bracketed
+// status, edit markers, session summaries) and should render dim.
+func (m *AgentPaneModel) isMeta(wrappedIdx int) bool {
+	if len(m.metaRawLines) == 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	return rawIdx >= 0 && m.metaRawLines[rawIdx]
+}
+
+// isPlain reports whether the wrapped line must bypass markdown and streaming
+// styling. Used for agent-supplied content that could otherwise open code
+// fences or trigger inline markdown (e.g. the awaiting-input block).
+func (m *AgentPaneModel) isPlain(wrappedIdx int) bool {
+	if len(m.plainRawLines) == 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	return rawIdx >= 0 && m.plainRawLines[rawIdx]
+}
+
+// turnSeparatorLabel returns the label for a wrapped line that represents a
+// turn divider, or "" if it isn't one. Only the FIRST wrapped line of the
+// owning raw line returns the label — continuations are handled by
+// isTurnSeparatorContinuation so they render as dim blanks rather than
+// falling through to markdown.
+func (m *AgentPaneModel) turnSeparatorLabel(wrappedIdx int) string {
+	if len(m.turnSeparatorRawLines) == 0 {
+		return ""
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	if rawIdx < 0 {
+		return ""
+	}
+	label, ok := m.turnSeparatorRawLines[rawIdx]
+	if !ok {
+		return ""
+	}
+	if rawIdx < len(m.wrappedIndex) && m.wrappedIndex[rawIdx] != wrappedIdx {
+		return ""
+	}
+	return label
+}
+
+// isTurnSeparatorContinuation reports whether the wrapped line is a non-
+// first wrapped segment of a separator raw line. This happens only at
+// widths narrow enough to wrap the placeholder text — we blank those
+// segments rather than let fragments of "── turn N ──" render as markdown.
+func (m *AgentPaneModel) isTurnSeparatorContinuation(wrappedIdx int) bool {
+	if len(m.turnSeparatorRawLines) == 0 {
+		return false
+	}
+	rawIdx := m.rawIndexOf(wrappedIdx)
+	if rawIdx < 0 {
+		return false
+	}
+	if _, ok := m.turnSeparatorRawLines[rawIdx]; !ok {
+		return false
+	}
+	return rawIdx < len(m.wrappedIndex) && m.wrappedIndex[rawIdx] != wrappedIdx
+}
+
+// overlayScrollbar paints the rightmost column of the content region with a
+// track-and-thumb indicator when the transcript exceeds the viewport.
+// Truncates each content row to width-1 cells (ANSI-aware) and appends the
+// scrollbar cell, preserving styling on the truncated prefix.
+//
+// No-op when all lines fit — the column is left as content.
+func (m *AgentPaneModel) overlayScrollbar(output []string, vis int) {
+	total := len(m.Lines)
+	if total <= vis || m.width <= 1 || vis <= 0 {
+		return
+	}
+
+	// Proportional thumb. Keep at least one row visible so the user can
+	// always see there is a scrollbar, even in very large transcripts.
+	thumbStart := m.ScrollOffset * vis / total
+	thumbEnd := (m.ScrollOffset + vis) * vis / total
+	if thumbEnd <= thumbStart {
+		thumbEnd = thumbStart + 1
+	}
+	if thumbEnd > vis {
+		thumbEnd = vis
+		if thumbStart >= thumbEnd {
+			thumbStart = thumbEnd - 1
+		}
+	}
+
+	for i := 0; i < vis; i++ {
+		if i >= len(output) {
+			break
+		}
+		var cell string
+		if i >= thumbStart && i < thumbEnd {
+			cell = scrollbarThumbStyle.Render("┃")
+		} else {
+			cell = scrollbarTrackStyle.Render("│")
+		}
+		output[i] = ansi.Truncate(output[i], m.width-1, "") + cell
+	}
+}
+
+// renderTurnSeparator produces a full-width dim divider centered around the
+// label, using heavy rules on each side. Falls back to a truncated label at
+// narrow widths rather than overflowing the pane.
+func renderTurnSeparator(label string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	text := " " + label + " "
+	textW := runewidth.StringWidth(text)
+	if textW+6 > width {
+		// Not enough room for rules on both sides. Truncate the label
+		// (with ellipsis) so it fits, then pad to width.
+		if textW > width {
+			text = runewidth.Truncate(text, width, "…")
+			textW = runewidth.StringWidth(text)
+		}
+		return agentDimStyle.Render(text + strings.Repeat(" ", width-textW))
+	}
+	totalRules := width - textW
+	leftRules := totalRules / 2
+	rightRules := totalRules - leftRules
+	line := strings.Repeat("─", leftRules) + text + strings.Repeat("─", rightRules)
+	return agentDimStyle.Render(line)
 }
 
 func (m *AgentPaneModel) isSelected(line, col int) bool {
@@ -1418,43 +1846,120 @@ func (m *AgentPaneModel) renderModelSelector(output []string, row *int) {
 	m.ModelSel.Render(output, row, m.width, m.height, m.inputAreaStartRow, m.inputAreaEndRow)
 }
 
-func (m *AgentPaneModel) renderStatusLine(style lipgloss.Style, statusMsg string) string {
-	left := ""
-	if m.modelLabel != "" {
-		left = " " + sanitizeInlineDisplay(m.modelLabel)
+// statusChipSpec describes a chip's typography for a given status. Label is
+// the short word that appears in the chip band; hint is the trailing
+// keyboard-hint text rendered next to the chip in dim style.
+type statusChipSpec struct {
+	label string
+	hint  string
+	style lipgloss.Style
+}
+
+// chipFor returns the chip spec for the current status. When the status is
+// animated the label is prefixed with the current spinner frame so the chip
+// itself pulses rather than the spinner floating next to it.
+func (m *AgentPaneModel) chipFor() statusChipSpec {
+	var spec statusChipSpec
+	switch m.status {
+	case event.StatusIdle:
+		spec = statusChipSpec{label: "READY", style: chipStyleIdle}
+	case event.StatusThinking:
+		spec = statusChipSpec{label: "THINKING", style: chipStyleThinking}
+	case event.StatusPlanning:
+		spec = statusChipSpec{label: "PLANNING", style: chipStylePlanning}
+	case event.StatusPlanningWaiting:
+		spec = statusChipSpec{label: "PLAN", hint: ":done execute · :skip", style: chipStylePlanWait}
+	case event.StatusReviewing:
+		spec = statusChipSpec{label: "REVIEW", hint: "Ctrl+O approve · Esc reject", style: chipStyleReview}
+	case event.StatusEditing:
+		spec = statusChipSpec{label: "EDIT", hint: "Ctrl+N continue", style: chipStyleEditing}
+	case event.StatusWaiting:
+		spec = statusChipSpec{label: "REPLY", hint: "Enter send", style: chipStyleWaiting}
+	case event.StatusAwaitingInput:
+		spec = statusChipSpec{label: "ANSWER", hint: "Enter send · Esc cancel", style: chipStyleAnswer}
+	case event.StatusLinting:
+		spec = statusChipSpec{label: "LINTING", style: chipStyleLinting}
+	default:
+		spec = statusChipSpec{label: "READY", style: chipStyleIdle}
 	}
-	// Append usage summary to the left section when data is available.
+	if statusAnimates(m.status) {
+		spec.label = string(spinnerFrames[m.spinnerFrame%len(spinnerFrames)]) + " " + spec.label
+	}
+	return spec
+}
+
+// renderStatusLine composes the final row: model + usage on the left, a
+// colored status chip on the right with an optional dim hint. Falls back
+// gracefully when the pane is narrow: drops the hint first, then the left
+// section, then truncates the chip label.
+func (m *AgentPaneModel) renderStatusLine() string {
+	// Left: model label + cumulative usage, dim.
+	var leftRaw strings.Builder
+	if m.modelLabel != "" {
+		leftRaw.WriteString(" ◇ ")
+		leftRaw.WriteString(sanitizeInlineDisplay(m.modelLabel))
+	}
 	if m.usage.turns > 0 && (m.usage.totalIn > 0 || m.usage.totalOut > 0) {
-		sep := " "
-		if left != "" {
-			sep = " | "
-		}
 		prefix := "~"
 		if m.usage.hasExact {
 			prefix = ""
 		}
-		usage := fmt.Sprintf("%s%s%s in", sep, prefix, formatTokenCount(m.usage.totalIn))
+		sep := " "
+		if leftRaw.Len() > 0 {
+			sep = " · "
+		}
+		fmt.Fprintf(&leftRaw, "%s%s%s↓", sep, prefix, formatTokenCount(m.usage.totalIn))
 		if m.usage.totalCached > 0 && m.usage.totalIn > 0 {
-			usage += fmt.Sprintf(" (%s cached)", formatTokenCount(m.usage.totalCached))
+			pct := m.usage.totalCached * 100 / m.usage.totalIn
+			fmt.Fprintf(&leftRaw, " (%d%%⚡)", pct)
 		}
-		usage += fmt.Sprintf(" · %s%s out", prefix, formatTokenCount(m.usage.totalOut))
-		left += usage
+		fmt.Fprintf(&leftRaw, " · %s%s↑", prefix, formatTokenCount(m.usage.totalOut))
 	}
-	right := ""
-	if statusMsg != "" {
-		right = statusMsg + " "
+	left := statusLeftStyle.Render(leftRaw.String())
+	leftW := lipgloss.Width(left)
+
+	// Right: chip + optional hint.
+	spec := m.chipFor()
+	chip := spec.style.Render(spec.label)
+	chipW := lipgloss.Width(chip)
+	hint := ""
+	hintW := 0
+	if spec.hint != "" {
+		hint = " " + statusHintStyle.Render(spec.hint) + " "
+		hintW = lipgloss.Width(hint)
 	}
-	leftW := runewidth.StringWidth(left)
-	rightW := runewidth.StringWidth(right)
-	padding := m.width - leftW - rightW
-	if padding < 1 {
-		// Not enough space — prefer the status message over the model label.
-		if right != "" {
-			return style.Render(m.padLine(runewidth.Truncate(right, m.width, "…")))
-		}
-		return style.Render(m.padLine(runewidth.Truncate(left, m.width, "…")))
+
+	gap := m.width - leftW - chipW - hintW
+	if gap >= 1 {
+		return left + strings.Repeat(" ", gap) + chip + hint
 	}
-	return style.Render(left + strings.Repeat(" ", padding) + right)
+	// Drop the hint.
+	gap = m.width - leftW - chipW
+	if gap >= 1 {
+		return left + strings.Repeat(" ", gap) + chip
+	}
+	// Drop the left section — keep the chip right-aligned, padded.
+	gap = m.width - chipW
+	if gap >= 0 {
+		return strings.Repeat(" ", gap) + chip
+	}
+	// Chip itself doesn't fit — truncate the label (plain text) first so
+	// runewidth can do it, then style.Render and finish with ANSI-aware
+	// trim + pad. padLine is unsafe here because the input is styled and
+	// its runewidth-based counter would miscount escape bytes.
+	if m.width <= 2 {
+		return strings.Repeat(" ", m.width)
+	}
+	fallback := spec.style.Render(runewidth.Truncate(spec.label, m.width-2, "…"))
+	fW := lipgloss.Width(fallback)
+	if fW > m.width {
+		fallback = ansi.Truncate(fallback, m.width, "")
+		fW = lipgloss.Width(fallback)
+	}
+	if fW < m.width {
+		fallback += strings.Repeat(" ", m.width-fW)
+	}
+	return fallback
 }
 
 // Render renders the agent pane as exactly m.height lines joined by \n.
@@ -1542,8 +2047,26 @@ func (m *AgentPaneModel) Render() string {
 					line.WriteString(strings.Repeat(" ", m.width-cellsUsed))
 				}
 				output[row] = line.String()
+			} else if label := m.turnSeparatorLabel(lineIdx); label != "" {
+				// Separator check wins over dim so past-turn dividers
+				// get the same full-width rule as the current one;
+				// renderTurnSeparator already applies agentDimStyle.
+				output[row] = renderTurnSeparator(label, m.width)
+			} else if m.isTurnSeparatorContinuation(lineIdx) {
+				// Wrapped tail of a separator placeholder at narrow
+				// widths — blank dim row rather than letting the raw
+				// fragment render as markdown garbage.
+				output[row] = agentDimStyle.Render(strings.Repeat(" ", m.width))
+			} else if m.isDim(lineIdx) {
+				output[row] = agentDimStyle.Render(m.padLine(lineText))
 			} else if m.isUserLine(lineIdx) {
 				output[row] = userMessageStyle.Render(m.padLine(lineText))
+			} else if m.isMeta(lineIdx) {
+				output[row] = agentDimStyle.Render(m.padLine(lineText))
+			} else if m.isPlain(lineIdx) {
+				output[row] = m.padLine(lineText)
+			} else if m.isStreaming(lineIdx) {
+				output[row] = streamingTintStyle.Render(m.padLine(lineText))
 			} else {
 				output[row] = m.cachedMarkdown(lineIdx)
 			}
@@ -1552,6 +2075,10 @@ func (m *AgentPaneModel) Render() string {
 		}
 		row++
 	}
+
+	// Scrollbar overlay spans the rendered content rows only — must run
+	// before the fill loop and separator/input rows consume the slot.
+	m.overlayScrollbar(output, vis)
 
 	// Fill remaining content area
 	bottomH := m.inputHeight()
@@ -1579,33 +2106,10 @@ func (m *AgentPaneModel) Render() string {
 		m.renderInputArea(output, &row)
 	}
 
-	// Status line (last row): model label on the left, status on the right.
+	// Status line (last row): model + usage on the left, colored chip
+	// + optional keyboard hint on the right.
 	if row < m.height {
-		var statusMsg string
-		style := agentStatusStyle
-		switch m.status {
-		case event.StatusIdle:
-			statusMsg = "Ready"
-			style = agentDimStyle
-		case event.StatusThinking:
-			statusMsg = "Thinking..."
-		case event.StatusPlanning:
-			statusMsg = "Planning..."
-		case event.StatusPlanningWaiting:
-			statusMsg = "Planning | :done to execute | :skip"
-		case event.StatusReviewing:
-			statusMsg = "Ctrl+O approve | Esc reject"
-		case event.StatusEditing:
-			statusMsg = "Ctrl+N to continue"
-		case event.StatusWaiting:
-			statusMsg = "Type to reply | Enter send"
-		case event.StatusAwaitingInput:
-			statusMsg = "Awaiting your answer | Enter send | Esc cancel"
-			style = agentAwaitStyle
-		case event.StatusLinting:
-			statusMsg = "Running style lint..."
-		}
-		output[row] = m.renderStatusLine(style, statusMsg)
+		output[row] = m.renderStatusLine()
 	}
 
 	return strings.Join(output, "\n")

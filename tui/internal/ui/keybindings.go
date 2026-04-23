@@ -147,6 +147,7 @@ func DefaultKeymap() *Keymap {
 			// LSP
 			{code: 't', mod: tea.ModCtrl}: ActionGoBack,
 			{code: 'k', mod: tea.ModAlt}:  ActionHover,
+			{code: '˚', mod: 0}:           ActionHover, // macOS: Option+K sends ˚
 		},
 		byString: map[string]Action{
 			"ctrl+g": ActionAgentStart,
@@ -164,6 +165,8 @@ func DefaultKeymap() *Keymap {
 			"®":      ActionEvaluatorToggle, // macOS: Option+R sends ®
 			"alt+t":  ActionTerseToggle,
 			"†":      ActionTerseToggle, // macOS: Option+T sends †
+			"alt+k":  ActionHover,
+			"˚":      ActionHover, // macOS: Option+K sends ˚
 			"ctrl+p": ActionOpenPalette,
 			"ctrl+b": ActionToggleProject,
 			"ctrl+/": ActionToggleComment,

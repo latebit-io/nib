@@ -212,7 +212,7 @@ func DefaultBindings() []Binding {
 		// Code Intelligence
 		{ActionGoToDefinition, "Go to definition", []string{"F12"}, CatLSP},
 		{ActionGoBack, "Go back", []string{"Ctrl+-", "Ctrl+T"}, CatLSP},
-		{ActionHover, "Hover info", []string{"Alt+K"}, CatLSP},
+		{ActionHover, "Hover info", []string{"Shift+F1"}, CatLSP},
 	}
 }
 

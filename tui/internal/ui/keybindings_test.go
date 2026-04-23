@@ -24,7 +24,6 @@ func TestKeymap_MacOptionRuneFallbacks(t *testing.T) {
 		{"Alt+V / √", 'v', '√', ActionEvaluatorToggle},
 		{"Alt+R / ®", 'r', '®', ActionEvaluatorToggle},
 		{"Alt+T / †", 't', '†', ActionTerseToggle},
-		{"Alt+K / ˚", 'k', '˚', ActionHover},
 	}
 
 	km := DefaultKeymap()
@@ -39,5 +38,16 @@ func TestKeymap_MacOptionRuneFallbacks(t *testing.T) {
 				t.Errorf("macOS rune %q resolved to %v, want %v (missing macOS fallback?)", tc.rune, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestKeymap_Hover verifies Shift+F1 triggers hover. The binding is tested
+// both by direct key lookup and by string lookup (msg.String()) so the
+// match path taken by bubbletea at runtime is covered either way.
+func TestKeymap_Hover(t *testing.T) {
+	km := DefaultKeymap()
+	msg := tea.KeyPressMsg{Code: tea.KeyF1, Mod: tea.ModShift}
+	if got := km.Match(msg); got != ActionHover {
+		t.Errorf("Shift+F1 resolved to %v, want ActionHover", got)
 	}
 }

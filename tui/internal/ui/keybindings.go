@@ -145,34 +145,35 @@ func DefaultKeymap() *Keymap {
 			{code: 'R', mod: tea.ModCtrl | tea.ModShift}: ActionReloadFile, // some terminals send uppercase with Shift
 
 			// LSP
-			{code: 't', mod: tea.ModCtrl}: ActionGoBack,
-			{code: 'k', mod: tea.ModAlt}:  ActionHover,
+			{code: 't', mod: tea.ModCtrl}:        ActionGoBack,
+			{code: tea.KeyF1, mod: tea.ModShift}: ActionHover,
 		},
 		byString: map[string]Action{
-			"ctrl+g": ActionAgentStart,
-			"alt+g":  ActionAgentPlan,
-			"©":      ActionAgentPlan, // macOS: Option+G sends ©
-			"alt+a":  ActionDialCycle,
-			"å":      ActionDialCycle, // macOS: Option+A sends å
-			"alt+m":  ActionModelSelector,
-			"µ":      ActionModelSelector, // macOS: Option+M sends µ
-			"alt+s":  ActionStyleCycle,
-			"ß":      ActionStyleCycle, // macOS: Option+S sends ß
-			"alt+v":  ActionEvaluatorToggle,
-			"√":      ActionEvaluatorToggle, // macOS: Option+V sends √
-			"alt+r":  ActionEvaluatorToggle,
-			"®":      ActionEvaluatorToggle, // macOS: Option+R sends ®
-			"alt+t":  ActionTerseToggle,
-			"†":      ActionTerseToggle, // macOS: Option+T sends †
-			"ctrl+p": ActionOpenPalette,
-			"ctrl+b": ActionToggleProject,
-			"ctrl+/": ActionToggleComment,
-			"ctrl+_": ActionToggleComment, // some terminals send Ctrl+/ as Ctrl+_
-			"f4":     ActionHelp,
-			"f1":     ActionFocusProject,
-			"f2":     ActionFocusEditor,
-			"f3":     ActionFocusAgent,
-			"f12":    ActionGoToDefinition, // F12 (VS Code)
+			"ctrl+g":   ActionAgentStart,
+			"alt+g":    ActionAgentPlan,
+			"©":        ActionAgentPlan, // macOS: Option+G sends ©
+			"alt+a":    ActionDialCycle,
+			"å":        ActionDialCycle, // macOS: Option+A sends å
+			"alt+m":    ActionModelSelector,
+			"µ":        ActionModelSelector, // macOS: Option+M sends µ
+			"alt+s":    ActionStyleCycle,
+			"ß":        ActionStyleCycle, // macOS: Option+S sends ß
+			"alt+v":    ActionEvaluatorToggle,
+			"√":        ActionEvaluatorToggle, // macOS: Option+V sends √
+			"alt+r":    ActionEvaluatorToggle,
+			"®":        ActionEvaluatorToggle, // macOS: Option+R sends ®
+			"alt+t":    ActionTerseToggle,
+			"†":        ActionTerseToggle, // macOS: Option+T sends †
+			"shift+f1": ActionHover,
+			"ctrl+p":   ActionOpenPalette,
+			"ctrl+b":   ActionToggleProject,
+			"ctrl+/":   ActionToggleComment,
+			"ctrl+_":   ActionToggleComment, // some terminals send Ctrl+/ as Ctrl+_
+			"f4":       ActionHelp,
+			"f1":       ActionFocusProject,
+			"f2":       ActionFocusEditor,
+			"f3":       ActionFocusAgent,
+			"f12":      ActionGoToDefinition, // F12 (VS Code)
 		},
 	}
 	return km

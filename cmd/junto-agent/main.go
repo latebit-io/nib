@@ -25,9 +25,12 @@ import (
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/headless"
+	"github.com/latebit-io/junto/engine/lint"
+	"github.com/latebit-io/junto/engine/runconfig"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/validate"
 	"github.com/latebit-io/junto/engine/validate/goparse"
+	"github.com/latebit-io/junto/engine/validate/lintstage"
 	"github.com/latebit-io/junto/engine/wire"
 )
 
@@ -189,6 +192,16 @@ func run() error {
 	// Resolve coding style — injected into the agent's system prompt.
 	styleResult := wire.NewStyle(projectRoot)
 
+	// Resolve smoke-run config. In headless / CI mode this is the
+	// primary safety net that catches "compiles clean but won't launch"
+	// regressions before the agent reports success.
+	smokeCfg := runconfig.Load(projectRoot)
+	if smokeCfg.Skipped {
+		slog.Info("smoke: skipped", "reason", smokeCfg.SkipReason)
+	} else {
+		slog.Info("smoke: configured", "command", smokeCfg.Command, "source", smokeCfg.Source)
+	}
+
 	// Create agent in headless mode.
 	opts := &agent.NewOptions{
 		MemoryStore:       mem.Store,
@@ -196,6 +209,7 @@ func run() error {
 		Interaction:       agent.Headless,
 		DistributedMemory: agent.DetectDistributedMemory(mcpResult.ServerNames),
 		CodingStyle:       styleResult.AgentStyle,
+		SmokeConfig:       smokeCfg,
 	}
 	if styleResult.Resolved != nil {
 		opts.Linters = styleResult.Linters
@@ -205,7 +219,11 @@ func run() error {
 		opts.DiagProvider = lspMgr
 	}
 	if os.Getenv("JUNTO_VALIDATORS_DISABLED") == "" {
-		opts.ValidationPipeline = validate.NewPipeline(goparse.Validator{})
+		perFileLinters := styleResult.PerFileLinters
+		opts.ValidationPipeline = validate.NewPipeline(
+			goparse.Validator{},
+			lintstage.New(func() []lint.Linter { return perFileLinters }),
+		)
 	}
 	ag := agent.New(provider, workspace, events, opts, mcpResult.Tools...)
 

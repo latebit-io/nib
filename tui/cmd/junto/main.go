@@ -18,13 +18,17 @@ import (
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/highlight"
+	"github.com/latebit-io/junto/engine/lint"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/oauth"
+	"github.com/latebit-io/junto/engine/runconfig"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/styleconfig"
 	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/junto/engine/validate/architecture"
 	"github.com/latebit-io/junto/engine/validate/goparse"
+	"github.com/latebit-io/junto/engine/validate/lintstage"
 	"github.com/latebit-io/junto/engine/validate/treesitter"
 	"github.com/latebit-io/junto/engine/wire"
 	"github.com/latebit-io/junto/tui/internal/ui"
@@ -150,6 +154,17 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Resolve coding style — injected into the agent's system prompt.
 	styleResult := wire.NewStyle(projectRoot)
 
+	// Resolve smoke-run configuration. Skipped when no Makefile, no
+	// language default, or no .project/run.json — the agent then
+	// won't register the smoke_run tool or auto-invoke at task
+	// completion.
+	smokeCfg := runconfig.Load(projectRoot)
+	if smokeCfg.Skipped {
+		slog.Info("smoke: skipped", "reason", smokeCfg.SkipReason)
+	} else {
+		slog.Info("smoke: configured", "command", smokeCfg.Command, "source", smokeCfg.Source)
+	}
+
 	slog.Debug("startup: provider resolved", "hasProvider", provider != nil)
 
 	// Start memory server — always needed for project plans, independent of LLM.
@@ -198,6 +213,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			DistributedMemory: distributed,
 			CodingStyle:       styleResult.AgentStyle,
 			Terse:             true,
+			SmokeConfig:       smokeCfg,
 		}
 		if styleResult.Resolved != nil {
 			opts.Linters = styleResult.Linters
@@ -207,9 +223,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			opts.DiagProvider = lspMgr
 		}
 		if os.Getenv("JUNTO_VALIDATORS_DISABLED") == "" {
+			perFileLinters := styleResult.PerFileLinters
 			opts.ValidationPipeline = validate.NewPipeline(
 				goparse.Validator{},
 				treesitter.New(highlight.LanguageFor),
+				architecture.New(styleResult.Architecture, highlight.LanguageFor),
+				lintstage.New(func() []lint.Linter { return perFileLinters }),
 			)
 		}
 		return agent.New(p, sess, events, opts, mcpResult.Tools...)
@@ -398,6 +417,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 					currentStyleKey = ""
 					currentResolved = nil
 					ag.SetStyle(nil, nil)
+					styleResult.Architecture.Set(styleconfig.Architecture{})
 					if evaluatorActive {
 						ag.SetEvaluator(nil)
 						evaluatorActive = false
@@ -411,6 +431,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				data := agent.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
 				linters := wire.LintersForStyle(s.LintCmd, styleResult.DefaultLinters)
 				ag.SetStyle(data, linters)
+				styleResult.Architecture.Set(s.Architecture)
 
 				currentResolved = &styleconfig.Resolved{
 					Name:           s.Name,
@@ -418,6 +439,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 					LintCmd:        s.LintCmd,
 					Evaluator:      s.Evaluator,
 					EvaluatorModel: s.EvaluatorModel,
+					Architecture:   s.Architecture,
 				}
 
 				if evaluatorActive {

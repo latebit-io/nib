@@ -57,7 +57,7 @@ func TestRunTaskReview_NoConfigurationSurfacesBanner(t *testing.T) {
 	}
 
 	tokens := drainTokens(events)
-	if !strings.Contains(tokens, "no lint or style evaluator configured") {
+	if !strings.Contains(tokens, "no lint") || !strings.Contains(tokens, "configured") {
 		t.Errorf("expected disambiguating banner, got: %q", tokens)
 	}
 }
@@ -69,7 +69,7 @@ func TestRunTaskReview_NoEditsNoBanner(t *testing.T) {
 
 	_ = a.runTaskReview(context.Background(), "Done")
 	tokens := drainTokens(events)
-	if strings.Contains(tokens, "no lint or style evaluator configured") {
+	if strings.Contains(tokens, "configured") {
 		t.Errorf("should not emit banner without edits, got: %q", tokens)
 	}
 	if strings.Contains(tokens, "Task complete — running style lint") {

@@ -29,30 +29,59 @@ type StyleResult struct {
 	// Used as fallback when a style has no explicit lint_cmd (e.g. during
 	// runtime style cycling).
 	DefaultLinters []lint.Linter
+	// Architecture is the thread-safe holder for the active style's
+	// structural caps. The architecture validator reads it; the TUI's
+	// CycleStyle closure updates it on style switch. Always non-nil so
+	// callers can register the validator unconditionally; the validator
+	// short-circuits via its Applicable check when no caps are configured.
+	Architecture *styleconfig.ActiveProvider
+	// PerFileLinters is the per-file safe linter subset, used by the
+	// pre-approval lint validator stage. Nil when neither the style nor
+	// the project has a per-file linter configured.
+	PerFileLinters []lint.Linter
+	// DefaultPerFileLinters is the auto-detected per-file linter set for
+	// the project language. Used as fallback when a style has no
+	// {file}-bearing lint_cmd, including during runtime style cycling.
+	DefaultPerFileLinters []lint.Linter
 }
 
 // NewStyle resolves the coding style configuration and converts it to
-// agent-ready prompt data. Returns a zero StyleResult when no style is active.
+// agent-ready prompt data. Returns a zero StyleResult except for the
+// Architecture provider, which is always non-nil so validators can be
+// registered unconditionally at the composition root.
 func NewStyle(projectRoot string) StyleResult {
 	cfg, resolved := styleconfig.Resolve(projectRoot)
 
 	// Auto-detect project-appropriate linters. Stored on the result so
 	// callers can reuse them during runtime style cycling.
 	defaults := lint.Detect(projectRoot)
+	perFileDefaults := lint.DetectPerFile(projectRoot)
+
+	archProvider := styleconfig.NewActiveProvider()
 
 	if resolved == nil {
 		slog.Debug("wire: no active coding style")
-		return StyleResult{Config: cfg, DefaultLinters: defaults}
+		return StyleResult{
+			Config:                cfg,
+			DefaultLinters:        defaults,
+			DefaultPerFileLinters: perFileDefaults,
+			Architecture:          archProvider,
+		}
 	}
+
+	archProvider.Set(resolved.Architecture)
 
 	slog.Info("wire: coding style active", "style", resolved.Name)
 
 	return StyleResult{
-		Config:         cfg,
-		Resolved:       resolved,
-		AgentStyle:     agent.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules)),
-		Linters:        LintersForStyle(resolved.LintCmd, defaults),
-		DefaultLinters: defaults,
+		Config:                cfg,
+		Resolved:              resolved,
+		AgentStyle:            agent.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules)),
+		Linters:               LintersForStyle(resolved.LintCmd, defaults),
+		DefaultLinters:        defaults,
+		PerFileLinters:        LintersForStylePerFile(resolved.LintCmd, perFileDefaults),
+		DefaultPerFileLinters: perFileDefaults,
+		Architecture:          archProvider,
 	}
 }
 
@@ -64,6 +93,19 @@ func LintersForStyle(lintCmd []string, defaults []lint.Linter) []lint.Linter {
 		return lint.FromShellCommands(lintCmd)
 	}
 	return defaults
+}
+
+// LintersForStylePerFile returns the per-file safe subset of linters for a
+// style — used by the pre-approval lint validator stage. If the style has
+// lint_cmd, only commands containing the {file} placeholder qualify;
+// otherwise the auto-detected per-file defaults (luacheck and similar) are
+// returned. Returns nil when neither source produces a per-file linter so
+// the validator's Applicable check skips the stage cleanly.
+func LintersForStylePerFile(lintCmd []string, perFileDefaults []lint.Linter) []lint.Linter {
+	if perFile := lint.PerFileShellCommands(lintCmd); len(perFile) > 0 {
+		return perFile
+	}
+	return perFileDefaults
 }
 
 // NewStyleEvaluator creates a StyleEvaluator from the resolved style config

@@ -71,6 +71,7 @@ func resolve(cfg *Config) *Resolved {
 		LintCmd:        s.LintCmd,
 		Evaluator:      s.Evaluator,
 		EvaluatorModel: s.EvaluatorModel,
+		Architecture:   s.Architecture,
 	}
 }
 
@@ -191,6 +192,20 @@ func mergeConfigs(dst, src *Config) {
 		}
 		if ss.EvaluatorModel != "" {
 			ds.EvaluatorModel = ss.EvaluatorModel
+		}
+		// Architecture merges field-by-field so a project file can tighten
+		// one cap without forcing the developer to repeat the others.
+		if ss.Architecture.MaxFileLines > 0 {
+			ds.Architecture.MaxFileLines = ss.Architecture.MaxFileLines
+		}
+		if ss.Architecture.MaxFunctionLines > 0 {
+			ds.Architecture.MaxFunctionLines = ss.Architecture.MaxFunctionLines
+		}
+		if ss.Architecture.MaxFunctionsPerFile > 0 {
+			ds.Architecture.MaxFunctionsPerFile = ss.Architecture.MaxFunctionsPerFile
+		}
+		if ss.Architecture.Action != "" {
+			ds.Architecture.Action = ss.Architecture.Action
 		}
 		dst.Styles[name] = ds
 	}

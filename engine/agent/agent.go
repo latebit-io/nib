@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/latebit-io/junto/engine/lint"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/junto/engine/runconfig"
 	"github.com/latebit-io/junto/engine/validate"
 )
 
@@ -183,6 +185,12 @@ type Agent struct {
 	// instructions rather than buried in tool results.
 	pendingLint string
 
+	// smokeConfig is the resolved smoke-run configuration. Skipped means
+	// no smoke command is available for this project; the agent does not
+	// register the smoke_run tool in that case and runTaskReview skips
+	// the auto-invocation. Read-only after New.
+	smokeConfig runconfig.Resolved
+
 	// terse enables terse output mode — instructs the LLM to minimize
 	// explanatory text, reducing output tokens by ~65%.
 	terse bool
@@ -274,6 +282,12 @@ type NewOptions struct {
 	// prompt instructs the LLM to minimize explanatory text, reducing
 	// output tokens by ~65%. Switchable at runtime via SetTerse.
 	Terse bool
+	// SmokeConfig is the resolved smoke-run configuration for the
+	// project. When non-Skipped, the agent registers the smoke_run
+	// tool and auto-invokes it during runTaskReview so tasks marked
+	// complete are verified by an actual launch — runtime errors that
+	// the parser/lint/architecture stages cannot catch surface here.
+	SmokeConfig runconfig.Resolved
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -299,6 +313,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var linters []lint.Linter
 	var evaluator *StyleEvaluator
 	var terse bool
+	var smokeCfg runconfig.Resolved
 	var pipeline validate.Pipeline = validate.NoopPipeline{}
 	if opts != nil {
 		diagProvider = opts.DiagProvider
@@ -311,6 +326,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		linters = slices.Clone(opts.Linters)
 		evaluator = opts.StyleEvaluator
 		terse = opts.Terse
+		smokeCfg = opts.SmokeConfig
 		if opts.ValidationPipeline != nil {
 			pipeline = opts.ValidationPipeline
 		}
@@ -348,6 +364,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		evaluator:         evaluator,
 		diagDelay:         500 * time.Millisecond,
 		workspace:         workspace,
+		smokeConfig:       smokeCfg,
 	}
 
 	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
@@ -376,6 +393,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	builtins = append(builtins, NewGlobTool(workspace))
 	builtins = append(builtins, NewSearchProjectTool(projectRoot))
 	builtins = append(builtins, NewPackageInfoTool(projectRoot))
+	builtins = a.appendSmokeTool(builtins, projectRoot)
 
 	// request_input is interactive-only: headless agents have no developer
 	// to ask, so the tool is not registered and the LLM cannot emit a call.
@@ -1524,16 +1542,30 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 
 	lintWillRun := len(editedFiles) > 0 && len(linters) > 0
 	evalWillRun := len(edits) > 0 && evalConfigured
+	smokeWillRun := len(editedFiles) > 0 && !a.smokeConfig.Skipped &&
+		a.smokeConfig.Command != "" && os.Getenv("JUNTO_SMOKE_DISABLED") == ""
 
 	// Surface "no review configured" when we have work but nothing to check it
 	// with. Silent return used to be indistinguishable from "clean"; now the
 	// developer sees why.
-	if len(editedFiles) > 0 && !lintWillRun && !evalWillRun {
-		a.send(event.AgentToken{Text: "\n[Task complete — no lint or style evaluator configured]\n"})
+	if len(editedFiles) > 0 && !lintWillRun && !evalWillRun && !smokeWillRun {
+		a.send(event.AgentToken{Text: "\n[Task complete — no lint, style evaluator, or smoke run configured]\n"})
 	}
 
 	if lintWillRun {
 		a.runLinters(ctx, linters, editedFiles, editedDirs, filesByDir)
+	}
+
+	// Smoke runs verify the artifact actually launches — runtime errors
+	// the parser/lint/architecture stages cannot catch. The result is
+	// appended to the review so the LLM sees it on the next turn (it
+	// can decide to reopen the task and fix the regression).
+	if smokeWillRun {
+		smokeMsg := a.runSmokeReview(ctx)
+		if smokeMsg != "" {
+			review.WriteString("\n\n")
+			review.WriteString(smokeMsg)
+		}
 	}
 
 	// Run evaluator on all edits.
@@ -1628,6 +1660,42 @@ func (a *Agent) runLinters(ctx context.Context, linters []lint.Linter, editedFil
 type infraError struct {
 	name string
 	err  error
+}
+
+// appendSmokeTool registers the smoke_run tool when the project's
+// smokeConfig is non-Skipped and resolves to a real command. Extracted
+// from registerTools so the latter stays under the func-length cap and
+// the gate logic is easier to review in isolation.
+func (a *Agent) appendSmokeTool(builtins []Tool, projectRoot string) []Tool {
+	if a.smokeConfig.Skipped {
+		return builtins
+	}
+	if a.smokeConfig.Command == "" {
+		return builtins
+	}
+	return append(builtins, NewSmokeRunTool(projectRoot, a.smokeConfig))
+}
+
+// runSmokeReview invokes the configured smoke-run command once at task
+// completion and returns a formatted result for inclusion in the
+// runTaskReview output. Returns an empty string only when the
+// configuration is Skipped at call time (the JUNTO_SMOKE_DISABLED env
+// var path is checked by the caller).
+//
+// Smoke runs do not consume the per-path validatorRetries budget — that
+// counter is per-edit, while smoke fires per task. The LLM's incentive
+// to fix runtime regressions comes from the failure being included in
+// the update_task tool result; under autonomous mode it will iterate
+// without further plumbing, and under guided mode the developer sees
+// the failure and decides whether to push the agent forward.
+func (a *Agent) runSmokeReview(ctx context.Context) string {
+	cfg := a.smokeConfig
+	if cfg.Skipped {
+		return ""
+	}
+	a.send(event.AgentToken{Text: fmt.Sprintf("\n[Smoke run: %s]\n", cfg.Command)})
+	res := runSmoke(ctx, a.workspace.ProjectRoot(), cfg)
+	return formatSmokeResult(cfg, res)
 }
 
 // formatFindings renders structured lint.Findings as plain text for injection

@@ -63,5 +63,11 @@
       "enforcement": "soft"
     }
   ],
-  "evaluator": true
+  "evaluator": true,
+  "architecture": {
+    "max_file_lines": 300,
+    "max_function_lines": 20,
+    "max_functions_per_file": 15,
+    "action": "block"
+  }
 }

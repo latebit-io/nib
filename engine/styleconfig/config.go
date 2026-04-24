@@ -34,6 +34,10 @@ type Style struct {
 	// EvaluatorModel overrides the model for the evaluator (e.g. a cheaper/faster
 	// model). When empty, the main agent's provider is used.
 	EvaluatorModel string `json:"evaluator_model,omitempty"`
+	// Architecture sets deterministic structural caps (max file lines,
+	// max function lines, etc.) checked by the architecture validator
+	// before each edit. Zero value disables the validator for this style.
+	Architecture Architecture `json:"architecture,omitzero"`
 }
 
 // Rule is a single enforceable principle within a coding style.
@@ -60,6 +64,9 @@ type Resolved struct {
 	Evaluator bool
 	// EvaluatorModel overrides the model for the evaluator. Empty uses the main provider.
 	EvaluatorModel string
+	// Architecture holds the deterministic structural caps for this style.
+	// The zero value disables the architecture validator.
+	Architecture Architecture
 }
 
 // StyleNames returns the sorted list of style names in the config.

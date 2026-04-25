@@ -277,10 +277,16 @@ var (
 	chipStylePlanning = chipBase.Background(lipgloss.Color("25")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStylePlanWait = chipBase.Background(lipgloss.Color("60")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleReview   = chipBase.Background(lipgloss.Color("136")).Foreground(lipgloss.Color("232")).Bold(true)
-	chipStyleEditing  = chipBase.Background(lipgloss.Color("28")).Foreground(lipgloss.Color("231")).Bold(true)
-	chipStyleWaiting  = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
-	chipStyleAnswer   = chipBase.Background(lipgloss.Color("162")).Foreground(lipgloss.Color("231")).Bold(true)
-	chipStyleLinting  = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
+	// chipStyleBlock is reserved for StatusBlockReview — distinct
+	// red background so the developer can tell at a glance that a
+	// validator stage flagged this proposal as needing eyes-on,
+	// not the routine review-and-approve they'd see at lower
+	// autonomy levels.
+	chipStyleBlock   = chipBase.Background(lipgloss.Color("160")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleEditing = chipBase.Background(lipgloss.Color("28")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleWaiting = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleAnswer  = chipBase.Background(lipgloss.Color("162")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleLinting = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
 
 	// statusHintStyle renders the trailing keyboard hint next to a chip in
 	// a dim color — it's context, not headline.
@@ -1871,6 +1877,8 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 		spec = statusChipSpec{label: "PLAN", hint: ":done execute · :skip", style: chipStylePlanWait}
 	case event.StatusReviewing:
 		spec = statusChipSpec{label: "REVIEW", hint: "Ctrl+O approve · Esc reject", style: chipStyleReview}
+	case event.StatusBlockReview:
+		spec = statusChipSpec{label: "BLOCK", hint: "Ctrl+O approve · Esc reject", style: chipStyleBlock}
 	case event.StatusEditing:
 		spec = statusChipSpec{label: "EDIT", hint: "Ctrl+N continue", style: chipStyleEditing}
 	case event.StatusWaiting:

@@ -58,6 +58,19 @@ func (s *Session) WorkTreeLoaded() bool {
 	return s.workTree.TreeLoaded()
 }
 
+// NextPendingTask implements agent.TaskTracker. Returns the title of
+// the first leaf task in document order with status TaskPending, or
+// "" when none remains. The agent's runTaskReview hook appends this
+// to the task-completion review so the LLM has a clear next step
+// without the developer typing "continue" between every task.
+func (s *Session) NextPendingTask() string {
+	t := s.WorkTree()
+	if t == nil {
+		return ""
+	}
+	return t.FindNextPendingTask()
+}
+
 // ReloadWorkTree re-fetches the work tree from demarkus.
 func (s *Session) ReloadWorkTree() error {
 	return s.workTree.Reload()

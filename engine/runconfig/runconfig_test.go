@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // mustWriteFile writes data to path inside the test's temp tree and
@@ -194,6 +195,33 @@ func TestLoadGoSinglePackageDetected(t *testing.T) {
 	}
 	if got.Source != "go-run" {
 		t.Errorf("Source = %q, want go-run", got.Source)
+	}
+}
+
+// TestEffectiveTimeoutFallsBackToDefault verifies the helper used by
+// runSmoke and formatSmokeResult resolves zero / negative Timeout to
+// DefaultTimeout — without this single source of truth, a Resolved
+// constructed directly (test paths, future callers bypassing Load)
+// would render "Timed out after 0s" while proc actually used the
+// default deadline.
+func TestEffectiveTimeoutFallsBackToDefault(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   Resolved
+		want time.Duration
+	}{
+		{"zero falls back", Resolved{}, DefaultTimeout},
+		{"negative falls back", Resolved{Timeout: -1}, DefaultTimeout},
+		{"explicit value preserved", Resolved{Timeout: 7 * time.Second}, 7 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveTimeout(tc.in); got != tc.want {
+				t.Errorf("EffectiveTimeout(%+v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 

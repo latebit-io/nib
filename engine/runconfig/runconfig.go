@@ -26,6 +26,21 @@ import (
 // an explicit higher timeout.
 const DefaultTimeout = 30 * time.Second
 
+// EffectiveTimeout returns the timeout the runner will actually
+// enforce, applying the [DefaultTimeout] fallback when r.Timeout is
+// zero or negative. Callers that need to report or compare against
+// "the timeout that was used" must go through this helper rather than
+// reading r.Timeout directly — production code reaches Resolved via
+// [Load] which already defaults the field, but tests and future
+// caller paths constructing Resolved values directly would otherwise
+// see zero and report misleading values like "Timed out after 0s".
+func EffectiveTimeout(r Resolved) time.Duration {
+	if r.Timeout <= 0 {
+		return DefaultTimeout
+	}
+	return r.Timeout
+}
+
 // Config is the on-disk shape of `.project/run.json`. Fields are
 // lowercase JSON keys to match the rest of junto's project config
 // surface.

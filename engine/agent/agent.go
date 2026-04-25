@@ -78,10 +78,19 @@ func DetectDistributedMemory(serverNames []string) []string {
 
 // planningBlocklist contains tool names disabled during planning mode.
 // These are write-side tools that modify code or run commands.
+//
+// smoke_run is here because it executes the project's smoke command
+// (typically `make smoke` / `lua main.lua` / etc.) via `sh -c`. That is
+// command execution — same threat profile as bash — and planning mode
+// is supposed to be read-only. The auto-invocation path in
+// runTaskReview only fires from update_task(complete), which is itself
+// blocked here, so the auto-path is naturally suppressed in planning
+// mode too.
 var planningBlocklist = map[string]bool{
 	"edit_file":   true,
 	"write_file":  true,
 	"bash":        true,
+	"smoke_run":   true,
 	"update_task": true,
 }
 
@@ -1574,7 +1583,42 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 		review.WriteString(evalMsg)
 	}
 
+	if hint := a.nextTaskHint(); hint != "" {
+		review.WriteString("\n\n")
+		review.WriteString(hint)
+	}
+
 	return review.String() + a.intentReminder()
+}
+
+// nextTaskHint returns a one-line nudge identifying the next pending
+// task in the work tree, or "" when no pending task remains. Appended
+// to runTaskReview's output so the LLM sees a concrete next step
+// after a task completes — without this, even under LevelTrusted the
+// model tends to stop and wait for developer input ("yes continue")
+// at every task boundary, making "trust mode" feel like guided mode.
+//
+// The hint is informational. The LLM still has to call
+// update_task(action:"activate", title:"<title>") to actually start
+// the next task — the gate at enforceActiveTaskGate enforces this so
+// no work happens off the tracked plan. The hint just removes the
+// "what now?" pause.
+//
+// Empty when:
+//   - The workspace doesn't implement TaskTracker (no project plan).
+//   - No tasks are pending (all done; agent should naturally finish).
+func (a *Agent) nextTaskHint() string {
+	tt, ok := a.workspace.(TaskTracker)
+	if !ok {
+		return ""
+	}
+	next := tt.NextPendingTask()
+	if next == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Next pending task: %q. Call update_task(action:\"activate\", title:%q) to start it, or call update_task(action:\"complete\") on the project itself when there is genuinely nothing more to do.",
+		next, next)
 }
 
 // groupEditsByDir returns the unique edited file paths, unique package

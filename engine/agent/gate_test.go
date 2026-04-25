@@ -18,6 +18,7 @@ func (g *gateTracker) CompleteTask(string) error       { return nil }
 func (g *gateTracker) AddTask(_, _, _, _ string) error { return nil }
 func (g *gateTracker) ActiveTaskPath() string          { return g.activePath }
 func (g *gateTracker) WorkTreeLoaded() bool            { return g.loaded }
+func (g *gateTracker) NextPendingTask() string         { return "" }
 
 // gateTestWorkspace wraps gateTracker so it satisfies both Workspace
 // (via an embedded testWorkspace) and TaskTracker.

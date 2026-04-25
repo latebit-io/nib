@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -194,6 +195,26 @@ type AppModel struct {
 	// fileWatcher monitors open files for external changes.
 	// nil when the OS watcher is unavailable.
 	fileWatcher *FileWatcher
+
+	// blockedPaths tracks Path values that have ALREADY been
+	// approved-after-Block in this session. The first Block on a
+	// file surfaces normally (developer must Ctrl+O / Esc);
+	// subsequent Blocks on the same file auto-apply with a
+	// "snoozed" banner. Cuts the per-file repeat-prompt churn the
+	// Pac-Man eval surfaced — once the developer has eyes-on with
+	// a particular over-cap file, further nags don't add
+	// information. Reset at process boundaries (NewApp seeds an
+	// empty map); never persisted across sessions.
+	blockedPaths map[string]bool
+
+	// pendingBlockedPath is the Path of a currently-surfaced Block
+	// awaiting developer decision. Set when EditProposed surfaces
+	// with a Block summary; copied to blockedPaths on Ctrl+O
+	// (manual approve = "yes I've seen this file's situation");
+	// cleared without snoozing on Esc (reject means "this specific
+	// edit is wrong, don't decide for me on the next one"). Empty
+	// when no Block is currently surfaced.
+	pendingBlockedPath string
 }
 
 // CloseWatcher shuts down the file watcher. Safe to call if the watcher is nil.
@@ -295,15 +316,16 @@ func NewApp(sess *session.Session) AppModel {
 	}
 
 	return AppModel{
-		Session:     sess,
-		Editor:      editorPane,
-		AgentPane:   agentPane,
-		ProjectPane: projectPane,
-		Regions:     rm,
-		Services:    svc,
-		Keymap:      km,
-		dial:        session.LevelTrusted,
-		fileWatcher: fw,
+		Session:      sess,
+		Editor:       editorPane,
+		AgentPane:    agentPane,
+		ProjectPane:  projectPane,
+		Regions:      rm,
+		Services:     svc,
+		Keymap:       km,
+		dial:         session.LevelTrusted,
+		fileWatcher:  fw,
+		blockedPaths: map[string]bool{},
 		SearchOverlay: SearchOverlayModel{
 			SearchFunc: func(pattern string) ([]search.Result, error) {
 				return sess.Search(pattern, search.Options{})
@@ -831,26 +853,54 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			// search/replace content even when we skip the visual review.
 			m.Editor.Overlay = NewDiffOverlay(diff)
 
-			// Block-verdict guard: a validator stage flagged this edit
-			// as needing developer attention (architecture cap exceeded,
-			// for example). Refuse auto-approval even at LevelTrusted —
-			// the validator already exhausted its retry budget feeding
-			// feedback to the LLM, so surfacing here is the safety
-			// valve. Without this gate the architectural cap is
-			// theatre: validator reports the breach, autonomous mode
-			// applies the broken edit anyway. Pac-Man rerun proved it.
-			blocked := hasBlockSummary(e.ValidatorSummaries)
+			// Validator guard: refuse auto-approval whenever any
+			// non-"pass" verdict reaches us. The agent already
+			// exhausted the per-CanonPath retry budget feeding
+			// feedback back to the LLM (so the model had its 3
+			// attempts to self-correct), and the proposal is now
+			// surfacing precisely BECAUSE the LLM couldn't fix it.
+			// Auto-applying it under LevelTrusted would invert the
+			// validator's purpose. Fail-closed on unknown verdicts
+			// too — a future verdict must explicitly opt into
+			// auto-apply rather than slipping through this gate.
+			//
+			// LevelYolo is the explicit opt-out: the developer has
+			// accepted that validator Block findings may slip
+			// through. m.dial.AutoApproveBlock() returns true only
+			// at LevelYolo, so the gate retains the LevelTrusted
+			// safety valve by default.
+			needsReview := summaryRequiresReview(e.ValidatorSummaries)
+			snoozed := needsReview && m.blockedPaths[e.Edit.Path]
+			autoApprove := m.dial.AutoApproveEdits() &&
+				(!needsReview || m.dial.AutoApproveBlock() || snoozed)
 
-			if m.dial.AutoApproveEdits() && !blocked {
-				// At LevelTrusted, skip the visual review step and apply
+			if autoApprove {
+				switch {
+				case snoozed:
+					// Per-file snooze: the developer already saw and
+					// approved a Block on this file earlier in the
+					// session. Repeat Blocks add no new information,
+					// so auto-apply with a marker banner instead of
+					// re-prompting.
+					m.AgentPane.AppendMeta(snoozeBannerForSummaries(e.Edit.Path, e.ValidatorSummaries))
+				case needsReview:
+					// LevelYolo override path.
+					m.AgentPane.AppendMeta(yoloOverrideBannerForSummaries(e.ValidatorSummaries))
+				}
+				// At LevelTrusted+, skip the visual review step and apply
 				// immediately.
 				cmd = m.applyApproval()
 			} else {
-				if blocked {
-					m.AgentPane.AppendMeta(
-						"\n[validator: block — auto-approval refused; review the diff and Ctrl+O to apply]\n")
+				status := event.StatusReviewing
+				if needsReview {
+					m.pendingBlockedPath = e.Edit.Path
+					m.AgentPane.AppendMeta(reviewBannerForSummaries(e.ValidatorSummaries))
+					// Distinct status so the indicator stands out
+					// from routine reviewing — block-review means
+					// "validator flagged this, eyes-on required."
+					status = event.StatusBlockReview
 				}
-				cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusReviewing))
+				cmd = tea.Batch(cmd, m.AgentPane.SetStatus(status))
 				m.Editor.Overlay.Active = true
 				// Auto-scroll so the diff is visible with some context above.
 				target := diff.StartLine - 3
@@ -948,20 +998,83 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	return cmd
 }
 
-// hasBlockSummary reports whether any validator summary in the slice
-// carries the "block" verdict — the signal that a pre-approval check
-// flagged the edit as requiring developer attention rather than silent
-// auto-approval. The verdict comparison is a literal string match
-// against the wire-format value, matching what validate.Verdict.String()
-// produces; a future verdict would need an explicit case here, by
-// design.
-func hasBlockSummary(summaries []event.ValidatorSummary) bool {
+// summaryRequiresReview reports whether any validator summary
+// carries a non-"pass" verdict. The auto-approve gate uses this to
+// fail-closed on anything the validator was unhappy with — Block
+// (must-surface), Retry (LLM exhausted its budget without fixing
+// it), and any future verdict that doesn't explicitly map to "pass".
+// The literal string comparison matches what validate.Verdict.String()
+// produces over the wire.
+func summaryRequiresReview(summaries []event.ValidatorSummary) bool {
 	for _, s := range summaries {
-		if s.Verdict == "block" {
+		if s.Verdict != "pass" {
 			return true
 		}
 	}
 	return false
+}
+
+// snoozeBannerForSummaries renders the agent-pane meta line shown
+// when a Block-bearing edit auto-applies because the developer
+// already approved a prior Block on the same file this session. The
+// banner names the file AND the verdicts so a session log reviewer
+// can tell that the snooze (not Yolo, not LevelTrusted alone) was
+// the reason auto-apply fired.
+func snoozeBannerForSummaries(path string, summaries []event.ValidatorSummary) string {
+	return fmt.Sprintf(
+		"\n[validator: %s — auto-applied (snoozed: %s already approved this session)]\n",
+		joinNonPassVerdicts(summaries), path)
+}
+
+// yoloOverrideBannerForSummaries renders the agent-pane meta line
+// shown when LevelYolo auto-applies an edit that would otherwise
+// have surfaced under LevelTrusted. The banner names the verdicts
+// that were overridden so the developer reviewing the session log
+// can see exactly which validator findings were ignored — without
+// it, the only signal of an architecture-cap or lint-stage failure
+// would be the on-disk result.
+func yoloOverrideBannerForSummaries(summaries []event.ValidatorSummary) string {
+	return fmt.Sprintf(
+		"\n[validator: %s — auto-applied (yolo); review on-disk result]\n",
+		joinNonPassVerdicts(summaries))
+}
+
+// reviewBannerForSummaries renders the agent-pane meta line shown
+// when the validator gate refuses auto-approval. Lists the unique
+// non-pass verdicts so the developer knows what kind of failure
+// they're being asked to look at — `[validator: block — ...]`,
+// `[validator: retry — ...]`, or `[validator: block, retry — ...]`
+// when multiple stages flagged the edit.
+func reviewBannerForSummaries(summaries []event.ValidatorSummary) string {
+	verdicts := joinNonPassVerdicts(summaries)
+	if verdicts == "" {
+		// Shouldn't be reached — caller gates on summaryRequiresReview
+		// — but if a future verdict label reads as empty for some
+		// reason, fall back to a generic banner rather than emit
+		// "validator:  — ...".
+		return "\n[validator: non-pass verdict — auto-approval refused; press Ctrl+O to apply, Esc to reject]\n"
+	}
+	return fmt.Sprintf(
+		"\n[validator: %s — auto-approval refused; press Ctrl+O to apply, Esc to reject]\n",
+		verdicts)
+}
+
+// joinNonPassVerdicts returns a comma-separated list of unique
+// non-pass verdict labels in document order. Empty when only pass
+// verdicts (or no summaries) are present. Shared by the
+// review-banner and yolo-override-banner so both surfaces use the
+// exact same wording for the verdict list.
+func joinNonPassVerdicts(summaries []event.ValidatorSummary) string {
+	seen := map[string]bool{}
+	var verdicts []string
+	for _, s := range summaries {
+		if s.Verdict == "pass" || seen[s.Verdict] {
+			continue
+		}
+		seen[s.Verdict] = true
+		verdicts = append(verdicts, s.Verdict)
+	}
+	return strings.Join(verdicts, ", ")
 }
 
 // clearEditorOverlay delegates scroll correction to the engine and clears
@@ -1050,6 +1163,14 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "agent", m.Session.HasAgent())
 		if m.Session.PendingEdit() != nil && m.Editor.Overlay != nil {
+			// Manual approval after a Block surfaced — snooze
+			// future Block prompts on this same file for the rest
+			// of the session. The developer has eyes-on; further
+			// nags don't add information.
+			if m.pendingBlockedPath != "" {
+				m.blockedPaths[m.pendingBlockedPath] = true
+				m.pendingBlockedPath = ""
+			}
 			cmd := m.applyApproval()
 			return m, cmd
 		}
@@ -1063,6 +1184,10 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.Session.PendingEdit() != nil {
 			slog.Debug("overlay cleared", "reason", "reject")
+			// Reject means "this specific edit is wrong" not "stop
+			// prompting me on this file" — clear the pending Block
+			// path WITHOUT promoting it to snoozed.
+			m.pendingBlockedPath = ""
 			m.clearEditorOverlay(false)
 			m.Session.RejectEdit()
 			return m, nil

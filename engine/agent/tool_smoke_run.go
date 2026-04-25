@@ -88,13 +88,12 @@ func (t *SmokeRunTool) Execute(ctx context.Context, _ llm.ToolCall) ToolResult {
 }
 
 // runSmoke invokes the configured smoke command via [proc.Run]. The
-// timeout comes from cfg.Timeout (defaulted in runconfig.Load), so a
-// project that needs longer than 30s sets it explicitly in run.json.
+// effective timeout comes from runconfig.EffectiveTimeout — a single
+// source of truth shared with formatSmokeResult so the rendered
+// "Timed out after X" message matches the actual deadline proc
+// enforced.
 func runSmoke(ctx context.Context, projectRoot string, cfg runconfig.Resolved) proc.Result {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = runconfig.DefaultTimeout
-	}
+	timeout := runconfig.EffectiveTimeout(cfg)
 	slog.Debug("smoke: running",
 		"command", cfg.Command, "source", cfg.Source, "timeout", timeout)
 
@@ -128,11 +127,14 @@ func formatSmokeResult(cfg runconfig.Resolved, res proc.Result) string {
 	case res.StartErr != nil:
 		return header + "Could not start: " + res.StartErr.Error()
 	case res.TimedOut:
+		// Use EffectiveTimeout so a Resolved with a zero Timeout
+		// (test paths bypassing runconfig.Load) reports the actual
+		// deadline proc enforced rather than "Timed out after 0s".
 		return header + fmt.Sprintf(
 			"Timed out after %s. The command may run forever (e.g. an interactive UI). "+
 				"Adjust .project/run.json `smoke_command` to a non-blocking smoke target, "+
 				"or raise `timeout_ms` if the artifact legitimately takes longer to start.\n\n%s",
-			cfg.Timeout, indent(res.Output))
+			runconfig.EffectiveTimeout(cfg), indent(res.Output))
 	case res.Cancelled:
 		return header + "Cancelled (developer interrupted)."
 	case res.ExitCode == 0:

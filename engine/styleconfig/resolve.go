@@ -257,8 +257,14 @@ func mergeConfigs(dst, src *Config) {
 		// net. Canonicalising at write time means downstream
 		// consumers can compare strings directly without re-running
 		// normalisedAction in every read site.
-		if ss.Architecture.Action != "" && isValidArchitectureAction(ss.Architecture.Action) {
-			ds.Architecture.Action = canonicalArchitectureAction(ss.Architecture.Action)
+		//
+		// Canonicalise FIRST, then gate. A whitespace-only string
+		// passes isValidArchitectureAction (which trims internally
+		// and accepts "") but canonicalises to "" — the raw-string
+		// check missed it and we'd silently clear an inherited
+		// policy.
+		if action := canonicalArchitectureAction(ss.Architecture.Action); action != "" && isValidArchitectureAction(action) {
+			ds.Architecture.Action = action
 		}
 		dst.Styles[name] = ds
 	}

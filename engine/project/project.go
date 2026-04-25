@@ -74,6 +74,39 @@ func (t *Tree) ActiveGoal() (goal *Node, ancestry []*Node) {
 	return nil, nil
 }
 
+// FindNextPendingTask returns the title of the first leaf task in
+// document order whose status is TaskPending. Used by the agent's
+// auto-continue path to suggest the next task to activate after one
+// completes — without an explicit hint, the LLM tends to stop and
+// wait for developer guidance even under autonomy levels that allow
+// continuation.
+//
+// Returns "" when no pending task remains. Callers treat that as
+// "all done" and refrain from injecting a continuation prompt.
+func (t *Tree) FindNextPendingTask() string {
+	for _, root := range t.Roots {
+		if title := findFirstPending(root); title != "" {
+			return title
+		}
+	}
+	return ""
+}
+
+// findFirstPending walks n depth-first and returns the title of the
+// first leaf task with TaskPending status. Empty string when no
+// pending task exists in the subtree.
+func findFirstPending(n *Node) string {
+	if !n.IsHeading && n.Status == TaskPending {
+		return n.Title
+	}
+	for _, child := range n.Children {
+		if title := findFirstPending(child); title != "" {
+			return title
+		}
+	}
+	return ""
+}
+
 // SetActiveGoal marks the task at targetTitle as active and clears any
 // previously active task. Returns true if the target was found and updated.
 // Only leaf tasks (IsHeading=false) can be set active. If the target is

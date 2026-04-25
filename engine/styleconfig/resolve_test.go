@@ -385,6 +385,33 @@ func TestIsValidArchitectureAction(t *testing.T) {
 	}
 }
 
+// TestMergeConfigsRejectsWhitespaceOnlyArchitectureAction verifies a
+// whitespace-only Action value (typo, accidental space) does NOT
+// clear an inherited builtin policy. isValidArchitectureAction
+// trims internally and accepts "" as a valid value, so the merge
+// gate must canonicalise BEFORE checking — otherwise a "   " in
+// project config silently demotes a builtin "block" to "" → "warn".
+func TestMergeConfigsRejectsWhitespaceOnlyArchitectureAction(t *testing.T) {
+	dst := &Config{Styles: map[string]Style{
+		"clean": {
+			Name:         "Clean",
+			Architecture: Architecture{MaxFileLines: 300, Action: "block"},
+		},
+	}}
+	src := &Config{Styles: map[string]Style{
+		"clean": {
+			Architecture: Architecture{Action: "   "},
+		},
+	}}
+
+	mergeConfigs(dst, src)
+
+	if got := dst.Styles["clean"].Architecture.Action; got != "block" {
+		t.Errorf("Action = %q, want %q (whitespace-only must not clear inherited policy)",
+			got, "block")
+	}
+}
+
 // TestMergeConfigsCanonicalisesArchitectureAction verifies that a
 // case/whitespace variant of a known action is accepted AND stored
 // in canonical lowercase form, so downstream string comparisons

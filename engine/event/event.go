@@ -92,6 +92,14 @@ const (
 	StatusPlanningWaiting StatusKind = "planning-waiting"
 	// StatusReviewing means an edit proposal is pending user review.
 	StatusReviewing StatusKind = "reviewing"
+	// StatusBlockReview means an edit proposal is pending user review
+	// SPECIFICALLY because a validator stage flagged it (architecture
+	// cap, lint, etc.). The TUI uses this to render a more
+	// attention-grabbing status indicator than plain "reviewing" —
+	// the developer needs to know this surfaced for a reason and is
+	// not the routine review-and-approve flow they'd see at lower
+	// autonomy levels.
+	StatusBlockReview StatusKind = "block-review"
 	// StatusEditing means an approved edit is being applied and the user may continue.
 	StatusEditing StatusKind = "editing"
 	// StatusWaiting means the agent is waiting for user input.

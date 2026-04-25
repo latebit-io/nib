@@ -208,6 +208,14 @@ type TaskTracker interface {
 	// initial fetch failed (e.g. demarkus unreachable). The active-task
 	// gate uses this to distinguish "no active task" from "no tree at all."
 	WorkTreeLoaded() bool
+	// NextPendingTask returns the title of the first leaf task in
+	// document order with status TaskPending, or "" when none exists.
+	// The agent's runTaskReview path uses this to append a hint after
+	// a task completes so the LLM has a clear next step without the
+	// developer having to type "continue" — the autonomy contract
+	// promises hands-off operation under LevelTrusted+, but the LLM
+	// otherwise tends to stop and wait at task boundaries.
+	NextPendingTask() string
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

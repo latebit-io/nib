@@ -2,9 +2,31 @@ package runconfig
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+// mustWriteFile writes data to path inside the test's temp tree and
+// fails the test on any I/O error. Centralised so individual tests
+// stay focused on the behavioural assertion rather than fixture
+// plumbing — a silent fixture failure would otherwise let a test
+// exercise the wrong filesystem state and report a misleading pass.
+func mustWriteFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// mustMkdirAll creates dir (and any missing parents) and fails the
+// test on error. Same rationale as [mustWriteFile].
+func mustMkdirAll(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+}
 
 // TestLoadExplicitConfig verifies an explicit smoke_command in
 // .project/run.json wins over auto-detection.
@@ -12,13 +34,9 @@ func TestLoadExplicitConfig(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".project"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	mustMkdirAll(t, filepath.Join(dir, ".project"))
 	cfg := `{"smoke_command": "echo custom-smoke", "timeout_ms": 5000}`
-	if err := os.WriteFile(filepath.Join(dir, ".project", "run.json"), []byte(cfg), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	mustWriteFile(t, filepath.Join(dir, ".project", "run.json"), []byte(cfg))
 
 	got := Load(dir)
 	if got.Skipped {
@@ -41,10 +59,10 @@ func TestLoadDisabledConfig(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(dir, ".project"), 0o755)
-	_ = os.WriteFile(filepath.Join(dir, "Makefile"), []byte("run:\n\techo go\n"), 0o644)
-	_ = os.WriteFile(filepath.Join(dir, ".project", "run.json"),
-		[]byte(`{"disabled": true}`), 0o644)
+	mustMkdirAll(t, filepath.Join(dir, ".project"))
+	mustWriteFile(t, filepath.Join(dir, "Makefile"), []byte("run:\n\techo go\n"))
+	mustWriteFile(t, filepath.Join(dir, ".project", "run.json"),
+		[]byte(`{"disabled": true}`))
 
 	got := Load(dir)
 	if !got.Skipped {
@@ -61,8 +79,8 @@ func TestLoadDetectsMakeSmoke(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(dir, "Makefile"),
-		[]byte(".PHONY: smoke run\n\nsmoke:\n\techo smoking\n\nrun:\n\techo running\n"), 0o644)
+	mustWriteFile(t, filepath.Join(dir, "Makefile"),
+		[]byte(".PHONY: smoke run\n\nsmoke:\n\techo smoking\n\nrun:\n\techo running\n"))
 
 	got := Load(dir)
 	if got.Skipped {
@@ -82,8 +100,8 @@ func TestLoadDetectsMakeRun(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(dir, "Makefile"),
-		[]byte(".PHONY: run\n\nrun:\n\techo running\n"), 0o644)
+	mustWriteFile(t, filepath.Join(dir, "Makefile"),
+		[]byte(".PHONY: run\n\nrun:\n\techo running\n"))
 
 	got := Load(dir)
 	if got.Source != "make-run" {
@@ -120,10 +138,62 @@ func TestHasMakefileTargetIgnoresRecipeLines(t *testing.T) {
 	mk := "" +
 		"build:\n" +
 		"\techo run: not a target\n"
-	_ = os.WriteFile(filepath.Join(dir, "Makefile"), []byte(mk), 0o644)
+	mustWriteFile(t, filepath.Join(dir, "Makefile"), []byte(mk))
 
 	if hasMakefileTarget(dir, "run") {
 		t.Errorf("hasMakefileTarget(run) = true; recipe-line false-positive")
+	}
+}
+
+// TestLoadGoLibraryModuleSkipped verifies a Go library module
+// (go.mod present but no main.go at root) is NOT auto-detected as
+// runnable. Without this gate, `go run ./...` would have errored
+// with "no Go files" or "main package not found" and the failure
+// would have surfaced as a smoke regression instead of a config
+// gap. Library modules should configure .project/run.json or a
+// Makefile target if smoke applies.
+func TestLoadGoLibraryModuleSkipped(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "go.mod"), []byte("module x\n\ngo 1.22\n"))
+	// Deliberately no main.go — represents a library or a multi-binary
+	// repo where the runnable lives under cmd/<name>/main.go.
+
+	got := Load(dir)
+	if !got.Skipped {
+		t.Errorf("Skipped = false, want true (Go library module without main.go must skip)")
+	}
+}
+
+// TestLoadGoSinglePackageDetected verifies the single-main-at-root
+// pattern resolves to `go run .` (not `go run ./...`). Selecting
+// the current package only avoids accumulating sibling packages
+// the developer didn't intend to smoke.
+func TestLoadGoSinglePackageDetected(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("go"); err != nil {
+		// Load's own LookPath gate on `go` returns Skipped when go
+		// is missing; this test exercises the positive branch and
+		// is only meaningful when go is on PATH.
+		t.Skip("go not on PATH; cannot verify the positive go-run branch")
+	}
+
+	dir := t.TempDir()
+	mustWriteFile(t, filepath.Join(dir, "go.mod"), []byte("module x\n\ngo 1.22\n"))
+	mustWriteFile(t, filepath.Join(dir, "main.go"),
+		[]byte("package main\n\nfunc main() {}\n"))
+
+	got := Load(dir)
+	if got.Skipped {
+		t.Fatalf("Skipped = true, want false (main.go + go.mod should auto-detect)")
+	}
+	if got.Command != "go run ." {
+		t.Errorf("Command = %q, want %q", got.Command, "go run .")
+	}
+	if got.Source != "go-run" {
+		t.Errorf("Source = %q, want go-run", got.Source)
 	}
 }
 
@@ -134,10 +204,9 @@ func TestLoadInvalidJSONFallsBackToDefaults(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(dir, ".project"), 0o755)
-	_ = os.WriteFile(filepath.Join(dir, ".project", "run.json"), []byte("{not json"), 0o644)
-	_ = os.WriteFile(filepath.Join(dir, "Makefile"),
-		[]byte("run:\n\techo run\n"), 0o644)
+	mustMkdirAll(t, filepath.Join(dir, ".project"))
+	mustWriteFile(t, filepath.Join(dir, ".project", "run.json"), []byte("{not json"))
+	mustWriteFile(t, filepath.Join(dir, "Makefile"), []byte("run:\n\techo run\n"))
 
 	got := Load(dir)
 	if got.Skipped {

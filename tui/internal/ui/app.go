@@ -831,11 +831,25 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			// search/replace content even when we skip the visual review.
 			m.Editor.Overlay = NewDiffOverlay(diff)
 
-			if m.dial.AutoApproveEdits() {
+			// Block-verdict guard: a validator stage flagged this edit
+			// as needing developer attention (architecture cap exceeded,
+			// for example). Refuse auto-approval even at LevelTrusted —
+			// the validator already exhausted its retry budget feeding
+			// feedback to the LLM, so surfacing here is the safety
+			// valve. Without this gate the architectural cap is
+			// theatre: validator reports the breach, autonomous mode
+			// applies the broken edit anyway. Pac-Man rerun proved it.
+			blocked := hasBlockSummary(e.ValidatorSummaries)
+
+			if m.dial.AutoApproveEdits() && !blocked {
 				// At LevelTrusted, skip the visual review step and apply
 				// immediately.
 				cmd = m.applyApproval()
 			} else {
+				if blocked {
+					m.AgentPane.AppendMeta(
+						"\n[validator: block — auto-approval refused; review the diff and Ctrl+O to apply]\n")
+				}
 				cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusReviewing))
 				m.Editor.Overlay.Active = true
 				// Auto-scroll so the diff is visible with some context above.
@@ -940,6 +954,22 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 // bufferMutated should be true when called after a successful ApproveEdit
 // (the buffer already has the replacement content). When false (reject,
 // error, done), the buffer is unchanged and the conversion differs.
+// hasBlockSummary reports whether any validator summary in the slice
+// carries the "block" verdict — the signal that a pre-approval check
+// flagged the edit as requiring developer attention rather than silent
+// auto-approval. The verdict comparison is a literal string match
+// against the wire-format value, matching what validate.Verdict.String()
+// produces; a future verdict would need an explicit case here, by
+// design.
+func hasBlockSummary(summaries []event.ValidatorSummary) bool {
+	for _, s := range summaries {
+		if s.Verdict == "block" {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
 	o := m.Editor.Overlay
 	if o == nil {

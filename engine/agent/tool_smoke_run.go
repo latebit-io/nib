@@ -35,6 +35,15 @@ func NewSmokeRunTool(projectRoot string, cfg runconfig.Resolved) *SmokeRunTool {
 }
 
 // Definition returns the OpenAI-compatible tool schema for smoke_run.
+//
+// The description deliberately does NOT include the resolved command
+// string — it is reused across every turn the tool is registered, and
+// project run configs occasionally include inline env assignments or
+// auth flags that should not be cached into the system prompt. The
+// command IS surfaced to the LLM in the per-call tool result (where
+// the LLM is already running it and needs to know what executed for
+// failure diagnosis), and that path is governed by the documented
+// .project/run.json trust boundary.
 func (t *SmokeRunTool) Definition() llm.ToolDef {
 	desc := "Run the project's smoke command (typically `make smoke` or `make run`) " +
 		"to verify the artifact actually launches and does not crash on startup. " +
@@ -44,7 +53,7 @@ func (t *SmokeRunTool) Definition() llm.ToolDef {
 		"errors, missing initialisation, broken wiring."
 
 	if t.cfg.Source != "" {
-		desc += fmt.Sprintf(" (resolved command: `%s`, source: %s)", t.cfg.Command, t.cfg.Source)
+		desc += fmt.Sprintf(" (resolved via: %s)", t.cfg.Source)
 	}
 
 	return llm.ToolDef{
@@ -90,7 +99,7 @@ func runSmoke(ctx context.Context, projectRoot string, cfg runconfig.Resolved) p
 		"command", cfg.Command, "source", cfg.Source, "timeout", timeout)
 
 	res := proc.Run(ctx, proc.Request{
-		Command: cfg.Command,
+		Shell:   cfg.Command,
 		Dir:     projectRoot,
 		Timeout: timeout,
 	})

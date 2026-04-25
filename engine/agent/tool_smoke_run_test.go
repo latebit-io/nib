@@ -10,15 +10,18 @@ import (
 	"github.com/latebit-io/junto/engine/runconfig"
 )
 
-// TestSmokeToolDefinitionAdvertisesCommand verifies the tool definition
-// includes the resolved command and source so the LLM knows what
-// "smoke" maps to in this project. Without this, the model is
-// effectively blind to which target it is invoking.
-func TestSmokeToolDefinitionAdvertisesCommand(t *testing.T) {
+// TestSmokeToolDefinitionAdvertisesSource verifies the tool definition
+// names the source (so the LLM knows what kind of target it is
+// invoking) but deliberately does NOT include the raw resolved command.
+// The command is surfaced only in per-call results where the LLM needs
+// it for failure diagnosis; keeping it out of the static description
+// avoids caching project-specific run config (potentially with inline
+// env/auth flags) into the system prompt across every turn.
+func TestSmokeToolDefinitionAdvertisesSource(t *testing.T) {
 	t.Parallel()
 
 	tool := NewSmokeRunTool("/tmp", runconfig.Resolved{
-		Command: "make smoke",
+		Command: "API_KEY=secret make smoke",
 		Source:  "make-smoke",
 		Timeout: 5 * time.Second,
 	})
@@ -27,11 +30,15 @@ func TestSmokeToolDefinitionAdvertisesCommand(t *testing.T) {
 	if def.Function.Name != "smoke_run" {
 		t.Errorf("Name = %q, want smoke_run", def.Function.Name)
 	}
-	if !strings.Contains(def.Function.Description, "make smoke") {
-		t.Errorf("Description missing command: %q", def.Function.Description)
-	}
 	if !strings.Contains(def.Function.Description, "make-smoke") {
 		t.Errorf("Description missing source: %q", def.Function.Description)
+	}
+	// The raw command must never appear in the description. The static
+	// prefix mentions `make smoke` and `make run` as examples — a
+	// distinctive secret-bearing fixture proves the resolved command
+	// is NOT copied in.
+	if strings.Contains(def.Function.Description, "API_KEY=secret") {
+		t.Errorf("Description leaked raw command: %q", def.Function.Description)
 	}
 }
 
@@ -108,21 +115,16 @@ func TestSmokeToolTimeout(t *testing.T) {
 }
 
 // TestFormatSmokeResultStartErr verifies the StartErr path renders a
-// "Could not start" message rather than blank output.
+// "Could not start" message rather than blank output. Note that
+// SmokeRunTool.Execute short-circuits on an empty command before
+// reaching proc.Run, so this test bypasses the tool wrapper and
+// exercises runSmoke + formatSmokeResult directly.
 func TestFormatSmokeResultStartErr(t *testing.T) {
 	t.Parallel()
 
-	tool := NewSmokeRunTool("", runconfig.Resolved{
-		Command: "", // empty command triggers proc.ErrEmptyCommand
-		Source:  "test",
-	})
-	// Calling Execute with an empty command goes through the early
-	// "no command resolved" guard, not StartErr; bypass that with a
-	// direct call.
-	got := formatSmokeResult(runconfig.Resolved{Command: "", Source: "test"},
-		runSmoke(context.Background(), "", runconfig.Resolved{Command: "", Source: "test"}))
+	cfg := runconfig.Resolved{Command: "", Source: "test"}
+	got := formatSmokeResult(cfg, runSmoke(context.Background(), "", cfg))
 	if !strings.Contains(got, "Could not start") {
 		t.Errorf("formatSmokeResult missing 'Could not start': %q", got)
 	}
-	_ = tool
 }

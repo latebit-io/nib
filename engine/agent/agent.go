@@ -1854,10 +1854,18 @@ func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) s
 // feedback means the caller should proceed to the comprehension gate
 // with the returned summaries attached to AgentEditProposed.
 //
-// The retry budget is per-path (CanonPath) so repeated breakage of the
-// same file eventually surfaces, while unrelated files retain fresh
-// budgets. Counters are reset on successful approval and on run
-// boundaries.
+// Retry AND Block both consume the per-CanonPath retry budget. Block
+// would otherwise be theatre under autonomous mode: the validator
+// reports a critical issue (architecture-cap exceeded, must split this
+// file) but the LLM never sees the feedback and the TUI's
+// LevelTrusted gate auto-approves the broken proposal anyway. Feeding
+// Block feedback through the same retry channel gives the LLM a chance
+// to self-correct (architectural fixes are big but tractable —
+// "extract these functions into a sibling file"), and budget exhaustion
+// surfaces the proposal so the developer sees the failure. The TUI
+// applies an additional safety valve that refuses auto-approval when
+// any summary carries Verdict="block" — see [tui.AppModel.Update]
+// where it routes EditProposed events.
 func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal) ([]event.ValidatorSummary, string) {
 	if a.pipeline == nil {
 		return nil, ""
@@ -1876,15 +1884,17 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 
 	summaries := toValidatorSummaries(results)
 
-	if validate.WorstVerdict(results) != validate.Retry {
+	worst := validate.WorstVerdict(results)
+	if worst == validate.Pass {
 		return summaries, ""
 	}
 
-	// Retry path: the LLM can likely self-correct. Consume a budget
-	// slot; if exhausted, fall through with the summaries attached so
-	// the developer sees what the validators flagged. The map is also
-	// mutated by RunWithMode/Reply/recordEdit, so every access is
-	// guarded by a.mu — matching the existing recordEdit pattern.
+	// Non-Pass path (Retry or Block): the LLM can self-correct in many
+	// cases. Consume a budget slot; if exhausted, fall through with the
+	// summaries attached so the developer sees what the validators
+	// flagged. The map is also mutated by RunWithMode/Reply/recordEdit,
+	// so every access is guarded by a.mu — matching the existing
+	// recordEdit pattern.
 	a.mu.Lock()
 	a.validatorRetries[proposal.CanonPath]++
 	attempts := a.validatorRetries[proposal.CanonPath]
@@ -1892,10 +1902,18 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 
 	if attempts > maxValidatorRetries {
 		slog.Warn("validator retry budget exhausted; surfacing proposal",
-			"path", proposal.CanonPath, "attempts", attempts)
+			"path", proposal.CanonPath, "attempts", attempts, "verdict", worst.String())
 		return summaries, ""
 	}
-	return summaries, aggregateRetryFeedback(results)
+	feedback := aggregateRetryFeedback(results)
+	if feedback == "" {
+		// Validator reported non-Pass without any feedback — nothing
+		// actionable to send back, so let the proposal surface so the
+		// developer can intervene. Without this guard the LLM would
+		// see an empty retry message and have no signal to fix.
+		return summaries, ""
+	}
+	return summaries, feedback
 }
 
 // toValidatorSummaries projects validate.Result onto the leaner

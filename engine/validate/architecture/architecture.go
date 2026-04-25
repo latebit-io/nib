@@ -15,6 +15,7 @@ package architecture
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
@@ -87,7 +88,20 @@ func (v *Validator) Applicable(c validate.Candidate) bool {
 // sets Action="block" and any cap is exceeded; Retry otherwise. The
 // architecture snapshot is taken once at the start of the call to
 // avoid double-read races against a concurrent style cycle.
+//
+// Honours the nil-safety contract documented on [New]: a Validator
+// constructed with nil provider or nil langFor returns Pass. The
+// pipeline never invokes Validate on a non-Applicable candidate, but
+// direct callers (tests, custom orchestration) may bypass that
+// pre-check, so the guards live here too.
 func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate.Result {
+	if v.provider == nil || v.langFor == nil {
+		return validate.Result{Verdict: validate.Pass, Stage: StageName}
+	}
+	lang := v.langFor(c.Path)
+	if lang == nil {
+		return validate.Result{Verdict: validate.Pass, Stage: StageName}
+	}
 	arch := v.provider.Architecture()
 	if !arch.Enabled() {
 		return validate.Result{Verdict: validate.Pass, Stage: StageName}
@@ -114,8 +128,20 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 	}
 
 	if arch.MaxFunctionLines > 0 || arch.MaxFunctionsPerFile > 0 {
-		spans, err := parseFunctionSpans(ctx, v.langFor(c.Path), c.After)
-		if err == nil {
+		spans, err := parseFunctionSpans(ctx, lang, c.After)
+		switch {
+		case err != nil:
+			// Parser failures (tree-sitter setup, broken grammar,
+			// ctx cancellation mid-parse) are infrastructure
+			// noise, not a code-quality signal the LLM can act
+			// on — surfacing as a finding would mislead. Log
+			// loudly via slog.Warn so the developer can see
+			// when function-cap checks degrade silently, then
+			// continue with whatever the file-line cap path
+			// already produced.
+			slog.Warn("architecture: function-cap parse failed",
+				"path", c.Path, "err", err)
+		default:
 			fnFindings, fnFeedback := checkFunctionCaps(c.Path, spans, arch)
 			findings = append(findings, fnFindings...)
 			if fnFeedback != "" {

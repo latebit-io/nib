@@ -18,7 +18,6 @@ import (
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/highlight"
-	"github.com/latebit-io/junto/engine/lint"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/oauth"
@@ -223,12 +222,15 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			opts.DiagProvider = lspMgr
 		}
 		if os.Getenv("JUNTO_VALIDATORS_DISABLED") == "" {
-			perFileLinters := styleResult.PerFileLinters
+			// lintstage reads the per-file linter set through the
+			// holder so a runtime style cycle (Alt+S) takes effect
+			// on the next edit instead of getting stuck on the
+			// startup snapshot.
 			opts.ValidationPipeline = validate.NewPipeline(
 				goparse.Validator{},
 				treesitter.New(highlight.LanguageFor),
 				architecture.New(styleResult.Architecture, highlight.LanguageFor),
-				lintstage.New(func() []lint.Linter { return perFileLinters }),
+				lintstage.New(styleResult.PerFileLinters.Linters),
 			)
 		}
 		return agent.New(p, sess, events, opts, mcpResult.Tools...)
@@ -418,6 +420,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 					currentResolved = nil
 					ag.SetStyle(nil, nil)
 					styleResult.Architecture.Set(styleconfig.Architecture{})
+					styleResult.PerFileLinters.Set(nil)
 					if evaluatorActive {
 						ag.SetEvaluator(nil)
 						evaluatorActive = false
@@ -432,6 +435,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				linters := wire.LintersForStyle(s.LintCmd, styleResult.DefaultLinters)
 				ag.SetStyle(data, linters)
 				styleResult.Architecture.Set(s.Architecture)
+				styleResult.PerFileLinters.Set(
+					wire.LintersForStylePerFile(s.LintCmd, styleResult.DefaultPerFileLinters))
 
 				currentResolved = &styleconfig.Resolved{
 					Name:           s.Name,

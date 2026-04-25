@@ -140,9 +140,17 @@ func detectDefault(projectRoot string) (cmd, source string) {
 		return "make run", "make-run"
 	}
 
-	if exists(projectRoot, "go.mod") {
+	// Go: require BOTH a module marker (go.mod) AND a main.go at the
+	// project root. `go run ./...` was the obvious shape but it
+	// errors for library modules (no main package) and multi-binary
+	// repos (the `cmd/foo`, `cmd/bar` pattern). Mirroring the other
+	// language defaults — which all check for a `main.<ext>` at root
+	// — keeps the heuristic uniform: anything more complex should
+	// configure `.project/run.json` or a Makefile target, both of
+	// which already win over this auto-detection branch.
+	if exists(projectRoot, "go.mod") && exists(projectRoot, "main.go") {
 		if _, err := exec.LookPath("go"); err == nil {
-			return "go run ./...", "go-run"
+			return "go run .", "go-run"
 		}
 	}
 	if exists(projectRoot, "main.lua") {

@@ -25,12 +25,14 @@ import (
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/headless"
-	"github.com/latebit-io/junto/engine/lint"
+	"github.com/latebit-io/junto/engine/highlight"
 	"github.com/latebit-io/junto/engine/runconfig"
 	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/junto/engine/validate/architecture"
 	"github.com/latebit-io/junto/engine/validate/goparse"
 	"github.com/latebit-io/junto/engine/validate/lintstage"
+	"github.com/latebit-io/junto/engine/validate/treesitter"
 	"github.com/latebit-io/junto/engine/wire"
 )
 
@@ -219,10 +221,18 @@ func run() error {
 		opts.DiagProvider = lspMgr
 	}
 	if os.Getenv("JUNTO_VALIDATORS_DISABLED") == "" {
-		perFileLinters := styleResult.PerFileLinters
+		// Headless / CI mode wires the same validator stages as the
+		// TUI. Architecture caps and syntax-regression checks matter
+		// MORE here, not less — there's no developer to notice a
+		// runaway file size or a parser-breaking edit before the
+		// agent commits. The tree-sitter grammars are already a
+		// transitive dep of engine, so the binary-size delta of
+		// linking them in is small relative to the correctness win.
 		opts.ValidationPipeline = validate.NewPipeline(
 			goparse.Validator{},
-			lintstage.New(func() []lint.Linter { return perFileLinters }),
+			treesitter.New(highlight.LanguageFor),
+			architecture.New(styleResult.Architecture, highlight.LanguageFor),
+			lintstage.New(styleResult.PerFileLinters.Linters),
 		)
 	}
 	ag := agent.New(provider, workspace, events, opts, mcpResult.Tools...)

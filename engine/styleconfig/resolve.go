@@ -107,6 +107,7 @@ func loadBuiltins() *Config {
 		}
 
 		warnInvalidEnforcement(entry.Name(), s.Rules)
+		warnInvalidArchitectureAction(entry.Name(), s.Name, s.Architecture.Action)
 
 		// Key is the filename without extension: "solid-hexagonal.json" → "solid-hexagonal".
 		key := strings.TrimSuffix(entry.Name(), ".json")
@@ -139,6 +140,33 @@ func warnInvalidEnforcement(source string, rules []Rule) {
 	}
 }
 
+// isValidArchitectureAction reports whether action is one of the
+// known values. Empty is treated as valid because empty defaults to
+// "warn" downstream — the consumer's normalisedAction handles that.
+func isValidArchitectureAction(action string) bool {
+	switch action {
+	case "", "warn", "block", "off":
+		return true
+	}
+	return false
+}
+
+// warnInvalidArchitectureAction logs a warning when source declares an
+// architecture.action that is not one of the known values. The merge
+// path additionally REFUSES to overwrite a valid builtin with an
+// invalid value (see [mergeConfigs]) — a typo in a project config
+// must not silently demote `block` to the default `warn`, which
+// would change UX behaviour (silent retry vs surface to developer)
+// rather than just prompt wording.
+func warnInvalidArchitectureAction(source, styleName, action string) {
+	if isValidArchitectureAction(action) {
+		return
+	}
+	slog.Warn("styleconfig: invalid architecture action",
+		"source", source, "style", styleName,
+		"action", action, "expected", "warn|block|off")
+}
+
 // loadFile reads and parses a single config file.
 // Returns nil on missing file or parse error.
 func loadFile(path string) *Config {
@@ -159,6 +187,7 @@ func loadFile(path string) *Config {
 	}
 	for name, s := range cfg.Styles {
 		warnInvalidEnforcement(path+":"+name, s.Rules)
+		warnInvalidArchitectureAction(path+":"+name, name, s.Architecture.Action)
 	}
 	return &cfg
 }
@@ -204,7 +233,15 @@ func mergeConfigs(dst, src *Config) {
 		if ss.Architecture.MaxFunctionsPerFile > 0 {
 			ds.Architecture.MaxFunctionsPerFile = ss.Architecture.MaxFunctionsPerFile
 		}
-		if ss.Architecture.Action != "" {
+		// Action overwrites only with a known value. An invalid
+		// action (typo in project/global config) would otherwise
+		// silently replace a builtin "block" with garbage, which
+		// normalisedAction maps to the default "warn" — silently
+		// demoting Block→Retry is a UX regression we refuse to
+		// accept. The load path already emitted a warn-level log
+		// at file load via warnInvalidArchitectureAction; this
+		// branch is the safety net.
+		if ss.Architecture.Action != "" && isValidArchitectureAction(ss.Architecture.Action) {
 			ds.Architecture.Action = ss.Architecture.Action
 		}
 		dst.Styles[name] = ds

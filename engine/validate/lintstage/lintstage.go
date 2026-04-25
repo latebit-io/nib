@@ -137,7 +137,14 @@ func writeCandidate(originalPath, content string) (dir, file string, cleanup fun
 	}
 	target := filepath.Join(tempDir, base)
 	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
-		_ = os.RemoveAll(tempDir)
+		// Best-effort cleanup of the now-orphaned temp dir. Logging
+		// the cleanup failure (instead of dropping it on the floor)
+		// surfaces a leak signal if /tmp permissions or fs state
+		// regularly prevent rollback.
+		if rmErr := os.RemoveAll(tempDir); rmErr != nil {
+			slog.Warn("lintstage: cleanup after write failure failed",
+				"dir", tempDir, "err", rmErr)
+		}
 		return "", "", nil, fmt.Errorf("write temp: %w", err)
 	}
 

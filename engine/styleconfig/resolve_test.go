@@ -288,6 +288,97 @@ func TestMergeConfigs(t *testing.T) {
 	}
 }
 
+// TestMergeConfigsArchitectureFieldwise verifies the per-field merge
+// rules — empty fields preserve dst, non-empty values overwrite, and
+// each field merges independently so a project tightening only
+// MaxFileLines does not have to repeat MaxFunctionLines etc.
+func TestMergeConfigsArchitectureFieldwise(t *testing.T) {
+	dst := &Config{Styles: map[string]Style{
+		"a": {
+			Name: "A",
+			Architecture: Architecture{
+				MaxFileLines:        300,
+				MaxFunctionLines:    20,
+				MaxFunctionsPerFile: 15,
+				Action:              "block",
+			},
+		},
+	}}
+	src := &Config{Styles: map[string]Style{
+		"a": {
+			Architecture: Architecture{
+				MaxFileLines: 500, // tighten only this
+			},
+		},
+	}}
+
+	mergeConfigs(dst, src)
+
+	a := dst.Styles["a"].Architecture
+	if a.MaxFileLines != 500 {
+		t.Errorf("MaxFileLines = %d, want 500 (overwritten)", a.MaxFileLines)
+	}
+	if a.MaxFunctionLines != 20 {
+		t.Errorf("MaxFunctionLines = %d, want 20 (preserved)", a.MaxFunctionLines)
+	}
+	if a.MaxFunctionsPerFile != 15 {
+		t.Errorf("MaxFunctionsPerFile = %d, want 15 (preserved)", a.MaxFunctionsPerFile)
+	}
+	if a.Action != "block" {
+		t.Errorf("Action = %q, want block (preserved)", a.Action)
+	}
+}
+
+// TestMergeConfigsRejectsInvalidArchitectureAction verifies a typo in
+// project/global Architecture.Action does NOT overwrite a valid
+// builtin. Without this guard, "blcok" would land in dst, then
+// normalisedAction would map it to "warn" — silently demoting a
+// block-policy preset to a warn-policy one and changing UX
+// behaviour (silent retry vs surface-to-developer).
+func TestMergeConfigsRejectsInvalidArchitectureAction(t *testing.T) {
+	dst := &Config{Styles: map[string]Style{
+		"clean": {
+			Name:         "Clean",
+			Architecture: Architecture{MaxFileLines: 300, Action: "block"},
+		},
+	}}
+	src := &Config{Styles: map[string]Style{
+		"clean": {
+			Architecture: Architecture{Action: "blcok"}, // typo
+		},
+	}}
+
+	mergeConfigs(dst, src)
+
+	if got := dst.Styles["clean"].Architecture.Action; got != "block" {
+		t.Errorf("Action = %q, want %q (invalid override must be refused)", got, "block")
+	}
+}
+
+// TestIsValidArchitectureAction locks in the accepted set so a
+// well-meaning "let me also accept 'enforce'" PR fails loud here
+// instead of silently expanding the policy surface.
+func TestIsValidArchitectureAction(t *testing.T) {
+	cases := []struct {
+		action string
+		want   bool
+	}{
+		{"", true},
+		{"warn", true},
+		{"block", true},
+		{"off", true},
+		{"WARN", false}, // case-sensitive at validation time
+		{"enforce", false},
+		{"blcok", false},
+		{"warn ", false}, // no trimming at validation
+	}
+	for _, tc := range cases {
+		if got := isValidArchitectureAction(tc.action); got != tc.want {
+			t.Errorf("isValidArchitectureAction(%q) = %v, want %v", tc.action, got, tc.want)
+		}
+	}
+}
+
 func TestResolveLintCmd(t *testing.T) {
 	projectRoot := t.TempDir()
 	dir := filepath.Join(projectRoot, ".project")

@@ -9,12 +9,27 @@
 // must not block forever on a child that holds a stdout pipe; the
 // patterns here have been hardened against `go run .` and similar
 // fork-and-exit shells.
+//
+// # Shell-only by design
+//
+// [Run] always invokes the command via `sh -c <Request.Shell>` — there
+// is no argv mode. Both current callers (BashTool, smoke runner) are
+// shell-by-design: BashTool exists so the LLM can use pipes,
+// redirection, and command substitution; smoke commands frequently
+// chain build-and-launch with `&&`. Sanitisation belongs at the
+// caller's trust boundary, not in this helper — see
+// [agent.BashTool] (LLM-authored, prompt-level guard only) and
+// [agent.SmokeRunTool] (`.project/run.json`, reviewed and committed).
+// If a future caller ever needs argv-style execution, add a separate
+// API; do not add a mode flag that would let untrusted input slip
+// through this entry point with shell semantics still implied.
 package proc
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -32,12 +47,17 @@ const DefaultTail = 4 * 1024
 // [exec.Cmd.Run] may hang if a child still holds an inherited pipe fd.
 const DefaultGraceAfterCancel = time.Second
 
-// Request describes one process invocation.
+// Request describes one process invocation. The command is always
+// interpreted by `sh -c` — see the package doc for the rationale and
+// the trust boundary expected of callers.
 type Request struct {
-	// Command is passed to `sh -c` so callers can use shell features
-	// (pipes, redirection, substitution). Empty Command yields an
-	// error before any process is started.
-	Command string
+	// Shell is the shell command line passed to `sh -c`. Callers may
+	// use pipes, redirection, command substitution, env assignments,
+	// and chained commands. The field is named Shell (not Command)
+	// to make the interpretation impossible to confuse with
+	// argv-style execution — there is no argv mode in this package.
+	// Empty Shell yields [ErrEmptyCommand] before any process is started.
+	Shell string
 
 	// Dir is the working directory for the process. Empty means the
 	// caller's current directory; pass an absolute path to be safe.
@@ -72,15 +92,23 @@ type Result struct {
 	// normally.
 	ExitCode int
 
-	// TimedOut is true when the timeout fired before the process
-	// exited cleanly. The process group has been signalled in that
-	// case; Output may contain partial data.
+	// TimedOut is true when [Request.Timeout] specifically fired
+	// before the process exited cleanly. Parent-context deadlines
+	// (a caller passing `context.WithDeadline(...)` shorter than
+	// Timeout) surface as Cancelled instead — TimedOut is reserved
+	// for "the wall-clock cap *this package* applied was reached."
+	// The process group has been signalled in that case; Output
+	// may contain partial data.
 	TimedOut bool
 
-	// Cancelled is true when the parent context was cancelled (not
-	// the timeout). Distinguished from TimedOut so callers can
-	// surface "user pressed Esc" differently from "command took too
-	// long."
+	// Cancelled is true when the parent context's Done channel
+	// closed for any reason other than [Request.Timeout]: an
+	// explicit ctx cancel (the developer hit Esc, the agent run
+	// was aborted) OR a parent-supplied deadline that expired
+	// before this package's own timeout. Both surface as
+	// Cancelled because callers (BashTool, smoke-run) treat them
+	// identically — the work was abandoned by the controlling
+	// scope, not killed by proc itself.
 	Cancelled bool
 
 	// Duration is the wall-clock time the process ran for.
@@ -103,7 +131,7 @@ var ErrEmptyCommand = errors.New("proc: empty command")
 // Concurrency: safe to call from multiple goroutines simultaneously.
 // Each call gets its own subprocess and capture buffer.
 func Run(ctx context.Context, req Request) Result {
-	if req.Command == "" {
+	if req.Shell == "" {
 		return Result{StartErr: ErrEmptyCommand}
 	}
 
@@ -111,19 +139,11 @@ func Run(ctx context.Context, req Request) Result {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	headCap := req.HeadCap
-	if headCap <= 0 {
-		headCap = DefaultHead
-	}
-	tailCap := req.TailCap
-	if tailCap <= 0 {
-		tailCap = DefaultTail
-	}
 
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", req.Command)
+	cmd := exec.CommandContext(cmdCtx, "sh", "-c", req.Shell)
 	cmd.Dir = req.Dir
 	if req.Env != nil {
 		cmd.Env = req.Env
@@ -142,7 +162,7 @@ func Run(ctx context.Context, req Request) Result {
 	}
 	cmd.WaitDelay = DefaultGraceAfterCancel
 
-	htw := NewHeadTailWriter(headCap, tailCap)
+	htw := NewHeadTailWriter(req.HeadCap, req.TailCap)
 	cmd.Stdout = htw
 	cmd.Stderr = htw
 
@@ -155,12 +175,31 @@ func Run(ctx context.Context, req Request) Result {
 	res := Result{Output: out, Duration: elapsed}
 
 	switch {
-	case errors.Is(cmdCtx.Err(), context.DeadlineExceeded):
-		res.TimedOut = true
-		res.ExitCode = -1
+	// Parent ctx checks come first. A caller-supplied cancellation
+	// or deadline propagates to cmdCtx as DeadlineExceeded too, so
+	// inspecting the child first would mis-attribute a parent-side
+	// expiry to Request.Timeout. Both flavours of parent expiry
+	// surface as Cancelled — the work was abandoned by the caller's
+	// scope, not killed by this package.
 	case ctx.Err() != nil:
 		res.Cancelled = true
 		res.ExitCode = -1
+	case errors.Is(cmdCtx.Err(), context.DeadlineExceeded):
+		res.TimedOut = true
+		res.ExitCode = -1
+	case errors.Is(runErr, exec.ErrWaitDelay):
+		// The process itself exited successfully but inherited
+		// pipes were still open when WaitDelay expired (typically:
+		// a backgrounded child holds the stdout pipe). exec.Run
+		// surfaces this as ErrWaitDelay; from the caller's
+		// perspective the command succeeded. Logged via slog so a
+		// project that regularly leaks daemons during smoke is
+		// diagnosable, but not surfaced to callers — neither
+		// BashTool nor SmokeRunTool can do anything actionable
+		// with "your subshell forked something."
+		slog.Warn("proc: WaitDelay expired with pipes still open after clean exit",
+			"shell", req.Shell)
+		res.ExitCode = 0
 	case runErr != nil:
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
@@ -193,8 +232,20 @@ type HeadTailWriter struct {
 }
 
 // NewHeadTailWriter creates a writer that keeps the first headCap bytes
-// and the last tailCap bytes of output. Both arguments must be positive.
+// and the last tailCap bytes of output. A zero or negative argument
+// is replaced by [DefaultHead] or [DefaultTail] respectively — the
+// zero value of the constructor is useful, matching the rest of the
+// package's API style. The defaulting is enforced HERE rather than
+// in callers because tailCap == 0 would otherwise cause Write to
+// spin forever (the chunk size in the ring-buffer copy would stay
+// zero, never advancing through the input).
 func NewHeadTailWriter(headCap, tailCap int) *HeadTailWriter {
+	if headCap <= 0 {
+		headCap = DefaultHead
+	}
+	if tailCap <= 0 {
+		tailCap = DefaultTail
+	}
 	return &HeadTailWriter{
 		head:    make([]byte, 0, headCap),
 		headCap: headCap,

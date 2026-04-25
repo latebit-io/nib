@@ -12,7 +12,7 @@ import (
 func TestRunSuccess(t *testing.T) {
 	t.Parallel()
 
-	res := Run(context.Background(), Request{Command: "printf hello"})
+	res := Run(context.Background(), Request{Shell: "printf hello"})
 	if res.StartErr != nil {
 		t.Fatalf("StartErr = %v, want nil", res.StartErr)
 	}
@@ -34,7 +34,7 @@ func TestRunSuccess(t *testing.T) {
 func TestRunNonzeroExit(t *testing.T) {
 	t.Parallel()
 
-	res := Run(context.Background(), Request{Command: "exit 7"})
+	res := Run(context.Background(), Request{Shell: "exit 7"})
 	if res.StartErr != nil {
 		t.Fatalf("StartErr = %v, want nil", res.StartErr)
 	}
@@ -50,7 +50,7 @@ func TestRunTimeout(t *testing.T) {
 	t.Parallel()
 
 	res := Run(context.Background(), Request{
-		Command: "sleep 10",
+		Shell:   "sleep 10",
 		Timeout: 100 * time.Millisecond,
 	})
 	if !res.TimedOut {
@@ -76,7 +76,7 @@ func TestRunCancelled(t *testing.T) {
 		cancel()
 	}()
 
-	res := Run(ctx, Request{Command: "sleep 10"})
+	res := Run(ctx, Request{Shell: "sleep 10"})
 	if res.TimedOut {
 		t.Errorf("TimedOut = true, want false on cancel")
 	}
@@ -89,7 +89,7 @@ func TestRunCancelled(t *testing.T) {
 func TestRunEmptyCommand(t *testing.T) {
 	t.Parallel()
 
-	res := Run(context.Background(), Request{Command: ""})
+	res := Run(context.Background(), Request{Shell: ""})
 	if res.StartErr != ErrEmptyCommand {
 		t.Errorf("StartErr = %v, want ErrEmptyCommand", res.StartErr)
 	}
@@ -133,14 +133,132 @@ func TestHeadTailTruncation(t *testing.T) {
 	}
 }
 
+// TestRunParentDeadlineSurfacesAsCancelled verifies that when the
+// parent context expires (deadline shorter than Request.Timeout),
+// the result reports Cancelled rather than TimedOut. Without the
+// child-first-check fix, the inherited DeadlineExceeded on cmdCtx
+// would be mis-attributed to Request.Timeout firing.
+func TestRunParentDeadlineSurfacesAsCancelled(t *testing.T) {
+	t.Parallel()
+
+	parent, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	res := Run(parent, Request{
+		Shell:   "sleep 10",
+		Timeout: 30 * time.Second, // far longer than the parent deadline
+	})
+
+	if !res.Cancelled {
+		t.Errorf("Cancelled = false, want true (parent deadline must surface as Cancelled, not TimedOut)")
+	}
+	if res.TimedOut {
+		t.Errorf("TimedOut = true, want false (Request.Timeout did not fire)")
+	}
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1", res.ExitCode)
+	}
+}
+
+// TestRunWaitDelayBackgroundedChildSucceeds verifies the
+// exec.ErrWaitDelay path is treated as success rather than a
+// StartErr. The shell command exits cleanly while a backgrounded
+// `sleep` still holds the stdout pipe — exec.Run surfaces this as
+// ErrWaitDelay after WaitDelay (1s by default in proc) expires, but
+// the parent process succeeded so ExitCode must be 0.
+//
+// Without the explicit ErrWaitDelay branch in Run, this test would
+// fail because the error would land in StartErr ("proc: …
+// ErrWaitDelay"), mislabeling a clean exit as a fork failure.
+func TestRunWaitDelayBackgroundedChildSucceeds(t *testing.T) {
+	t.Parallel()
+
+	// `( sleep 5 & ) 2>/dev/null` backgrounds sleep with no output;
+	// `printf done` forces final stdout that the parent uses cleanly.
+	// The parent exits 0 immediately; the daemonised sleep keeps a
+	// pipe open until WaitDelay (1s) forces close → ErrWaitDelay.
+	res := Run(context.Background(), Request{
+		Shell:   "( sleep 5 ) & printf done",
+		Timeout: 10 * time.Second,
+	})
+	if res.StartErr != nil {
+		t.Fatalf("StartErr = %v, want nil (ErrWaitDelay must not surface as StartErr)", res.StartErr)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0 (process exited successfully despite pipe linger)", res.ExitCode)
+	}
+	if res.TimedOut {
+		t.Errorf("TimedOut = true, want false (timeout was 10s, command exits in <1s)")
+	}
+}
+
+// TestNewHeadTailWriterDefaultsZeroAndNegative verifies the constructor
+// substitutes DefaultHead / DefaultTail when given zero or negative
+// caps. Without this, tailCap=0 would make Write spin forever (chunk
+// size stays zero in the ring-buffer copy) and negative values would
+// panic in make([]byte, …).
+func TestNewHeadTailWriterDefaultsZeroAndNegative(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name             string
+		headCap, tailCap int
+	}{
+		{"both zero", 0, 0},
+		{"both negative", -100, -50},
+		{"head zero only", 0, 100},
+		{"tail negative only", 100, -1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewHeadTailWriter(tc.headCap, tc.tailCap)
+			// Write some bytes — must not panic, must not spin forever,
+			// must produce a non-empty output via String().
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _ = w.Write([]byte("hello world"))
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatalf("Write spun forever or blocked — caps did not default to positive values")
+			}
+			if w.String() == "" {
+				t.Errorf("String() empty after write; defaulted caps should hold output")
+			}
+		})
+	}
+}
+
+// TestRunDefaultsHeadTailViaWriter verifies that a Request with zero
+// HeadCap/TailCap still produces useful output — the defaulting now
+// lives inside NewHeadTailWriter, not Run, so this confirms the
+// single-source-of-truth refactor preserves behaviour.
+func TestRunDefaultsHeadTailViaWriter(t *testing.T) {
+	t.Parallel()
+
+	res := Run(context.Background(), Request{
+		Shell: "printf hello",
+		// HeadCap and TailCap left zero — should default to DefaultHead/DefaultTail.
+	})
+	if res.StartErr != nil {
+		t.Fatalf("StartErr = %v", res.StartErr)
+	}
+	if res.Output != "hello" {
+		t.Errorf("Output = %q, want %q", res.Output, "hello")
+	}
+}
+
 // TestRunDirRespected verifies the working directory is honoured.
 func TestRunDirRespected(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	res := Run(context.Background(), Request{
-		Command: "pwd",
-		Dir:     dir,
+		Shell: "pwd",
+		Dir:   dir,
 	})
 	if res.StartErr != nil {
 		t.Fatalf("StartErr = %v", res.StartErr)

@@ -2,6 +2,7 @@ package wire
 
 import (
 	"log/slog"
+	"sync"
 
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/lint"
@@ -9,6 +10,47 @@ import (
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/styleconfig"
 )
+
+// PerFileLinterHolder is a thread-safe holder for the active style's
+// per-file linters. The lintstage validator reads it; the TUI's
+// CycleStyle closure updates it on style switch.
+//
+// Pattern parity with [styleconfig.ActiveProvider] — capturing a
+// slice into a closure at pipeline construction would race when the
+// TUI goroutine writes during a style cycle while the agent
+// goroutine reads mid-Validate. The holder is the seam that lets
+// runtime style cycling reach the validator without rebuilding the
+// pipeline.
+type PerFileLinterHolder struct {
+	mu      sync.RWMutex
+	linters []lint.Linter
+}
+
+// NewPerFileLinterHolder returns a holder seeded with the given
+// initial linter set. Composition roots populate it from the
+// resolved style at startup and on every style cycle.
+func NewPerFileLinterHolder(initial []lint.Linter) *PerFileLinterHolder {
+	return &PerFileLinterHolder{linters: initial}
+}
+
+// Linters returns a snapshot of the current per-file linter set.
+// The slice header is copied; the underlying linters are shared.
+// Returning the snapshot is safe because lintstage iterates the
+// slice under its own pipeline call boundary.
+func (h *PerFileLinterHolder) Linters() []lint.Linter {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.linters
+}
+
+// Set replaces the per-file linter set. Pass nil to disable
+// per-file lint (e.g. when the developer cycles past the last
+// style with `Alt+S`).
+func (h *PerFileLinterHolder) Set(linters []lint.Linter) {
+	h.mu.Lock()
+	h.linters = linters
+	h.mu.Unlock()
+}
 
 // StyleResult holds the resolved style configuration and the effective
 // linters to run during post-task review.
@@ -35,10 +77,15 @@ type StyleResult struct {
 	// callers can register the validator unconditionally; the validator
 	// short-circuits via its Applicable check when no caps are configured.
 	Architecture *styleconfig.ActiveProvider
-	// PerFileLinters is the per-file safe linter subset, used by the
-	// pre-approval lint validator stage. Nil when neither the style nor
-	// the project has a per-file linter configured.
-	PerFileLinters []lint.Linter
+	// PerFileLinters is the thread-safe holder for the per-file safe
+	// linter subset, used by the pre-approval lint validator stage.
+	// Always non-nil so callers can register the validator
+	// unconditionally; the holder returns nil when neither the
+	// style nor the project has a per-file linter configured. The
+	// TUI's CycleStyle closure updates the holder on style switch
+	// so a style with a different {file}-bearing lint_cmd takes
+	// effect on the next edit without rebuilding the pipeline.
+	PerFileLinters *PerFileLinterHolder
 	// DefaultPerFileLinters is the auto-detected per-file linter set for
 	// the project language. Used as fallback when a style has no
 	// {file}-bearing lint_cmd, including during runtime style cycling.
@@ -58,6 +105,7 @@ func NewStyle(projectRoot string) StyleResult {
 	perFileDefaults := lint.DetectPerFile(projectRoot)
 
 	archProvider := styleconfig.NewActiveProvider()
+	perFileHolder := NewPerFileLinterHolder(nil)
 
 	if resolved == nil {
 		slog.Debug("wire: no active coding style")
@@ -66,10 +114,12 @@ func NewStyle(projectRoot string) StyleResult {
 			DefaultLinters:        defaults,
 			DefaultPerFileLinters: perFileDefaults,
 			Architecture:          archProvider,
+			PerFileLinters:        perFileHolder,
 		}
 	}
 
 	archProvider.Set(resolved.Architecture)
+	perFileHolder.Set(LintersForStylePerFile(resolved.LintCmd, perFileDefaults))
 
 	slog.Info("wire: coding style active", "style", resolved.Name)
 
@@ -79,7 +129,7 @@ func NewStyle(projectRoot string) StyleResult {
 		AgentStyle:            agent.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules)),
 		Linters:               LintersForStyle(resolved.LintCmd, defaults),
 		DefaultLinters:        defaults,
-		PerFileLinters:        LintersForStylePerFile(resolved.LintCmd, perFileDefaults),
+		PerFileLinters:        perFileHolder,
 		DefaultPerFileLinters: perFileDefaults,
 		Architecture:          archProvider,
 	}

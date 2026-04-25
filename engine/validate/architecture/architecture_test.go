@@ -389,3 +389,100 @@ func TestNameIsStable(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", got, StageName)
 	}
 }
+
+// TestValidateNilSafetyContract verifies the [New] doc's promise that
+// "A nil provider or langFor makes the validator a no-op" actually
+// holds when Validate is called directly (bypassing the pipeline's
+// Applicable pre-check). Without the guards, direct callers would
+// panic on nil pointer dereference / nil function call.
+func TestValidateNilSafetyContract(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		v    *Validator
+	}{
+		{"nil provider and langFor", New(nil, nil)},
+		{"nil provider only", New(nil, langFor)},
+		{"nil langFor only", New(&stubProvider{
+			arch: styleconfig.Architecture{MaxFileLines: 10},
+		}, nil)},
+	}
+
+	cand := validate.Candidate{
+		Path:  "main.lua",
+		After: strings.Repeat("local x = 1\n", 200), // would trigger the cap
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("Validate panicked: %v", r)
+				}
+			}()
+			got := tc.v.Validate(context.Background(), cand)
+			if got.Verdict != validate.Pass {
+				t.Errorf("Verdict = %v, want Pass", got.Verdict)
+			}
+		})
+	}
+}
+
+// TestValidateLogsParseFailureKeepsFileCap verifies that a
+// parse failure in parseFunctionSpans does not silently swallow
+// findings: the file-line cap path still runs and produces its
+// finding, while the parser failure is logged (per CLAUDE.md's
+// rule on silent errors). Forces a parse failure by cancelling
+// the context before Validate runs — parseFunctionSpans returns
+// ctx.Err() when ctx is already done at the SetLanguage check.
+func TestValidateLogsParseFailureKeepsFileCap(t *testing.T) {
+	t.Parallel()
+
+	v := New(&stubProvider{arch: styleconfig.Architecture{
+		MaxFileLines:     50,
+		MaxFunctionLines: 5, // would fire if parser ran; cancelled ctx prevents that
+		Action:           "warn",
+	}}, langFor)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel so parseFunctionSpans returns ctx.Err()
+
+	got := v.Validate(ctx, validate.Candidate{
+		Path:  "main.lua",
+		After: strings.Repeat("local x = 1\n", 200), // 200 lines > 50 cap
+	})
+
+	// File-line cap fires regardless of parser status — exactly one
+	// finding, attributed to the file-size check, not the function check.
+	if got.Verdict != validate.Retry {
+		t.Fatalf("Verdict = %v, want Retry (file-line cap should fire)", got.Verdict)
+	}
+	if len(got.Findings) != 1 {
+		t.Errorf("Findings = %d, want 1 (function-cap path must not produce findings on parse failure)", len(got.Findings))
+	}
+	if !strings.Contains(got.Findings[0].Message, "file is") {
+		t.Errorf("finding[0] = %q, want file-line cap message", got.Findings[0].Message)
+	}
+}
+
+// TestValidateUnsupportedLanguageNoOp verifies a registered langFor
+// that returns nil for a particular extension (e.g. .json against a
+// langFor that only knows Lua/Go) makes Validate a no-op rather
+// than parsing nothing as something. Defence in depth — the
+// pipeline's Applicable check already filters this in normal use.
+func TestValidateUnsupportedLanguageNoOp(t *testing.T) {
+	t.Parallel()
+
+	v := New(&stubProvider{arch: styleconfig.Architecture{
+		MaxFileLines: 10, // would fire if Validate ran
+	}}, langFor)
+
+	got := v.Validate(context.Background(), validate.Candidate{
+		Path:  "package.json",
+		After: strings.Repeat("{}\n", 50),
+	})
+	if got.Verdict != validate.Pass {
+		t.Errorf("Verdict = %v, want Pass for unsupported language", got.Verdict)
+	}
+}

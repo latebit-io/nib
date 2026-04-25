@@ -28,28 +28,52 @@ type PerFileLinterHolder struct {
 
 // NewPerFileLinterHolder returns a holder seeded with the given
 // initial linter set. Composition roots populate it from the
-// resolved style at startup and on every style cycle.
+// resolved style at startup and on every style cycle. The slice is
+// cloned defensively — see [PerFileLinterHolder.Set] for the
+// rationale.
 func NewPerFileLinterHolder(initial []lint.Linter) *PerFileLinterHolder {
-	return &PerFileLinterHolder{linters: initial}
+	return &PerFileLinterHolder{linters: cloneLinters(initial)}
 }
 
-// Linters returns a snapshot of the current per-file linter set.
-// The slice header is copied; the underlying linters are shared.
-// Returning the snapshot is safe because lintstage iterates the
-// slice under its own pipeline call boundary.
+// Linters returns a snapshot of the current per-file linter set,
+// defensively copied so a caller mutating the result cannot race
+// with a concurrent Set. Today's only reader (lintstage) just
+// iterates and never mutates, but the type's "thread-safe" contract
+// has to hold against future callers without a hand-rolled
+// "treat as immutable" convention. The underlying [lint.Linter]
+// implementations are pointer-typed and shared — the cost we're
+// guarding is the slice header / backing array, not the linter
+// state itself.
 func (h *PerFileLinterHolder) Linters() []lint.Linter {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.linters
+	return cloneLinters(h.linters)
 }
 
-// Set replaces the per-file linter set. Pass nil to disable
-// per-file lint (e.g. when the developer cycles past the last
-// style with `Alt+S`).
+// Set replaces the per-file linter set. The provided slice is
+// cloned defensively so a caller that later mutates the slice
+// (e.g. appends a new linter and re-Sets) cannot accidentally
+// touch storage the holder is concurrently exposing through
+// [PerFileLinterHolder.Linters]. Pass nil to disable per-file lint
+// (e.g. when the developer cycles past the last style with `Alt+S`).
 func (h *PerFileLinterHolder) Set(linters []lint.Linter) {
 	h.mu.Lock()
-	h.linters = linters
+	h.linters = cloneLinters(linters)
 	h.mu.Unlock()
+}
+
+// cloneLinters returns a defensive copy of src so the holder's
+// stored slice is decoupled from the caller's. Returns nil for
+// empty input to preserve the "no per-file linter configured"
+// sentinel that lintstage's Applicable check relies on
+// (`len(v.source()) > 0`).
+func cloneLinters(src []lint.Linter) []lint.Linter {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]lint.Linter, len(src))
+	copy(dst, src)
+	return dst
 }
 
 // StyleResult holds the resolved style configuration and the effective

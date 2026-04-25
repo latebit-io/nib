@@ -29,6 +29,22 @@ const StageName = "lint"
 // feedback string so a noisy linter cannot blow out the model context.
 const maxReportedFindings = 8
 
+// maxStoredFindings caps how many findings the validator retains
+// across all linters in a single Validate call. Beyond display, any
+// extras would just sit in Result.Findings until GC'd — but a noisy
+// linter producing 100k diagnostics still pressurises memory and the
+// "… and N more" hint becomes meaningless. 64 leaves comfortable
+// headroom above the 8-item display cap so the hint stays useful.
+const maxStoredFindings = 64
+
+// maxFindingMessageBytes clamps an individual finding's Message
+// before it reaches the retry feedback builder. Without this a
+// single pathological diagnostic (multi-MB message produced by a
+// misconfigured external tool) would land in the LLM prompt and
+// bill the developer for the tokens. Generous enough for typical
+// `path:line:col: rule: message (linter)` shapes.
+const maxFindingMessageBytes = 500
+
 // LinterSource returns the per-file linters available for the current
 // project. The validator calls it once per Validate, so style cycles
 // or runtime config changes that swap the linter set are picked up
@@ -91,6 +107,7 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 	defer cleanup()
 
 	var findings []lint.Finding
+	capped := false
 	for _, l := range linters {
 		if err := ctx.Err(); err != nil {
 			break
@@ -100,7 +117,27 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 			slog.Warn("lintstage: linter run failed", "linter", l.Name(), "err", res.Error)
 			continue
 		}
-		findings = append(findings, res.Findings...)
+		// Append up to the storage cap, then stop. A noisy linter
+		// emitting 8 MiB of diagnostics (the lint package's
+		// per-invocation output cap) would otherwise produce
+		// ~100k Finding structs in memory; we'd display 8 and
+		// throw the rest away anyway. Log once per Validate call
+		// when the cap is hit so operators can spot a misbehaving
+		// linter without the warning becoming spam.
+		for i := range res.Findings {
+			if len(findings) >= maxStoredFindings {
+				if !capped {
+					slog.Warn("lintstage: finding cap reached; truncating",
+						"linter", l.Name(), "cap", maxStoredFindings)
+					capped = true
+				}
+				break
+			}
+			findings = append(findings, res.Findings[i])
+		}
+		if capped {
+			break
+		}
 	}
 
 	if len(findings) == 0 {
@@ -169,9 +206,11 @@ func rewritePaths(findings []lint.Finding, realPath string) {
 }
 
 // formatFeedback renders findings into a retry prompt the LLM can act
-// on. Caps the rendered list at maxReportedFindings so a noisy linter
-// does not blow out the model's context window — the count of elided
-// findings is preserved so the LLM knows there are more.
+// on. Caps the rendered list at maxReportedFindings AND clamps each
+// individual message at maxFindingMessageBytes so a single
+// pathological diagnostic from a misconfigured external tool cannot
+// blow out the model's context window. The count of elided findings
+// is preserved so the LLM knows there are more.
 func formatFeedback(path string, findings []lint.Finding) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Per-file lint flagged %d issue(s) in %s. Fix them and propose the edit again.\n\n",
@@ -183,17 +222,33 @@ func formatFeedback(path string, findings []lint.Finding) string {
 		if linterTag == "" {
 			linterTag = StageName
 		}
+		msg := clampMessage(f.Message)
 		switch {
 		case f.Line > 0 && f.Col > 0:
-			fmt.Fprintf(&b, "  - line %d:%d — %s (%s)\n", f.Line, f.Col, f.Message, linterTag)
+			fmt.Fprintf(&b, "  - line %d:%d — %s (%s)\n", f.Line, f.Col, msg, linterTag)
 		case f.Line > 0:
-			fmt.Fprintf(&b, "  - line %d — %s (%s)\n", f.Line, f.Message, linterTag)
+			fmt.Fprintf(&b, "  - line %d — %s (%s)\n", f.Line, msg, linterTag)
 		default:
-			fmt.Fprintf(&b, "  - %s (%s)\n", f.Message, linterTag)
+			fmt.Fprintf(&b, "  - %s (%s)\n", msg, linterTag)
 		}
 	}
 	if len(findings) > limit {
 		fmt.Fprintf(&b, "  … and %d more\n", len(findings)-limit)
 	}
 	return b.String()
+}
+
+// clampMessage truncates s to maxFindingMessageBytes, appending an
+// ellipsis when the string was actually shortened. Byte-bounded
+// rather than rune-bounded — the cost we're guarding is LLM tokens,
+// which scale with bytes for ASCII messages and remain bounded for
+// multi-byte sequences. A truncated multibyte boundary is acceptable
+// here because the message is diagnostic text, not data we round-trip.
+func clampMessage(s string) string {
+	if len(s) <= maxFindingMessageBytes {
+		return s
+	}
+	const ellipsis = " …(truncated)"
+	cut := max(maxFindingMessageBytes-len(ellipsis), 0)
+	return s[:cut] + ellipsis
 }

@@ -2,6 +2,9 @@ package proc
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +192,42 @@ func TestRunWaitDelayBackgroundedChildSucceeds(t *testing.T) {
 	}
 	if res.TimedOut {
 		t.Errorf("TimedOut = true, want false (timeout was 10s, command exits in <1s)")
+	}
+}
+
+// TestRunWaitDelayReapsDescendants verifies that a backgrounded
+// pipe-holding child is killed via the process group on the
+// ErrWaitDelay path. Without explicit reaping, the descendant
+// survives Run's return and pollutes subsequent invocations
+// (stealing ports, mutating shared state). The test uses a
+// sentinel-touch trick: the backgrounded process tries to write a
+// file 2 seconds after fork. If the file exists when we look, the
+// process survived and the regression has returned.
+func TestRunWaitDelayReapsDescendants(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "lingered.txt")
+
+	// `( sleep 2; touch SENTINEL )` is the descendant. `printf done`
+	// makes the parent shell exit cleanly. WaitDelay (1s) fires
+	// because the descendant still holds the pipe → ErrWaitDelay
+	// path → must reap.
+	res := Run(context.Background(), Request{
+		Shell:   fmt.Sprintf("( sleep 2; touch %s ) & printf done", sentinel),
+		Timeout: 10 * time.Second,
+	})
+	if res.StartErr != nil {
+		t.Fatalf("StartErr = %v", res.StartErr)
+	}
+
+	// Wait long enough for the would-be sleep to elapse + filesystem
+	// flush. If reaping worked, the touch never fires.
+	time.Sleep(3 * time.Second)
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Errorf("sentinel %q exists — backgrounded descendant survived ErrWaitDelay reaping", sentinel)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat sentinel: %v", err)
 	}
 }
 

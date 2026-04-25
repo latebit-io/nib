@@ -1693,7 +1693,14 @@ func (a *Agent) runSmokeReview(ctx context.Context) string {
 	if cfg.Skipped {
 		return ""
 	}
-	a.send(event.AgentToken{Text: fmt.Sprintf("\n[Smoke run: %s]\n", cfg.Command)})
+	// Surface only the source (make-smoke / lua-main / config / …)
+	// not the resolved command — `.project/run.json` may contain
+	// inline env assignments or auth flags, and this banner ends up
+	// in the capture sink (and from there in the session journal,
+	// which can be distributed). The command itself reaches debug
+	// logs (process-local) and the actual exec, both of which are
+	// dev-machine-local; persisted surfaces stay redacted.
+	a.send(event.AgentToken{Text: fmt.Sprintf("\n[Smoke run: %s]\n", cfg.Source)})
 	res := runSmoke(ctx, a.workspace.ProjectRoot(), cfg)
 	return formatSmokeResult(cfg, res)
 }

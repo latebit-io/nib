@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/engine/run/proc"
 	"github.com/latebit-io/junto/engine/runconfig"
 )
 
@@ -111,6 +113,49 @@ func TestSmokeToolTimeout(t *testing.T) {
 	res := tool.Execute(context.Background(), llm.ToolCall{})
 	if !strings.Contains(res.Content, "Timed out") {
 		t.Errorf("Content missing timeout banner: %q", res.Content)
+	}
+}
+
+// TestFormatSmokeResultDoesNotLeakCommand verifies the LLM-facing
+// formatted result never contains the literal command. The result
+// flows into LLM context and the capture sink (which feeds the
+// session journal, potentially distributed), so a `.project/run.json`
+// with inline env assignments or auth flags must not surface them
+// here. The source identifier is enough for the LLM to diagnose
+// failures.
+func TestFormatSmokeResultDoesNotLeakCommand(t *testing.T) {
+	t.Parallel()
+
+	cfg := runconfig.Resolved{
+		Command: "API_KEY=sk-secret make smoke",
+		Source:  "make-smoke",
+		Timeout: 5 * time.Second,
+	}
+
+	cases := []struct {
+		name string
+		res  proc.Result
+	}{
+		{"success", proc.Result{ExitCode: 0, Duration: 100 * time.Millisecond}},
+		{"failure", proc.Result{ExitCode: 3, Output: "stderr from the run", Duration: 200 * time.Millisecond}},
+		{"timeout", proc.Result{TimedOut: true, ExitCode: -1, Output: "partial output"}},
+		{"cancel", proc.Result{Cancelled: true, ExitCode: -1}},
+		{"start err", proc.Result{StartErr: errors.New("exec failed")}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatSmokeResult(cfg, tc.res)
+			if strings.Contains(got, "API_KEY=sk-secret") {
+				t.Errorf("formatted result leaked secret: %q", got)
+			}
+			if strings.Contains(got, "make smoke") {
+				t.Errorf("formatted result leaked literal command: %q", got)
+			}
+			if !strings.Contains(got, "make-smoke") {
+				t.Errorf("formatted result missing source identifier: %q", got)
+			}
+		})
 	}
 }
 

@@ -357,7 +357,11 @@ func TestMergeConfigsRejectsInvalidArchitectureAction(t *testing.T) {
 
 // TestIsValidArchitectureAction locks in the accepted set so a
 // well-meaning "let me also accept 'enforce'" PR fails loud here
-// instead of silently expanding the policy surface.
+// instead of silently expanding the policy surface. Validation is
+// case-insensitive and whitespace-tolerant — matching
+// [Architecture.normalisedAction]'s contract — so a project config
+// with `"Action": "BLOCK"` is accepted by the merge path rather
+// than silently dropped.
 func TestIsValidArchitectureAction(t *testing.T) {
 	cases := []struct {
 		action string
@@ -367,15 +371,43 @@ func TestIsValidArchitectureAction(t *testing.T) {
 		{"warn", true},
 		{"block", true},
 		{"off", true},
-		{"WARN", false}, // case-sensitive at validation time
+		{"WARN", true},    // case-insensitive
+		{"Block", true},   // mixed case
+		{"  off  ", true}, // whitespace-tolerant
 		{"enforce", false},
 		{"blcok", false},
-		{"warn ", false}, // no trimming at validation
+		{"warning", false}, // close to a valid value but not equal
 	}
 	for _, tc := range cases {
 		if got := isValidArchitectureAction(tc.action); got != tc.want {
 			t.Errorf("isValidArchitectureAction(%q) = %v, want %v", tc.action, got, tc.want)
 		}
+	}
+}
+
+// TestMergeConfigsCanonicalisesArchitectureAction verifies that a
+// case/whitespace variant of a known action is accepted AND stored
+// in canonical lowercase form, so downstream string comparisons
+// don't have to re-normalise. Without this, a project config
+// `"Action": "BLOCK"` would silently fall back to the builtin's
+// value because the validity check rejected it as unknown.
+func TestMergeConfigsCanonicalisesArchitectureAction(t *testing.T) {
+	dst := &Config{Styles: map[string]Style{
+		"clean": {
+			Name:         "Clean",
+			Architecture: Architecture{Action: "warn"},
+		},
+	}}
+	src := &Config{Styles: map[string]Style{
+		"clean": {
+			Architecture: Architecture{Action: "BLOCK"},
+		},
+	}}
+
+	mergeConfigs(dst, src)
+
+	if got := dst.Styles["clean"].Architecture.Action; got != "block" {
+		t.Errorf("Action = %q, want %q (canonical lowercase from BLOCK)", got, "block")
 	}
 }
 

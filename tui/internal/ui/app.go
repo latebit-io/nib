@@ -948,12 +948,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	return cmd
 }
 
-// clearEditorOverlay delegates scroll correction to the engine and clears
-// the TUI overlay state.
-//
-// bufferMutated should be true when called after a successful ApproveEdit
-// (the buffer already has the replacement content). When false (reject,
-// error, done), the buffer is unchanged and the conversion differs.
 // hasBlockSummary reports whether any validator summary in the slice
 // carries the "block" verdict — the signal that a pre-approval check
 // flagged the edit as requiring developer attention rather than silent
@@ -970,6 +964,12 @@ func hasBlockSummary(summaries []event.ValidatorSummary) bool {
 	return false
 }
 
+// clearEditorOverlay delegates scroll correction to the engine and clears
+// the TUI overlay state.
+//
+// bufferMutated should be true when called after a successful ApproveEdit
+// (the buffer already has the replacement content). When false (reject,
+// error, done), the buffer is unchanged and the conversion differs.
 func (m *AppModel) clearEditorOverlay(bufferMutated bool) {
 	o := m.Editor.Overlay
 	if o == nil {

@@ -255,3 +255,92 @@ func TestNameStable(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", got, StageName)
 	}
 }
+
+// TestFindingsCappedAtMaxStored verifies a noisy linter (returning more
+// than maxStoredFindings) cannot blow up Result.Findings. Without the
+// cap, an 8 MiB output from luacheck on a generated file (~100k
+// findings) would all sit in memory until GC'd. The cap means we keep
+// the first 64 — enough for the 8-item display plus headroom — and
+// drop the tail.
+func TestFindingsCappedAtMaxStored(t *testing.T) {
+	t.Parallel()
+
+	noisy := make([]lint.Finding, maxStoredFindings*4)
+	for i := range noisy {
+		noisy[i] = lint.Finding{Line: i + 1, Linter: "noisy", Message: "x"}
+	}
+	stub := &stubLinter{name: "noisy", result: lint.Result{Findings: noisy}}
+	v := New(func() []lint.Linter { return []lint.Linter{stub} })
+
+	got := v.Validate(context.Background(), validate.Candidate{
+		Path:  "main.lua",
+		After: "local x = 1\n",
+	})
+
+	if got.Verdict != validate.Retry {
+		t.Fatalf("Verdict = %v, want Retry", got.Verdict)
+	}
+	if len(got.Findings) != maxStoredFindings {
+		t.Errorf("len(Findings) = %d, want %d (cap)", len(got.Findings), maxStoredFindings)
+	}
+}
+
+// TestFindingMessageClampedInFeedback verifies a single pathological
+// diagnostic (multi-MB message) is truncated before reaching the
+// retry feedback. Without this clamp, one bad finding would multiply
+// the LLM's input-token bill.
+func TestFindingMessageClampedInFeedback(t *testing.T) {
+	t.Parallel()
+
+	huge := strings.Repeat("X", maxFindingMessageBytes*4)
+	stub := &stubLinter{
+		name: "huge",
+		result: lint.Result{Findings: []lint.Finding{
+			{Line: 1, Linter: "huge", Message: huge},
+		}},
+	}
+	v := New(func() []lint.Linter { return []lint.Linter{stub} })
+
+	got := v.Validate(context.Background(), validate.Candidate{
+		Path:  "main.lua",
+		After: "local x = 1\n",
+	})
+
+	if len(got.Feedback) >= len(huge) {
+		t.Errorf("Feedback length %d >= huge message length %d; clamp not applied",
+			len(got.Feedback), len(huge))
+	}
+	if !strings.Contains(got.Feedback, "(truncated)") {
+		t.Errorf("Feedback missing truncation marker: %q", got.Feedback[:min(len(got.Feedback), 200)])
+	}
+}
+
+// TestClampMessageBoundaries locks in the precise truncation behaviour
+// so a future "let me make this rune-aware" or "let me drop the
+// ellipsis" change has to update the test deliberately.
+func TestClampMessageBoundaries(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"short", "hello", "hello"},
+		{"exactly at cap", strings.Repeat("a", maxFindingMessageBytes), strings.Repeat("a", maxFindingMessageBytes)},
+		{
+			name: "over cap",
+			in:   strings.Repeat("a", maxFindingMessageBytes+10),
+			want: strings.Repeat("a", maxFindingMessageBytes-len(" …(truncated)")) + " …(truncated)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampMessage(tc.in)
+			if got != tc.want {
+				t.Errorf("clampMessage(len=%d) = %q (len=%d), want length %d",
+					len(tc.in), got[:min(len(got), 50)], len(got), len(tc.want))
+			}
+		})
+	}
+}

@@ -110,12 +110,19 @@ func runSmoke(ctx context.Context, projectRoot string, cfg runconfig.Resolved) p
 	return res
 }
 
-// formatSmokeResult renders a proc.Result into LLM-facing text. The
-// shape is deliberately simple: a one-line verdict so a clean run
-// flushes through quickly, and the captured output appended on
-// failure so the LLM can read the stack trace.
+// formatSmokeResult renders a proc.Result into LLM-facing text.
+//
+// The header deliberately surfaces the source identifier (make-smoke,
+// lua-main, config, …) but NOT the resolved command. The result
+// string flows into the LLM context (and onward to the model
+// provider's logs) and into the capture sink (and onward to
+// distributed session journals). `.project/run.json` is the developer's
+// trust boundary, but the LLM-facing tool result is not — keep
+// inline env assignments / auth flags out of persisted surfaces. The
+// LLM has enough signal from the source label and captured output to
+// diagnose failures without seeing the literal command.
 func formatSmokeResult(cfg runconfig.Resolved, res proc.Result) string {
-	header := fmt.Sprintf("Smoke run: `%s` (%s)\n", cfg.Command, cfg.Source)
+	header := fmt.Sprintf("Smoke run (%s)\n", cfg.Source)
 
 	switch {
 	case res.StartErr != nil:

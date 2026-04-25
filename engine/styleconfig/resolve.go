@@ -141,14 +141,27 @@ func warnInvalidEnforcement(source string, rules []Rule) {
 }
 
 // isValidArchitectureAction reports whether action is one of the
-// known values. Empty is treated as valid because empty defaults to
-// "warn" downstream — the consumer's normalisedAction handles that.
+// known values, applying the same normalisation
+// (lowercase + trim) the consumer's [Architecture.normalisedAction]
+// uses. Without this, a project config with "Action": "BLOCK" would
+// be rejected by the merge path and silently fall back to whichever
+// value the builtin shipped — even though the architecture struct's
+// own contract says comparisons are case-insensitive. Empty is
+// treated as valid because empty defaults to "warn" downstream.
 func isValidArchitectureAction(action string) bool {
-	switch action {
+	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "", "warn", "block", "off":
 		return true
 	}
 	return false
+}
+
+// canonicalArchitectureAction returns the lowercase trimmed form of
+// action so merged configs store a single canonical representation.
+// Pass-through "" for unset values; callers must check before using
+// the result as a non-empty signal.
+func canonicalArchitectureAction(action string) string {
+	return strings.ToLower(strings.TrimSpace(action))
 }
 
 // warnInvalidArchitectureAction logs a warning when source declares an
@@ -233,16 +246,19 @@ func mergeConfigs(dst, src *Config) {
 		if ss.Architecture.MaxFunctionsPerFile > 0 {
 			ds.Architecture.MaxFunctionsPerFile = ss.Architecture.MaxFunctionsPerFile
 		}
-		// Action overwrites only with a known value. An invalid
-		// action (typo in project/global config) would otherwise
-		// silently replace a builtin "block" with garbage, which
-		// normalisedAction maps to the default "warn" — silently
-		// demoting Block→Retry is a UX regression we refuse to
-		// accept. The load path already emitted a warn-level log
-		// at file load via warnInvalidArchitectureAction; this
-		// branch is the safety net.
+		// Action overwrites only with a known value, normalised to
+		// lowercase canonical form. An invalid action (typo in
+		// project/global config) would otherwise silently replace a
+		// builtin "block" with garbage, which normalisedAction maps
+		// to the default "warn" — silently demoting Block→Retry is
+		// a UX regression we refuse to accept. The load path
+		// already emitted a warn-level log at file load via
+		// warnInvalidArchitectureAction; this branch is the safety
+		// net. Canonicalising at write time means downstream
+		// consumers can compare strings directly without re-running
+		// normalisedAction in every read site.
 		if ss.Architecture.Action != "" && isValidArchitectureAction(ss.Architecture.Action) {
-			ds.Architecture.Action = ss.Architecture.Action
+			ds.Architecture.Action = canonicalArchitectureAction(ss.Architecture.Action)
 		}
 		dst.Styles[name] = ds
 	}

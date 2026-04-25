@@ -71,3 +71,75 @@ func TestPerFileLinterHolderRaceSafe(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// TestPerFileLinterHolderDefensiveCopyOnSet verifies that a caller
+// who later mutates the slice they passed into Set cannot affect
+// the holder's stored value. Without the defensive copy, a future
+// caller pattern like
+//
+//	tmp := buildLinters()
+//	holder.Set(tmp)
+//	tmp[0] = nil  // accidental teardown
+//
+// would race with concurrent Linters() readers and could put a nil
+// into the iterating goroutine's path.
+func TestPerFileLinterHolderDefensiveCopyOnSet(t *testing.T) {
+	t.Parallel()
+
+	caller := []lint.Linter{&stubLinter{name: "original"}}
+	h := NewPerFileLinterHolder(caller)
+
+	// Mutate the caller's slice after handing it over.
+	caller[0] = &stubLinter{name: "tampered"}
+
+	got := h.Linters()
+	if len(got) != 1 {
+		t.Fatalf("Linters() = %d items, want 1", len(got))
+	}
+	if got[0].Name() != "original" {
+		t.Errorf("holder slice mutated by caller: got name %q, want %q",
+			got[0].Name(), "original")
+	}
+}
+
+// TestPerFileLinterHolderDefensiveCopyOnLinters verifies that a
+// reader who mutates the returned slice cannot affect the holder's
+// stored value. Without the defensive copy, the natural-looking
+//
+//	xs := holder.Linters()
+//	xs = append(xs, extra)
+//
+// can — depending on capacity — write into the holder's backing
+// array.
+func TestPerFileLinterHolderDefensiveCopyOnLinters(t *testing.T) {
+	t.Parallel()
+
+	h := NewPerFileLinterHolder([]lint.Linter{&stubLinter{name: "kept"}})
+
+	xs := h.Linters()
+	xs[0] = &stubLinter{name: "tampered"}
+
+	again := h.Linters()
+	if again[0].Name() != "kept" {
+		t.Errorf("holder slice mutated by reader: got name %q, want %q",
+			again[0].Name(), "kept")
+	}
+}
+
+// TestPerFileLinterHolderEmptyInputPreservesNil locks the
+// "no per-file linter" sentinel — callers' Applicable check uses
+// len() > 0, so an empty slice and nil must be observationally
+// indistinguishable through the holder.
+func TestPerFileLinterHolderEmptyInputPreservesNil(t *testing.T) {
+	t.Parallel()
+
+	h := NewPerFileLinterHolder([]lint.Linter{})
+	if got := h.Linters(); got != nil {
+		t.Errorf("Linters() = %+v on empty initial input, want nil", got)
+	}
+
+	h2 := NewPerFileLinterHolder(nil)
+	if got := h2.Linters(); got != nil {
+		t.Errorf("Linters() = %+v on nil initial input, want nil", got)
+	}
+}

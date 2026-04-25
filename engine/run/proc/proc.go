@@ -192,13 +192,29 @@ func Run(ctx context.Context, req Request) Result {
 		// pipes were still open when WaitDelay expired (typically:
 		// a backgrounded child holds the stdout pipe). exec.Run
 		// surfaces this as ErrWaitDelay; from the caller's
-		// perspective the command succeeded. Logged via slog so a
-		// project that regularly leaks daemons during smoke is
-		// diagnosable, but not surfaced to callers — neither
-		// BashTool nor SmokeRunTool can do anything actionable
-		// with "your subshell forked something."
+		// perspective the command succeeded.
+		//
+		// `cmd.Cancel` (which kills the whole process group via
+		// SIGKILL on -PID) is invoked only on ctx cancellation,
+		// NOT on the WaitDelay path. So an inherited-pipe-holder
+		// (backgrounded daemon, double-forked child) survives the
+		// call by default — and would steal ports, mutate shared
+		// state, or otherwise pollute subsequent smoke runs.
+		// Reap explicitly here. ESRCH means the group is already
+		// gone (race with natural exit), which is fine.
+		if cmd.Process != nil {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				slog.Warn("proc: failed to reap lingering descendants after WaitDelay",
+					"err", err, "duration", elapsed)
+			}
+		}
+		// Log without `req.Shell` — slog reaches /tmp/junto-debug.log
+		// under --debug, and that file gets attached to bug reports,
+		// pasted into chat threads, etc. Per CLAUDE.md no API keys or
+		// secrets in debug output. Duration is the diagnostic signal:
+		// short = drain-tax noise, long = something genuinely linger-y.
 		slog.Warn("proc: WaitDelay expired with pipes still open after clean exit",
-			"shell", req.Shell)
+			"duration", elapsed)
 		res.ExitCode = 0
 	case runErr != nil:
 		var exitErr *exec.ExitError

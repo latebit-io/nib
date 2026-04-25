@@ -14,11 +14,12 @@ func TestPlanningBlocklistContents(t *testing.T) {
 	t.Parallel()
 
 	want := map[string]bool{
-		"edit_file":   true,
-		"write_file":  true,
-		"bash":        true,
-		"smoke_run":   true,
-		"update_task": true,
+		"edit_file":    true,
+		"write_file":   true,
+		"replace_file": true,
+		"bash":         true,
+		"smoke_run":    true,
+		"update_task":  true,
 	}
 
 	if len(planningBlocklist) != len(want) {

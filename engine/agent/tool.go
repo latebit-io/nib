@@ -187,10 +187,42 @@ type Workspace interface {
 	ContextSet
 }
 
+// CurrentContentReader is an optional capability that returns the
+// CURRENT content of a file, preferring an open editor buffer over
+// disk. Tools that need byte-exact-match against what the developer
+// is looking at right now (notably replace_file, whose Search is the
+// entire file content) type-assert on this interface; tools that
+// only need disk content stick with [FileReader.ReadFile].
+//
+// The default Session implementation prefers buffer content when the
+// path has an open editor — buffers can hold unsaved edits applied
+// by earlier tool calls in the same agent turn, and disk lags those
+// edits until a manual save fires. Without buffer-aware reading,
+// replace_file's Search built from disk content fails the
+// search-and-replace match on the buffer, auto-rejecting every
+// wholesale rewrite the LLM proposes after any prior edit_file call
+// in the same session.
+type CurrentContentReader interface {
+	// CurrentContent returns the buffer content if an editor is open
+	// for the path, falling back to disk read otherwise. Errors only
+	// on I/O failure for the disk fallback; a missing file returns
+	// the same fs.ErrNotExist that ReadFile produces so callers can
+	// distinguish "missing" from "empty."
+	CurrentContent(path string) (string, error)
+}
+
 // TaskTracker is an optional interface for workspaces that support
 // structured task tracking via a work tree. Tools type-assert to this
 // interface — it is not required for basic workspace operations.
-type TaskTracker interface {
+//
+// nolint:interfacebloat — the methods here are all coordinated views
+// of one concept (the project task tree) and Session implements them
+// all naturally. Splitting into TaskActivator + TaskAdder + TaskHinter +
+// ProjectInitializer would push the same surface across four
+// interfaces, multiply test-stub boilerplate, and force every caller
+// to type-assert on N narrower interfaces. The bloat is conceptual,
+// not interface-segregation.
+type TaskTracker interface { //nolint:interfacebloat
 	// ActivateTask marks a task as active in the work tree and persists.
 	ActivateTask(title string) error
 	// CompleteTask marks a task as done in the work tree and persists.
@@ -216,6 +248,13 @@ type TaskTracker interface {
 	// promises hands-off operation under LevelTrusted+, but the LLM
 	// otherwise tends to stop and wait at task boundaries.
 	NextPendingTask() string
+	// InitProject ensures /project.md exists with the given project
+	// name and h1-level phases, then reloads the work tree so
+	// subsequent task operations succeed without manual memory
+	// bootstrapping. Idempotent — never overwrites an existing
+	// plan. Distinct from memory_publish: project state belongs
+	// here, session notes belong in memory_*.
+	InitProject(name string, phases []string) error
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

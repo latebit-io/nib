@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/run/proc"
 	"github.com/latebit-io/junto/engine/runconfig"
@@ -156,6 +157,55 @@ func TestFormatSmokeResultDoesNotLeakCommand(t *testing.T) {
 				t.Errorf("formatted result missing source identifier: %q", got)
 			}
 		})
+	}
+}
+
+// TestAgent_SmokeRunUnregisteredWhenDisabled verifies
+// JUNTO_SMOKE_DISABLED is a complete kill-switch — when set, the
+// LLM does NOT see smoke_run as an available tool, matching the
+// auto-invocation suppression in runTaskReview. Pre-fix, the env
+// var only gated the auto-run path; the LLM could still invoke
+// smoke_run directly, defeating the disable in exactly the
+// environments that set the flag.
+func TestAgent_SmokeRunUnregisteredWhenDisabled(t *testing.T) {
+	t.Setenv("JUNTO_SMOKE_DISABLED", "1")
+
+	events := make(chan event.Event, 8)
+	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
+		&NewOptions{SmokeConfig: runconfig.Resolved{
+			Command: "make smoke",
+			Source:  "test",
+			Timeout: 5 * time.Second,
+		}})
+
+	if _, ok := ag.tools["smoke_run"]; ok {
+		t.Errorf("smoke_run registered with JUNTO_SMOKE_DISABLED set; want absent")
+	}
+	for _, def := range ag.toolDefs {
+		if def.Function.Name == "smoke_run" {
+			t.Errorf("smoke_run advertised in tool defs with JUNTO_SMOKE_DISABLED set")
+		}
+	}
+}
+
+// TestAgent_SmokeRunRegisteredWhenEnabled verifies the positive
+// path: with no kill-switch and a resolved smoke config, the tool
+// IS registered. Guards against an over-aggressive future tightening
+// of appendSmokeTool that accidentally disables the happy path.
+func TestAgent_SmokeRunRegisteredWhenEnabled(t *testing.T) {
+	// Explicitly clear in case the test runner inherited it.
+	t.Setenv("JUNTO_SMOKE_DISABLED", "")
+
+	events := make(chan event.Event, 8)
+	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
+		&NewOptions{SmokeConfig: runconfig.Resolved{
+			Command: "make smoke",
+			Source:  "test",
+			Timeout: 5 * time.Second,
+		}})
+
+	if _, ok := ag.tools["smoke_run"]; !ok {
+		t.Errorf("smoke_run not registered without kill-switch; want present")
 	}
 }
 

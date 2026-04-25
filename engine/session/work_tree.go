@@ -164,6 +164,68 @@ func (w *WorkTreeManager) Reload() error {
 	return w.load()
 }
 
+// InitProject ensures /project.md exists in demarkus with the given
+// project name and h1-level phase headings, then reloads the work
+// tree so subsequent SetActiveGoal / AddTask calls succeed without
+// the agent having to bootstrap memory by hand.
+//
+// Idempotent: if /project.md already exists, the existing document is
+// preserved untouched and only the tree is reloaded. Callers that
+// want to RESET the tree must delete the document via demarkus
+// first; the agent must not be able to wipe the developer's plan.
+//
+// Returns nil on success, error if memory is not configured or the
+// fetch/publish/parse round-trip fails. Empty `phases` is allowed —
+// a tree with only a project header is still loadable; the LLM can
+// add phases by calling project_task_add (which auto-creates
+// missing features under an existing phase, but does NOT create
+// phases).
+func (w *WorkTreeManager) InitProject(name string, phases []string) error {
+	w.mu.RLock()
+	store := w.store
+	w.mu.RUnlock()
+	if store == nil {
+		return errors.New("memory store not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Idempotency check: if the document already exists with a body,
+	// just reload — never overwrite the developer's existing plan.
+	doc, err := store.Fetch(ctx, workTreePath)
+	switch {
+	case err == nil && strings.TrimSpace(doc.Body) != "":
+		return w.Reload()
+	case err != nil && !errors.Is(err, memory.ErrNotFound):
+		return fmt.Errorf("fetch %s: %w", workTreePath, err)
+	}
+
+	body := buildProjectSkeleton(name, phases)
+	if _, err := store.Publish(ctx, workTreePath, body, 0); err != nil {
+		return fmt.Errorf("publish %s: %w", workTreePath, err)
+	}
+	return w.Reload()
+}
+
+// buildProjectSkeleton renders the YAML-frontmatter + h1-phase
+// scaffold the project parser expects. Empty phases produces a tree
+// with only the frontmatter — still valid, just empty.
+func buildProjectSkeleton(name string, phases []string) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "project: %s\n", strings.TrimSpace(name))
+	b.WriteString("---\n")
+	for _, p := range phases {
+		title := strings.TrimSpace(p)
+		if title == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n# %s\n", title)
+	}
+	return b.String()
+}
+
 // WorkTreeSnapshot holds the result of a background work tree fetch.
 type WorkTreeSnapshot struct {
 	Tree    *project.Tree

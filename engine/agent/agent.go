@@ -87,20 +87,22 @@ func DetectDistributedMemory(serverNames []string) []string {
 // blocked here, so the auto-path is naturally suppressed in planning
 // mode too.
 var planningBlocklist = map[string]bool{
-	"edit_file":   true,
-	"write_file":  true,
-	"bash":        true,
-	"smoke_run":   true,
-	"update_task": true,
+	"edit_file":    true,
+	"write_file":   true,
+	"replace_file": true,
+	"bash":         true,
+	"smoke_run":    true,
+	"update_task":  true,
 }
 
 // mutatingTools contains tool names that modify filesystem or shell state.
 // In execution mode these require an active `[>]` task in /project.md —
 // the gate enforces "all agent work is tracked in the project tree."
 var mutatingTools = map[string]bool{
-	"edit_file":  true,
-	"write_file": true,
-	"bash":       true,
+	"edit_file":    true,
+	"write_file":   true,
+	"replace_file": true,
+	"bash":         true,
 }
 
 // Agent drives the multi-turn LLM loop.
@@ -390,6 +392,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		NewReadFileTool(workspace, cache),
 		editTool,
 		NewWriteFileTool(workspace, cache),
+		NewReplaceFileTool(workspace, cache),
 		NewListFilesTool(workspace),
 		NewBashTool(projectRoot),
 	}
@@ -404,12 +407,15 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	builtins = append(builtins, NewPackageInfoTool(projectRoot))
 	builtins = a.appendSmokeTool(builtins, projectRoot)
 
-	// request_input is interactive-only: headless agents have no developer
-	// to ask, so the tool is not registered and the LLM cannot emit a call.
-	// This forces autonomous decisions at the tool-availability layer.
-	if a.interactionMode != Headless {
-		builtins = append(builtins, NewRequestInputTool())
-	}
+	// request_input was deliberately removed: the LLM was using it as a
+	// workaround for tool-surface friction ("which strategy should I
+	// pick?") rather than for genuine ambiguity in the developer's
+	// goal. With replace_file now covering the wholesale-rewrite case
+	// the friction is gone — and the absence of request_input forces
+	// the LLM to either make a tool call that succeeds or fail loud,
+	// which is a better default than escalating decisions back through
+	// a chat prompt for the developer to dis/approve. Re-register
+	// behind a feature flag if a legitimate use case appears.
 
 	// LSP-powered tools — conditionally registered via type assertion.
 	if diagProvider != nil {
@@ -436,12 +442,15 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 
 	// Task tracking — conditionally registered via type assertion on workspace.
 	// update_task handles activate/complete; project_task_add handles new-task
-	// creation. Both share the same TaskTracker instance so all mutations
-	// route through the session's in-memory work tree.
+	// creation; project_init bootstraps /project.md so the work tree is loaded
+	// before any of those calls fire on a fresh repo. All three share the same
+	// TaskTracker instance so mutations route through the session's in-memory
+	// work tree.
 	if tt, ok := workspace.(TaskTracker); ok {
 		builtins = append(builtins,
 			NewTaskTool(tt),
 			NewProjectTaskAddTool(tt),
+			NewProjectInitTool(tt),
 		)
 	}
 
@@ -1710,7 +1719,20 @@ type infraError struct {
 // smokeConfig is non-Skipped and resolves to a real command. Extracted
 // from registerTools so the latter stays under the func-length cap and
 // the gate logic is easier to review in isolation.
+//
+// Honours JUNTO_SMOKE_DISABLED end-to-end: when the env var is set
+// the tool is NOT advertised to the LLM at all, matching the
+// auto-invocation suppression in runTaskReview. Without this guard
+// the kill-switch was a half-disable — auto-runs went silent but the
+// LLM could still invoke smoke_run directly, which is the opposite
+// of what an operator setting the env var wants. Read at agent-
+// construction time, matching how JUNTO_VALIDATORS_DISABLED gates
+// the validation pipeline at the composition root; flipping the
+// env var mid-session does not toggle live behaviour.
 func (a *Agent) appendSmokeTool(builtins []Tool, projectRoot string) []Tool {
+	if os.Getenv("JUNTO_SMOKE_DISABLED") != "" {
+		return builtins
+	}
 	if a.smokeConfig.Skipped {
 		return builtins
 	}
@@ -2031,7 +2053,16 @@ func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg
 // the expected result to detect developer modifications.
 func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) string {
 	a.send(event.AgentStatus{Status: event.StatusEditing})
-	a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
+	// Render the "press Ctrl+N to continue" prompt only at LevelGuided
+	// (where the developer actually has to press Ctrl+N). At
+	// LevelCollaborate+ the autonomous flag is set and continue fires
+	// automatically — the message is then visual noise that reads
+	// like an approval prompt and confused testers ("why did it ask
+	// for my approval?"). The StatusEditing chip transition is the
+	// signal in autonomous modes.
+	if !a.currentAutonomous() {
+		a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
+	}
 
 	select {
 	case <-ctx.Done():

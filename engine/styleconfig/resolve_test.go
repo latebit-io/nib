@@ -307,7 +307,7 @@ func TestMergeConfigsArchitectureFieldwise(t *testing.T) {
 	src := &Config{Styles: map[string]Style{
 		"a": {
 			Architecture: Architecture{
-				MaxFileLines: 500, // tighten only this
+				MaxFileLines: 500, // override only this field
 			},
 		},
 	}}

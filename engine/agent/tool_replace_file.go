@@ -103,16 +103,18 @@ func (t *ReplaceFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResu
 		return textResult(fmt.Sprintf("Error: %s is outside the project root", args.Path))
 	}
 
-	// Prefer buffer-current content when the workspace supports it
-	// (Session does in production). The cache lags the editor buffer
-	// when prior tool calls in the same turn applied edits — disk
-	// hasn't been written, but the buffer has the new content. If
-	// replace_file's Search is built from cache/disk in that state,
-	// the TUI's Session.ReviewEdit search-and-match against the
-	// buffer fails ("edit could not be matched") and the proposal
-	// auto-rejects, defeating the wholesale-rewrite use case the
-	// tool exists for. CurrentContentReader removes that lag.
-	existing, err := t.readCurrent(canon, args.Path)
+	// Read existing content via cache (populated by prior read_file
+	// calls or by the continueCh path that snapshots buffer content
+	// on the TUI goroutine after every approved edit). Reading the
+	// editor buffer directly from the agent goroutine would race
+	// against TUI-owned buffer mutations — the existing architecture
+	// avoids that by keeping buffer reads on the TUI goroutine and
+	// pushing snapshots to the agent via channels. The cache is in
+	// sync between agent turns; rare developer-typing-during-run
+	// divergence is not yet addressed.
+	existing, err := t.cache.LoadOrRead(canon, func() (string, error) {
+		return t.workspace.ReadFile(args.Path)
+	})
 	if err != nil {
 		// Distinguish missing-file from other I/O failures so the LLM
 		// gets a clear "use write_file" steer rather than a generic
@@ -156,18 +158,4 @@ func (t *ReplaceFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResu
 			ExpectedContent: args.Content,
 		},
 	}
-}
-
-// readCurrent returns the current content of path, preferring buffer
-// state when the workspace satisfies [CurrentContentReader] (which
-// the production Session does). Falls back to the cache+disk path
-// for workspaces that don't implement it (notably test stubs that
-// provide only the FileReader surface).
-func (t *ReplaceFileTool) readCurrent(canon, path string) (string, error) {
-	if r, ok := t.workspace.(CurrentContentReader); ok {
-		return r.CurrentContent(path)
-	}
-	return t.cache.LoadOrRead(canon, func() (string, error) {
-		return t.workspace.ReadFile(path)
-	})
 }

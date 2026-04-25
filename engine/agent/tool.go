@@ -187,30 +187,6 @@ type Workspace interface {
 	ContextSet
 }
 
-// CurrentContentReader is an optional capability that returns the
-// CURRENT content of a file, preferring an open editor buffer over
-// disk. Tools that need byte-exact-match against what the developer
-// is looking at right now (notably replace_file, whose Search is the
-// entire file content) type-assert on this interface; tools that
-// only need disk content stick with [FileReader.ReadFile].
-//
-// The default Session implementation prefers buffer content when the
-// path has an open editor — buffers can hold unsaved edits applied
-// by earlier tool calls in the same agent turn, and disk lags those
-// edits until a manual save fires. Without buffer-aware reading,
-// replace_file's Search built from disk content fails the
-// search-and-replace match on the buffer, auto-rejecting every
-// wholesale rewrite the LLM proposes after any prior edit_file call
-// in the same session.
-type CurrentContentReader interface {
-	// CurrentContent returns the buffer content if an editor is open
-	// for the path, falling back to disk read otherwise. Errors only
-	// on I/O failure for the disk fallback; a missing file returns
-	// the same fs.ErrNotExist that ReadFile produces so callers can
-	// distinguish "missing" from "empty."
-	CurrentContent(path string) (string, error)
-}
-
 // TaskTracker is an optional interface for workspaces that support
 // structured task tracking via a work tree. Tools type-assert to this
 // interface — it is not required for basic workspace operations.

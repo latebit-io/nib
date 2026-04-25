@@ -413,11 +413,12 @@ func TestMergeConfigsRejectsWhitespaceOnlyArchitectureAction(t *testing.T) {
 }
 
 // TestMergeConfigsCanonicalisesArchitectureAction verifies that a
-// case/whitespace variant of a known action is accepted AND stored
-// in canonical lowercase form, so downstream string comparisons
-// don't have to re-normalise. Without this, a project config
-// `"Action": "BLOCK"` would silently fall back to the builtin's
-// value because the validity check rejected it as unknown.
+// case/whitespace variant of a known action is stored in canonical
+// lowercase form, so downstream string comparisons don't have to
+// re-normalise. isValidArchitectureAction is already case-insensitive
+// (it lowercases + trims internally), so "BLOCK" is accepted — the
+// risk this test guards is the merge path writing the raw "BLOCK"
+// through, forcing every read site to re-run normalisedAction.
 func TestMergeConfigsCanonicalisesArchitectureAction(t *testing.T) {
 	dst := &Config{Styles: map[string]Style{
 		"clean": {

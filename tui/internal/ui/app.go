@@ -914,7 +914,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		} else {
 			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
 			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
-			m.Session.RejectEdit()
+			m.Session.RejectEdit("search-mismatch")
 		}
 	case event.AgentFileCreated:
 		m.AgentPane.AppendMeta("\n[Created: " + e.Path + "]\n")
@@ -1189,7 +1189,7 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// path WITHOUT promoting it to snoozed.
 			m.pendingBlockedPath = ""
 			m.clearEditorOverlay(false)
-			m.Session.RejectEdit()
+			m.Session.RejectEdit("user")
 			return m, nil
 		}
 		// No pending edit — cancel agent if active

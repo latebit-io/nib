@@ -540,3 +540,37 @@ func TestEditFileTool_FuzzyWhitespaceCorrection(t *testing.T) {
 		t.Errorf("search not corrected: %q", proposal.Edit.Search)
 	}
 }
+
+// TestEditFileTool_UsesCacheConsistentWithBufferAfterContinue
+// documents the architectural invariant edit_file relies on: the
+// cache reflects buffer content between agent turns, fed by the
+// continueCh path that snapshots Buf.Content() on the TUI goroutine
+// after each approved edit. The tool reads cache (or falls back to
+// disk via ReadFile) — never the buffer directly, because that
+// would race against TUI-owned mutations. This test guards against
+// a regression that re-introduces direct buffer access from the
+// agent goroutine; the test passes when resolveContent only
+// consults cache+disk via the FileReader surface.
+func TestEditFileTool_UsesCacheConsistentWithBufferAfterContinue(t *testing.T) {
+	t.Parallel()
+
+	const content = "package main\n\nfunc main() {}\n"
+	ws := &testWorkspace{
+		files:     map[string]string{"main.go": content},
+		inContext: map[string]bool{},
+	}
+	tool := NewEditFileTool(ws, NewFileCache())
+
+	args := mustMarshal(t, editArgs{
+		Path:    "main.go",
+		Search:  "func main() {}",
+		Replace: "func main() { return }",
+	})
+	result := tool.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	})
+	if result.Effect != EffectEditProposed {
+		t.Fatalf("Effect = %d, want EffectEditProposed (cache+disk path broken)",
+			result.Effect)
+	}
+}

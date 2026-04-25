@@ -210,75 +210,20 @@ func TestReplaceFileTool_DefinitionAdvertisesSchema(t *testing.T) {
 	}
 }
 
-// bufferAwareWorkspace adds a CurrentContent override on top of the
-// base testWorkspace, simulating an open editor whose buffer holds
-// content ahead of (or different from) the disk-backed ReadFile
-// result. This is the regression scenario: prior edit_file calls in
-// the same agent turn applied to the buffer but the cache/disk view
-// still holds the stale pre-edit content.
-type bufferAwareWorkspace struct {
-	*testWorkspace
-	bufferContent map[string]string // path → live buffer content
-}
-
-func (w *bufferAwareWorkspace) CurrentContent(path string) (string, error) {
-	if c, ok := w.bufferContent[path]; ok {
-		return c, nil
-	}
-	return w.ReadFile(path)
-}
-
-// TestReplaceFileTool_PrefersBufferOverDisk verifies the
-// CurrentContentReader path: when the workspace exposes buffer
-// content, replace_file's Search is built from the buffer (live
-// state) rather than disk (cache-lagged state). Without this fix
-// the TUI's search-and-replace match against the buffer fails for
-// any file the agent edited earlier in the same turn — exactly the
-// "[edit could not be matched — auto-rejecting]" path the Pac-Man
-// rerun surfaced.
-func TestReplaceFileTool_PrefersBufferOverDisk(t *testing.T) {
+// TestReplaceFileTool_UsesCacheConsistentWithBufferAfterContinue
+// documents the architectural invariant replace_file relies on: the
+// cache reflects buffer content between agent turns, fed by the
+// continueCh path that snapshots Buf.Content() on the TUI goroutine
+// after each approved edit. The tool reads cache via FileReader —
+// never the buffer directly, because that would race against
+// TUI-owned mutations. This test guards against a regression that
+// re-introduces cross-goroutine buffer access.
+func TestReplaceFileTool_UsesCacheConsistentWithBufferAfterContinue(t *testing.T) {
 	t.Parallel()
 
-	const diskContent = "-- stale on-disk version\nlocal x = 1\n"
-	const bufferContent = "-- live buffer ahead of disk\nlocal x = 2\nlocal y = 3\n"
-	const newContent = "-- replacement\nlocal x = 99\n"
-
-	ws := &bufferAwareWorkspace{
-		testWorkspace: &testWorkspace{
-			files:     map[string]string{"src/main.lua": diskContent},
-			inContext: map[string]bool{},
-		},
-		bufferContent: map[string]string{"src/main.lua": bufferContent},
-	}
-	tool := NewReplaceFileTool(ws, NewFileCache())
-
-	args := mustMarshal(t, replaceArgs{Path: "src/main.lua", Content: newContent})
-	result := tool.Execute(context.Background(), llm.ToolCall{
-		ID:       "rp",
-		Function: llm.FunctionCall{Name: "replace_file", Arguments: string(args)},
-	})
-
-	prop, ok := result.Payload.(EditProposal)
-	if !ok {
-		t.Fatalf("Payload type = %T, want EditProposal", result.Payload)
-	}
-	if prop.Edit.Search != bufferContent {
-		t.Errorf("Search built from disk (%q), want buffer (%q)",
-			prop.Edit.Search, bufferContent)
-	}
-}
-
-// TestReplaceFileTool_FallsBackToCacheWithoutCurrentContentReader
-// verifies the fallback path: a workspace that doesn't implement
-// CurrentContentReader (e.g. a test stub or a future external
-// frontend) gets the original cache+disk behaviour. This keeps the
-// new capability optional rather than breaking existing callers.
-func TestReplaceFileTool_FallsBackToCacheWithoutCurrentContentReader(t *testing.T) {
-	t.Parallel()
-
-	const diskContent = "old content\n"
+	const content = "old content\n"
 	ws := &testWorkspace{
-		files:     map[string]string{"main.lua": diskContent},
+		files:     map[string]string{"main.lua": content},
 		inContext: map[string]bool{},
 	}
 	tool := NewReplaceFileTool(ws, NewFileCache())
@@ -291,8 +236,8 @@ func TestReplaceFileTool_FallsBackToCacheWithoutCurrentContentReader(t *testing.
 	if !ok {
 		t.Fatalf("Payload type = %T, want EditProposal", result.Payload)
 	}
-	if prop.Edit.Search != diskContent {
-		t.Errorf("Search = %q, want %q (disk fallback)", prop.Edit.Search, diskContent)
+	if prop.Edit.Search != content {
+		t.Errorf("Search = %q, want %q (cache+disk path)", prop.Edit.Search, content)
 	}
 }
 

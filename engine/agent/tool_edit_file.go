@@ -266,10 +266,27 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 	}
 }
 
-// resolveContent returns the file content and canonical path, reading from
-// cache first and falling back to disk. The closure captures the original
-// relative path so ReadFile receives the documented relative-path input
-// while the cache is keyed by canonical absolute path.
+// resolveContent returns the file content and canonical path, reading
+// from cache first and falling back to disk. The closure captures the
+// original relative path so ReadFile receives the documented
+// relative-path input while the cache is keyed by canonical absolute
+// path.
+//
+// The cache is kept in sync with the editor buffer between agent
+// turns: after each approved edit the TUI feeds buffer content via
+// continueCh, which Agent.waitForContinue stores into the cache
+// (engine/agent/agent.go:cache.Set). So in steady state, "cache
+// content" is the same bytes Session.ReviewEdit will search against
+// in the buffer. The rare divergence — the developer typing
+// concurrently during an agent run — is not yet addressed and would
+// surface as an auto-reject the agent then retries.
+//
+// A previous CurrentContentReader-based fix tried to bypass the
+// cache by reading the buffer directly. That introduced a
+// cross-goroutine race against the TUI-owned buffer state, which
+// the existing architecture deliberately avoids by doing buffer
+// reads only on the TUI goroutine. Reverted in favour of the
+// in-sync-cache invariant.
 func (t *EditFileTool) resolveContent(path string) (content, canon string, err error) {
 	canon = t.workspace.CanonPath(path)
 	content, err = t.cache.LoadOrRead(canon, func() (string, error) {

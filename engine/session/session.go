@@ -1165,29 +1165,6 @@ func (s *Session) ReadFile(path string) (string, error) {
 	return content, nil
 }
 
-// CurrentContent implements agent.CurrentContentReader. Returns
-// the live buffer content when an editor is open for the path,
-// falling back to disk read otherwise. Used by replace_file (and
-// any future tool whose Search must match the editor's current
-// view byte-for-byte) so that wholesale rewrites don't auto-reject
-// when prior edits in the same agent turn left the buffer ahead of
-// the cache and disk.
-//
-// Returned content is normalised the same way [Session.ReadFile]
-// normalises disk reads — trailing single newline trimmed — so
-// callers comparing buffer and disk content do not have to handle a
-// terminator difference.
-func (s *Session) CurrentContent(path string) (string, error) {
-	canon := s.CanonPath(path)
-	s.mu.Lock()
-	e := s.editors[canon]
-	s.mu.Unlock()
-	if e != nil {
-		return e.Buf.Content(), nil
-	}
-	return s.ReadFile(path)
-}
-
 // ListFiles returns all project files (respects .gitignore).
 func (s *Session) ListFiles() ([]string, error) {
 	return filelist.Walk(s.projectRoot)
@@ -1962,15 +1939,32 @@ func (s *Session) AbortApproval() {
 	}
 }
 
-// RejectEdit rejects the pending edit and signals the agent.
-func (s *Session) RejectEdit() {
+// RejectEdit rejects the pending edit and signals the agent. The
+// source string is captured into the session journal so post-mortem
+// analysis can distinguish a developer-driven reject (Esc keypress)
+// from a system-driven auto-reject (search-text mismatch, missing
+// editor, etc.). Pre-fix this always recorded "user" regardless of
+// caller, which made auto-reject silent failures appear as if the
+// developer had intervened — a meaningful UX-debugging hazard.
+//
+// Callers in the TUI:
+//   - ActionAgentReject (Esc keypress)   → source "user"
+//   - EditProposed search-mismatch path  → source "search-mismatch"
+//   - ApproveEdit "file not open" path   → source "file-not-open"
+//
+// Empty source defaults to "unknown" so the field is always present
+// and downstream parsers don't have to special-case missing values.
+func (s *Session) RejectEdit(source string) {
 	if s.pendingEdit == nil || !s.HasAgent() {
 		return
+	}
+	if source == "" {
+		source = "unknown"
 	}
 	s.emitCapture("rejected", map[string]any{
 		"id":     s.pendingEdit.ID,
 		"path":   s.pendingEdit.Path,
-		"source": "user",
+		"source": source,
 	})
 	s.pendingEdit = nil
 	s.pendingProposedReplace = ""

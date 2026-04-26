@@ -69,6 +69,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 
 	userContent, err := a.prompts.RenderUserMessage(UserPromptData{
 		FileName:       fileName,
+		Language:       DetectLanguage(fileName),
 		FileContent:    numbered.String(),
 		Fence:          fence,
 		ContextFiles:   shown,

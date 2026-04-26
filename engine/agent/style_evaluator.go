@@ -136,9 +136,31 @@ func truncateCode(s string) string {
 }
 
 // buildEvaluatorPrompt constructs the review prompt for the evaluator.
+//
+// When the file's language can be inferred from its extension, the prompt
+// pins the reviewer to that language's idioms before listing the rules.
+// Without this anchor the model defaults to whichever language family the
+// rule wording most resembles — which has produced false positives in
+// Lua/Python files reviewed against Go-flavored Clean Code rules
+// (composition roots, multi-return error tuples, interface segregation).
 func buildEvaluatorPrompt(rules []string, path, search, replace string) string {
 	var b strings.Builder
 	b.WriteString("Review this proposed edit against the coding style rules.\n\n")
+	if lang := DetectLanguage(path); lang != "" {
+		b.WriteString("## Language\n\n")
+		b.WriteString("This file is **")
+		b.WriteString(lang)
+		b.WriteString("**. Apply each rule using the idioms native to ")
+		b.WriteString(lang)
+		b.WriteString(". Do NOT borrow idioms from other languages just because the rule wording resembles them. Specifically:\n")
+		b.WriteString("- Do not flag missing constructor injection, composition roots, or DI containers in languages without classes/interfaces.\n")
+		b.WriteString("- Do not flag missing multi-return error tuples (e.g. `nil, err`) in languages where exceptions or other patterns are idiomatic.\n")
+		b.WriteString("- Do not flag missing interface segregation in languages without explicit interfaces — duck typing or composition is the equivalent.\n")
+		b.WriteString("- A rule about \"types\" or \"classes\" applies to the language's actual unit of structure (struct, class, table, record, module), not to a construct it lacks.\n")
+		b.WriteString("- Judge the spirit of each rule against ")
+		b.WriteString(lang)
+		b.WriteString(" conventions. If a rule has no meaningful equivalent in this language, skip it instead of inventing one.\n\n")
+	}
 	b.WriteString("## Rules\n\n")
 	for _, r := range rules {
 		b.WriteString("- ")

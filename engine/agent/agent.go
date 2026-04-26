@@ -940,6 +940,11 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 		activeDefs = a.planningToolDefs()
 	}
 
+	// narrativeNudgeFired guards the post-turn outstanding-work check from
+	// firing more than once per developer input. Reset each time a new
+	// developer message arrives via inputCh.
+	narrativeNudgeFired := false
+
 	for {
 		// Compact old tool results if history is large enough.
 		*messages = a.maybeCompact(*messages, activeDefs)
@@ -963,13 +968,30 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 			slog.Debug("LLM turn error, entering wait state for retry", "err", err)
 		}
 
+		// Narrative gate: if the model yielded with text that enumerates
+		// outstanding work AND its tracked task tree is empty, give it one
+		// chance to either add the work as tasks or scrub the language.
+		// Skip on error turns (no clean assistant content to scan) and
+		// when already fired once for this developer input.
+		if err == nil && !narrativeNudgeFired && a.shouldNudgeOutstanding(*messages) {
+			narrativeNudgeFired = true
+			*messages = append(*messages, llm.Message{
+				Role:    "user",
+				Content: outstandingNudgeMessage,
+			})
+			a.send(event.AgentToken{Text: "\n[Nudge: outstanding-work language detected — track or scrub it]\n"})
+			a.send(event.AgentStatus{Status: event.StatusThinking})
+			continue
+		}
+
 		// Agent's turn is done — wait for the developer's next message.
 		// AgentWaiting is critical: if the frontend never sees it, the
 		// agent blocks on inputCh with no way for the user to reply.
 		a.mu.Lock()
 		a.waiting = true
 		a.mu.Unlock()
-		if err := a.sendCritical(ctx, event.AgentWaiting{}); err != nil {
+		finished := a.tasksAllComplete()
+		if err := a.sendCritical(ctx, event.AgentWaiting{Finished: finished}); err != nil {
 			slog.Error("agent waiting delivery failed", "err", err)
 			*success = false
 			return
@@ -981,6 +1003,7 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 			a.waiting = false
 			a.intent = input
 			a.mu.Unlock()
+			narrativeNudgeFired = false
 
 			// Refresh the system prompt so runtime changes (e.g. coding
 			// style switched via SetCodingStyle) take effect immediately.
@@ -997,6 +1020,86 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 			return
 		}
 	}
+}
+
+// outstandingNudgeMessage is the synthetic user message the narrative gate
+// injects when the model yields with text that enumerates outstanding work
+// while the task tree is empty. Phrased as a developer instruction so the
+// model treats it as high-priority guidance, not background context.
+const outstandingNudgeMessage = "Your last message enumerated work as 'still needed', 'not yet', or 'remaining' while the tracked task tree was empty. Either:\n" +
+	"  (a) the items are real — add each one as a pending task via project_task_add and continue working, or\n" +
+	"  (b) the items are out of scope — rewrite the summary without that language so the project state is consistent.\n" +
+	"Do not yield again until the narrative and the task tree agree."
+
+// outstandingWorkMarkers are case-insensitive substrings that flag a wrap-up
+// message as enumerating uncompleted work. Conservative on purpose — false
+// positives nudge the model harmlessly; false negatives let the original bug
+// through. Each entry is a phrase, not a single word, to reduce hits on
+// neutral prose ("not" alone is far too broad).
+var outstandingWorkMarkers = []string{
+	"still need", // covers "still need", "still needs", "still needed"
+	"not yet",    // "not yet implemented", "not yet wired"
+	"need implementation",
+	"needs implementation",
+	"yet to be",
+	"remaining work",
+	"work remaining",
+	"outstanding",
+	"to be implemented",
+	"to be done",
+	"to do:",
+	"todo:",
+}
+
+// shouldNudgeOutstanding reports whether the most recent assistant message
+// enumerates outstanding work AND the tracked task tree is empty — the
+// failure mode where the model declares "all done" while listing items
+// that still need doing. Returns false when no TaskReader is wired (no
+// project plan = nothing to compare narrative against).
+func (a *Agent) shouldNudgeOutstanding(messages []llm.Message) bool {
+	if !a.tasksAllComplete() {
+		return false
+	}
+	last := lastAssistantContent(messages)
+	if last == "" {
+		return false
+	}
+	return containsOutstandingWorkMarker(last)
+}
+
+// tasksAllComplete reports whether the workspace exposes a task tree AND
+// it has no pending tasks. Returns false when the workspace is not a
+// TaskReader — without a plan there is nothing to be "all complete" against.
+func (a *Agent) tasksAllComplete() bool {
+	tt, ok := a.workspace.(TaskReader)
+	if !ok {
+		return false
+	}
+	return tt.NextPendingTask() == ""
+}
+
+// lastAssistantContent returns the Content of the most recent assistant
+// message in the slice, or "" when none exists. Used to scan the model's
+// final wrap-up text for outstanding-work markers.
+func lastAssistantContent(messages []llm.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			return messages[i].Content
+		}
+	}
+	return ""
+}
+
+// containsOutstandingWorkMarker reports whether s contains any of the
+// outstandingWorkMarkers phrases (case-insensitive).
+func containsOutstandingWorkMarker(s string) bool {
+	lower := strings.ToLower(s)
+	for _, marker := range outstandingWorkMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // planningToolDefs returns the tool definitions with write-side tools removed.

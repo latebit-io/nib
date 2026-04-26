@@ -976,9 +976,12 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		m.AgentPane.ClearAwaitingInput()
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
-		if m.Session.Phase() == session.PhasePlanning {
+		switch {
+		case m.Session.Phase() == session.PhasePlanning:
 			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusPlanningWaiting))
-		} else {
+		case e.Finished:
+			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusFinished))
+		default:
 			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusWaiting))
 		}
 		m.AgentPane.SetInputActive(true)

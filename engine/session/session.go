@@ -164,6 +164,12 @@ type Session struct {
 	// proposal in the diff overlay.
 	pendingProposedReplace string
 
+	// pendingApproval carries the edit identity and applied search/replace
+	// from PrepareApproval to CompleteApproval so the staged-flow path can
+	// emit the same "accepted" capture event as ApproveEdit. Cleared by
+	// CompleteApproval and AbortApproval.
+	pendingApproval *stagedApproval
+
 	// langSyncer is the language service port (optional, nil when no LSP).
 	// Session depends on the interface, never on lsp.Manager directly (DIP).
 	// Set once via SetLanguageService before the TUI starts — effectively

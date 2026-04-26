@@ -48,7 +48,12 @@ type MemoryResult struct {
 // StartMemory bootstraps auth, starts the demarkus server, seeds initial
 // content, and returns the memory store, session summary, and cleanup
 // function. Binaries must already be installed via EnsureBinaries.
-func StartMemory(projectRoot string) (*MemoryResult, error) {
+//
+// ctx bounds the seed and summary RPCs; on cancellation StartMemory
+// stops the server it started so it doesn't leak. Pass a cancellable
+// context when the caller can interrupt startup (e.g. SIGINT during
+// boot); context.Background() is acceptable for non-interactive paths.
+func StartMemory(ctx context.Context, projectRoot string) (*MemoryResult, error) {
 	mgr := memserver.New(projectRoot)
 
 	token, err := mgr.EnsureToken()
@@ -72,12 +77,12 @@ func StartMemory(projectRoot string) (*MemoryResult, error) {
 		return stopAndFail("new store", err)
 	}
 
-	if err := seed.Install(context.Background(), store, projectRoot); err != nil {
+	if err := seed.Install(ctx, store, projectRoot); err != nil {
 		return stopAndFail("seed", err)
 	}
 
 	var summary string
-	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), memoryOpTimeout)
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, memoryOpTimeout)
 	doc, err := store.Fetch(fetchCtx, "/summary.md")
 	fetchCancel()
 	switch {

@@ -1259,12 +1259,6 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// openModelSelector opens the model selector overlay.
-// If multiple profiles exist, shows profile picker first.
-// If one profile, fetches models directly.
-// Model-selector + OAuth connect flow (applySwitchResult,
-// openModelSelector, startOAuthConnect) lives in model_switch.go.
-
 func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {
 	// Placeholder — implement specific dialog responses as needed.
 	return m, nil

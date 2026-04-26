@@ -19,6 +19,7 @@ package treesitter
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
@@ -76,10 +77,22 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 
 	beforeErrors, err := countErrors(ctx, lang, c.Before)
 	if err != nil {
+		// Pass-through on parser failure so a grammar bug or transient
+		// allocation error doesn't block edits, but surface the cause —
+		// silent disablement of the syntax-regression gate is exactly the
+		// kind of "looks fine in prod, broken in CI" hazard. Skip the log
+		// when the context was cancelled: that's the caller's signal, not
+		// an unexpected fault.
+		if ctx.Err() == nil {
+			slog.Warn("tree-sitter: baseline parse failed", "path", c.Path, "err", err)
+		}
 		return validate.Result{Verdict: validate.Pass, Stage: StageName}
 	}
 	afterErrors, err := collectErrors(ctx, lang, c.After)
 	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("tree-sitter: candidate parse failed", "path", c.Path, "err", err)
+		}
 		return validate.Result{Verdict: validate.Pass, Stage: StageName}
 	}
 

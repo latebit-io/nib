@@ -167,7 +167,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	slog.Debug("startup: provider resolved", "hasProvider", provider != nil)
 
 	// Start memory server — always needed for project plans, independent of LLM.
-	mem, err := wire.StartMemory(projectRoot)
+	mem, err := wire.StartMemory(appCtx, projectRoot)
 	if err != nil {
 		return fmt.Errorf("memory: %w", err)
 	}

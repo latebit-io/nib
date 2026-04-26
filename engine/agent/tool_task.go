@@ -9,7 +9,7 @@ import (
 )
 
 // TaskTool handles task status updates in the project work tree.
-// Uses the TaskTracker interface to update state through the session,
+// Uses the TaskMutator interface to update state through the session,
 // avoiding direct memory writes and keeping the work tree consistent.
 type TaskTool struct {
 	tracker TaskMutator

@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"fmt"
 	"image/color"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -26,8 +26,15 @@ import (
 // rendering subsystem visible without touching the public API.
 
 // expandTabs converts runes to display runes and builds buffer→display column mapping.
-func expandTabs(runes []rune) (expanded []rune, bufToDisp []int) {
-	bufToDisp = make([]int, len(runes)+1)
+func (m *EditorModel) expandTabs(runes []rune) (expanded []rune, bufToDisp []int) {
+	if cap(m.bufToDispBuf) < len(runes)+1 {
+		m.bufToDispBuf = make([]int, len(runes)+1)
+	}
+	bufToDisp = m.bufToDispBuf[:len(runes)+1]
+	if maxDisp := len(runes) * editor.TabWidth; cap(m.expandedBuf) < maxDisp {
+		m.expandedBuf = make([]rune, 0, maxDisp)
+	}
+	expanded = m.expandedBuf[:0]
 	dispCol := 0
 	for bi, r := range runes {
 		bufToDisp[bi] = dispCol
@@ -48,7 +55,48 @@ func expandTabs(runes []rune) (expanded []rune, bufToDisp []int) {
 		}
 	}
 	bufToDisp[len(runes)] = dispCol
+	m.expandedBuf = expanded
 	return
+}
+
+// formatGutterDigits returns a right-aligned line number padded with
+// leading spaces to width. Replaces fmt.Sprintf("%*d", …) in the per-line
+// gutter rendering paths so the conversion stays alloc-free except for
+// the final string copy. Callers append the trailing suffix (' ', '-',
+// or a diagnostic icon) themselves.
+func (m *EditorModel) formatGutterDigits(n, width int) string {
+	// Convert into a small fixed stack array so the digit conversion
+	// itself stays alloc-free regardless of m.gutterBuf state. 20 covers
+	// every int64.
+	var tmp [20]byte
+	digits := strconv.AppendInt(tmp[:0], int64(n), 10)
+	pad := width - len(digits)
+	if pad <= 0 {
+		return string(digits)
+	}
+	if cap(m.gutterBuf) < width {
+		m.gutterBuf = make([]byte, 0, width)
+	}
+	m.gutterBuf = m.gutterBuf[:0]
+	for i := 0; i < pad; i++ {
+		m.gutterBuf = append(m.gutterBuf, ' ')
+	}
+	m.gutterBuf = append(m.gutterBuf, digits...)
+	return string(m.gutterBuf)
+}
+
+// formatGutterBlank returns width-1 spaces followed by suffix. Used for
+// the added-line gutter where there is no source line number.
+func (m *EditorModel) formatGutterBlank(width int, suffix byte) string {
+	if cap(m.gutterBuf) < width {
+		m.gutterBuf = make([]byte, 0, width)
+	}
+	m.gutterBuf = m.gutterBuf[:0]
+	for i := 0; i < width-1; i++ {
+		m.gutterBuf = append(m.gutterBuf, ' ')
+	}
+	m.gutterBuf = append(m.gutterBuf, suffix)
+	return string(m.gutterBuf)
 }
 
 // fillDisplay returns a rune buffer of the given width (space-filled),
@@ -101,7 +149,7 @@ func (m *EditorModel) renderNormalLine(
 		lineText = san.Sanitize(lineText)
 	}
 
-	numText := fmt.Sprintf("%*d", gutterW-1, lineIdx+1)
+	numText := m.formatGutterDigits(lineIdx+1, gutterW-1)
 	if diag := m.diagnosticForLine(lineIdx); diag != nil {
 		// Diagnostic icon takes priority in the gutter suffix.
 		line.WriteString(gutterStyle.Render(numText))
@@ -123,7 +171,7 @@ func (m *EditorModel) renderNormalLine(
 	}
 
 	rawRunes := []rune(lineText)
-	expanded, bufToDisp := expandTabs(rawRunes)
+	expanded, bufToDisp := m.expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
 	displayed := m.fillDisplay(expanded, contentW, scrollCol)
 
@@ -369,8 +417,7 @@ func (m *EditorModel) renderRemovedLine(
 ) string {
 	var line strings.Builder
 
-	gutterText := fmt.Sprintf("%*d-", gutterW-1, lineIdx+1)
-	line.WriteString(gutterSt.Render(gutterText))
+	line.WriteString(gutterSt.Render(m.formatGutterDigits(lineIdx+1, gutterW-1) + "-"))
 
 	// Sanitize agent-origin lines to prevent ANSI injection from LLM output.
 	removedText := m.eng.LineText(lineIdx)
@@ -379,7 +426,7 @@ func (m *EditorModel) renderRemovedLine(
 		removedText = san.Sanitize(removedText)
 	}
 	rawRunes := []rune(removedText)
-	expanded, bufToDisp := expandTabs(rawRunes)
+	expanded, bufToDisp := m.expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
 	displayed := m.fillDisplay(expanded, contentW, scrollCol)
 
@@ -488,12 +535,18 @@ func (m *EditorModel) renderAddedLine(
 ) string {
 	var line strings.Builder
 
-	gutterText := fmt.Sprintf("%*s+", gutterW-1, "")
-	line.WriteString(gutterSt.Render(gutterText))
+	line.WriteString(gutterSt.Render(m.formatGutterBlank(gutterW, '+')))
 
 	oe := m.Overlay.Editor
-	rawRunes := []rune(oe.LineText(overlayIdx))
-	expanded, bufToDisp := expandTabs(rawRunes)
+	// Sanitize overlay text — the overlay holds the agent's pending
+	// replacement, so it must pass through the ANSI sanitizer before
+	// reaching the terminal (parity with renderNormalLine/renderRemovedLine
+	// agent-line paths).
+	overlayText := oe.LineText(overlayIdx)
+	var san sanitize.Sanitizer
+	overlayText = san.Sanitize(overlayText)
+	rawRunes := []rune(overlayText)
+	expanded, bufToDisp := m.expandTabs(rawRunes)
 	scrollCol := m.eng.ScrollCol
 	displayed := m.fillDisplay(expanded, contentW, scrollCol)
 

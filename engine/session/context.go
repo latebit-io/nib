@@ -100,7 +100,14 @@ func (s *Session) loadContext() {
 			slog.Warn("loadContext: skipping invalid path", "path", rel, "err", err)
 			continue
 		}
-		paths = append(paths, s.CanonPath(rel))
+		canon := s.CanonPath(rel)
+		// Skip auto-managed project metadata so the persisted context.md
+		// can't make .project/* entries sticky across restarts (which
+		// would defeat the isProjectMeta boundary used elsewhere).
+		if s.isProjectMeta(canon) {
+			continue
+		}
+		paths = append(paths, canon)
 	}
 	s.mu.Lock()
 	for _, p := range paths {

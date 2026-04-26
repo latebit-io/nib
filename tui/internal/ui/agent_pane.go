@@ -57,12 +57,10 @@ func statusStreaming(s event.StatusKind) bool {
 	return s == event.StatusThinking || s == event.StatusPlanning
 }
 
-// usageState tracks cumulative token consumption for display.
-// Per-turn, the best available value is used: provider-reported if non-zero,
-// otherwise client-side estimate. This handles mixed runs correctly.
 // Token-usage tracking (usageState, SetStreamingInput, UpdateUsage,
 // UsageIndicator, ResetUsage, formatTokenCount, formatTurnUsage,
 // formatCompacted, formatSessionSummary) lives in agent_pane_usage.go.
+
 func (m *AgentPaneModel) inputHeight() int {
 	h := m.height / 6
 	if h < 5 {

@@ -183,6 +183,18 @@ type EditorModel struct {
 	dispToBuf    []int
 	displayBuf   []rune
 
+	// expandedBuf and bufToDispBuf back the per-line tab-expansion output.
+	// Each renderXLine() call invokes expandTabs once and consumes the
+	// result before returning, so a single set of scratch slices is safe
+	// even though three render functions share them.
+	expandedBuf  []rune
+	bufToDispBuf []int
+
+	// gutterBuf is a reusable byte scratch for gutter formatting.
+	// Replaces fmt.Sprintf("%*d", …) with strconv.AppendInt + manual
+	// leading-space padding so per-line gutter rendering is alloc-free.
+	gutterBuf []byte
+
 	// Find holds the find bar state.
 	Find FindBar
 
@@ -859,7 +871,7 @@ func (m *EditorModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 	case lineAdded:
 		if m.Overlay != nil {
 			oe := m.Overlay.Editor
-			_, bufToDisp := expandTabs([]rune(oe.LineText(entry.overlayLine)))
+			_, bufToDisp := m.expandTabs([]rune(oe.LineText(entry.overlayLine)))
 			col := displayColToBufCol(bufToDisp, displayCol)
 			slog.Debug("overlay click", "overlayLine", entry.overlayLine, "col", col)
 			m.Overlay.Active = true
@@ -902,7 +914,7 @@ func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 		oe := m.Overlay.Editor
 		switch entry.kind {
 		case lineAdded:
-			_, bufToDisp := expandTabs([]rune(oe.LineText(entry.overlayLine)))
+			_, bufToDisp := m.expandTabs([]rune(oe.LineText(entry.overlayLine)))
 			col := displayColToBufCol(bufToDisp, displayCol)
 			oe.MoveCursorTo(entry.overlayLine, col)
 		case lineNormal:

@@ -41,6 +41,12 @@ type StyleEvaluatorPort interface {
 	Review(ctx context.Context, path, search, replace string) (violations []string, ok bool)
 }
 
+// Compile-time assertion that *StyleEvaluator satisfies StyleEvaluatorPort.
+// Renaming or changing Review's signature would break the interface
+// silently otherwise — tests construct *StyleEvaluator directly, not
+// through the port.
+var _ StyleEvaluatorPort = (*StyleEvaluator)(nil)
+
 // StyleEvaluator reviews proposed edits against coding style rules using
 // a secondary LLM call. It catches design-level violations that static
 // analysis cannot detect (responsibility splitting, abstraction quality,

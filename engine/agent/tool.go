@@ -187,17 +187,6 @@ type Workspace interface {
 	ContextSet
 }
 
-// TaskTracker is an optional interface for workspaces that support
-// structured task tracking via a work tree. Tools type-assert to this
-// interface — it is not required for basic workspace operations.
-//
-// nolint:interfacebloat — the methods here are all coordinated views
-// of one concept (the project task tree) and Session implements them
-// all naturally. Splitting into TaskActivator + TaskAdder + TaskHinter +
-// ProjectInitializer would push the same surface across four
-// interfaces, multiply test-stub boilerplate, and force every caller
-// to type-assert on N narrower interfaces. The bloat is conceptual,
-// not interface-segregation.
 // TaskReader exposes read-only views over the project's task tree. The
 // agent's task-completion review and the active-task gate consume only
 // this surface — they never mutate state, so depending on TaskMutator

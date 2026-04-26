@@ -146,14 +146,15 @@ func (s *Sink) Append(_ context.Context, e capture.Event) error {
 	// stays short. Callers observe the canonical form immediately; the
 	// dispatch goroutine reads from a snapshot that no other goroutine
 	// holds a reference to.
-	if e.Timestamp.IsZero() {
-		// Stamp here (not in formatEvent) so the configured Clock is
-		// honoured. formatEvent runs on the dispatch goroutine and
-		// must not pull live time when tests have injected a clock.
-		e.Timestamp = s.cfg.Clock()
-	}
 	if s.cfg.Redactor != nil {
 		e = s.cfg.Redactor(e)
+	}
+	if e.Timestamp.IsZero() {
+		// Stamp after the redactor so a redactor that reconstructs the
+		// event (and zeroes Timestamp) cannot reintroduce an unstamped
+		// event into the queue. formatEvent fails closed on a zero
+		// timestamp, so the invariant must hold here.
+		e.Timestamp = s.cfg.Clock()
 	}
 	e = capEventFields(e, s.cfg.MaxFieldBytes)
 
@@ -341,10 +342,15 @@ func formatHeader(sessionID string, started time.Time) string {
 // still being readable.
 //
 // The timestamp must be pre-populated (Append stamps zero values via the
-// configured Clock); a zero timestamp here would silently render as the
-// Go epoch and is treated as a programmer error rather than a fallback.
+// configured Clock, after the redactor runs); a zero timestamp here is
+// treated as a contract violation and surfaced rather than silently
+// rendering as the Go epoch — the only path to zero is a redactor that
+// reconstructs the event and forgets to carry the timestamp forward.
 func formatEvent(e capture.Event) (string, error) {
 	ts := e.Timestamp
+	if ts.IsZero() {
+		return "", errors.New("demarkus capture: zero event timestamp")
+	}
 	payload, err := json.Marshal(e.Payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal payload: %w", err)

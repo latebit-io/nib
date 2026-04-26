@@ -80,9 +80,7 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	}
 	e := s.editorForEdit()
 	if e == nil {
-		s.agent.Reject()
-		s.pendingEdit = nil
-		s.editReviewed = false
+		s.RejectEdit("file-not-open")
 		return false, "file not open"
 	}
 	editPath := s.activeFile
@@ -132,6 +130,14 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	return ok, reason
 }
 
+// stagedApproval is set by PrepareApproval and consumed by CompleteApproval
+// to emit the same "accepted" capture event ApproveEdit would.
+type stagedApproval struct {
+	editID  string
+	search  string
+	replace string
+}
+
 // ApprovalPlan describes the validated edit the frontend should apply.
 type ApprovalPlan struct {
 	// Line is the buffer line where the edit starts (0-indexed).
@@ -164,16 +170,12 @@ func (s *Session) PrepareApproval(search, replace string) (*ApprovalPlan, error)
 	}
 	e := s.editorForEdit()
 	if e == nil {
-		s.agent.Reject()
-		s.pendingEdit = nil
-		s.editReviewed = false
+		s.RejectEdit("file-not-open")
 		return nil, errors.New("file not open")
 	}
 	loc, reason := e.LocateEdit(search)
 	if loc == nil {
-		s.agent.Reject()
-		s.pendingEdit = nil
-		s.editReviewed = false
+		s.RejectEdit("search-mismatch")
 		return nil, errors.New(reason)
 	}
 	if s.pendingEdit.Path != "" {
@@ -183,6 +185,11 @@ func (s *Session) PrepareApproval(search, replace string) (*ApprovalPlan, error)
 	}
 	lineOrigins := computeLineOrigins(search, s.pendingEdit.Replace, replace)
 
+	s.pendingApproval = &stagedApproval{
+		editID:  s.pendingEdit.ID,
+		search:  search,
+		replace: replace,
+	}
 	s.pendingEdit = nil
 	s.editReviewed = false
 	return &ApprovalPlan{
@@ -223,27 +230,57 @@ func computeLineOrigins(search, originalReplace, finalReplace string) []*buffer.
 }
 
 // CompleteApproval signals the agent that the prepared edit has been applied.
-// Call this after the frontend has applied the edit. Promotes the staged
-// edit path to lastEditedFile so Continue sends the right content.
+// Requires PrepareApproval to have run — without staged state we have no
+// validated edit to approve, so the call is a no-op (preventing blind
+// approvals that would advance the run with no recorded edit).
+//
+// Promotes the staged edit path to lastEditedFile, marks the file as
+// modified, emits the "accepted" capture event with the same shape as
+// ApproveEdit, and seeds pendingContinue* so Continue can detect
+// developer edits made between approve and continue.
 //
 // Sets awaitingContinue eagerly — the agent will shortly emit
 // StatusEditing on the best-effort event path, but that event can be dropped
 // under channel pressure. Gating on our own action keeps CanContinue honest
 // even when the event is lost.
 func (s *Session) CompleteApproval() {
-	if s.HasAgent() {
-		s.lastEditedFile = s.stagedEditFile
-		if s.stagedEditFile != "" {
-			s.mu.Lock()
-			s.modifiedFiles[s.stagedEditFile] = true
-			s.mu.Unlock()
-		}
-		s.stagedEditFile = ""
-		s.mu.Lock()
-		s.awaitingContinue = true
-		s.mu.Unlock()
-		s.agent.Approve()
+	if !s.HasAgent() || s.stagedEditFile == "" || s.pendingApproval == nil {
+		return
 	}
+	staged := s.pendingApproval
+	editPath := s.stagedEditFile
+
+	s.lastEditedFile = editPath
+	s.mu.Lock()
+	s.modifiedFiles[editPath] = true
+	e := s.editors[editPath]
+	s.mu.Unlock()
+	if e != nil {
+		s.pendingContinuePath = editPath
+		s.pendingContinueExpected = e.Buf.Content()
+		s.pendingContinueSet = true
+	}
+
+	modified := staged.replace != s.pendingProposedReplace
+	accepted := map[string]any{
+		"id":               staged.editID,
+		"path":             editPath,
+		"search":           staged.search,
+		"replace":          staged.replace,
+		"modified_by_user": modified,
+	}
+	if modified {
+		accepted["proposed_replace"] = s.pendingProposedReplace
+	}
+	s.emitCapture("accepted", accepted)
+
+	s.stagedEditFile = ""
+	s.pendingApproval = nil
+	s.pendingProposedReplace = ""
+	s.mu.Lock()
+	s.awaitingContinue = true
+	s.mu.Unlock()
+	s.agent.Approve()
 }
 
 // AbortApproval rejects a prepared approval that was never completed.
@@ -251,10 +288,22 @@ func (s *Session) CompleteApproval() {
 // receives a rejection and can try a different approach — unlike
 // CancelAgent which kills the entire run.
 func (s *Session) AbortApproval() {
-	if s.HasAgent() {
-		s.stagedEditFile = ""
-		s.agent.Reject()
+	if !s.HasAgent() {
+		return
 	}
+	staged := s.pendingApproval
+	editPath := s.stagedEditFile
+	s.stagedEditFile = ""
+	s.pendingApproval = nil
+	s.pendingProposedReplace = ""
+	if staged != nil {
+		s.emitCapture("rejected", map[string]any{
+			"id":     staged.editID,
+			"path":   editPath,
+			"source": "apply_failed",
+		})
+	}
+	s.agent.Reject()
 }
 
 // RejectEdit rejects the pending edit and signals the agent. The
@@ -265,10 +314,11 @@ func (s *Session) AbortApproval() {
 // caller, which made auto-reject silent failures appear as if the
 // developer had intervened — a meaningful UX-debugging hazard.
 //
-// Callers in the TUI:
-//   - ActionAgentReject (Esc keypress)   → source "user"
-//   - EditProposed search-mismatch path  → source "search-mismatch"
-//   - ApproveEdit "file not open" path   → source "file-not-open"
+// Callers in the engine and TUI:
+//   - ActionAgentReject (Esc keypress)              → source "user"
+//   - EditProposed search-mismatch path             → source "search-mismatch"
+//   - ApproveEdit / PrepareApproval "file not open" → source "file-not-open"
+//   - PrepareApproval LocateEdit failure            → source "search-mismatch"
 //
 // Empty source defaults to "unknown" so the field is always present
 // and downstream parsers don't have to special-case missing values.
@@ -290,6 +340,8 @@ func (s *Session) RejectEdit(source string) {
 	s.pendingContinueExpected = ""
 	s.pendingContinueSet = false
 	s.editReviewed = false
+	s.stagedEditFile = ""
+	s.pendingApproval = nil
 	s.agent.Reject()
 }
 

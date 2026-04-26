@@ -990,7 +990,11 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 		a.mu.Lock()
 		a.waiting = true
 		a.mu.Unlock()
-		finished := a.tasksAllComplete()
+		// Finished requires both an empty task tree AND a clean turn —
+		// surfacing DONE on an errored turn with an incidentally-empty
+		// tree would mislead the developer into thinking the run
+		// completed when it actually bailed out and is awaiting retry.
+		finished := err == nil && a.tasksAllComplete()
 		if err := a.sendCritical(ctx, event.AgentWaiting{Finished: finished}); err != nil {
 			slog.Error("agent waiting delivery failed", "err", err)
 			*success = false
@@ -1044,7 +1048,8 @@ var outstandingWorkMarkers = []string{
 	"yet to be",
 	"remaining work",
 	"work remaining",
-	"outstanding",
+	"outstanding work",  // "outstanding" alone is an adjective that fires
+	"outstanding items", // on benign praise ("outstanding work — all done")
 	"to be implemented",
 	"to be done",
 	"to do:",

@@ -38,8 +38,20 @@ func TestContainsOutstandingWorkMarker(t *testing.T) {
 		{"need implementation", "fruit spawn rules need implementation", true},
 		{"yet to be", "level transitions yet to be implemented", true},
 		{"todo prefix", "TODO: hook collisions", true},
+		{"outstanding work phrase", "outstanding work on the AI module", true},
+		{"outstanding items phrase", "two outstanding items remain in the queue", true},
 		{"plain not", "the function returns true if not idle", false},
 		{"plain need", "we need this commit message to be precise", false},
+		// "outstanding" as a bare adjective ("Outstanding!", "Outstanding
+		// result.") must NOT fire — that was the bug behind narrowing to
+		// phrase-only matches. The phrase variants ("outstanding work",
+		// "outstanding items") still match on praise like "outstanding
+		// work — well done", but that's an accepted trade-off: a false
+		// positive costs one nudge round-trip (the gate fires at most
+		// once per developer turn), while a false negative lets the
+		// original "all done + still-need-X" bug through.
+		{"bare praise outstanding", "Outstanding!", false},
+		{"bare praise outstanding result", "Outstanding result on this run.", false},
 		{"empty", "", false},
 	}
 	for _, tc := range cases {
@@ -348,6 +360,44 @@ func TestAgent_NarrativeGate_ActiveTaskInProgress_NoFire(t *testing.T) {
 	defer provider.mu.Unlock()
 	if provider.call != 1 {
 		t.Errorf("provider call count = %d, want 1 (gate must not fire while task active)", provider.call)
+	}
+}
+
+// TestAgent_AgentWaiting_NotFinishedOnErrorTurn verifies that a turn
+// ending in error does NOT light up Finished, even when the task tree
+// is empty. Without this guard a provider failure on an empty-tree run
+// would render DONE — telling the developer the work completed when in
+// reality the turn bailed out and is awaiting retry.
+func TestAgent_AgentWaiting_NotFinishedOnErrorTurn(t *testing.T) {
+	// Stream closes without Done: drainStream surfaces a stream-error,
+	// processLLMTurn returns it, runLoop falls through to AgentWaiting.
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			{
+				{Token: "partial "},
+				{Token: "response"},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, taskTreeWorkspace{next: ""}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	})
+	if ev == nil {
+		t.Fatal("timeout waiting for AgentWaiting after errored turn")
+	}
+	w := ev.(event.AgentWaiting)
+	if w.Finished {
+		t.Error("AgentWaiting.Finished = true on errored turn, want false (error != sanctioned completion)")
 	}
 }
 

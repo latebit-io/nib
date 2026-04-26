@@ -78,6 +78,12 @@ type SystemPromptData struct {
 type UserPromptData struct {
 	// FileName is the active file's relative path.
 	FileName string
+	// Language is the human-readable language name inferred from FileName's
+	// extension (e.g. "Lua", "Python", "Go"). Empty when the extension is
+	// unknown. The template uses this to anchor the model in the file's
+	// language so it applies style rules using native idioms instead of
+	// importing patterns from other languages.
+	Language string
 	// FileContent is the file content with 1-indexed line numbers prepended.
 	FileContent string
 	// Fence is the code fence marker (``` or longer if the content contains backticks).

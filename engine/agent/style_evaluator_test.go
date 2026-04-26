@@ -168,6 +168,54 @@ func TestBuildEvaluatorPrompt(t *testing.T) {
 	}
 }
 
+// TestBuildEvaluatorPrompt_languageAnchor verifies the prompt pins the
+// reviewer to the file's language so it doesn't import idioms from
+// whichever language the rule wording resembles. This was a real
+// regression — Lua files were getting flagged for missing Go-style
+// `nil, err` returns and constructor injection because the Clean Code
+// rules read Go-flavored without a language anchor.
+func TestBuildEvaluatorPrompt_languageAnchor(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		wantLang string
+		wantHint bool
+	}{
+		{"lua file gets Lua anchor", "src/game.lua", "Lua", true},
+		{"python file gets Python anchor", "app.py", "Python", true},
+		{"go file gets Go anchor", "main.go", "Go", true},
+		{"unknown extension skips anchor", "Makefile", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := buildEvaluatorPrompt([]string{"rule"}, tc.path, "old", "new")
+
+			if tc.wantHint {
+				if !strings.Contains(prompt, "## Language") {
+					t.Error("expected ## Language section in prompt")
+				}
+				if !strings.Contains(prompt, tc.wantLang) {
+					t.Errorf("expected language %q in prompt", tc.wantLang)
+				}
+				// The anti-idiom guidance is the whole point of this
+				// section — assert it is actually present, not just
+				// the heading.
+				if !strings.Contains(prompt, "Do not flag missing multi-return error tuples") {
+					t.Error("expected anti-idiom guidance about multi-return error tuples")
+				}
+				if !strings.Contains(prompt, "Do not flag missing constructor injection") {
+					t.Error("expected anti-idiom guidance about constructor injection")
+				}
+			} else {
+				if strings.Contains(prompt, "## Language") {
+					t.Error("unknown-language file should not include Language section")
+				}
+			}
+		})
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !strings.Contains(s, sub) {

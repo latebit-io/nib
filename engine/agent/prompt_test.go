@@ -499,6 +499,55 @@ func TestBuildMessagesNoCodingStyle(t *testing.T) {
 	}
 }
 
+// TestBuildMessagesUserPromptIncludesLanguage verifies the user message
+// surfaces the file's language so the generating model applies style
+// rules using native idioms. Lua files were silently picking up Go
+// idioms because the prompt never told the model what language they
+// were in.
+func TestBuildMessagesUserPromptIncludesLanguage(t *testing.T) {
+	a := testAgent()
+	msgs := a.buildMessages("game.lua", "local M = {}", "add tests", nil, "", ModeExecution)
+
+	user := msgs[1].Content
+	if !strings.Contains(user, "language: Lua") {
+		t.Errorf("user message should include language hint, got:\n%s", user)
+	}
+}
+
+// TestBuildMessagesUserPromptOmitsLanguageWhenUnknown verifies we don't
+// invent a language when the extension is unrecognized — a wrong guess
+// is worse than no guess.
+func TestBuildMessagesUserPromptOmitsLanguageWhenUnknown(t *testing.T) {
+	a := testAgent()
+	msgs := a.buildMessages("Makefile", "all:\n\techo hi", "add tests", nil, "", ModeExecution)
+
+	user := msgs[1].Content
+	if strings.Contains(user, "language:") {
+		t.Errorf("user message should omit language hint for unknown extension, got:\n%s", user)
+	}
+}
+
+// TestBuildMessagesCodingStyleHasLanguageGuidance verifies the system
+// prompt teaches the model to apply rules using native-language idioms,
+// not idioms borrowed from whichever language the rule wording most
+// resembles. Without this, Clean Code rules read Go-flavored and the
+// model produced Go-style scaffolding in Lua/Python files.
+func TestBuildMessagesCodingStyleHasLanguageGuidance(t *testing.T) {
+	a := testAgent()
+	a.codingStyle = NewCodingStyleData("Clean Code", []StyleRule{
+		{Name: "Errors as First-Class Citizens", Instruction: "Handle errors explicitly.", Enforcement: "hard"},
+	})
+	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", ModeExecution)
+
+	system := msgs[0].Content
+	if !strings.Contains(system, "Apply rules using idioms native to the file's language") {
+		t.Error("system prompt should include native-language guidance when coding style is set")
+	}
+	if !strings.Contains(system, "do not write Go-style") {
+		t.Error("system prompt should explicitly warn against Go-style returns in non-Go files")
+	}
+}
+
 func TestNewCodingStyleData(t *testing.T) {
 	rules := []StyleRule{
 		{Name: "SRP", Instruction: "One reason to change", Enforcement: "hard"},

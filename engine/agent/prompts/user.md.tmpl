@@ -10,7 +10,7 @@
 ```
 {{end -}}
 
-## File: {{.FileName}}
+## File: {{.FileName}}{{if .Language}} (language: {{.Language}}){{end}}
 
 {{.Fence}}
 {{.FileContent}}{{.Fence}}

@@ -869,8 +869,20 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			// through. m.dial.AutoApproveBlock() returns true only
 			// at LevelYolo, so the gate retains the LevelTrusted
 			// safety valve by default.
+			// summaryRequiresReview is the must-surface gate (true for
+			// any non-pass verdict, including retry). summaryHasBlock
+			// is the narrower snooze-eligibility gate — only Block
+			// findings can be silenced for the rest of the session,
+			// because only Block carries the "developer has eyes-on
+			// for this file's recurring architectural concern"
+			// semantics. Retry is per-edit (LLM exhausted its budget
+			// on this specific change) and must be reviewed each time
+			// — auto-applying future retries on a once-approved file
+			// would re-open a fail-open path for validator-exhausted
+			// proposals.
 			needsReview := summaryRequiresReview(e.ValidatorSummaries)
-			snoozed := needsReview && m.blockedPaths[e.Edit.Path]
+			blockSnoozeEligible := summaryHasBlock(e.ValidatorSummaries)
+			snoozed := blockSnoozeEligible && m.blockedPaths[e.Edit.Path]
 			autoApprove := m.dial.AutoApproveEdits() &&
 				(!needsReview || m.dial.AutoApproveBlock() || snoozed)
 
@@ -893,7 +905,17 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			} else {
 				status := event.StatusReviewing
 				if needsReview {
-					m.pendingBlockedPath = e.Edit.Path
+					// Only arm the snooze cache for Block findings —
+					// see the comment above on blockSnoozeEligible.
+					// Retry-only proposals still surface (needsReview
+					// is true) but a manual approval must NOT promote
+					// the path into blockedPaths, otherwise a future
+					// retry would auto-apply.
+					if blockSnoozeEligible {
+						m.pendingBlockedPath = e.Edit.Path
+					} else {
+						m.pendingBlockedPath = ""
+					}
 					m.AgentPane.AppendMeta(reviewBannerForSummaries(e.ValidatorSummaries))
 					// Distinct status so the indicator stands out
 					// from routine reviewing — block-review means
@@ -1008,6 +1030,27 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 func summaryRequiresReview(summaries []event.ValidatorSummary) bool {
 	for _, s := range summaries {
 		if s.Verdict != "pass" {
+			return true
+		}
+	}
+	return false
+}
+
+// summaryHasBlock reports whether any summary carries an explicit
+// "block" verdict. Distinct from [summaryRequiresReview] because
+// snoozing is only safe for Block — it carries the "developer has
+// eyes-on for this file's recurring architectural concern"
+// semantics. Retry (validator exhausted on this specific change),
+// or any future non-pass non-block verdict, is per-edit and must be
+// reviewed each time; promoting them into blockedPaths would
+// re-open a fail-open path for validator-exhausted proposals.
+//
+// Forward-compat: a future verdict explicitly intended to be
+// snoozable must opt in here, not in summaryRequiresReview. The
+// default for unknown verdicts stays "must surface, never snooze."
+func summaryHasBlock(summaries []event.ValidatorSummary) bool {
+	for _, s := range summaries {
+		if s.Verdict == "block" {
 			return true
 		}
 	}
@@ -1915,13 +1958,21 @@ func (m *AppModel) tryApplyApproval() (approvalOutcome, tea.Cmd) {
 		return outcomePreparationFailedRetryable, nil
 	}
 
-	// Try the apply first — ApplyEdit short-circuits on LocateEdit failure
-	// without mutating the buffer, so the overlay can stay visible if it fails.
+	// ApplyEdit short-circuits on LocateEdit failure without mutating
+	// the buffer. On failure we MUST clear the overlay: PrepareApproval
+	// already cleared session.pendingEdit, so a developer pressing Esc
+	// at this point hits the "No pending edit" branch of
+	// ActionAgentReject and cancels the entire agent instead of
+	// dismissing the dead diff. Leaving the overlay visible (the
+	// previous design intent) made sense only when a retry path
+	// existed; AbortApproval below now closes that off, so the overlay
+	// has no purpose post-failure.
 	ok, reason := m.Editor.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
 	if !ok {
 		slog.Warn("apply failed", "reason", reason)
 		m.AgentPane.AppendText("\n[apply failed: " + reason + "]\n")
 		m.Session.AbortApproval()
+		m.clearEditorOverlay(false)
 		return outcomeApplyFailed, nil
 	}
 

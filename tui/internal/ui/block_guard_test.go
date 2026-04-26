@@ -86,6 +86,102 @@ func TestSummaryRequiresReview(t *testing.T) {
 	}
 }
 
+// TestSummaryHasBlock locks the snooze-eligibility gate. Critical:
+// retry verdicts (validator exhausted its budget on this specific
+// change) must NOT be snooze-eligible — promoting them into
+// blockedPaths would auto-apply the next retry on the same file
+// without developer review, re-opening a fail-open path.
+//
+// summaryHasBlock is separate from [summaryRequiresReview] precisely
+// to keep these two questions separate: "must surface" (any non-pass)
+// vs "may snooze" (explicit block only).
+func TestSummaryHasBlock(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   []event.ValidatorSummary
+		want bool
+	}{
+		{
+			name: "empty",
+			in:   nil,
+			want: false,
+		},
+		{
+			name: "all pass",
+			in: []event.ValidatorSummary{
+				{Stage: "go-parse", Verdict: "pass"},
+			},
+			want: false,
+		},
+		{
+			name: "retry only — must surface but must NOT be snoozable",
+			in: []event.ValidatorSummary{
+				{Stage: "lint", Verdict: "retry"},
+			},
+			want: false,
+		},
+		{
+			name: "block alone is snoozable",
+			in: []event.ValidatorSummary{
+				{Stage: "architecture", Verdict: "block"},
+			},
+			want: true,
+		},
+		{
+			name: "block among pass and retry — block dominates",
+			in: []event.ValidatorSummary{
+				{Stage: "go-parse", Verdict: "pass"},
+				{Stage: "architecture", Verdict: "block"},
+				{Stage: "lint", Verdict: "retry"},
+			},
+			want: true,
+		},
+		{
+			name: "unknown verdict is NOT snoozable (forward-compat fail-closed)",
+			in: []event.ValidatorSummary{
+				{Stage: "future-stage", Verdict: "warn"},
+			},
+			want: false,
+		},
+		{
+			name: "case-sensitive BLOCK does not match (would silently be unsnoozable)",
+			in: []event.ValidatorSummary{
+				{Stage: "x", Verdict: "BLOCK"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := summaryHasBlock(tc.in); got != tc.want {
+				t.Errorf("summaryHasBlock(%+v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSummaryHasBlock_NotEqualToSummaryRequiresReview pins the
+// invariant that the two predicates are deliberately different.
+// Without this, a refactor that "simplifies" summaryHasBlock to
+// alias summaryRequiresReview would silently re-introduce the
+// retry-snoozes-future-retries fail-open bug.
+func TestSummaryHasBlock_NotEqualToSummaryRequiresReview(t *testing.T) {
+	t.Parallel()
+
+	// Retry: must surface (true) but must not be snoozable (false).
+	retryOnly := []event.ValidatorSummary{{Stage: "lint", Verdict: "retry"}}
+	if !summaryRequiresReview(retryOnly) {
+		t.Fatal("setup invariant: retry must require review")
+	}
+	if summaryHasBlock(retryOnly) {
+		t.Errorf("retry was reported as snooze-eligible — fail-open regression: " +
+			"approving a retry once would auto-apply future retries on the same file")
+	}
+}
+
 // TestSnoozeBannerForSummaries verifies the snooze banner names
 // both the verdicts and the path that triggered the snooze, so a
 // session log reviewer can attribute auto-applies correctly. The

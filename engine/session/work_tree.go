@@ -208,16 +208,43 @@ func (w *WorkTreeManager) InitProject(name string, phases []string) error {
 	return w.Reload()
 }
 
+// maxProjectInitPhases caps the number of phases written by
+// buildProjectSkeleton. The phases come from an LLM-driven tool call
+// (project_init); without a cap, sloppy or runaway output could write
+// an absurdly large /project.md before the demarkus body-size check
+// rejects it. 256 is generous for any real project structure and
+// cheap to enforce.
+const maxProjectInitPhases = 256
+
+// sanitizeProjectInitLine collapses any whitespace runs (including
+// embedded newlines) to a single space. This protects the
+// frontmatter and heading lines from LLM-supplied multi-line values
+// that would otherwise inject extra `---` delimiters, phantom YAML
+// keys, or unintended markdown structure into /project.md — the
+// project parser is a naive line splitter and would happily mis-parse
+// the corruption.
+func sanitizeProjectInitLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // buildProjectSkeleton renders the YAML-frontmatter + h1-phase
 // scaffold the project parser expects. Empty phases produces a tree
-// with only the frontmatter — still valid, just empty.
+// with only the frontmatter — still valid, just empty. Inputs are
+// single-line-normalised and the phase count is capped — see
+// [sanitizeProjectInitLine] and [maxProjectInitPhases] for the
+// threat model.
 func buildProjectSkeleton(name string, phases []string) string {
 	var b strings.Builder
 	b.WriteString("---\n")
-	fmt.Fprintf(&b, "project: %s\n", strings.TrimSpace(name))
+	fmt.Fprintf(&b, "project: %s\n", sanitizeProjectInitLine(name))
 	b.WriteString("---\n")
-	for _, p := range phases {
-		title := strings.TrimSpace(p)
+	for i, p := range phases {
+		if i >= maxProjectInitPhases {
+			slog.Warn("buildProjectSkeleton: phase count exceeded cap; truncating",
+				"got", len(phases), "cap", maxProjectInitPhases)
+			break
+		}
+		title := sanitizeProjectInitLine(p)
 		if title == "" {
 			continue
 		}

@@ -69,8 +69,9 @@ func (t *ProjectInitTool) Definition() llm.ToolDef {
 						Type: "array",
 						Description: "Top-level phase headings as plain titles (e.g. " +
 							"['Foundation', 'Movement', 'Ghosts', 'Polish']). Each becomes an H1 in /project.md. " +
-							"Empty array creates the doc with only the project header — phases can be added later " +
-							"by re-running project_init or by editing /project.md directly via memory tools.",
+							"Pass them all in this call — project_init is idempotent and a second call will " +
+							"NOT add phases to an existing /project.md. Empty array creates the doc with only " +
+							"the project header; to add phases later, edit /project.md directly via memory tools.",
 						Items: &llm.FunctionParam{Type: "string"},
 					},
 				},
@@ -100,9 +101,15 @@ func (t *ProjectInitTool) Execute(_ context.Context, call llm.ToolCall) ToolResu
 	}
 
 	if len(args.Phases) == 0 {
+		// project_task_add requires an existing phase, so no follow-up
+		// task call works yet. Re-running project_init won't add phases
+		// either (idempotent — see WorkTreeManager.InitProject). The
+		// only forward path is editing /project.md directly via the
+		// memory tools, then resuming task tracking.
 		return textResult(fmt.Sprintf(
-			"Initialised /project.md for %q (no phases). Add phases by calling project_init again, "+
-				"or add tasks under existing phases via project_task_add.", name))
+			"Initialised /project.md for %q (no phases). Add phase headings by editing "+
+				"/project.md directly via memory tools (memory_publish/memory_append), then "+
+				"call project_task_add to add tasks under them.", name))
 	}
 	return textResult(fmt.Sprintf(
 		"Initialised /project.md for %q with phases: %s. Add tasks via project_task_add(phase, feature, task).",

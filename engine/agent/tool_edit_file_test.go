@@ -541,6 +541,19 @@ func TestEditFileTool_FuzzyWhitespaceCorrection(t *testing.T) {
 	}
 }
 
+// readCountingWorkspace wraps testWorkspace to record ReadFile calls,
+// proving that a primed cache short-circuits disk access in
+// resolveContent. Used by the cache-priority regression test.
+type readCountingWorkspace struct {
+	*testWorkspace
+	readCalls int
+}
+
+func (w *readCountingWorkspace) ReadFile(path string) (string, error) {
+	w.readCalls++
+	return w.testWorkspace.ReadFile(path)
+}
+
 // TestEditFileTool_UsesCacheConsistentWithBufferAfterContinue
 // documents the architectural invariant edit_file relies on: the
 // cache reflects buffer content between agent turns, fed by the
@@ -551,26 +564,51 @@ func TestEditFileTool_FuzzyWhitespaceCorrection(t *testing.T) {
 // a regression that re-introduces direct buffer access from the
 // agent goroutine; the test passes when resolveContent only
 // consults cache+disk via the FileReader surface.
+//
+// The cache is primed with content that diverges from disk so a
+// regression bypassing cache would (a) read divergent disk bytes
+// and (b) fail to match the cache-only Search marker, dropping the
+// effect off EffectEditProposed. A ReadFile call counter proves
+// disk was not consulted on the cache-hit path.
 func TestEditFileTool_UsesCacheConsistentWithBufferAfterContinue(t *testing.T) {
 	t.Parallel()
 
-	const content = "package main\n\nfunc main() {}\n"
-	ws := &testWorkspace{
-		files:     map[string]string{"main.go": content},
-		inContext: map[string]bool{},
+	const diskContent = "package main\n\nfunc main() {}\n"
+	const cacheContent = "package main\n\nfunc main() { println(\"cached\") }\n"
+
+	ws := &readCountingWorkspace{
+		testWorkspace: &testWorkspace{
+			files:     map[string]string{"main.go": diskContent},
+			inContext: map[string]bool{},
+		},
 	}
-	tool := NewEditFileTool(ws, NewFileCache())
+	cache := NewFileCache()
+	cache.Set("main.go", cacheContent) // root="" → CanonPath is identity
+	tool := NewEditFileTool(ws, cache)
 
 	args := mustMarshal(t, editArgs{
 		Path:    "main.go",
-		Search:  "func main() {}",
-		Replace: "func main() { return }",
+		Search:  `println("cached")`,
+		Replace: `println("rewritten")`,
 	})
 	result := tool.Execute(context.Background(), llm.ToolCall{
 		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
 	})
+
 	if result.Effect != EffectEditProposed {
-		t.Fatalf("Effect = %d, want EffectEditProposed (cache+disk path broken)",
-			result.Effect)
+		t.Fatalf("Effect = %d, content = %q; want EffectEditProposed — search "+
+			"only matches CACHED content, so a non-proposal result means cache priority broke",
+			result.Effect, result.Content)
+	}
+	prop, ok := result.Payload.(EditProposal)
+	if !ok {
+		t.Fatalf("Payload type = %T, want EditProposal", result.Payload)
+	}
+	if !strings.Contains(prop.ExpectedContent, `println("rewritten")`) {
+		t.Errorf("ExpectedContent did not derive from cached content: %q", prop.ExpectedContent)
+	}
+	if ws.readCalls != 0 {
+		t.Errorf("ReadFile called %d times; want 0 (primed cache must short-circuit disk)",
+			ws.readCalls)
 	}
 }

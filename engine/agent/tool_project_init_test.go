@@ -66,9 +66,10 @@ func TestProjectInitTool_HappyPath(t *testing.T) {
 }
 
 // TestProjectInitTool_NoPhases verifies the empty-phases case
-// produces a message that steers the LLM toward adding phases via
-// re-init or via direct memory editing — instead of letting the
-// agent silently get stuck with an empty plan.
+// produces a message that steers the LLM toward adding phases by
+// editing /project.md directly via memory tools — re-running
+// project_init is a dead end (idempotent), and project_task_add
+// alone will fail because the phase doesn't exist.
 func TestProjectInitTool_NoPhases(t *testing.T) {
 	t.Parallel()
 
@@ -81,7 +82,18 @@ func TestProjectInitTool_NoPhases(t *testing.T) {
 	})
 
 	if !strings.Contains(result.Content, "no phases") {
-		t.Errorf("result missing no-phases steer: %q", result.Content)
+		t.Errorf("result missing no-phases marker: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "memory") {
+		t.Errorf("result must steer LLM to memory tools for phase addition: %q", result.Content)
+	}
+	// Regression guard: prior wording said "Add phases by calling
+	// project_init again" — InitProject is idempotent and ignores
+	// new phases on a populated /project.md, so this guidance was a
+	// dead end on fresh repos.
+	if strings.Contains(result.Content, "project_init again") {
+		t.Errorf("regression: no-phases message must not promise re-running project_init: %q",
+			result.Content)
 	}
 	if got := tracker.initCalls[0].phases; len(got) != 0 {
 		t.Errorf("phases = %v, want empty", got)

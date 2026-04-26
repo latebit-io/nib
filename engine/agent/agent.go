@@ -103,6 +103,7 @@ var mutatingTools = map[string]bool{
 	"write_file":   true,
 	"replace_file": true,
 	"bash":         true,
+	"smoke_run":    true,
 }
 
 // Agent drives the multi-turn LLM loop.
@@ -1962,12 +1963,23 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 		return summaries, ""
 	}
 
-	// Non-Pass path (Retry or Block): the LLM can self-correct in many
-	// cases. Consume a budget slot; if exhausted, fall through with the
-	// summaries attached so the developer sees what the validators
-	// flagged. The map is also mutated by RunWithMode/Reply/recordEdit,
-	// so every access is guarded by a.mu — matching the existing
-	// recordEdit pattern.
+	// Non-Pass path (Retry or Block): if the validators produced no
+	// actionable feedback, there's nothing to send the LLM — surface
+	// the proposal so the developer can intervene. Compute feedback
+	// BEFORE touching validatorRetries: an empty-feedback round is a
+	// developer-visible surface, not a silent retry, and burning a
+	// budget slot for it would exhaust the budget on attempts that
+	// never actually retry.
+	feedback := aggregateRetryFeedback(results)
+	if feedback == "" {
+		return summaries, ""
+	}
+
+	// Actionable feedback exists — this is a real silent retry. Consume
+	// a budget slot; if exhausted, surface so the developer sees what
+	// the validators flagged. The map is also mutated by
+	// RunWithMode/Reply/recordEdit, so every access is guarded by a.mu —
+	// matching the existing recordEdit pattern.
 	a.mu.Lock()
 	a.validatorRetries[proposal.CanonPath]++
 	attempts := a.validatorRetries[proposal.CanonPath]
@@ -1976,14 +1988,6 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 	if attempts > maxValidatorRetries {
 		slog.Warn("validator retry budget exhausted; surfacing proposal",
 			"path", proposal.CanonPath, "attempts", attempts, "verdict", worst.String())
-		return summaries, ""
-	}
-	feedback := aggregateRetryFeedback(results)
-	if feedback == "" {
-		// Validator reported non-Pass without any feedback — nothing
-		// actionable to send back, so let the proposal surface so the
-		// developer can intervene. Without this guard the LLM would
-		// see an empty retry message and have no signal to fix.
 		return summaries, ""
 	}
 	return summaries, feedback

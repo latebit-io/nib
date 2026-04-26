@@ -79,7 +79,7 @@ func TestEnforceActiveTaskGate_TreeNotLoadedAllows(t *testing.T) {
 func TestEnforceActiveTaskGate_NoActiveTaskBlocks(t *testing.T) {
 	tracker := &gateTracker{loaded: true, activePath: ""}
 	a := newGateTestAgent(tracker, ModeExecution)
-	for _, tool := range []string{"edit_file", "write_file", "bash"} {
+	for _, tool := range []string{"edit_file", "write_file", "replace_file", "bash", "smoke_run"} {
 		msg := a.enforceActiveTaskGate(context.Background(), tool)
 		if msg == "" {
 			t.Errorf("%s should have been blocked", tool)

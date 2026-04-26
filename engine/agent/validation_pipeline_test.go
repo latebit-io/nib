@@ -165,7 +165,10 @@ func TestRunValidationPipelineBlockConsumesBudget(t *testing.T) {
 // TestRunValidationPipelineNonPassWithoutFeedbackSurfaces verifies that
 // a non-Pass verdict with empty Feedback short-circuits to surfacing
 // the proposal rather than sending an empty retry message to the LLM
-// (which would be a useless cycle of "fix this: ").
+// (which would be a useless cycle of "fix this: "). It also asserts
+// the retry budget is NOT consumed: empty-feedback rounds are
+// developer-visible surfaces, not silent retries, and burning a slot
+// would exhaust the budget on attempts that never actually retry.
 func TestRunValidationPipelineNonPassWithoutFeedbackSurfaces(t *testing.T) {
 	t.Parallel()
 
@@ -174,12 +177,17 @@ func TestRunValidationPipelineNonPassWithoutFeedbackSurfaces(t *testing.T) {
 	}}
 	ag, _ := newPipelineTestAgent(t, pipe)
 
-	summaries, feedback := ag.runValidationPipeline(context.Background(), sampleProposal())
+	proposal := sampleProposal()
+	summaries, feedback := ag.runValidationPipeline(context.Background(), proposal)
 	if feedback != "" {
 		t.Errorf("empty-feedback non-Pass returned %q; want surface (empty)", feedback)
 	}
 	if len(summaries) != 1 {
 		t.Errorf("summaries = %+v, want one summary surfacing the verdict", summaries)
+	}
+	if got, ok := ag.validatorRetries[proposal.CanonPath]; ok {
+		t.Errorf("empty-feedback round consumed budget: retries[%q] = %d; want untouched",
+			proposal.CanonPath, got)
 	}
 }
 

@@ -1163,14 +1163,10 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "agent", m.Session.HasAgent())
 		if m.Session.PendingEdit() != nil && m.Editor.Overlay != nil {
-			// Manual approval after a Block surfaced — snooze
-			// future Block prompts on this same file for the rest
-			// of the session. The developer has eyes-on; further
-			// nags don't add information.
-			if m.pendingBlockedPath != "" {
-				m.blockedPaths[m.pendingBlockedPath] = true
-				m.pendingBlockedPath = ""
-			}
+			// Block snooze (pendingBlockedPath → blockedPaths) is
+			// handled inside applyApproval after ApplyEdit lands —
+			// snoozing here would silently disable future Block
+			// review on this path even when the approval failed.
 			cmd := m.applyApproval()
 			return m, cmd
 		}
@@ -1844,10 +1840,59 @@ func (m *AppModel) handleToggleProject() (tea.Model, tea.Cmd) {
 
 // --- Edit Approval ---
 
+// approvalOutcome enumerates how applyApproval finished. The caller
+// uses it to decide pending-block snoozing — promotion to
+// blockedPaths happens only on outcomeSucceeded; both terminal
+// failure paths drop the pending snapshot; the retryable preparation
+// failure leaves it in place so a follow-up press can still snooze.
+//
+// Modelling the three branches as data (not three call sites that
+// each remember to call the snooze helper) is what fixes the original
+// regression: a future edit to applyApproval can't accidentally
+// reach the success suffix without also producing outcomeSucceeded,
+// and the snooze helper has exactly one caller.
+type approvalOutcome int
+
+const (
+	// outcomeSucceeded: PrepareApproval+ApplyEdit both landed. Snooze.
+	outcomeSucceeded approvalOutcome = iota
+	// outcomePreparationFailedTerminal: PrepareApproval failed AND the
+	// session has no PendingEdit anymore (agent gave up on this edit).
+	// No retry possible; drop the pending snapshot.
+	outcomePreparationFailedTerminal
+	// outcomePreparationFailedRetryable: PrepareApproval failed but
+	// PendingEdit is still set. Developer can retry; keep the pending
+	// snapshot so a successful retry can still snooze.
+	outcomePreparationFailedRetryable
+	// outcomeApplyFailed: ApplyEdit rejected the patch; AbortApproval
+	// cleared PendingEdit. Drop the pending snapshot.
+	outcomeApplyFailed
+)
+
 // applyApproval validates the reviewed edit and applies it atomically.
-// At dial levels with AutoContinue, the agent is also signalled to continue;
-// otherwise the user must press Ctrl+N.
+// At dial levels with AutoContinue, the agent is also signalled to
+// continue; otherwise the user must press Ctrl+N.
+//
+// The flow splits cleanly: tryApplyApproval runs the prepare → apply
+// → continue pipeline and returns an [approvalOutcome];
+// reconcilePendingBlockOnOutcome decides snoozing based on that
+// outcome. Centralising the snooze decision in one
+// data-driven helper is what protects the
+// "snooze only on confirmed approval" invariant — see the type
+// comment on [approvalOutcome] for why.
 func (m *AppModel) applyApproval() tea.Cmd {
+	blockedPath := m.pendingBlockedPath
+	outcome, cmd := m.tryApplyApproval()
+	m.reconcilePendingBlockOnOutcome(blockedPath, outcome)
+	return cmd
+}
+
+// tryApplyApproval runs the prepare → apply → continue pipeline and
+// returns the outcome plus any tea.Cmd the success branch produced.
+// It does NOT touch pendingBlockedPath / blockedPaths — that
+// reconciliation is the caller's responsibility, see
+// [reconcilePendingBlockOnOutcome].
+func (m *AppModel) tryApplyApproval() (approvalOutcome, tea.Cmd) {
 	o := m.Editor.Overlay
 	oldLines := make([]string, 0, o.EndLine-o.StartLine+1)
 	for i := o.StartLine; i <= o.EndLine; i++ {
@@ -1865,8 +1910,9 @@ func (m *AppModel) applyApproval() tea.Cmd {
 		// set (e.g. "not reviewed"), keep the overlay so the user can retry.
 		if m.Session.PendingEdit() == nil {
 			m.clearEditorOverlay(false)
+			return outcomePreparationFailedTerminal, nil
 		}
-		return nil
+		return outcomePreparationFailedRetryable, nil
 	}
 
 	// Try the apply first — ApplyEdit short-circuits on LocateEdit failure
@@ -1876,8 +1922,9 @@ func (m *AppModel) applyApproval() tea.Cmd {
 		slog.Warn("apply failed", "reason", reason)
 		m.AgentPane.AppendText("\n[apply failed: " + reason + "]\n")
 		m.Session.AbortApproval()
-		return nil
+		return outcomeApplyFailed, nil
 	}
+
 	// bufferMutated=true: ApplyEdit already replaced the lines, so CollapseOverlay
 	// must use the post-mutation coordinate translation (subtract removedCount,
 	// not addedCount) to keep the viewport pointing at the right buffer line.
@@ -1895,5 +1942,35 @@ func (m *AppModel) applyApproval() tea.Cmd {
 		statusCmd = m.AgentPane.SetStatus(event.StatusEditing)
 	}
 	m.refreshProjectPane()
-	return statusCmd
+	return outcomeSucceeded, statusCmd
+}
+
+// reconcilePendingBlockOnOutcome promotes (or drops) the pending
+// blocked-path snapshot based on what tryApplyApproval reported.
+//
+// Snooze rule: only outcomeSucceeded promotes blockedPath into
+// blockedPaths. The two terminal failure outcomes drop the snapshot
+// so a fresh proposal must re-trigger the surface; the retryable
+// outcome leaves the snapshot alone so the developer's retry can
+// still snooze on success.
+//
+// Pure with respect to AppModel — only mutates blockedPaths and
+// pendingBlockedPath — so the snooze invariant is unit-testable
+// without standing up the full Session/Editor stack. This is
+// deliberate: the original bug was a state-ordering one (snooze
+// promoted at keypress before the pipeline ran), and the test for
+// it should not depend on running the pipeline at all.
+func (m *AppModel) reconcilePendingBlockOnOutcome(blockedPath string, outcome approvalOutcome) {
+	switch outcome {
+	case outcomeSucceeded:
+		if blockedPath != "" {
+			m.blockedPaths[blockedPath] = true
+			m.pendingBlockedPath = ""
+		}
+	case outcomePreparationFailedTerminal, outcomeApplyFailed:
+		m.pendingBlockedPath = ""
+	case outcomePreparationFailedRetryable:
+		// Leave pendingBlockedPath in place — a successful retry
+		// of the same proposal should still be able to snooze.
+	}
 }

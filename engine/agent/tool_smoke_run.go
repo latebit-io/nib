@@ -94,8 +94,13 @@ func (t *SmokeRunTool) Execute(ctx context.Context, _ llm.ToolCall) ToolResult {
 // enforced.
 func runSmoke(ctx context.Context, projectRoot string, cfg runconfig.Resolved) proc.Result {
 	timeout := runconfig.EffectiveTimeout(cfg)
-	slog.Debug("smoke: running",
-		"command", cfg.Command, "source", cfg.Source, "timeout", timeout)
+	// Log source/timeout but NOT cfg.Command — `.project/run.json`
+	// may contain inline env assignments or auth flags. The
+	// formatSmokeResult comment lays out the same redaction policy
+	// for LLM-facing/persisted surfaces; debug logs can flow to
+	// JUNTO_LOG files, bug reports, and CI captures, so they get
+	// the same treatment. cfg.Source identifies which command ran.
+	slog.Debug("smoke: running", "source", cfg.Source, "timeout", timeout)
 
 	res := proc.Run(ctx, proc.Request{
 		Shell:   cfg.Command,
@@ -104,7 +109,7 @@ func runSmoke(ctx context.Context, projectRoot string, cfg runconfig.Resolved) p
 	})
 
 	slog.Debug("smoke: completed",
-		"command", cfg.Command, "exit", res.ExitCode,
+		"source", cfg.Source, "exit", res.ExitCode,
 		"timed_out", res.TimedOut, "duration", res.Duration)
 	return res
 }

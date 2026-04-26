@@ -10,16 +10,18 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 )
 
-// taskTreeWorkspace is a stubWorkspace that also satisfies TaskReader
-// with a configurable next-pending-task. Used by the narrative-gate
-// tests to drive the "all tasks complete" branch.
+// taskTreeWorkspace is a stubWorkspace that also satisfies TaskReader.
+// Defaults reflect a loaded tree with no active task — flip loaded or
+// active in a test to exercise the unloaded / mid-task branches.
 type taskTreeWorkspace struct {
 	stubWorkspace
-	next string
+	next     string
+	active   string
+	unloaded bool
 }
 
-func (t taskTreeWorkspace) ActiveTaskPath() string  { return "" }
-func (t taskTreeWorkspace) WorkTreeLoaded() bool    { return true }
+func (t taskTreeWorkspace) ActiveTaskPath() string  { return t.active }
+func (t taskTreeWorkspace) WorkTreeLoaded() bool    { return !t.unloaded }
 func (t taskTreeWorkspace) NextPendingTask() string { return t.next }
 
 func TestContainsOutstandingWorkMarker(t *testing.T) {
@@ -262,6 +264,90 @@ func TestAgent_AgentWaiting_NotFinishedWhenTreeHasPendingWork(t *testing.T) {
 	w := ev.(event.AgentWaiting)
 	if w.Finished {
 		t.Error("AgentWaiting.Finished = true, want false (pending task remains)")
+	}
+}
+
+// TestAgent_NarrativeGate_UnloadedTree_NoFire verifies that the gate is
+// silent when the work tree has not loaded yet. An unloaded tree reads
+// as "no pending tasks" via the nil-tree fallback, but that's "unknown"
+// not "complete" — firing Finished or the nudge here would be wrong on
+// every cold start before /project.md fetches.
+func TestAgent_NarrativeGate_UnloadedTree_NoFire(t *testing.T) {
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			{
+				{Token: "Setup not yet complete."},
+				{Done: true},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, taskTreeWorkspace{unloaded: true}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	})
+	if ev == nil {
+		t.Fatal("timeout waiting for AgentWaiting")
+	}
+	w := ev.(event.AgentWaiting)
+	if w.Finished {
+		t.Error("AgentWaiting.Finished = true on unloaded tree, want false (unknown != done)")
+	}
+
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.call != 1 {
+		t.Errorf("provider call count = %d, want 1 (gate must not fire on unloaded tree)", provider.call)
+	}
+}
+
+// TestAgent_NarrativeGate_ActiveTaskInProgress_NoFire verifies that an
+// active [>] task suppresses both the Finished signal and the narrative
+// gate. FindNextPendingTask only walks [ ] tasks, so a tree with one
+// active leaf and zero pending leaves reads as empty pending — without
+// the active-task check the agent would declare completion mid-work.
+func TestAgent_NarrativeGate_ActiveTaskInProgress_NoFire(t *testing.T) {
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			{
+				{Token: "Mid-flow note: collisions still need wiring up."},
+				{Done: true},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, taskTreeWorkspace{active: "Implement collisions"}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	})
+	if ev == nil {
+		t.Fatal("timeout waiting for AgentWaiting")
+	}
+	w := ev.(event.AgentWaiting)
+	if w.Finished {
+		t.Error("AgentWaiting.Finished = true while a task is active, want false")
+	}
+
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.call != 1 {
+		t.Errorf("provider call count = %d, want 1 (gate must not fire while task active)", provider.call)
 	}
 }
 

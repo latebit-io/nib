@@ -1067,15 +1067,25 @@ func (a *Agent) shouldNudgeOutstanding(messages []llm.Message) bool {
 	return containsOutstandingWorkMarker(last)
 }
 
-// tasksAllComplete reports whether the workspace exposes a task tree AND
-// it has no pending tasks. Returns false when the workspace is not a
-// TaskReader — without a plan there is nothing to be "all complete" against.
+// tasksAllComplete reports whether the workspace exposes a loaded task
+// tree with no in-progress and no pending work. Returns false when:
+//
+//   - the workspace is not a TaskReader — no plan to compare against;
+//   - the work tree has not loaded yet — empty pending != complete, it's
+//     "unknown", and reading "unknown" as "done" would fire the Finished
+//     signal and the narrative gate before the developer's plan is even
+//     present;
+//   - an active [>] task exists — FindNextPendingTask only walks [ ]
+//     tasks, so a tree with one active and zero pending leaves reads
+//     as empty here. Without the active-task check the agent declares
+//     completion mid-work and the DONE chip lights up while it's still
+//     mid-task.
 func (a *Agent) tasksAllComplete() bool {
 	tt, ok := a.workspace.(TaskReader)
-	if !ok {
+	if !ok || !tt.WorkTreeLoaded() {
 		return false
 	}
-	return tt.NextPendingTask() == ""
+	return tt.ActiveTaskPath() == "" && tt.NextPendingTask() == ""
 }
 
 // lastAssistantContent returns the Content of the most recent assistant

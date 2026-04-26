@@ -285,6 +285,11 @@ type AgentPaneModel struct {
 	// prompt. Controls status-bar rendering and rewires Enter/Esc so the
 	// textarea submits an answer (or cancels the run) instead of a goal.
 	awaitingInput *awaitingInputState
+
+	// renderBuf is the per-frame output slice. Hoisted onto the model so
+	// each Render call resizes/clears in place rather than allocating a
+	// fresh []string. Capacity grows to the largest m.height seen.
+	renderBuf []string
 }
 
 // NewAgentPaneModel creates a new agent pane.
@@ -1557,7 +1562,13 @@ func (m *AgentPaneModel) Render() string {
 		return ""
 	}
 
-	output := make([]string, m.height)
+	if cap(m.renderBuf) < m.height {
+		m.renderBuf = make([]string, m.height)
+	} else {
+		m.renderBuf = m.renderBuf[:m.height]
+		clear(m.renderBuf)
+	}
+	output := m.renderBuf
 	row := 0
 
 	// Use package-level style vars directly — no local copies needed

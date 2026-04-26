@@ -9,6 +9,7 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/styleconfig"
+	"github.com/latebit-io/junto/engine/validate/architecture"
 )
 
 // PerFileLinterHolder is a thread-safe holder for the active style's
@@ -95,12 +96,18 @@ type StyleResult struct {
 	// Used as fallback when a style has no explicit lint_cmd (e.g. during
 	// runtime style cycling).
 	DefaultLinters []lint.Linter
-	// Architecture is the thread-safe holder for the active style's
-	// structural caps. The architecture validator reads it; the TUI's
-	// CycleStyle closure updates it on style switch. Always non-nil so
-	// callers can register the validator unconditionally; the validator
-	// short-circuits via its Applicable check when no caps are configured.
-	Architecture *styleconfig.ActiveProvider
+	// Architecture is the read port consumed by the architecture
+	// validator at edit time. Always non-nil so callers can register
+	// the validator unconditionally; the validator short-circuits via
+	// its Applicable check when no caps are configured. Use
+	// [StyleResult.SetArchitecture] to update the active caps when the
+	// developer cycles styles at runtime — the read port and the write
+	// hook share thread-safe state under the hood.
+	Architecture architecture.Provider
+	// SetArchitecture updates the active architecture caps. Composition
+	// roots wire this into runtime style-cycle handlers (e.g. Alt+S in
+	// the TUI). Pass an empty styleconfig.Architecture to disable caps.
+	SetArchitecture func(styleconfig.Architecture)
 	// PerFileLinters is the thread-safe holder for the per-file safe
 	// linter subset, used by the pre-approval lint validator stage.
 	// Always non-nil so callers can register the validator
@@ -131,6 +138,8 @@ func NewStyle(projectRoot string) StyleResult {
 	archProvider := styleconfig.NewActiveProvider()
 	perFileHolder := NewPerFileLinterHolder(nil)
 
+	setArch := func(a styleconfig.Architecture) { archProvider.Set(a) }
+
 	if resolved == nil {
 		slog.Debug("wire: no active coding style")
 		return StyleResult{
@@ -138,6 +147,7 @@ func NewStyle(projectRoot string) StyleResult {
 			DefaultLinters:        defaults,
 			DefaultPerFileLinters: perFileDefaults,
 			Architecture:          archProvider,
+			SetArchitecture:       setArch,
 			PerFileLinters:        perFileHolder,
 		}
 	}
@@ -156,6 +166,7 @@ func NewStyle(projectRoot string) StyleResult {
 		PerFileLinters:        perFileHolder,
 		DefaultPerFileLinters: perFileDefaults,
 		Architecture:          archProvider,
+		SetArchitecture:       setArch,
 	}
 }
 

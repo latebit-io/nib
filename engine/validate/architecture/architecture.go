@@ -42,22 +42,16 @@ type Provider interface {
 	Architecture() styleconfig.Architecture
 }
 
-// LanguageFunc returns the tree-sitter grammar for a given path, or nil
-// when the extension is unsupported. Mirrors the contract used by
-// engine/validate/treesitter so both validators can share
-// [highlight.LanguageFor] at the composition root.
-type LanguageFunc func(path string) *sitter.Language
-
 // Validator is the architecture-cap pre-approval validator.
 type Validator struct {
 	provider Provider
-	langFor  LanguageFunc
+	langFor  validate.LanguageFunc
 }
 
 // New constructs a Validator wired to the given architecture provider
 // and language resolver. A nil provider or langFor makes the validator
 // a no-op — Applicable returns false, Validate returns Pass.
-func New(provider Provider, langFor LanguageFunc) *Validator {
+func New(provider Provider, langFor validate.LanguageFunc) *Validator {
 	return &Validator{provider: provider, langFor: langFor}
 }
 

@@ -19,8 +19,13 @@ import (
 
 	"github.com/latebit-io/junto/engine/mcp"
 	"github.com/latebit-io/junto/engine/memory"
-	"github.com/latebit-io/junto/engine/memory/mcpadapter"
 )
+
+// StoreFactory wraps a connected demarkus-mcp client into a memory.Store.
+// Composition roots inject the concrete adapter (e.g. mcpadapter.New) so
+// the server package depends only on the [memory.Store] port and the MCP
+// client transport, not on any specific store implementation.
+type StoreFactory func(*mcp.Client) memory.Store
 
 // Manager manages the demarkus-server child process and the demarkus-mcp
 // client subprocess that fronts it.
@@ -588,11 +593,15 @@ func (m *Manager) EnsureToken() (string, error) {
 // don't block startup indefinitely if the binary is broken.
 const mcpInitTimeout = 10 * time.Second
 
-// NewStore spawns a demarkus-mcp subprocess pointed at this manager's server
-// and returns a memory.Store backed by the MCP adapter. Must be called after
-// Start and EnsureToken. The subprocess is owned by the Manager — Stop closes
-// it. Any partially-started subprocess is torn down on error.
-func (m *Manager) NewStore(token string) (memory.Store, error) {
+// NewStore spawns a demarkus-mcp subprocess pointed at this manager's
+// server and wraps the resulting client via the supplied factory. Must be
+// called after Start and EnsureToken. The subprocess is owned by the
+// Manager — Stop closes it. Any partially-started subprocess is torn
+// down on error. A nil factory is treated as a programmer error.
+func (m *Manager) NewStore(token string, factory StoreFactory) (memory.Store, error) {
+	if factory == nil {
+		return nil, errors.New("memory: nil StoreFactory")
+	}
 	// Guard against double-call without an intervening Stop(). Stop() clears
 	// mcpClient, so this only fires if a caller accidentally re-invokes
 	// NewStore on the same live Manager.
@@ -620,7 +629,7 @@ func (m *Manager) NewStore(token string) (memory.Store, error) {
 		return nil, fmt.Errorf("memory: demarkus-mcp initialize: %w", err)
 	}
 	m.mcpClient = client
-	return mcpadapter.New(client), nil
+	return factory(client), nil
 }
 
 // errNoExistingServer indicates no running server was found (PID file absent,

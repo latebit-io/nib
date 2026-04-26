@@ -24,10 +24,28 @@ const maxEvaluatorCodeBytes = 4096
 // strings should never approach this limit.
 const maxEvaluatorResponseBytes = 64 * 1024
 
+// StyleEvaluatorPort is the narrow interface the agent loop consumes for
+// post-edit style review. It exists so tests and alternative evaluators
+// (rule-based, deterministic, future model adapters) can replace the
+// LLM-backed implementation without satisfying its constructor or
+// construction-time provider plumbing.
+//
+// Implementations must be safe for concurrent calls because the agent
+// goroutine drives Review() while the TUI goroutine may swap the
+// evaluator instance via [Agent.SetEvaluator].
+type StyleEvaluatorPort interface {
+	// Review evaluates a single proposed edit against the configured
+	// rules and returns any violation strings. The ok flag reports
+	// whether the review completed — false on timeout, infrastructure
+	// failure, or any cause that means "verdict unknown."
+	Review(ctx context.Context, path, search, replace string) (violations []string, ok bool)
+}
+
 // StyleEvaluator reviews proposed edits against coding style rules using
 // a secondary LLM call. It catches design-level violations that static
 // analysis cannot detect (responsibility splitting, abstraction quality,
-// naming conventions, architectural layering).
+// naming conventions, architectural layering). Satisfies
+// [StyleEvaluatorPort].
 type StyleEvaluator struct {
 	provider llm.Provider
 	rules    []string // formatted style rules from CodingStyleData

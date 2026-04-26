@@ -419,7 +419,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 					currentStyleKey = ""
 					currentResolved = nil
 					ag.SetStyle(nil, nil)
-					styleResult.Architecture.Set(styleconfig.Architecture{})
+					styleResult.SetArchitecture(styleconfig.Architecture{})
 					styleResult.PerFileLinters.Set(nil)
 					if evaluatorActive {
 						ag.SetEvaluator(nil)
@@ -434,7 +434,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				data := agent.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
 				linters := wire.LintersForStyle(s.LintCmd, styleResult.DefaultLinters)
 				ag.SetStyle(data, linters)
-				styleResult.Architecture.Set(s.Architecture)
+				styleResult.SetArchitecture(s.Architecture)
 				styleResult.PerFileLinters.Set(
 					wire.LintersForStylePerFile(s.LintCmd, styleResult.DefaultPerFileLinters))
 

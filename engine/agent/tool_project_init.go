@@ -30,13 +30,14 @@ import (
 // project_init for the structured plan that drives task tracking
 // and the autonomy gate.
 type ProjectInitTool struct {
-	tracker TaskTracker
+	tracker TaskMutator
 }
 
 // NewProjectInitTool creates a project_init tool backed by a
-// TaskTracker. Nil tracker disables the tool; the session-backed
-// workspace implements TaskTracker in normal runs.
-func NewProjectInitTool(tracker TaskTracker) *ProjectInitTool {
+// TaskMutator. Nil tracker disables the tool; the session-backed
+// workspace implements TaskTracker (which composes TaskMutator) in
+// normal runs.
+func NewProjectInitTool(tracker TaskMutator) *ProjectInitTool {
 	return &ProjectInitTool{tracker: tracker}
 }
 

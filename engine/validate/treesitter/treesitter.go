@@ -35,22 +35,16 @@ const StageName = "tree-sitter"
 // so large it blows out the model's context window.
 const maxReportedErrors = 5
 
-// LanguageFunc returns the tree-sitter grammar for a given path, or nil
-// when the extension is unsupported. The returned *sitter.Language is
-// expected to be cached and reused by the caller — the validator does
-// not call Close() on it.
-type LanguageFunc func(path string) *sitter.Language
-
 // Validator is the tree-sitter-backed syntax-regression validator.
 type Validator struct {
-	langFor LanguageFunc
+	langFor validate.LanguageFunc
 }
 
 // New constructs a Validator wired to the given language resolver.
 // A nil langFor makes the validator a permanent no-op — Applicable
 // returns false, Validate returns Pass. This matches the overall
 // null-object posture: missing dependencies degrade to pass-through.
-func New(langFor LanguageFunc) *Validator {
+func New(langFor validate.LanguageFunc) *Validator {
 	return &Validator{langFor: langFor}
 }
 

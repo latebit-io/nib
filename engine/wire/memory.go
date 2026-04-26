@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"time"
 	"unicode/utf8"
 
+	"github.com/latebit-io/junto/engine/mcp"
 	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/junto/engine/memory/mcpadapter"
+	"github.com/latebit-io/junto/engine/memory/seed"
 	memserver "github.com/latebit-io/junto/engine/memory/server"
 )
 
@@ -65,12 +67,12 @@ func StartMemory(projectRoot string) (*MemoryResult, error) {
 		return nil, fmt.Errorf("%s: %w", reason, err)
 	}
 
-	store, err := mgr.NewStore(token)
+	store, err := mgr.NewStore(token, func(c *mcp.Client) memory.Store { return mcpadapter.New(c) })
 	if err != nil {
 		return stopAndFail("new store", err)
 	}
 
-	if err := seedMemory(store, projectRoot); err != nil {
+	if err := seed.Install(context.Background(), store, projectRoot); err != nil {
 		return stopAndFail("seed", err)
 	}
 
@@ -107,45 +109,4 @@ func StartMemory(projectRoot string) (*MemoryResult, error) {
 		Summary: summary,
 		Cleanup: cleanup,
 	}, nil
-}
-
-// seedMemory creates the initial index.md if the memory store is empty.
-// The seed document provides a navigable hub linking to the four core
-// memory documents that the agent prompt references (summary, journal,
-// architecture, debugging). This ensures new projects have a working
-// memory structure from the first session.
-func seedMemory(store memory.Store, projectRoot string) error {
-	checkCtx, checkCancel := context.WithTimeout(context.Background(), memoryOpTimeout)
-	_, err := store.Fetch(checkCtx, "/index.md")
-	checkCancel()
-	if err == nil {
-		return nil // already seeded
-	}
-	if !errors.Is(err, memory.ErrNotFound) {
-		return fmt.Errorf("check index: %w", err)
-	}
-
-	projectName := filepath.Base(projectRoot)
-	seed := fmt.Sprintf(`# Project Memory
-
-## Project
-- Name: %s
-
-## Documents
-- [Summary](/summary.md) — compact project snapshot (auto-injected on session start)
-- [Journal](/journal.md) — session notes and progress
-- [Architecture](/architecture.md) — design decisions and rationale
-- [Debugging](/debugging.md) — lessons from investigations
-`, projectName)
-
-	pubCtx, pubCancel := context.WithTimeout(context.Background(), memoryOpTimeout)
-	defer pubCancel()
-	if _, err := store.Publish(pubCtx, "/index.md", seed, 0); err != nil {
-		// Benign race: another session seeded between our Fetch and Publish.
-		if errors.Is(err, memory.ErrConflict) {
-			return nil
-		}
-		return fmt.Errorf("publish index: %w", err)
-	}
-	return nil
 }

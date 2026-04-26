@@ -74,6 +74,18 @@ type SymbolProvider interface {
 	WorkspaceSymbols(ctx context.Context, query string) ([]SymbolInfo, error)
 }
 
+// ServiceManager is the minimum LSP surface every Junto frontend needs:
+// document syncing for file lifecycle plus diagnostics for the agent's
+// post-edit pipeline. Optional capabilities (Hover, Definition, etc.) are
+// discovered separately via type assertion.
+//
+// Defined in this package so consumers (session, agent) depend on the
+// language port — not on the composition root that constructs it.
+type ServiceManager interface {
+	DocumentSyncer
+	DiagnosticProvider
+}
+
 // --- Domain types ---
 
 // TextChange represents an incremental edit to a document.

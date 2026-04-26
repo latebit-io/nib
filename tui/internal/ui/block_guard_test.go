@@ -300,3 +300,88 @@ func TestReviewBannerForSummaries(t *testing.T) {
 		})
 	}
 }
+
+// TestReviewBannerIncludesStageFeedback verifies the per-stage reason
+// is rendered alongside the verdict so the developer can decide
+// without staring at an unannotated diff. The literal block text
+// from the validator must reach the banner intact (path, cap, count).
+func TestReviewBannerIncludesStageFeedback(t *testing.T) {
+	t.Parallel()
+
+	got := reviewBannerForSummaries([]event.ValidatorSummary{
+		{
+			Stage:    "architecture",
+			Verdict:  "block",
+			Feedback: "main.lua exceeds 500-line cap (got 612)",
+		},
+	})
+	wants := []string{
+		"validator: block",
+		"architecture",
+		"main.lua exceeds 500-line cap (got 612)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("banner missing %q; got %q", w, got)
+		}
+	}
+}
+
+// TestReviewBannerMultiStageFeedback verifies each non-pass stage
+// gets its own bullet so a developer reading the banner can tell the
+// architecture and lint findings apart at a glance — without per-stage
+// labelling, multiple findings would blur into one paragraph.
+func TestReviewBannerMultiStageFeedback(t *testing.T) {
+	t.Parallel()
+
+	got := reviewBannerForSummaries([]event.ValidatorSummary{
+		{Stage: "architecture", Verdict: "block", Feedback: "file too long"},
+		{Stage: "lint", Verdict: "retry", Feedback: "unused import"},
+	})
+	wants := []string{
+		"architecture: file too long",
+		"lint: unused import",
+	}
+	for _, w := range wants {
+		if !strings.Contains(got, w) {
+			t.Errorf("banner missing %q; got %q", w, got)
+		}
+	}
+}
+
+// TestReviewBannerPassSummariesElided verifies pass-verdict stages do
+// NOT contribute reasons to the bulleted list — "go-parse: <empty>"
+// would be noise. Only the non-pass stages explain why review fired.
+func TestReviewBannerPassSummariesElided(t *testing.T) {
+	t.Parallel()
+
+	got := reviewBannerForSummaries([]event.ValidatorSummary{
+		{Stage: "go-parse", Verdict: "pass"},
+		{Stage: "architecture", Verdict: "block", Feedback: "cap exceeded"},
+	})
+	if strings.Contains(got, "go-parse") {
+		t.Errorf("banner mentions pass stage go-parse; got %q", got)
+	}
+	if !strings.Contains(got, "architecture: cap exceeded") {
+		t.Errorf("banner missing block stage feedback; got %q", got)
+	}
+}
+
+// TestReviewBannerEmptyFeedbackOmitted verifies a non-pass stage with
+// no Feedback string is silently skipped rather than emitting an
+// empty bullet. Some validators (or future stages) may produce only a
+// verdict without a structured reason — the banner must still render
+// cleanly with just the header line.
+func TestReviewBannerEmptyFeedbackOmitted(t *testing.T) {
+	t.Parallel()
+
+	got := reviewBannerForSummaries([]event.ValidatorSummary{
+		{Stage: "architecture", Verdict: "block", Feedback: ""},
+	})
+	if strings.Contains(got, "•") {
+		t.Errorf("banner emitted an empty bullet for feedback-less summary; got %q", got)
+	}
+	if !strings.Contains(got, "validator: block") {
+		t.Errorf("banner missing the verdict header; got %q", got)
+	}
+}

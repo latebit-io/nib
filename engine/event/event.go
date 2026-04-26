@@ -42,8 +42,12 @@ type ValidatorSummary struct {
 	Stage string
 	// Verdict is the string form ("pass", "retry", "block").
 	Verdict string
-	// Feedback is the LLM-facing retry prompt, empty on pass/block.
-	// Frontends may render it as the reason a proposal was held back.
+	// Feedback is the human-readable reason the validator returned this
+	// verdict. Empty on Pass. Populated on Retry (the LLM gets it back
+	// as a tool-result retry prompt) and on Block (the developer sees
+	// it in the review banner so they know what rule fired). The same
+	// string serves both audiences — kept terse and self-contained so
+	// it reads as well in a chat panel as in a turn replay.
 	Feedback string
 }
 
@@ -104,6 +108,13 @@ const (
 	StatusEditing StatusKind = "editing"
 	// StatusWaiting means the agent is waiting for user input.
 	StatusWaiting StatusKind = "waiting"
+	// StatusFinished is a turn-end idle state like StatusWaiting, but the
+	// agent yielded after declaring its tracked task tree empty (sanctioned
+	// stop condition #1). Distinct surface so the developer can tell at a
+	// glance whether the pause is "your turn to reply" or "I think all work
+	// is done — type a new goal or close the session." Both states accept
+	// the same input flow; the difference is purely diagnostic.
+	StatusFinished StatusKind = "finished"
 	// StatusLinting means the agent is running post-edit style lint commands.
 	StatusLinting StatusKind = "linting"
 	// StatusAwaitingInput means the agent is blocked mid-turn on a developer
@@ -146,7 +157,13 @@ func (AgentNavigate) eventTag()     {}
 // AgentWaiting signals the agent finished its turn and is waiting for user input.
 // The frontend should enable the input prompt so the developer can continue
 // the conversation. The agent goroutine is blocked until Reply() is called.
-type AgentWaiting struct{}
+type AgentWaiting struct {
+	// Finished is true when the agent yielded after declaring its tracked
+	// task tree empty (sanctioned stop condition #1 — all tasks complete).
+	// Frontends can use this to distinguish "your turn to reply" from
+	// "I'm done with the planned work" without changing the input flow.
+	Finished bool
+}
 
 // AwaitingInputOption is a suggested choice presented with an AgentAwaitingInput
 // prompt. The developer may type the ID to pick the option, or any free-form

@@ -135,6 +135,11 @@ var (
 	chipStyleWaiting = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleAnswer  = chipBase.Background(lipgloss.Color("162")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleLinting = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
+	// chipStyleFinished marks "all tracked tasks complete" yields. Green
+	// like editing-success but with a heavier weight so the developer
+	// distinguishes "I'm done with the planned work" from the routine
+	// REPLY pause without changing the input flow.
+	chipStyleFinished = chipBase.Background(lipgloss.Color("22")).Foreground(lipgloss.Color("231")).Bold(true)
 
 	// statusHintStyle renders the trailing keyboard hint next to a chip in
 	// a dim color — it's context, not headline.
@@ -1469,6 +1474,8 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 		spec = statusChipSpec{label: "EDIT", hint: "Ctrl+N continue", style: chipStyleEditing}
 	case event.StatusWaiting:
 		spec = statusChipSpec{label: "REPLY", hint: "Enter send", style: chipStyleWaiting}
+	case event.StatusFinished:
+		spec = statusChipSpec{label: "DONE", hint: "all tracked tasks complete · type to continue", style: chipStyleFinished}
 	case event.StatusAwaitingInput:
 		spec = statusChipSpec{label: "ANSWER", hint: "Enter send · Esc cancel", style: chipStyleAnswer}
 	case event.StatusLinting:

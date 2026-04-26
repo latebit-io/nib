@@ -79,10 +79,11 @@ func yoloOverrideBannerForSummaries(summaries []event.ValidatorSummary) string {
 
 // reviewBannerForSummaries renders the agent-pane meta line shown
 // when the validator gate refuses auto-approval. Lists the unique
-// non-pass verdicts so the developer knows what kind of failure
-// they're being asked to look at — `[validator: block — ...]`,
-// `[validator: retry — ...]`, or `[validator: block, retry — ...]`
-// when multiple stages flagged the edit.
+// non-pass verdicts AND each non-pass stage's feedback so the
+// developer can decide whether to approve or reject without having
+// to guess what the validator flagged. Without per-stage feedback the
+// banner only said "auto-approval refused" — leaving the developer
+// staring at a diff with no explanation of which rule fired or why.
 func reviewBannerForSummaries(summaries []event.ValidatorSummary) string {
 	verdicts := joinNonPassVerdicts(summaries)
 	if verdicts == "" {
@@ -92,9 +93,43 @@ func reviewBannerForSummaries(summaries []event.ValidatorSummary) string {
 		// "validator:  — ...".
 		return "\n[validator: non-pass verdict — auto-approval refused; press Ctrl+O to apply, Esc to reject]\n"
 	}
-	return fmt.Sprintf(
+	var b strings.Builder
+	fmt.Fprintf(&b,
 		"\n[validator: %s — auto-approval refused; press Ctrl+O to apply, Esc to reject]\n",
 		verdicts)
+	if reasons := formatStageReasons(summaries); reasons != "" {
+		b.WriteString(reasons)
+	}
+	return b.String()
+}
+
+// formatStageReasons renders the per-stage feedback of each non-pass
+// summary as a bulleted list. Returns "" when no non-pass summary
+// carries feedback (e.g. an architecture validator that produces only
+// a verdict without a structured reason). The output is wrapped at
+// stage boundaries — each stage's feedback is a single bullet so the
+// developer reads it as one unit even when feedback spans lines.
+func formatStageReasons(summaries []event.ValidatorSummary) string {
+	var b strings.Builder
+	for _, s := range summaries {
+		if s.Verdict == "pass" {
+			continue
+		}
+		feedback := strings.TrimSpace(s.Feedback)
+		if feedback == "" {
+			continue
+		}
+		stage := s.Stage
+		if stage == "" {
+			stage = s.Verdict
+		}
+		// Indent continuation lines so a multi-line feedback string
+		// (e.g. lint findings, several at once) reads as one bullet
+		// rather than a list of unrelated lines.
+		indented := strings.ReplaceAll(feedback, "\n", "\n    ")
+		fmt.Fprintf(&b, "  • %s: %s\n", stage, indented)
+	}
+	return b.String()
 }
 
 // joinNonPassVerdicts returns a comma-separated list of unique

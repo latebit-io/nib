@@ -17,13 +17,14 @@ import (
 // Activate and complete are handled by the existing `update_task` tool —
 // this tool exists solely to cover "add a task that doesn't exist yet."
 type ProjectTaskAddTool struct {
-	tracker TaskTracker
+	tracker TaskMutator
 }
 
 // NewProjectTaskAddTool creates a project_task_add tool backed by a
-// TaskTracker. Nil tracker disables the tool; the session-backed
-// workspace implements TaskTracker in normal runs.
-func NewProjectTaskAddTool(tracker TaskTracker) *ProjectTaskAddTool {
+// TaskMutator. Nil tracker disables the tool; the session-backed
+// workspace implements TaskTracker (which composes TaskMutator) in
+// normal runs.
+func NewProjectTaskAddTool(tracker TaskMutator) *ProjectTaskAddTool {
 	return &ProjectTaskAddTool{tracker: tracker}
 }
 

@@ -55,7 +55,7 @@ func setupIntegration(t *testing.T) *integrationEnv {
 	t.Logf("server running on port %d", port)
 
 	binDir := filepath.Join(root, ".project", "bin")
-	store, err := mgr.NewStore(token)
+	store, err := mgr.NewStore(token, func(c *mcp.Client) memory.Store { return mcpadapter.New(c) })
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

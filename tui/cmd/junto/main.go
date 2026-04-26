@@ -167,7 +167,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	slog.Debug("startup: provider resolved", "hasProvider", provider != nil)
 
 	// Start memory server — always needed for project plans, independent of LLM.
-	mem, err := wire.StartMemory(projectRoot)
+	mem, err := wire.StartMemory(appCtx, projectRoot)
 	if err != nil {
 		return fmt.Errorf("memory: %w", err)
 	}
@@ -419,7 +419,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 					currentStyleKey = ""
 					currentResolved = nil
 					ag.SetStyle(nil, nil)
-					styleResult.Architecture.Set(styleconfig.Architecture{})
+					styleResult.SetArchitecture(styleconfig.Architecture{})
 					styleResult.PerFileLinters.Set(nil)
 					if evaluatorActive {
 						ag.SetEvaluator(nil)
@@ -434,7 +434,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				data := agent.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
 				linters := wire.LintersForStyle(s.LintCmd, styleResult.DefaultLinters)
 				ag.SetStyle(data, linters)
-				styleResult.Architecture.Set(s.Architecture)
+				styleResult.SetArchitecture(s.Architecture)
 				styleResult.PerFileLinters.Set(
 					wire.LintersForStylePerFile(s.LintCmd, styleResult.DefaultPerFileLinters))
 

@@ -119,7 +119,7 @@ type Result struct {
 	StartErr error
 }
 
-// ErrEmptyCommand is returned by [Run] when [Request.Command] is empty.
+// ErrEmptyCommand is returned by [Run] when [Request.Shell] is empty.
 // Distinct from a process that exits without producing output so
 // callers can fail loud rather than silent.
 var ErrEmptyCommand = errors.New("proc: empty command")

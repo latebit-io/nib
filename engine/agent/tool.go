@@ -187,34 +187,19 @@ type Workspace interface {
 	ContextSet
 }
 
-// TaskTracker is an optional interface for workspaces that support
-// structured task tracking via a work tree. Tools type-assert to this
-// interface — it is not required for basic workspace operations.
-//
-// nolint:interfacebloat — the methods here are all coordinated views
-// of one concept (the project task tree) and Session implements them
-// all naturally. Splitting into TaskActivator + TaskAdder + TaskHinter +
-// ProjectInitializer would push the same surface across four
-// interfaces, multiply test-stub boilerplate, and force every caller
-// to type-assert on N narrower interfaces. The bloat is conceptual,
-// not interface-segregation.
-type TaskTracker interface { //nolint:interfacebloat
-	// ActivateTask marks a task as active in the work tree and persists.
-	ActivateTask(title string) error
-	// CompleteTask marks a task as done in the work tree and persists.
-	CompleteTask(title string) error
-	// ActiveTaskPath returns the ancestry path of the current active task,
-	// or empty string if no task is active.
+// TaskReader exposes read-only views over the project's task tree. The
+// agent's task-completion review and the active-task gate consume only
+// this surface — they never mutate state, so depending on TaskMutator
+// would be overreach.
+type TaskReader interface {
+	// ActiveTaskPath returns the ancestry path of the current active
+	// task, or empty string if no task is active.
 	ActiveTaskPath() string
-	// AddTask appends a new pending task under the given phase and
-	// feature, creating the feature if absent, then persists. If link
-	// is non-empty, it is appended to the task title as a markdown link
-	// to a supplementary memory document.
-	AddTask(phase, feature, task, link string) error
-	// WorkTreeLoaded reports whether the session currently holds a parsed
-	// work tree. False means either /project.md does not exist yet or the
-	// initial fetch failed (e.g. demarkus unreachable). The active-task
-	// gate uses this to distinguish "no active task" from "no tree at all."
+	// WorkTreeLoaded reports whether the session currently holds a
+	// parsed work tree. False means either /project.md does not exist
+	// yet or the initial fetch failed (e.g. demarkus unreachable). The
+	// active-task gate uses this to distinguish "no active task" from
+	// "no tree at all."
 	WorkTreeLoaded() bool
 	// NextPendingTask returns the title of the first leaf task in
 	// document order with status TaskPending, or "" when none exists.
@@ -224,6 +209,23 @@ type TaskTracker interface { //nolint:interfacebloat
 	// promises hands-off operation under LevelTrusted+, but the LLM
 	// otherwise tends to stop and wait at task boundaries.
 	NextPendingTask() string
+}
+
+// TaskMutator covers the write-side operations on the project task
+// tree. Tool implementations consume the narrowest mutation surface
+// they need (e.g. project_init only requires InitProject) so a future
+// stub or alternative backing store does not have to satisfy the full
+// tracker contract.
+type TaskMutator interface {
+	// ActivateTask marks a task as active in the work tree and persists.
+	ActivateTask(title string) error
+	// CompleteTask marks a task as done in the work tree and persists.
+	CompleteTask(title string) error
+	// AddTask appends a new pending task under the given phase and
+	// feature, creating the feature if absent, then persists. If link
+	// is non-empty, it is appended to the task title as a markdown link
+	// to a supplementary memory document.
+	AddTask(phase, feature, task, link string) error
 	// InitProject ensures /project.md exists with the given project
 	// name and h1-level phases, then reloads the work tree so
 	// subsequent task operations succeed without manual memory
@@ -231,6 +233,16 @@ type TaskTracker interface { //nolint:interfacebloat
 	// plan. Distinct from memory_publish: project state belongs
 	// here, session notes belong in memory_*.
 	InitProject(name string, phases []string) error
+}
+
+// TaskTracker is the union surface used at the workspace boundary.
+// Tool authors should prefer the narrower [TaskReader] / [TaskMutator]
+// interfaces when their tool only needs one half of the contract; the
+// composition root assertion `workspace.(TaskTracker)` continues to
+// gate task-aware tool registration as a single check.
+type TaskTracker interface {
+	TaskReader
+	TaskMutator
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

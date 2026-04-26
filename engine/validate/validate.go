@@ -13,9 +13,22 @@ package validate
 import (
 	"context"
 
+	sitter "github.com/tree-sitter/go-tree-sitter"
+
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lint"
 )
+
+// LanguageFunc returns the tree-sitter grammar for a given path, or nil
+// when the extension is unsupported. Defined here so every grammar-aware
+// validator (treesitter, architecture, future per-language stages)
+// shares one source of truth — composition roots can resolve a single
+// [highlight.LanguageFor] reference and pass it to N validators without
+// each subpackage re-declaring the contract.
+//
+// The returned [*sitter.Language] is expected to be cached and reused;
+// validators must not call Close() on it.
+type LanguageFunc func(path string) *sitter.Language
 
 // Candidate describes a proposed edit awaiting validation. Before and
 // After hold full file contents so stateless validators (parser,

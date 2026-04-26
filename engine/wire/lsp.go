@@ -21,20 +21,15 @@ type lspServerConfig struct {
 	LanguageID string   `json:"languageId"`
 }
 
-// LSPManager is the interface returned by InitLSP. It combines the
-// capabilities both binaries need: document syncing (for file tracking,
-// includes Close) and diagnostics (for the agent's DiagProvider).
-type LSPManager interface {
-	lang.DocumentSyncer
-	lang.DiagnosticProvider
-}
-
 // InitLSP creates an LSP Manager from config or auto-detection.
 // The events channel receives DiagnosticsUpdated events; the TUI renders
 // them as an overlay while the headless runner ignores them. Both binaries
 // benefit from the DiagProvider interface for agent diagnostics after edits.
 // Returns nil if no language servers are configured or available.
-func InitLSP(projectRoot string, events chan<- event.Event) LSPManager {
+//
+// The returned [lang.ServiceManager] is the canonical port; consumers
+// import engine/lang for the type rather than reaching into wire.
+func InitLSP(projectRoot string, events chan<- event.Event) lang.ServiceManager {
 	configs := loadLSPConfigs(projectRoot)
 	if len(configs) == 0 {
 		configs = defaultLSPConfigs()

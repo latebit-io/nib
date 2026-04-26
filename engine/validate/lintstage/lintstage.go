@@ -117,13 +117,15 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 			slog.Warn("lintstage: linter run failed", "linter", l.Name(), "err", res.Error)
 			continue
 		}
-		// Append up to the storage cap, then stop. A noisy linter
-		// emitting 8 MiB of diagnostics (the lint package's
-		// per-invocation output cap) would otherwise produce
-		// ~100k Finding structs in memory; we'd display 8 and
-		// throw the rest away anyway. Log once per Validate call
-		// when the cap is hit so operators can spot a misbehaving
-		// linter without the warning becoming spam.
+		// Append up to the storage cap. A noisy linter emitting 8 MiB
+		// of diagnostics (the lint package's per-invocation output
+		// cap) would otherwise produce ~100k Finding structs in
+		// memory; we'd display 8 and throw the rest away anyway. Log
+		// once per Validate call when the cap is hit so operators
+		// can spot a misbehaving linter without the warning becoming
+		// spam. Subsequent linters still run — their findings are
+		// dropped at the cap guard but a clean linter following a
+		// noisy one is not silently skipped.
 		for i := range res.Findings {
 			if len(findings) >= maxStoredFindings {
 				if !capped {
@@ -134,9 +136,6 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 				break
 			}
 			findings = append(findings, res.Findings[i])
-		}
-		if capped {
-			break
 		}
 	}
 

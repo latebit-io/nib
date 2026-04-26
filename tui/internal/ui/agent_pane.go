@@ -57,162 +57,10 @@ func statusStreaming(s event.StatusKind) bool {
 	return s == event.StatusThinking || s == event.StatusPlanning
 }
 
-// usageState tracks cumulative token consumption for display.
-// Per-turn, the best available value is used: provider-reported if non-zero,
-// otherwise client-side estimate. This handles mixed runs correctly.
-type usageState struct {
-	totalIn           int  // best-available input tokens (provider or estimate per turn)
-	totalOut          int  // best-available output tokens (provider or estimate per turn)
-	totalCached       int  // provider-reported cached tokens (exact, 0 if unavailable)
-	hasExact          bool // true if any turn reported provider data
-	turns             int
-	streamingChars    int // characters received via AppendToken since last turn completed
-	streamingInputEst int // current LLM call's input estimate (set before Stream, cleared on turn end)
-}
+// Token-usage tracking (usageState, SetStreamingInput, UpdateUsage,
+// UsageIndicator, ResetUsage, formatTokenCount, formatTurnUsage,
+// formatCompacted, formatSessionSummary) lives in agent_pane_usage.go.
 
-// SetStreamingInput updates the current LLM call's input estimate.
-// Called right before Stream() starts so the status bar can show input cost
-// in real-time while the response is streaming.
-func (m *AgentPaneModel) SetStreamingInput(e event.AgentInputEstimate) {
-	m.usage.streamingInputEst = e.System + e.Tools + e.History + e.New
-}
-
-// UpdateUsage accumulates token counts from a turn usage event.
-// Uses provider-reported values when available, falls back to client-side
-// estimates. Resets the streaming counters since the turn data supersedes them.
-func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
-	turnHasProvider := u.PromptTokens > 0 || u.CompletionTokens > 0
-	if turnHasProvider {
-		m.usage.totalIn += u.PromptTokens
-		m.usage.totalOut += u.CompletionTokens
-		m.usage.totalCached += u.CachedTokens
-		m.usage.hasExact = true
-	} else {
-		m.usage.totalIn += u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
-		m.usage.totalOut += u.CompletionEst
-	}
-	m.usage.streamingChars = 0
-	m.usage.streamingInputEst = 0
-	m.usage.turns++
-}
-
-// UsageIndicator returns a compact string for the main editor status bar.
-// Updates in real-time: shows streaming input/output estimates while tokens
-// arrive. Uses ~ prefix when only estimates are available.
-func (m *AgentPaneModel) UsageIndicator() string {
-	streamOut := (m.usage.streamingChars + 3) / 4
-	streamIn := m.usage.streamingInputEst
-
-	in := m.usage.totalIn + streamIn
-	out := m.usage.totalOut + streamOut
-
-	if in == 0 && out == 0 {
-		return ""
-	}
-
-	prefix := "~"
-	if m.usage.hasExact {
-		prefix = ""
-	}
-	s := prefix + formatTokenCount(in) + "↓"
-	if m.usage.totalCached > 0 && m.usage.totalIn > 0 {
-		pct := m.usage.totalCached * 100 / m.usage.totalIn
-		s += fmt.Sprintf("(%d%%⚡)", pct)
-	}
-	s += " " + prefix + formatTokenCount(out) + "↑"
-	return s
-}
-
-// ResetUsage clears accumulated usage for a new agent run.
-func (m *AgentPaneModel) ResetUsage() {
-	m.usage = usageState{}
-}
-
-// formatTokenCount renders a token count as a compact string.
-// < 1000 → "847", ≥ 1000 → "12.3k", ≥ 999950 → "1.0M".
-func formatTokenCount(n int) string {
-	switch {
-	case n >= 999_950: // %.1f rounds 999950+ to 1000.0k — use M instead
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	case n >= 1000:
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
-	default:
-		return fmt.Sprintf("%d", n)
-	}
-}
-
-// formatTurnUsage produces a compact per-turn footer: model · turn N ·
-// token counts · tool count. Rendered dim via the AppendMeta path, so the
-// reader skims it as chrome. Model is optional — omitted when empty so
-// the line still reads well before the model label is known.
-func formatTurnUsage(u event.AgentTurnUsage, model string) string {
-	var b strings.Builder
-	b.WriteString("\n◇ ")
-	if model != "" {
-		b.WriteString(sanitizeInlineDisplay(model))
-		b.WriteString(" · ")
-	}
-	fmt.Fprintf(&b, "turn %d", u.Turn)
-
-	hasProvider := u.PromptTokens > 0 || u.CompletionTokens > 0
-	if hasProvider {
-		fmt.Fprintf(&b, " · %s↓", formatTokenCount(u.PromptTokens))
-		if u.CachedTokens > 0 && u.PromptTokens > 0 {
-			pct := u.CachedTokens * 100 / u.PromptTokens
-			fmt.Fprintf(&b, " (%d%%⚡)", pct)
-		}
-		fmt.Fprintf(&b, " · %s↑", formatTokenCount(u.CompletionTokens))
-	} else {
-		total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
-		if total > 0 {
-			fmt.Fprintf(&b, " · ~%s↓ · ~%s↑", formatTokenCount(total), formatTokenCount(u.CompletionEst))
-		}
-	}
-	if u.ToolCalls > 0 {
-		fmt.Fprintf(&b, " · %d tools", u.ToolCalls)
-	}
-	b.WriteByte('\n')
-	return b.String()
-}
-
-// formatCompacted produces a dim metadata line when conversation history
-// is compacted. Shows tokens before and after so the developer can see
-// how much was saved.
-func formatCompacted(e event.AgentCompacted) string {
-	saved := e.BeforeTokens - e.AfterTokens
-	return fmt.Sprintf("\n[compacted: %s → %s history (saved %s)]\n",
-		formatTokenCount(e.BeforeTokens),
-		formatTokenCount(e.AfterTokens),
-		formatTokenCount(saved))
-}
-
-// formatSessionSummary produces the summary shown when the agent finishes.
-// Matches the per-turn footer's visual language: middle-dot separators and
-// arrow-glyph token counts so session-wide and per-turn metadata feel like
-// one layer of chrome, not two styles.
-func formatSessionSummary(u usageState) string {
-	if u.turns == 0 {
-		return ""
-	}
-	prefix := "~"
-	if u.hasExact {
-		prefix = ""
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Session · %d turns", u.turns)
-	if u.totalIn > 0 || u.totalOut > 0 {
-		fmt.Fprintf(&b, " · %s%s↓", prefix, formatTokenCount(u.totalIn))
-		if u.totalCached > 0 && u.totalIn > 0 {
-			pct := u.totalCached * 100 / u.totalIn
-			fmt.Fprintf(&b, " (%d%%⚡)", pct)
-		}
-		fmt.Fprintf(&b, " · %s%s↑", prefix, formatTokenCount(u.totalOut))
-	}
-	return b.String()
-}
-
-// inputHeight returns the number of rows reserved for the input area
-// (separator + input + status). Uses 1/6 of the pane height, minimum 5.
 func (m *AgentPaneModel) inputHeight() int {
 	h := m.height / 6
 	if h < 5 {
@@ -437,6 +285,11 @@ type AgentPaneModel struct {
 	// prompt. Controls status-bar rendering and rewires Enter/Esc so the
 	// textarea submits an answer (or cancels the run) instead of a goal.
 	awaitingInput *awaitingInputState
+
+	// renderBuf is the per-frame output slice. Hoisted onto the model so
+	// each Render call resizes/clears in place rather than allocating a
+	// fresh []string. Capacity grows to the largest m.height seen.
+	renderBuf []string
 }
 
 // NewAgentPaneModel creates a new agent pane.
@@ -768,277 +621,10 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-// AppendToken sanitizes and appends streaming text from the agent.
-// Uses the stateful sanitizer to handle escape sequences split across chunks.
-// Counts sanitized bytes for real-time output token estimation.
-// Anchors the streaming tint watermark at the first token of a burst so
-// all lines produced during this burst render with the live style.
-func (m *AgentPaneModel) AppendToken(text string) {
-	if m.streamingStartRaw < 0 {
-		// Capture the raw index the token will land on: AppendText's first
-		// part is merged into the last existing raw line, so the burst's
-		// first line is the current end of RawLines (or 0 when empty).
-		start := len(m.RawLines) - 1
-		if start < 0 {
-			start = 0
-		}
-		m.streamingStartRaw = start
-	}
-	clean := m.sanitizer.Sanitize(text)
-	m.usage.streamingChars += len(clean)
-	m.AppendText(clean)
-}
-
-// AppendTurnUsage formats and appends the per-turn footer with the pane's
-// current model label as chrome.
-func (m *AgentPaneModel) AppendTurnUsage(u event.AgentTurnUsage) {
-	m.AppendMeta(formatTurnUsage(u, m.modelLabel))
-}
-
-// AppendMeta sanitizes and appends non-stream chrome text (tool calls, edit
-// markers, errors, bracketed status updates, awaiting-input block). Marks
-// the resulting raw lines so Render can style them dim, separating chrome
-// from the agent's prose. Always begins on a fresh raw line so meta
-// content cannot merge into an in-flight streaming token line.
-//
-// Uses a one-shot sanitizer so it doesn't interfere with the streaming
-// sanitizer state.
-func (m *AgentPaneModel) AppendMeta(text string) {
-	var s sanitize.Sanitizer
-	clean := s.Sanitize(text)
-	if !strings.HasPrefix(clean, "\n") {
-		clean = "\n" + clean
-	}
-	// Force a trailing newline too. Without this, a caller passing a
-	// single-line meta string (no "\n" terminator) would leave the meta
-	// content as the current last raw line. AppendText reuses the last
-	// raw line for the first chunk of the next append, so the first
-	// agent token after the meta block would be merged into that line
-	// and inherit the meta mark — rendering the token dim and leaking
-	// meta fence state into the stream.
-	if !strings.HasSuffix(clean, "\n") {
-		clean += "\n"
-	}
-	firstRaw := len(m.RawLines)
-	m.AppendText(clean)
-	endRaw := len(m.RawLines)
-	// Exclude the trailing empty raw line — AppendText reuses it for the
-	// next incoming chunk, so marking it would dim the first agent token
-	// after this meta block.
-	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
-		endRaw--
-	}
-	if m.metaRawLines == nil {
-		m.metaRawLines = make(map[int]bool)
-	}
-	for i := firstRaw; i < endRaw; i++ {
-		m.metaRawLines[i] = true
-	}
-	// AppendText already ran recomputeCodeBlock, but it saw these lines
-	// as untagged so a stray fence in LLM-supplied reason/error text
-	// may have flipped rawFenceAfter. Recompute from firstRaw now that
-	// metaRawLines is populated — the skip branch resets fence state.
-	m.recomputeCodeBlock(firstRaw)
-	m.invalidateMdCache()
-}
-
-// AppendUserMessage appends the developer's follow-up message as plain text
-// and marks the raw lines so Render() can style them distinctly. Prepends a
-// "── turn N ──" divider and advances the dim watermark so the previous
-// exchange fades into the background. Tracks raw line indices (not wrapped)
-// so styling survives rewrap on resize.
-func (m *AgentPaneModel) AppendUserMessage(text string) {
-	var s sanitize.Sanitizer
-	text = s.Sanitize(text)
-
-	// Watermark for the dim split: everything with a raw index below this
-	// is rendered dim. Captured before any append so the separator itself
-	// belongs to the new turn (bright), and previous content fades.
-	turnStart := len(m.RawLines)
-	m.turnCounter++
-	label := fmt.Sprintf("turn %d", m.turnCounter)
-	// Emit a compact placeholder — Render substitutes the full-width rule
-	// using the label from turnSeparatorRawLines. Storing the label (not
-	// parsing the rendered text) keeps the raw content small and stable
-	// across resizes.
-	m.AppendText("\n\n── " + label + " ──")
-	sepRaw := len(m.RawLines) - 1
-	if m.turnSeparatorRawLines == nil {
-		m.turnSeparatorRawLines = make(map[int]string)
-	}
-	m.turnSeparatorRawLines[sepRaw] = label
-
-	// Second AppendText for the actual user text. Tracks its own start
-	// index so the separator lines are NOT marked as user content.
-	userStart := len(m.RawLines)
-	m.AppendText("\n\nYou: " + text + "\n\n")
-	// Exclude the trailing empty raw line — AppendText reuses the last
-	// raw line for the first chunk of the next append, so marking it
-	// would misclassify the first agent token as a user message.
-	if m.userRawLines == nil {
-		m.userRawLines = make(map[int]bool)
-	}
-	endRaw := len(m.RawLines)
-	if endRaw > userStart && m.RawLines[endRaw-1] == "" {
-		endRaw--
-	}
-	for i := userStart; i < endRaw; i++ {
-		m.userRawLines[i] = true
-	}
-
-	// AppendText ran recomputeCodeBlock before user lines were marked, so
-	// fence state may have advanced through user content (e.g. an unmatched
-	// "```" in the message). Recompute from the turn start now that
-	// userRawLines is populated — this skips user lines and resets fence
-	// state correctly.
-	m.recomputeCodeBlock(turnStart)
-	m.turnStartRaw = turnStart
-	m.invalidateMdCache()
-}
-
-// recomputeCodeBlock rebuilds inCodeAfter starting from raw line index fromRaw.
-// Fence detection runs on RawLines (logical lines) so that wrapping can never
-// split or fabricate a fence. The per-raw-line state is then projected to all
-// wrapped lines belonging to that raw line via wrappedIndex.
-//
-// Fence state is persisted in rawFenceAfter so incremental appends seed from
-// rawFenceAfter[fromRaw-1] in O(1) instead of rescanning the entire prefix.
-//
-// Fences follow CommonMark rules: 3+ backticks or tildes, 0–3 leading spaces,
-// opener can have info string, closer must use the same char at >= opener
-// length with no non-space content after. This correctly handles nested fences
-// (e.g. ```“ wrapping an inner ```).
-func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
-	// Size inCodeAfter to match Lines.
-	for len(m.inCodeAfter) < len(m.Lines) {
-		m.inCodeAfter = append(m.inCodeAfter, false)
-	}
-	m.inCodeAfter = m.inCodeAfter[:len(m.Lines)]
-
-	// Truncate rawFenceAfter to fromRaw so we rebuild from there.
-	if fromRaw < len(m.rawFenceAfter) {
-		m.rawFenceAfter = m.rawFenceAfter[:fromRaw]
-	}
-
-	// Seed from persisted state — O(1).
-	var fence fenceState
-	if fromRaw > 0 && fromRaw-1 < len(m.rawFenceAfter) {
-		fence = m.rawFenceAfter[fromRaw-1]
-	}
-
-	for ri := fromRaw; ri < len(m.RawLines); ri++ {
-		// User messages are rendered with userMessageStyle, not markdown.
-		// Skip them so an unmatched fence in user input doesn't bleed into
-		// subsequent agent output.
-		if m.userRawLines[ri] || m.plainRawLines[ri] || m.metaRawLines[ri] {
-			// All three classes bypass fence detection: user messages,
-			// awaiting-input blocks, and meta chrome (tool calls, edit
-			// proposals, errors) may carry LLM-supplied text with
-			// unmatched backticks that must not flip the state of
-			// subsequent agent output.
-			m.rawFenceAfter = append(m.rawFenceAfter, fence)
-			wStart := m.wrappedIndex[ri]
-			wEnd := len(m.Lines)
-			if ri+1 < len(m.wrappedIndex) {
-				wEnd = m.wrappedIndex[ri+1]
-			}
-			for wi := wStart; wi < wEnd; wi++ {
-				m.inCodeAfter[wi] = false
-			}
-			continue
-		}
-
-		fenceBefore := fence
-		fc, fl, closeable := parseFenceLine(m.RawLines[ri])
-		if fl > 0 {
-			if fence.len == 0 {
-				// Not in a code block — any fence opens one (info string allowed).
-				fence = fenceState{char: fc, len: fl}
-			} else if closeable && fc == fence.char && fl >= fence.len {
-				// In a code block — only close if no trailing non-space content.
-				fence = fenceState{}
-			}
-		}
-
-		// A raw line is "code" if we were inside a fence before processing it
-		// (body + closer) OR if processing it opened a fence (opener). This
-		// ensures all wrapped segments of a closer line are marked as code,
-		// not just the first one.
-		lineIsCode := fenceBefore.len > 0 || fence.len > 0
-
-		// Persist fence state for this raw line.
-		m.rawFenceAfter = append(m.rawFenceAfter, fence)
-
-		// Fill all wrapped lines that belong to this raw line.
-		wStart := m.wrappedIndex[ri]
-		wEnd := len(m.Lines)
-		if ri+1 < len(m.wrappedIndex) {
-			wEnd = m.wrappedIndex[ri+1]
-		}
-		for wi := wStart; wi < wEnd; wi++ {
-			m.inCodeAfter[wi] = lineIsCode
-		}
-	}
-}
-
-// parseFenceLine checks if line is a code fence (opener or closer).
-// Returns the fence character ('`' or '~'), the run length, and whether the
-// line can act as a closer (no non-space content after the fence run).
-// Returns 0, 0, false if the line is not a fence at all.
-//
-// CommonMark rules: 0–3 leading spaces, 3+ of the same fence char. An opener
-// may have trailing info text (canClose=false). A closer must have only
-// optional trailing spaces (canClose=true).
-func parseFenceLine(line string) (ch rune, count int, canClose bool) {
-	runes := []rune(line)
-	i := 0
-
-	// Skip 0–3 leading spaces.
-	spaces := 0
-	for i < len(runes) && runes[i] == ' ' && spaces < 3 {
-		i++
-		spaces++
-	}
-	if i >= len(runes) {
-		return 0, 0, false
-	}
-
-	ch = runes[i]
-	if ch != '`' && ch != '~' {
-		return 0, 0, false
-	}
-
-	// Count consecutive fence chars.
-	start := i
-	for i < len(runes) && runes[i] == ch {
-		i++
-	}
-	count = i - start
-	if count < 3 {
-		return 0, 0, false
-	}
-
-	// A closer requires only optional trailing spaces after the fence run.
-	canClose = true
-	for j := i; j < len(runes); j++ {
-		if runes[j] != ' ' && runes[j] != '\t' {
-			canClose = false
-			break
-		}
-	}
-
-	return ch, count, canClose
-}
-
-// isCodeLine returns true when Lines[i] should be rendered with code block styling.
-// This covers the opening fence, body lines, and the closing fence — all wrapped
-// segments of a raw line share the same flag.
-func (m *AgentPaneModel) isCodeLine(i int) bool {
-	if i < 0 || i >= len(m.inCodeAfter) {
-		return false
-	}
-	return m.inCodeAfter[i]
-}
+// Streaming-text transcript pipeline (AppendToken,
+// AppendTurnUsage, AppendMeta, AppendUserMessage,
+// recomputeCodeBlock, parseFenceLine, isCodeLine) lives in
+// agent_pane_transcript.go.
 
 func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	scrollLines := 3
@@ -1976,7 +1562,13 @@ func (m *AgentPaneModel) Render() string {
 		return ""
 	}
 
-	output := make([]string, m.height)
+	if cap(m.renderBuf) < m.height {
+		m.renderBuf = make([]string, m.height)
+	} else {
+		m.renderBuf = m.renderBuf[:m.height]
+		clear(m.renderBuf)
+	}
+	output := m.renderBuf
 	row := 0
 
 	// Use package-level style vars directly — no local copies needed

@@ -9,15 +9,17 @@ import (
 )
 
 // TaskTool handles task status updates in the project work tree.
-// Uses the TaskTracker interface to update state through the session,
+// Uses the TaskMutator interface to update state through the session,
 // avoiding direct memory writes and keeping the work tree consistent.
 type TaskTool struct {
-	tracker TaskTracker
+	tracker TaskMutator
 }
 
 // NewTaskTool creates a task tracking tool. The tracker is obtained via
 // type assertion on the workspace — nil tracker disables the tool.
-func NewTaskTool(tracker TaskTracker) *TaskTool {
+// TaskMutator covers ActivateTask and CompleteTask; the read-side
+// surface is unused here so depending on it would be overreach.
+func NewTaskTool(tracker TaskMutator) *TaskTool {
 	return &TaskTool{tracker: tracker}
 }
 

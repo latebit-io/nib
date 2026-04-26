@@ -16,7 +16,6 @@ import (
 	"log/slog"
 	"maps"
 	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -149,6 +148,13 @@ func (s *Sink) Append(_ context.Context, e capture.Event) error {
 	// holds a reference to.
 	if s.cfg.Redactor != nil {
 		e = s.cfg.Redactor(e)
+	}
+	if e.Timestamp.IsZero() {
+		// Stamp after the redactor so a redactor that reconstructs the
+		// event (and zeroes Timestamp) cannot reintroduce an unstamped
+		// event into the queue. formatEvent fails closed on a zero
+		// timestamp, so the invariant must hold here.
+		e.Timestamp = s.cfg.Clock()
 	}
 	e = capEventFields(e, s.cfg.MaxFieldBytes)
 
@@ -288,30 +294,32 @@ func (s *Sink) writeSummary(ctx context.Context) {
 	s.mu.Unlock()
 }
 
-// formatSummary renders the close-time summary block. Stable ordering
-// (sorted kinds) keeps the output deterministic for tests and diffs.
+// formatSummary renders the close-time summary block. encoding/json
+// sorts map keys lexicographically when marshalling map[string]T, so
+// the resulting "counts" object is deterministic across runs without
+// hand-rolled iteration.
 func formatSummary(counts map[string]int, dropped int, closedAt time.Time) string {
-	kinds := make([]string, 0, len(counts))
-	for k := range counts {
-		kinds = append(kinds, k)
+	payload := struct {
+		ClosedAt string         `json:"closed_at"`
+		Dropped  int            `json:"dropped"`
+		Counts   map[string]int `json:"counts"`
+	}{
+		ClosedAt: closedAt.UTC().Format(time.RFC3339),
+		Dropped:  dropped,
+		Counts:   counts,
 	}
-	sort.Strings(kinds)
-
+	body, err := json.Marshal(payload)
+	if err != nil {
+		// Cannot occur for the primitive shape above; log defensively
+		// so a future schema change cannot fail silently.
+		slog.Warn("demarkus capture: summary marshal failed", "err", err)
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("\n## Session Summary\n\n")
-	b.WriteString("```json\n{")
-	b.WriteString("\"closed_at\":\"")
-	b.WriteString(closedAt.UTC().Format(time.RFC3339))
-	b.WriteString("\",\"dropped\":")
-	fmt.Fprintf(&b, "%d", dropped)
-	b.WriteString(",\"counts\":{")
-	for i, k := range kinds {
-		if i > 0 {
-			b.WriteString(",")
-		}
-		fmt.Fprintf(&b, "%q:%d", k, counts[k])
-	}
-	b.WriteString("}}\n```\n")
+	b.WriteString("```json\n")
+	b.Write(body)
+	b.WriteString("\n```\n")
 	return b.String()
 }
 
@@ -332,10 +340,16 @@ func formatHeader(sessionID string, started time.Time) string {
 // wall-clock-timestamped, tagged with the event kind, and followed by a
 // fenced JSON payload so the document is trivially machine-parseable while
 // still being readable.
+//
+// The timestamp must be pre-populated (Append stamps zero values via the
+// configured Clock, after the redactor runs); a zero timestamp here is
+// treated as a contract violation and surfaced rather than silently
+// rendering as the Go epoch — the only path to zero is a redactor that
+// reconstructs the event and forgets to carry the timestamp forward.
 func formatEvent(e capture.Event) (string, error) {
 	ts := e.Timestamp
 	if ts.IsZero() {
-		ts = time.Now()
+		return "", errors.New("demarkus capture: zero event timestamp")
 	}
 	payload, err := json.Marshal(e.Payload)
 	if err != nil {

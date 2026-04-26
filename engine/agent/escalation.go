@@ -1,5 +1,7 @@
 package agent
 
+import "github.com/latebit-io/junto/engine/llm"
+
 // maxTokensEscalator is the optional capability surface LLM providers
 // implement to support runtime escalation of their output-token cap. The
 // agent escalates after detecting a truncated response so the retry has
@@ -8,6 +10,18 @@ type maxTokensEscalator interface {
 	MaxTokens() int
 	SetMaxTokens(int)
 }
+
+// Compile-time assertions that every shipped llm.Provider continues to
+// satisfy maxTokensEscalator. The agent escalates via type assertion at
+// runtime; without these declarations, a renamed method on any
+// implementation would silently degrade to "no escalation possible" and
+// the agent would loop against the same truncation ceiling. The
+// assertion forces the regression to surface at build time.
+var (
+	_ maxTokensEscalator = (*llm.AgentAPI)(nil)
+	_ maxTokensEscalator = (*llm.AnthropicAPI)(nil)
+	_ maxTokensEscalator = (*llm.CodexAPI)(nil)
+)
 
 // maxTokensInitialEscalation is the starting value used when the provider
 // had no cap set (e.g. OpenAI-compat defaults to "unset"). Chosen to give

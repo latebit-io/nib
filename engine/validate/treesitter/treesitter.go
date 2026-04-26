@@ -19,6 +19,7 @@ package treesitter
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
@@ -35,22 +36,16 @@ const StageName = "tree-sitter"
 // so large it blows out the model's context window.
 const maxReportedErrors = 5
 
-// LanguageFunc returns the tree-sitter grammar for a given path, or nil
-// when the extension is unsupported. The returned *sitter.Language is
-// expected to be cached and reused by the caller — the validator does
-// not call Close() on it.
-type LanguageFunc func(path string) *sitter.Language
-
 // Validator is the tree-sitter-backed syntax-regression validator.
 type Validator struct {
-	langFor LanguageFunc
+	langFor validate.LanguageFunc
 }
 
 // New constructs a Validator wired to the given language resolver.
 // A nil langFor makes the validator a permanent no-op — Applicable
 // returns false, Validate returns Pass. This matches the overall
 // null-object posture: missing dependencies degrade to pass-through.
-func New(langFor LanguageFunc) *Validator {
+func New(langFor validate.LanguageFunc) *Validator {
 	return &Validator{langFor: langFor}
 }
 
@@ -82,10 +77,22 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 
 	beforeErrors, err := countErrors(ctx, lang, c.Before)
 	if err != nil {
+		// Pass-through on parser failure so a grammar bug or transient
+		// allocation error doesn't block edits, but surface the cause —
+		// silent disablement of the syntax-regression gate is exactly the
+		// kind of "looks fine in prod, broken in CI" hazard. Skip the log
+		// when the context was cancelled: that's the caller's signal, not
+		// an unexpected fault.
+		if ctx.Err() == nil {
+			slog.Warn("tree-sitter: baseline parse failed", "path", c.Path, "err", err)
+		}
 		return validate.Result{Verdict: validate.Pass, Stage: StageName}
 	}
 	afterErrors, err := collectErrors(ctx, lang, c.After)
 	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("tree-sitter: candidate parse failed", "path", c.Path, "err", err)
+		}
 		return validate.Result{Verdict: validate.Pass, Stage: StageName}
 	}
 

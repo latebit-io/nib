@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -204,7 +205,7 @@ func hasMakefileTarget(projectRoot, name string) bool {
 	// line-by-line so we don't confuse it with a target inside a
 	// recipe ("\tname:" prefixed by tab is a shell command).
 	prefix := name + ":"
-	for line := range splitLines(string(data)) {
+	for line := range strings.Lines(string(data)) {
 		if len(line) > 0 && line[0] == '\t' {
 			continue
 		}
@@ -213,26 +214,6 @@ func hasMakefileTarget(projectRoot, name string) bool {
 		}
 	}
 	return false
-}
-
-// splitLines yields each line of s without allocating a slice. Mirrors
-// strings.Split(s, "\n") semantics — empty trailing line is omitted
-// when s has a trailing newline.
-func splitLines(s string) func(yield func(string) bool) {
-	return func(yield func(string) bool) {
-		start := 0
-		for i := 0; i < len(s); i++ {
-			if s[i] == '\n' {
-				if !yield(s[start:i]) {
-					return
-				}
-				start = i + 1
-			}
-		}
-		if start < len(s) {
-			yield(s[start:])
-		}
-	}
 }
 
 // exists reports whether projectRoot/name is a file or directory.

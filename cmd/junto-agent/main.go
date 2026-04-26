@@ -167,6 +167,12 @@ func run() error {
 		}()
 	}
 
+	// Setup cancellation via SIGINT/SIGTERM. Established before
+	// StartMemory so a Ctrl-C during the seed RPC unwinds cleanly
+	// instead of being held off until the agent run begins.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Ensure demarkus binaries are installed.
 	if err := wire.EnsureBinaries(projectRoot); err != nil {
 		return setupErr("memory: install binaries: %v", err)
@@ -185,7 +191,7 @@ func run() error {
 	slog.Debug("llm config", "profile", llmResolved.Profile, "model", llmResolved.Model)
 
 	// Start memory server.
-	mem, err := wire.StartMemory(projectRoot)
+	mem, err := wire.StartMemory(ctx, projectRoot)
 	if err != nil {
 		return setupErr("memory: %v", err)
 	}
@@ -236,10 +242,6 @@ func run() error {
 		)
 	}
 	ag := agent.New(provider, workspace, events, opts, mcpResult.Tools...)
-
-	// Setup cancellation via SIGINT/SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Stderr writer — streams status in TTY or verbose mode.
 	stderr := io.Writer(io.Discard)

@@ -62,5 +62,11 @@
       "instruction": "Prefer stdlib over third-party packages when the stdlib solution is adequate. Never reimplement functionality available in the standard library.",
       "enforcement": "hard"
     }
-  ]
+  ],
+  "architecture": {
+    "max_file_lines": 800,
+    "max_function_lines": 80,
+    "max_functions_per_file": 30,
+    "action": "warn"
+  }
 }

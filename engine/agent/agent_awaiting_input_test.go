@@ -68,91 +68,39 @@ func drainUntil(t *testing.T, ch <-chan event.Event, timeout time.Duration, matc
 	}
 }
 
-func TestAgent_RequestInput_RoundTrip(t *testing.T) {
-	provider := &multiTurnProvider{
-		turns: [][]llm.StreamEvent{
-			// Turn 1: LLM asks via request_input.
-			{
-				{
-					ToolCalls: []llm.ToolCall{{
-						ID:   "call-ri",
-						Type: "function",
-						Function: llm.FunctionCall{
-							Name: "request_input",
-							Arguments: `{
-								"prompt": "Fix all or only new?",
-								"options": [
-									{"id":"fix-all","label":"Fix every violation"},
-									{"id":"fix-new","label":"Only fix new ones"}
-								]
-							}`,
-						},
-					}},
-					Done: true,
-				},
-			},
-			// Turn 2: LLM receives the answer, emits no tool calls, turn ends.
-			{
-				{Token: "ok, fixing all."},
-				{Done: true},
-			},
-		},
-	}
+// TestAgent_RequestInputUnregisteredAcrossModes verifies the
+// request_input tool is NOT registered in either Headless or
+// Interactive mode, in either the tools map or the LLM-facing
+// definitions slice. The tool was deliberately removed because the
+// LLM was using it as a workaround for tool-surface friction
+// ("which strategy should I pick?") rather than for genuine goal
+// ambiguity. If a legitimate use case re-emerges, re-register
+// behind a feature flag — never as an always-on default.
+func TestAgent_RequestInputUnregisteredAcrossModes(t *testing.T) {
+	t.Parallel()
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
-
-	// Drain events until we see AgentAwaitingInput.
-	awaitEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentAwaitingInput)
-		return ok
-	})
-	if awaitEv == nil {
-		t.Fatal("timeout waiting for AgentAwaitingInput")
+	cases := []struct {
+		name string
+		mode InteractionMode
+	}{
+		{"headless", Headless},
+		{"interactive", Interactive},
 	}
-	ae := awaitEv.(event.AgentAwaitingInput)
-	if ae.Prompt != "Fix all or only new?" {
-		t.Errorf("Prompt = %q", ae.Prompt)
-	}
-	if ae.CallID != "call-ri" {
-		t.Errorf("CallID = %q, want call-ri", ae.CallID)
-	}
-	if len(ae.Options) != 2 || ae.Options[0].ID != "fix-all" {
-		t.Errorf("Options = %+v", ae.Options)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			events := make(chan event.Event, 8)
+			ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
+				&NewOptions{Interaction: tc.mode})
 
-	// Developer answers with the first option.
-	ag.AnswerInput("fix-all")
-
-	// Drain until turn 2 ends with AgentWaiting (turn-end signal).
-	waitEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentWaiting)
-		return ok
-	})
-	if waitEv == nil {
-		t.Fatal("timeout waiting for AgentWaiting after answer")
-	}
-
-	// Verify the answer was delivered to the LLM as a tool-role message
-	// tied to the request_input call ID.
-	provider.mu.Lock()
-	defer provider.mu.Unlock()
-	var found bool
-	for _, msg := range provider.toolInputs {
-		// The agent appends an intent reminder to tool results, so the
-		// content starts with the raw answer but isn't byte-equal.
-		if msg.ToolCallID == "call-ri" && strings.HasPrefix(msg.Content, "fix-all") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("answer not delivered as tool message for call-ri; got %+v", provider.toolInputs)
+			if _, ok := ag.tools["request_input"]; ok {
+				t.Errorf("request_input registered in %s mode; want absent", tc.name)
+			}
+			for _, def := range ag.toolDefs {
+				if def.Function.Name == "request_input" {
+					t.Errorf("request_input advertised in %s tool defs; want absent", tc.name)
+				}
+			}
+		})
 	}
 }
 
@@ -393,57 +341,13 @@ func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 	}
 }
 
-func TestAgent_RequestInput_CancelDuringAwait(t *testing.T) {
-	provider := &multiTurnProvider{
-		turns: [][]llm.StreamEvent{
-			{
-				{
-					ToolCalls: []llm.ToolCall{{
-						ID:   "call-ri",
-						Type: "function",
-						Function: llm.FunctionCall{
-							Name:      "request_input",
-							Arguments: `{"prompt":"pick"}`,
-						},
-					}},
-					Done: true,
-				},
-			},
-		},
-	}
-
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
-
-	// Wait for the prompt to arrive, then cancel.
-	awaitEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentAwaitingInput)
-		return ok
-	})
-	if awaitEv == nil {
-		t.Fatal("timeout waiting for AgentAwaitingInput")
-	}
-	cancel()
-
-	// The agent run must end (AgentDone with Success=false).
-	doneEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentDone)
-		return ok
-	})
-	if doneEv == nil {
-		t.Fatal("timeout waiting for AgentDone after cancel")
-	}
-	if doneEv.(event.AgentDone).Success {
-		t.Error("AgentDone.Success should be false after cancel")
-	}
-}
-
+// TestAgent_AnswerInput_NoPendingIsNoOp verifies that calling
+// AnswerInput when no prompt is pending is safe (drops the answer
+// without blocking or panicking). This guards the dormant
+// awaiting-input infrastructure that remains wired into the Session
+// and TUI even though the LLM-facing request_input tool was
+// removed — the surface API stays defensive.
 func TestAgent_AnswerInput_NoPendingIsNoOp(t *testing.T) {
-	// Same pattern as Approve/Reject/Continue: calling AnswerInput with
-	// no pending prompt must not block or panic — the answer is dropped.
 	events := make(chan event.Event, 8)
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, nil)
 
@@ -456,96 +360,5 @@ func TestAgent_AnswerInput_NoPendingIsNoOp(t *testing.T) {
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("AnswerInput blocked with no pending prompt")
-	}
-}
-
-func TestAgent_HeadlessMode_RequestInputNotRegistered(t *testing.T) {
-	events := make(chan event.Event, 8)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, &NewOptions{Interaction: Headless})
-
-	// Tool registry must not contain request_input in headless mode.
-	if _, ok := ag.tools["request_input"]; ok {
-		t.Error("request_input should not be registered in headless mode")
-	}
-	// Tool definitions advertised to the LLM must not include it either.
-	for _, def := range ag.toolDefs {
-		if def.Function.Name == "request_input" {
-			t.Error("request_input should not be advertised in headless tool defs")
-		}
-	}
-}
-
-func TestAgent_InteractiveMode_RequestInputIsRegistered(t *testing.T) {
-	events := make(chan event.Event, 8)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, &NewOptions{Interaction: Interactive})
-
-	if _, ok := ag.tools["request_input"]; !ok {
-		t.Error("request_input must be registered in interactive mode")
-	}
-	var advertised bool
-	for _, def := range ag.toolDefs {
-		if def.Function.Name == "request_input" {
-			advertised = true
-			break
-		}
-	}
-	if !advertised {
-		t.Error("request_input must be advertised in interactive tool defs")
-	}
-}
-
-func TestAgent_RequestInput_AnswerDrainedAcrossRuns(t *testing.T) {
-	// Stale answers from a previous run must not leak into a fresh run's
-	// awaitingInputCh. RunWithMode drains the channel at start.
-	provider := &multiTurnProvider{
-		turns: [][]llm.StreamEvent{
-			{
-				{
-					ToolCalls: []llm.ToolCall{{
-						ID:       "call-ri",
-						Type:     "function",
-						Function: llm.FunctionCall{Name: "request_input", Arguments: `{"prompt":"pick"}`},
-					}},
-					Done: true,
-				},
-			},
-			{{Done: true}}, // turn 2 after answer
-		},
-	}
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
-
-	// Prime the channel with a stale answer, then start a run. If the
-	// drain didn't happen, the stale answer would satisfy the new prompt
-	// and the test would observe a non-empty tool input for the new run.
-	ag.awaitingInputCh <- "STALE"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
-	awaitEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentAwaitingInput)
-		return ok
-	})
-	if awaitEv == nil {
-		t.Fatal("timeout waiting for AgentAwaitingInput in fresh run")
-	}
-	// The stale STALE was drained; provide a fresh answer.
-	ag.AnswerInput("fresh")
-	waitEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentWaiting)
-		return ok
-	})
-	if waitEv == nil {
-		t.Fatal("timeout waiting for AgentWaiting")
-	}
-
-	provider.mu.Lock()
-	defer provider.mu.Unlock()
-	for _, msg := range provider.toolInputs {
-		if strings.HasPrefix(msg.Content, "STALE") {
-			t.Fatal("stale answer leaked into new run — drain failed")
-		}
 	}
 }

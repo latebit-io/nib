@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Detect returns the default set of linters for projectRoot, chosen by
@@ -50,6 +51,60 @@ func FromShellCommands(cmds []string) []Linter {
 		linters = append(linters, &RawLinter{Command: c})
 	}
 	return linters
+}
+
+// DetectPerFile returns linters that operate safely on a single isolated
+// file — useful for the pre-approval validator stage which writes the
+// candidate's After content to a temp file (no package context). Used
+// alongside [Detect]; the latter returns the full per-task set
+// (golangci-lint, go vet) which need real package layout.
+//
+// Today's per-file safe set: luacheck for Lua projects. Add new entries
+// when an adapter is verified to behave correctly with no surrounding
+// package — gofmt is the obvious next candidate. Returning nil means
+// "no per-file linter for this project"; the validator stage skips
+// itself in that case via Applicable.
+func DetectPerFile(projectRoot string) []Linter {
+	if isLuaProject(projectRoot) {
+		if _, err := exec.LookPath("luacheck"); err == nil {
+			slog.Info("lint: per-file luacheck available for Lua project")
+			return []Linter{&RawLinter{Command: "luacheck {file}"}}
+		}
+		slog.Debug("lint: Lua project detected but luacheck not on PATH (per-file)")
+	}
+	return nil
+}
+
+// PerFileShellCommands wraps each user-configured shell command in a
+// RawLinter, but skips commands that cannot safely run against an
+// isolated single file. A command must contain "{file}" to qualify —
+// commands that only reference {dir} (or neither placeholder) operate
+// on a whole directory and would mis-report when fed a temp directory
+// holding only the candidate's content.
+//
+// Returns nil when no qualifying commands are present so callers can
+// distinguish "user configured no per-file lint" from "ran clean."
+func PerFileShellCommands(cmds []string) []Linter {
+	if len(cmds) == 0 {
+		return nil
+	}
+	var linters []Linter
+	for _, c := range cmds {
+		if !containsFilePlaceholder(c) {
+			continue
+		}
+		linters = append(linters, &RawLinter{Command: c})
+	}
+	return linters
+}
+
+// containsFilePlaceholder reports whether cmd references the {file}
+// placeholder, marking it safe for per-file dispatch.
+func containsFilePlaceholder(cmd string) bool {
+	// Use a simple substring check — RawLinter uses the same approach.
+	// We deliberately do not parse the shell command; the placeholder
+	// substring is sufficient for classification.
+	return strings.Contains(cmd, "{file}")
 }
 
 func goModExists(projectRoot string) bool {

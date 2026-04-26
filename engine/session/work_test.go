@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/latebit-io/junto/engine/memory"
@@ -293,4 +295,59 @@ func TestReloadWorkTree(t *testing.T) {
 func newWorkTestSession(t *testing.T) *Session {
 	t.Helper()
 	return New(nil, t.TempDir())
+}
+
+// TestBuildProjectSkeleton_SanitisesNameAndPhases verifies that LLM-
+// supplied name/phase strings containing newlines or excessive
+// whitespace are collapsed to a single line. Without this, a
+// multi-line name could close the `---` frontmatter early or inject
+// phantom YAML keys, and a multi-line phase title could create
+// unintended phases or task lines — the project parser is a naive
+// line splitter and would happily mis-parse the corruption.
+func TestBuildProjectSkeleton_SanitisesNameAndPhases(t *testing.T) {
+	t.Parallel()
+
+	// Name with embedded newline + a phase with a newline that would
+	// otherwise become a second `# Heading` in the rendered doc.
+	doc := buildProjectSkeleton(
+		"My\n---\nproject: hijacked\nProject",
+		[]string{"Foundation\n# Smuggled Phase\n- [>] smuggled task"},
+	)
+
+	tree := project.Parse(doc)
+	if tree.ProjectName != "My --- project: hijacked Project" {
+		t.Errorf("ProjectName = %q; want collapsed single-line value", tree.ProjectName)
+	}
+	if len(tree.Roots) != 1 {
+		t.Fatalf("Roots = %d; want exactly 1 (no smuggled headings): %s", len(tree.Roots), doc)
+	}
+	if !strings.Contains(tree.Roots[0].Title, "Foundation") {
+		t.Errorf("Phase title = %q; want sanitised Foundation prefix", tree.Roots[0].Title)
+	}
+	if strings.Contains(tree.Roots[0].Title, "\n") {
+		t.Errorf("Phase title must not contain newline: %q", tree.Roots[0].Title)
+	}
+	if len(tree.Roots[0].Children) != 0 {
+		t.Errorf("phase has %d unexpected children — newline injection may have created phantom tasks: %+v",
+			len(tree.Roots[0].Children), tree.Roots[0].Children)
+	}
+}
+
+// TestBuildProjectSkeleton_CapsPhaseCount verifies the phase count
+// cap kicks in for absurdly large LLM input. Without the cap, sloppy
+// agent output could write a multi-MB /project.md before the
+// demarkus body-size check rejects it.
+func TestBuildProjectSkeleton_CapsPhaseCount(t *testing.T) {
+	t.Parallel()
+
+	phases := make([]string, maxProjectInitPhases+50)
+	for i := range phases {
+		phases[i] = fmt.Sprintf("Phase %d", i)
+	}
+	doc := buildProjectSkeleton("Big", phases)
+	tree := project.Parse(doc)
+	if len(tree.Roots) != maxProjectInitPhases {
+		t.Errorf("Roots = %d; want cap %d (extra phases must be truncated)",
+			len(tree.Roots), maxProjectInitPhases)
+	}
 }

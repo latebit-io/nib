@@ -57,5 +57,11 @@
       "instruction": "Return errors explicitly. Never panic for recoverable conditions. Every error must be handled — logged or propagated — never silently ignored.",
       "enforcement": "hard"
     }
-  ]
+  ],
+  "architecture": {
+    "max_file_lines": 500,
+    "max_function_lines": 50,
+    "max_functions_per_file": 12,
+    "action": "block"
+  }
 }

@@ -23,8 +23,25 @@ const (
 
 	// LevelTrusted applies proposed edits instantly without requiring approval
 	// or animation, and continues the agent automatically. The developer can
-	// still cancel an in-progress run with Escape.
+	// still cancel an in-progress run with Escape. Validator Block verdicts
+	// (the safety valve for "this edit is structurally wrong") still surface
+	// the diff for review — auto-approval is for routine work, not for edits
+	// the validators flagged as needing developer attention.
 	LevelTrusted AutonomyLevel = 3
+
+	// LevelYolo extends LevelTrusted by ALSO auto-applying edits whose
+	// validator summaries carry a Block verdict. This is an opt-in escape
+	// hatch for benchmark / exploratory runs where the developer has
+	// accepted the risk that architecture caps and similar guards may be
+	// violated, and would rather see the result than be interrupted.
+	//
+	// Use deliberately. The Block verdict exists because at least one
+	// validator stage decided the edit needed eyes — auto-applying it
+	// means the developer is responsible for catching the consequences
+	// (oversized files, broken structure) at PR review or after the
+	// fact rather than at edit time. The autonomy dial defaults to
+	// LevelTrusted on every TUI startup; LevelYolo never persists.
+	LevelYolo AutonomyLevel = 4
 )
 
 // Name returns the short display name for the autonomy level.
@@ -36,6 +53,8 @@ func (l AutonomyLevel) Name() string {
 		return "collaborate"
 	case LevelTrusted:
 		return "trust"
+	case LevelYolo:
+		return "yolo"
 	default:
 		return "unknown"
 	}
@@ -48,7 +67,7 @@ func (l AutonomyLevel) String() string {
 
 // Cycle advances to the next level, wrapping from the highest back to LevelGuided.
 func (l AutonomyLevel) Cycle() AutonomyLevel {
-	if l >= LevelTrusted {
+	if l >= LevelYolo {
 		return LevelGuided
 	}
 	return l + 1
@@ -57,6 +76,12 @@ func (l AutonomyLevel) Cycle() AutonomyLevel {
 // AutoApproveEdits reports whether proposed edits should be applied without
 // requiring explicit developer approval (Ctrl+O).
 func (l AutonomyLevel) AutoApproveEdits() bool { return l >= LevelTrusted }
+
+// AutoApproveBlock reports whether proposed edits whose validator
+// summaries carry a Block verdict should ALSO be auto-applied. Only
+// LevelYolo opts into this — under LevelTrusted the safety valve
+// holds (Block surfaces the diff for explicit Ctrl+O / Esc).
+func (l AutonomyLevel) AutoApproveBlock() bool { return l >= LevelYolo }
 
 // AutoContinue reports whether the agent should continue automatically after
 // an approved edit without requiring an explicit Ctrl+N.

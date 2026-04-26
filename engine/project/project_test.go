@@ -33,6 +33,77 @@ func TestTree_ActiveGoal(t *testing.T) {
 	}
 }
 
+// TestTree_FindNextPendingTask verifies document-order traversal
+// returns the first leaf task with TaskPending. Skips active and
+// done tasks, walks across phases and features. Returns "" when no
+// pending task remains so the agent's auto-continue path knows to
+// stop.
+func TestTree_FindNextPendingTask(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		md   string
+		want string
+	}{
+		{
+			name: "skips active and done, returns next pending",
+			md: `# Phase
+## Feature
+- [x] done
+- [>] active
+- [ ] first pending
+- [ ] second pending
+`,
+			want: "first pending",
+		},
+		{
+			name: "no pending returns empty",
+			md: `# Phase
+## Feature
+- [x] done
+- [>] active
+`,
+			want: "",
+		},
+		{
+			name: "empty tree returns empty",
+			md:   ``,
+			want: "",
+		},
+		{
+			name: "walks across features",
+			md: `# Phase
+## Feature A
+- [x] done a1
+## Feature B
+- [ ] pending b1
+`,
+			want: "pending b1",
+		},
+		{
+			name: "walks across phases",
+			md: `# Phase 1
+## F
+- [x] done
+# Phase 2
+## F
+- [ ] target
+`,
+			want: "target",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := Parse(tc.md)
+			if got := tree.FindNextPendingTask(); got != tc.want {
+				t.Errorf("FindNextPendingTask() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTree_ActiveGoal_None(t *testing.T) {
 	input := "# A\n- [ ] pending\n"
 	tree := Parse(input)

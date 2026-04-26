@@ -119,6 +119,78 @@ func TestRunValidationPipelineRetryConsumesBudget(t *testing.T) {
 	}
 }
 
+// TestRunValidationPipelineBlockConsumesBudget verifies Block verdicts
+// flow through the same retry-budget mechanism as Retry. Without this
+// behaviour a Block verdict would be theatre under autonomous mode:
+// the validator reports a critical issue (architecture cap exceeded,
+// must split file) but the LLM never sees the feedback and the TUI's
+// LevelTrusted gate auto-approves the proposal anyway. This regression
+// test was added after a Pac-Man rerun corrupted main.lua because the
+// architecture validator's Block was ignored end-to-end.
+func TestRunValidationPipelineBlockConsumesBudget(t *testing.T) {
+	t.Parallel()
+
+	queue := make([]validate.Result, maxValidatorRetries+1)
+	for i := range queue {
+		queue[i] = validate.Result{
+			Verdict:  validate.Block,
+			Stage:    "architecture",
+			Feedback: "file too big — split it",
+		}
+	}
+	pipe := &fakePipeline{queue: queue}
+	ag, _ := newPipelineTestAgent(t, pipe)
+
+	// First maxValidatorRetries calls must return feedback so the LLM
+	// gets a chance to fix the architectural issue before the proposal
+	// surfaces to the developer.
+	for i := 0; i < maxValidatorRetries; i++ {
+		_, feedback := ag.runValidationPipeline(context.Background(), sampleProposal())
+		if feedback == "" {
+			t.Errorf("attempt %d: Block returned no feedback; expected retry prompt", i+1)
+		}
+	}
+
+	// Budget exhausted — proposal must surface with summaries so the
+	// TUI's auto-approve gate can refuse approval.
+	summaries, feedback := ag.runValidationPipeline(context.Background(), sampleProposal())
+	if feedback != "" {
+		t.Errorf("exhausted budget produced feedback: %q; expected surface", feedback)
+	}
+	if len(summaries) != 1 || summaries[0].Verdict != "block" {
+		t.Errorf("surfaced summaries = %+v, want one block summary", summaries)
+	}
+}
+
+// TestRunValidationPipelineNonPassWithoutFeedbackSurfaces verifies that
+// a non-Pass verdict with empty Feedback short-circuits to surfacing
+// the proposal rather than sending an empty retry message to the LLM
+// (which would be a useless cycle of "fix this: "). It also asserts
+// the retry budget is NOT consumed: empty-feedback rounds are
+// developer-visible surfaces, not silent retries, and burning a slot
+// would exhaust the budget on attempts that never actually retry.
+func TestRunValidationPipelineNonPassWithoutFeedbackSurfaces(t *testing.T) {
+	t.Parallel()
+
+	pipe := &fakePipeline{queue: []validate.Result{
+		{Verdict: validate.Block, Stage: "x", Feedback: ""},
+	}}
+	ag, _ := newPipelineTestAgent(t, pipe)
+
+	proposal := sampleProposal()
+	summaries, feedback := ag.runValidationPipeline(context.Background(), proposal)
+	if feedback != "" {
+		t.Errorf("empty-feedback non-Pass returned %q; want surface (empty)", feedback)
+	}
+	if len(summaries) != 1 {
+		t.Errorf("summaries = %+v, want one summary surfacing the verdict", summaries)
+	}
+	if got, ok := ag.validatorRetries[proposal.CanonPath]; ok {
+		t.Errorf("empty-feedback round consumed budget: retries[%q] = %d; want untouched",
+			proposal.CanonPath, got)
+	}
+}
+
 // TestRunValidationPipelineResetsOnApproval verifies recordEdit wipes the
 // per-path retry counter so subsequent edits to the same file start with
 // a fresh budget.

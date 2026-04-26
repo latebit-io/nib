@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/latebit-io/junto/engine/lint"
 	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/junto/engine/runconfig"
 	"github.com/latebit-io/junto/engine/validate"
 )
 
@@ -76,20 +78,32 @@ func DetectDistributedMemory(serverNames []string) []string {
 
 // planningBlocklist contains tool names disabled during planning mode.
 // These are write-side tools that modify code or run commands.
+//
+// smoke_run is here because it executes the project's smoke command
+// (typically `make smoke` / `lua main.lua` / etc.) via `sh -c`. That is
+// command execution — same threat profile as bash — and planning mode
+// is supposed to be read-only. The auto-invocation path in
+// runTaskReview only fires from update_task(complete), which is itself
+// blocked here, so the auto-path is naturally suppressed in planning
+// mode too.
 var planningBlocklist = map[string]bool{
-	"edit_file":   true,
-	"write_file":  true,
-	"bash":        true,
-	"update_task": true,
+	"edit_file":    true,
+	"write_file":   true,
+	"replace_file": true,
+	"bash":         true,
+	"smoke_run":    true,
+	"update_task":  true,
 }
 
 // mutatingTools contains tool names that modify filesystem or shell state.
 // In execution mode these require an active `[>]` task in /project.md —
 // the gate enforces "all agent work is tracked in the project tree."
 var mutatingTools = map[string]bool{
-	"edit_file":  true,
-	"write_file": true,
-	"bash":       true,
+	"edit_file":    true,
+	"write_file":   true,
+	"replace_file": true,
+	"bash":         true,
+	"smoke_run":    true,
 }
 
 // Agent drives the multi-turn LLM loop.
@@ -183,6 +197,12 @@ type Agent struct {
 	// instructions rather than buried in tool results.
 	pendingLint string
 
+	// smokeConfig is the resolved smoke-run configuration. Skipped means
+	// no smoke command is available for this project; the agent does not
+	// register the smoke_run tool in that case and runTaskReview skips
+	// the auto-invocation. Read-only after New.
+	smokeConfig runconfig.Resolved
+
 	// terse enables terse output mode — instructs the LLM to minimize
 	// explanatory text, reducing output tokens by ~65%.
 	terse bool
@@ -274,6 +294,12 @@ type NewOptions struct {
 	// prompt instructs the LLM to minimize explanatory text, reducing
 	// output tokens by ~65%. Switchable at runtime via SetTerse.
 	Terse bool
+	// SmokeConfig is the resolved smoke-run configuration for the
+	// project. When non-Skipped, the agent registers the smoke_run
+	// tool and auto-invokes it during runTaskReview so tasks marked
+	// complete are verified by an actual launch — runtime errors that
+	// the parser/lint/architecture stages cannot catch surface here.
+	SmokeConfig runconfig.Resolved
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -299,6 +325,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var linters []lint.Linter
 	var evaluator *StyleEvaluator
 	var terse bool
+	var smokeCfg runconfig.Resolved
 	var pipeline validate.Pipeline = validate.NoopPipeline{}
 	if opts != nil {
 		diagProvider = opts.DiagProvider
@@ -311,6 +338,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		linters = slices.Clone(opts.Linters)
 		evaluator = opts.StyleEvaluator
 		terse = opts.Terse
+		smokeCfg = opts.SmokeConfig
 		if opts.ValidationPipeline != nil {
 			pipeline = opts.ValidationPipeline
 		}
@@ -348,6 +376,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		evaluator:         evaluator,
 		diagDelay:         500 * time.Millisecond,
 		workspace:         workspace,
+		smokeConfig:       smokeCfg,
 	}
 
 	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
@@ -364,6 +393,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		NewReadFileTool(workspace, cache),
 		editTool,
 		NewWriteFileTool(workspace, cache),
+		NewReplaceFileTool(workspace, cache),
 		NewListFilesTool(workspace),
 		NewBashTool(projectRoot),
 	}
@@ -376,13 +406,17 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	builtins = append(builtins, NewGlobTool(workspace))
 	builtins = append(builtins, NewSearchProjectTool(projectRoot))
 	builtins = append(builtins, NewPackageInfoTool(projectRoot))
+	builtins = a.appendSmokeTool(builtins, projectRoot)
 
-	// request_input is interactive-only: headless agents have no developer
-	// to ask, so the tool is not registered and the LLM cannot emit a call.
-	// This forces autonomous decisions at the tool-availability layer.
-	if a.interactionMode != Headless {
-		builtins = append(builtins, NewRequestInputTool())
-	}
+	// request_input was deliberately removed: the LLM was using it as a
+	// workaround for tool-surface friction ("which strategy should I
+	// pick?") rather than for genuine ambiguity in the developer's
+	// goal. With replace_file now covering the wholesale-rewrite case
+	// the friction is gone — and the absence of request_input forces
+	// the LLM to either make a tool call that succeeds or fail loud,
+	// which is a better default than escalating decisions back through
+	// a chat prompt for the developer to dis/approve. Re-register
+	// behind a feature flag if a legitimate use case appears.
 
 	// LSP-powered tools — conditionally registered via type assertion.
 	if diagProvider != nil {
@@ -409,12 +443,15 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 
 	// Task tracking — conditionally registered via type assertion on workspace.
 	// update_task handles activate/complete; project_task_add handles new-task
-	// creation. Both share the same TaskTracker instance so all mutations
-	// route through the session's in-memory work tree.
+	// creation; project_init bootstraps /project.md so the work tree is loaded
+	// before any of those calls fire on a fresh repo. All three share the same
+	// TaskTracker instance so mutations route through the session's in-memory
+	// work tree.
 	if tt, ok := workspace.(TaskTracker); ok {
 		builtins = append(builtins,
 			NewTaskTool(tt),
 			NewProjectTaskAddTool(tt),
+			NewProjectInitTool(tt),
 		)
 	}
 
@@ -1524,16 +1561,30 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 
 	lintWillRun := len(editedFiles) > 0 && len(linters) > 0
 	evalWillRun := len(edits) > 0 && evalConfigured
+	smokeWillRun := len(editedFiles) > 0 && !a.smokeConfig.Skipped &&
+		a.smokeConfig.Command != "" && os.Getenv("JUNTO_SMOKE_DISABLED") == ""
 
 	// Surface "no review configured" when we have work but nothing to check it
 	// with. Silent return used to be indistinguishable from "clean"; now the
 	// developer sees why.
-	if len(editedFiles) > 0 && !lintWillRun && !evalWillRun {
-		a.send(event.AgentToken{Text: "\n[Task complete — no lint or style evaluator configured]\n"})
+	if len(editedFiles) > 0 && !lintWillRun && !evalWillRun && !smokeWillRun {
+		a.send(event.AgentToken{Text: "\n[Task complete — no lint, style evaluator, or smoke run configured]\n"})
 	}
 
 	if lintWillRun {
 		a.runLinters(ctx, linters, editedFiles, editedDirs, filesByDir)
+	}
+
+	// Smoke runs verify the artifact actually launches — runtime errors
+	// the parser/lint/architecture stages cannot catch. The result is
+	// appended to the review so the LLM sees it on the next turn (it
+	// can decide to reopen the task and fix the regression).
+	if smokeWillRun {
+		smokeMsg := a.runSmokeReview(ctx)
+		if smokeMsg != "" {
+			review.WriteString("\n\n")
+			review.WriteString(smokeMsg)
+		}
 	}
 
 	// Run evaluator on all edits.
@@ -1542,7 +1593,42 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 		review.WriteString(evalMsg)
 	}
 
+	if hint := a.nextTaskHint(); hint != "" {
+		review.WriteString("\n\n")
+		review.WriteString(hint)
+	}
+
 	return review.String() + a.intentReminder()
+}
+
+// nextTaskHint returns a one-line nudge identifying the next pending
+// task in the work tree, or "" when no pending task remains. Appended
+// to runTaskReview's output so the LLM sees a concrete next step
+// after a task completes — without this, even under LevelTrusted the
+// model tends to stop and wait for developer input ("yes continue")
+// at every task boundary, making "trust mode" feel like guided mode.
+//
+// The hint is informational. The LLM still has to call
+// update_task(action:"activate", title:"<title>") to actually start
+// the next task — the gate at enforceActiveTaskGate enforces this so
+// no work happens off the tracked plan. The hint just removes the
+// "what now?" pause.
+//
+// Empty when:
+//   - The workspace doesn't implement TaskTracker (no project plan).
+//   - No tasks are pending (all done; agent should naturally finish).
+func (a *Agent) nextTaskHint() string {
+	tt, ok := a.workspace.(TaskTracker)
+	if !ok {
+		return ""
+	}
+	next := tt.NextPendingTask()
+	if next == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Next pending task: %q. Call update_task(action:\"activate\", title:%q) to start it, or call update_task(action:\"complete\") on the project itself when there is genuinely nothing more to do.",
+		next, next)
 }
 
 // groupEditsByDir returns the unique edited file paths, unique package
@@ -1628,6 +1714,62 @@ func (a *Agent) runLinters(ctx context.Context, linters []lint.Linter, editedFil
 type infraError struct {
 	name string
 	err  error
+}
+
+// appendSmokeTool registers the smoke_run tool when the project's
+// smokeConfig is non-Skipped and resolves to a real command. Extracted
+// from registerTools so the latter stays under the func-length cap and
+// the gate logic is easier to review in isolation.
+//
+// Honours JUNTO_SMOKE_DISABLED end-to-end: when the env var is set
+// the tool is NOT advertised to the LLM at all, matching the
+// auto-invocation suppression in runTaskReview. Without this guard
+// the kill-switch was a half-disable — auto-runs went silent but the
+// LLM could still invoke smoke_run directly, which is the opposite
+// of what an operator setting the env var wants. Read at agent-
+// construction time, matching how JUNTO_VALIDATORS_DISABLED gates
+// the validation pipeline at the composition root; flipping the
+// env var mid-session does not toggle live behaviour.
+func (a *Agent) appendSmokeTool(builtins []Tool, projectRoot string) []Tool {
+	if os.Getenv("JUNTO_SMOKE_DISABLED") != "" {
+		return builtins
+	}
+	if a.smokeConfig.Skipped {
+		return builtins
+	}
+	if a.smokeConfig.Command == "" {
+		return builtins
+	}
+	return append(builtins, NewSmokeRunTool(projectRoot, a.smokeConfig))
+}
+
+// runSmokeReview invokes the configured smoke-run command once at task
+// completion and returns a formatted result for inclusion in the
+// runTaskReview output. Returns an empty string only when the
+// configuration is Skipped at call time (the JUNTO_SMOKE_DISABLED env
+// var path is checked by the caller).
+//
+// Smoke runs do not consume the per-path validatorRetries budget — that
+// counter is per-edit, while smoke fires per task. The LLM's incentive
+// to fix runtime regressions comes from the failure being included in
+// the update_task tool result; under autonomous mode it will iterate
+// without further plumbing, and under guided mode the developer sees
+// the failure and decides whether to push the agent forward.
+func (a *Agent) runSmokeReview(ctx context.Context) string {
+	cfg := a.smokeConfig
+	if cfg.Skipped {
+		return ""
+	}
+	// Surface only the source (make-smoke / lua-main / config / …)
+	// not the resolved command — `.project/run.json` may contain
+	// inline env assignments or auth flags, and this banner ends up
+	// in the capture sink (and from there in the session journal,
+	// which can be distributed). The command itself reaches debug
+	// logs (process-local) and the actual exec, both of which are
+	// dev-machine-local; persisted surfaces stay redacted.
+	a.send(event.AgentToken{Text: fmt.Sprintf("\n[Smoke run: %s]\n", cfg.Source)})
+	res := runSmoke(ctx, a.workspace.ProjectRoot(), cfg)
+	return formatSmokeResult(cfg, res)
 }
 
 // formatFindings renders structured lint.Findings as plain text for injection
@@ -1786,10 +1928,18 @@ func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) s
 // feedback means the caller should proceed to the comprehension gate
 // with the returned summaries attached to AgentEditProposed.
 //
-// The retry budget is per-path (CanonPath) so repeated breakage of the
-// same file eventually surfaces, while unrelated files retain fresh
-// budgets. Counters are reset on successful approval and on run
-// boundaries.
+// Retry AND Block both consume the per-CanonPath retry budget. Block
+// would otherwise be theatre under autonomous mode: the validator
+// reports a critical issue (architecture-cap exceeded, must split this
+// file) but the LLM never sees the feedback and the TUI's
+// LevelTrusted gate auto-approves the broken proposal anyway. Feeding
+// Block feedback through the same retry channel gives the LLM a chance
+// to self-correct (architectural fixes are big but tractable —
+// "extract these functions into a sibling file"), and budget exhaustion
+// surfaces the proposal so the developer sees the failure. The TUI
+// applies an additional safety valve that refuses auto-approval when
+// any summary carries Verdict="block" — see [tui.AppModel.Update]
+// where it routes EditProposed events.
 func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal) ([]event.ValidatorSummary, string) {
 	if a.pipeline == nil {
 		return nil, ""
@@ -1808,15 +1958,28 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 
 	summaries := toValidatorSummaries(results)
 
-	if validate.WorstVerdict(results) != validate.Retry {
+	worst := validate.WorstVerdict(results)
+	if worst == validate.Pass {
 		return summaries, ""
 	}
 
-	// Retry path: the LLM can likely self-correct. Consume a budget
-	// slot; if exhausted, fall through with the summaries attached so
-	// the developer sees what the validators flagged. The map is also
-	// mutated by RunWithMode/Reply/recordEdit, so every access is
-	// guarded by a.mu — matching the existing recordEdit pattern.
+	// Non-Pass path (Retry or Block): if the validators produced no
+	// actionable feedback, there's nothing to send the LLM — surface
+	// the proposal so the developer can intervene. Compute feedback
+	// BEFORE touching validatorRetries: an empty-feedback round is a
+	// developer-visible surface, not a silent retry, and burning a
+	// budget slot for it would exhaust the budget on attempts that
+	// never actually retry.
+	feedback := aggregateRetryFeedback(results)
+	if feedback == "" {
+		return summaries, ""
+	}
+
+	// Actionable feedback exists — this is a real silent retry. Consume
+	// a budget slot; if exhausted, surface so the developer sees what
+	// the validators flagged. The map is also mutated by
+	// RunWithMode/Reply/recordEdit, so every access is guarded by a.mu —
+	// matching the existing recordEdit pattern.
 	a.mu.Lock()
 	a.validatorRetries[proposal.CanonPath]++
 	attempts := a.validatorRetries[proposal.CanonPath]
@@ -1824,10 +1987,10 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 
 	if attempts > maxValidatorRetries {
 		slog.Warn("validator retry budget exhausted; surfacing proposal",
-			"path", proposal.CanonPath, "attempts", attempts)
+			"path", proposal.CanonPath, "attempts", attempts, "verdict", worst.String())
 		return summaries, ""
 	}
-	return summaries, aggregateRetryFeedback(results)
+	return summaries, feedback
 }
 
 // toValidatorSummaries projects validate.Result onto the leaner
@@ -1894,7 +2057,16 @@ func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg
 // the expected result to detect developer modifications.
 func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) string {
 	a.send(event.AgentStatus{Status: event.StatusEditing})
-	a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
+	// Render the "press Ctrl+N to continue" prompt only at LevelGuided
+	// (where the developer actually has to press Ctrl+N). At
+	// LevelCollaborate+ the autonomous flag is set and continue fires
+	// automatically — the message is then visual noise that reads
+	// like an approval prompt and confused testers ("why did it ask
+	// for my approval?"). The StatusEditing chip transition is the
+	// signal in autonomous modes.
+	if !a.currentAutonomous() {
+		a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
+	}
 
 	select {
 	case <-ctx.Done():

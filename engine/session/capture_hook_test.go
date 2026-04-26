@@ -156,7 +156,7 @@ func TestCaptureRejectedOnRejectEdit(t *testing.T) {
 	sess.HandleEvent(event.AgentEditProposed{Edit: event.PendingEdit{
 		ID: "edit-2", Path: "main.go", Search: "hello", Replace: "goodbye",
 	}})
-	sess.RejectEdit()
+	sess.RejectEdit("user")
 
 	kinds := sink.kinds()
 	if len(kinds) != 2 || kinds[0] != "proposal" || kinds[1] != "rejected" {
@@ -164,6 +164,48 @@ func TestCaptureRejectedOnRejectEdit(t *testing.T) {
 	}
 	if got := sink.snapshot()[1].Payload["source"]; got != "user" {
 		t.Errorf("rejected source = %v, want user", got)
+	}
+}
+
+// TestCaptureRejectedSourceDistinguishesAutoFromUser verifies the
+// reject capture event preserves the source distinction so post-mortem
+// analysis can tell a developer-driven Esc from an auto-reject (search
+// mismatch, missing editor, etc.). The Pac-Man rerun surfaced a
+// silent auto-reject that was mislabeled as "user" — the developer
+// thought they had hit Esc when in fact the search-text-mismatch
+// path had fired. This test locks the contract that the source
+// string the caller passes is what the capture event records.
+func TestCaptureRejectedSourceDistinguishesAutoFromUser(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{"user reject", "user", "user"},
+		{"search mismatch auto-reject", "search-mismatch", "search-mismatch"},
+		{"file not open auto-reject", "file-not-open", "file-not-open"},
+		{"empty source defaults to unknown", "", "unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := newTestSession("hello world")
+			sink := &fakeSink{}
+			sess.SetEventSink(sink)
+			sess.HandleEvent(event.AgentEditProposed{Edit: event.PendingEdit{
+				ID: "e", Path: "main.go", Search: "hello", Replace: "x",
+			}})
+			sess.RejectEdit(tc.source)
+
+			snap := sink.snapshot()
+			if len(snap) < 2 {
+				t.Fatalf("expected at least 2 events, got %d", len(snap))
+			}
+			if got := snap[1].Payload["source"]; got != tc.want {
+				t.Errorf("rejected source = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

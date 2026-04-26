@@ -71,6 +71,7 @@ func resolve(cfg *Config) *Resolved {
 		LintCmd:        s.LintCmd,
 		Evaluator:      s.Evaluator,
 		EvaluatorModel: s.EvaluatorModel,
+		Architecture:   s.Architecture,
 	}
 }
 
@@ -106,6 +107,7 @@ func loadBuiltins() *Config {
 		}
 
 		warnInvalidEnforcement(entry.Name(), s.Rules)
+		warnInvalidArchitectureAction(entry.Name(), s.Name, s.Architecture.Action)
 
 		// Key is the filename without extension: "solid-hexagonal.json" → "solid-hexagonal".
 		key := strings.TrimSuffix(entry.Name(), ".json")
@@ -138,6 +140,46 @@ func warnInvalidEnforcement(source string, rules []Rule) {
 	}
 }
 
+// isValidArchitectureAction reports whether action is one of the
+// known values, applying the same normalisation
+// (lowercase + trim) the consumer's [Architecture.normalisedAction]
+// uses. Without this, a project config with "Action": "BLOCK" would
+// be rejected by the merge path and silently fall back to whichever
+// value the builtin shipped — even though the architecture struct's
+// own contract says comparisons are case-insensitive. Empty is
+// treated as valid because empty defaults to "warn" downstream.
+func isValidArchitectureAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "", "warn", "block", "off":
+		return true
+	}
+	return false
+}
+
+// canonicalArchitectureAction returns the lowercase trimmed form of
+// action so merged configs store a single canonical representation.
+// Pass-through "" for unset values; callers must check before using
+// the result as a non-empty signal.
+func canonicalArchitectureAction(action string) string {
+	return strings.ToLower(strings.TrimSpace(action))
+}
+
+// warnInvalidArchitectureAction logs a warning when source declares an
+// architecture.action that is not one of the known values. The merge
+// path additionally REFUSES to overwrite a valid builtin with an
+// invalid value (see [mergeConfigs]) — a typo in a project config
+// must not silently demote `block` to the default `warn`, which
+// would change UX behaviour (silent retry vs surface to developer)
+// rather than just prompt wording.
+func warnInvalidArchitectureAction(source, styleName, action string) {
+	if isValidArchitectureAction(action) {
+		return
+	}
+	slog.Warn("styleconfig: invalid architecture action",
+		"source", source, "style", styleName,
+		"action", action, "expected", "warn|block|off")
+}
+
 // loadFile reads and parses a single config file.
 // Returns nil on missing file or parse error.
 func loadFile(path string) *Config {
@@ -158,6 +200,7 @@ func loadFile(path string) *Config {
 	}
 	for name, s := range cfg.Styles {
 		warnInvalidEnforcement(path+":"+name, s.Rules)
+		warnInvalidArchitectureAction(path+":"+name, name, s.Architecture.Action)
 	}
 	return &cfg
 }
@@ -191,6 +234,37 @@ func mergeConfigs(dst, src *Config) {
 		}
 		if ss.EvaluatorModel != "" {
 			ds.EvaluatorModel = ss.EvaluatorModel
+		}
+		// Architecture merges field-by-field so a project file can tighten
+		// one cap without forcing the developer to repeat the others.
+		if ss.Architecture.MaxFileLines > 0 {
+			ds.Architecture.MaxFileLines = ss.Architecture.MaxFileLines
+		}
+		if ss.Architecture.MaxFunctionLines > 0 {
+			ds.Architecture.MaxFunctionLines = ss.Architecture.MaxFunctionLines
+		}
+		if ss.Architecture.MaxFunctionsPerFile > 0 {
+			ds.Architecture.MaxFunctionsPerFile = ss.Architecture.MaxFunctionsPerFile
+		}
+		// Action overwrites only with a known value, normalised to
+		// lowercase canonical form. An invalid action (typo in
+		// project/global config) would otherwise silently replace a
+		// builtin "block" with garbage, which normalisedAction maps
+		// to the default "warn" — silently demoting Block→Retry is
+		// a UX regression we refuse to accept. The load path
+		// already emitted a warn-level log at file load via
+		// warnInvalidArchitectureAction; this branch is the safety
+		// net. Canonicalising at write time means downstream
+		// consumers can compare strings directly without re-running
+		// normalisedAction in every read site.
+		//
+		// Canonicalise FIRST, then gate. A whitespace-only string
+		// passes isValidArchitectureAction (which trims internally
+		// and accepts "") but canonicalises to "" — the raw-string
+		// check missed it and we'd silently clear an inherited
+		// policy.
+		if action := canonicalArchitectureAction(ss.Architecture.Action); action != "" && isValidArchitectureAction(action) {
+			ds.Architecture.Action = action
 		}
 		dst.Styles[name] = ds
 	}

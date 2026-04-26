@@ -12,10 +12,12 @@ type stubTracker struct {
 	addErr   error
 }
 
-func (s *stubTracker) ActivateTask(string) error { return nil }
-func (s *stubTracker) CompleteTask(string) error { return nil }
-func (s *stubTracker) ActiveTaskPath() string    { return "" }
-func (s *stubTracker) WorkTreeLoaded() bool      { return true }
+func (s *stubTracker) ActivateTask(string) error          { return nil }
+func (s *stubTracker) CompleteTask(string) error          { return nil }
+func (s *stubTracker) ActiveTaskPath() string             { return "" }
+func (s *stubTracker) WorkTreeLoaded() bool               { return true }
+func (s *stubTracker) NextPendingTask() string            { return "" }
+func (s *stubTracker) InitProject(string, []string) error { return nil }
 func (s *stubTracker) AddTask(p, f, t, l string) error {
 	s.addCalls = append(s.addCalls, struct{ phase, feature, task, link string }{p, f, t, l})
 	return s.addErr

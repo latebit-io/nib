@@ -198,6 +198,49 @@ func TestPromptLoaderFallsBackToEmbedded(t *testing.T) {
 	}
 }
 
+// TestSystemPromptAutonomousModeRules verifies the autonomous-mode
+// section ships the "stop asking permission" instructions. The
+// Pac-Man rerun showed the LLM ending turns with "Say keep going
+// and I'll continue Phase 3/4" — even at LevelTrusted/LevelYolo —
+// because the prompt didn't explicitly forbid the offer-pattern.
+// These keywords lock the fix in.
+func TestSystemPromptAutonomousModeRules(t *testing.T) {
+	t.Parallel()
+
+	loader := NewPromptLoader("")
+
+	autonomous := loader.SystemPrompt(SystemPromptData{Autonomous: true})
+	for _, want := range []string{
+		"Autonomous Mode",
+		"WILL NOT be answered",
+		"immediately activate the next pending task",
+	} {
+		if !strings.Contains(autonomous, want) {
+			t.Errorf("autonomous prompt missing %q", want)
+		}
+	}
+
+	// Ensure the ask-permission language is gated OUT in autonomous mode.
+	if strings.Contains(autonomous, "ask the developer:") {
+		t.Errorf("autonomous prompt still contains ask-permission instruction")
+	}
+
+	// Non-autonomous mode keeps the original ask-language. The
+	// lint-violations ask only renders when CodingStyle is set
+	// (it's inside the `## Style Lint` block) — so the test must
+	// supply a non-nil CodingStyle to exercise that gate.
+	guided := loader.SystemPrompt(SystemPromptData{
+		Autonomous:  false,
+		CodingStyle: &CodingStyleData{Name: "test", Rules: []string{}},
+	})
+	if strings.Contains(guided, "Autonomous Mode") {
+		t.Errorf("non-autonomous prompt should not include the Autonomous Mode section")
+	}
+	if !strings.Contains(guided, "ask the developer:") {
+		t.Errorf("non-autonomous prompt should retain the lint-violations ask-language")
+	}
+}
+
 func TestSystemPromptIncludesMemorySection(t *testing.T) {
 	loader := NewPromptLoader("")
 	system := loader.SystemPrompt(SystemPromptData{})

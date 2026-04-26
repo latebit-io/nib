@@ -1939,15 +1939,32 @@ func (s *Session) AbortApproval() {
 	}
 }
 
-// RejectEdit rejects the pending edit and signals the agent.
-func (s *Session) RejectEdit() {
+// RejectEdit rejects the pending edit and signals the agent. The
+// source string is captured into the session journal so post-mortem
+// analysis can distinguish a developer-driven reject (Esc keypress)
+// from a system-driven auto-reject (search-text mismatch, missing
+// editor, etc.). Pre-fix this always recorded "user" regardless of
+// caller, which made auto-reject silent failures appear as if the
+// developer had intervened — a meaningful UX-debugging hazard.
+//
+// Callers in the TUI:
+//   - ActionAgentReject (Esc keypress)   → source "user"
+//   - EditProposed search-mismatch path  → source "search-mismatch"
+//   - ApproveEdit "file not open" path   → source "file-not-open"
+//
+// Empty source defaults to "unknown" so the field is always present
+// and downstream parsers don't have to special-case missing values.
+func (s *Session) RejectEdit(source string) {
 	if s.pendingEdit == nil || !s.HasAgent() {
 		return
+	}
+	if source == "" {
+		source = "unknown"
 	}
 	s.emitCapture("rejected", map[string]any{
 		"id":     s.pendingEdit.ID,
 		"path":   s.pendingEdit.Path,
-		"source": "user",
+		"source": source,
 	})
 	s.pendingEdit = nil
 	s.pendingProposedReplace = ""

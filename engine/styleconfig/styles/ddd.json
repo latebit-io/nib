@@ -52,5 +52,11 @@
       "instruction": "The domain layer has zero imports from infrastructure (database, HTTP, messaging). All external concerns are injected through interfaces defined in the domain.",
       "enforcement": "hard"
     }
-  ]
+  ],
+  "architecture": {
+    "max_file_lines": 500,
+    "max_function_lines": 40,
+    "max_functions_per_file": 15,
+    "action": "warn"
+  }
 }

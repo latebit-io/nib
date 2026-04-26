@@ -190,7 +190,15 @@ type Workspace interface {
 // TaskTracker is an optional interface for workspaces that support
 // structured task tracking via a work tree. Tools type-assert to this
 // interface — it is not required for basic workspace operations.
-type TaskTracker interface {
+//
+// nolint:interfacebloat — the methods here are all coordinated views
+// of one concept (the project task tree) and Session implements them
+// all naturally. Splitting into TaskActivator + TaskAdder + TaskHinter +
+// ProjectInitializer would push the same surface across four
+// interfaces, multiply test-stub boilerplate, and force every caller
+// to type-assert on N narrower interfaces. The bloat is conceptual,
+// not interface-segregation.
+type TaskTracker interface { //nolint:interfacebloat
 	// ActivateTask marks a task as active in the work tree and persists.
 	ActivateTask(title string) error
 	// CompleteTask marks a task as done in the work tree and persists.
@@ -208,6 +216,21 @@ type TaskTracker interface {
 	// initial fetch failed (e.g. demarkus unreachable). The active-task
 	// gate uses this to distinguish "no active task" from "no tree at all."
 	WorkTreeLoaded() bool
+	// NextPendingTask returns the title of the first leaf task in
+	// document order with status TaskPending, or "" when none exists.
+	// The agent's runTaskReview path uses this to append a hint after
+	// a task completes so the LLM has a clear next step without the
+	// developer having to type "continue" — the autonomy contract
+	// promises hands-off operation under LevelTrusted+, but the LLM
+	// otherwise tends to stop and wait at task boundaries.
+	NextPendingTask() string
+	// InitProject ensures /project.md exists with the given project
+	// name and h1-level phases, then reloads the work tree so
+	// subsequent task operations succeed without manual memory
+	// bootstrapping. Idempotent — never overwrites an existing
+	// plan. Distinct from memory_publish: project state belongs
+	// here, session notes belong in memory_*.
+	InitProject(name string, phases []string) error
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent

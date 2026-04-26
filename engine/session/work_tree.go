@@ -164,6 +164,95 @@ func (w *WorkTreeManager) Reload() error {
 	return w.load()
 }
 
+// InitProject ensures /project.md exists in demarkus with the given
+// project name and h1-level phase headings, then reloads the work
+// tree so subsequent SetActiveGoal / AddTask calls succeed without
+// the agent having to bootstrap memory by hand.
+//
+// Idempotent: if /project.md already exists, the existing document is
+// preserved untouched and only the tree is reloaded. Callers that
+// want to RESET the tree must delete the document via demarkus
+// first; the agent must not be able to wipe the developer's plan.
+//
+// Returns nil on success, error if memory is not configured or the
+// fetch/publish/parse round-trip fails. Empty `phases` is allowed —
+// a tree with only a project header is still loadable; the LLM can
+// add phases by calling project_task_add (which auto-creates
+// missing features under an existing phase, but does NOT create
+// phases).
+func (w *WorkTreeManager) InitProject(name string, phases []string) error {
+	w.mu.RLock()
+	store := w.store
+	w.mu.RUnlock()
+	if store == nil {
+		return errors.New("memory store not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Idempotency check: if the document already exists with a body,
+	// just reload — never overwrite the developer's existing plan.
+	doc, err := store.Fetch(ctx, workTreePath)
+	switch {
+	case err == nil && strings.TrimSpace(doc.Body) != "":
+		return w.Reload()
+	case err != nil && !errors.Is(err, memory.ErrNotFound):
+		return fmt.Errorf("fetch %s: %w", workTreePath, err)
+	}
+
+	body := buildProjectSkeleton(name, phases)
+	if _, err := store.Publish(ctx, workTreePath, body, 0); err != nil {
+		return fmt.Errorf("publish %s: %w", workTreePath, err)
+	}
+	return w.Reload()
+}
+
+// maxProjectInitPhases caps the number of phases written by
+// buildProjectSkeleton. The phases come from an LLM-driven tool call
+// (project_init); without a cap, sloppy or runaway output could write
+// an absurdly large /project.md before the demarkus body-size check
+// rejects it. 256 is generous for any real project structure and
+// cheap to enforce.
+const maxProjectInitPhases = 256
+
+// sanitizeProjectInitLine collapses any whitespace runs (including
+// embedded newlines) to a single space. This protects the
+// frontmatter and heading lines from LLM-supplied multi-line values
+// that would otherwise inject extra `---` delimiters, phantom YAML
+// keys, or unintended markdown structure into /project.md — the
+// project parser is a naive line splitter and would happily mis-parse
+// the corruption.
+func sanitizeProjectInitLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// buildProjectSkeleton renders the YAML-frontmatter + h1-phase
+// scaffold the project parser expects. Empty phases produces a tree
+// with only the frontmatter — still valid, just empty. Inputs are
+// single-line-normalised and the phase count is capped — see
+// [sanitizeProjectInitLine] and [maxProjectInitPhases] for the
+// threat model.
+func buildProjectSkeleton(name string, phases []string) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	fmt.Fprintf(&b, "project: %s\n", sanitizeProjectInitLine(name))
+	b.WriteString("---\n")
+	for i, p := range phases {
+		if i >= maxProjectInitPhases {
+			slog.Warn("buildProjectSkeleton: phase count exceeded cap; truncating",
+				"got", len(phases), "cap", maxProjectInitPhases)
+			break
+		}
+		title := sanitizeProjectInitLine(p)
+		if title == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n# %s\n", title)
+	}
+	return b.String()
+}
+
 // WorkTreeSnapshot holds the result of a background work tree fetch.
 type WorkTreeSnapshot struct {
 	Tree    *project.Tree

@@ -47,5 +47,11 @@
       "instruction": "Tests serve as documentation. A new developer should understand the system's behavior by reading the test suite. Organize tests by feature or user story, not by internal module.",
       "enforcement": "soft"
     }
-  ]
+  ],
+  "architecture": {
+    "max_file_lines": 400,
+    "max_function_lines": 30,
+    "max_functions_per_file": 20,
+    "action": "warn"
+  }
 }

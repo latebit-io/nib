@@ -52,5 +52,11 @@
       "instruction": "Package and directory names reflect business concepts (orders, users, payments), not technical roles (models, controllers, services). The structure screams the domain.",
       "enforcement": "soft"
     }
-  ]
+  ],
+  "architecture": {
+    "max_file_lines": 600,
+    "max_function_lines": 50,
+    "max_functions_per_file": 20,
+    "action": "warn"
+  }
 }

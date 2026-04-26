@@ -288,6 +288,157 @@ func TestMergeConfigs(t *testing.T) {
 	}
 }
 
+// TestMergeConfigsArchitectureFieldwise verifies the per-field merge
+// rules — empty fields preserve dst, non-empty values overwrite, and
+// each field merges independently so a project tightening only
+// MaxFileLines does not have to repeat MaxFunctionLines etc.
+func TestMergeConfigsArchitectureFieldwise(t *testing.T) {
+	dst := &Config{Styles: map[string]Style{
+		"a": {
+			Name: "A",
+			Architecture: Architecture{
+				MaxFileLines:        300,
+				MaxFunctionLines:    20,
+				MaxFunctionsPerFile: 15,
+				Action:              "block",
+			},
+		},
+	}}
+	src := &Config{Styles: map[string]Style{
+		"a": {
+			Architecture: Architecture{
+				MaxFileLines: 500, // override only this field
+			},
+		},
+	}}
+
+	mergeConfigs(dst, src)
+
+	a := dst.Styles["a"].Architecture
+	if a.MaxFileLines != 500 {
+		t.Errorf("MaxFileLines = %d, want 500 (overwritten)", a.MaxFileLines)
+	}
+	if a.MaxFunctionLines != 20 {
+		t.Errorf("MaxFunctionLines = %d, want 20 (preserved)", a.MaxFunctionLines)
+	}
+	if a.MaxFunctionsPerFile != 15 {
+		t.Errorf("MaxFunctionsPerFile = %d, want 15 (preserved)", a.MaxFunctionsPerFile)
+	}
+	if a.Action != "block" {
+		t.Errorf("Action = %q, want block (preserved)", a.Action)
+	}
+}
+
+// TestMergeConfigsRejectsInvalidArchitectureAction verifies a typo in
+// project/global Architecture.Action does NOT overwrite a valid
+// builtin. Without this guard, "blcok" would land in dst, then
+// normalisedAction would map it to "warn" — silently demoting a
+// block-policy preset to a warn-policy one and changing UX
+// behaviour (silent retry vs surface-to-developer).
+func TestMergeConfigsRejectsInvalidArchitectureAction(t *testing.T) {
+	dst := &Config{Styles: map[string]Style{
+		"clean": {
+			Name:         "Clean",
+			Architecture: Architecture{MaxFileLines: 300, Action: "block"},
+		},
+	}}
+	src := &Config{Styles: map[string]Style{
+		"clean": {
+			Architecture: Architecture{Action: "blcok"}, // typo
+		},
+	}}
+
+	mergeConfigs(dst, src)
+
+	if got := dst.Styles["clean"].Architecture.Action; got != "block" {
+		t.Errorf("Action = %q, want %q (invalid override must be refused)", got, "block")
+	}
+}
+
+// TestIsValidArchitectureAction locks in the accepted set so a
+// well-meaning "let me also accept 'enforce'" PR fails loud here
+// instead of silently expanding the policy surface. Validation is
+// case-insensitive and whitespace-tolerant — matching
+// [Architecture.normalisedAction]'s contract — so a project config
+// with `"Action": "BLOCK"` is accepted by the merge path rather
+// than silently dropped.
+func TestIsValidArchitectureAction(t *testing.T) {
+	cases := []struct {
+		action string
+		want   bool
+	}{
+		{"", true},
+		{"warn", true},
+		{"block", true},
+		{"off", true},
+		{"WARN", true},    // case-insensitive
+		{"Block", true},   // mixed case
+		{"  off  ", true}, // whitespace-tolerant
+		{"enforce", false},
+		{"blcok", false},
+		{"warning", false}, // close to a valid value but not equal
+	}
+	for _, tc := range cases {
+		if got := isValidArchitectureAction(tc.action); got != tc.want {
+			t.Errorf("isValidArchitectureAction(%q) = %v, want %v", tc.action, got, tc.want)
+		}
+	}
+}
+
+// TestMergeConfigsRejectsWhitespaceOnlyArchitectureAction verifies a
+// whitespace-only Action value (typo, accidental space) does NOT
+// clear an inherited builtin policy. isValidArchitectureAction
+// trims internally and accepts "" as a valid value, so the merge
+// gate must canonicalise BEFORE checking — otherwise a "   " in
+// project config silently demotes a builtin "block" to "" → "warn".
+func TestMergeConfigsRejectsWhitespaceOnlyArchitectureAction(t *testing.T) {
+	dst := &Config{Styles: map[string]Style{
+		"clean": {
+			Name:         "Clean",
+			Architecture: Architecture{MaxFileLines: 300, Action: "block"},
+		},
+	}}
+	src := &Config{Styles: map[string]Style{
+		"clean": {
+			Architecture: Architecture{Action: "   "},
+		},
+	}}
+
+	mergeConfigs(dst, src)
+
+	if got := dst.Styles["clean"].Architecture.Action; got != "block" {
+		t.Errorf("Action = %q, want %q (whitespace-only must not clear inherited policy)",
+			got, "block")
+	}
+}
+
+// TestMergeConfigsCanonicalisesArchitectureAction verifies that a
+// case/whitespace variant of a known action is stored in canonical
+// lowercase form, so downstream string comparisons don't have to
+// re-normalise. isValidArchitectureAction is already case-insensitive
+// (it lowercases + trims internally), so "BLOCK" is accepted — the
+// risk this test guards is the merge path writing the raw "BLOCK"
+// through, forcing every read site to re-run normalisedAction.
+func TestMergeConfigsCanonicalisesArchitectureAction(t *testing.T) {
+	dst := &Config{Styles: map[string]Style{
+		"clean": {
+			Name:         "Clean",
+			Architecture: Architecture{Action: "warn"},
+		},
+	}}
+	src := &Config{Styles: map[string]Style{
+		"clean": {
+			Architecture: Architecture{Action: "BLOCK"},
+		},
+	}}
+
+	mergeConfigs(dst, src)
+
+	if got := dst.Styles["clean"].Architecture.Action; got != "block" {
+		t.Errorf("Action = %q, want %q (canonical lowercase from BLOCK)", got, "block")
+	}
+}
+
 func TestResolveLintCmd(t *testing.T) {
 	projectRoot := t.TempDir()
 	dir := filepath.Join(projectRoot, ".project")

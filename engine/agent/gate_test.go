@@ -13,11 +13,13 @@ type gateTracker struct {
 	activePath string
 }
 
-func (g *gateTracker) ActivateTask(string) error       { return nil }
-func (g *gateTracker) CompleteTask(string) error       { return nil }
-func (g *gateTracker) AddTask(_, _, _, _ string) error { return nil }
-func (g *gateTracker) ActiveTaskPath() string          { return g.activePath }
-func (g *gateTracker) WorkTreeLoaded() bool            { return g.loaded }
+func (g *gateTracker) ActivateTask(string) error          { return nil }
+func (g *gateTracker) CompleteTask(string) error          { return nil }
+func (g *gateTracker) AddTask(_, _, _, _ string) error    { return nil }
+func (g *gateTracker) ActiveTaskPath() string             { return g.activePath }
+func (g *gateTracker) WorkTreeLoaded() bool               { return g.loaded }
+func (g *gateTracker) NextPendingTask() string            { return "" }
+func (g *gateTracker) InitProject(string, []string) error { return nil }
 
 // gateTestWorkspace wraps gateTracker so it satisfies both Workspace
 // (via an embedded testWorkspace) and TaskTracker.
@@ -77,7 +79,7 @@ func TestEnforceActiveTaskGate_TreeNotLoadedAllows(t *testing.T) {
 func TestEnforceActiveTaskGate_NoActiveTaskBlocks(t *testing.T) {
 	tracker := &gateTracker{loaded: true, activePath: ""}
 	a := newGateTestAgent(tracker, ModeExecution)
-	for _, tool := range []string{"edit_file", "write_file", "bash"} {
+	for _, tool := range []string{"edit_file", "write_file", "replace_file", "bash", "smoke_run"} {
 		msg := a.enforceActiveTaskGate(context.Background(), tool)
 		if msg == "" {
 			t.Errorf("%s should have been blocked", tool)

@@ -58,6 +58,32 @@ func (s *Session) WorkTreeLoaded() bool {
 	return s.workTree.TreeLoaded()
 }
 
+// InitProject implements agent.TaskTracker. Bootstraps /project.md
+// with the given name and h1-phase headings, then reloads the work
+// tree so subsequent task operations succeed. Idempotent — never
+// overwrites an existing plan; if /project.md already exists, this
+// just refreshes the in-memory tree.
+//
+// Distinct from memory_publish (which is for session memory and
+// arbitrary docs) — this tool is the only sanctioned path for
+// creating the project's task-tracking document.
+func (s *Session) InitProject(name string, phases []string) error {
+	return s.workTree.InitProject(name, phases)
+}
+
+// NextPendingTask implements agent.TaskTracker. Returns the title of
+// the first leaf task in document order with status TaskPending, or
+// "" when none remains. The agent's runTaskReview hook appends this
+// to the task-completion review so the LLM has a clear next step
+// without the developer typing "continue" between every task.
+func (s *Session) NextPendingTask() string {
+	t := s.WorkTree()
+	if t == nil {
+		return ""
+	}
+	return t.FindNextPendingTask()
+}
+
 // ReloadWorkTree re-fetches the work tree from demarkus.
 func (s *Session) ReloadWorkTree() error {
 	return s.workTree.Reload()

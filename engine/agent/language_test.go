@@ -22,7 +22,6 @@ func TestDetectLanguage(t *testing.T) {
 		{"main.kt", "Kotlin"},
 		{"View.swift", "Swift"},
 		{"main.c", "C"},
-		{"queue.h", "C"},
 		{"engine.cpp", "C++"},
 		{"engine.hpp", "C++"},
 		{"Program.cs", "C#"},
@@ -57,6 +56,12 @@ func TestDetectLanguage(t *testing.T) {
 		{"", ""},
 		{".gitignore", ""},
 		{"some.exe", ""},
+
+		// Ambiguous extensions must return "" — .h is used by C, C++,
+		// and Objective-C with materially different idioms, so anchoring
+		// to any one would mis-guide the reviewer for the other two.
+		{"queue.h", ""},
+		{"View.h", ""},
 	}
 
 	for _, tc := range tests {

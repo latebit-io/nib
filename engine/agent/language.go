@@ -12,8 +12,10 @@ import (
 // importing idioms from whichever language the rule wording resembles.
 //
 // Add new entries when a project surfaces a language we don't yet detect.
-// Unknown extensions return "" — the caller treats that as "language
-// unknown" and skips the language guidance section rather than guessing.
+// Unknown or ambiguous extensions return "" — the caller treats that as
+// "language unknown" and skips the language guidance section rather than
+// guessing. Ambiguous extensions (e.g. .h, used by C, C++, and Obj-C with
+// substantially different idioms) are intentionally absent.
 var languageByExt = map[string]string{
 	".go":     "Go",
 	".lua":    "Lua",
@@ -32,7 +34,6 @@ var languageByExt = map[string]string{
 	".kts":    "Kotlin",
 	".swift":  "Swift",
 	".c":      "C",
-	".h":      "C",
 	".cpp":    "C++",
 	".cc":     "C++",
 	".cxx":    "C++",

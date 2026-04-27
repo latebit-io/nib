@@ -126,6 +126,13 @@ func TestSearchCommandGuard(t *testing.T) {
 		{"chained with &&", "cd src && grep TODO .", true},
 		{"chained with ;", "cd src; grep TODO .", true},
 		{"piped from another command", "cat *.go | grep TODO", true},
+
+		// Blocked — newline-separated multi-line commands (e.g.
+		// pasted into bash -c with a heredoc). Without (?m) and \n
+		// in the boundary class these slipped through.
+		{"newline-separated", "cd src\ngrep TODO .", true},
+		{"newline at start of second tool", "echo hi\nfind . -name '*.go'", true},
+		{"newline + spaces before tool", "set -e\n  rg pattern", true},
 	}
 
 	for _, tt := range tests {
@@ -160,6 +167,7 @@ func TestDestructiveCommandGuard(t *testing.T) {
 		// Allowed.
 		{"rm single file", "rm /tmp/scratch.log", false},
 		{"rm with -f only", "rm -f /tmp/scratch.log", false},
+		{"rm with --recursive alone (interactive)", "rm --recursive build/", false},
 		{"git status", "git status", false},
 		{"git diff", "git diff HEAD~1", false},
 		{"git log", "git log --oneline -5", false},
@@ -191,6 +199,9 @@ func TestDestructiveCommandGuard(t *testing.T) {
 		{"git switch", "git switch main", true},
 		{"git reset hard", "git reset --hard HEAD~1", true},
 		{"git clean -fd", "git clean -fd", true},
+		{"git clean --force", "git clean --force", true},
+		{"git clean --force -d", "git clean --force -d", true},
+		{"git clean -f -d", "git clean -f -d", true},
 	}
 
 	for _, tt := range tests {
@@ -258,6 +269,36 @@ func TestRedactCommandPreview(t *testing.T) {
 			wantPrefix: strings.Repeat("世", 21), // 21 * 3 = 63 bytes <= 64
 			wantSuffix: "…",
 			wantValid:  true,
+		},
+
+		// --- Env-var masking (added 2026-04-27) ---
+		// Inline KEY=VALUE assignments are the most common shape under
+		// which secrets leak into shell-blocked logs. Replace VALUE
+		// with <redacted>; leave the rest of the command intact so the
+		// recognisable shape survives.
+		{
+			name:        "leading env assignment masked",
+			in:          "OPENAI_API_KEY=sk-abc123 ./script.sh",
+			shouldEqual: "OPENAI_API_KEY=<redacted> ./script.sh",
+			wantValid:   true,
+		},
+		{
+			name:        "multiple assignments all masked",
+			in:          "FOO=bar BAZ=qux ./run",
+			shouldEqual: "FOO=<redacted> BAZ=<redacted> ./run",
+			wantValid:   true,
+		},
+		{
+			name:        "non-secret env still over-redacted (acceptable)",
+			in:          "PATH=/usr/bin echo hi",
+			shouldEqual: "PATH=<redacted> echo hi",
+			wantValid:   true,
+		},
+		{
+			name:        "no equals sign — no masking",
+			in:          "echo hello",
+			shouldEqual: "echo hello",
+			wantValid:   true,
 		},
 	}
 	for _, tt := range tests {

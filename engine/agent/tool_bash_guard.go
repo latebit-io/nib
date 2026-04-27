@@ -42,40 +42,63 @@ var (
 	teeRe = regexp.MustCompile(`\btee\s+(?:-a\s+)?(\S+)`)
 
 	// searchCmdRe matches code-search shell tools (grep / rg / ag / ack / find)
-	// invoked at the start of a command segment. The (?:^|[;&|(]) anchor
-	// catches both standalone invocations ("grep -r foo .") and chained
-	// ones ("cd dir && grep -r foo ."). The leading group is non-capturing
-	// (?: …); the tool name is the only capturing group, so
-	// FindStringSubmatch returns [full_match, tool] and callers read the
-	// tool from m[1]. (See [searchCommandGuard] — `m[1]` is the offending
-	// tool name passed into the error message.)
-	searchCmdRe = regexp.MustCompile(`(?:^|[;&|(])\s*\b(grep|rg|ripgrep|ag|ack|find)\b`)
-
-	// destructiveOpRe matches commands that destroy local state without the
-	// developer's explicit ask: `rm -r*f*` / `rm -f*r*` (recursive delete),
-	// `git push`, `git checkout`, `git reset --hard`, `git clean -f`. These
-	// are not theatre — accidental `git checkout .` or `rm -rf` from an
-	// agent loses real work. Block at the tool layer so the dev can opt in
-	// by typing the command themselves if they truly want it.
+	// invoked at the start of a command segment. The (?:^|[;&|(\n]) anchor
+	// catches standalone invocations ("grep -r foo ."), chained ones
+	// ("cd dir && grep -r foo ."), AND newline-separated commands
+	// inside a heredoc-style multi-line bash invocation
+	// ("cd dir\ngrep TODO ."). The (?m) flag makes ^ match at the
+	// start of any line, not just the start of the string — so a
+	// command pasted into bash -c with embedded newlines is caught
+	// at every line head, not only the first.
 	//
-	// rm: any flag run containing both 'r' and 'f' (in either order) is
-	// recursive force-delete. Single-file `rm path` is not blocked — it
-	// goes through the normal exit-code path and the dev can see what
-	// happened. Two regexes cover the two shapes:
-	//   - destructiveRmRe: r and f in the same `-` token (`-rf`, `-fr`,
-	//     `--recursive --force`, etc.)
-	//   - destructiveRmSplitRe: r and f in *separate* short-flag tokens
-	//     before any command separator (`rm -r -f x`, `rm -f -r x`,
-	//     `rm -v -r -f x`). The [^|;&]* between flags caps the scan to a
-	//     single rm invocation so a later `rm -r` ; `cmd -f` does not
-	//     cross-fire.
-	destructiveRmRe      = regexp.MustCompile(`\brm\b\s+(?:-{1,2}[a-zA-Z]*(?:rf|fr|recursive)[a-zA-Z]*\b|--recursive\b[^|;&]*--force\b|--force\b[^|;&]*--recursive\b)`)
+	// The leading group is non-capturing (?: …); the tool name is the
+	// only capturing group, so FindStringSubmatch returns
+	// [full_match, tool] and callers read the tool from m[1]. (See
+	// [searchCommandGuard] — `m[1]` is the offending tool name passed
+	// into the error message.)
+	searchCmdRe = regexp.MustCompile(`(?m)(?:^|[;&|(\n])\s*\b(grep|rg|ripgrep|ag|ack|find)\b`)
+
+	// destructiveRmRe / destructiveRmSplitRe / destructiveGitRe match
+	// commands that destroy local state without the developer's explicit
+	// ask: `rm -rf` (recursive force-delete), `git push`, `git checkout`,
+	// `git reset --hard`, `git clean -f`. These are not theatre —
+	// accidental `git checkout .` or `rm -rf` from an agent loses real
+	// work. Block at the tool layer so the dev can opt in by typing
+	// the command themselves if they truly want it.
+	//
+	// rm: only RECURSIVE+FORCE deletes are blocked. `rm path` (single
+	// file) and `rm --recursive path` (interactive recursive, prompts
+	// before each file) are NOT blocked — they go through the normal
+	// exit-code path. Three regexes cover the three shapes:
+	//   - destructiveRmRe (short-flag combo): both 'r' and 'f' in the
+	//     same `-` token (`-rf`, `-fr`, `-vrf`, `-vfr`).
+	//   - destructiveRmRe (long-flag combo): both `--recursive` AND
+	//     `--force` present in either order before any command
+	//     separator. `--recursive` alone is allowed.
+	//   - destructiveRmSplitRe: 'r' and 'f' in *separate* short-flag
+	//     tokens (`rm -r -f x`, `rm -f -r x`, `rm -v -r -f x`). The
+	//     [^|;&]* cap keeps a later `rm -r foo; cmd -f bar` from
+	//     cross-firing.
+	//
+	// The short-flag pattern below requires r and f letters in the
+	// SAME `-…` token (no `--` long-form here — long-form is handled
+	// by the explicit `--recursive ... --force` branches that require
+	// both). Examples: `-rf`, `-fr`, `-vrf`, `-r9f`. Counter-examples:
+	// `--recursive` (long-form, only one of {r,f} present semantically),
+	// `-r` alone, `-f` alone.
+	destructiveRmRe      = regexp.MustCompile(`\brm\b\s+(?:-[a-zA-Z]*(?:rf|fr|r[a-zA-Z]+f|f[a-zA-Z]+r)[a-zA-Z]*\b|--recursive\b[^|;&]*--force\b|--force\b[^|;&]*--recursive\b)`)
 	destructiveRmSplitRe = regexp.MustCompile(`\brm\b[^|;&]*\s-[a-zA-Z]*r[a-zA-Z]*\b[^|;&]*\s-[a-zA-Z]*f[a-zA-Z]*\b|\brm\b[^|;&]*\s-[a-zA-Z]*f[a-zA-Z]*\b[^|;&]*\s-[a-zA-Z]*r[a-zA-Z]*\b`)
 
-	// destructiveGitRe covers the git-history-loss patterns: push (publishes
-	// state), checkout/switch (drops uncommitted changes), reset --hard
-	// (drops history), clean -f (drops untracked files).
-	destructiveGitRe = regexp.MustCompile(`\bgit\s+(?:push\b|checkout\b|switch\b|reset\b[^|;&]*--hard\b|clean\b[^|;&]*-[a-zA-Z]*f[a-zA-Z]*\b)`)
+	// destructiveGitRe covers the git-history-loss patterns: push
+	// (publishes state), checkout/switch (drops uncommitted changes),
+	// reset --hard (drops history), clean with -f or --force (drops
+	// untracked files; -d/--dir extends to directories but the force
+	// flag is what makes it destructive).
+	//
+	// `git clean` accepts both `-f` short form (with possible flag
+	// combinations like `-fd`, `-fdx`) and `--force` long form, in any
+	// position before a separator. Either shape is blocked.
+	destructiveGitRe = regexp.MustCompile(`\bgit\s+(?:push\b|checkout\b|switch\b|reset\b[^|;&]*--hard\b|clean\b[^|;&]*(?:-[a-zA-Z]*f[a-zA-Z]*\b|--force\b))`)
 )
 
 // safeRedirectTarget returns true if the redirect target does not write to a
@@ -118,15 +141,47 @@ func firstLine(s string) string {
 // exposing the rest of an inline-secret command.
 const redactPreviewBytes = 64
 
+// envAssignmentRe matches an inline shell environment-variable
+// assignment of the form `KEY=VALUE`. The KEY half is restricted to the
+// shell-conventional shape `[A-Za-z_][A-Za-z0-9_]*` so identifiers like
+// `PATH`, `OPENAI_API_KEY`, `MY_TOKEN` match while file paths
+// (`./script.sh`), URLs (`http://...`), and similar non-assignment
+// tokens do not. The VALUE is everything up to the next whitespace.
+//
+// Word-boundary anchoring (\b) ensures we don't match the trailing half
+// of unrelated tokens like `foo=bar` inside a shell argument value.
+var envAssignmentRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)=(\S+)`)
+
 // redactCommandPreview returns a short preview of command suitable for
 // logging when a guard rejects it. The full command may contain secrets
 // (env-var assignments, inline tokens, paths leaking workspace identity)
-// that should not land in slog. We trim to [redactPreviewBytes] and add
-// an ellipsis when the command was longer; the guard's class string
-// (the `msg` returned by guardCommand) carries the *why* without
+// that should not land in slog. We mask, trim to [redactPreviewBytes],
+// and add an ellipsis when the command was longer; the guard's class
+// string (the `msg` returned by guardCommand) carries the *why* without
 // needing the full command text. The preview exists purely so triage
 // can grep logs for a recognisable shape ("rm -rf …") without exposing
 // the rest.
+//
+// Masking covers ONE high-confidence shape: leading or inline
+// `KEY=VALUE` env-var assignments (e.g. `OPENAI_API_KEY=sk-... cmd`).
+// The VALUE is replaced with `<redacted>`. This catches the most common
+// leak path on bash invocations and over-redacts harmlessly when KEY is
+// non-sensitive (`PATH=/usr/bin foo` becomes `PATH=<redacted> foo` in
+// logs only — the LLM still sees the full command via the tool result).
+//
+// Out of scope (intentionally — push back on the broader review ask):
+//
+//   - API-key shape detection (sk-…, ant-…, hf_…, ghp_…). Each
+//     provider has a different format; pattern lists go stale and
+//     produce false negatives on novel shapes. Real prevention is at
+//     the source (don't put keys in shell args).
+//   - Authorization header parsing (`-H "Authorization: Bearer …"`).
+//     Requires real shell tokenisation: quoted args, escapes,
+//     line-continuations. A regex that handles all that ends up bigger
+//     than a tokeniser.
+//
+// If those become important, build a dedicated sanitiser package with
+// its own test surface — don't bolt patterns onto this preview helper.
 //
 // Truncation is rune-aware: when the byte cap lands inside a multibyte
 // UTF-8 sequence (e.g. a CJK glyph in a path, an em-dash in an
@@ -134,11 +189,12 @@ const redactPreviewBytes = 64
 // redactPreviewBytes so the returned string is always valid UTF-8.
 // Mirrors the truncation pattern at engine/agent/prompt.go:51 and :63.
 //
-// This is a heuristic, not a sanitiser. Secret-pattern masking (token
-// detection, env-var stripping) is a separate hardening project — for
-// now we just bound the surface.
+// Order: TrimSpace → mask → truncate. Masking must happen before
+// truncation so the cap can't slice through the middle of a secret
+// VALUE and leave half exposed.
 func redactCommandPreview(command string) string {
 	command = strings.TrimSpace(command)
+	command = envAssignmentRe.ReplaceAllString(command, "$1=<redacted>")
 	if len(command) <= redactPreviewBytes {
 		return command
 	}

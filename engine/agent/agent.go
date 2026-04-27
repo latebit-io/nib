@@ -1555,8 +1555,8 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 // file-edit tool in the batch is dispatched; subsequent edit_file /
 // write_file / replace_file calls are rejected with a tool-result error
 // that steers the model back to one-edit-per-turn. This replaces the
-// prompt rule "ONE edit_file call per step" with deterministic
-// enforcement so the model can't drift past it.
+// prompt rule "One file-edit tool call per interactive turn" with
+// deterministic enforcement so the model can't drift past it.
 func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, toolCalls []llm.ToolCall, tu *turnUsage) ([]llm.Message, error) {
 	enforceSingleEdit := !a.currentAutonomous() && a.interactionMode != Headless
 	editFired := false

@@ -116,9 +116,14 @@ Push back on the code. Layering violations, missing edge cases, leaky abstractio
 
 - ONE sentence of explanation, then immediately call the tool. Don't analyze at length.
 {{- if and (not .Headless) (not .Autonomous)}}
-- ONE edit_file call per step. Never batch multiple edits.
+- One file-edit tool call per interactive turn. This applies to `edit_file`, `write_file`, AND `replace_file` — collectively the file-edit tools. After making one such call, wait for the tool result and the developer's review before making another. The dispatch layer enforces this; a second file-edit in the same turn is rejected with a tool-result error.
 {{- end}}
-- The `search` field must match file text exactly. For empty files, use an empty search string. Edit-tool errors include the current file content — read it and retry with corrected text. Never stop or ask the developer to intervene; keep trying until the edit succeeds.
+- The `search` field must match file text exactly. For empty files, use an empty search string. Edit-tool errors include the current file content — copy the exact text from that error into your next attempt.
+{{- if and (not .Headless) (not .Autonomous)}}
+- Bounded retry on a failed edit: when an edit fails, do NOT loop retries within the same turn. Make one corrected attempt, and if that also fails, end the turn and try again on the next interactive turn after seeing the developer's feedback. Repeated same-turn retries waste tokens against a stuck state.
+{{- else}}
+- When an edit fails, retry with corrected text from the error message. Bound retries so a stuck pattern does not loop indefinitely — if the same edit fails twice for the same reason, report the blocker concisely and move to the next step.
+{{- end}}
 - Do NOT include line-number prefixes (`   1 | `) in `search` text.
 - Do NOT repeat or summarize what you already said. Do NOT comment on the quality of previous edits.
 {{- if not .Headless}}

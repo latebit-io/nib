@@ -249,18 +249,42 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 
 	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
 
-	// Collect both AgentError and AgentDone in a single loop so the
-	// assertion is order-tolerant. The previous shape (two drainUntil
-	// calls in sequence) silently dropped non-matching events as it
-	// scanned for the first match — which would have lost an AgentDone
-	// that arrived before AgentError on a future re-ordering of the
-	// abort path.
+	errMsg, doneSuccess := collectAbortEvents(t, events, 2*time.Second)
+	if !strings.Contains(errMsg, "budget exceeded") {
+		t.Errorf("AgentError = %q, want substring 'budget exceeded'", errMsg)
+	}
+	if doneSuccess {
+		t.Error("AgentDone.Success = true, want false on budget abort")
+	}
+
+	// The provider must have been called exactly once — the abort cuts the
+	// run before a second LLM round-trip can commit more tokens.
+	provider.mu.Lock()
+	calls := provider.call
+	provider.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider calls = %d, want 1 (no second turn after abort)", calls)
+	}
+}
+
+// collectAbortEvents drains the agent's event channel until both an
+// [event.AgentError] and an [event.AgentDone] have been observed (or
+// the timeout fires). Returns the AgentError's message and the
+// AgentDone's Success flag. Order-tolerant: the two events may arrive
+// in any sequence, and intervening events (tokens, status, edit
+// proposals) are silently discarded. [event.FlushBuffers] is auto-
+// resolved with an empty result so the agent does not block on a flush
+// that the test harness has no real buffer to satisfy.
+//
+// Used by every test that asserts on the budget-abort surface so the
+// drain logic stays in one place — duplicating it across tests
+// historically silently dropped one event when its order shifted.
+func collectAbortEvents(t *testing.T, events <-chan event.Event, timeout time.Duration) (errMsg string, doneSuccess bool) {
+	t.Helper()
 	var (
-		errMsg      string
-		errSeen     bool
-		doneSuccess bool
-		doneSeen    bool
-		deadline    = time.After(2 * time.Second)
+		errSeen  bool
+		doneSeen bool
+		deadline = time.After(timeout)
 	)
 	for !errSeen || !doneSeen {
 		select {
@@ -284,23 +308,10 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 			if !doneSeen {
 				t.Fatal("timeout waiting for AgentDone after budget abort")
 			}
+			return errMsg, doneSuccess
 		}
 	}
-	if !strings.Contains(errMsg, "budget exceeded") {
-		t.Errorf("AgentError = %q, want substring 'budget exceeded'", errMsg)
-	}
-	if doneSuccess {
-		t.Error("AgentDone.Success = true, want false on budget abort")
-	}
-
-	// The provider must have been called exactly once — the abort cuts the
-	// run before a second LLM round-trip can commit more tokens.
-	provider.mu.Lock()
-	calls := provider.call
-	provider.mu.Unlock()
-	if calls != 1 {
-		t.Errorf("provider calls = %d, want 1 (no second turn after abort)", calls)
-	}
+	return errMsg, doneSuccess
 }
 
 // TestAgent_TokenBudget_AbortsBetweenInnerStreams verifies the inner-
@@ -356,42 +367,7 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 
 	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
 
-	// Collect both AgentError and AgentDone before exiting the loop so
-	// the assertions are order-tolerant. The same shape as
-	// TestAgent_TokenBudget_AbortsRun — kept consistent so a future
-	// change to the abort-event ordering does not silently regress
-	// either test.
-	var (
-		errMsg      string
-		errSeen     bool
-		doneSuccess bool
-		doneSeen    bool
-		deadline    = time.After(2 * time.Second)
-	)
-	for !errSeen || !doneSeen {
-		select {
-		case ev := <-events:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
-			switch e := ev.(type) {
-			case event.AgentError:
-				errSeen = true
-				errMsg = e.Err
-			case event.AgentDone:
-				doneSeen = true
-				doneSuccess = e.Success
-			}
-		case <-deadline:
-			if !errSeen {
-				t.Fatal("timeout waiting for AgentError after inner-loop budget abort")
-			}
-			if !doneSeen {
-				t.Fatal("timeout waiting for AgentDone after inner-loop budget abort")
-			}
-		}
-	}
+	errMsg, doneSuccess := collectAbortEvents(t, events, 2*time.Second)
 	if !strings.Contains(errMsg, "budget exceeded") {
 		t.Errorf("AgentError = %q, want substring 'budget exceeded'", errMsg)
 	}

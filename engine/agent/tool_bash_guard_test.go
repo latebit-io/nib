@@ -202,6 +202,17 @@ func TestDestructiveCommandGuard(t *testing.T) {
 		{"git clean --force", "git clean --force", true},
 		{"git clean --force -d", "git clean --force -d", true},
 		{"git clean -f -d", "git clean -f -d", true},
+
+		// Newline-separated destructive variants. Bash treats newlines as
+		// statement separators by default, but a model that emits a
+		// multi-line tool argument may produce a destructive sequence
+		// that is one logical command in some invocation contexts (bash
+		// -c with embedded newlines, heredocs, line-continuation). The
+		// guard's job is to be conservative — block the recognisable
+		// shape rather than reasoning about how bash will tokenise.
+		{"rm long flags newline separated", "rm --recursive\n--force build/", true},
+		{"rm split flags newline separated", "rm -r\n-f build/", true},
+		{"git reset hard newline", "git reset\n--hard HEAD", true},
 	}
 
 	for _, tt := range tests {

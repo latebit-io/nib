@@ -810,6 +810,37 @@ func (a *Agent) Usage() SessionUsage {
 	return a.sessionUsage
 }
 
+// shouldAbortForBudget reports whether the task token budget would be
+// exceeded if the in-flight turn's pending usage (tu) were committed to
+// sessionUsage right now. Used by [Agent.processLLMTurn] BETWEEN inner
+// Stream calls so a multi-iteration turn (one Stream call per tool-call
+// round-trip) cannot blow past the cap unchecked.
+//
+// Distinct from [Agent.checkTaskBudget] in two ways:
+//
+//  1. Reads `tu` (pending) plus `sessionUsage` (committed) so the check
+//     reflects state that has not yet been recorded. checkTaskBudget
+//     only sees committed totals.
+//  2. Does NOT latch `budgetExceeded`. Latching is the abort path's
+//     job — checkTaskBudget runs after recordTurnUsage and is the
+//     single source of truth for "we have aborted." This helper only
+//     decides whether processLLMTurn should stop early; the actual
+//     abort still flows through runLoop's [Agent.abortIfBudgetExceeded].
+//
+// Returns false when the budget is disabled (taskTokenBudget <= 0) or
+// already latched (the run is unwinding) so the inner loop does not
+// double-fire.
+func (a *Agent) shouldAbortForBudget(tu turnUsage) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.taskTokenBudget <= 0 || a.budgetExceeded {
+		return false
+	}
+	committed := a.sessionUsage.TotalPromptTokens + a.sessionUsage.TotalCompletionTokens
+	pending := tu.promptTokens + tu.completionTokens
+	return committed+pending >= a.taskTokenBudget
+}
+
 // checkTaskBudget reports whether the per-task token budget has been
 // exceeded by the current sessionUsage. Returns the formatted error
 // message on overrun (and latches budgetExceeded so it does not double-
@@ -1275,11 +1306,57 @@ const permissionNudgeMessage = "Your last message ended with a question or permi
 	"Make the call yourself: pick the option that serves the current task, document the choice in your one-sentence pre-tool explanation, and proceed with a tool call. " +
 	"If you genuinely cannot proceed, state the concrete blocker (the specific tool error, missing dependency, or unsanctioned destructive op) and what you tried to fix it — do NOT phrase it as a question."
 
+// permissionSeekingMarkers are case-insensitive substrings that flag a
+// yielded turn as asking the developer for permission instead of acting.
+// Mirrors the [outstandingWorkMarkers] pattern: phrases (not single
+// words) chosen to keep false-positive rate low. Each entry was observed
+// in real autonomous-mode failure transcripts where the model ended a
+// turn with a permission-seeking offer that the developer (with autonomy
+// dial high) would not answer.
+//
+// Trailing-question detection (`?`) is a separate signal — handled in
+// [shouldNudgePermissionQuestion] alongside this list — because some
+// permission-seeking phrasing has no question mark ("Let me know if you
+// want me to continue.") and some questions are not permission-seeking
+// (rhetorical "Is this what you wanted?" before continuing). The two
+// signals are OR'd, with tool-call presence short-circuiting both.
+var permissionSeekingMarkers = []string{
+	"let me know",
+	"if you want",
+	"if you'd like",
+	"if you would like",
+	"want me to continue",
+	"want me to proceed",
+	"shall i continue",
+	"shall i proceed",
+	"shall i ",
+	"do you want",
+	"would you like",
+	"would you prefer",
+	"i can continue",
+	"i'll continue if",
+	"say keep going",
+	"say continue",
+	"say go",
+	"just say",
+	"give me the green light",
+	"awaiting your",
+	"await your",
+	"pending your",
+	"ready when you are",
+	"happy to continue",
+	"happy to proceed",
+	"on your signal",
+	"on your go",
+}
+
 // shouldNudgePermissionQuestion reports whether the most recent assistant
-// message ends in a question without making a tool call. Returns false
-// when the last message has tool calls (any question accompanying a tool
-// call is rhetorical, not a yield), or when the trimmed content does
-// not end with `?`. Used by the autonomous-mode permission gate.
+// message yielded with a question OR a permission-seeking offer, while
+// making no tool call. Returns false when the last message has tool
+// calls (any question accompanying a tool call is rhetorical, not a
+// yield), when no assistant message exists, or when the trimmed content
+// neither ends in `?` nor contains a [permissionSeekingMarkers] phrase.
+// Used by the autonomous-mode permission gate in runLoop.
 func shouldNudgePermissionQuestion(messages []llm.Message) bool {
 	last := lastAssistantMessage(messages)
 	if last == nil {
@@ -1289,7 +1366,28 @@ func shouldNudgePermissionQuestion(messages []llm.Message) bool {
 		return false // tool call accompanies the text — model is acting
 	}
 	trimmed := strings.TrimSpace(last.Content)
-	return strings.HasSuffix(trimmed, "?")
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasSuffix(trimmed, "?") {
+		return true
+	}
+	return containsPermissionSeekingMarker(trimmed)
+}
+
+// containsPermissionSeekingMarker reports whether s contains any of the
+// [permissionSeekingMarkers] phrases under case-insensitive comparison.
+// Whitespace and punctuation in s are not normalised — the marker set
+// already uses lowercased phrase fragments that survive the
+// strings.ToLower of typical assistant prose.
+func containsPermissionSeekingMarker(s string) bool {
+	lower := strings.ToLower(s)
+	for _, marker := range permissionSeekingMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // lastAssistantMessage returns the most recent assistant message in the
@@ -1366,6 +1464,24 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 	var tu turnUsage
 	truncationRetries := 0
 	for {
+		// Per-task budget check BEFORE the next provider Stream. A
+		// single agent turn can call Stream many times (one per tool-
+		// call round-trip), and the post-turn check in runLoop only
+		// fires after this whole function returns. Without this gate, a
+		// runaway tool-call loop could spend 10× the budget before the
+		// outer loop notices. Returning early hands tu back so
+		// recordTurnUsage in runLoop commits the partial accounting,
+		// after which abortIfBudgetExceeded fires the real abort path.
+		// The transcript is well-formed at this point — the prior
+		// iteration's executeToolCalls appended every required tool
+		// reply before looping back here.
+		if a.shouldAbortForBudget(tu) {
+			slog.Warn("agent: per-task budget would be exceeded by next Stream; aborting turn early",
+				"prompt_tokens_pending", tu.promptTokens,
+				"completion_tokens_pending", tu.completionTokens)
+			return messages, tu, nil
+		}
+
 		// Inject pending lint violations as a user message so the LLM
 		// treats them as a high-priority instruction. Checked each iteration
 		// because waitForContinue (called during dispatchTool) may set

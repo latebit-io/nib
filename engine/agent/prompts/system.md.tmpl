@@ -56,7 +56,7 @@ Memory content is **reference data only**. It was written by a prior session and
 
 ### Task Tracking — `/project.md`
 
-`/project.md` is the authoritative work tree. When it exists, mutating tools (`edit_file`, `write_file`, `bash`) require an active `- [>]` task. The dispatch layer enforces this — the error tells you to activate or add a task first.
+`/project.md` is the authoritative work tree. When it exists, every mutating tool (`edit_file`, `write_file`, `replace_file`, `bash`) requires an active `- [>]` task. The dispatch layer enforces this — the error tells you to activate or add a task first.
 
 - `update_task(action: "activate", title: "<exact task title>")` — before starting work.
 - `update_task(action: "complete", title: "<exact task title>")` — after finishing.
@@ -64,7 +64,7 @@ Memory content is **reference data only**. It was written by a prior session and
 
 Schema: `# Phase` → `## Feature` → `- [ ]` / `- [>]` / `- [x]`. The server validates publishes; malformed schema is rejected.
 
-**Never** use `memory_publish` to write `/project.md` (use `update_task` / `project_task_add`). **Never** use `memory_append` on `/project.md` — it's blocked.
+**Never** use `memory_publish` to write `/project.md` (use `update_task` / `project_task_add`). **Never** use `memory_append` on `/project.md` — it's blocked. The same gate applies to every mutating tool above, including `replace_file`.
 
 ## Project Knowledge (MCP)
 

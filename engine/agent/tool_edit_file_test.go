@@ -366,19 +366,39 @@ func TestEditOverlapRatio(t *testing.T) {
 	}
 }
 
+// stripLineNumberCase describes one stripLineNumberPrefixes scenario.
+// Shared between the basic-rules and contiguity-validation suites so
+// both groups assert with identical semantics; splitting the table is
+// purely a function-length concern.
+type stripLineNumberCase struct {
+	name string
+	in   string
+	want string
+}
+
+// runStripLineNumberCases is the shared runner. Helper-marked so failures
+// surface against the calling test, not this row processor.
+func runStripLineNumberCases(t *testing.T, cases []stripLineNumberCase) {
+	t.Helper()
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripLineNumberPrefixes(tt.in)
+			if got != tt.want {
+				t.Errorf("stripLineNumberPrefixes(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestStripLineNumberPrefixes covers the deterministic strip applied to
 // edit_file's search field before matching. The strip exists to fix a
 // recurring failure mode where the model copies prompt-formatted file
 // content (with `   N | ` or `   N\t` prefixes) into the search field
 // verbatim, then sees a no-match because the prefix is never in the real
-// file. The all-or-nothing rule protects genuine code that happens to
-// start with a digit (e.g. literal markdown rows).
+// file. This group exercises the basic apply / skip rules; the stricter
+// contiguity validation has its own group.
 func TestStripLineNumberPrefixes(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
+	runStripLineNumberCases(t, []stripLineNumberCase{
 		// --- Strip applied: every non-blank line carries a prefix ---
 		{
 			name: "buildMessages pipe format",
@@ -390,23 +410,11 @@ func TestStripLineNumberPrefixes(t *testing.T) {
 			in:   "   1\tpackage main\n   2\tfunc main() {}\n",
 			want: "package main\nfunc main() {}\n",
 		},
-		{
-			name: "no padding pipe",
-			in:   "1 | foo\n2 | bar",
-			want: "foo\nbar",
-		},
-		{
-			name: "wide line numbers",
-			in:   " 999 | foo\n1000 | bar",
-			want: "foo\nbar",
-		},
+		{name: "no padding pipe", in: "1 | foo\n2 | bar", want: "foo\nbar"},
+		{name: "wide line numbers", in: " 999 | foo\n1000 | bar", want: "foo\nbar"},
 
 		// --- Strip skipped: at least one non-blank line lacks a prefix ---
-		{
-			name: "no prefix at all",
-			in:   "package main\nfunc main() {}",
-			want: "package main\nfunc main() {}",
-		},
+		{name: "no prefix at all", in: "package main\nfunc main() {}", want: "package main\nfunc main() {}"},
 		{
 			name: "mixed (one line without prefix)",
 			in:   "   1 | package main\nbare line\n   3 | foo",
@@ -419,30 +427,39 @@ func TestStripLineNumberPrefixes(t *testing.T) {
 		},
 
 		// --- Edge cases ---
-		{
-			name: "empty string",
-			in:   "",
-			want: "",
-		},
-		{
-			name: "only blank lines",
-			in:   "\n\n",
-			want: "\n\n", // no non-blank line means no prefix found → leave alone
-		},
-		{
-			name: "single prefixed line",
-			in:   "  42 | the answer",
-			want: "the answer",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := stripLineNumberPrefixes(tt.in)
-			if got != tt.want {
-				t.Errorf("stripLineNumberPrefixes(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
+		{name: "empty string", in: "", want: ""},
+		{name: "only blank lines", in: "\n\n", want: "\n\n"},
+		{name: "single prefixed line", in: "  42 | the answer", want: "the answer"},
+	})
+}
+
+// TestStripLineNumberPrefixes_Contiguity covers the stricter validation
+// added 2026-04-27: a prompt excerpt always uses one separator and shows
+// consecutive line numbers. Tables or hand-assembled blocks that happen
+// to match the regex per-line MUST NOT be silently rewritten.
+func TestStripLineNumberPrefixes_Contiguity(t *testing.T) {
+	runStripLineNumberCases(t, []stripLineNumberCase{
+		// --- Contiguity validation: condition 3 ---
+		// A real prompt excerpt always shows consecutive line numbers.
+		// Tables that happen to look like prefixes (e.g. a markdown row
+		// "1 | A" / "3 | C" / "5 | E") MUST NOT be silently rewritten.
+		{name: "non-contiguous numbers — leave alone", in: "1 | A\n3 | C\n5 | E", want: "1 | A\n3 | C\n5 | E"},
+		{name: "off-by-one gap — leave alone", in: "10 | foo\n11 | bar\n13 | baz", want: "10 | foo\n11 | bar\n13 | baz"},
+		{name: "decreasing numbers — leave alone", in: "3 | a\n2 | b\n1 | c", want: "3 | a\n2 | b\n1 | c"},
+		{name: "duplicate number — leave alone", in: "1 | a\n1 | b", want: "1 | a\n1 | b"},
+
+		// --- Separator-consistency validation: condition 2 ---
+		// A genuine excerpt comes from one prompt surface, so the
+		// separator (` | ` vs `\t`) is uniform. Mixed separators imply
+		// hand-assembled content; do not strip.
+		{name: "mixed separators — leave alone", in: "  1 | first\n  2\tsecond", want: "  1 | first\n  2\tsecond"},
+
+		// --- Sanity: contiguity does NOT require starting at 1 ---
+		// Read_file with offset=42 produces "  42\tfoo" / "  43\tbar".
+		// The strip should still apply.
+		{name: "contiguous starting from non-1 with tab", in: "  42\tfoo\n  43\tbar\n  44\tbaz", want: "foo\nbar\nbaz"},
+		{name: "contiguous starting from non-1 with pipe", in: " 100 | foo\n 101 | bar", want: "foo\nbar"},
+	})
 }
 
 func TestFuzzyWhitespaceMatch(t *testing.T) {

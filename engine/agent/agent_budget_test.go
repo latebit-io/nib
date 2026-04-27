@@ -69,6 +69,81 @@ func TestCheckTaskBudget_Disabled(t *testing.T) {
 	}
 }
 
+// TestShouldAbortForBudget covers the inner-loop budget gate that
+// processLLMTurn consults BETWEEN provider Stream calls. Distinct from
+// checkTaskBudget in two ways: it sums committed+pending usage (so a
+// turn that has not yet been recorded is still counted), and it does
+// not latch budgetExceeded (the abort path owns the latch). Each row
+// confirms one branch of the gate.
+func TestShouldAbortForBudget(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		opts    *NewOptions
+		mutate  func(a *Agent)
+		pending turnUsage
+		want    bool
+	}{
+		{
+			name:    "zero budget disables gate",
+			opts:    &NewOptions{TaskTokenBudget: -1}, // -1 → unlimited (zero internally)
+			pending: turnUsage{promptTokens: 1_000_000},
+			want:    false,
+		},
+		{
+			name: "already latched suppresses gate",
+			opts: &NewOptions{TaskTokenBudget: 100},
+			mutate: func(a *Agent) {
+				a.budgetExceeded = true
+				a.sessionUsage.TotalPromptTokens = 200
+			},
+			want: false,
+		},
+		{
+			name:    "committed alone exceeds — fires",
+			opts:    &NewOptions{TaskTokenBudget: 100},
+			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 200 },
+			pending: turnUsage{},
+			want:    true,
+		},
+		{
+			name:    "committed alone under, pending pushes over — fires",
+			opts:    &NewOptions{TaskTokenBudget: 100},
+			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 60 },
+			pending: turnUsage{promptTokens: 50}, // 60+50 = 110 > 100
+			want:    true,
+		},
+		{
+			name:    "completion tokens count too",
+			opts:    &NewOptions{TaskTokenBudget: 100},
+			pending: turnUsage{completionTokens: 150},
+			want:    true,
+		},
+		{
+			name:    "under cap returns false",
+			opts:    &NewOptions{TaskTokenBudget: 1000},
+			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 200 },
+			pending: turnUsage{promptTokens: 200},
+			want:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			events := make(chan event.Event, 4)
+			ag := New(&multiTurnProvider{}, stubWorkspace{}, events, tc.opts)
+			if tc.mutate != nil {
+				tc.mutate(ag)
+			}
+			if got := ag.shouldAbortForBudget(tc.pending); got != tc.want {
+				t.Errorf("shouldAbortForBudget(%+v) = %v, want %v", tc.pending, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCheckTaskBudget_FiresAndLatches verifies that a single check fires
 // once when the budget is crossed, and subsequent checks return empty
 // because budgetExceeded latches. The latch keeps an Resume after abort
@@ -139,26 +214,47 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 
 	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
 
-	errEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentError)
-		return ok
-	})
-	if errEv == nil {
-		t.Fatal("timeout waiting for AgentError after budget exceeded")
+	// Collect both AgentError and AgentDone in a single loop so the
+	// assertion is order-tolerant. The previous shape (two drainUntil
+	// calls in sequence) silently dropped non-matching events as it
+	// scanned for the first match — which would have lost an AgentDone
+	// that arrived before AgentError on a future re-ordering of the
+	// abort path.
+	var (
+		errMsg      string
+		errSeen     bool
+		doneSuccess bool
+		doneSeen    bool
+		deadline    = time.After(2 * time.Second)
+	)
+	for !errSeen || !doneSeen {
+		select {
+		case ev := <-events:
+			if fb, ok := ev.(event.FlushBuffers); ok {
+				fb.Result <- event.FlushResult{}
+				continue
+			}
+			switch e := ev.(type) {
+			case event.AgentError:
+				errSeen = true
+				errMsg = e.Err
+			case event.AgentDone:
+				doneSeen = true
+				doneSuccess = e.Success
+			}
+		case <-deadline:
+			if !errSeen {
+				t.Fatal("timeout waiting for AgentError after budget exceeded")
+			}
+			if !doneSeen {
+				t.Fatal("timeout waiting for AgentDone after budget abort")
+			}
+		}
 	}
-	msg := errEv.(event.AgentError).Err
-	if !strings.Contains(msg, "budget exceeded") {
-		t.Errorf("AgentError = %q, want substring 'budget exceeded'", msg)
+	if !strings.Contains(errMsg, "budget exceeded") {
+		t.Errorf("AgentError = %q, want substring 'budget exceeded'", errMsg)
 	}
-
-	doneEv := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentDone)
-		return ok
-	})
-	if doneEv == nil {
-		t.Fatal("timeout waiting for AgentDone after budget abort")
-	}
-	if doneEv.(event.AgentDone).Success {
+	if doneSuccess {
 		t.Error("AgentDone.Success = true, want false on budget abort")
 	}
 
@@ -169,6 +265,86 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 	provider.mu.Unlock()
 	if calls != 1 {
 		t.Errorf("provider calls = %d, want 1 (no second turn after abort)", calls)
+	}
+}
+
+// TestAgent_TokenBudget_AbortsBetweenInnerStreams verifies the inner-
+// loop budget gate: a single agent turn can call Stream multiple times
+// (once per tool-call round-trip), and the budget must abort BETWEEN
+// those calls — not just after the whole turn finishes. The scripted
+// provider emits a tool call to a non-existent tool on the first
+// Stream; the agent dispatches it (gets an error reply), then loops to
+// call Stream a second time. With the budget set so the FIRST stream's
+// usage already crosses the cap, the second Stream must never fire.
+//
+// Without the inner gate, processLLMTurn would loop indefinitely (or
+// until truncation) and runLoop's outer abort would only fire after
+// sessionUsage caught up — many tokens too late.
+func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
+	t.Parallel()
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			// Inner Stream #1: emits a tool call to a non-existent
+			// tool. The dispatcher returns an error string; the loop
+			// would normally call Stream again. Reports 1500 tokens —
+			// already over the 500-token budget when committed.
+			{
+				{
+					ToolCalls: []llm.ToolCall{{
+						ID:       "call-1",
+						Type:     "function",
+						Function: llm.FunctionCall{Name: "no_such_tool", Arguments: "{}"},
+					}},
+					Done: true,
+					Usage: &llm.Usage{
+						PromptTokens:     1500,
+						CompletionTokens: 50,
+					},
+				},
+			},
+			// Inner Stream #2: must NEVER be invoked. If the test
+			// reaches this turn, the inner-loop gate failed.
+			{
+				{Token: "should not see"},
+				{Done: true},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, &NewOptions{
+		TaskTokenBudget: 500,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	// Wait for AgentDone to mean the run finished.
+	deadline := time.After(2 * time.Second)
+WAIT:
+	for {
+		select {
+		case ev := <-events:
+			if fb, ok := ev.(event.FlushBuffers); ok {
+				fb.Result <- event.FlushResult{}
+				continue
+			}
+			if _, ok := ev.(event.AgentDone); ok {
+				break WAIT
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for AgentDone")
+		}
+	}
+
+	// The inner gate must have prevented the second Stream call.
+	provider.mu.Lock()
+	calls := provider.call
+	provider.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider Stream calls = %d, want 1 (inner-loop budget gate failed)", calls)
 	}
 }
 

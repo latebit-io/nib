@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -27,7 +28,15 @@ import (
 // file. We strip it deterministically here rather than asking the model
 // to remember not to include it (the prompt-only instruction was
 // unreliable, especially on long context).
-var lineNumberPrefixRe = regexp.MustCompile(`^[ ]*\d+(?:[ ]+\||\t)[ ]?`)
+//
+// Capture groups: $1 is the numeric prefix as text (e.g. "  12"), $2 is
+// the separator (`|` or `\t`). [stripLineNumberPrefixes] uses both to
+// validate that a candidate excerpt is a real prompt-style block: every
+// line must share the same separator AND the captured numbers must form
+// a contiguous +1 sequence. Without those checks, an unrelated digit-
+// prefixed table (e.g. a markdown row "1 | A" / "3 | C") would get its
+// prefixes silently shaved off.
+var lineNumberPrefixRe = regexp.MustCompile(`^[ ]*(\d+)([ ]+\||\t)[ ]?`)
 
 // editOverlapWarningThreshold is the unchanged-line ratio at which an
 // edit_file call logs an over-rewrite warning. 0.80 means "if more than
@@ -96,30 +105,57 @@ func nonEmptyLines(s string) []string {
 }
 
 // stripLineNumberPrefixes removes the leading line-number prefix from
-// every line of s and returns the cleaned text. The strip applies only
-// when EVERY non-blank line carries a recognisable prefix — partial
-// matches indicate genuine code that happens to start with a digit (e.g.
-// "1.0 | foo" in a markdown table, "42 | x" as a literal data row), and
-// mutilating real content would break legitimate edits.
+// every line of s and returns the cleaned text. The strip applies ONLY
+// when the input is a real prompt-style excerpt — three conditions must
+// all hold:
 //
-// Returns s unchanged when no non-blank line has a prefix or any
-// non-blank line lacks one. Blank lines are skipped because they carry
-// no prefix in either format and would otherwise force the all-or-
-// nothing rule to fail spuriously.
+//  1. Every non-blank line carries a recognisable prefix.
+//  2. Every non-blank line uses the same separator (all `|` or all `\t`,
+//     not mixed). A genuine excerpt comes from one of buildMessages or
+//     sliceLines, never both — mixed separators imply the content was
+//     hand-assembled.
+//  3. The captured line numbers form a contiguous increasing sequence
+//     (each number is exactly previous+1). Real prompt excerpts always
+//     show consecutive lines; a table that happens to look like
+//     prefixes ("1 | A" / "3 | C" / "5 | E") will not pass this check.
+//
+// Any failure returns s unchanged. Blank lines are excluded from all
+// three checks because they carry no prefix in either format and would
+// otherwise force the all-or-nothing rule to fail spuriously.
 func stripLineNumberPrefixes(s string) string {
 	if s == "" {
 		return s
 	}
 	lines := strings.Split(s, "\n")
+	separator := ""
+	prevNum := 0
 	prefixed := false
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		if !lineNumberPrefixRe.MatchString(line) {
-			return s
+		m := lineNumberPrefixRe.FindStringSubmatch(line)
+		if m == nil {
+			return s // condition 1 violated — at least one line lacks a prefix
 		}
-		prefixed = true
+		num, err := strconv.Atoi(m[1])
+		if err != nil {
+			return s // theoretically unreachable (regex matched \d+) but defensive
+		}
+		sep := m[2]
+		if !prefixed {
+			separator = sep
+			prevNum = num
+			prefixed = true
+			continue
+		}
+		if sep != separator {
+			return s // condition 2 violated — separator mismatch
+		}
+		if num != prevNum+1 {
+			return s // condition 3 violated — non-contiguous numbers
+		}
+		prevNum = num
 	}
 	if !prefixed {
 		return s

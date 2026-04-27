@@ -127,6 +127,12 @@ func loadBuiltins() *Config {
 	// the architecture validator, style evaluator, and prompt style section
 	// are all disabled. The developer opts in via JUNTO_STYLE or
 	// .project/style.json.
+	//
+	// retained for future reactivation if defaultActiveStyle policy
+	// changes — the body is dormant today (the constant is "") but kept
+	// so flipping the constant back to a style name (e.g. "clean-code")
+	// is a single-line change. Removing the block would require
+	// re-deriving and re-testing the activation+fallback semantics.
 	if defaultActiveStyle != "" {
 		if _, ok := cfg.Styles[defaultActiveStyle]; ok {
 			cfg.Active = defaultActiveStyle

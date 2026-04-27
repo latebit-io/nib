@@ -171,6 +171,17 @@ func TestDestructiveCommandGuard(t *testing.T) {
 		{"rm long flags", "rm --recursive --force build/", true},
 		{"rm long flags reversed", "rm --force --recursive build/", true},
 
+		// Blocked — recursive + force split across separate short-flag tokens.
+		// Common idiom; prior regex only matched flags joined into one
+		// token, leaving these two orderings as a known bypass.
+		{"rm split -r -f", "rm -r -f build/", true},
+		{"rm split -f -r", "rm -f -r build/", true},
+		{"rm split with extra flag between", "rm -r -v -f build/", true},
+		{"rm split with prepended -v", "rm -v -r -f build/", true},
+		// But a separator between r and f flags must NOT cross-fire:
+		// `rm -r foo; cmd -f bar` is rm of one item then a separate cmd.
+		{"rm -r then separator then -f not cross-fired", "rm -r foo; cmd -f bar", false},
+
 		// Blocked — git destructive ops.
 		{"git push", "git push origin main", true},
 		{"git push force", "git push --force origin main", true},

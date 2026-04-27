@@ -6,19 +6,39 @@ import (
 	"github.com/latebit-io/junto/engine/llm"
 )
 
-// TestShouldNudgePermissionQuestion locks in the conditions under which
-// the autonomous-mode gate fires: a yielded turn whose last assistant
-// message has no tool calls and ends in `?`. Every other shape (tool
-// calls present, no trailing `?`, no assistant message at all) is a
-// non-fire so the gate does not interrupt healthy flow.
-func TestShouldNudgePermissionQuestion(t *testing.T) {
-	t.Parallel()
+// permissionGateCase describes one shouldNudgePermissionQuestion scenario.
+// Defined here so the structural-shape tests and the phrase-pattern tests
+// share a single row type and a single runner.
+type permissionGateCase struct {
+	name string
+	msgs []llm.Message
+	want bool
+}
 
-	tests := []struct {
-		name string
-		msgs []llm.Message
-		want bool
-	}{
+// runPermissionGateCases is the shared table-driven body for the two
+// shouldNudgePermissionQuestion test groups. Split into two callers so
+// each function stays under the funlen cap; the runner ensures both
+// suites assert on identical semantics.
+func runPermissionGateCases(t *testing.T, cases []permissionGateCase) {
+	t.Helper()
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldNudgePermissionQuestion(tt.msgs); got != tt.want {
+				t.Errorf("shouldNudgePermissionQuestion = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestShouldNudgePermissionQuestion_Structure locks in the structural
+// conditions: tool-call presence short-circuits, no-assistant returns
+// false, walks back from the latest message, and the existing trailing-
+// `?` signal still fires. Phrase patterns are covered separately in
+// [TestShouldNudgePermissionQuestion_PhraseForms].
+func TestShouldNudgePermissionQuestion_Structure(t *testing.T) {
+	t.Parallel()
+	runPermissionGateCases(t, []permissionGateCase{
 		{
 			name: "trailing question without tool calls fires",
 			msgs: []llm.Message{
@@ -29,9 +49,7 @@ func TestShouldNudgePermissionQuestion(t *testing.T) {
 		},
 		{
 			name: "trailing whitespace tolerated",
-			msgs: []llm.Message{
-				{Role: "assistant", Content: "Want me to continue?\n\n"},
-			},
+			msgs: []llm.Message{{Role: "assistant", Content: "Want me to continue?\n\n"}},
 			want: true,
 		},
 		{
@@ -43,23 +61,17 @@ func TestShouldNudgePermissionQuestion(t *testing.T) {
 		},
 		{
 			name: "no trailing question",
-			msgs: []llm.Message{
-				{Role: "assistant", Content: "Done. The file compiles."},
-			},
+			msgs: []llm.Message{{Role: "assistant", Content: "Done. The file compiles."}},
 			want: false,
 		},
 		{
 			name: "empty assistant content",
-			msgs: []llm.Message{
-				{Role: "assistant", Content: ""},
-			},
+			msgs: []llm.Message{{Role: "assistant", Content: ""}},
 			want: false,
 		},
 		{
 			name: "no assistant message at all",
-			msgs: []llm.Message{
-				{Role: "user", Content: "do the thing"},
-			},
+			msgs: []llm.Message{{Role: "user", Content: "do the thing"}},
 			want: false,
 		},
 		{
@@ -70,16 +82,57 @@ func TestShouldNudgePermissionQuestion(t *testing.T) {
 			},
 			want: true,
 		},
-	}
+	})
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := shouldNudgePermissionQuestion(tt.msgs); got != tt.want {
-				t.Errorf("shouldNudgePermissionQuestion = %v, want %v", got, tt.want)
-			}
-		})
-	}
+// TestShouldNudgePermissionQuestion_PhraseForms covers the phrase-based
+// signal added 2026-04-27: permission-seeking *statements* (no trailing
+// `?`) that the original predicate missed. Each row is a phrase
+// observed in real autonomous-mode failure transcripts.
+func TestShouldNudgePermissionQuestion_PhraseForms(t *testing.T) {
+	t.Parallel()
+	runPermissionGateCases(t, []permissionGateCase{
+		{
+			name: "let me know offer",
+			msgs: []llm.Message{{Role: "assistant", Content: "Done with the first edit. Let me know if you want me to continue with the next phase."}},
+			want: true,
+		},
+		{
+			name: "say keep going offer",
+			msgs: []llm.Message{{Role: "assistant", Content: "I'll pause here. Say keep going and I'll continue Phase 3/4."}},
+			want: true,
+		},
+		{
+			name: "want me to proceed",
+			msgs: []llm.Message{{Role: "assistant", Content: "Want me to proceed with the cleanup."}},
+			want: true,
+		},
+		{
+			name: "if you want statement",
+			msgs: []llm.Message{{Role: "assistant", Content: "Phase 2 complete. If you want, next turn I'll start Phase 3."}},
+			want: true,
+		},
+		{
+			name: "i can continue",
+			msgs: []llm.Message{{Role: "assistant", Content: "Stopping here. I can continue when you give the green light."}},
+			want: true,
+		},
+		{
+			name: "ready when you are",
+			msgs: []llm.Message{{Role: "assistant", Content: "Ready when you are."}},
+			want: true,
+		},
+		{
+			name: "case insensitive",
+			msgs: []llm.Message{{Role: "assistant", Content: "LET ME KNOW IF YOU WANT TO PROCEED."}},
+			want: true,
+		},
+		{
+			name: "non-permission text without ? does not fire",
+			msgs: []llm.Message{{Role: "assistant", Content: "Done. The build passes and tests are green."}},
+			want: false,
+		},
+	})
 }
 
 // TestLastAssistantMessage covers the helper that the permission gate

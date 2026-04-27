@@ -59,8 +59,16 @@ var (
 	// rm: any flag run containing both 'r' and 'f' (in either order) is
 	// recursive force-delete. Single-file `rm path` is not blocked — it
 	// goes through the normal exit-code path and the dev can see what
-	// happened.
-	destructiveRmRe = regexp.MustCompile(`\brm\b\s+(?:-{1,2}[a-zA-Z]*(?:rf|fr|recursive)[a-zA-Z]*\b|--recursive\b[^|;&]*--force\b|--force\b[^|;&]*--recursive\b)`)
+	// happened. Two regexes cover the two shapes:
+	//   - destructiveRmRe: r and f in the same `-` token (`-rf`, `-fr`,
+	//     `--recursive --force`, etc.)
+	//   - destructiveRmSplitRe: r and f in *separate* short-flag tokens
+	//     before any command separator (`rm -r -f x`, `rm -f -r x`,
+	//     `rm -v -r -f x`). The [^|;&]* between flags caps the scan to a
+	//     single rm invocation so a later `rm -r` ; `cmd -f` does not
+	//     cross-fire.
+	destructiveRmRe      = regexp.MustCompile(`\brm\b\s+(?:-{1,2}[a-zA-Z]*(?:rf|fr|recursive)[a-zA-Z]*\b|--recursive\b[^|;&]*--force\b|--force\b[^|;&]*--recursive\b)`)
+	destructiveRmSplitRe = regexp.MustCompile(`\brm\b[^|;&]*\s-[a-zA-Z]*r[a-zA-Z]*\b[^|;&]*\s-[a-zA-Z]*f[a-zA-Z]*\b|\brm\b[^|;&]*\s-[a-zA-Z]*f[a-zA-Z]*\b[^|;&]*\s-[a-zA-Z]*r[a-zA-Z]*\b`)
 
 	// destructiveGitRe covers the git-history-loss patterns: push (publishes
 	// state), checkout/switch (drops uncommitted changes), reset --hard
@@ -88,6 +96,39 @@ func safeRedirectTarget(target string) bool {
 	default:
 		return false
 	}
+}
+
+// firstLine returns the first newline-delimited line of s with surrounding
+// whitespace trimmed. Useful for log fields where a multi-line guard
+// message would otherwise wrap awkwardly — the first line of every guard
+// message is the "Error: …" headline, which carries the classification
+// without any of the multi-line "use X instead" guidance.
+func firstLine(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return strings.TrimSpace(s)
+}
+
+// redactCommandPreview returns a short preview of command suitable for
+// logging when a guard rejects it. The full command may contain secrets
+// (env-var assignments, inline tokens, paths leaking workspace identity)
+// that should not land in slog. We trim to redactPreviewBytes and add an
+// ellipsis when the command was longer; the guard's class string (the
+// `msg` returned by guardCommand) carries the *why* without needing the
+// full command text. The preview exists purely so triage can grep logs
+// for a recognisable shape ("rm -rf …") without exposing the rest.
+//
+// This is a heuristic, not a sanitiser. Secret-pattern masking (token
+// detection, env-var stripping) is a separate hardening project — for
+// now we just bound the surface.
+func redactCommandPreview(command string) string {
+	const redactPreviewBytes = 64
+	command = strings.TrimSpace(command)
+	if len(command) <= redactPreviewBytes {
+		return command
+	}
+	return command[:redactPreviewBytes] + "…"
 }
 
 // guardCommand runs every active bash guard against a command and returns
@@ -150,7 +191,7 @@ func searchCommandGuard(command string) string {
 // failure message explain the policy. Better a one-turn retry-with-
 // permission than an unrecoverable mistake.
 func destructiveCommandGuard(command string) string {
-	if destructiveRmRe.MatchString(command) {
+	if destructiveRmRe.MatchString(command) || destructiveRmSplitRe.MatchString(command) {
 		return "Error: command attempts a recursive force-delete (`rm -rf` or equivalent).\n" +
 			"This is destructive and the developer has not explicitly asked for it. " +
 			"Ask before retrying, or limit the delete to specific files without `-rf`."

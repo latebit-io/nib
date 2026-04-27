@@ -89,7 +89,14 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	}
 
 	if msg := guardCommand(args.Command); msg != "" {
-		slog.Warn("bash: blocked by guard", "command", args.Command)
+		// Log the guard classification (msg) and a redacted preview
+		// instead of the full command — the verbatim command may carry
+		// secrets that should not land in slog. The LLM still sees the
+		// full guard message via the tool result, so debugging is not
+		// degraded.
+		slog.Warn("bash: blocked by guard",
+			"reason", firstLine(msg),
+			"preview", redactCommandPreview(args.Command))
 		return textResult(msg)
 	}
 

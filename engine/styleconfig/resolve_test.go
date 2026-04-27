@@ -18,9 +18,12 @@ type resolveTestCase struct {
 
 var resolveTests = []resolveTestCase{
 	{
-		name:         "default active style is clean-code",
-		wantName:     "Clean Code",
-		wantRulesCnt: 12,
+		// Production default since 2026-04-26: no style is active unless the
+		// developer opts in via JUNTO_STYLE or .project/style.json. This
+		// keeps the architecture validator, style evaluator, and prompt
+		// style section all off by default — governance is opt-in.
+		name:    "default is no active style",
+		wantNil: true,
 	},
 	{
 		name:         "env var selects builtin style",
@@ -166,32 +169,34 @@ func TestResolve_malformedJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Malformed JSON is skipped, so the default builtin style is used.
+	// Malformed JSON is skipped. With the default-none policy, this leaves
+	// no active style — the prompt skips the style section and validators
+	// short-circuit. The behaviour the test guards is "malformed JSON does
+	// not crash and does not silently activate a different style"; that
+	// holds equally well for nil resolved as it did for a clean-code
+	// fallback.
 	_, resolved := resolveWithPaths(globalPath, "")
-	if resolved == nil {
-		t.Fatal("expected default style from builtins, got nil")
-	}
-	if resolved.Name != "Clean Code" {
-		t.Errorf("Name = %q, want default Clean Code", resolved.Name)
+	if resolved != nil {
+		t.Errorf("expected nil resolved with default-none policy, got %+v", resolved)
 	}
 }
 
 func TestResolve_missingFile(t *testing.T) {
-	// Missing files are skipped, so the default builtin style is used.
+	// Missing files are skipped. Same expectation as malformed JSON under
+	// the default-none policy: no style is active.
 	_, resolved := resolveWithPaths("/nonexistent/style.json", "/nonexistent/project")
-	if resolved == nil {
-		t.Fatal("expected default style from builtins, got nil")
-	}
-	if resolved.Name != "Clean Code" {
-		t.Errorf("Name = %q, want default Clean Code", resolved.Name)
+	if resolved != nil {
+		t.Errorf("expected nil resolved with default-none policy, got %+v", resolved)
 	}
 }
 
 func TestLoadBuiltins(t *testing.T) {
 	cfg := loadBuiltins()
 
-	if cfg.Active != "clean-code" {
-		t.Fatalf("Active = %q, want %q", cfg.Active, "clean-code")
+	// Default-none policy (2026-04-26): Active stays empty until the
+	// developer opts in via JUNTO_STYLE or .project/style.json.
+	if cfg.Active != "" {
+		t.Fatalf("Active = %q, want empty (default-none policy)", cfg.Active)
 	}
 
 	expected := []string{"bdd", "clean-architecture", "clean-code", "ddd", "idiomatic-go", "solid-hexagonal"}

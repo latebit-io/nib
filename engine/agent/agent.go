@@ -52,6 +52,16 @@ const (
 	Headless
 )
 
+// defaultTaskTokenBudget caps prompt+completion tokens for a single agent
+// run when the caller does not set [NewOptions.TaskTokenBudget] explicitly.
+// Sized to comfortably cover a multi-file refactor or a small game build
+// while still tripping long before a runaway loop burns the developer's
+// wallet. The 2026-04-26 pacman regression burned 55M+ tokens on a single
+// task; this default catches that class of cascade two orders of magnitude
+// earlier. Override with NewOptions.TaskTokenBudget when a larger or
+// smaller cap suits the workload.
+const defaultTaskTokenBudget = 2_000_000
+
 // distributedKeywords are substrings that identify an MCP server as
 // distributed (team/shared) memory. If any keyword appears in the server
 // name (case-insensitive), the server is classified as distributed memory
@@ -102,6 +112,19 @@ var mutatingTools = map[string]bool{
 	"replace_file": true,
 	"bash":         true,
 	"smoke_run":    true,
+}
+
+// fileEditTools is the subset of mutating tools whose calls must be
+// rate-limited to ONE per LLM turn in non-autonomous, non-headless mode.
+// Distinct from [mutatingTools] (which gates on the project task tree)
+// because bash and smoke_run can legitimately chain after an edit (e.g.
+// "edit then verify with go test"), but a second file edit in the same
+// turn means the model is bypassing the developer's review-and-continue
+// flow. Enforcement happens in [Agent.executeToolCalls].
+var fileEditTools = map[string]bool{
+	"edit_file":    true,
+	"write_file":   true,
+	"replace_file": true,
 }
 
 // Agent drives the multi-turn LLM loop.
@@ -223,6 +246,15 @@ type Agent struct {
 
 	// sessionUsage accumulates token consumption across the entire agent run.
 	sessionUsage SessionUsage
+	// taskTokenBudget caps prompt+completion tokens for a single agent run.
+	// Zero means unlimited (the budget check is skipped). Set via
+	// [NewOptions.TaskTokenBudget]; the run loop aborts with an AgentError
+	// when sessionUsage prompt+completion crosses this threshold.
+	taskTokenBudget int
+	// budgetExceeded latches once the budget abort fires so subsequent
+	// turn checks (e.g. on a Resume of a saved conversation) do not double-
+	// emit the AgentError. Reset alongside sessionUsage on RunWithMode/Reply.
+	budgetExceeded bool
 	// turnCounter is the 1-indexed turn number within the current run.
 	turnCounter int
 	// runID is a generation token incremented on each RunWithMode call.
@@ -302,6 +334,18 @@ type NewOptions struct {
 	// complete are verified by an actual launch — runtime errors that
 	// the parser/lint/architecture stages cannot catch surface here.
 	SmokeConfig runconfig.Resolved
+
+	// TaskTokenBudget caps total prompt+completion tokens consumed by a
+	// single agent run (RunWithMode → Done). Once the budget is exceeded
+	// the run aborts with an AgentError so a runaway loop cannot quietly
+	// burn the developer's wallet. The 2026-04-26 pacman regression burned
+	// 55M+ tokens on a single broken task; the budget is the safety net
+	// that keeps that from recurring.
+	//
+	//	== 0 — use the default ([defaultTaskTokenBudget]).
+	//	 < 0 — unlimited (disable the check; not recommended).
+	//	 > 0 — explicit cap in tokens.
+	TaskTokenBudget int
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -329,6 +373,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var terse bool
 	var smokeCfg runconfig.Resolved
 	var pipeline validate.Pipeline = validate.NoopPipeline{}
+	taskTokenBudget := defaultTaskTokenBudget
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -343,6 +388,12 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		smokeCfg = opts.SmokeConfig
 		if opts.ValidationPipeline != nil {
 			pipeline = opts.ValidationPipeline
+		}
+		switch {
+		case opts.TaskTokenBudget < 0:
+			taskTokenBudget = 0 // explicit unlimited
+		case opts.TaskTokenBudget > 0:
+			taskTokenBudget = opts.TaskTokenBudget
 		}
 	}
 
@@ -379,6 +430,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		diagDelay:         500 * time.Millisecond,
 		workspace:         workspace,
 		smokeConfig:       smokeCfg,
+		taskTokenBudget:   taskTokenBudget,
 	}
 
 	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
@@ -524,6 +576,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.runID++
 	a.sessionUsage = SessionUsage{}
 	a.turnCounter = 0
+	a.budgetExceeded = false
 
 	// Reset tools with state
 	for _, t := range a.tools {
@@ -589,6 +642,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.runID++
 	a.sessionUsage = SessionUsage{}
 	a.turnCounter = 0
+	a.budgetExceeded = false
 	a.intent = input
 
 	for _, t := range a.tools {
@@ -754,6 +808,71 @@ func (a *Agent) Usage() SessionUsage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.sessionUsage
+}
+
+// shouldAbortForBudget reports whether the task token budget would be
+// exceeded if the in-flight turn's pending usage (tu) were committed to
+// sessionUsage right now. Used by [Agent.processLLMTurn] BETWEEN inner
+// Stream calls so a multi-iteration turn (one Stream call per tool-call
+// round-trip) cannot blow past the cap unchecked.
+//
+// Distinct from [Agent.checkTaskBudget] in two ways:
+//
+//  1. Reads `tu` (pending) plus `sessionUsage` (committed) so the check
+//     reflects state that has not yet been recorded. checkTaskBudget
+//     only sees committed totals.
+//  2. Does NOT latch `budgetExceeded`. Latching is the abort path's
+//     job — checkTaskBudget runs after recordTurnUsage and is the
+//     single source of truth for "we have aborted." This helper only
+//     decides whether processLLMTurn should stop early; the actual
+//     abort still flows through runLoop's [Agent.abortIfBudgetExceeded].
+//
+// Returns false when the budget is disabled (taskTokenBudget <= 0) or
+// already latched (the run is unwinding) so the inner loop does not
+// double-fire.
+func (a *Agent) shouldAbortForBudget(tu turnUsage) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.taskTokenBudget <= 0 || a.budgetExceeded {
+		return false
+	}
+	committed := a.sessionUsage.TotalPromptTokens + a.sessionUsage.TotalCompletionTokens
+	pending := tu.promptTokens + tu.completionTokens
+	return committed+pending >= a.taskTokenBudget
+}
+
+// checkTaskBudget reports whether the per-task token budget has been
+// exceeded by the current sessionUsage. Returns the formatted error
+// message on overrun (and latches budgetExceeded so it does not double-
+// emit) or "" otherwise. A zero budget disables the check.
+//
+// Sums prompt + completion tokens. Cached tokens are already a subset of
+// prompt and would double-count if added separately. Called from runLoop
+// immediately after each recordTurnUsage so a runaway turn is caught
+// before the next LLM call commits more tokens.
+func (a *Agent) checkTaskBudget(runID uint64) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if runID != a.runID {
+		return "" // late check from a cancelled run
+	}
+	if a.taskTokenBudget <= 0 {
+		return ""
+	}
+	if a.budgetExceeded {
+		return ""
+	}
+	used := a.sessionUsage.TotalPromptTokens + a.sessionUsage.TotalCompletionTokens
+	if used < a.taskTokenBudget {
+		return ""
+	}
+	a.budgetExceeded = true
+	return fmt.Sprintf(
+		"task token budget exceeded: %d tokens used (cap %d) across %d turn(s); "+
+			"aborting to prevent runaway cost. "+
+			"Set NewOptions.TaskTokenBudget = -1 to disable, or a higher value to raise the cap.",
+		used, a.taskTokenBudget, a.sessionUsage.Turns,
+	)
 }
 
 // hasLintPending reports whether lint violations are waiting to be injected.
@@ -944,6 +1063,10 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 	// firing more than once per developer input. Reset each time a new
 	// developer message arrives via inputCh.
 	narrativeNudgeFired := false
+	// permissionNudgeFired guards the autonomous-mode permission-question
+	// gate from firing more than once per developer input. Same lifecycle
+	// as narrativeNudgeFired — reset on each inputCh receive.
+	permissionNudgeFired := false
 
 	for {
 		// Compact old tool results if history is large enough.
@@ -957,6 +1080,13 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 		// Pass runID so late updates from canceled runs are ignored.
 		a.recordTurnUsage(runID, tu)
 
+		// Per-task token budget. Enforced after recordTurnUsage so the
+		// turn that crosses the threshold has its consumption logged
+		// before the run aborts.
+		if a.abortIfBudgetExceeded(runID, success) {
+			return
+		}
+
 		if ctx.Err() != nil {
 			*success = false
 			return
@@ -968,19 +1098,12 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 			slog.Debug("LLM turn error, entering wait state for retry", "err", err)
 		}
 
-		// Narrative gate: if the model yielded with text that enumerates
-		// outstanding work AND its tracked task tree is empty, give it one
-		// chance to either add the work as tasks or scrub the language.
-		// Skip on error turns (no clean assistant content to scan) and
-		// when already fired once for this developer input.
-		if err == nil && !narrativeNudgeFired && a.shouldNudgeOutstanding(*messages) {
-			narrativeNudgeFired = true
-			*messages = append(*messages, llm.Message{
-				Role:    "user",
-				Content: outstandingNudgeMessage,
-			})
-			a.send(event.AgentToken{Text: "\n[Nudge: outstanding-work language detected — track or scrub it]\n"})
-			a.send(event.AgentStatus{Status: event.StatusThinking})
+		// Post-turn nudges (narrative, permission). Each is one-shot per
+		// developer input. tryInjectPostTurnNudge returns true when one
+		// fired so the loop should re-enter processLLMTurn instead of
+		// yielding to AgentWaiting. Skipped on error turns because there
+		// is no clean assistant content to scan.
+		if err == nil && a.tryInjectPostTurnNudge(messages, &narrativeNudgeFired, &permissionNudgeFired) {
 			continue
 		}
 
@@ -1008,6 +1131,7 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 			a.intent = input
 			a.mu.Unlock()
 			narrativeNudgeFired = false
+			permissionNudgeFired = false
 
 			// Refresh the system prompt so runtime changes (e.g. coding
 			// style switched via SetCodingStyle) take effect immediately.
@@ -1024,6 +1148,61 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 			return
 		}
 	}
+}
+
+// abortIfBudgetExceeded fires the per-task token budget abort when usage
+// has crossed the cap. Returns true when the abort fired so the run loop
+// should `return` immediately. Aborting cancels the agent (so any
+// in-flight tool wait unblocks) and surfaces an AgentError; the deferred
+// AgentDone in run/resumeRun then reports success=false. Extracted from
+// runLoop to keep the loop's cyclomatic complexity below the package
+// threshold.
+func (a *Agent) abortIfBudgetExceeded(runID uint64, success *bool) bool {
+	msg := a.checkTaskBudget(runID)
+	if msg == "" {
+		return false
+	}
+	slog.Warn("agent: task token budget exceeded; aborting", "msg", msg)
+	a.send(event.AgentError{Err: msg})
+	a.Cancel()
+	*success = false
+	return true
+}
+
+// tryInjectPostTurnNudge runs the post-turn nudge gates (narrative,
+// permission) in order and returns true when one fires so the caller
+// should `continue` the run loop. The narrative gate flags wrap-ups that
+// enumerate outstanding work while the task tree is empty. The
+// permission gate (autonomous mode only) flags turns that yielded with a
+// question instead of a tool call.
+//
+// Each gate is one-shot per developer input — narrativeFired and
+// permissionFired are mutated in place when their gate fires. Both
+// gates skip on error turns; the caller is responsible for that check
+// so a turn whose model errored does not consume a one-shot slot for
+// the next clean turn.
+func (a *Agent) tryInjectPostTurnNudge(messages *[]llm.Message, narrativeFired, permissionFired *bool) bool {
+	if !*narrativeFired && a.shouldNudgeOutstanding(*messages) {
+		*narrativeFired = true
+		*messages = append(*messages, llm.Message{
+			Role:    "user",
+			Content: outstandingNudgeMessage,
+		})
+		a.send(event.AgentToken{Text: "\n[Nudge: outstanding-work language detected — track or scrub it]\n"})
+		a.send(event.AgentStatus{Status: event.StatusThinking})
+		return true
+	}
+	if !*permissionFired && a.currentAutonomous() && shouldNudgePermissionQuestion(*messages) {
+		*permissionFired = true
+		*messages = append(*messages, llm.Message{
+			Role:    "user",
+			Content: permissionNudgeMessage,
+		})
+		a.send(event.AgentToken{Text: "\n[Nudge: permission-seeking question detected in autonomous mode — act, don't ask]\n"})
+		a.send(event.AgentStatus{Status: event.StatusThinking})
+		return true
+	}
+	return false
 }
 
 // outstandingNudgeMessage is the synthetic user message the narrative gate
@@ -1117,6 +1296,113 @@ func containsOutstandingWorkMarker(s string) bool {
 	return false
 }
 
+// permissionNudgeMessage is the synthetic user message the autonomous-mode
+// permission-question gate injects when the model yields with a question
+// instead of acting. The developer set autonomy high precisely to avoid
+// these prompts and will not answer; reprompting forces the model to
+// decide and proceed (or surface a concrete blocker, which is a different
+// shape than a chat question).
+const permissionNudgeMessage = "Your last message ended with a question or permission-seeking offer. Autonomy is high — the developer will not answer. " +
+	"Make the call yourself: pick the option that serves the current task, document the choice in your one-sentence pre-tool explanation, and proceed with a tool call. " +
+	"If you genuinely cannot proceed, state the concrete blocker (the specific tool error, missing dependency, or unsanctioned destructive op) and what you tried to fix it — do NOT phrase it as a question."
+
+// permissionSeekingMarkers are case-insensitive substrings that flag a
+// yielded turn as asking the developer for permission instead of acting.
+// Mirrors the [outstandingWorkMarkers] pattern: phrases (not single
+// words) chosen to keep false-positive rate low. Each entry was observed
+// in real autonomous-mode failure transcripts where the model ended a
+// turn with a permission-seeking offer that the developer (with autonomy
+// dial high) would not answer.
+//
+// Trailing-question detection (`?`) is a separate signal — handled in
+// [shouldNudgePermissionQuestion] alongside this list — because some
+// permission-seeking phrasing has no question mark ("Let me know if you
+// want me to continue.") and some questions are not permission-seeking
+// (rhetorical "Is this what you wanted?" before continuing). The two
+// signals are OR'd, with tool-call presence short-circuiting both.
+var permissionSeekingMarkers = []string{
+	"let me know",
+	"if you want",
+	"if you'd like",
+	"if you would like",
+	"want me to continue",
+	"want me to proceed",
+	"shall i continue",
+	"shall i proceed",
+	"shall i ",
+	"do you want",
+	"would you like",
+	"would you prefer",
+	"i can continue",
+	"i'll continue if",
+	"say keep going",
+	"say continue",
+	"say go",
+	"just say",
+	"give me the green light",
+	"awaiting your",
+	"await your",
+	"pending your",
+	"ready when you are",
+	"happy to continue",
+	"happy to proceed",
+	"on your signal",
+	"on your go",
+}
+
+// shouldNudgePermissionQuestion reports whether the most recent assistant
+// message yielded with a question OR a permission-seeking offer, while
+// making no tool call. Returns false when the last message has tool
+// calls (any question accompanying a tool call is rhetorical, not a
+// yield), when no assistant message exists, or when the trimmed content
+// neither ends in `?` nor contains a [permissionSeekingMarkers] phrase.
+// Used by the autonomous-mode permission gate in runLoop.
+func shouldNudgePermissionQuestion(messages []llm.Message) bool {
+	last := lastAssistantMessage(messages)
+	if last == nil {
+		return false
+	}
+	if len(last.ToolCalls) > 0 {
+		return false // tool call accompanies the text — model is acting
+	}
+	trimmed := strings.TrimSpace(last.Content)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasSuffix(trimmed, "?") {
+		return true
+	}
+	return containsPermissionSeekingMarker(trimmed)
+}
+
+// containsPermissionSeekingMarker reports whether s contains any of the
+// [permissionSeekingMarkers] phrases under case-insensitive comparison.
+// Whitespace and punctuation in s are not normalised — the marker set
+// already uses lowercased phrase fragments that survive the
+// strings.ToLower of typical assistant prose.
+func containsPermissionSeekingMarker(s string) bool {
+	lower := strings.ToLower(s)
+	for _, marker := range permissionSeekingMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// lastAssistantMessage returns the most recent assistant message in the
+// slice, or nil when none exists. Distinct from lastAssistantContent
+// (which returns Content) because the permission-question gate also
+// needs to inspect ToolCalls.
+func lastAssistantMessage(messages []llm.Message) *llm.Message {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			return &messages[i]
+		}
+	}
+	return nil
+}
+
 // planningToolDefs returns the tool definitions with write-side tools removed.
 func (a *Agent) planningToolDefs() []llm.ToolDef {
 	defs := make([]llm.ToolDef, 0, len(a.toolDefs))
@@ -1178,6 +1464,24 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 	var tu turnUsage
 	truncationRetries := 0
 	for {
+		// Per-task budget check BEFORE the next provider Stream. A
+		// single agent turn can call Stream many times (one per tool-
+		// call round-trip), and the post-turn check in runLoop only
+		// fires after this whole function returns. Without this gate, a
+		// runaway tool-call loop could spend 10× the budget before the
+		// outer loop notices. Returning early hands tu back so
+		// recordTurnUsage in runLoop commits the partial accounting,
+		// after which abortIfBudgetExceeded fires the real abort path.
+		// The transcript is well-formed at this point — the prior
+		// iteration's executeToolCalls appended every required tool
+		// reply before looping back here.
+		if a.shouldAbortForBudget(tu) {
+			slog.Warn("agent: per-task budget would be exceeded by next Stream; aborting turn early",
+				"prompt_tokens_pending", tu.promptTokens,
+				"completion_tokens_pending", tu.completionTokens)
+			return messages, tu, nil
+		}
+
 		// Inject pending lint violations as a user message so the LLM
 		// treats them as a high-priority instruction. Checked each iteration
 		// because waitForContinue (called during dispatchTool) may set
@@ -1246,7 +1550,17 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 // LLM sees the fix-lint-first directive without losing the tool-call ID
 // linkage. Returns an error when autosave fails or ctx is cancelled mid-
 // dispatch so the caller can end the turn visibly.
+//
+// In non-autonomous, non-headless (interactive) mode, only the FIRST
+// file-edit tool in the batch is dispatched; subsequent edit_file /
+// write_file / replace_file calls are rejected with a tool-result error
+// that steers the model back to one-edit-per-turn. This replaces the
+// prompt rule "One file-edit tool call per interactive turn" with
+// deterministic enforcement so the model can't drift past it.
 func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, toolCalls []llm.ToolCall, tu *turnUsage) ([]llm.Message, error) {
+	enforceSingleEdit := !a.currentAutonomous() && a.interactionMode != Headless
+	editFired := false
+
 	for _, tc := range toolCalls {
 		if a.hasLintPending() {
 			messages = append(messages, llm.Message{
@@ -1256,6 +1570,24 @@ func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, to
 			})
 			continue
 		}
+
+		toolName := strings.ToLower(tc.Function.Name)
+		if enforceSingleEdit && fileEditTools[toolName] {
+			if editFired {
+				slog.Info("agent: rejecting extra file-edit in same turn",
+					"tool", toolName, "id", tc.ID)
+				messages = append(messages, llm.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content: "Skipped — only ONE file-edit per turn in interactive mode. " +
+						"Wait for the developer to review the previous edit, then make this change " +
+						"in a follow-up turn. The next tool result will include the updated file content.",
+				})
+				continue
+			}
+			editFired = true
+		}
+
 		tu.toolCalls++
 
 		if err := a.flushDirtyBuffers(ctx); err != nil {

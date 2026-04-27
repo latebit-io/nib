@@ -259,8 +259,12 @@ func TestSystemPromptInteractiveMode(t *testing.T) {
 	if !strings.Contains(system, "Context Set") {
 		t.Error("interactive system prompt should include Context Set section")
 	}
-	if !strings.Contains(system, "ONE edit_file call per step") {
-		t.Error("interactive system prompt should include single-edit rule")
+	// 2026-04-27 prompt rev: rule was broadened from "ONE edit_file call
+	// per step" to cover all file-edit tools (edit_file, write_file,
+	// replace_file). The canonical phrase the test guards is now the
+	// "One file-edit tool call per interactive turn" wording.
+	if !strings.Contains(system, "One file-edit tool call per interactive turn") {
+		t.Error("interactive system prompt should include the one-file-edit-per-turn rule")
 	}
 	if strings.Contains(system, "headless mode") {
 		t.Error("interactive system prompt should not mention headless mode")
@@ -283,8 +287,11 @@ func TestSystemPromptHeadlessMode(t *testing.T) {
 	if strings.Contains(system, "Context Set") {
 		t.Error("headless system prompt should not include Context Set section")
 	}
-	if strings.Contains(system, "ONE edit_file call per step") {
-		t.Error("headless system prompt should not include single-edit rule")
+	// Headless mode is autonomous; the one-file-edit-per-turn rule
+	// (broadened 2026-04-27) is gated on `(not .Headless) (not .Autonomous)`,
+	// so headless prompts must NOT include it.
+	if strings.Contains(system, "One file-edit tool call per interactive turn") {
+		t.Error("headless system prompt should not include single-edit-per-turn rule")
 	}
 	if strings.Contains(system, "After a rejection") {
 		t.Error("headless system prompt should not include rejection rules")
@@ -296,9 +303,9 @@ func TestSystemPromptHeadlessMode(t *testing.T) {
 	if !strings.Contains(system, "Critical Perspective") {
 		t.Error("headless system prompt should include Critical Perspective section")
 	}
-	if !strings.Contains(system, "Edit Strategy") {
-		t.Error("headless system prompt should include Edit Strategy section")
-	}
+	// "Edit Strategy" was deleted in the 2026-04-26 prompt prune — its
+	// content (minimal-surgical-edits guidance) was redundant on Claude
+	// 4.x and now lives as a single rule in the trimmed Rules section.
 }
 
 func TestPlanningPromptInteractiveMode(t *testing.T) {

@@ -78,7 +78,14 @@ func resolve(cfg *Config) *Resolved {
 // defaultActiveStyle is the built-in style activated when no config file or
 // environment variable selects a different one. File configs and JUNTO_STYLE
 // override this.
-const defaultActiveStyle = "clean-code"
+//
+// Empty means "no active style" — the prompt skips the style section, the
+// architecture validator and style evaluator are disabled, and per-edit
+// linting depends only on auto-detected per-file linters. This is the
+// production default since 2026-04-26: governance is opt-in. Set
+// JUNTO_STYLE=clean-code (or similar) or write `.project/style.json` with
+// an `active` field to opt into a style.
+const defaultActiveStyle = ""
 
 // loadBuiltins reads all embedded style JSON files into a Config.
 func loadBuiltins() *Config {
@@ -114,14 +121,26 @@ func loadBuiltins() *Config {
 		cfg.Styles[key] = s
 	}
 
-	// Activate the default style if it was loaded successfully.
-	// Fall back to the first available style (sorted) if the default is missing.
-	if _, ok := cfg.Styles[defaultActiveStyle]; ok {
-		cfg.Active = defaultActiveStyle
-	} else if names := cfg.StyleNames(); len(names) > 0 {
-		cfg.Active = names[0]
-		slog.Warn("styleconfig: default active style missing; falling back",
-			"default", defaultActiveStyle, "fallback", cfg.Active)
+	// Activate the default style if one is configured AND it was loaded
+	// successfully. When defaultActiveStyle is empty (the production default
+	// since 2026-04-26), Active stays "" — meaning no style is active and
+	// the architecture validator, style evaluator, and prompt style section
+	// are all disabled. The developer opts in via JUNTO_STYLE or
+	// .project/style.json.
+	//
+	// retained for future reactivation if defaultActiveStyle policy
+	// changes — the body is dormant today (the constant is "") but kept
+	// so flipping the constant back to a style name (e.g. "clean-code")
+	// is a single-line change. Removing the block would require
+	// re-deriving and re-testing the activation+fallback semantics.
+	if defaultActiveStyle != "" {
+		if _, ok := cfg.Styles[defaultActiveStyle]; ok {
+			cfg.Active = defaultActiveStyle
+		} else if names := cfg.StyleNames(); len(names) > 0 {
+			cfg.Active = names[0]
+			slog.Warn("styleconfig: default active style missing; falling back",
+				"default", defaultActiveStyle, "fallback", cfg.Active)
+		}
 	}
 
 	return cfg

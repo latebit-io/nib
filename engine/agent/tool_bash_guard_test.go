@@ -333,19 +333,36 @@ func TestRedactCommandPreview(t *testing.T) {
 }
 
 // TestGuardCommand verifies the unified entry point composes the three
-// individual guards and returns the first error encountered. Tests one
-// row from each guard family so a regression in [guardCommand]'s
-// dispatching is caught even if individual guards still pass.
+// individual guards in the documented "first error wins" dispatch order:
+// fileWriteGuard → searchCommandGuard → destructiveCommandGuard. The
+// wantContains string is a unique substring of each guard's message
+// (`write_file`, `search_project`, `destructive`) — overlap rows confirm
+// precedence by checking which message comes back when MULTIPLE guards
+// would have fired. Without these, a refactor that reordered the
+// dispatch chain would silently change which error the developer sees
+// while every blocked/allowed assertion still passed.
 func TestGuardCommand(t *testing.T) {
 	tests := []struct {
-		name    string
-		command string
-		blocked bool
+		name         string
+		command      string
+		blocked      bool
+		wantContains string
 	}{
-		{"allowed build", "go build ./...", false},
-		{"file write blocked", "echo x > out.txt", true},
-		{"search blocked", "grep TODO .", true},
-		{"destructive blocked", "rm -rf build/", true},
+		// Single-guard rows — each command triggers exactly one guard.
+		{"allowed build", "go build ./...", false, ""},
+		{"file write blocked", "echo x > out.txt", true, "write_file"},
+		{"search blocked", "grep TODO .", true, "search_project"},
+		{"destructive blocked", "rm -rf build/", true, "destructive"},
+
+		// Overlap rows — verify "first error wins" precedence.
+		// fileWriteGuard runs before searchCommandGuard, so a `grep …
+		// > out.txt` should surface the file-write message even though
+		// the search guard would also have fired.
+		{"file-write precedence over search", "grep TODO . > out.txt", true, "write_file"},
+		// searchCommandGuard runs before destructiveCommandGuard, so a
+		// `grep … && rm -rf …` should surface the search message even
+		// though the destructive guard would also have fired.
+		{"search precedence over destructive", "grep TODO . && rm -rf build/", true, "search_project"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -355,6 +372,9 @@ func TestGuardCommand(t *testing.T) {
 			}
 			if !tt.blocked && result != "" {
 				t.Errorf("expected allowed but got: %s\ncommand: %s", result, tt.command)
+			}
+			if tt.blocked && tt.wantContains != "" && !strings.Contains(result, tt.wantContains) {
+				t.Errorf("expected error containing %q, got: %s", tt.wantContains, result)
 			}
 		})
 	}

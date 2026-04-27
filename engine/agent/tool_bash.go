@@ -88,8 +88,8 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 		return textResult("Error: command is required")
 	}
 
-	if msg := fileWriteGuard(args.Command); msg != "" {
-		slog.Warn("bash: blocked file-writing command", "command", args.Command)
+	if msg := guardCommand(args.Command); msg != "" {
+		slog.Warn("bash: blocked by guard", "command", args.Command)
 		return textResult(msg)
 	}
 

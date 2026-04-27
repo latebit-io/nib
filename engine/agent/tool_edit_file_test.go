@@ -281,6 +281,170 @@ func TestEditFileTool_ProposalPendingEditFields(t *testing.T) {
 	}
 }
 
+// TestEditOverlapRatio locks in the over-rewrite signal: a high ratio of
+// shared lines between search and replace flags edits that rewrote more
+// than they needed to change. Cases cover the extremes (clean rewrite =
+// 0.0, identical = 1.0), partial overlap, and the noise-suppression
+// rules (empty lines and pure-whitespace lines are excluded).
+func TestEditOverlapRatio(t *testing.T) {
+	tests := []struct {
+		name      string
+		search    string
+		replace   string
+		wantRatio float64
+		wantLines int
+	}{
+		{
+			name:      "identical text — full overlap",
+			search:    "a\nb\nc",
+			replace:   "a\nb\nc",
+			wantRatio: 1.0,
+			wantLines: 3,
+		},
+		{
+			name:      "totally different — zero overlap",
+			search:    "a\nb\nc",
+			replace:   "x\ny\nz",
+			wantRatio: 0.0,
+			wantLines: 3,
+		},
+		{
+			name:      "two of three lines unchanged",
+			search:    "a\nb\nc",
+			replace:   "a\nNEW\nc",
+			wantRatio: 2.0 / 3.0,
+			wantLines: 3,
+		},
+		{
+			name:      "duplicate lines counted via multiset",
+			search:    "a\na\nb",
+			replace:   "a\nb\nb",
+			wantRatio: 2.0 / 3.0, // one a + one b match; duplicate replace-b not reused
+			wantLines: 3,
+		},
+		{
+			name:      "blank lines excluded from both sides",
+			search:    "a\n\n\nb",
+			replace:   "a\nb",
+			wantRatio: 1.0,
+			wantLines: 2,
+		},
+		{
+			name:      "pure-whitespace lines excluded",
+			search:    "a\n   \nb",
+			replace:   "a\nb",
+			wantRatio: 1.0,
+			wantLines: 2,
+		},
+		{
+			name:      "empty search returns zero-zero",
+			search:    "",
+			replace:   "anything",
+			wantRatio: 0.0,
+			wantLines: 0,
+		},
+		{
+			name:      "rewrote-whole-function with one-field added",
+			search:    "func F(name string) {\n\treturn name\n}",
+			replace:   "func F(name string) {\n\tlog.Print(\"hi\")\n\treturn name\n}",
+			wantRatio: 1.0, // every non-empty search line appears unchanged in replace
+			wantLines: 3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRatio, gotLines := editOverlapRatio(tt.search, tt.replace)
+			if gotLines != tt.wantLines {
+				t.Errorf("lines = %d, want %d", gotLines, tt.wantLines)
+			}
+			// Allow a small floating-point tolerance for division results.
+			delta := gotRatio - tt.wantRatio
+			if delta < -1e-9 || delta > 1e-9 {
+				t.Errorf("ratio = %v, want %v", gotRatio, tt.wantRatio)
+			}
+		})
+	}
+}
+
+// TestStripLineNumberPrefixes covers the deterministic strip applied to
+// edit_file's search field before matching. The strip exists to fix a
+// recurring failure mode where the model copies prompt-formatted file
+// content (with `   N | ` or `   N\t` prefixes) into the search field
+// verbatim, then sees a no-match because the prefix is never in the real
+// file. The all-or-nothing rule protects genuine code that happens to
+// start with a digit (e.g. literal markdown rows).
+func TestStripLineNumberPrefixes(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// --- Strip applied: every non-blank line carries a prefix ---
+		{
+			name: "buildMessages pipe format",
+			in:   "   1 | package main\n   2 | \n   3 | func main() {}\n",
+			want: "package main\n\nfunc main() {}\n",
+		},
+		{
+			name: "read_file tab format",
+			in:   "   1\tpackage main\n   2\tfunc main() {}\n",
+			want: "package main\nfunc main() {}\n",
+		},
+		{
+			name: "no padding pipe",
+			in:   "1 | foo\n2 | bar",
+			want: "foo\nbar",
+		},
+		{
+			name: "wide line numbers",
+			in:   " 999 | foo\n1000 | bar",
+			want: "foo\nbar",
+		},
+
+		// --- Strip skipped: at least one non-blank line lacks a prefix ---
+		{
+			name: "no prefix at all",
+			in:   "package main\nfunc main() {}",
+			want: "package main\nfunc main() {}",
+		},
+		{
+			name: "mixed (one line without prefix)",
+			in:   "   1 | package main\nbare line\n   3 | foo",
+			want: "   1 | package main\nbare line\n   3 | foo",
+		},
+		{
+			name: "literal markdown row that resembles prefix",
+			in:   "1.0 | description",
+			want: "1.0 | description", // not stripped — leading "1.0" doesn't match `\d+ | `
+		},
+
+		// --- Edge cases ---
+		{
+			name: "empty string",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "only blank lines",
+			in:   "\n\n",
+			want: "\n\n", // no non-blank line means no prefix found → leave alone
+		},
+		{
+			name: "single prefixed line",
+			in:   "  42 | the answer",
+			want: "the answer",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripLineNumberPrefixes(tt.in)
+			if got != tt.want {
+				t.Errorf("stripLineNumberPrefixes(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFuzzyWhitespaceMatch(t *testing.T) {
 	t.Run("tabs vs spaces", func(t *testing.T) {
 		content := "func main() {\n\tfmt.Println(\"hello\")\n}"

@@ -296,9 +296,9 @@ func TestSystemPromptHeadlessMode(t *testing.T) {
 	if !strings.Contains(system, "Critical Perspective") {
 		t.Error("headless system prompt should include Critical Perspective section")
 	}
-	if !strings.Contains(system, "Edit Strategy") {
-		t.Error("headless system prompt should include Edit Strategy section")
-	}
+	// "Edit Strategy" was deleted in the 2026-04-26 prompt prune — its
+	// content (minimal-surgical-edits guidance) was redundant on Claude
+	// 4.x and now lives as a single rule in the trimmed Rules section.
 }
 
 func TestPlanningPromptInteractiveMode(t *testing.T) {

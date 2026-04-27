@@ -15,7 +15,6 @@ func TestFileWriteGuard(t *testing.T) {
 		{name: "simple build", command: "go build ./...", blocked: false},
 		{name: "run tests", command: "go test ./...", blocked: false},
 		{name: "gofmt check", command: "gofmt -l .", blocked: false},
-		{name: "grep pattern", command: "grep -r TODO .", blocked: false},
 		{name: "pipe", command: "go test ./... | head -20", blocked: false},
 		{name: "echo no redirect", command: "echo hello", blocked: false},
 		{name: "stderr to stdout", command: "go build ./... 2>&1", blocked: false},
@@ -91,5 +90,134 @@ func TestFileWriteGuardErrorMessage(t *testing.T) {
 		if !strings.Contains(result, want) {
 			t.Errorf("error message missing %q: %s", want, result)
 		}
+	}
+}
+
+// TestSearchCommandGuard locks in the 2026-04-26 rule that bash must not be
+// the route for code search. The dedicated tools (search_project, glob)
+// return structured results and respect gitignore; bash grep/rg/find dump
+// raw text, drag the conversation through walls of output, and miss
+// gitignored files. Each blocked-row checks both that the command is
+// rejected and that the error names the tool we want the LLM to use
+// instead.
+func TestSearchCommandGuard(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Allowed — non-search bash commands stay allowed.
+		{"build", "go build ./...", false},
+		{"echo no search tool", "echo grep is a word", false},
+		{"go test", "go test ./agent/...", false},
+		{"make build", "make build", false},
+
+		// Blocked — direct invocations.
+		{"grep", "grep -r TODO .", true},
+		{"rg", "rg pattern", true},
+		{"ripgrep", "ripgrep pattern", true},
+		{"ag", "ag pattern .", true},
+		{"ack", "ack TODO", true},
+		{"find", "find . -name '*.go'", true},
+
+		// Blocked — chained after separators (catches the model trying to
+		// sneak grep through a `cd && grep` pipeline).
+		{"chained with &&", "cd src && grep TODO .", true},
+		{"chained with ;", "cd src; grep TODO .", true},
+		{"piped from another command", "cat *.go | grep TODO", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := searchCommandGuard(tt.command)
+			if tt.blocked && result == "" {
+				t.Errorf("expected blocked: %s", tt.command)
+			}
+			if !tt.blocked && result != "" {
+				t.Errorf("expected allowed but got: %s\ncommand: %s", result, tt.command)
+			}
+			if tt.blocked && !strings.Contains(result, "search_project") {
+				t.Errorf("blocked-search error should name search_project: %s", result)
+			}
+		})
+	}
+}
+
+// TestDestructiveCommandGuard locks in the policy that an autonomous agent
+// does not run history-loss or workspace-loss operations without explicit
+// developer ask. The blocked commands have all caused real lost work in
+// other agent harnesses; refusing at the tool layer is cheaper than
+// auditing them after the fact. The allowed rows protect against
+// over-blocking — `rm path` is fine for single files, `git status` and
+// other read-only git commands are not destructive.
+func TestDestructiveCommandGuard(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// Allowed.
+		{"rm single file", "rm /tmp/scratch.log", false},
+		{"rm with -f only", "rm -f /tmp/scratch.log", false},
+		{"git status", "git status", false},
+		{"git diff", "git diff HEAD~1", false},
+		{"git log", "git log --oneline -5", false},
+		{"git fetch", "git fetch", false},
+
+		// Blocked — recursive force delete in any flag order.
+		{"rm -rf", "rm -rf build/", true},
+		{"rm -fr", "rm -fr build/", true},
+		{"rm with -rf among other flags", "rm -vrf build/", true},
+		{"rm long flags", "rm --recursive --force build/", true},
+		{"rm long flags reversed", "rm --force --recursive build/", true},
+
+		// Blocked — git destructive ops.
+		{"git push", "git push origin main", true},
+		{"git push force", "git push --force origin main", true},
+		{"git checkout file", "git checkout -- file.go", true},
+		{"git checkout branch", "git checkout main", true},
+		{"git switch", "git switch main", true},
+		{"git reset hard", "git reset --hard HEAD~1", true},
+		{"git clean -fd", "git clean -fd", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := destructiveCommandGuard(tt.command)
+			if tt.blocked && result == "" {
+				t.Errorf("expected blocked: %s", tt.command)
+			}
+			if !tt.blocked && result != "" {
+				t.Errorf("expected allowed but got: %s\ncommand: %s", result, tt.command)
+			}
+		})
+	}
+}
+
+// TestGuardCommand verifies the unified entry point composes the three
+// individual guards and returns the first error encountered. Tests one
+// row from each guard family so a regression in [guardCommand]'s
+// dispatching is caught even if individual guards still pass.
+func TestGuardCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"allowed build", "go build ./...", false},
+		{"file write blocked", "echo x > out.txt", true},
+		{"search blocked", "grep TODO .", true},
+		{"destructive blocked", "rm -rf build/", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := guardCommand(tt.command)
+			if tt.blocked && result == "" {
+				t.Errorf("expected blocked: %s", tt.command)
+			}
+			if !tt.blocked && result != "" {
+				t.Errorf("expected allowed but got: %s\ncommand: %s", result, tt.command)
+			}
+		})
 	}
 }

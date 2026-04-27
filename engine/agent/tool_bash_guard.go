@@ -6,13 +6,16 @@ import (
 	"strings"
 )
 
-// File-write guard for the bash tool.
+// Bash command guards.
 //
-// The LLM has dedicated edit_file / write_file tools that go through the
-// approval flow and are platform-agnostic. Shell commands that redirect
-// output to files bypass that flow and are not portable (BSD vs GNU head,
-// sed -i behavior, etc.). This guard catches the common accidental patterns
-// and returns an error message that steers the model toward the right tool.
+// The LLM has dedicated tools for editing (edit_file/write_file), searching
+// (search_project), and structural questions (glob, list_files). Shell
+// commands that bypass those tools either skip the approval flow, return
+// non-portable results (BSD vs GNU sed/head/find), or do something
+// destructive the dev didn't ask for. The guards here catch the common
+// patterns and return an error message that steers the model toward the
+// right tool — replacing prose-only "don't do X" rules in the system prompt
+// with deterministic enforcement.
 //
 // This is a heuristic, not a sandbox. Known bypass vectors that require a
 // full shell parser to detect (accepted risks):
@@ -36,6 +39,33 @@ var (
 
 	// teeRe matches tee with an optional -a flag followed by a file target.
 	teeRe = regexp.MustCompile(`\btee\s+(?:-a\s+)?(\S+)`)
+
+	// searchCmdRe matches code-search shell tools (grep / rg / ag / ack / find)
+	// invoked at the start of a command segment. The (?:^|[;&|(]) anchor
+	// catches both standalone invocations ("grep -r foo .") and chained ones
+	// ("cd dir && grep -r foo ."). Lookahead-free because Go's RE2 doesn't
+	// support lookbehind — we capture the optional separator into group 1
+	// and the tool name into group 2 so the matcher can return the offending
+	// tool for the error message.
+	searchCmdRe = regexp.MustCompile(`(?:^|[;&|(])\s*\b(grep|rg|ripgrep|ag|ack|find)\b`)
+
+	// destructiveOpRe matches commands that destroy local state without the
+	// developer's explicit ask: `rm -r*f*` / `rm -f*r*` (recursive delete),
+	// `git push`, `git checkout`, `git reset --hard`, `git clean -f`. These
+	// are not theatre — accidental `git checkout .` or `rm -rf` from an
+	// agent loses real work. Block at the tool layer so the dev can opt in
+	// by typing the command themselves if they truly want it.
+	//
+	// rm: any flag run containing both 'r' and 'f' (in either order) is
+	// recursive force-delete. Single-file `rm path` is not blocked — it
+	// goes through the normal exit-code path and the dev can see what
+	// happened.
+	destructiveRmRe = regexp.MustCompile(`\brm\b\s+(?:-{1,2}[a-zA-Z]*(?:rf|fr|recursive)[a-zA-Z]*\b|--recursive\b[^|;&]*--force\b|--force\b[^|;&]*--recursive\b)`)
+
+	// destructiveGitRe covers the git-history-loss patterns: push (publishes
+	// state), checkout/switch (drops uncommitted changes), reset --hard
+	// (drops history), clean -f (drops untracked files).
+	destructiveGitRe = regexp.MustCompile(`\bgit\s+(?:push\b|checkout\b|switch\b|reset\b[^|;&]*--hard\b|clean\b[^|;&]*-[a-zA-Z]*f[a-zA-Z]*\b)`)
 )
 
 // safeRedirectTarget returns true if the redirect target does not write to a
@@ -58,6 +88,83 @@ func safeRedirectTarget(target string) bool {
 	default:
 		return false
 	}
+}
+
+// guardCommand runs every active bash guard against a command and returns
+// the first non-empty error message, or "" when the command passes them
+// all. This is the single entry point [BashTool.Execute] calls before
+// invoking the shell — adding a new guard means appending one line here
+// rather than threading another check through the call site.
+//
+// Guard order is intentional: file-write checks first (highest false-
+// positive risk if a destructive command coincidentally writes a file),
+// then search redirects, then destructive-state ops. Every guard receives
+// the unmodified command string; none of them mutate it.
+func guardCommand(command string) string {
+	if msg := fileWriteGuard(command); msg != "" {
+		return msg
+	}
+	if msg := searchCommandGuard(command); msg != "" {
+		return msg
+	}
+	if msg := destructiveCommandGuard(command); msg != "" {
+		return msg
+	}
+	return ""
+}
+
+// searchCommandGuard blocks code-search shell tools (grep, rg, ripgrep, ag,
+// ack, find) so the LLM is steered toward `search_project` and `glob`,
+// which return structured file:line results, respect gitignore, and don't
+// drag the conversation through a wall of unrelated bash output. Empty
+// return means the command does not start with a blocked search tool.
+//
+// `find` is included because the typical LLM use of `find` is "find files
+// matching a name pattern" — `glob` does that better and faster. `find`
+// for filesystem ops (delete, exec) is rare from a coding agent and, if
+// genuinely needed, the developer can run it themselves outside the agent.
+func searchCommandGuard(command string) string {
+	m := searchCmdRe.FindStringSubmatch(command)
+	if m == nil {
+		return ""
+	}
+	tool := m[1]
+	return fmt.Sprintf(
+		"Error: command starts with %q, which bypasses the structured search tools.\n"+
+			"Use search_project for code search (returns file:line results, respects gitignore) "+
+			"or glob for file-name patterns. If you must use bash for a one-off filesystem "+
+			"operation, ask the developer to run it themselves.",
+		tool,
+	)
+}
+
+// destructiveCommandGuard blocks destructive operations the developer did
+// not explicitly request: `rm -rf`, `git push`, `git checkout`, `git
+// switch`, `git reset --hard`, `git clean -f`. The shared concern is "this
+// command can lose real work the developer cared about, and an autonomous
+// agent guessing wrong is more expensive than refusing."
+//
+// The dev can run any of these themselves outside the agent. The dev can
+// also explicitly ask the agent ("force-push my branch to origin") — but
+// that intent never reaches this layer, so we block first and let the
+// failure message explain the policy. Better a one-turn retry-with-
+// permission than an unrecoverable mistake.
+func destructiveCommandGuard(command string) string {
+	if destructiveRmRe.MatchString(command) {
+		return "Error: command attempts a recursive force-delete (`rm -rf` or equivalent).\n" +
+			"This is destructive and the developer has not explicitly asked for it. " +
+			"Ask before retrying, or limit the delete to specific files without `-rf`."
+	}
+	if m := destructiveGitRe.FindString(command); m != "" {
+		return fmt.Sprintf(
+			"Error: command attempts a destructive git operation (%q).\n"+
+				"Operations that publish state (push), drop uncommitted changes (checkout/switch), "+
+				"or rewrite history (reset --hard, clean -f) are blocked unless the developer "+
+				"explicitly asked. Ask before retrying.",
+			strings.TrimSpace(m),
+		)
+	}
+	return ""
 }
 
 // fileWriteGuard checks whether a shell command attempts to write files via

@@ -5,12 +5,130 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/llm"
 )
+
+// lineNumberPrefixRe matches the leading line-number prefix that the
+// engine prepends when showing file content to the LLM. Two prompt
+// surfaces produce these prefixes:
+//
+//   - buildMessages (engine/agent/prompt.go ~line 31) — format `%4d | %s`,
+//     producing rows like `"   1 | content"`.
+//   - sliceLines (engine/agent/tool_read_file.go ~line 138) — format
+//     `%4d\t%s`, producing rows like `"   1\tcontent"`.
+//
+// When the model copies file content into edit_file's `search` field
+// verbatim, the prefix comes along too — and never matches the actual
+// file. We strip it deterministically here rather than asking the model
+// to remember not to include it (the prompt-only instruction was
+// unreliable, especially on long context).
+var lineNumberPrefixRe = regexp.MustCompile(`^[ ]*\d+(?:[ ]+\||\t)[ ]?`)
+
+// editOverlapWarningThreshold is the unchanged-line ratio at which an
+// edit_file call logs an over-rewrite warning. 0.80 means "if more than
+// 80% of search lines also appear unchanged in replace, the model is
+// rewriting too much for the change it intends to make." Tuned to flag
+// the obvious "rewrote a whole function to add one field" pattern
+// without firing on legitimate small edits where overlap is naturally
+// high (most lines are context anchors).
+const editOverlapWarningThreshold = 0.80
+
+// editOverlapMinLines suppresses the over-rewrite warning for edits with
+// fewer search lines than this floor. Tiny edits (a one-line change with
+// two anchor lines) routinely sit above the ratio threshold but are
+// exactly the right shape — flagging them would train developers to
+// ignore the warning.
+const editOverlapMinLines = 5
+
+// editOverlapRatio reports what fraction of search's non-empty lines also
+// appear unchanged in replace. Returns (ratio, searchLineCount). The
+// ratio is computed line-by-line via a multiset intersection: each
+// search line that has a counterpart in replace contributes once,
+// duplicate matches are not double-counted. Empty lines are excluded
+// from both numerator and denominator because they are noise — every
+// edit has whitespace lines, and a cluster of empty lines would inflate
+// the ratio without meaning anything.
+//
+// A ratio of 1.0 means every non-empty search line has a duplicate in
+// replace (extreme over-rewrite). A ratio of 0.0 means the replace
+// shares no lines with search (clean rewrite or wholly new content).
+// Returns (0, 0) for empty search to keep callers from dividing by
+// zero.
+func editOverlapRatio(search, replace string) (float64, int) {
+	searchLines := nonEmptyLines(search)
+	if len(searchLines) == 0 {
+		return 0, 0
+	}
+	replaceMultiset := make(map[string]int, len(searchLines))
+	for _, line := range nonEmptyLines(replace) {
+		replaceMultiset[line]++
+	}
+	matched := 0
+	for _, line := range searchLines {
+		if replaceMultiset[line] > 0 {
+			replaceMultiset[line]--
+			matched++
+		}
+	}
+	return float64(matched) / float64(len(searchLines)), len(searchLines)
+}
+
+// nonEmptyLines splits s on \n and returns only the lines whose trimmed
+// content is non-empty. Used by [editOverlapRatio] so leading/trailing
+// blank lines and indentation-only rows do not skew the overlap signal.
+func nonEmptyLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	raw := strings.Split(s, "\n")
+	out := raw[:0]
+	for _, line := range raw {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// stripLineNumberPrefixes removes the leading line-number prefix from
+// every line of s and returns the cleaned text. The strip applies only
+// when EVERY non-blank line carries a recognisable prefix — partial
+// matches indicate genuine code that happens to start with a digit (e.g.
+// "1.0 | foo" in a markdown table, "42 | x" as a literal data row), and
+// mutilating real content would break legitimate edits.
+//
+// Returns s unchanged when no non-blank line has a prefix or any
+// non-blank line lacks one. Blank lines are skipped because they carry
+// no prefix in either format and would otherwise force the all-or-
+// nothing rule to fail spuriously.
+func stripLineNumberPrefixes(s string) string {
+	if s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	prefixed := false
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		if !lineNumberPrefixRe.MatchString(line) {
+			return s
+		}
+		prefixed = true
+	}
+	if !prefixed {
+		return s
+	}
+	for i, line := range lines {
+		lines[i] = lineNumberPrefixRe.ReplaceAllString(line, "")
+	}
+	return strings.Join(lines, "\n")
+}
 
 // maxContentPreview is the max bytes of file content included in error messages
 // sent back to the LLM. Prevents unbounded message sizes for large files.
@@ -231,6 +349,13 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 		return textResult("Error: search field cannot be empty (file is not empty — copy existing text to anchor your edit)")
 	}
 
+	// Strip line-number prefixes before matching. The prefixes come from
+	// our own prompt surfaces and are never present in actual file
+	// content; copying them verbatim into `search` would guarantee a
+	// no-match. Done before validateSearchMatch so the silent-retry
+	// budget is not consumed by a prefix-induced mismatch.
+	args.Search = stripLineNumberPrefixes(args.Search)
+
 	correctedSearch, errMsg := t.validateSearchMatch(args.Path, args.Search, content)
 	if errMsg != "" {
 		return textResult(errMsg)
@@ -244,6 +369,14 @@ func (t *EditFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 			"path", args.Path, "reason", msg,
 			"search_len", len(args.Search), "replace_len", len(args.Replace))
 		return textResult("Error: " + msg)
+	}
+
+	if ratio, lines := editOverlapRatio(args.Search, args.Replace); lines >= editOverlapMinLines && ratio >= editOverlapWarningThreshold {
+		slog.Warn("edit_file: over-rewrite detected — search and replace mostly identical",
+			"path", args.Path,
+			"search_lines", lines,
+			"unchanged_ratio", ratio,
+			"hint", "split into smaller edits that only change the lines that differ")
 	}
 
 	expectedContent := strings.Replace(content, args.Search, args.Replace, 1)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // Bash command guards.
@@ -42,11 +43,12 @@ var (
 
 	// searchCmdRe matches code-search shell tools (grep / rg / ag / ack / find)
 	// invoked at the start of a command segment. The (?:^|[;&|(]) anchor
-	// catches both standalone invocations ("grep -r foo .") and chained ones
-	// ("cd dir && grep -r foo ."). Lookahead-free because Go's RE2 doesn't
-	// support lookbehind — we capture the optional separator into group 1
-	// and the tool name into group 2 so the matcher can return the offending
-	// tool for the error message.
+	// catches both standalone invocations ("grep -r foo .") and chained
+	// ones ("cd dir && grep -r foo ."). The leading group is non-capturing
+	// (?: …); the tool name is the only capturing group, so
+	// FindStringSubmatch returns [full_match, tool] and callers read the
+	// tool from m[1]. (See [searchCommandGuard] — `m[1]` is the offending
+	// tool name passed into the error message.)
 	searchCmdRe = regexp.MustCompile(`(?:^|[;&|(])\s*\b(grep|rg|ripgrep|ag|ack|find)\b`)
 
 	// destructiveOpRe matches commands that destroy local state without the
@@ -110,25 +112,41 @@ func firstLine(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// redactPreviewBytes is the byte cap on the trimmed preview returned by
+// [redactCommandPreview]. 64 bytes is enough to keep the recognisable
+// shape ("rm -rf build/", "echo … > out.txt") for triage without
+// exposing the rest of an inline-secret command.
+const redactPreviewBytes = 64
+
 // redactCommandPreview returns a short preview of command suitable for
 // logging when a guard rejects it. The full command may contain secrets
 // (env-var assignments, inline tokens, paths leaking workspace identity)
-// that should not land in slog. We trim to redactPreviewBytes and add an
-// ellipsis when the command was longer; the guard's class string (the
-// `msg` returned by guardCommand) carries the *why* without needing the
-// full command text. The preview exists purely so triage can grep logs
-// for a recognisable shape ("rm -rf …") without exposing the rest.
+// that should not land in slog. We trim to [redactPreviewBytes] and add
+// an ellipsis when the command was longer; the guard's class string
+// (the `msg` returned by guardCommand) carries the *why* without
+// needing the full command text. The preview exists purely so triage
+// can grep logs for a recognisable shape ("rm -rf …") without exposing
+// the rest.
+//
+// Truncation is rune-aware: when the byte cap lands inside a multibyte
+// UTF-8 sequence (e.g. a CJK glyph in a path, an em-dash in an
+// argument), the cut backs up to the last rune boundary <=
+// redactPreviewBytes so the returned string is always valid UTF-8.
+// Mirrors the truncation pattern at engine/agent/prompt.go:51 and :63.
 //
 // This is a heuristic, not a sanitiser. Secret-pattern masking (token
 // detection, env-var stripping) is a separate hardening project — for
 // now we just bound the surface.
 func redactCommandPreview(command string) string {
-	const redactPreviewBytes = 64
 	command = strings.TrimSpace(command)
 	if len(command) <= redactPreviewBytes {
 		return command
 	}
-	return command[:redactPreviewBytes] + "…"
+	cut := redactPreviewBytes
+	for cut > 0 && !utf8.RuneStart(command[cut]) {
+		cut--
+	}
+	return command[:cut] + "…"
 }
 
 // guardCommand runs every active bash guard against a command and returns

@@ -143,7 +143,14 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 		// Check timeout before exit code — CommandContext kills the process
 		// on deadline, which produces an ExitError with code -1.
 		if cmdCtx.Err() == context.DeadlineExceeded {
-			slog.Warn("bash: command timed out", "command", args.Command, "timeout", timeout)
+			// Log the redacted preview, not the verbatim command — the
+			// timeout path runs at Warn level and an inline secret
+			// (e.g. `MY_TOKEN=xyz ./script.sh`) would otherwise land
+			// in slog. Mirrors the guard path's treatment at the top
+			// of Execute.
+			slog.Warn("bash: command timed out",
+				"preview", redactCommandPreview(args.Command),
+				"timeout", timeout)
 			return textResult(fmt.Sprintf("Error: command timed out after %s\n\n%s", timeout, output))
 		}
 		if ctx.Err() != nil {

@@ -137,8 +137,20 @@ func TestShouldAbortForBudget(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(ag)
 			}
+			// Capture the latch state before the call. shouldAbortForBudget
+			// must NOT mutate budgetExceeded — only the abort path
+			// (checkTaskBudget after recordTurnUsage commits) is allowed
+			// to latch. If this helper accidentally latched, a later
+			// checkTaskBudget call would short-circuit and the abort
+			// AgentError would never fire. Locking the invariant in tests
+			// keeps that pre-condition load-bearing.
+			latchBefore := ag.budgetExceeded
 			if got := ag.shouldAbortForBudget(tc.pending); got != tc.want {
 				t.Errorf("shouldAbortForBudget(%+v) = %v, want %v", tc.pending, got, tc.want)
+			}
+			if ag.budgetExceeded != latchBefore {
+				t.Errorf("shouldAbortForBudget mutated budgetExceeded latch: before=%v, after=%v",
+					latchBefore, ag.budgetExceeded)
 			}
 		})
 	}
@@ -321,22 +333,47 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 
 	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
 
-	// Wait for AgentDone to mean the run finished.
-	deadline := time.After(2 * time.Second)
-WAIT:
-	for {
+	// Collect both AgentError and AgentDone before exiting the loop so
+	// the assertions are order-tolerant. The same shape as
+	// TestAgent_TokenBudget_AbortsRun — kept consistent so a future
+	// change to the abort-event ordering does not silently regress
+	// either test.
+	var (
+		errMsg      string
+		errSeen     bool
+		doneSuccess bool
+		doneSeen    bool
+		deadline    = time.After(2 * time.Second)
+	)
+	for !errSeen || !doneSeen {
 		select {
 		case ev := <-events:
 			if fb, ok := ev.(event.FlushBuffers); ok {
 				fb.Result <- event.FlushResult{}
 				continue
 			}
-			if _, ok := ev.(event.AgentDone); ok {
-				break WAIT
+			switch e := ev.(type) {
+			case event.AgentError:
+				errSeen = true
+				errMsg = e.Err
+			case event.AgentDone:
+				doneSeen = true
+				doneSuccess = e.Success
 			}
 		case <-deadline:
-			t.Fatal("timeout waiting for AgentDone")
+			if !errSeen {
+				t.Fatal("timeout waiting for AgentError after inner-loop budget abort")
+			}
+			if !doneSeen {
+				t.Fatal("timeout waiting for AgentDone after inner-loop budget abort")
+			}
 		}
+	}
+	if !strings.Contains(errMsg, "budget exceeded") {
+		t.Errorf("AgentError = %q, want substring 'budget exceeded'", errMsg)
+	}
+	if doneSuccess {
+		t.Error("AgentDone.Success = true, want false on inner-loop budget abort")
 	}
 
 	// The inner gate must have prevented the second Stream call.

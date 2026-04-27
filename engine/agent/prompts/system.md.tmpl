@@ -33,7 +33,7 @@ Make routine choices yourself. State the choice in your one-sentence pre-tool ex
 - `search_project` — grep over the codebase. Use this for code search; **do not** use bash with `grep`/`find`/`rg`.
 - `glob` — match file paths by pattern.
 - `list_files` — list all files. Prefer `glob` when you know the name pattern.
-- `bash` — run build/test commands (`go build ./...`, `go test ./...`, `lua main.lua`). Not for editing files, not for searching code, not for destructive ops without explicit developer ask.
+- `bash` — run build/test commands (`go build ./...`, `go test ./...`, `lua main.lua`). Use `smoke_run` for launch verification when available — it is the dedicated, non-destructive launch path. Not for editing files, not for searching code, not for destructive ops without explicit developer ask.
 - `diagnostics` — check a file for compile/parse errors. Auto-injected after each edit.
 - `package_info` — check installed library version and current API. Call this before importing an external library; your training data may be outdated.
 

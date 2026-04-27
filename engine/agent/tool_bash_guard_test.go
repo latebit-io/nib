@@ -3,6 +3,7 @@ package agent
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestFileWriteGuard(t *testing.T) {
@@ -200,6 +201,80 @@ func TestDestructiveCommandGuard(t *testing.T) {
 			}
 			if !tt.blocked && result != "" {
 				t.Errorf("expected allowed but got: %s\ncommand: %s", result, tt.command)
+			}
+		})
+	}
+}
+
+// TestRedactCommandPreview locks in the rune-aware truncation contract:
+// the byte cap must NOT split a multibyte UTF-8 sequence. Without this,
+// a path containing a CJK glyph or em-dash whose rune-start happens to
+// land just before the cap would yield invalid UTF-8 in slog output —
+// some log backends drop or re-encode such strings, hiding the very
+// signal we wanted preserved. Mirrors the pattern at
+// engine/agent/prompt.go:51.
+func TestRedactCommandPreview(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		in          string
+		wantSuffix  string // expected suffix of the result; empty means no truncation
+		wantPrefix  string // result must begin with this
+		wantValid   bool   // result must be valid UTF-8
+		shouldEqual string // when set, result must equal this exactly
+	}{
+		{
+			name:        "short ASCII passes through trimmed",
+			in:          "  go build ./...  ",
+			shouldEqual: "go build ./...",
+			wantValid:   true,
+		},
+		{
+			name:       "long ASCII truncates with ellipsis",
+			in:         strings.Repeat("a", 100),
+			wantPrefix: strings.Repeat("a", 64),
+			wantSuffix: "…",
+			wantValid:  true,
+		},
+		{
+			name: "multibyte glyph at cap boundary backs up to rune start",
+			// Build an input where byte index redactPreviewBytes (=64) lands
+			// inside a 3-byte CJK rune. 63 ASCII bytes + a 3-byte glyph (世
+			// is 3 bytes in UTF-8) + filler. The cut at 64 would be in the
+			// middle of 世 (bytes 64,65 of the rune); the function must
+			// back up to position 63 so the returned string ends just
+			// before 世 and remains valid UTF-8.
+			in:         strings.Repeat("a", 63) + "世" + strings.Repeat("b", 30),
+			wantPrefix: strings.Repeat("a", 63),
+			wantSuffix: "…",
+			wantValid:  true,
+		},
+		{
+			name: "all multibyte content truncates cleanly",
+			// 30 copies of 世 = 90 bytes. Cut at 64 lands inside the
+			// 22nd rune. Function backs up to a rune boundary and
+			// appends the ellipsis.
+			in:         strings.Repeat("世", 30),
+			wantPrefix: strings.Repeat("世", 21), // 21 * 3 = 63 bytes <= 64
+			wantSuffix: "…",
+			wantValid:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := redactCommandPreview(tt.in)
+			if tt.shouldEqual != "" && got != tt.shouldEqual {
+				t.Errorf("got %q, want %q", got, tt.shouldEqual)
+			}
+			if tt.wantPrefix != "" && !strings.HasPrefix(got, tt.wantPrefix) {
+				t.Errorf("got %q, want prefix %q", got, tt.wantPrefix)
+			}
+			if tt.wantSuffix != "" && !strings.HasSuffix(got, tt.wantSuffix) {
+				t.Errorf("got %q, want suffix %q", got, tt.wantSuffix)
+			}
+			if tt.wantValid && !utf8.ValidString(got) {
+				t.Errorf("got %q is not valid UTF-8", got)
 			}
 		})
 	}

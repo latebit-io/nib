@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/budget"
 	"github.com/latebit-io/junto/engine/event"
 )
 
@@ -94,13 +95,13 @@ func TestShouldAbortForBudget(t *testing.T) {
 		name    string
 		opts    *NewOptions
 		mutate  func(a *Agent)
-		pending turnUsage
+		pending budget.Turn
 		want    bool
 	}{
 		{
 			name:    "zero budget disables gate",
 			opts:    &NewOptions{TaskTokenBudget: -1}, // -1 → unlimited (zero internally)
-			pending: turnUsage{promptTokens: 1_000_000},
+			pending: budget.Turn{PromptTokens: 1_000_000},
 			want:    false,
 		},
 		{
@@ -113,42 +114,16 @@ func TestShouldAbortForBudget(t *testing.T) {
 			want: false,
 		},
 		{
-			name:    "committed alone exceeds — fires",
-			opts:    &NewOptions{TaskTokenBudget: 100},
-			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 200 },
-			pending: turnUsage{},
-			want:    true,
-		},
-		{
-			name:    "committed alone under, pending pushes over — fires",
+			// Wiring smoke: confirms shouldAbortForBudget delegates to
+			// budget.WouldExceed for the math (committed + pending). The
+			// pure-math edge cases are exhaustively covered in
+			// coding/budget; this single positive row is enough to catch
+			// a wiring regression here.
+			name:    "math is wired through to budget.WouldExceed",
 			opts:    &NewOptions{TaskTokenBudget: 100},
 			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 60 },
-			pending: turnUsage{promptTokens: 50}, // 60+50 = 110 > 100
+			pending: budget.Turn{PromptTokens: 50}, // 60+50 = 110 > 100
 			want:    true,
-		},
-		{
-			// Boundary: committed + pending == TaskTokenBudget. The gate
-			// uses >= (not >) so the cap value itself is over the line.
-			// Without this row, a refactor that flipped the comparator
-			// to > would silently let one extra Stream call through.
-			name:    "committed + pending exactly at cap — fires",
-			opts:    &NewOptions{TaskTokenBudget: 100},
-			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 50 },
-			pending: turnUsage{promptTokens: 50}, // 50+50 = 100 == 100
-			want:    true,
-		},
-		{
-			name:    "completion tokens count too",
-			opts:    &NewOptions{TaskTokenBudget: 100},
-			pending: turnUsage{completionTokens: 150},
-			want:    true,
-		},
-		{
-			name:    "under cap returns false",
-			opts:    &NewOptions{TaskTokenBudget: 1000},
-			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 200 },
-			pending: turnUsage{promptTokens: 200},
-			want:    false,
 		},
 	}
 
@@ -385,16 +360,16 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 }
 
 // TestAgent_TokenBudget_DefaultApplied checks that when NewOptions.TaskTokenBudget
-// is left zero, [New] resolves it to [defaultTaskTokenBudget] rather than
+// is left zero, [New] resolves it to [budget.DefaultTaskTokens] rather than
 // leaving the budget disabled. Disabling the budget by default would make
 // the safety net silently absent — the regression guard would not fire.
 func TestAgent_TokenBudget_DefaultApplied(t *testing.T) {
 	t.Parallel()
 	events := make(chan event.Event, 1)
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, nil)
-	if ag.taskTokenBudget != defaultTaskTokenBudget {
+	if ag.taskTokenBudget != budget.DefaultTaskTokens {
 		t.Errorf("taskTokenBudget = %d, want default %d",
-			ag.taskTokenBudget, defaultTaskTokenBudget)
+			ag.taskTokenBudget, budget.DefaultTaskTokens)
 	}
 }
 

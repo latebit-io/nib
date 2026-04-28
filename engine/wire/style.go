@@ -4,10 +4,10 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/ai/llmconfig"
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/lint"
-	"github.com/latebit-io/junto/engine/llm"
-	"github.com/latebit-io/junto/engine/llmconfig"
 	"github.com/latebit-io/junto/engine/styleconfig"
 	"github.com/latebit-io/junto/engine/validate/architecture"
 )

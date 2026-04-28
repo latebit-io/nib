@@ -7,11 +7,14 @@ require (
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/latebit-io/junto/ai v0.0.0
 	github.com/latebit-io/junto/engine v0.0.0
 	github.com/mattn/go-runewidth v0.0.19
 )
 
 replace github.com/latebit-io/junto/engine => ../engine
+
+replace github.com/latebit-io/junto/ai => ../ai
 
 require (
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect

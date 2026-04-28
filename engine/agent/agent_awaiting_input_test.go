@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // multiTurnProvider serves pre-canned stream events for each successive

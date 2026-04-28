@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/memory"
 	"github.com/latebit-io/junto/engine/project"
 )

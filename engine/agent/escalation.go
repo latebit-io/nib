@@ -1,6 +1,6 @@
 package agent
 
-import "github.com/latebit-io/junto/engine/llm"
+import "github.com/latebit-io/junto/ai/llm"
 
 // maxTokensEscalator is the optional capability surface LLM providers
 // implement to support runtime escalation of their output-token cap. The

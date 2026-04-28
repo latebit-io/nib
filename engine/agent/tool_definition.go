@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // GoToDefinitionTool lets the LLM jump to a symbol's definition via LSP.

@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/llm"
-	"github.com/latebit-io/junto/engine/llmconfig"
-	"github.com/latebit-io/junto/engine/oauth"
+	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/ai/llmconfig"
+	"github.com/latebit-io/junto/ai/oauth"
 )
 
 // ProviderResult holds the provider, config, and OAuth store from NewProvider.

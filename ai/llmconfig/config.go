@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 // Profile holds the configuration for a single LLM provider endpoint.

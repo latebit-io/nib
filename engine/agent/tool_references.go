@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // FindReferencesTool lets the LLM find all references to a symbol.

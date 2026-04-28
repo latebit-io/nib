@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/lint"
-	"github.com/latebit-io/junto/engine/llm"
 	"github.com/latebit-io/junto/engine/memory"
 	"github.com/latebit-io/junto/engine/runconfig"
 	"github.com/latebit-io/junto/engine/validate"

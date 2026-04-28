@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 type testWorkspace struct {

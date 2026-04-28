@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // DiagnosticsTool exposes language service diagnostics to the agent.

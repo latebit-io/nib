@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // mockDiagProvider returns canned diagnostics.

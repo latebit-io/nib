@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // TestDrainStream_ResetsThinkStateOnReturn locks in that drainStream never

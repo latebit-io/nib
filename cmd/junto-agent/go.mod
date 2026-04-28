@@ -2,7 +2,10 @@ module github.com/latebit-io/junto/cmd/junto-agent
 
 go 1.26
 
-require github.com/latebit-io/junto/engine v0.0.0
+require (
+	github.com/latebit-io/junto/ai v0.0.0
+	github.com/latebit-io/junto/engine v0.0.0
+)
 
 require (
 	github.com/mattn/go-pointer v0.0.1 // indirect
@@ -13,3 +16,5 @@ require (
 )
 
 replace github.com/latebit-io/junto/engine => ../../engine
+
+replace github.com/latebit-io/junto/ai => ../../ai

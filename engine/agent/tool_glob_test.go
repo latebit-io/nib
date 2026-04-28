@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 // globWorkspace is a Workspace stub that returns a fixed file list.

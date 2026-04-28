@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 // ListFilesTool lets the LLM see the project file structure.

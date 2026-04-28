@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 // defaultEvaluatorTimeout is the maximum duration for a single evaluator LLM call.

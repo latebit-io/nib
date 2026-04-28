@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // lspTimeout is the default timeout for LSP requests made by tools.

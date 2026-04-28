@@ -5,7 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/latebit-io/junto/engine/llmconfig"
+	"github.com/latebit-io/junto/ai/llmconfig"
 )
 
 // Model-selector + OAuth connect flow for AppModel.

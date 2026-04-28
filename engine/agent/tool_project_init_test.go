@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 // initTracker is a controllable TaskTracker stub that records

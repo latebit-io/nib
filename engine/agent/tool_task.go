@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 // TaskTool handles task status updates in the project work tree.

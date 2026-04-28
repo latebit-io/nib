@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // Conversation streaming + compaction helpers for Agent.

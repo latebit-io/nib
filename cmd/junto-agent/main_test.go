@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/agent"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/headless"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // mockProvider returns pre-configured streaming responses for each turn.

@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 // permissionGateCase describes one shouldNudgePermissionQuestion scenario.

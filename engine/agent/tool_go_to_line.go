@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/llm"
 )
 
 // GoToLineTool lets the agent navigate the developer's editor to a specific

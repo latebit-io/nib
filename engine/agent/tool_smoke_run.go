@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 	"github.com/latebit-io/junto/engine/run/proc"
 	"github.com/latebit-io/junto/engine/runconfig"
 )

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 func TestEscalateMaxTokens(t *testing.T) {

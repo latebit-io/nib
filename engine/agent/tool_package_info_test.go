@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 func pkgInfoCall(name, symbol string) llm.ToolCall {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/llm"
+	"github.com/latebit-io/junto/ai/llm"
 )
 
 // missingFileWorkspace returns fs.ErrNotExist for any ReadFile call.

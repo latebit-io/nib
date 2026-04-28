@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 	"log/slog"
-	"strings"
 
+	"github.com/latebit-io/junto/coding/validation"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/validate"
 )
@@ -22,7 +22,10 @@ import (
 // the proposal so the developer sees the failure.
 //
 // State remains on Agent (pipeline, validatorRetries, cache, mu) so
-// the run loop's existing locking rules carry over unchanged.
+// the run loop's existing locking rules carry over unchanged. The
+// pure projection / feedback aggregation helpers live in
+// [coding/validation] so they can be unit-tested without standing up
+// an Agent.
 
 // runValidationPipeline runs pre-approval validators against the proposal
 // and decides whether to retry, surface results, or pass through silently.
@@ -61,7 +64,7 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 		return nil, ""
 	}
 
-	summaries := toValidatorSummaries(results)
+	summaries := validation.ToValidatorSummaries(results)
 
 	worst := validate.WorstVerdict(results)
 	if worst == validate.Pass {
@@ -75,7 +78,7 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 	// developer-visible surface, not a silent retry, and burning a
 	// budget slot for it would exhaust the budget on attempts that
 	// never actually retry.
-	feedback := aggregateRetryFeedback(results)
+	feedback := validation.AggregateRetryFeedback(results)
 	if feedback == "" {
 		return summaries, ""
 	}
@@ -90,42 +93,10 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 	attempts := a.validatorRetries[proposal.CanonPath]
 	a.mu.Unlock()
 
-	if attempts > maxValidatorRetries {
+	if attempts > validation.MaxValidatorRetries {
 		slog.Warn("validator retry budget exhausted; surfacing proposal",
 			"path", proposal.CanonPath, "attempts", attempts, "verdict", worst.String())
 		return summaries, ""
 	}
 	return summaries, feedback
-}
-
-// toValidatorSummaries projects validate.Result onto the leaner
-// event.ValidatorSummary wire type so the frontend contract does not
-// couple to the validate package internals.
-func toValidatorSummaries(results []validate.Result) []event.ValidatorSummary {
-	out := make([]event.ValidatorSummary, 0, len(results))
-	for _, r := range results {
-		out = append(out, event.ValidatorSummary{
-			Stage:    r.Stage,
-			Verdict:  r.Verdict.String(),
-			Feedback: r.Feedback,
-		})
-	}
-	return out
-}
-
-// aggregateRetryFeedback concatenates the non-empty Feedback strings of
-// every non-Pass result into a single message for the LLM. Pass results
-// are elided so the retry prompt stays focused on the faults.
-func aggregateRetryFeedback(results []validate.Result) string {
-	var b strings.Builder
-	for _, r := range results {
-		if r.Verdict == validate.Pass || r.Feedback == "" {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(r.Feedback)
-	}
-	return b.String()
 }

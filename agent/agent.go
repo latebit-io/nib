@@ -18,6 +18,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/latebit-io/junto/agent/event"
 	"github.com/latebit-io/junto/ai/llm"
@@ -71,22 +73,45 @@ type Agent struct {
 	// added during phase 3 alongside the loop implementation.
 }
 
-// New constructs an Agent from Options. Panics if required fields are
-// missing — agent construction is a programming error, not a runtime
-// failure mode worth gracefully handling at the call site.
-func New(opts Options) *Agent {
+// ErrInvalidOptions is returned by [New] when Options is missing a required
+// field or contains an inconsistency that would produce an unusable agent
+// (nil tool, empty tool name, duplicate tool name).
+var ErrInvalidOptions = errors.New("agent: invalid options")
+
+// New constructs an Agent from Options. Returns ErrInvalidOptions wrapped
+// with a specific reason when validation fails.
+//
+// Validation rules:
+//   - Provider must be non-nil.
+//   - Events must be non-nil.
+//   - Each entry in Tools must be non-nil.
+//   - Each tool's Definition().Function.Name must be non-empty.
+//   - Tool names must be unique. A duplicate is a configuration error;
+//     silently overwriting would desync the tools map and toolDefs slice
+//     (the LLM would see the duplicate while only one route exists).
+func New(opts Options) (*Agent, error) {
 	if opts.Provider == nil {
-		panic("agent.New: Options.Provider is required")
+		return nil, fmt.Errorf("%w: Provider is required", ErrInvalidOptions)
 	}
 	if opts.Events == nil {
-		panic("agent.New: Options.Events is required")
+		return nil, fmt.Errorf("%w: Events is required", ErrInvalidOptions)
 	}
 
 	tools := make(map[string]Tool, len(opts.Tools))
 	defs := make([]llm.ToolDef, 0, len(opts.Tools))
-	for _, t := range opts.Tools {
+	for i, t := range opts.Tools {
+		if t == nil {
+			return nil, fmt.Errorf("%w: Tools[%d] is nil", ErrInvalidOptions, i)
+		}
 		def := t.Definition()
-		tools[def.Function.Name] = t
+		name := def.Function.Name
+		if name == "" {
+			return nil, fmt.Errorf("%w: Tools[%d] has empty Definition().Function.Name", ErrInvalidOptions, i)
+		}
+		if _, dup := tools[name]; dup {
+			return nil, fmt.Errorf("%w: duplicate tool name %q", ErrInvalidOptions, name)
+		}
+		tools[name] = t
 		defs = append(defs, def)
 	}
 
@@ -97,7 +122,7 @@ func New(opts Options) *Agent {
 		tools:        tools,
 		toolDefs:     defs,
 		hooks:        opts.Hooks,
-	}
+	}, nil
 }
 
 // Prompt starts a new run with the given user message. Blocks the caller

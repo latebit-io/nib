@@ -1,4 +1,4 @@
-package agent
+package nudges
 
 import "testing"
 
@@ -22,18 +22,18 @@ func TestPlanningBlocklistContents(t *testing.T) {
 		"update_task":  true,
 	}
 
-	if len(planningBlocklist) != len(want) {
-		t.Errorf("planningBlocklist size = %d, want %d (members: %v vs %v)",
-			len(planningBlocklist), len(want), planningBlocklist, want)
+	if len(PlanningBlocklist) != len(want) {
+		t.Errorf("PlanningBlocklist size = %d, want %d (members: %v vs %v)",
+			len(PlanningBlocklist), len(want), PlanningBlocklist, want)
 	}
 	for name, expected := range want {
-		if got := planningBlocklist[name]; got != expected {
-			t.Errorf("planningBlocklist[%q] = %v, want %v", name, got, expected)
+		if got := PlanningBlocklist[name]; got != expected {
+			t.Errorf("PlanningBlocklist[%q] = %v, want %v", name, got, expected)
 		}
 	}
-	for name := range planningBlocklist {
+	for name := range PlanningBlocklist {
 		if !want[name] {
-			t.Errorf("planningBlocklist contains unexpected entry %q — add to test or revert", name)
+			t.Errorf("PlanningBlocklist contains unexpected entry %q — add to test or revert", name)
 		}
 	}
 }

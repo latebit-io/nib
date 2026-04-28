@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/nudges"
 	"github.com/latebit-io/junto/coding/tools"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lang"
@@ -83,25 +84,6 @@ func DetectDistributedMemory(serverNames []string) []string {
 		}
 	}
 	return result
-}
-
-// planningBlocklist contains tool names disabled during planning mode.
-// These are write-side tools that modify code or run commands.
-//
-// smoke_run is here because it executes the project's smoke command
-// (typically `make smoke` / `lua main.lua` / etc.) via `sh -c`. That is
-// command execution — same threat profile as bash — and planning mode
-// is supposed to be read-only. The auto-invocation path in
-// runTaskReview only fires from update_task(complete), which is itself
-// blocked here, so the auto-path is naturally suppressed in planning
-// mode too.
-var planningBlocklist = map[string]bool{
-	"edit_file":    true,
-	"write_file":   true,
-	"replace_file": true,
-	"bash":         true,
-	"smoke_run":    true,
-	"update_task":  true,
 }
 
 // mutatingTools contains tool names that modify filesystem or shell state.
@@ -399,8 +381,8 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	}
 
 	// Build per-instance planning blocklist: start from defaults, merge extras.
-	merged := make(map[string]bool, len(planningBlocklist)+len(extraBlocklist))
-	for k, v := range planningBlocklist {
+	merged := make(map[string]bool, len(nudges.PlanningBlocklist)+len(extraBlocklist))
+	for k, v := range nudges.PlanningBlocklist {
 		merged[k] = v
 	}
 	for _, name := range extraBlocklist {
@@ -1193,53 +1175,23 @@ func (a *Agent) tryInjectPostTurnNudge(messages *[]llm.Message, narrativeFired, 
 		*narrativeFired = true
 		*messages = append(*messages, llm.Message{
 			Role:    "user",
-			Content: outstandingNudgeMessage,
+			Content: nudges.OutstandingNudgeMessage,
 		})
 		a.send(event.AgentToken{Text: "\n[Nudge: outstanding-work language detected — track or scrub it]\n"})
 		a.send(event.AgentStatus{Status: event.StatusThinking})
 		return true
 	}
-	if !*permissionFired && a.currentAutonomous() && shouldNudgePermissionQuestion(*messages) {
+	if !*permissionFired && a.currentAutonomous() && nudges.ShouldNudgePermissionQuestion(*messages) {
 		*permissionFired = true
 		*messages = append(*messages, llm.Message{
 			Role:    "user",
-			Content: permissionNudgeMessage,
+			Content: nudges.PermissionNudgeMessage,
 		})
 		a.send(event.AgentToken{Text: "\n[Nudge: permission-seeking question detected in autonomous mode — act, don't ask]\n"})
 		a.send(event.AgentStatus{Status: event.StatusThinking})
 		return true
 	}
 	return false
-}
-
-// outstandingNudgeMessage is the synthetic user message the narrative gate
-// injects when the model yields with text that enumerates outstanding work
-// while the task tree is empty. Phrased as a developer instruction so the
-// model treats it as high-priority guidance, not background context.
-const outstandingNudgeMessage = "Your last message enumerated work as 'still needed', 'not yet', or 'remaining' while the tracked task tree was empty. Either:\n" +
-	"  (a) the items are real — add each one as a pending task via project_task_add and continue working, or\n" +
-	"  (b) the items are out of scope — rewrite the summary without that language so the project state is consistent.\n" +
-	"Do not yield again until the narrative and the task tree agree."
-
-// outstandingWorkMarkers are case-insensitive substrings that flag a wrap-up
-// message as enumerating uncompleted work. Conservative on purpose — false
-// positives nudge the model harmlessly; false negatives let the original bug
-// through. Each entry is a phrase, not a single word, to reduce hits on
-// neutral prose ("not" alone is far too broad).
-var outstandingWorkMarkers = []string{
-	"still need", // covers "still need", "still needs", "still needed"
-	"not yet",    // "not yet implemented", "not yet wired"
-	"need implementation",
-	"needs implementation",
-	"yet to be",
-	"remaining work",
-	"work remaining",
-	"outstanding work",  // "outstanding" alone is an adjective that fires
-	"outstanding items", // on benign praise ("outstanding work — all done")
-	"to be implemented",
-	"to be done",
-	"to do:",
-	"todo:",
 }
 
 // shouldNudgeOutstanding reports whether the most recent assistant message
@@ -1251,11 +1203,11 @@ func (a *Agent) shouldNudgeOutstanding(messages []llm.Message) bool {
 	if !a.tasksAllComplete() {
 		return false
 	}
-	last := lastAssistantContent(messages)
+	last := nudges.LastAssistantContent(messages)
 	if last == "" {
 		return false
 	}
-	return containsOutstandingWorkMarker(last)
+	return nudges.ContainsOutstandingWorkMarker(last)
 }
 
 // tasksAllComplete reports whether the workspace exposes a loaded task
@@ -1277,137 +1229,6 @@ func (a *Agent) tasksAllComplete() bool {
 		return false
 	}
 	return tt.ActiveTaskPath() == "" && tt.NextPendingTask() == ""
-}
-
-// lastAssistantContent returns the Content of the most recent assistant
-// message in the slice, or "" when none exists. Used to scan the model's
-// final wrap-up text for outstanding-work markers.
-func lastAssistantContent(messages []llm.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" {
-			return messages[i].Content
-		}
-	}
-	return ""
-}
-
-// containsOutstandingWorkMarker reports whether s contains any of the
-// outstandingWorkMarkers phrases (case-insensitive).
-func containsOutstandingWorkMarker(s string) bool {
-	lower := strings.ToLower(s)
-	for _, marker := range outstandingWorkMarkers {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// permissionNudgeMessage is the synthetic user message the autonomous-mode
-// permission-question gate injects when the model yields with a question
-// instead of acting. The developer set autonomy high precisely to avoid
-// these prompts and will not answer; reprompting forces the model to
-// decide and proceed (or surface a concrete blocker, which is a different
-// shape than a chat question).
-const permissionNudgeMessage = "Your last message ended with a question or permission-seeking offer. Autonomy is high — the developer will not answer. " +
-	"Make the call yourself: pick the option that serves the current task, document the choice in your one-sentence pre-tool explanation, and proceed with a tool call. " +
-	"If you genuinely cannot proceed, state the concrete blocker (the specific tool error, missing dependency, or unsanctioned destructive op) and what you tried to fix it — do NOT phrase it as a question."
-
-// permissionSeekingMarkers are case-insensitive substrings that flag a
-// yielded turn as asking the developer for permission instead of acting.
-// Mirrors the [outstandingWorkMarkers] pattern: phrases (not single
-// words) chosen to keep false-positive rate low. Each entry was observed
-// in real autonomous-mode failure transcripts where the model ended a
-// turn with a permission-seeking offer that the developer (with autonomy
-// dial high) would not answer.
-//
-// Trailing-question detection (`?`) is a separate signal — handled in
-// [shouldNudgePermissionQuestion] alongside this list — because some
-// permission-seeking phrasing has no question mark ("Let me know if you
-// want me to continue.") and some questions are not permission-seeking
-// (rhetorical "Is this what you wanted?" before continuing). The two
-// signals are OR'd, with tool-call presence short-circuiting both.
-var permissionSeekingMarkers = []string{
-	"let me know",
-	"if you want",
-	"if you'd like",
-	"if you would like",
-	"want me to continue",
-	"want me to proceed",
-	"shall i continue",
-	"shall i proceed",
-	"shall i ",
-	"do you want",
-	"would you like",
-	"would you prefer",
-	"i can continue",
-	"i'll continue if",
-	"say keep going",
-	"say continue",
-	"say go",
-	"just say",
-	"give me the green light",
-	"awaiting your",
-	"await your",
-	"pending your",
-	"ready when you are",
-	"happy to continue",
-	"happy to proceed",
-	"on your signal",
-	"on your go",
-}
-
-// shouldNudgePermissionQuestion reports whether the most recent assistant
-// message yielded with a question OR a permission-seeking offer, while
-// making no tool call. Returns false when the last message has tool
-// calls (any question accompanying a tool call is rhetorical, not a
-// yield), when no assistant message exists, or when the trimmed content
-// neither ends in `?` nor contains a [permissionSeekingMarkers] phrase.
-// Used by the autonomous-mode permission gate in runLoop.
-func shouldNudgePermissionQuestion(messages []llm.Message) bool {
-	last := lastAssistantMessage(messages)
-	if last == nil {
-		return false
-	}
-	if len(last.ToolCalls) > 0 {
-		return false // tool call accompanies the text — model is acting
-	}
-	trimmed := strings.TrimSpace(last.Content)
-	if trimmed == "" {
-		return false
-	}
-	if strings.HasSuffix(trimmed, "?") {
-		return true
-	}
-	return containsPermissionSeekingMarker(trimmed)
-}
-
-// containsPermissionSeekingMarker reports whether s contains any of the
-// [permissionSeekingMarkers] phrases under case-insensitive comparison.
-// Whitespace and punctuation in s are not normalised — the marker set
-// already uses lowercased phrase fragments that survive the
-// strings.ToLower of typical assistant prose.
-func containsPermissionSeekingMarker(s string) bool {
-	lower := strings.ToLower(s)
-	for _, marker := range permissionSeekingMarkers {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// lastAssistantMessage returns the most recent assistant message in the
-// slice, or nil when none exists. Distinct from lastAssistantContent
-// (which returns Content) because the permission-question gate also
-// needs to inspect ToolCalls.
-func lastAssistantMessage(messages []llm.Message) *llm.Message {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" {
-			return &messages[i]
-		}
-	}
-	return nil
 }
 
 // planningToolDefs returns the tool definitions with write-side tools removed.

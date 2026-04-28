@@ -1,4 +1,4 @@
-package agent
+package nudges
 
 import (
 	"testing"
@@ -6,9 +6,66 @@ import (
 	"github.com/latebit-io/junto/ai/llm"
 )
 
-// permissionGateCase describes one shouldNudgePermissionQuestion scenario.
-// Defined here so the structural-shape tests and the phrase-pattern tests
-// share a single row type and a single runner.
+func TestContainsOutstandingWorkMarker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"clean wrap-up", "All done. Tests pass.", false},
+		{"still need", "exact maze verification still need implementation", true},
+		{"still needs caps", "Frightened ghost behavior STILL NEEDS work.", true},
+		{"not yet", "ghost AI not yet wired to update loop", true},
+		{"need implementation", "fruit spawn rules need implementation", true},
+		{"yet to be", "level transitions yet to be implemented", true},
+		{"todo prefix", "TODO: hook collisions", true},
+		{"outstanding work phrase", "outstanding work on the AI module", true},
+		{"outstanding items phrase", "two outstanding items remain in the queue", true},
+		{"plain not", "the function returns true if not idle", false},
+		{"plain need", "we need this commit message to be precise", false},
+		// "outstanding" as a bare adjective ("Outstanding!", "Outstanding
+		// result.") must NOT fire — that was the bug behind narrowing to
+		// phrase-only matches. The phrase variants ("outstanding work",
+		// "outstanding items") still match on praise like "outstanding
+		// work — well done", but that's an accepted trade-off: a false
+		// positive costs one nudge round-trip (the gate fires at most
+		// once per developer turn), while a false negative lets the
+		// original "all done + still-need-X" bug through.
+		{"bare praise outstanding", "Outstanding!", false},
+		{"bare praise outstanding result", "Outstanding result on this run.", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ContainsOutstandingWorkMarker(tc.in); got != tc.want {
+				t.Errorf("ContainsOutstandingWorkMarker(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLastAssistantContent(t *testing.T) {
+	t.Parallel()
+	messages := []llm.Message{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "first"},
+		{Role: "tool", Content: "tool result"},
+		{Role: "assistant", Content: "final"},
+	}
+	if got := LastAssistantContent(messages); got != "final" {
+		t.Errorf("LastAssistantContent = %q, want %q", got, "final")
+	}
+	if got := LastAssistantContent(nil); got != "" {
+		t.Errorf("LastAssistantContent(nil) = %q, want empty", got)
+	}
+}
+
+// permissionGateCase describes one ShouldNudgePermissionQuestion
+// scenario. Defined here so the structural-shape tests and the
+// phrase-pattern tests share a single row type and a single runner.
 type permissionGateCase struct {
 	name string
 	msgs []llm.Message
@@ -16,7 +73,7 @@ type permissionGateCase struct {
 }
 
 // runPermissionGateCases is the shared table-driven body for the two
-// shouldNudgePermissionQuestion test groups. Split into two callers so
+// ShouldNudgePermissionQuestion test groups. Split into two callers so
 // each function stays under the funlen cap; the runner ensures both
 // suites assert on identical semantics.
 func runPermissionGateCases(t *testing.T, cases []permissionGateCase) {
@@ -24,8 +81,8 @@ func runPermissionGateCases(t *testing.T, cases []permissionGateCase) {
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := shouldNudgePermissionQuestion(tt.msgs); got != tt.want {
-				t.Errorf("shouldNudgePermissionQuestion = %v, want %v", got, tt.want)
+			if got := ShouldNudgePermissionQuestion(tt.msgs); got != tt.want {
+				t.Errorf("ShouldNudgePermissionQuestion = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -33,9 +90,9 @@ func runPermissionGateCases(t *testing.T, cases []permissionGateCase) {
 
 // TestShouldNudgePermissionQuestion_Structure locks in the structural
 // conditions: tool-call presence short-circuits, no-assistant returns
-// false, walks back from the latest message, and the existing trailing-
-// `?` signal still fires. Phrase patterns are covered separately in
-// [TestShouldNudgePermissionQuestion_PhraseForms].
+// false, walks back from the latest message, and the existing
+// trailing-`?` signal still fires. Phrase patterns are covered
+// separately in [TestShouldNudgePermissionQuestion_PhraseForms].
 func TestShouldNudgePermissionQuestion_Structure(t *testing.T) {
 	t.Parallel()
 	runPermissionGateCases(t, []permissionGateCase{
@@ -85,10 +142,10 @@ func TestShouldNudgePermissionQuestion_Structure(t *testing.T) {
 	})
 }
 
-// TestShouldNudgePermissionQuestion_PhraseForms covers the phrase-based
-// signal added 2026-04-27: permission-seeking *statements* (no trailing
-// `?`) that the original predicate missed. Each row is a phrase
-// observed in real autonomous-mode failure transcripts.
+// TestShouldNudgePermissionQuestion_PhraseForms covers the phrase-
+// based signal added 2026-04-27: permission-seeking *statements* (no
+// trailing `?`) that the original predicate missed. Each row is a
+// phrase observed in real autonomous-mode failure transcripts.
 func TestShouldNudgePermissionQuestion_PhraseForms(t *testing.T) {
 	t.Parallel()
 	runPermissionGateCases(t, []permissionGateCase{
@@ -136,9 +193,10 @@ func TestShouldNudgePermissionQuestion_PhraseForms(t *testing.T) {
 }
 
 // TestLastAssistantMessage covers the helper that the permission gate
-// uses to inspect both Content and ToolCalls (lastAssistantContent only
-// returns Content). Single-table test because the helper is trivial; the
-// edge cases just verify "walks back from end, returns nil if absent."
+// uses to inspect both Content and ToolCalls (LastAssistantContent
+// only returns Content). Single-table test because the helper is
+// trivial; the edge cases just verify "walks back from end, returns
+// nil if absent."
 func TestLastAssistantMessage(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -170,7 +228,7 @@ func TestLastAssistantMessage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := lastAssistantMessage(tt.msgs)
+			got := LastAssistantMessage(tt.msgs)
 			if tt.wantNil {
 				if got != nil {
 					t.Errorf("expected nil, got %+v", got)

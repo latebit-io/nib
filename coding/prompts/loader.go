@@ -1,4 +1,4 @@
-package agent
+package prompts
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 	"text/template"
 )
 
-//go:embed prompts/system.md.tmpl prompts/planning_system.md.tmpl prompts/user.md.tmpl
+//go:embed templates/system.md.tmpl templates/planning_system.md.tmpl templates/user.md.tmpl
 var defaultPrompts embed.FS
 
 // maxPromptFileBytes is the size limit for project prompt overrides (1MB).
@@ -152,7 +152,7 @@ func (l *PromptLoader) renderSystemTemplate(name string, data SystemPromptData) 
 
 	// Project override failed — fall back to the embedded default template.
 	if source == "project" {
-		embedded, readErr := defaultPrompts.ReadFile("prompts/" + name)
+		embedded, readErr := defaultPrompts.ReadFile("templates/" + name)
 		if readErr != nil {
 			// Embedded files are compiled in — this should never happen.
 			panic(fmt.Sprintf("embedded prompt missing: %s: %v", name, readErr))
@@ -243,7 +243,7 @@ func (l *PromptLoader) load(name string) (string, string) {
 		}
 	}
 
-	data, err := defaultPrompts.ReadFile("prompts/" + name)
+	data, err := defaultPrompts.ReadFile("templates/" + name)
 	if err != nil {
 		// Embedded files are compiled in — this means a corrupt binary.
 		panic(fmt.Sprintf("embedded prompt missing: %s: %v", name, err))

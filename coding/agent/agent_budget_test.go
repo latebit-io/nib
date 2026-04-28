@@ -359,6 +359,113 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 	}
 }
 
+// TestAgent_StaleRunGuard_SkipsSecondStream verifies the runID guard
+// inside processLLMTurn's inner for-loop. The provider's first Stream
+// call returns a tool call (forcing processLLMTurn to loop) AND
+// signals the test once the call lands — at which point the test
+// bumps a.runID (simulating a competing RunWithMode that replaced
+// the current run in the window between unlock and prevCancel) and
+// cancels the agent's context (mirroring prevCancel). Without the
+// guard, processLLMTurn would call Stream a second time and burn
+// tokens on a request whose accounting recordTurnUsage would later
+// drop. With the guard, processLLMTurn returns ctx.Canceled at the
+// top of the next iteration before Stream fires.
+func TestAgent_StaleRunGuard_SkipsSecondStream(t *testing.T) {
+	t.Parallel()
+
+	streamCalled := make(chan struct{}, 1)
+	provider := &signallingProvider{streamCalled: streamCalled}
+	provider.turns = [][]llm.StreamEvent{
+		// Turn 1: tool call forces processLLMTurn to loop back.
+		{
+			{
+				ToolCalls: []llm.ToolCall{{
+					ID:       "call-1",
+					Type:     "function",
+					Function: llm.FunctionCall{Name: "no_such_tool", Arguments: "{}"},
+				}},
+				Done: true,
+			},
+		},
+		// Turn 2: must NEVER fire. If reached, the guard failed.
+		{
+			{Token: "should not see"},
+			{Done: true},
+		},
+	}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// Drain events so the agent does not block on FlushBuffers or a
+	// full channel during the unwind.
+	go func() {
+		for ev := range events {
+			if fb, ok := ev.(event.FlushBuffers); ok {
+				fb.Result <- event.FlushResult{}
+			}
+		}
+	}()
+
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+
+	// Wait for the first Stream call to land, then race the runID
+	// bump against the second iteration of processLLMTurn's for loop.
+	select {
+	case <-streamCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Stream call never observed")
+	}
+
+	// Bump runID WITHOUT canceling ctx. The agent's existing post-
+	// drainStream `ctx.Err()` check (right after a successful Stream)
+	// would also stop the loop if ctx were canceled, masking whether
+	// the runID guard at the TOP of the loop is actually load-bearing.
+	// Bumping only runID isolates this test to the guard under
+	// inspection.
+	ag.mu.Lock()
+	ag.runID++
+	ag.mu.Unlock()
+
+	// Allow the goroutine to react. 50ms is generous: the guard runs
+	// at the top of the next iteration before any IO. With the guard
+	// in place, processLLMTurn returns immediately; without it, the
+	// second Stream call fires well within this window.
+	time.Sleep(50 * time.Millisecond)
+
+	provider.mu.Lock()
+	calls := provider.call
+	provider.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider Stream calls = %d, want 1 (stale-run guard failed)", calls)
+	}
+
+	// Cancel for cleanup so the run goroutine exits before the test
+	// returns. With ctx canceled, the run loop's existing waiting-
+	// state select will pick the ctx.Done branch and return.
+	cancel()
+}
+
+// signallingProvider is a multiTurnProvider that pings a channel
+// each time Stream is invoked. Used by stale-run guard tests to
+// synchronize the runID flip with a known point in the agent loop.
+type signallingProvider struct {
+	multiTurnProvider
+	streamCalled chan<- struct{}
+}
+
+func (p *signallingProvider) Stream(ctx context.Context, messages []llm.Message, defs []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	ch, err := p.multiTurnProvider.Stream(ctx, messages, defs)
+	select {
+	case p.streamCalled <- struct{}{}:
+	default:
+	}
+	return ch, err
+}
+
 // TestAgent_TokenBudget_DefaultApplied checks that when NewOptions.TaskTokenBudget
 // is left zero, [New] resolves it to [budget.DefaultTaskTokens] rather than
 // leaving the budget disabled. Disabling the budget by default would make

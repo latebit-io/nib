@@ -1023,7 +1023,7 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 
 		var tu budget.Turn
 		var err error
-		*messages, tu, err = a.processLLMTurn(ctx, *messages, thinkState, activeDefs)
+		*messages, tu, err = a.processLLMTurn(ctx, runID, *messages, thinkState, activeDefs)
 
 		// Record usage regardless of error — partial data is still valuable.
 		// Pass runID so late updates from canceled runs are ignored.
@@ -1222,11 +1222,33 @@ func (a *Agent) afterToolDispatch(toolName string) {
 // processLLMTurn runs the LLM loop for one agent turn: stream responses,
 // dispatch tool calls, repeat until no tool calls remain. Returns the
 // updated messages list, accumulated usage, or an error if the turn could
-// not complete. toolDefs controls which tools the LLM can invoke for this turn.
-func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, budget.Turn, error) {
+// not complete. toolDefs controls which tools the LLM can invoke for this
+// turn. runID is the generation token of the calling run — checked at
+// each inner iteration so a new RunWithMode/Reply that increments runID
+// while this turn is mid-flight short-circuits before the next Stream
+// call instead of spending tokens on a request whose accounting will be
+// dropped by [Agent.recordTurnUsage]'s runID guard.
+func (a *Agent) processLLMTurn(ctx context.Context, runID uint64, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, budget.Turn, error) {
 	var tu budget.Turn
 	truncationRetries := 0
 	for {
+		// Stale-run guard. RunWithMode/Reply increments a.runID, resets
+		// sessionUsage, releases mu, then calls prevCancel(). In the
+		// window between the unlock and prevCancel, the old goroutine
+		// could pass shouldAbortForBudget (sessionUsage just reset),
+		// reach Stream, and burn tokens on a Stream call whose accounting
+		// recordTurnUsage will drop. Catching the staleness here narrows
+		// the window to "between this unlock and the Stream call below"
+		// (~tens of ns) — not zero, but practically closed. Returning
+		// ctx.Canceled lets the run loop's existing ctx.Err() check
+		// route the old goroutine to a clean exit.
+		a.mu.Lock()
+		stale := runID != a.runID
+		a.mu.Unlock()
+		if stale {
+			return messages, tu, context.Canceled
+		}
+
 		// Per-task budget check BEFORE the next provider Stream. A
 		// single agent turn can call Stream many times (one per tool-
 		// call round-trip), and the post-turn check in runLoop only

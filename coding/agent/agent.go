@@ -381,10 +381,8 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	}
 
 	// Build per-instance planning blocklist: start from defaults, merge extras.
-	merged := make(map[string]bool, len(nudges.PlanningBlocklist)+len(extraBlocklist))
-	for k, v := range nudges.PlanningBlocklist {
-		merged[k] = v
-	}
+	// DefaultPlanningBlocklist returns a fresh copy so mutations stay local.
+	merged := nudges.DefaultPlanningBlocklist()
 	for _, name := range extraBlocklist {
 		merged[strings.ToLower(name)] = true
 	}

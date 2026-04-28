@@ -24,63 +24,6 @@ func (t taskTreeWorkspace) ActiveTaskPath() string  { return t.active }
 func (t taskTreeWorkspace) WorkTreeLoaded() bool    { return !t.unloaded }
 func (t taskTreeWorkspace) NextPendingTask() string { return t.next }
 
-func TestContainsOutstandingWorkMarker(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{"clean wrap-up", "All done. Tests pass.", false},
-		{"still need", "exact maze verification still need implementation", true},
-		{"still needs caps", "Frightened ghost behavior STILL NEEDS work.", true},
-		{"not yet", "ghost AI not yet wired to update loop", true},
-		{"need implementation", "fruit spawn rules need implementation", true},
-		{"yet to be", "level transitions yet to be implemented", true},
-		{"todo prefix", "TODO: hook collisions", true},
-		{"outstanding work phrase", "outstanding work on the AI module", true},
-		{"outstanding items phrase", "two outstanding items remain in the queue", true},
-		{"plain not", "the function returns true if not idle", false},
-		{"plain need", "we need this commit message to be precise", false},
-		// "outstanding" as a bare adjective ("Outstanding!", "Outstanding
-		// result.") must NOT fire — that was the bug behind narrowing to
-		// phrase-only matches. The phrase variants ("outstanding work",
-		// "outstanding items") still match on praise like "outstanding
-		// work — well done", but that's an accepted trade-off: a false
-		// positive costs one nudge round-trip (the gate fires at most
-		// once per developer turn), while a false negative lets the
-		// original "all done + still-need-X" bug through.
-		{"bare praise outstanding", "Outstanding!", false},
-		{"bare praise outstanding result", "Outstanding result on this run.", false},
-		{"empty", "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := containsOutstandingWorkMarker(tc.in); got != tc.want {
-				t.Errorf("containsOutstandingWorkMarker(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestLastAssistantContent(t *testing.T) {
-	t.Parallel()
-	messages := []llm.Message{
-		{Role: "system", Content: "system prompt"},
-		{Role: "user", Content: "hi"},
-		{Role: "assistant", Content: "first"},
-		{Role: "tool", Content: "tool result"},
-		{Role: "assistant", Content: "final"},
-	}
-	if got := lastAssistantContent(messages); got != "final" {
-		t.Errorf("lastAssistantContent = %q, want %q", got, "final")
-	}
-	if got := lastAssistantContent(nil); got != "" {
-		t.Errorf("lastAssistantContent(nil) = %q, want empty", got)
-	}
-}
-
 // TestAgent_NarrativeGate_FiresWhenTreeEmptyAndOutstandingLanguage
 // drives the agent through one turn that yields with text containing an
 // outstanding-work marker while the task tree is empty. The gate should

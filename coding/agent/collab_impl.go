@@ -2,10 +2,23 @@ package agent
 
 import (
 	"context"
+	"strings"
 
 	"github.com/latebit-io/junto/coding/tools"
 	"github.com/latebit-io/junto/engine/event"
 )
+
+// fatalProposalMarkers are the unrecoverable outcomes [handleEditProposal]
+// can produce. Matched as substrings so the IsError flag stays accurate
+// even if the upstream message gains a wrapped error suffix. Rejection
+// notes ("The developer rejected this edit…") and validator
+// recalibration are normal flow and intentionally NOT listed here.
+var fatalProposalMarkers = []string{
+	"Error: agent canceled",
+	"Error: could not deliver edit proposal to frontend",
+	"Error: continue channel closed",
+	"Error: approval channel closed",
+}
 
 // Propose satisfies [tools.Approver]. Tools in coding/tools call this
 // when they want an edit reviewed; the body returned is fed to the LLM
@@ -15,14 +28,10 @@ import (
 // notes are normal flow).
 func (a *Agent) Propose(ctx context.Context, p tools.EditProposal) (string, bool) {
 	body := a.handleEditProposal(ctx, p)
-	// handleEditProposal returns "Error: …" prefixed strings only on
-	// fatal delivery / cancellation failures. Rejection notes and
-	// recalibration messages also start with "Error" sometimes (legacy
-	// strings); we only flag the unrecoverable cases here so frontends
-	// don't treat normal rejection as a tool error.
-	switch body {
-	case "Error: agent canceled":
-		return body, true
+	for _, marker := range fatalProposalMarkers {
+		if strings.Contains(body, marker) {
+			return body, true
+		}
 	}
 	return body, false
 }

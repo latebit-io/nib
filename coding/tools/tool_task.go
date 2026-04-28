@@ -65,6 +65,9 @@ type taskArgs struct {
 
 // Execute handles the tool call.
 func (t *TaskTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+	if len(call.Function.Arguments) > maxToolArgsBytes {
+		return errorResult("Error: arguments too large")
+	}
 	var args taskArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return errorResult("Error: invalid arguments: " + err.Error())

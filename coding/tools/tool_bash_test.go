@@ -10,7 +10,7 @@ import (
 )
 
 func bashCall(command string) llm.ToolCall {
-	args, _ := json.Marshal(map[string]string{"command": command})
+	args, _ := json.Marshal(map[string]string{"command": command}) // marshal of map[string]string cannot fail
 	return llm.ToolCall{
 		ID: "test-1",
 		Function: llm.FunctionCall{

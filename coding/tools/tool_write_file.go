@@ -60,13 +60,29 @@ type writeArgs struct {
 
 // Execute creates a new file, seeds the cache, and publishes a
 // file-created event before returning the confirmation message.
+//
+// Validation order mirrors replace_file so a malformed call is
+// rejected with the same shape regardless of which file tool the LLM
+// picked: argument-size cap → unmarshal → path required → content
+// size cap → project-root containment → write.
 func (t *WriteFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+	if len(call.Function.Arguments) > maxToolArgsBytes {
+		return errorResult(fmt.Sprintf("Error: arguments too large (%d bytes, max %d).", len(call.Function.Arguments), maxToolArgsBytes))
+	}
 	var args writeArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Path == "" {
 		return errorResult("Error: path is required")
+	}
+	if len(args.Content) > maxDiffInputBytes {
+		return errorResult(fmt.Sprintf(
+			"Error: content too large (%d bytes, max %d). Split the file or use multiple edit_file calls.",
+			len(args.Content), maxDiffInputBytes))
+	}
+	if !inProject(t.workspace, t.workspace.CanonPath(args.Path)) {
+		return errorResult(fmt.Sprintf("Error: %s is outside the project root", args.Path))
 	}
 
 	if err := t.workspace.WriteFile(args.Path, args.Content); err != nil {

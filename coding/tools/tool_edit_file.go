@@ -192,6 +192,15 @@ func TruncateWithHint(content, hint string) string {
 // Files beyond this threshold get a placeholder instead of a line-level diff.
 const maxDiffInputBytes = 10 * 1024 * 1024
 
+// maxToolArgsBytes caps the raw JSON payload of a single tool call's
+// arguments before unmarshal. Sized to comfortably contain the largest
+// well-formed call (two maxDiffInputBytes-sized strings plus JSON
+// overhead) while protecting against pathological LLM output (runaway
+// repetition in a single call) that would otherwise allocate gigabytes
+// during decode. Per-field caps still apply after unmarshal — this is
+// the early bouncer.
+const maxToolArgsBytes = 32 * 1024 * 1024
+
 // SimpleDiff produces a unified-diff-like comparison between expected and actual
 // content, showing only the lines that differ. Output is capped at maxDiffPreview
 // bytes to avoid blowing token budgets on large file changes.
@@ -370,6 +379,9 @@ type editArgs struct {
 // pipeline, sends the proposal to the frontend, and blocks on
 // approval+continue; its returned body becomes the tool result.
 func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+	if len(call.Function.Arguments) > maxToolArgsBytes {
+		return errorResult(fmt.Sprintf("Error: arguments too large (%d bytes, max %d). Use a narrower edit.", len(call.Function.Arguments), maxToolArgsBytes))
+	}
 	var args editArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))

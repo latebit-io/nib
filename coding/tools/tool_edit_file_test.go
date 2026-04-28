@@ -52,11 +52,17 @@ func (w *testWorkspace) CanonPath(p string) string {
 }
 
 func (w *testWorkspace) InContext(path string) bool {
+	if w.inContext == nil {
+		return false
+	}
 	return w.inContext[w.CanonPath(path)]
 }
 
 func (w *testWorkspace) AddContext(path string) {
 	w.addContextCalls++
+	if w.inContext == nil {
+		w.inContext = make(map[string]bool)
+	}
 	w.inContext[w.CanonPath(path)] = true
 }
 

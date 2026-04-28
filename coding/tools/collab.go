@@ -13,9 +13,12 @@ import (
 //
 // Propose runs the validation pipeline, sends the proposal to the
 // frontend, blocks on approval, blocks on continue, and returns the
-// outcome message. A non-nil error means the proposal could not be
-// delivered; the tool should treat that as an unrecoverable failure
-// (set IsError) and surface the error string to the LLM.
+// outcome message together with a flag indicating whether that
+// outcome was a fatal failure (delivery timeout, agent cancel,
+// continue-channel closed). When isError is true the tool should
+// surface the body as a tool error so the frontend can render it
+// distinctively; otherwise the body is normal flow (validation
+// recalibration, rejection note, applied notice).
 type Approver interface {
 	// Propose runs the proposal through the configured validation
 	// pipeline and approval flow. The returned string is the body the

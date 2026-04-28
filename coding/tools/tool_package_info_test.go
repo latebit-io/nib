@@ -17,7 +17,7 @@ func pkgInfoCall(name, symbol string) llm.ToolCall {
 	if symbol != "" {
 		args["symbol"] = symbol
 	}
-	data, _ := json.Marshal(args)
+	data, _ := json.Marshal(args) // marshal of map[string]string cannot fail
 	return llm.ToolCall{
 		ID: "test-pkg-1",
 		Function: llm.FunctionCall{

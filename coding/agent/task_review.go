@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/latebit-io/junto/coding/tools"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lint"
 )
@@ -248,8 +249,8 @@ func (a *Agent) runSmokeReview(ctx context.Context) string {
 	// logs (process-local) and the actual exec, both of which are
 	// dev-machine-local; persisted surfaces stay redacted.
 	a.send(event.AgentToken{Text: fmt.Sprintf("\n[Smoke run: %s]\n", cfg.Source)})
-	res := runSmoke(ctx, a.workspace.ProjectRoot(), cfg)
-	return formatSmokeResult(cfg, res)
+	res := tools.RunSmoke(ctx, a.workspace.ProjectRoot(), cfg)
+	return tools.FormatSmokeResult(cfg, res)
 }
 
 // formatFindings renders structured lint.Findings as plain text for injection

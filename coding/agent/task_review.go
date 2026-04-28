@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
-	"github.com/latebit-io/junto/coding/tools"
+	"github.com/latebit-io/junto/coding/lint"
+	"github.com/latebit-io/junto/coding/smoke"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/lint"
+	enginelint "github.com/latebit-io/junto/engine/lint"
 )
 
 // Post-task review pipeline for Agent.
@@ -65,7 +65,11 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 
 	// Collect unique edited files and unique package directories. A task
 	// that edits three files in one package lints one directory, not three.
-	editedFiles, editedDirs, filesByDir := groupEditsByDir(edits)
+	paths := make([]string, 0, len(edits))
+	for _, e := range edits {
+		paths = append(paths, e.Path)
+	}
+	editedFiles, editedDirs, filesByDir := lint.GroupPathsByDir(paths)
 
 	lintWillRun := len(editedFiles) > 0 && len(linters) > 0
 	evalWillRun := len(edits) > 0 && evalConfigured
@@ -139,32 +143,10 @@ func (a *Agent) nextTaskHint() string {
 		next, next)
 }
 
-// groupEditsByDir returns the unique edited file paths, unique package
-// directories, and a dir→files map. Each is deterministic in insertion
-// order so downstream output is stable across runs.
-func groupEditsByDir(edits []taskEdit) (files, dirs []string, byDir map[string][]string) {
-	seenFile := make(map[string]bool)
-	seenDir := make(map[string]bool)
-	byDir = make(map[string][]string)
-	for _, e := range edits {
-		if !seenFile[e.Path] {
-			seenFile[e.Path] = true
-			files = append(files, e.Path)
-		}
-		dir := filepath.Dir(e.Path)
-		if !seenDir[dir] {
-			seenDir[dir] = true
-			dirs = append(dirs, dir)
-		}
-		byDir[dir] = append(byDir[dir], e.Path)
-	}
-	return files, dirs, byDir
-}
-
 // runLinters executes each configured linter once per edited directory and
 // emits the three-state banner + injects findings into pendingLint when
 // any finding lands on an edited file.
-func (a *Agent) runLinters(ctx context.Context, linters []lint.Linter, editedFiles, editedDirs []string, filesByDir map[string][]string) {
+func (a *Agent) runLinters(ctx context.Context, linters []enginelint.Linter, editedFiles, editedDirs []string, filesByDir map[string][]string) {
 	a.send(event.AgentStatus{Status: event.StatusLinting})
 	a.send(event.AgentToken{Text: "\n[Task complete — running style lint...]\n"})
 
@@ -174,7 +156,7 @@ func (a *Agent) runLinters(ctx context.Context, linters []lint.Linter, editedFil
 	}
 
 	var (
-		editedFindings []lint.Finding
+		editedFindings []enginelint.Finding
 		siblingCount   int
 		infraErrors    []infraError
 		projectRoot    = a.workspace.ProjectRoot()
@@ -249,34 +231,15 @@ func (a *Agent) runSmokeReview(ctx context.Context) string {
 	// logs (process-local) and the actual exec, both of which are
 	// dev-machine-local; persisted surfaces stay redacted.
 	a.send(event.AgentToken{Text: fmt.Sprintf("\n[Smoke run: %s]\n", cfg.Source)})
-	res := tools.RunSmoke(ctx, a.workspace.ProjectRoot(), cfg)
-	return tools.FormatSmokeResult(cfg, res)
+	res := smoke.RunSmoke(ctx, a.workspace.ProjectRoot(), cfg)
+	return smoke.FormatSmokeResult(cfg, res)
 }
 
-// formatFindings renders structured lint.Findings as plain text for injection
-// into the LLM's next-turn pendingLint message. One finding per line; ANSI
-// free; deterministic order (caller-supplied).
-func formatFindings(findings []lint.Finding) string {
-	var b strings.Builder
-	for i, f := range findings {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		// path:line:col: [linter] message
-		b.WriteString(f.Path)
-		if f.Line > 0 {
-			fmt.Fprintf(&b, ":%d", f.Line)
-			if f.Col > 0 {
-				fmt.Fprintf(&b, ":%d", f.Col)
-			}
-		}
-		b.WriteString(": ")
-		if f.Linter != "" {
-			fmt.Fprintf(&b, "[%s] ", f.Linter)
-		}
-		b.WriteString(f.Message)
-	}
-	return b.String()
+// formatFindings is a shim around [lint.FormatFindings] for the
+// runLinters call site. The actual rendering lives in `coding/lint`
+// so it can be unit-tested without standing up an Agent.
+func formatFindings(findings []enginelint.Finding) string {
+	return lint.FormatFindings(findings)
 }
 
 // evaluateTurn runs the style evaluator on all edits made during the turn.

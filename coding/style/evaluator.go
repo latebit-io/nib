@@ -1,4 +1,4 @@
-package agent
+package style
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/prompts"
 )
 
 // defaultEvaluatorTimeout is the maximum duration for a single evaluator LLM call.
@@ -146,7 +147,7 @@ func truncateCode(s string) string {
 func buildEvaluatorPrompt(rules []string, path, search, replace string) string {
 	var b strings.Builder
 	b.WriteString("Review this proposed edit against the coding style rules.\n\n")
-	if lang := DetectLanguage(path); lang != "" {
+	if lang := prompts.DetectLanguage(path); lang != "" {
 		b.WriteString("## Language\n\n")
 		b.WriteString("This file is **")
 		b.WriteString(lang)

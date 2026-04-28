@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/coding/agent"
 	"github.com/latebit-io/junto/engine/mcp"
 )
 

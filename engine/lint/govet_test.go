@@ -21,15 +21,15 @@ func captureSlog(t *testing.T, level slog.Level) *bytes.Buffer {
 }
 
 func TestParseGoVetOutput_findings(t *testing.T) {
-	output := `# github.com/latebit-io/junto/engine/agent
-engine/agent/agent.go:1510:13: unreachable code
-engine/agent/tool.go:42:5: printf format %d has arg x of wrong type string
+	output := `# github.com/latebit-io/junto/coding/agent
+coding/agent/agent.go:1510:13: unreachable code
+coding/agent/tool.go:42:5: printf format %d has arg x of wrong type string
 `
 	findings := parseGoVetOutput("", output)
 	if len(findings) != 2 {
 		t.Fatalf("expected 2 findings, got %d: %+v", len(findings), findings)
 	}
-	if findings[0].Path != "engine/agent/agent.go" {
+	if findings[0].Path != "coding/agent/agent.go" {
 		t.Errorf("finding 0 path: %q", findings[0].Path)
 	}
 	if findings[0].Line != 1510 || findings[0].Col != 13 {
@@ -38,7 +38,7 @@ engine/agent/tool.go:42:5: printf format %d has arg x of wrong type string
 	if findings[0].Message != "unreachable code" {
 		t.Errorf("finding 0 message: %q", findings[0].Message)
 	}
-	if findings[1].Path != "engine/agent/tool.go" {
+	if findings[1].Path != "coding/agent/tool.go" {
 		t.Errorf("finding 1 path: %q", findings[1].Path)
 	}
 }

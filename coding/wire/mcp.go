@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/coding/agent"
+	codingtools "github.com/latebit-io/junto/coding/tools"
 	"github.com/latebit-io/junto/engine/mcp"
 )
 
@@ -97,12 +98,12 @@ func DiscoverMCPTools(projectRoot string) MCPResult {
 		serverNames = append(serverNames, name)
 
 		for _, info := range serverTools {
-			adapted := agent.MCPToolInfo{
+			adapted := codingtools.MCPToolInfo{
 				Name:        info.Name,
 				Description: info.Description,
 				InputSchema: info.InputSchema,
 			}
-			tools = append(tools, agent.NewMCPToolAdapter(client, adapted))
+			tools = append(tools, codingtools.NewMCPToolAdapter(client, adapted))
 			slog.Debug("mcp: registered tool", "server", name, "tool", info.Name)
 		}
 		slog.Info("mcp: connected", "server", name, "tools", len(serverTools))

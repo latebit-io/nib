@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/latebit-io/junto/agent v0.0.0 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/tree-sitter-grammars/tree-sitter-lua v0.5.0 // indirect
 	github.com/tree-sitter-grammars/tree-sitter-yaml v0.7.2 // indirect
@@ -19,5 +20,7 @@ require (
 replace github.com/latebit-io/junto/engine => ../../engine
 
 replace github.com/latebit-io/junto/ai => ../../ai
+
+replace github.com/latebit-io/junto/agent => ../../agent
 
 replace github.com/latebit-io/junto/coding => ../../coding

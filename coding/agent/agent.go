@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/tools"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/lint"
@@ -440,26 +441,32 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 
 // registerTools builds the tool registry. Built-in tools are registered first
 // and cannot be overridden by extraTools (e.g. MCP).
+//
+// Side-effecting tools (edit_file, replace_file, write_file, go_to_line,
+// update_task) receive narrow collaborator interfaces that the agent
+// satisfies via methods on *Agent (Propose, FileCreated, Navigate,
+// OnComplete). The collaborators stay private to this package; the
+// tools depend on the abstract interfaces only.
 func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, memStore memory.Store, extraTools []Tool) {
-	editTool := NewEditFileTool(workspace, cache)
+	editTool := tools.NewEditFileTool(workspace, cache, a)
 
 	builtins := []Tool{
-		NewReadFileTool(workspace, cache),
+		tools.NewReadFileTool(workspace, cache),
 		editTool,
-		NewWriteFileTool(workspace, cache),
-		NewReplaceFileTool(workspace, cache),
-		NewListFilesTool(workspace),
-		NewBashTool(projectRoot),
+		tools.NewWriteFileTool(workspace, cache, a),
+		tools.NewReplaceFileTool(workspace, cache, a),
+		tools.NewListFilesTool(workspace),
+		tools.NewBashTool(projectRoot),
 	}
 
 	if diagProvider != nil {
-		builtins = append(builtins, NewDiagnosticsTool(diagProvider, workspace))
+		builtins = append(builtins, tools.NewDiagnosticsTool(diagProvider, workspace))
 	}
 
-	builtins = append(builtins, NewGoToLineTool(workspace))
-	builtins = append(builtins, NewGlobTool(workspace))
-	builtins = append(builtins, NewSearchProjectTool(projectRoot))
-	builtins = append(builtins, NewPackageInfoTool(projectRoot))
+	builtins = append(builtins, tools.NewGoToLineTool(workspace, a))
+	builtins = append(builtins, tools.NewGlobTool(workspace))
+	builtins = append(builtins, tools.NewSearchProjectTool(projectRoot))
+	builtins = append(builtins, tools.NewPackageInfoTool(projectRoot))
 	builtins = a.appendSmokeTool(builtins, projectRoot)
 
 	// request_input was deliberately removed: the LLM was using it as a
@@ -475,23 +482,23 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	// LSP-powered tools — conditionally registered via type assertion.
 	if diagProvider != nil {
 		if dp, ok := diagProvider.(lang.DefinitionProvider); ok {
-			builtins = append(builtins, NewGoToDefinitionTool(workspace, dp))
+			builtins = append(builtins, tools.NewGoToDefinitionTool(workspace, dp))
 		}
 		if rp, ok := diagProvider.(lang.ReferenceProvider); ok {
-			builtins = append(builtins, NewFindReferencesTool(workspace, rp))
+			builtins = append(builtins, tools.NewFindReferencesTool(workspace, rp))
 		}
 		if sp, ok := diagProvider.(lang.SymbolProvider); ok {
-			builtins = append(builtins, NewWorkspaceSymbolsTool(workspace, sp))
+			builtins = append(builtins, tools.NewWorkspaceSymbolsTool(workspace, sp))
 		}
 	}
 
 	// Memory tools — conditionally registered when demarkus is configured.
 	if memStore != nil {
 		builtins = append(builtins,
-			NewMemoryFetchTool(memStore),
-			NewMemoryPublishTool(memStore),
-			NewMemoryAppendTool(memStore),
-			NewMemoryListTool(memStore),
+			tools.NewMemoryFetchTool(memStore),
+			tools.NewMemoryPublishTool(memStore),
+			tools.NewMemoryAppendTool(memStore),
+			tools.NewMemoryListTool(memStore),
 		)
 	}
 
@@ -503,9 +510,9 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	// work tree.
 	if tt, ok := workspace.(TaskTracker); ok {
 		builtins = append(builtins,
-			NewTaskTool(tt),
-			NewProjectTaskAddTool(tt),
-			NewProjectInitTool(tt),
+			tools.NewTaskTool(tt, a),
+			tools.NewProjectTaskAddTool(tt),
+			tools.NewProjectInitTool(tt),
 		)
 	}
 
@@ -1755,10 +1762,11 @@ func (a *Agent) flushDirtyBuffers(ctx context.Context) error {
 	}
 }
 
-// dispatchTool executes a tool call and handles any side effects.
-// Pure tools (EffectNone) just return their content. Tools with effects
-// (navigate, file created, edit proposed) are handled here so tools
-// never need access to the event channel or approval channels.
+// dispatchTool executes a tool call and returns the body fed back to
+// the LLM. Side effects (navigation, file-created notifications, edit
+// approval, task review) are owned by the tools themselves via
+// collaborator interfaces — the dispatcher just enforces the planning
+// blocklist and the active-task gate, then calls Execute.
 func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 	name := strings.ToLower(tc.Function.Name)
 
@@ -1781,70 +1789,7 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 	}
 
 	result := tool.Execute(ctx, tc)
-
-	switch result.Effect {
-	case EffectNavigate:
-		nav, ok := result.Payload.(event.AgentNavigate)
-		if !ok {
-			return fmt.Sprintf("Error: EffectNavigate with unexpected payload type %T", result.Payload) + a.intentReminder()
-		}
-		a.send(nav)
-
-	case EffectFileCreated:
-		path, ok := result.Payload.(string)
-		if !ok {
-			return fmt.Sprintf("Error: EffectFileCreated with unexpected payload type %T", result.Payload) + a.intentReminder()
-		}
-		a.send(event.AgentFileCreated{Path: path})
-
-	case EffectEditProposed:
-		proposal, ok := result.Payload.(EditProposal)
-		if !ok {
-			return fmt.Sprintf("Error: EffectEditProposed with unexpected payload type %T", result.Payload) + a.intentReminder()
-		}
-		content := a.handleEditProposal(ctx, proposal)
-		return content + a.intentReminder()
-
-	case EffectTaskCompleted:
-		return a.runTaskReview(ctx, result.Content)
-
-	case EffectAwaitingInput:
-		payload, ok := result.Payload.(AwaitingInputPayload)
-		if !ok {
-			return fmt.Sprintf("Error: EffectAwaitingInput with unexpected payload type %T", result.Payload) + a.intentReminder()
-		}
-		return a.handleAwaitingInput(ctx, payload) + a.intentReminder()
-	}
-
 	return result.Content + a.intentReminder()
-}
-
-// handleAwaitingInput sends the AgentAwaitingInput event to the frontend and
-// blocks on awaitingInputCh for the developer's typed answer. The answer is
-// returned verbatim as the tool result so the LLM sees it as structured tool
-// output, not as a new user message.
-func (a *Agent) handleAwaitingInput(ctx context.Context, payload AwaitingInputPayload) string {
-	a.send(event.AgentStatus{Status: event.StatusAwaitingInput})
-
-	// The event is critical — if the frontend never sees it, the developer
-	// has no way to answer and the agent blocks forever.
-	if err := a.sendCritical(ctx, event.AgentAwaitingInput{
-		Prompt:  payload.Prompt,
-		Options: payload.Options,
-		Reason:  payload.Reason,
-		CallID:  payload.CallID,
-	}); err != nil {
-		slog.Error("awaiting-input delivery failed", "err", err)
-		return fmt.Sprintf("Error: could not deliver request_input prompt to frontend: %v", err)
-	}
-
-	select {
-	case <-ctx.Done():
-		return "Error: agent canceled"
-	case answer := <-a.awaitingInputCh:
-		a.send(event.AgentStatus{Status: event.StatusThinking})
-		return answer
-	}
 }
 
 // Task-review pipeline (runTaskReview, nextTaskHint, groupEditsByDir,
@@ -1875,7 +1820,7 @@ func (a *Agent) appendSmokeTool(builtins []Tool, projectRoot string) []Tool {
 	if a.smokeConfig.Command == "" {
 		return builtins
 	}
-	return append(builtins, NewSmokeRunTool(projectRoot, a.smokeConfig))
+	return append(builtins, tools.NewSmokeRunTool(projectRoot, a.smokeConfig))
 }
 
 // recordEdit tracks an approved edit for end-of-turn review. Also
@@ -1972,7 +1917,7 @@ func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg
 		content = c
 	}
 	return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
-		proposal.Path, truncateForPreview(content)), false
+		proposal.Path, tools.TruncateForPreview(content)), false
 }
 
 // waitForContinue blocks until the developer finishes editing and presses
@@ -2004,7 +1949,7 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 
 		var result string
 		if newContent != proposal.ExpectedContent {
-			diff := simpleDiff(proposal.ExpectedContent, newContent)
+			diff := tools.SimpleDiff(proposal.ExpectedContent, newContent)
 			result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
 				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
 				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
@@ -2013,16 +1958,16 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 				"Align your next steps with their direction. "+
 				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
 				"Current file (%s):\n```\n%s\n```",
-				diff, proposal.Path, truncateForPreview(newContent))
+				diff, proposal.Path, tools.TruncateForPreview(newContent))
 		} else {
 			result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-				proposal.Path, truncateForPreview(newContent))
+				proposal.Path, tools.TruncateForPreview(newContent))
 		}
 
 		// Auto-inject diagnostics so the agent can self-correct errors.
 		if a.diagProvider != nil {
 			time.Sleep(a.diagDelay)
-			diagResult := formatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
+			diagResult := tools.FormatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
 			result += "\n\nDiagnostics after edit:\n" + diagResult
 		}
 

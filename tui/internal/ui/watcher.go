@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/latebit-io/junto/engine/session"
+	"github.com/latebit-io/junto/coding/session"
 )
 
 // fileChangedMsg is sent when a watched file changes on disk.

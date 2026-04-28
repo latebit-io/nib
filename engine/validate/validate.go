@@ -154,7 +154,7 @@ type Pipeline interface {
 }
 
 // NoopPipeline is the null-object implementation of Pipeline. It is the
-// default installed by [github.com/latebit-io/junto/engine/agent.New]
+// default installed by [github.com/latebit-io/junto/coding/agent.New]
 // when no validators are registered; swap it out at the composition
 // root to enable pre-approval checks.
 type NoopPipeline struct{}

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/coding/agent"
 	"github.com/latebit-io/junto/engine/buffer"
 	"github.com/latebit-io/junto/engine/editor"
 	"github.com/latebit-io/junto/engine/event"

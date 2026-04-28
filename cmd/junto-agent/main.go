@@ -22,18 +22,18 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/latebit-io/junto/engine/agent"
+	"github.com/latebit-io/junto/coding/agent"
+	"github.com/latebit-io/junto/coding/headless"
+	"github.com/latebit-io/junto/coding/session"
+	"github.com/latebit-io/junto/coding/wire"
 	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/headless"
 	"github.com/latebit-io/junto/engine/highlight"
 	"github.com/latebit-io/junto/engine/runconfig"
-	"github.com/latebit-io/junto/engine/session"
 	"github.com/latebit-io/junto/engine/validate"
 	"github.com/latebit-io/junto/engine/validate/architecture"
 	"github.com/latebit-io/junto/engine/validate/goparse"
 	"github.com/latebit-io/junto/engine/validate/lintstage"
 	"github.com/latebit-io/junto/engine/validate/treesitter"
-	"github.com/latebit-io/junto/engine/wire"
 )
 
 // errSetup is a sentinel wrapped into setup errors so main can distinguish

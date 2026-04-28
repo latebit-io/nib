@@ -1,6 +1,6 @@
 package headless
 
-import "github.com/latebit-io/junto/engine/agent"
+import "github.com/latebit-io/junto/coding/agent"
 
 // Compile-time guarantee that *agent.Agent satisfies the local agentPort
 // interface. The session and headless packages each depend on a

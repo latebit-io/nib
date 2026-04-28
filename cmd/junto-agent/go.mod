@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/latebit-io/junto/ai v0.0.0
+	github.com/latebit-io/junto/coding v0.0.0
 	github.com/latebit-io/junto/engine v0.0.0
 )
 
@@ -18,3 +19,5 @@ require (
 replace github.com/latebit-io/junto/engine => ../../engine
 
 replace github.com/latebit-io/junto/ai => ../../ai
+
+replace github.com/latebit-io/junto/coding => ../../coding

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -359,111 +360,93 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 	}
 }
 
-// TestAgent_StaleRunGuard_SkipsSecondStream verifies the runID guard
-// inside processLLMTurn's inner for-loop. The provider's first Stream
-// call returns a tool call (forcing processLLMTurn to loop) AND
-// signals the test once the call lands — at which point the test
-// bumps a.runID (simulating a competing RunWithMode that replaced
-// the current run in the window between unlock and prevCancel) and
-// cancels the agent's context (mirroring prevCancel). Without the
-// guard, processLLMTurn would call Stream a second time and burn
-// tokens on a request whose accounting recordTurnUsage would later
-// drop. With the guard, processLLMTurn returns ctx.Canceled at the
-// top of the next iteration before Stream fires.
-func TestAgent_StaleRunGuard_SkipsSecondStream(t *testing.T) {
+// TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun verifies the
+// stale-run guard at the top of processLLMTurn's inner for-loop.
+// Calling processLLMTurn with a runID that does not match a.runID
+// must return errStaleRun before any side effect — most importantly
+// before any Stream call. Synchronous: no goroutine race, no
+// timers. The integration with runLoop's `errors.Is(err, errStaleRun)
+// { return }` short-circuit is verifiable by reading runLoop and
+// does not need its own goroutine-orchestrated test.
+func TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun(t *testing.T) {
 	t.Parallel()
 
-	streamCalled := make(chan struct{}, 1)
-	provider := &signallingProvider{streamCalled: streamCalled}
-	provider.turns = [][]llm.StreamEvent{
-		// Turn 1: tool call forces processLLMTurn to loop back.
-		{
-			{
-				ToolCalls: []llm.ToolCall{{
-					ID:       "call-1",
-					Type:     "function",
-					Function: llm.FunctionCall{Name: "no_such_tool", Arguments: "{}"},
-				}},
-				Done: true,
-			},
-		},
-		// Turn 2: must NEVER fire. If reached, the guard failed.
-		{
-			{Token: "should not see"},
-			{Done: true},
-		},
+	provider := &multiTurnProvider{
+		// Single scripted turn — the guard must fire before this is
+		// ever requested. If Stream is called, the test fails on the
+		// call-count assertion, not on a missing turn.
+		turns: [][]llm.StreamEvent{{{Token: "should not see", Done: true}}},
 	}
+	events := make(chan event.Event, 16)
+	ag := New(provider, stubWorkspace{}, events, nil)
 
+	// Pin the agent's runID to a known value so the test's stale
+	// runID is unambiguous. New() initializes runID to 0; setting
+	// it under the lock keeps the race detector happy.
+	ag.mu.Lock()
+	ag.runID = 5
+	ag.mu.Unlock()
+
+	thinkState := false
+	_, _, err := ag.processLLMTurn(context.Background(), 999, nil, &thinkState, nil)
+
+	if !errors.Is(err, errStaleRun) {
+		t.Errorf("err = %v, want errStaleRun", err)
+	}
+	provider.mu.Lock()
+	calls := provider.call
+	provider.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("provider Stream calls = %d, want 0 (guard must fire before Stream)", calls)
+	}
+}
+
+// TestProcessLLMTurn_FreshRunIDProceeds is the negative control:
+// when runID matches a.runID, the guard does NOT fire and Stream
+// is invoked normally. Locks the guard's selectivity — without
+// this, a regression that always returned errStaleRun would still
+// pass [TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun].
+func TestProcessLLMTurn_FreshRunIDProceeds(t *testing.T) {
+	t.Parallel()
+
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{{{Token: "ok", Done: true}}},
+	}
 	events := make(chan event.Event, 64)
 	ag := New(provider, stubWorkspace{}, events, nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	ag.mu.Lock()
+	ag.runID = 7
+	ag.mu.Unlock()
 
-	// Drain events so the agent does not block on FlushBuffers or a
-	// full channel during the unwind.
+	// Drain events so the agent does not block on a full channel
+	// while processLLMTurn sends its status/token/estimate events.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for ev := range events {
 			if fb, ok := ev.(event.FlushBuffers); ok {
 				fb.Result <- event.FlushResult{}
 			}
 		}
 	}()
+	t.Cleanup(func() {
+		close(events)
+		<-done
+	})
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+	thinkState := false
+	_, _, err := ag.processLLMTurn(context.Background(), 7, nil, &thinkState, nil)
 
-	// Wait for the first Stream call to land, then race the runID
-	// bump against the second iteration of processLLMTurn's for loop.
-	select {
-	case <-streamCalled:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first Stream call never observed")
+	if errors.Is(err, errStaleRun) {
+		t.Errorf("guard fired on a fresh runID; err = %v", err)
 	}
-
-	// Bump runID WITHOUT canceling ctx. The agent's existing post-
-	// drainStream `ctx.Err()` check (right after a successful Stream)
-	// would also stop the loop if ctx were canceled, masking whether
-	// the runID guard at the TOP of the loop is actually load-bearing.
-	// Bumping only runID isolates this test to the guard under
-	// inspection.
-	ag.mu.Lock()
-	ag.runID++
-	ag.mu.Unlock()
-
-	// Allow the goroutine to react. 50ms is generous: the guard runs
-	// at the top of the next iteration before any IO. With the guard
-	// in place, processLLMTurn returns immediately; without it, the
-	// second Stream call fires well within this window.
-	time.Sleep(50 * time.Millisecond)
-
 	provider.mu.Lock()
 	calls := provider.call
 	provider.mu.Unlock()
 	if calls != 1 {
-		t.Errorf("provider Stream calls = %d, want 1 (stale-run guard failed)", calls)
+		t.Errorf("provider Stream calls = %d, want 1 (guard must NOT fire on matching runID)", calls)
 	}
-
-	// Cancel for cleanup so the run goroutine exits before the test
-	// returns. With ctx canceled, the run loop's existing waiting-
-	// state select will pick the ctx.Done branch and return.
-	cancel()
-}
-
-// signallingProvider is a multiTurnProvider that pings a channel
-// each time Stream is invoked. Used by stale-run guard tests to
-// synchronize the runID flip with a known point in the agent loop.
-type signallingProvider struct {
-	multiTurnProvider
-	streamCalled chan<- struct{}
-}
-
-func (p *signallingProvider) Stream(ctx context.Context, messages []llm.Message, defs []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	ch, err := p.multiTurnProvider.Stream(ctx, messages, defs)
-	select {
-	case p.streamCalled <- struct{}{}:
-	default:
-	}
-	return ch, err
 }
 
 // TestAgent_TokenBudget_DefaultApplied checks that when NewOptions.TaskTokenBudget

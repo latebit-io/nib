@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -54,6 +55,15 @@ const (
 	// agent runs at full speed without user interaction.
 	Headless
 )
+
+// errStaleRun is the sentinel returned by [Agent.processLLMTurn] when
+// it detects mid-turn that the agent's runID has advanced (a competing
+// RunWithMode/Reply replaced this run). Distinct from context.Canceled
+// so [Agent.runLoop] can short-circuit without emitting the post-turn
+// AgentWaiting event for a run that has already been replaced — using
+// context.Canceled here would route the stale goroutine through the
+// normal error path and yield an AgentWaiting for the wrong run.
+var errStaleRun = errors.New("agent run replaced by a newer run")
 
 // distributedKeywords are substrings that identify an MCP server as
 // distributed (team/shared) memory. If any keyword appears in the server
@@ -1025,6 +1035,18 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 		var err error
 		*messages, tu, err = a.processLLMTurn(ctx, runID, *messages, thinkState, activeDefs)
 
+		// Stale-run short-circuit: a competing RunWithMode/Reply
+		// replaced this run mid-turn. Skip recordTurnUsage (the runID
+		// guard would drop it anyway), abortIfBudgetExceeded, and the
+		// AgentWaiting emission — none of those are correct for a run
+		// that no longer exists from the developer's perspective. The
+		// deferred sender in run() also suppresses AgentDone for stale
+		// runs, so the goroutine exits silently and the new run owns
+		// the lifecycle.
+		if errors.Is(err, errStaleRun) {
+			return
+		}
+
 		// Record usage regardless of error — partial data is still valuable.
 		// Pass runID so late updates from canceled runs are ignored.
 		a.recordTurnUsage(runID, tu)
@@ -1236,17 +1258,21 @@ func (a *Agent) processLLMTurn(ctx context.Context, runID uint64, messages []llm
 		// sessionUsage, releases mu, then calls prevCancel(). In the
 		// window between the unlock and prevCancel, the old goroutine
 		// could pass shouldAbortForBudget (sessionUsage just reset),
-		// reach Stream, and burn tokens on a Stream call whose accounting
-		// recordTurnUsage will drop. Catching the staleness here narrows
-		// the window to "between this unlock and the Stream call below"
-		// (~tens of ns) — not zero, but practically closed. Returning
-		// ctx.Canceled lets the run loop's existing ctx.Err() check
-		// route the old goroutine to a clean exit.
+		// reach Stream, and burn tokens on a Stream call whose
+		// accounting recordTurnUsage will drop. Catching the staleness
+		// here narrows the window to "between this unlock and the
+		// Stream call below" (~tens of ns) — not zero, but practically
+		// closed. Returning [errStaleRun] (NOT context.Canceled) lets
+		// the run loop short-circuit before any post-turn UI events
+		// fire; if we returned ctx.Canceled, the run loop's `ctx.Err()
+		// != nil` check would still see ctx as live (prevCancel has
+		// not yet fired) and the stale goroutine would emit
+		// AgentWaiting for a run that has already been replaced.
 		a.mu.Lock()
 		stale := runID != a.runID
 		a.mu.Unlock()
 		if stale {
-			return messages, tu, context.Canceled
+			return messages, tu, errStaleRun
 		}
 
 		// Per-task budget check BEFORE the next provider Stream. A
@@ -1373,12 +1399,15 @@ func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, to
 			editFired = true
 		}
 
-		tu.ToolCalls++
-
 		if err := a.flushDirtyBuffers(ctx); err != nil {
 			a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
 			return messages, err
 		}
+		// Count only tool calls that pass the autosave gate. An
+		// autosave failure short-circuits before any tool dispatch
+		// happens, so counting at the top of the loop would inflate
+		// AgentTurnUsage.ToolCalls for tools that never actually ran.
+		tu.ToolCalls++
 		slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
 		a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
 

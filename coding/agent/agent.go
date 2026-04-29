@@ -19,6 +19,7 @@ import (
 	"github.com/latebit-io/junto/coding/budget"
 	"github.com/latebit-io/junto/coding/nudges"
 	"github.com/latebit-io/junto/coding/tools"
+	"github.com/latebit-io/junto/coding/truncation"
 	"github.com/latebit-io/junto/engine/event"
 	"github.com/latebit-io/junto/engine/lang"
 	"github.com/latebit-io/junto/engine/lint"
@@ -1378,7 +1379,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, runID uint64, messages []llm
 
 		if truncated {
 			var retryErr error
-			messages, truncationRetries, retryErr = a.handleTruncationRetry(messages, toolCalls, truncationRetries)
+			messages, truncationRetries, retryErr = truncation.Recover(messages, toolCalls, truncationRetries, a.currentProvider(), a.send)
 			if retryErr != nil {
 				return messages, tu, retryErr
 			}
@@ -1469,111 +1470,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, to
 	return messages, nil
 }
 
-// handleTruncationRetry enforces the consecutive-truncation retry cap and,
-// when under the cap, delegates to handleTruncatedTurn to append recovery
-// messages. Returns the updated messages, the incremented retry counter, and
-// a terminal error if the cap was reached (caller returns the error so the
-// turn ends instead of looping against a model that will not fit in-budget).
-//
-// Both paths append a tool-role reply for every pending tool call — the
-// assistant message with ToolCalls has already been committed by the caller,
-// and leaving it unanswered would produce a malformed transcript that the
-// next provider request (including a Resume from saved messages) would
-// reject on validation.
-func (a *Agent) handleTruncationRetry(messages []llm.Message, toolCalls []llm.ToolCall, retries int) ([]llm.Message, int, error) {
-	if retries >= maxTruncationRetries {
-		const abortReply = "Error: your response was truncated at the model's max output token limit, and the agent has exhausted its truncation-recovery retries. The turn is being abandoned to avoid looping against a model that cannot fit its answer in the available budget."
-		messages = appendTruncationRejections(messages, toolCalls, abortReply)
-		err := fmt.Errorf("agent: abandoning turn after %d consecutive truncated responses", retries+1)
-		slog.Error("agent: truncation retries exhausted", "retries", retries)
-		a.send(event.AgentError{Err: err.Error()})
-		return messages, retries, err
-	}
-	messages = a.handleTruncatedTurn(messages, toolCalls)
-	return messages, retries + 1, nil
-}
-
-// appendTruncationRejections appends a tool-role reply for each pending
-// tool call from a truncated assistant message. Chat-completion transcripts
-// require a tool-role message for every tool_calls entry before the next
-// assistant turn — skipping them leaves dangling references that providers
-// validate and reject on the following request. No-op when toolCalls is
-// empty (the assistant message had no tool calls to answer).
-func appendTruncationRejections(messages []llm.Message, toolCalls []llm.ToolCall, reply string) []llm.Message {
-	for _, tc := range toolCalls {
-		messages = append(messages, llm.Message{
-			Role:       "tool",
-			ToolCallID: tc.ID,
-			Content:    reply,
-		})
-	}
-	return messages
-}
-
-// handleTruncatedTurn rejects tool calls from a turn whose output was cut
-// off by the model's max-token cap. Their accumulated arguments may be
-// incomplete — executing them risks corrupting files (e.g. a truncated
-// edit_file replace that silently shrinks a buffer). Each tool call gets an
-// explicit error reply; a turn with no tool calls gets a user-role nudge so
-// the loop has something to condition the retry on. When the active provider
-// supports runtime escalation, the output-token cap is doubled before the
-// next turn so the retry has more headroom.
-func (a *Agent) handleTruncatedTurn(messages []llm.Message, toolCalls []llm.ToolCall) []llm.Message {
-	from, to, escalated := a.escalateProviderMaxTokens()
-	slog.Warn("agent: LLM output truncated, rejecting tool calls",
-		"tool_calls", len(toolCalls),
-		"max_tokens_from", from, "max_tokens_to", to, "escalated", escalated)
-
-	toolMsg, userMsg, uiMsg := truncationRecoveryMessages(from, to, escalated)
-	a.send(event.AgentError{Err: uiMsg})
-	messages = appendTruncationRejections(messages, toolCalls, toolMsg)
-	if len(toolCalls) == 0 {
-		messages = append(messages, llm.Message{
-			Role:    "user",
-			Content: userMsg,
-		})
-	}
-	return messages
-}
-
-// escalateProviderMaxTokens doubles the current max_tokens on the active
-// provider if it implements maxTokensEscalator. Returns the previous and new
-// values plus whether the cap actually moved — false means the provider
-// doesn't support escalation or is already at the ceiling.
-func (a *Agent) escalateProviderMaxTokens() (from, to int, escalated bool) {
-	esc, ok := a.currentProvider().(maxTokensEscalator)
-	if !ok {
-		return 0, 0, false
-	}
-	from = esc.MaxTokens()
-	to = escalateMaxTokens(from)
-	if to == from {
-		return from, to, false
-	}
-	esc.SetMaxTokens(to)
-	return from, to, true
-}
-
-// truncationRecoveryMessages builds the three user-facing strings for a
-// truncation event: the tool-role reply, the user-role nudge (for turns with
-// no tool calls), and the status-bar AgentError text. The phrasing differs
-// based on whether we were able to escalate the provider's cap.
-func truncationRecoveryMessages(from, to int, escalated bool) (toolMsg, userMsg, uiMsg string) {
-	if escalated {
-		toolMsg = fmt.Sprintf(
-			"Error: your response was truncated at the model's max output token limit (was %d, now bumped to %d for the next turn). Any arguments accumulated for this tool call are likely incomplete and were NOT executed. Retry — you now have more output headroom, but still prefer narrow edit_file search/replace over full-file rewrites.",
-			from, to)
-		userMsg = fmt.Sprintf(
-			"Your previous response was truncated at the max output token limit. The cap has been raised from %d to %d for this turn — retry with the same plan.",
-			from, to)
-		uiMsg = fmt.Sprintf("LLM output truncated — bumping max_tokens %d → %d and retrying.", from, to)
-		return
-	}
-	toolMsg = "Error: your response was truncated at the model's max output token limit, and the provider is already at its output-cap ceiling. Any arguments accumulated for this tool call are likely incomplete and were NOT executed. You must break the work into smaller pieces — e.g. for edit_file, narrow the search/replace to only the lines that actually change rather than rewriting large blocks."
-	userMsg = "Your previous response was truncated at the max output token limit, and the provider is already at its output-cap ceiling. Retry by breaking the work into smaller pieces."
-	uiMsg = "LLM output truncated and provider is at max_tokens ceiling — asking the model to split the work."
-	return
-}
+// Truncation handling (Recover, Escalate, RecoveryMessages,
+// AppendRejections, MaxRetries) lives in [coding/truncation]. Agent
+// invokes [truncation.Recover] from processLLMTurn after a Truncated
+// stream event.
 
 // flushDirtyBuffers asks the frontend to save all dirty buffers to disk,
 // then invalidates the corresponding cache entries. The actual I/O runs

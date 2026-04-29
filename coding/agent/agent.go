@@ -162,6 +162,13 @@ type Agent struct {
 	// meant for the new run.
 	coord *approval.Coordinator
 
+	// approvalFlow runs the edit-approval orchestration (validation,
+	// proposal delivery, await approve/reject, recordEdit, await
+	// continue, diagnostics). Constructed once at New() time with
+	// callbacks that close over agent state; the per-run coord is
+	// passed to Handle from the run goroutine via coordFromCtx.
+	approvalFlow *approval.Orchestrator
+
 	// waiting is set while the run loop is parked on coord.AwaitInput
 	// between turns, awaiting the developer's next message.
 	waiting bool
@@ -419,6 +426,18 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		smokeConfig:       smokeCfg,
 		taskTokenBudget:   taskTokenBudget,
 	}
+
+	a.approvalFlow = approval.NewOrchestrator(approval.Deps{
+		Cache:        cache,
+		Workspace:    workspace,
+		Send:         a.send,
+		SendCritical: a.sendCritical,
+		Validate:     a.runValidationPipeline,
+		RecordEdit:   a.recordEdit,
+		Autonomous:   a.currentAutonomous,
+		DiagProvider: diagProvider,
+		DiagDelay:    a.diagDelay,
+	})
 
 	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
 
@@ -1594,143 +1613,11 @@ func (a *Agent) recordEdit(proposal EditProposal) {
 // search-validation retry budget so the two layers compose predictably.
 const maxValidatorRetries = 3
 
-// handleEditProposal manages the full approval flow for a proposed edit.
-// This logic was formerly inside EditFileTool — now it lives here so
-// the tool is a pure computation and the channels stay private to Agent.
-// The coord parameter is the run's [*approval.Coordinator] (resolved by
-// [Agent.Propose] from the run-annotated ctx); using a parameter rather
-// than [Agent.coord] guarantees this proposal flows through the same
-// run's channels even if a competing RunWithMode swaps a.coord
-// mid-handle.
-func (a *Agent) handleEditProposal(ctx context.Context, coord *approval.Coordinator, proposal EditProposal) string {
-	// Pre-approval validation: run the configured pipeline against the
-	// candidate's expected post-edit content. A Retry verdict hands
-	// structured feedback back to the LLM without surfacing the broken
-	// proposal; exhaustion (or any other verdict) falls through to the
-	// comprehension gate with the results attached to the event.
-	validatorSummaries, retryFeedback := a.runValidationPipeline(ctx, proposal)
-	if retryFeedback != "" {
-		return retryFeedback
-	}
-
-	a.send(event.AgentStatus{Status: event.StatusReviewing})
-
-	// The proposal event is critical — if the frontend never sees it,
-	// waitForApproval blocks forever with nothing for the user to approve.
-	if err := a.sendCritical(ctx, event.AgentEditProposed{
-		Edit:               proposal.Edit,
-		ValidatorSummaries: validatorSummaries,
-	}); err != nil {
-		slog.Error("edit proposal delivery failed", "err", err)
-		return fmt.Sprintf("Error: could not deliver edit proposal to frontend: %v", err)
-	}
-
-	// Wait for approval or rejection.
-	msg, canceled := a.waitForApproval(ctx, coord, proposal)
-	if canceled {
-		return "Error: agent canceled"
-	}
-	if msg != "" {
-		return msg
-	}
-
-	// Approved — record for end-of-turn review and add to context set.
-	a.recordEdit(proposal)
-	if !a.workspace.InContext(proposal.Path) {
-		a.workspace.AddContext(proposal.Path)
-	}
-
-	// Wait for the developer to continue with updated buffer content.
-	return a.waitForContinue(ctx, coord, proposal)
-}
-
-// Validation pipeline (runValidationPipeline, toValidatorSummaries,
-// aggregateRetryFeedback) lives in validation.go.
-
-// waitForApproval blocks until the developer approves or rejects the edit,
-// or the context is canceled. Returns (rejectionMsg, false) on reject,
-// ("", true) on cancel or channel-closed, ("", false) on approve. The
-// coord parameter is the run's [*approval.Coordinator]; see
-// [Agent.handleEditProposal] for why it's passed explicitly rather
-// than read from [Agent.coord].
-func (a *Agent) waitForApproval(ctx context.Context, coord *approval.Coordinator, proposal EditProposal) (msg string, canceled bool) {
-	approved, err := coord.AwaitApproval(ctx)
-	if err != nil {
-		if errors.Is(err, approval.ErrChannelClosed) {
-			return "Error: approval channel closed", true
-		}
-		return "", true
-	}
-	if approved {
-		return "", false
-	}
-
-	a.send(event.AgentStatus{Status: event.StatusThinking})
-	a.send(event.AgentToken{Text: "\n[Edit rejected]\n\n"})
-
-	content := ""
-	if c, ok := a.cache.Get(proposal.CanonPath); ok {
-		content = c
-	}
-	return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
-		proposal.Path, tools.TruncateForPreview(content)), false
-}
-
-// waitForContinue blocks until the developer finishes editing and presses
-// continue, or the context is canceled. Compares the new content against
-// the expected result to detect developer modifications. The coord
-// parameter is the run's [*approval.Coordinator]; see
-// [Agent.handleEditProposal] for the parameter rationale.
-func (a *Agent) waitForContinue(ctx context.Context, coord *approval.Coordinator, proposal EditProposal) string {
-	a.send(event.AgentStatus{Status: event.StatusEditing})
-	// Render the "press Ctrl+N to continue" prompt only at LevelGuided
-	// (where the developer actually has to press Ctrl+N). At
-	// LevelCollaborate+ the autonomous flag is set and continue fires
-	// automatically — the message is then visual noise that reads
-	// like an approval prompt and confused testers ("why did it ask
-	// for my approval?"). The StatusEditing chip transition is the
-	// signal in autonomous modes.
-	if !a.currentAutonomous() {
-		a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
-	}
-
-	newContent, err := coord.AwaitContinue(ctx)
-	if err != nil {
-		if errors.Is(err, approval.ErrChannelClosed) {
-			return "Error: continue channel closed"
-		}
-		return "Error: agent canceled"
-	}
-	a.cache.Set(proposal.CanonPath, newContent)
-	a.send(event.AgentStatus{Status: event.StatusThinking})
-	a.send(event.AgentToken{Text: "\n"})
-
-	var result string
-	if newContent != proposal.ExpectedContent {
-		diff := tools.SimpleDiff(proposal.ExpectedContent, newContent)
-		result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
-			"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
-			"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
-			"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
-			"Recalibrate: study the diff — it signals the developer's intent. "+
-			"Align your next steps with their direction. "+
-			"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
-			"Current file (%s):\n```\n%s\n```",
-			diff, proposal.Path, tools.TruncateForPreview(newContent))
-	} else {
-		result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-			proposal.Path, tools.TruncateForPreview(newContent))
-	}
-
-	// Auto-inject diagnostics so the agent can self-correct errors.
-	if a.diagProvider != nil {
-		time.Sleep(a.diagDelay)
-		diagResult := tools.FormatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
-		result += "\n\nDiagnostics after edit:\n" + diagResult
-	}
-
-	return result
-}
+// Edit-approval orchestration (handleEditProposal, waitForApproval,
+// waitForContinue, fatalProposalMarkers) lives in
+// [coding/approval.Orchestrator]. The agent constructs one in New
+// with [approval.Deps] callbacks bound to its own state and routes
+// proposals through it via [Agent.Propose] in collab_impl.go.
 
 // fetchMemorySummary re-fetches /summary.md from the memory store so each
 // conversation sees the latest state. Returns the fetched summary, or falls

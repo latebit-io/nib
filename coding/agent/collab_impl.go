@@ -26,8 +26,19 @@ var fatalProposalMarkers = []string{
 // surfaced as a tool error to the frontend (only set on delivery
 // failures and cancellation; rejection feedback and recalibration
 // notes are normal flow).
+//
+// The run's [*approval.Coordinator] is recovered from ctx (it was
+// stashed by RunWithMode/Reply via [ctxWithCoord]). A nil coord
+// means the tool is being invoked outside an active run — a
+// programming error worth surfacing as a tool error rather than
+// silently routing through [Agent.coord], which the run-handoff
+// race may have swapped to a different run's channels.
 func (a *Agent) Propose(ctx context.Context, p tools.EditProposal) (string, bool) {
-	body := a.handleEditProposal(ctx, p)
+	coord := coordFromCtx(ctx)
+	if coord == nil {
+		return "Error: edit proposal received without a run-scoped approval coordinator (no active run?)", true
+	}
+	body := a.handleEditProposal(ctx, coord, p)
 	for _, marker := range fatalProposalMarkers {
 		if strings.Contains(body, marker) {
 			return body, true

@@ -228,3 +228,31 @@ func TestCoordinator_AwaitAnswer_CtxCancel(t *testing.T) {
 		t.Errorf("AwaitAnswer err = %v, want DeadlineExceeded", err)
 	}
 }
+
+// TestDrain_ClosedChannelTerminates locks the defensive guarantee
+// that drain returns promptly on a closed channel. A closed receive
+// is always ready in a select arm, so a naive
+// `for { select { case <-ch: ; default: return } }` spins forever
+// once the channel is closed. The two-value receive + ok-flag check
+// terminates the loop. Coordinator never closes its own channels,
+// but drain is a generic helper that should not deadlock the test
+// harness if a caller ever does.
+func TestDrain_ClosedChannelTerminates(t *testing.T) {
+	t.Parallel()
+	ch := make(chan int, 3)
+	ch <- 1
+	ch <- 2
+	close(ch) // emptied first iteration of drain via the values, then ok=false
+
+	done := make(chan struct{})
+	go func() {
+		drain(ch)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(shortTimeout):
+		t.Fatal("drain did not terminate on a closed channel within the timeout")
+	}
+}

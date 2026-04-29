@@ -213,11 +213,19 @@ func (c *Coordinator) AwaitAnswer(ctx context.Context) (string, error) {
 	}
 }
 
-// drain reads off any pending values without blocking.
+// drain reads off any pending values without blocking. Returns
+// promptly on a closed channel: a closed receive is always ready in
+// the select arm, so without checking the comma-ok flag the loop
+// would spin forever once the channel is closed. The Coordinator
+// never closes its own channels — defensive guarantee for callers
+// that compose drain with channels they own.
 func drain[T any](ch chan T) {
 	for {
 		select {
-		case <-ch:
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
 		default:
 			return
 		}

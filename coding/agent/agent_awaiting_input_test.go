@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/truncation"
 	"github.com/latebit-io/junto/engine/event"
 )
 
@@ -105,7 +106,7 @@ func TestAgent_RequestInputUnregisteredAcrossModes(t *testing.T) {
 }
 
 // escalatingProvider wraps multiTurnProvider and also implements
-// maxTokensEscalator, so the agent-loop escalation path fires during the
+// truncation.Escalator, so the agent-loop escalation path fires during the
 // truncation test. Embedding preserves the scripted-stream Stream() method.
 type escalatingProvider struct {
 	*multiTurnProvider
@@ -156,16 +157,16 @@ func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
 
 	// The provider's max_tokens should have been bumped to the initial
 	// escalation value (started at 0 → unset → jumps to the floor).
-	if provider.MaxTokens() != maxTokensInitialEscalation {
+	if provider.MaxTokens() != truncation.InitialEscalation {
 		t.Errorf("MaxTokens after escalation = %d, want %d",
-			provider.MaxTokens(), maxTokensInitialEscalation)
+			provider.MaxTokens(), truncation.InitialEscalation)
 	}
 }
 
 func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 	// A misbehaving model (or one already at the output-token ceiling) that
 	// keeps returning Truncated=true must not loop forever — the agent
-	// abandons the turn after maxTruncationRetries consecutive truncations.
+	// abandons the turn after truncation.MaxRetries consecutive truncations.
 	truncatedTurn := []llm.StreamEvent{
 		{
 			ToolCalls: []llm.ToolCall{{
@@ -177,8 +178,8 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 			Truncated: true,
 		},
 	}
-	turns := make([][]llm.StreamEvent, 0, maxTruncationRetries+2)
-	for i := 0; i < maxTruncationRetries+2; i++ {
+	turns := make([][]llm.StreamEvent, 0, truncation.MaxRetries+2)
+	for i := 0; i < truncation.MaxRetries+2; i++ {
 		turns = append(turns, truncatedTurn)
 	}
 	provider := &multiTurnProvider{turns: turns}
@@ -208,10 +209,10 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 		t.Fatal("timeout waiting for AgentDone after ctx cancel")
 	}
 
-	// The provider should have been called exactly maxTruncationRetries+1
+	// The provider should have been called exactly truncation.MaxRetries+1
 	// times — retries capped, no infinite loop.
 	provider.mu.Lock()
-	wantCalls := maxTruncationRetries + 1
+	wantCalls := truncation.MaxRetries + 1
 	if provider.call != wantCalls {
 		t.Errorf("provider calls = %d, want %d", provider.call, wantCalls)
 	}

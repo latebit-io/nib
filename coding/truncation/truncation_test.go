@@ -115,9 +115,9 @@ func TestAppendRejections_EmptyCallsIsNoop(t *testing.T) {
 	}
 }
 
-func TestRecoveryMessages_EscalatedPhrasing(t *testing.T) {
+func TestRecoveryMessages_AppliedPhrasing(t *testing.T) {
 	t.Parallel()
-	tool, user, ui := RecoveryMessages(8192, 16384, true)
+	tool, user, ui := RecoveryMessages(8192, 16384, EscalationApplied)
 	if !strings.Contains(tool, "8192") || !strings.Contains(tool, "16384") {
 		t.Errorf("tool message missing from/to numbers: %q", tool)
 	}
@@ -129,9 +129,9 @@ func TestRecoveryMessages_EscalatedPhrasing(t *testing.T) {
 	}
 }
 
-func TestRecoveryMessages_CeilingPhrasing(t *testing.T) {
+func TestRecoveryMessages_AtCeilingPhrasing(t *testing.T) {
 	t.Parallel()
-	tool, user, ui := RecoveryMessages(Ceiling, Ceiling, false)
+	tool, user, ui := RecoveryMessages(Ceiling, Ceiling, EscalationAtCeiling)
 	if !strings.Contains(tool, "ceiling") {
 		t.Errorf("tool message should mention ceiling: %q", tool)
 	}
@@ -140,6 +140,21 @@ func TestRecoveryMessages_CeilingPhrasing(t *testing.T) {
 	}
 	if !strings.Contains(ui, "ceiling") {
 		t.Errorf("ui message should mention ceiling: %q", ui)
+	}
+}
+
+func TestRecoveryMessages_UnsupportedPhrasing(t *testing.T) {
+	t.Parallel()
+	// from/to stay zero when the provider doesn't implement Escalator.
+	tool, user, ui := RecoveryMessages(0, 0, EscalationUnsupported)
+	for _, msg := range []string{tool, user, ui} {
+		if strings.Contains(msg, "ceiling") {
+			t.Errorf("unsupported phrasing must not mention 'ceiling' "+
+				"(would mislead the model about the cause): %q", msg)
+		}
+		if !strings.Contains(msg, "escalation") {
+			t.Errorf("unsupported phrasing should mention escalation: %q", msg)
+		}
 	}
 }
 
@@ -224,9 +239,14 @@ func TestRecover_NonEscalatorProvider_NoOpsEscalation(t *testing.T) {
 	if retries != 1 {
 		t.Errorf("retries = %d, want 1", retries)
 	}
-	// Tool message should use the ceiling phrasing (no escalation possible).
-	if !strings.Contains(msgs[0].Content, "ceiling") {
-		t.Errorf("expected ceiling phrasing for non-Escalator provider, got %q", msgs[0].Content)
+	// Tool message must use the unsupported phrasing — NOT the
+	// ceiling phrasing — because the cause is provider capability,
+	// not an exhausted cap. Conflating the two was the pre-fix bug.
+	if strings.Contains(msgs[0].Content, "ceiling") {
+		t.Errorf("non-Escalator provider must not surface 'ceiling' phrasing: %q", msgs[0].Content)
+	}
+	if !strings.Contains(msgs[0].Content, "escalation") {
+		t.Errorf("non-Escalator provider should mention escalation in its message: %q", msgs[0].Content)
 	}
 }
 

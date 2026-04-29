@@ -64,6 +64,42 @@ type Escalator interface {
 	SetMaxTokens(int)
 }
 
+// Compile-time assertions that every shipped llm.Provider continues
+// to satisfy [Escalator]. The agent dispatches via type assertion at
+// runtime; without these declarations a renamed method on any
+// implementation would silently degrade to "escalation unsupported"
+// and the agent would loop against the same truncation ceiling. The
+// assertion forces the regression to surface at build time.
+var (
+	_ Escalator = (*llm.AgentAPI)(nil)
+	_ Escalator = (*llm.AnthropicAPI)(nil)
+	_ Escalator = (*llm.CodexAPI)(nil)
+)
+
+// EscalationOutcome describes what happened when [Recover] tried to
+// bump the provider's max-tokens cap. The three states feed
+// [RecoveryMessages] so the model and the status bar see phrasing
+// that matches the actual situation — telling the LLM "the provider
+// is at its ceiling" when the provider simply doesn't support
+// runtime escalation is misleading and was a real bug in the
+// pre-carve agent code.
+type EscalationOutcome int
+
+const (
+	// EscalationApplied means the cap moved from a lower value to a
+	// higher one — the next turn has more headroom.
+	EscalationApplied EscalationOutcome = iota
+	// EscalationAtCeiling means the provider supports escalation but
+	// is already at [Ceiling]. Splitting the work is the only path
+	// forward.
+	EscalationAtCeiling
+	// EscalationUnsupported means the provider does not implement
+	// [Escalator] at runtime. Splitting the work is also the only
+	// path forward, but the cause is provider capability, not a cap
+	// the agent has already exhausted.
+	EscalationUnsupported
+)
+
 // Sender adapts the agent's event emitter so [Recover] can surface
 // status-bar AgentError events without depending on the agent's full
 // send/sendCritical surface.
@@ -124,9 +160,12 @@ func AppendRejections(messages []llm.Message, toolCalls []llm.ToolCall, reply st
 // truncation event: the tool-role reply (one per pending tool call),
 // the user-role nudge (for turns with no tool calls — the loop needs
 // SOMETHING to condition the retry on), and the status-bar AgentError
-// text. The phrasing differs based on whether [Escalate] succeeded.
-func RecoveryMessages(from, to int, escalated bool) (toolMsg, userMsg, uiMsg string) {
-	if escalated {
+// text. The phrasing differs by [EscalationOutcome] so the model and
+// the developer see the actual cause: cap-just-bumped, cap-already-
+// at-ceiling, or runtime-escalation-unsupported.
+func RecoveryMessages(from, to int, outcome EscalationOutcome) (toolMsg, userMsg, uiMsg string) {
+	switch outcome {
+	case EscalationApplied:
 		toolMsg = fmt.Sprintf(
 			"Error: your response was truncated at the model's max output token limit (was %d, now bumped to %d for the next turn). Any arguments accumulated for this tool call are likely incomplete and were NOT executed. Retry — you now have more output headroom, but still prefer narrow edit_file search/replace over full-file rewrites.",
 			from, to)
@@ -134,11 +173,15 @@ func RecoveryMessages(from, to int, escalated bool) (toolMsg, userMsg, uiMsg str
 			"Your previous response was truncated at the max output token limit. The cap has been raised from %d to %d for this turn — retry with the same plan.",
 			from, to)
 		uiMsg = fmt.Sprintf("LLM output truncated — bumping max_tokens %d → %d and retrying.", from, to)
-		return
+	case EscalationAtCeiling:
+		toolMsg = "Error: your response was truncated at the model's max output token limit, and the provider is already at its output-cap ceiling. Any arguments accumulated for this tool call are likely incomplete and were NOT executed. You must break the work into smaller pieces — e.g. for edit_file, narrow the search/replace to only the lines that actually change rather than rewriting large blocks."
+		userMsg = "Your previous response was truncated at the max output token limit, and the provider is already at its output-cap ceiling. Retry by breaking the work into smaller pieces."
+		uiMsg = "LLM output truncated and provider is at max_tokens ceiling — asking the model to split the work."
+	case EscalationUnsupported:
+		toolMsg = "Error: your response was truncated at the model's max output token limit, and this provider does not support runtime escalation of its output cap. Any arguments accumulated for this tool call are likely incomplete and were NOT executed. You must break the work into smaller pieces — e.g. for edit_file, narrow the search/replace to only the lines that actually change rather than rewriting large blocks."
+		userMsg = "Your previous response was truncated at the max output token limit, and this provider does not support runtime cap escalation. Retry by breaking the work into smaller pieces."
+		uiMsg = "LLM output truncated and provider does not support runtime cap escalation — asking the model to split the work."
 	}
-	toolMsg = "Error: your response was truncated at the model's max output token limit, and the provider is already at its output-cap ceiling. Any arguments accumulated for this tool call are likely incomplete and were NOT executed. You must break the work into smaller pieces — e.g. for edit_file, narrow the search/replace to only the lines that actually change rather than rewriting large blocks."
-	userMsg = "Your previous response was truncated at the max output token limit, and the provider is already at its output-cap ceiling. Retry by breaking the work into smaller pieces."
-	uiMsg = "LLM output truncated and provider is at max_tokens ceiling — asking the model to split the work."
 	return
 }
 
@@ -182,18 +225,22 @@ func Recover(
 		return messages, retries, err
 	}
 
-	var (
-		from, to  int
-		escalated bool
-	)
+	var from, to int
+	outcome := EscalationUnsupported
 	if esc, ok := provider.(Escalator); ok {
-		from, to, escalated = Escalate(esc)
+		var moved bool
+		from, to, moved = Escalate(esc)
+		if moved {
+			outcome = EscalationApplied
+		} else {
+			outcome = EscalationAtCeiling
+		}
 	}
 	slog.Warn("agent: LLM output truncated, rejecting tool calls",
 		"tool_calls", len(toolCalls),
-		"max_tokens_from", from, "max_tokens_to", to, "escalated", escalated)
+		"max_tokens_from", from, "max_tokens_to", to, "outcome", outcome)
 
-	toolMsg, userMsg, uiMsg := RecoveryMessages(from, to, escalated)
+	toolMsg, userMsg, uiMsg := RecoveryMessages(from, to, outcome)
 	if sender != nil {
 		sender(event.AgentError{Err: uiMsg})
 	}

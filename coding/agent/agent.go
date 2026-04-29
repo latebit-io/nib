@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/approval"
 	"github.com/latebit-io/junto/coding/budget"
 	"github.com/latebit-io/junto/coding/nudges"
 	"github.com/latebit-io/junto/coding/tools"
@@ -41,8 +42,9 @@ const (
 
 // InteractionMode controls prompt framing — how the agent describes its
 // workflow to the LLM. It does NOT change runtime behavior: the agent
-// always blocks on approveCh/continueCh for edits, and the frontend
-// (TUI or headless Runner) is responsible for signaling them.
+// always awaits approval/continue signals from the [approval.Coordinator]
+// for edits, and the frontend (TUI or headless Runner) is responsible
+// for driving those signals.
 // Set at construction time, immutable for the agent's lifetime.
 type InteractionMode int
 
@@ -55,6 +57,31 @@ const (
 	// agent runs at full speed without user interaction.
 	Headless
 )
+
+// coordCtxKey is the unexported context-value key under which the
+// active run's [*approval.Coordinator] is stashed. Used to bridge
+// the tool boundary: the [tools.Approver.Propose] collaborator
+// method is invoked by tools (which have no coord in scope) and
+// needs to dispatch to the run's coordinator. Every other agent-
+// internal callsite receives coord as an explicit parameter.
+type coordCtxKey struct{}
+
+// ctxWithCoord returns ctx annotated with c. Called once per run, on
+// the goroutine-launching side, so the run goroutine and any tool
+// dispatched on its behalf retrieve the run's coordinator via
+// [coordFromCtx] without reading the lazily-mutated [Agent.coord]
+// field.
+func ctxWithCoord(ctx context.Context, c *approval.Coordinator) context.Context {
+	return context.WithValue(ctx, coordCtxKey{}, c)
+}
+
+// coordFromCtx extracts the coordinator stashed by [ctxWithCoord].
+// Returns nil when the ctx was not annotated — a programming error
+// that callers should surface, not silently swallow.
+func coordFromCtx(ctx context.Context) *approval.Coordinator {
+	c, _ := ctx.Value(coordCtxKey{}).(*approval.Coordinator)
+	return c
+}
 
 // errStaleRun is the sentinel returned by [Agent.processLLMTurn] when
 // it detects mid-turn that the agent's runID has advanced (a competing
@@ -126,22 +153,18 @@ type Agent struct {
 	intent     string // current developer intent — included in every tool result
 	mode       Mode   // current conversation mode (execution or planning)
 
-	// Approval flow: agent blocks on these channels.
-	// These stay private to Agent — tools never see them.
-	approveCh  chan bool   // true = approved, false = rejected
-	continueCh chan string // buffer content after user edits
+	// coord owns the four coordination channels (approve/continue/
+	// reply/answer) the agent uses to talk to the frontend. Replaced
+	// (not reset) at every run boundary so a stale goroutine parked
+	// in coord.Await* on the previous run cannot consume signals
+	// meant for the new run.
+	coord *approval.Coordinator
 
-	// Conversation flow: agent blocks on inputCh between turns,
-	// waiting for the developer's next message.
-	inputCh chan string
-	waiting bool // true when blocked on inputCh
-	running bool // true while the run() goroutine is alive
-
-	// Structured input request flow: the agent blocks on awaitingInputCh
-	// mid-turn when a request_input tool call is dispatched. The frontend
-	// delivers the developer's typed answer via AnswerInput. Buffered 1
-	// so AnswerInput is non-blocking under normal operation.
-	awaitingInputCh chan string
+	// waiting is set while the run loop is parked on coord.AwaitInput
+	// between turns, awaiting the developer's next message.
+	waiting bool
+	// running is true while the run() goroutine is alive.
+	running bool
 
 	// savedMessages and savedMode preserve the conversation when a run
 	// exits (cancel, fatal error). Resume picks these up to continue
@@ -328,8 +351,7 @@ type NewOptions struct {
 // events (EditProposed, Done, Error) block for up to 5 seconds before being
 // discarded with a log. Use a buffered channel (e.g. 64) to absorb bursts.
 func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, opts *NewOptions, extraTools ...Tool) *Agent {
-	approveCh := make(chan bool, 1)
-	continueCh := make(chan string, 1)
+	coord := approval.New()
 	cache := NewFileCache()
 	projectRoot := workspace.ProjectRoot()
 
@@ -377,10 +399,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		events:            events,
 		cache:             cache,
 		prompts:           NewPromptLoader(projectRoot),
-		approveCh:         approveCh,
-		continueCh:        continueCh,
-		inputCh:           make(chan string, 1), // capacity 1: Reply() is non-blocking; only one pending reply is meaningful
-		awaitingInputCh:   make(chan string, 1), // capacity 1: AnswerInput is non-blocking; only one pending answer is meaningful
+		coord:             coord,
 		diagProvider:      diagProvider,
 		planningBlocklist: merged,
 		interactionMode:   interaction,
@@ -527,11 +546,26 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	// acquires mu.Lock, and cancel may unblock it immediately.
 	prevCancel := a.cancel
 
-	// Drain stale signals from previous run
-	drain(a.approveCh)
-	drain(a.continueCh)
-	drain(a.inputCh)
-	drain(a.awaitingInputCh)
+	// Allocate a fresh coordinator for the new run instead of draining
+	// the existing one. The previous goroutine may still be parked
+	// inside a Coordinator.Await* call on the old channels; if we
+	// reused the same coordinator, a Reply / Approve / Continue that
+	// landed in the gap between this Unlock and prevCancel would race
+	// with the stale goroutine — the stale select can pick the channel
+	// arm before ctx.Done and consume a signal meant for the new run.
+	// Swapping isolates the channels: the stale goroutine retains its
+	// captured pointer to the old coordinator (visible only on its own
+	// stack), the frontend's subsequent signals go to the new
+	// coordinator, and the old coordinator's channels are unreferenced
+	// once the stale goroutine exits.
+	a.coord = approval.New()
+	// Snapshot the coord under the lock so the goroutine launched
+	// below captures THIS run's coordinator. Reading a.coord later
+	// (after unlock) would re-introduce the race a fresh-coord-per-
+	// run is supposed to close: a subsequent RunWithMode could swap
+	// a.coord again before the goroutine reaches its first Await*,
+	// landing the goroutine on a third run's channels.
+	coord := a.coord
 
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
@@ -564,7 +598,11 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 		prevCancel()
 	}
 
-	go a.run(ctx, runID, fileName, fileContent, goal, contextFiles, mode)
+	// Annotate ctx so [Agent.Propose] (the Approver collaborator entry
+	// point invoked by tools) can recover this run's coord without
+	// reading the racy [Agent.coord] field.
+	runCtx := ctxWithCoord(ctx, coord)
+	go a.run(runCtx, runID, coord, fileName, fileContent, goal, contextFiles, mode)
 }
 
 // Reply sends a follow-up message to an ongoing conversation.
@@ -578,14 +616,12 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.mu.Lock()
 	if a.running {
-		defer a.mu.Unlock()
-		select {
-		case a.inputCh <- input:
-			return true
-		default:
-			slog.Warn("agent.Reply: inputCh full, dropping message")
-			return false
-		}
+		// Snapshot under the lock so a concurrent RunWithMode that
+		// swaps a.coord cannot redirect this Reply to a different
+		// run's channels.
+		coord := a.coord
+		a.mu.Unlock()
+		return coord.Reply(input)
 	}
 
 	// Agent not running — try to resume from saved conversation.
@@ -598,10 +634,10 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	mode := a.savedMode
 
 	prevCancel := a.cancel
-	drain(a.approveCh)
-	drain(a.continueCh)
-	drain(a.inputCh)
-	drain(a.awaitingInputCh)
+	// Fresh coordinator for the resumed run — same isolation rule
+	// as RunWithMode. See the comment there for the full rationale.
+	a.coord = approval.New()
+	coord := a.coord
 
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
@@ -635,7 +671,8 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 		Content: input,
 	})
 
-	go a.resumeRun(ctx, runID, messages, mode)
+	runCtx := ctxWithCoord(ctx, coord)
+	go a.resumeRun(runCtx, runID, coord, messages, mode)
 	return true
 }
 
@@ -654,16 +691,6 @@ func (a *Agent) IsRunning() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.running
-}
-
-func drain[T any](ch chan T) {
-	for {
-		select {
-		case <-ch:
-		default:
-			return
-		}
-	}
 }
 
 // SetProvider replaces the LLM provider for subsequent turns.
@@ -855,43 +882,43 @@ func (a *Agent) currentProvider() llm.Provider {
 	return a.provider
 }
 
-// Approve signals that the user approved the pending edit.
-func (a *Agent) Approve() {
-	select {
-	case a.approveCh <- true:
-	default:
-	}
-}
+// Approve signals that the user approved the pending edit. The active
+// coordinator is snapshotted under the lock so a concurrent
+// RunWithMode that swaps a.coord cannot redirect this signal to a
+// different run's channels mid-call.
+func (a *Agent) Approve() { a.activeCoord().Approve() }
 
-// Reject signals that the user rejected the pending edit.
-func (a *Agent) Reject() {
-	select {
-	case a.approveCh <- false:
-	default:
-	}
-}
+// Reject signals that the user rejected the pending edit. See
+// [Agent.Approve] for the snapshot rationale.
+func (a *Agent) Reject() { a.activeCoord().Reject() }
 
-// Continue signals the user is done editing and sends the current buffer content
-// for the file that was just edited.
+// Continue signals the user is done editing and sends the current
+// buffer content for the file that was just edited. See
+// [Agent.Approve] for the snapshot rationale.
 func (a *Agent) Continue(path, bufferContent string) {
 	slog.Debug("agent.Continue", "path", path, "content_len", len(bufferContent))
 	a.cache.Set(path, bufferContent)
-	select {
-	case a.continueCh <- bufferContent:
-	default:
-	}
+	a.activeCoord().Continue(bufferContent)
 }
 
 // AnswerInput delivers the developer's answer to a pending request_input
 // prompt. Text is the verbatim typed answer — typically an option ID, but
 // free-form is valid. Non-blocking: if no prompt is pending, the answer
-// is dropped (same shape as Approve/Reject/Continue).
-func (a *Agent) AnswerInput(text string) {
-	select {
-	case a.awaitingInputCh <- text:
-	default:
-		slog.Warn("agent.AnswerInput: no pending request_input, dropping answer")
-	}
+// is dropped (same shape as Approve/Reject/Continue). See
+// [Agent.Approve] for the snapshot rationale.
+func (a *Agent) AnswerInput(text string) { a.activeCoord().Answer(text) }
+
+// activeCoord snapshots the active run's coordinator under [Agent.mu]
+// so frontend signal methods do not read a.coord while RunWithMode /
+// Reply are mid-swap. The snapshot may belong to a run that is about
+// to be cancelled (the swap-then-cancel ordering is intentional in
+// RunWithMode); in that case the signal is delivered to channels
+// nobody will read, which is harmless because the goroutine that
+// would have read them is unwinding via ctx.Done.
+func (a *Agent) activeCoord() *approval.Coordinator {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.coord
 }
 
 // Cancel stops the current agent run.
@@ -943,7 +970,7 @@ func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
 	}
 }
 
-func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
+func (a *Agent) run(ctx context.Context, runID uint64, coord *approval.Coordinator, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
 	a.mu.Lock()
 	a.running = true
 	a.mu.Unlock()
@@ -990,12 +1017,12 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 	}
 
 	thinkState := false
-	a.runLoop(ctx, runID, &messages, &success, mode, &thinkState)
+	a.runLoop(ctx, runID, coord, &messages, &success, mode, &thinkState)
 }
 
 // resumeRun is the entry point for Resume — starts the run loop with
 // pre-existing messages instead of building them from scratch.
-func (a *Agent) resumeRun(ctx context.Context, runID uint64, initial []llm.Message, mode Mode) {
+func (a *Agent) resumeRun(ctx context.Context, runID uint64, coord *approval.Coordinator, initial []llm.Message, mode Mode) {
 	a.mu.Lock()
 	a.running = true
 	a.mu.Unlock()
@@ -1022,11 +1049,14 @@ func (a *Agent) resumeRun(ctx context.Context, runID uint64, initial []llm.Messa
 	a.send(event.AgentStatus{Status: event.StatusThinking})
 
 	thinkState := false
-	a.runLoop(ctx, runID, &messages, &success, mode, &thinkState)
+	a.runLoop(ctx, runID, coord, &messages, &success, mode, &thinkState)
 }
 
 // runLoop is the shared agent loop used by both run and resumeRun.
-func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Message, success *bool, mode Mode, thinkState *bool) {
+// The coord parameter is the run's [*approval.Coordinator], captured
+// at run-launch time so each goroutine awaits on the channels of its
+// own run rather than reading the racy [Agent.coord] field.
+func (a *Agent) runLoop(ctx context.Context, runID uint64, coord *approval.Coordinator, messages *[]llm.Message, success *bool, mode Mode, thinkState *bool) {
 	activeDefs := a.toolDefs
 	if mode == ModePlanning {
 		activeDefs = a.planningToolDefs()
@@ -1109,29 +1139,28 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 			return
 		}
 
-		select {
-		case input := <-a.inputCh:
-			a.mu.Lock()
-			a.waiting = false
-			a.intent = input
-			a.mu.Unlock()
-			narrativeNudgeFired = false
-			permissionNudgeFired = false
-
-			// Refresh the system prompt so runtime changes (e.g. coding
-			// style switched via SetCodingStyle) take effect immediately.
-			(*messages)[0].Content = a.rebuildSystemPrompt(mode)
-
-			*messages = append(*messages, llm.Message{
-				Role:    "user",
-				Content: input,
-			})
-			a.send(event.AgentStatus{Status: event.StatusThinking})
-			a.send(event.AgentToken{Text: "\n\n"})
-		case <-ctx.Done():
+		input, err := coord.AwaitInput(ctx)
+		if err != nil {
 			*success = false
 			return
 		}
+		a.mu.Lock()
+		a.waiting = false
+		a.intent = input
+		a.mu.Unlock()
+		narrativeNudgeFired = false
+		permissionNudgeFired = false
+
+		// Refresh the system prompt so runtime changes (e.g. coding
+		// style switched via SetCodingStyle) take effect immediately.
+		(*messages)[0].Content = a.rebuildSystemPrompt(mode)
+
+		*messages = append(*messages, llm.Message{
+			Role:    "user",
+			Content: input,
+		})
+		a.send(event.AgentStatus{Status: event.StatusThinking})
+		a.send(event.AgentToken{Text: "\n\n"})
 	}
 }
 
@@ -1669,7 +1698,12 @@ const maxValidatorRetries = 3
 // handleEditProposal manages the full approval flow for a proposed edit.
 // This logic was formerly inside EditFileTool — now it lives here so
 // the tool is a pure computation and the channels stay private to Agent.
-func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) string {
+// The coord parameter is the run's [*approval.Coordinator] (resolved by
+// [Agent.Propose] from the run-annotated ctx); using a parameter rather
+// than [Agent.coord] guarantees this proposal flows through the same
+// run's channels even if a competing RunWithMode swaps a.coord
+// mid-handle.
+func (a *Agent) handleEditProposal(ctx context.Context, coord *approval.Coordinator, proposal EditProposal) string {
 	// Pre-approval validation: run the configured pipeline against the
 	// candidate's expected post-edit content. A Retry verdict hands
 	// structured feedback back to the LLM without surfacing the broken
@@ -1693,7 +1727,7 @@ func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) s
 	}
 
 	// Wait for approval or rejection.
-	msg, canceled := a.waitForApproval(ctx, proposal)
+	msg, canceled := a.waitForApproval(ctx, coord, proposal)
 	if canceled {
 		return "Error: agent canceled"
 	}
@@ -1708,7 +1742,7 @@ func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) s
 	}
 
 	// Wait for the developer to continue with updated buffer content.
-	return a.waitForContinue(ctx, proposal)
+	return a.waitForContinue(ctx, coord, proposal)
 }
 
 // Validation pipeline (runValidationPipeline, toValidatorSummaries,
@@ -1716,18 +1750,20 @@ func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) s
 
 // waitForApproval blocks until the developer approves or rejects the edit,
 // or the context is canceled. Returns (rejectionMsg, false) on reject,
-// ("", true) on cancel, ("", false) on approve.
-func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg string, canceled bool) {
-	select {
-	case <-ctx.Done():
-		return "", true
-	case approved, ok := <-a.approveCh:
-		if !ok {
+// ("", true) on cancel or channel-closed, ("", false) on approve. The
+// coord parameter is the run's [*approval.Coordinator]; see
+// [Agent.handleEditProposal] for why it's passed explicitly rather
+// than read from [Agent.coord].
+func (a *Agent) waitForApproval(ctx context.Context, coord *approval.Coordinator, proposal EditProposal) (msg string, canceled bool) {
+	approved, err := coord.AwaitApproval(ctx)
+	if err != nil {
+		if errors.Is(err, approval.ErrChannelClosed) {
 			return "Error: approval channel closed", true
 		}
-		if approved {
-			return "", false
-		}
+		return "", true
+	}
+	if approved {
+		return "", false
 	}
 
 	a.send(event.AgentStatus{Status: event.StatusThinking})
@@ -1743,8 +1779,10 @@ func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg
 
 // waitForContinue blocks until the developer finishes editing and presses
 // continue, or the context is canceled. Compares the new content against
-// the expected result to detect developer modifications.
-func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) string {
+// the expected result to detect developer modifications. The coord
+// parameter is the run's [*approval.Coordinator]; see
+// [Agent.handleEditProposal] for the parameter rationale.
+func (a *Agent) waitForContinue(ctx context.Context, coord *approval.Coordinator, proposal EditProposal) string {
 	a.send(event.AgentStatus{Status: event.StatusEditing})
 	// Render the "press Ctrl+N to continue" prompt only at LevelGuided
 	// (where the developer actually has to press Ctrl+N). At
@@ -1757,43 +1795,42 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 		a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
 	}
 
-	select {
-	case <-ctx.Done():
-		return "Error: agent canceled"
-	case newContent, ok := <-a.continueCh:
-		if !ok {
+	newContent, err := coord.AwaitContinue(ctx)
+	if err != nil {
+		if errors.Is(err, approval.ErrChannelClosed) {
 			return "Error: continue channel closed"
 		}
-		a.cache.Set(proposal.CanonPath, newContent)
-		a.send(event.AgentStatus{Status: event.StatusThinking})
-		a.send(event.AgentToken{Text: "\n"})
-
-		var result string
-		if newContent != proposal.ExpectedContent {
-			diff := tools.SimpleDiff(proposal.ExpectedContent, newContent)
-			result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
-				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
-				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
-				"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
-				"Recalibrate: study the diff — it signals the developer's intent. "+
-				"Align your next steps with their direction. "+
-				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
-				"Current file (%s):\n```\n%s\n```",
-				diff, proposal.Path, tools.TruncateForPreview(newContent))
-		} else {
-			result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-				proposal.Path, tools.TruncateForPreview(newContent))
-		}
-
-		// Auto-inject diagnostics so the agent can self-correct errors.
-		if a.diagProvider != nil {
-			time.Sleep(a.diagDelay)
-			diagResult := tools.FormatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
-			result += "\n\nDiagnostics after edit:\n" + diagResult
-		}
-
-		return result
+		return "Error: agent canceled"
 	}
+	a.cache.Set(proposal.CanonPath, newContent)
+	a.send(event.AgentStatus{Status: event.StatusThinking})
+	a.send(event.AgentToken{Text: "\n"})
+
+	var result string
+	if newContent != proposal.ExpectedContent {
+		diff := tools.SimpleDiff(proposal.ExpectedContent, newContent)
+		result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
+			"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
+			"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
+			"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
+			"Recalibrate: study the diff — it signals the developer's intent. "+
+			"Align your next steps with their direction. "+
+			"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
+			"Current file (%s):\n```\n%s\n```",
+			diff, proposal.Path, tools.TruncateForPreview(newContent))
+	} else {
+		result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
+			proposal.Path, tools.TruncateForPreview(newContent))
+	}
+
+	// Auto-inject diagnostics so the agent can self-correct errors.
+	if a.diagProvider != nil {
+		time.Sleep(a.diagDelay)
+		diagResult := tools.FormatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
+		result += "\n\nDiagnostics after edit:\n" + diagResult
+	}
+
+	return result
 }
 
 // fetchMemorySummary re-fetches /summary.md from the memory store so each

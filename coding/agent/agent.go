@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/budget"
 	"github.com/latebit-io/junto/coding/nudges"
 	"github.com/latebit-io/junto/coding/tools"
 	"github.com/latebit-io/junto/engine/event"
@@ -54,15 +56,14 @@ const (
 	Headless
 )
 
-// defaultTaskTokenBudget caps prompt+completion tokens for a single agent
-// run when the caller does not set [NewOptions.TaskTokenBudget] explicitly.
-// Sized to comfortably cover a multi-file refactor or a small game build
-// while still tripping long before a runaway loop burns the developer's
-// wallet. The 2026-04-26 pacman regression burned 55M+ tokens on a single
-// task; this default catches that class of cascade two orders of magnitude
-// earlier. Override with NewOptions.TaskTokenBudget when a larger or
-// smaller cap suits the workload.
-const defaultTaskTokenBudget = 2_000_000
+// errStaleRun is the sentinel returned by [Agent.processLLMTurn] when
+// it detects mid-turn that the agent's runID has advanced (a competing
+// RunWithMode/Reply replaced this run). Distinct from context.Canceled
+// so [Agent.runLoop] can short-circuit without emitting the post-turn
+// AgentWaiting event for a run that has already been replaced — using
+// context.Canceled here would route the stale goroutine through the
+// normal error path and yield an AgentWaiting for the wrong run.
+var errStaleRun = errors.New("agent run replaced by a newer run")
 
 // distributedKeywords are substrings that identify an MCP server as
 // distributed (team/shared) memory. If any keyword appears in the server
@@ -228,7 +229,7 @@ type Agent struct {
 	taskEdits []taskEdit
 
 	// sessionUsage accumulates token consumption across the entire agent run.
-	sessionUsage SessionUsage
+	sessionUsage budget.Session
 	// taskTokenBudget caps prompt+completion tokens for a single agent run.
 	// Zero means unlimited (the budget check is skipped). Set via
 	// [NewOptions.TaskTokenBudget]; the run loop aborts with an AgentError
@@ -243,18 +244,6 @@ type Agent struct {
 	// runID is a generation token incremented on each RunWithMode call.
 	// recordTurnUsage checks this to ignore late updates from canceled runs.
 	runID uint64
-}
-
-// SessionUsage holds accumulated token consumption across an agent run.
-type SessionUsage struct {
-	// TotalPromptTokens is the sum of provider-reported input tokens.
-	TotalPromptTokens int
-	// TotalCompletionTokens is the sum of provider-reported output tokens.
-	TotalCompletionTokens int
-	// TotalCachedTokens is the sum of provider-reported cached input tokens.
-	TotalCachedTokens int
-	// Turns is the number of completed turns.
-	Turns int
 }
 
 // taskEdit records a single edit made during an agent task, for end-of-task
@@ -356,7 +345,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var terse bool
 	var smokeCfg runconfig.Resolved
 	var pipeline validate.Pipeline = validate.NoopPipeline{}
-	taskTokenBudget := defaultTaskTokenBudget
+	var taskTokenBudgetInput int
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -372,13 +361,9 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		if opts.ValidationPipeline != nil {
 			pipeline = opts.ValidationPipeline
 		}
-		switch {
-		case opts.TaskTokenBudget < 0:
-			taskTokenBudget = 0 // explicit unlimited
-		case opts.TaskTokenBudget > 0:
-			taskTokenBudget = opts.TaskTokenBudget
-		}
+		taskTokenBudgetInput = opts.TaskTokenBudget
 	}
+	taskTokenBudget := budget.Resolve(taskTokenBudgetInput)
 
 	// Build per-instance planning blocklist: start from defaults, merge extras.
 	// DefaultPlanningBlocklist returns a fresh copy so mutations stay local.
@@ -762,7 +747,7 @@ func (a *Agent) SetEvaluator(eval StyleEvaluatorPort) {
 // sends an AgentTurnUsage event to the frontend. The runID parameter is
 // checked against the current run — late updates from canceled runs are
 // silently ignored to prevent pollution of the new run's totals.
-func (a *Agent) recordTurnUsage(runID uint64, tu turnUsage) {
+func (a *Agent) recordTurnUsage(runID uint64, tu budget.Turn) {
 	a.mu.Lock()
 	if runID != a.runID {
 		a.mu.Unlock()
@@ -770,23 +755,23 @@ func (a *Agent) recordTurnUsage(runID uint64, tu turnUsage) {
 	}
 	a.turnCounter++
 	turn := a.turnCounter
-	a.sessionUsage.TotalPromptTokens += tu.promptTokens
-	a.sessionUsage.TotalCompletionTokens += tu.completionTokens
-	a.sessionUsage.TotalCachedTokens += tu.cachedTokens
+	a.sessionUsage.TotalPromptTokens += tu.PromptTokens
+	a.sessionUsage.TotalCompletionTokens += tu.CompletionTokens
+	a.sessionUsage.TotalCachedTokens += tu.CachedTokens
 	a.sessionUsage.Turns = turn
 	a.mu.Unlock() // safe: runID matched, so this run is still active
 
 	a.send(event.AgentTurnUsage{
 		Turn:             turn,
-		PromptTokens:     tu.promptTokens,
-		CompletionTokens: tu.completionTokens,
-		CachedTokens:     tu.cachedTokens,
-		ToolCalls:        tu.toolCalls,
-		SystemEst:        tu.lastEstimate.System,
-		ToolsEst:         tu.lastEstimate.Tools,
-		HistoryEst:       tu.lastEstimate.History,
-		NewEst:           tu.lastEstimate.New,
-		CompletionEst:    tu.completionEst,
+		PromptTokens:     tu.PromptTokens,
+		CompletionTokens: tu.CompletionTokens,
+		CachedTokens:     tu.CachedTokens,
+		ToolCalls:        tu.ToolCalls,
+		SystemEst:        tu.LastEstimate.System,
+		ToolsEst:         tu.LastEstimate.Tools,
+		HistoryEst:       tu.LastEstimate.History,
+		NewEst:           tu.LastEstimate.New,
+		CompletionEst:    tu.CompletionEst,
 	})
 }
 
@@ -817,15 +802,13 @@ func (a *Agent) Usage() SessionUsage {
 // Returns false when the budget is disabled (taskTokenBudget <= 0) or
 // already latched (the run is unwinding) so the inner loop does not
 // double-fire.
-func (a *Agent) shouldAbortForBudget(tu turnUsage) bool {
+func (a *Agent) shouldAbortForBudget(tu budget.Turn) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.taskTokenBudget <= 0 || a.budgetExceeded {
+	if a.budgetExceeded {
 		return false
 	}
-	committed := a.sessionUsage.TotalPromptTokens + a.sessionUsage.TotalCompletionTokens
-	pending := tu.promptTokens + tu.completionTokens
-	return committed+pending >= a.taskTokenBudget
+	return budget.WouldExceed(a.sessionUsage, tu, a.taskTokenBudget)
 }
 
 // checkTaskBudget reports whether the per-task token budget has been
@@ -840,26 +823,15 @@ func (a *Agent) shouldAbortForBudget(tu turnUsage) bool {
 func (a *Agent) checkTaskBudget(runID uint64) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if runID != a.runID {
-		return "" // late check from a cancelled run
-	}
-	if a.taskTokenBudget <= 0 {
+	if runID != a.runID || a.budgetExceeded {
 		return ""
 	}
-	if a.budgetExceeded {
-		return ""
-	}
-	used := a.sessionUsage.TotalPromptTokens + a.sessionUsage.TotalCompletionTokens
-	if used < a.taskTokenBudget {
+	msg, exceeded := budget.Exceeded(a.sessionUsage, a.taskTokenBudget)
+	if !exceeded {
 		return ""
 	}
 	a.budgetExceeded = true
-	return fmt.Sprintf(
-		"task token budget exceeded: %d tokens used (cap %d) across %d turn(s); "+
-			"aborting to prevent runaway cost. "+
-			"Set NewOptions.TaskTokenBudget = -1 to disable, or a higher value to raise the cap.",
-		used, a.taskTokenBudget, a.sessionUsage.Turns,
-	)
+	return msg
 }
 
 // hasLintPending reports whether lint violations are waiting to be injected.
@@ -979,13 +951,24 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 	success := true // false only on actual errors, not user-initiated cancel
 	var messages []llm.Message
 	defer func() {
+		// Gate ALL mutations on the staleness check. A stale goroutine
+		// is unwinding while a replacement run owns the agent's
+		// lifecycle; clobbering running/waiting/savedMessages/savedMode
+		// here would stomp on the new run's intent. RunWithMode has
+		// already cleared savedMessages and the new goroutine will
+		// (asynchronously) set running=true — touching that state from
+		// the stale goroutine briefly corrupts what Reply()/IsRunning()
+		// observe and can leak the old conversation into the new
+		// resume snapshot.
 		a.mu.Lock()
-		a.waiting = false
-		a.running = false
-		// Preserve conversation for Resume — cleared by RunWithMode on new session.
-		a.savedMessages = messages
-		a.savedMode = mode
 		stale := runID != a.runID
+		if !stale {
+			a.waiting = false
+			a.running = false
+			// Preserve conversation for Resume — cleared by RunWithMode on new session.
+			a.savedMessages = messages
+			a.savedMode = mode
+		}
 		a.mu.Unlock()
 		if !stale {
 			a.send(event.AgentDone{Success: success})
@@ -1020,12 +1003,15 @@ func (a *Agent) resumeRun(ctx context.Context, runID uint64, initial []llm.Messa
 	success := true
 	messages := initial
 	defer func() {
+		// Same staleness gate as run() — see that defer's comment.
 		a.mu.Lock()
-		a.waiting = false
-		a.running = false
-		a.savedMessages = messages
-		a.savedMode = mode
 		stale := runID != a.runID
+		if !stale {
+			a.waiting = false
+			a.running = false
+			a.savedMessages = messages
+			a.savedMode = mode
+		}
 		a.mu.Unlock()
 		if !stale {
 			a.send(event.AgentDone{Success: success})
@@ -1059,9 +1045,21 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 		// Compact old tool results if history is large enough.
 		*messages = a.maybeCompact(*messages, activeDefs)
 
-		var tu turnUsage
+		var tu budget.Turn
 		var err error
-		*messages, tu, err = a.processLLMTurn(ctx, *messages, thinkState, activeDefs)
+		*messages, tu, err = a.processLLMTurn(ctx, runID, *messages, thinkState, activeDefs)
+
+		// Stale-run short-circuit: a competing RunWithMode/Reply
+		// replaced this run mid-turn. Skip recordTurnUsage (the runID
+		// guard would drop it anyway), abortIfBudgetExceeded, and the
+		// AgentWaiting emission — none of those are correct for a run
+		// that no longer exists from the developer's perspective. The
+		// deferred sender in run() also suppresses AgentDone for stale
+		// runs, so the goroutine exits silently and the new run owns
+		// the lifecycle.
+		if errors.Is(err, errStaleRun) {
+			return
+		}
 
 		// Record usage regardless of error — partial data is still valuable.
 		// Pass runID so late updates from canceled runs are ignored.
@@ -1242,21 +1240,6 @@ func (a *Agent) planningToolDefs() []llm.ToolDef {
 	return defs
 }
 
-// turnUsage accumulates token consumption across multiple LLM calls within
-// a single agent turn (the inner loop may call Stream multiple times due to
-// tool-call iterations). Provider counts are summed across all calls in the
-// turn. lastEstimate reflects the final LLM call only — it shows the current
-// input composition, which is the most meaningful snapshot (summing estimates
-// across iterations would double-count the system prompt and tools).
-type turnUsage struct {
-	promptTokens     int
-	completionTokens int
-	cachedTokens     int
-	completionEst    int // client-side output estimate (summed across calls)
-	toolCalls        int
-	lastEstimate     llm.InputEstimate // from the final LLM call (current input composition)
-}
-
 // afterToolDispatch performs post-dispatch cleanup for tools that modify
 // the filesystem outside the edit approval flow (e.g. bash). Invalidates
 // the file cache and asks the frontend to reload open buffers.
@@ -1272,24 +1255,40 @@ func (a *Agent) afterToolDispatch(toolName string) {
 // errStreamClosedEarly, streamResult, maybeCompact,
 // estimateAndBroadcast, drainStream) live in stream.go.
 
-// addUsage incorporates provider-reported usage from one LLM call.
-func (u *turnUsage) addUsage(usage *llm.Usage) {
-	if usage == nil {
-		return
-	}
-	u.promptTokens += usage.PromptTokens
-	u.completionTokens += usage.CompletionTokens
-	u.cachedTokens += usage.CachedTokens
-}
-
 // processLLMTurn runs the LLM loop for one agent turn: stream responses,
 // dispatch tool calls, repeat until no tool calls remain. Returns the
 // updated messages list, accumulated usage, or an error if the turn could
-// not complete. toolDefs controls which tools the LLM can invoke for this turn.
-func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, turnUsage, error) {
-	var tu turnUsage
+// not complete. toolDefs controls which tools the LLM can invoke for this
+// turn. runID is the generation token of the calling run — checked at
+// each inner iteration so a new RunWithMode/Reply that increments runID
+// while this turn is mid-flight short-circuits before the next Stream
+// call instead of spending tokens on a request whose accounting will be
+// dropped by [Agent.recordTurnUsage]'s runID guard.
+func (a *Agent) processLLMTurn(ctx context.Context, runID uint64, messages []llm.Message, thinkState *bool, toolDefs []llm.ToolDef) ([]llm.Message, budget.Turn, error) {
+	var tu budget.Turn
 	truncationRetries := 0
 	for {
+		// Stale-run guard. RunWithMode/Reply increments a.runID, resets
+		// sessionUsage, releases mu, then calls prevCancel(). In the
+		// window between the unlock and prevCancel, the old goroutine
+		// could pass shouldAbortForBudget (sessionUsage just reset),
+		// reach Stream, and burn tokens on a Stream call whose
+		// accounting recordTurnUsage will drop. Catching the staleness
+		// here narrows the window to "between this unlock and the
+		// Stream call below" (~tens of ns) — not zero, but practically
+		// closed. Returning [errStaleRun] (NOT context.Canceled) lets
+		// the run loop short-circuit before any post-turn UI events
+		// fire; if we returned ctx.Canceled, the run loop's `ctx.Err()
+		// != nil` check would still see ctx as live (prevCancel has
+		// not yet fired) and the stale goroutine would emit
+		// AgentWaiting for a run that has already been replaced.
+		a.mu.Lock()
+		stale := runID != a.runID
+		a.mu.Unlock()
+		if stale {
+			return messages, tu, errStaleRun
+		}
+
 		// Per-task budget check BEFORE the next provider Stream. A
 		// single agent turn can call Stream many times (one per tool-
 		// call round-trip), and the post-turn check in runLoop only
@@ -1303,8 +1302,8 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 		// reply before looping back here.
 		if a.shouldAbortForBudget(tu) {
 			slog.Warn("agent: per-task budget would be exceeded by next Stream; aborting turn early",
-				"prompt_tokens_pending", tu.promptTokens,
-				"completion_tokens_pending", tu.completionTokens)
+				"prompt_tokens_pending", tu.PromptTokens,
+				"completion_tokens_pending", tu.CompletionTokens)
 			return messages, tu, nil
 		}
 
@@ -1316,7 +1315,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 			messages = append(messages, llm.Message{Role: "user", Content: msg})
 		}
 
-		tu.lastEstimate = a.estimateAndBroadcast(messages, toolDefs)
+		tu.LastEstimate = a.estimateAndBroadcast(messages, toolDefs)
 
 		ch, err := a.currentProvider().Stream(ctx, messages, toolDefs)
 		if err != nil {
@@ -1326,8 +1325,8 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 		}
 
 		result, err := a.drainStream(ctx, ch, thinkState)
-		tu.addUsage(result.usage)
-		tu.completionEst += llm.EstimateTokens(result.content)
+		tu.AddUsage(result.usage)
+		tu.CompletionEst += llm.EstimateTokens(result.content)
 		if err != nil {
 			slog.Error("agent: stream closed before completion", "err", err)
 			a.send(event.AgentError{Err: fmt.Sprintf("LLM stream error: %v", err)})
@@ -1383,7 +1382,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, messages []llm.Message, thin
 // that steers the model back to one-edit-per-turn. This replaces the
 // prompt rule "One file-edit tool call per interactive turn" with
 // deterministic enforcement so the model can't drift past it.
-func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, toolCalls []llm.ToolCall, tu *turnUsage) ([]llm.Message, error) {
+func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, toolCalls []llm.ToolCall, tu *budget.Turn) ([]llm.Message, error) {
 	enforceSingleEdit := !a.currentAutonomous() && a.interactionMode != Headless
 	editFired := false
 
@@ -1414,12 +1413,15 @@ func (a *Agent) executeToolCalls(ctx context.Context, messages []llm.Message, to
 			editFired = true
 		}
 
-		tu.toolCalls++
-
 		if err := a.flushDirtyBuffers(ctx); err != nil {
 			a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
 			return messages, err
 		}
+		// Count only tool calls that pass the autosave gate. An
+		// autosave failure short-circuits before any tool dispatch
+		// happens, so counting at the top of the loop would inflate
+		// AgentTurnUsage.ToolCalls for tools that never actually ran.
+		tu.ToolCalls++
 		slog.Debug("tool call", "name", tc.Function.Name, "id", tc.ID)
 		a.send(event.AgentToolCall{Name: tc.Function.Name, Args: tc.Function.Arguments})
 

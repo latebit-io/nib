@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/budget"
 	"github.com/latebit-io/junto/engine/event"
 )
 
@@ -94,13 +96,13 @@ func TestShouldAbortForBudget(t *testing.T) {
 		name    string
 		opts    *NewOptions
 		mutate  func(a *Agent)
-		pending turnUsage
+		pending budget.Turn
 		want    bool
 	}{
 		{
 			name:    "zero budget disables gate",
 			opts:    &NewOptions{TaskTokenBudget: -1}, // -1 → unlimited (zero internally)
-			pending: turnUsage{promptTokens: 1_000_000},
+			pending: budget.Turn{PromptTokens: 1_000_000},
 			want:    false,
 		},
 		{
@@ -113,42 +115,16 @@ func TestShouldAbortForBudget(t *testing.T) {
 			want: false,
 		},
 		{
-			name:    "committed alone exceeds — fires",
-			opts:    &NewOptions{TaskTokenBudget: 100},
-			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 200 },
-			pending: turnUsage{},
-			want:    true,
-		},
-		{
-			name:    "committed alone under, pending pushes over — fires",
+			// Wiring smoke: confirms shouldAbortForBudget delegates to
+			// budget.WouldExceed for the math (committed + pending). The
+			// pure-math edge cases are exhaustively covered in
+			// coding/budget; this single positive row is enough to catch
+			// a wiring regression here.
+			name:    "math is wired through to budget.WouldExceed",
 			opts:    &NewOptions{TaskTokenBudget: 100},
 			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 60 },
-			pending: turnUsage{promptTokens: 50}, // 60+50 = 110 > 100
+			pending: budget.Turn{PromptTokens: 50}, // 60+50 = 110 > 100
 			want:    true,
-		},
-		{
-			// Boundary: committed + pending == TaskTokenBudget. The gate
-			// uses >= (not >) so the cap value itself is over the line.
-			// Without this row, a refactor that flipped the comparator
-			// to > would silently let one extra Stream call through.
-			name:    "committed + pending exactly at cap — fires",
-			opts:    &NewOptions{TaskTokenBudget: 100},
-			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 50 },
-			pending: turnUsage{promptTokens: 50}, // 50+50 = 100 == 100
-			want:    true,
-		},
-		{
-			name:    "completion tokens count too",
-			opts:    &NewOptions{TaskTokenBudget: 100},
-			pending: turnUsage{completionTokens: 150},
-			want:    true,
-		},
-		{
-			name:    "under cap returns false",
-			opts:    &NewOptions{TaskTokenBudget: 1000},
-			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 200 },
-			pending: turnUsage{promptTokens: 200},
-			want:    false,
 		},
 	}
 
@@ -384,17 +360,112 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 	}
 }
 
+// TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun verifies the
+// stale-run guard at the top of processLLMTurn's inner for-loop.
+// Calling processLLMTurn with a runID that does not match a.runID
+// must return errStaleRun before any side effect — most importantly
+// before any Stream call. Synchronous: no goroutine race, no
+// timers. The integration with runLoop's `errors.Is(err, errStaleRun)
+// { return }` short-circuit is verifiable by reading runLoop and
+// does not need its own goroutine-orchestrated test.
+func TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun(t *testing.T) {
+	t.Parallel()
+
+	provider := &multiTurnProvider{
+		// Single scripted turn — the guard must fire before this is
+		// ever requested. If Stream is called, the test fails on the
+		// call-count assertion, not on a missing turn.
+		turns: [][]llm.StreamEvent{{{Token: "should not see", Done: true}}},
+	}
+	events := make(chan event.Event, 16)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	// Pin the agent's runID to a known value so the test's stale
+	// runID is unambiguous. New() initializes runID to 0; setting
+	// it under the lock keeps the race detector happy.
+	ag.mu.Lock()
+	ag.runID = 5
+	ag.mu.Unlock()
+
+	thinkState := false
+	_, _, err := ag.processLLMTurn(context.Background(), 999, nil, &thinkState, nil)
+
+	if !errors.Is(err, errStaleRun) {
+		t.Errorf("err = %v, want errStaleRun", err)
+	}
+	provider.mu.Lock()
+	calls := provider.call
+	provider.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("provider Stream calls = %d, want 0 (guard must fire before Stream)", calls)
+	}
+}
+
+// TestProcessLLMTurn_FreshRunIDProceeds is the negative control:
+// when runID matches a.runID, the guard does NOT fire and Stream
+// is invoked normally. Locks the guard's selectivity — without
+// this, a regression that always returned errStaleRun would still
+// pass [TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun].
+func TestProcessLLMTurn_FreshRunIDProceeds(t *testing.T) {
+	t.Parallel()
+
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{{{Token: "ok", Done: true}}},
+	}
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ag.mu.Lock()
+	ag.runID = 7
+	ag.mu.Unlock()
+
+	// Drain events so the agent does not block on a full channel
+	// while processLLMTurn sends its status/token/estimate events.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range events {
+			if fb, ok := ev.(event.FlushBuffers); ok {
+				fb.Result <- event.FlushResult{}
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(events)
+		<-done
+	})
+
+	thinkState := false
+	_, _, err := ag.processLLMTurn(context.Background(), 7, nil, &thinkState, nil)
+
+	// Asserting err == nil (rather than just !errors.Is(err, errStaleRun))
+	// catches any unexpected error from processLLMTurn — truncation
+	// retry exhaustion, drainStream failures, ctx cancellation. The
+	// stale-guard regression is just one shape of failure this test
+	// should catch; the broader assertion is the actually-load-bearing
+	// one for a "happy path proceeds" negative control.
+	if err != nil {
+		t.Fatalf("processLLMTurn returned %v, want nil (fresh runID)", err)
+	}
+	provider.mu.Lock()
+	calls := provider.call
+	provider.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("provider Stream calls = %d, want 1 (guard must NOT fire on matching runID)", calls)
+	}
+}
+
 // TestAgent_TokenBudget_DefaultApplied checks that when NewOptions.TaskTokenBudget
-// is left zero, [New] resolves it to [defaultTaskTokenBudget] rather than
+// is left zero, [New] resolves it to [budget.DefaultTaskTokens] rather than
 // leaving the budget disabled. Disabling the budget by default would make
 // the safety net silently absent — the regression guard would not fire.
 func TestAgent_TokenBudget_DefaultApplied(t *testing.T) {
 	t.Parallel()
 	events := make(chan event.Event, 1)
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, nil)
-	if ag.taskTokenBudget != defaultTaskTokenBudget {
+	if ag.taskTokenBudget != budget.DefaultTaskTokens {
 		t.Errorf("taskTokenBudget = %d, want default %d",
-			ag.taskTokenBudget, defaultTaskTokenBudget)
+			ag.taskTokenBudget, budget.DefaultTaskTokens)
 	}
 }
 

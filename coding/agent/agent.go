@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/junto/coding/approval"
 	"github.com/latebit-io/junto/coding/budget"
 	"github.com/latebit-io/junto/coding/nudges"
 	"github.com/latebit-io/junto/coding/tools"
@@ -41,8 +42,9 @@ const (
 
 // InteractionMode controls prompt framing — how the agent describes its
 // workflow to the LLM. It does NOT change runtime behavior: the agent
-// always blocks on approveCh/continueCh for edits, and the frontend
-// (TUI or headless Runner) is responsible for signaling them.
+// always awaits approval/continue signals from the [approval.Coordinator]
+// for edits, and the frontend (TUI or headless Runner) is responsible
+// for driving those signals.
 // Set at construction time, immutable for the agent's lifetime.
 type InteractionMode int
 
@@ -126,22 +128,16 @@ type Agent struct {
 	intent     string // current developer intent — included in every tool result
 	mode       Mode   // current conversation mode (execution or planning)
 
-	// Approval flow: agent blocks on these channels.
-	// These stay private to Agent — tools never see them.
-	approveCh  chan bool   // true = approved, false = rejected
-	continueCh chan string // buffer content after user edits
+	// coord owns the four coordination channels (approve/continue/
+	// reply/answer) the agent uses to talk to the frontend. Construction
+	// drains nothing — Reset is called explicitly at every run boundary.
+	coord *approval.Coordinator
 
-	// Conversation flow: agent blocks on inputCh between turns,
-	// waiting for the developer's next message.
-	inputCh chan string
-	waiting bool // true when blocked on inputCh
-	running bool // true while the run() goroutine is alive
-
-	// Structured input request flow: the agent blocks on awaitingInputCh
-	// mid-turn when a request_input tool call is dispatched. The frontend
-	// delivers the developer's typed answer via AnswerInput. Buffered 1
-	// so AnswerInput is non-blocking under normal operation.
-	awaitingInputCh chan string
+	// waiting is set while the run loop is parked on coord.AwaitInput
+	// between turns, awaiting the developer's next message.
+	waiting bool
+	// running is true while the run() goroutine is alive.
+	running bool
 
 	// savedMessages and savedMode preserve the conversation when a run
 	// exits (cancel, fatal error). Resume picks these up to continue
@@ -328,8 +324,7 @@ type NewOptions struct {
 // events (EditProposed, Done, Error) block for up to 5 seconds before being
 // discarded with a log. Use a buffered channel (e.g. 64) to absorb bursts.
 func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, opts *NewOptions, extraTools ...Tool) *Agent {
-	approveCh := make(chan bool, 1)
-	continueCh := make(chan string, 1)
+	coord := approval.New()
 	cache := NewFileCache()
 	projectRoot := workspace.ProjectRoot()
 
@@ -377,10 +372,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		events:            events,
 		cache:             cache,
 		prompts:           NewPromptLoader(projectRoot),
-		approveCh:         approveCh,
-		continueCh:        continueCh,
-		inputCh:           make(chan string, 1), // capacity 1: Reply() is non-blocking; only one pending reply is meaningful
-		awaitingInputCh:   make(chan string, 1), // capacity 1: AnswerInput is non-blocking; only one pending answer is meaningful
+		coord:             coord,
 		diagProvider:      diagProvider,
 		planningBlocklist: merged,
 		interactionMode:   interaction,
@@ -528,10 +520,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	prevCancel := a.cancel
 
 	// Drain stale signals from previous run
-	drain(a.approveCh)
-	drain(a.continueCh)
-	drain(a.inputCh)
-	drain(a.awaitingInputCh)
+	a.coord.Reset()
 
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
@@ -578,14 +567,8 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.mu.Lock()
 	if a.running {
-		defer a.mu.Unlock()
-		select {
-		case a.inputCh <- input:
-			return true
-		default:
-			slog.Warn("agent.Reply: inputCh full, dropping message")
-			return false
-		}
+		a.mu.Unlock()
+		return a.coord.Reply(input)
 	}
 
 	// Agent not running — try to resume from saved conversation.
@@ -598,10 +581,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	mode := a.savedMode
 
 	prevCancel := a.cancel
-	drain(a.approveCh)
-	drain(a.continueCh)
-	drain(a.inputCh)
-	drain(a.awaitingInputCh)
+	a.coord.Reset()
 
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
@@ -654,16 +634,6 @@ func (a *Agent) IsRunning() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.running
-}
-
-func drain[T any](ch chan T) {
-	for {
-		select {
-		case <-ch:
-		default:
-			return
-		}
-	}
 }
 
 // SetProvider replaces the LLM provider for subsequent turns.
@@ -856,43 +826,24 @@ func (a *Agent) currentProvider() llm.Provider {
 }
 
 // Approve signals that the user approved the pending edit.
-func (a *Agent) Approve() {
-	select {
-	case a.approveCh <- true:
-	default:
-	}
-}
+func (a *Agent) Approve() { a.coord.Approve() }
 
 // Reject signals that the user rejected the pending edit.
-func (a *Agent) Reject() {
-	select {
-	case a.approveCh <- false:
-	default:
-	}
-}
+func (a *Agent) Reject() { a.coord.Reject() }
 
 // Continue signals the user is done editing and sends the current buffer content
 // for the file that was just edited.
 func (a *Agent) Continue(path, bufferContent string) {
 	slog.Debug("agent.Continue", "path", path, "content_len", len(bufferContent))
 	a.cache.Set(path, bufferContent)
-	select {
-	case a.continueCh <- bufferContent:
-	default:
-	}
+	a.coord.Continue(bufferContent)
 }
 
 // AnswerInput delivers the developer's answer to a pending request_input
 // prompt. Text is the verbatim typed answer — typically an option ID, but
 // free-form is valid. Non-blocking: if no prompt is pending, the answer
 // is dropped (same shape as Approve/Reject/Continue).
-func (a *Agent) AnswerInput(text string) {
-	select {
-	case a.awaitingInputCh <- text:
-	default:
-		slog.Warn("agent.AnswerInput: no pending request_input, dropping answer")
-	}
-}
+func (a *Agent) AnswerInput(text string) { a.coord.Answer(text) }
 
 // Cancel stops the current agent run.
 func (a *Agent) Cancel() {
@@ -1109,29 +1060,28 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, messages *[]llm.Messa
 			return
 		}
 
-		select {
-		case input := <-a.inputCh:
-			a.mu.Lock()
-			a.waiting = false
-			a.intent = input
-			a.mu.Unlock()
-			narrativeNudgeFired = false
-			permissionNudgeFired = false
-
-			// Refresh the system prompt so runtime changes (e.g. coding
-			// style switched via SetCodingStyle) take effect immediately.
-			(*messages)[0].Content = a.rebuildSystemPrompt(mode)
-
-			*messages = append(*messages, llm.Message{
-				Role:    "user",
-				Content: input,
-			})
-			a.send(event.AgentStatus{Status: event.StatusThinking})
-			a.send(event.AgentToken{Text: "\n\n"})
-		case <-ctx.Done():
+		input, err := a.coord.AwaitInput(ctx)
+		if err != nil {
 			*success = false
 			return
 		}
+		a.mu.Lock()
+		a.waiting = false
+		a.intent = input
+		a.mu.Unlock()
+		narrativeNudgeFired = false
+		permissionNudgeFired = false
+
+		// Refresh the system prompt so runtime changes (e.g. coding
+		// style switched via SetCodingStyle) take effect immediately.
+		(*messages)[0].Content = a.rebuildSystemPrompt(mode)
+
+		*messages = append(*messages, llm.Message{
+			Role:    "user",
+			Content: input,
+		})
+		a.send(event.AgentStatus{Status: event.StatusThinking})
+		a.send(event.AgentToken{Text: "\n\n"})
 	}
 }
 
@@ -1716,18 +1666,17 @@ func (a *Agent) handleEditProposal(ctx context.Context, proposal EditProposal) s
 
 // waitForApproval blocks until the developer approves or rejects the edit,
 // or the context is canceled. Returns (rejectionMsg, false) on reject,
-// ("", true) on cancel, ("", false) on approve.
+// ("", true) on cancel or channel-closed, ("", false) on approve.
 func (a *Agent) waitForApproval(ctx context.Context, proposal EditProposal) (msg string, canceled bool) {
-	select {
-	case <-ctx.Done():
-		return "", true
-	case approved, ok := <-a.approveCh:
-		if !ok {
+	approved, err := a.coord.AwaitApproval(ctx)
+	if err != nil {
+		if errors.Is(err, approval.ErrChannelClosed) {
 			return "Error: approval channel closed", true
 		}
-		if approved {
-			return "", false
-		}
+		return "", true
+	}
+	if approved {
+		return "", false
 	}
 
 	a.send(event.AgentStatus{Status: event.StatusThinking})
@@ -1757,43 +1706,42 @@ func (a *Agent) waitForContinue(ctx context.Context, proposal EditProposal) stri
 		a.send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
 	}
 
-	select {
-	case <-ctx.Done():
-		return "Error: agent canceled"
-	case newContent, ok := <-a.continueCh:
-		if !ok {
+	newContent, err := a.coord.AwaitContinue(ctx)
+	if err != nil {
+		if errors.Is(err, approval.ErrChannelClosed) {
 			return "Error: continue channel closed"
 		}
-		a.cache.Set(proposal.CanonPath, newContent)
-		a.send(event.AgentStatus{Status: event.StatusThinking})
-		a.send(event.AgentToken{Text: "\n"})
-
-		var result string
-		if newContent != proposal.ExpectedContent {
-			diff := tools.SimpleDiff(proposal.ExpectedContent, newContent)
-			result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
-				"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
-				"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
-				"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
-				"Recalibrate: study the diff — it signals the developer's intent. "+
-				"Align your next steps with their direction. "+
-				"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
-				"Current file (%s):\n```\n%s\n```",
-				diff, proposal.Path, tools.TruncateForPreview(newContent))
-		} else {
-			result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-				proposal.Path, tools.TruncateForPreview(newContent))
-		}
-
-		// Auto-inject diagnostics so the agent can self-correct errors.
-		if a.diagProvider != nil {
-			time.Sleep(a.diagDelay)
-			diagResult := tools.FormatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
-			result += "\n\nDiagnostics after edit:\n" + diagResult
-		}
-
-		return result
+		return "Error: agent canceled"
 	}
+	a.cache.Set(proposal.CanonPath, newContent)
+	a.send(event.AgentStatus{Status: event.StatusThinking})
+	a.send(event.AgentToken{Text: "\n"})
+
+	var result string
+	if newContent != proposal.ExpectedContent {
+		diff := tools.SimpleDiff(proposal.ExpectedContent, newContent)
+		result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
+			"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
+			"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
+			"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
+			"Recalibrate: study the diff — it signals the developer's intent. "+
+			"Align your next steps with their direction. "+
+			"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
+			"Current file (%s):\n```\n%s\n```",
+			diff, proposal.Path, tools.TruncateForPreview(newContent))
+	} else {
+		result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
+			proposal.Path, tools.TruncateForPreview(newContent))
+	}
+
+	// Auto-inject diagnostics so the agent can self-correct errors.
+	if a.diagProvider != nil {
+		time.Sleep(a.diagDelay)
+		diagResult := tools.FormatDiagnostics(a.diagProvider, proposal.CanonPath, proposal.Path)
+		result += "\n\nDiagnostics after edit:\n" + diagResult
+	}
+
+	return result
 }
 
 // fetchMemorySummary re-fetches /summary.md from the memory store so each

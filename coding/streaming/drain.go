@@ -76,6 +76,14 @@ var ErrClosedEarly = errors.New("agent: provider closed stream before completion
 // so <think>...</think> spans that cross chunk boundaries are
 // stripped correctly across calls within a single turn.
 //
+// Drain also handles the cross-token-boundary case: a tag split
+// across StreamEvent.Token chunks (e.g. "Hello <thi" then
+// "nk>private</think>visible") is stitched back together by holding
+// the trailing partial-tag bytes as residue and re-scanning when the
+// next token arrives. Without this the leading "<thi" would have
+// been emitted verbatim and the matching "nk>private</think>" would
+// have leaked the entire think block to the Sender.
+//
 // Returns [ErrClosedEarly] when the channel closes without a Done
 // event and ctx is still live; the caller must treat this as a
 // failed turn rather than a clean completion with partial content.
@@ -91,10 +99,24 @@ func Drain(ctx context.Context, ch <-chan llm.StreamEvent, thinkState *bool, sen
 	defer func() { *thinkState = false }()
 
 	var (
-		buf    strings.Builder
-		out    Result
-		capped bool
+		buf     strings.Builder
+		out     Result
+		capped  bool
+		residue string // trailing partial-tag bytes held for the next token
 	)
+	emit := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		if buf.Len()+len(s) > MaxContentBytes {
+			slog.Warn("agent: content buffer cap reached, dropping subsequent tokens",
+				"cap_bytes", MaxContentBytes)
+			return true
+		}
+		buf.WriteString(s)
+		send(event.AgentToken{Text: s})
+		return false
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -109,6 +131,16 @@ func Drain(ctx context.Context, ch <-chan llm.StreamEvent, thinkState *bool, sen
 				return out, ErrClosedEarly
 			}
 			if ev.Done {
+				// Stream ended with a residue still held: flush it as
+				// content if we are NOT inside a think block. A residue
+				// in !inThink is "looked-like-a-tag-opener but never
+				// materialized" — original behavior was to ship those
+				// bytes verbatim. A residue in inThink is "looked-like-
+				// a-tag-closer inside a think span" — we suppress it
+				// because we never exited the think block.
+				if !*thinkState && residue != "" && !capped {
+					emit(residue)
+				}
 				out.ToolCalls = ev.ToolCalls
 				out.Usage = ev.Usage
 				out.Truncated = ev.Truncated
@@ -118,47 +150,75 @@ func Drain(ctx context.Context, ch <-chan llm.StreamEvent, thinkState *bool, sen
 			if capped {
 				continue // keep draining so the provider goroutine can exit cleanly
 			}
-			clean := stripThinkTags(ev.Token, thinkState)
-			if clean == "" {
-				continue
-			}
-			if buf.Len()+len(clean) > MaxContentBytes {
-				slog.Warn("agent: content buffer cap reached, dropping subsequent tokens",
-					"cap_bytes", MaxContentBytes)
-				capped = true
-				continue
-			}
-			buf.WriteString(clean)
-			send(event.AgentToken{Text: clean})
+			var clean string
+			clean, residue = stripThinkTags(residue+ev.Token, thinkState)
+			capped = emit(clean)
 		}
 	}
 }
 
-// stripThinkTags removes <think>...</think> content from a string.
-// inThink tracks state across calls for multi-line think blocks.
+// stripThinkTags removes <think>...</think> content from s. inThink
+// tracks state across calls for multi-line think blocks. The returned
+// residue is any trailing portion of s that COULD be the start of a
+// tag boundary the next call must complete — e.g. an input ending in
+// "<thi" returns clean="" and residue="<thi", so the caller can
+// prepend it to the next token and detect a "<think>" that spans
+// the chunk boundary.
+//
 // Private to the package because the only legitimate caller is
 // [Drain]; exporting it would invite per-token use outside the
-// stream-consumer's invariants (notably the post-call reset).
-func stripThinkTags(s string, inThink *bool) string {
+// stream-consumer's invariants (notably the post-call reset and the
+// residue threading).
+func stripThinkTags(s string, inThink *bool) (clean, residue string) {
 	var out strings.Builder
 	for len(s) > 0 {
 		if *inThink {
 			end := strings.Index(s, "</think>")
 			if end == -1 {
-				return out.String()
+				// Inside a think block; suppress everything but hold
+				// any trailing prefix of "</think>" so the next call
+				// can complete a closer that spans the boundary.
+				held := trailingTagPrefix(s, "</think>")
+				return out.String(), s[len(s)-held:]
 			}
 			s = s[end+len("</think>"):]
 			*inThink = false
 		} else {
 			start := strings.Index(s, "<think>")
 			if start == -1 {
-				out.WriteString(s)
-				return out.String()
+				// No opener; emit safe content and hold any trailing
+				// prefix of "<think>" so the next call can complete
+				// an opener that spans the boundary. The held bytes
+				// are NOT emitted yet — if they don't materialize,
+				// they'll be flushed on stream-end (see [Drain]).
+				held := trailingTagPrefix(s, "<think>")
+				out.WriteString(s[:len(s)-held])
+				return out.String(), s[len(s)-held:]
 			}
 			out.WriteString(s[:start])
 			s = s[start+len("<think>"):]
 			*inThink = true
 		}
 	}
-	return out.String()
+	return out.String(), ""
+}
+
+// trailingTagPrefix returns the length of the longest suffix of s
+// that is also a prefix of pattern. Used to detect a tag whose head
+// landed at the end of one chunk and whose tail is in the next.
+//
+// Capped at len(pattern)-1: a complete match would have been found
+// by [strings.Index] before this helper is called. Empty pattern or
+// empty s returns 0. Pure: no allocations beyond the slice header.
+func trailingTagPrefix(s, pattern string) int {
+	maxCheck := len(pattern) - 1
+	if len(s) < maxCheck {
+		maxCheck = len(s)
+	}
+	for n := maxCheck; n > 0; n-- {
+		if s[len(s)-n:] == pattern[:n] {
+			return n
+		}
+	}
+	return 0
 }

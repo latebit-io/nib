@@ -438,8 +438,14 @@ func TestProcessLLMTurn_FreshRunIDProceeds(t *testing.T) {
 	thinkState := false
 	_, _, err := ag.processLLMTurn(context.Background(), 7, nil, &thinkState, nil)
 
-	if errors.Is(err, errStaleRun) {
-		t.Errorf("guard fired on a fresh runID; err = %v", err)
+	// Asserting err == nil (rather than just !errors.Is(err, errStaleRun))
+	// catches any unexpected error from processLLMTurn — truncation
+	// retry exhaustion, drainStream failures, ctx cancellation. The
+	// stale-guard regression is just one shape of failure this test
+	// should catch; the broader assertion is the actually-load-bearing
+	// one for a "happy path proceeds" negative control.
+	if err != nil {
+		t.Fatalf("processLLMTurn returned %v, want nil (fresh runID)", err)
 	}
 	provider.mu.Lock()
 	calls := provider.call

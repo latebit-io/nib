@@ -951,13 +951,24 @@ func (a *Agent) run(ctx context.Context, runID uint64, fileName, fileContent, go
 	success := true // false only on actual errors, not user-initiated cancel
 	var messages []llm.Message
 	defer func() {
+		// Gate ALL mutations on the staleness check. A stale goroutine
+		// is unwinding while a replacement run owns the agent's
+		// lifecycle; clobbering running/waiting/savedMessages/savedMode
+		// here would stomp on the new run's intent. RunWithMode has
+		// already cleared savedMessages and the new goroutine will
+		// (asynchronously) set running=true — touching that state from
+		// the stale goroutine briefly corrupts what Reply()/IsRunning()
+		// observe and can leak the old conversation into the new
+		// resume snapshot.
 		a.mu.Lock()
-		a.waiting = false
-		a.running = false
-		// Preserve conversation for Resume — cleared by RunWithMode on new session.
-		a.savedMessages = messages
-		a.savedMode = mode
 		stale := runID != a.runID
+		if !stale {
+			a.waiting = false
+			a.running = false
+			// Preserve conversation for Resume — cleared by RunWithMode on new session.
+			a.savedMessages = messages
+			a.savedMode = mode
+		}
 		a.mu.Unlock()
 		if !stale {
 			a.send(event.AgentDone{Success: success})
@@ -992,12 +1003,15 @@ func (a *Agent) resumeRun(ctx context.Context, runID uint64, initial []llm.Messa
 	success := true
 	messages := initial
 	defer func() {
+		// Same staleness gate as run() — see that defer's comment.
 		a.mu.Lock()
-		a.waiting = false
-		a.running = false
-		a.savedMessages = messages
-		a.savedMode = mode
 		stale := runID != a.runID
+		if !stale {
+			a.waiting = false
+			a.running = false
+			a.savedMessages = messages
+			a.savedMode = mode
+		}
 		a.mu.Unlock()
 		if !stale {
 			a.send(event.AgentDone{Success: success})

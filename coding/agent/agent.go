@@ -129,8 +129,10 @@ type Agent struct {
 	mode       Mode   // current conversation mode (execution or planning)
 
 	// coord owns the four coordination channels (approve/continue/
-	// reply/answer) the agent uses to talk to the frontend. Construction
-	// drains nothing — Reset is called explicitly at every run boundary.
+	// reply/answer) the agent uses to talk to the frontend. Replaced
+	// (not reset) at every run boundary so a stale goroutine parked
+	// in coord.Await* on the previous run cannot consume signals
+	// meant for the new run.
 	coord *approval.Coordinator
 
 	// waiting is set while the run loop is parked on coord.AwaitInput
@@ -519,8 +521,19 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	// acquires mu.Lock, and cancel may unblock it immediately.
 	prevCancel := a.cancel
 
-	// Drain stale signals from previous run
-	a.coord.Reset()
+	// Allocate a fresh coordinator for the new run instead of draining
+	// the existing one. The previous goroutine may still be parked
+	// inside a Coordinator.Await* call on the old channels; if we
+	// reused the same coordinator, a Reply / Approve / Continue that
+	// landed in the gap between this Unlock and prevCancel would race
+	// with the stale goroutine — the stale select can pick the channel
+	// arm before ctx.Done and consume a signal meant for the new run.
+	// Swapping isolates the channels: the stale goroutine retains its
+	// captured pointer to the old coordinator (visible only on its own
+	// stack), the frontend's subsequent signals go to the new
+	// coordinator, and the old coordinator's channels are unreferenced
+	// once the stale goroutine exits.
+	a.coord = approval.New()
 
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
@@ -581,7 +594,9 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	mode := a.savedMode
 
 	prevCancel := a.cancel
-	a.coord.Reset()
+	// Fresh coordinator for the resumed run — same isolation rule
+	// as RunWithMode. See the comment there for the full rationale.
+	a.coord = approval.New()
 
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel

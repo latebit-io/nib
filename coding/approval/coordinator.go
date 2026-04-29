@@ -23,13 +23,30 @@ import (
 
 // Coordinator owns the agent <-> frontend coordination channels.
 //
-// Channel capacities are deliberately 1: each signal site is non-
-// blocking (Approve / Reject / Continue / Answer / Reply) so a stale
-// keystroke after cancel cannot wedge the frontend, and only one
-// pending value is meaningful for each lifecycle step. The Reset
-// helper drains all channels of any leftover values when a run
-// boundary changes, mirroring the previous agent-side drain calls in
-// RunWithMode and Reply.
+// Channel capacities are deliberately 1, and the signal methods
+// (Approve / Reject / Continue / Answer / Reply) are non-blocking
+// `select { case ch <- v: default: }` sends. Two things follow from
+// that contract:
+//
+//  1. A signal whose buffer is EMPTY queues — it is delivered to
+//     the next Await* caller even if no goroutine is parked at the
+//     moment of the signal. The headless runner relies on this:
+//     after consuming an AgentEditProposed event it immediately
+//     calls Approve, which can race ahead of the agent's
+//     AwaitApproval; the buffered slot absorbs that race so the
+//     agent picks the signal up the instant it parks.
+//
+//  2. A signal whose buffer is FULL is dropped (with a warning for
+//     Answer/Reply). One pending signal per channel is meaningful;
+//     a duplicate while the first is still queued is a redundant
+//     keystroke or a frontend bug, not a queue we want to grow.
+//
+// Stale-signal isolation across runs is the caller's job: Agent
+// allocates a fresh Coordinator at every RunWithMode / Reply-resume
+// rather than reusing one across the run boundary, so a queued
+// signal from a previous run cannot leak into the next.
+// Reset (drain in place) is retained for tests and for callers that
+// want to clear stale state without replacing the Coordinator.
 type Coordinator struct {
 	approveCh  chan bool   // true=approved, false=rejected
 	continueCh chan string // post-approval buffer content
@@ -59,8 +76,11 @@ func (c *Coordinator) Reset() {
 	drain(c.answerCh)
 }
 
-// Approve signals approval for the pending edit. Non-blocking —
-// dropped if no awaiter is parked or the channel is already loaded.
+// Approve signals approval for the pending edit. Non-blocking: if the
+// approve buffer is empty, the value queues for the next AwaitApproval
+// caller; if the buffer already holds a pending signal, the new value
+// is dropped (the existing queued signal is the one that will be
+// delivered).
 func (c *Coordinator) Approve() {
 	select {
 	case c.approveCh <- true:
@@ -68,8 +88,9 @@ func (c *Coordinator) Approve() {
 	}
 }
 
-// Reject signals rejection for the pending edit. Non-blocking —
-// dropped if no awaiter is parked or the channel is already loaded.
+// Reject signals rejection for the pending edit. Same buffered-send
+// semantics as Approve: queues into an empty buffer, drops on a full
+// buffer.
 func (c *Coordinator) Reject() {
 	select {
 	case c.approveCh <- false:
@@ -78,9 +99,8 @@ func (c *Coordinator) Reject() {
 }
 
 // Continue delivers the post-approval buffer content to the agent.
-// Non-blocking — dropped if no awaiter is parked. The path/cache
-// concerns are the agent's; this method only transports the new
-// content.
+// Same buffered-send semantics as Approve. The path/cache concerns
+// are the agent's; this method only transports the new content.
 func (c *Coordinator) Continue(content string) {
 	select {
 	case c.continueCh <- content:
@@ -89,9 +109,11 @@ func (c *Coordinator) Continue(content string) {
 }
 
 // Answer delivers the developer's typed answer to a pending
-// request_input prompt. Non-blocking — drops the answer with a
-// warning when no prompt is pending so a late keystroke cannot
-// queue a stale response for a future prompt.
+// request_input prompt. Same buffered-send semantics as Approve, but
+// a full-buffer drop is logged at warn level — for the answer flow a
+// dropped value is more often a frontend bug than an intentional
+// no-op, since request_input prompts are emitted explicitly by the
+// agent rather than implied by an editor approval gesture.
 //
 // The request_input tool is currently unregistered in the agent (see
 // agent composition); the channel and method are kept so the surface
@@ -100,14 +122,18 @@ func (c *Coordinator) Answer(text string) {
 	select {
 	case c.answerCh <- text:
 	default:
-		slog.Warn("approval.Answer: no pending request_input, dropping answer")
+		slog.Warn("approval.Answer: answer buffer full, dropping answer")
 	}
 }
 
-// Reply enqueues the developer's next conversational message. Non-
-// blocking: returns false (with a warning) when the buffer is full,
-// matching the previous Agent.Reply semantics where a duplicate
-// reply during the same wait window is dropped rather than queued.
+// Reply enqueues the developer's next conversational message. Same
+// buffered-send semantics as the other signals (queues into an empty
+// buffer; the agent picks it up at the next AwaitInput), but the
+// caller-visible result is exposed: returns false (with a warning)
+// when the buffer is full so callers can surface a "message dropped"
+// state to the developer instead of silently losing input. Matches
+// the previous Agent.Reply contract where a duplicate reply during
+// the same wait window is dropped rather than queued.
 func (c *Coordinator) Reply(text string) bool {
 	select {
 	case c.inputCh <- text:

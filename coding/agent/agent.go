@@ -18,6 +18,7 @@ import (
 	"github.com/latebit-io/junto/coding/approval"
 	"github.com/latebit-io/junto/coding/budget"
 	"github.com/latebit-io/junto/coding/nudges"
+	"github.com/latebit-io/junto/coding/streaming"
 	"github.com/latebit-io/junto/coding/tools"
 	"github.com/latebit-io/junto/coding/truncation"
 	"github.com/latebit-io/junto/engine/event"
@@ -1074,7 +1075,7 @@ func (a *Agent) runLoop(ctx context.Context, runID uint64, coord *approval.Coord
 
 	for {
 		// Compact old tool results if history is large enough.
-		*messages = a.maybeCompact(*messages, activeDefs)
+		*messages = streaming.MaybeCompact(*messages, activeDefs, a.send)
 
 		var tu budget.Turn
 		var err error
@@ -1280,10 +1281,8 @@ func (a *Agent) afterToolDispatch(toolName string) {
 	}
 }
 
-// Streaming + compaction helpers (compactHistoryThreshold,
-// compactKeepTurns, compactMinBytes, maxStreamContentBytes,
-// errStreamClosedEarly, streamResult, maybeCompact,
-// estimateAndBroadcast, drainStream) live in stream.go.
+// Streaming + compaction (Drain, MaybeCompact, EstimateAndBroadcast,
+// Result, the cap and threshold constants) live in [coding/streaming].
 
 // processLLMTurn runs the LLM loop for one agent turn: stream responses,
 // dispatch tool calls, repeat until no tool calls remain. Returns the
@@ -1345,7 +1344,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, runID uint64, messages []llm
 			messages = append(messages, llm.Message{Role: "user", Content: msg})
 		}
 
-		tu.LastEstimate = a.estimateAndBroadcast(messages, toolDefs)
+		tu.LastEstimate = streaming.EstimateAndBroadcast(messages, toolDefs, a.send)
 
 		ch, err := a.currentProvider().Stream(ctx, messages, toolDefs)
 		if err != nil {
@@ -1354,15 +1353,15 @@ func (a *Agent) processLLMTurn(ctx context.Context, runID uint64, messages []llm
 			return messages, tu, err
 		}
 
-		result, err := a.drainStream(ctx, ch, thinkState)
-		tu.AddUsage(result.usage)
-		tu.CompletionEst += llm.EstimateTokens(result.content)
+		result, err := streaming.Drain(ctx, ch, thinkState, a.send)
+		tu.AddUsage(result.Usage)
+		tu.CompletionEst += llm.EstimateTokens(result.Content)
 		if err != nil {
 			slog.Error("agent: stream closed before completion", "err", err)
 			a.send(event.AgentError{Err: fmt.Sprintf("LLM stream error: %v", err)})
 			return messages, tu, err
 		}
-		toolCalls, truncated := result.toolCalls, result.truncated
+		toolCalls, truncated := result.ToolCalls, result.Truncated
 
 		if ctx.Err() != nil {
 			return messages, tu, ctx.Err()
@@ -1370,7 +1369,7 @@ func (a *Agent) processLLMTurn(ctx context.Context, runID uint64, messages []llm
 
 		assistantMsg := llm.Message{
 			Role:    "assistant",
-			Content: result.content,
+			Content: result.Content,
 		}
 		if len(toolCalls) > 0 {
 			assistantMsg.ToolCalls = toolCalls

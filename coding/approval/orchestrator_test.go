@@ -126,6 +126,25 @@ func (r *orchTestRig) snapshotEvents() []event.Event {
 	return append([]event.Event(nil), r.events...)
 }
 
+// assertHasEditProposed fails the test if no AgentEditProposed
+// event appears in evs. Positive-path tests already coordinate on
+// [orchTestRig.proposalDelivered] for timing, but that channel
+// signals "delivery happened" — a regression that bypassed
+// SendCritical entirely would leave both the channel un-closed AND
+// the recorded-events slice without the event, and the failure
+// mode would be a goroutine timeout rather than a clear
+// "expected proposal event" message. Calling this after Handle
+// returns surfaces the regression diagnostically.
+func assertHasEditProposed(t *testing.T, evs []event.Event) {
+	t.Helper()
+	for _, ev := range evs {
+		if _, ok := ev.(event.AgentEditProposed); ok {
+			return
+		}
+	}
+	t.Fatalf("expected event.AgentEditProposed in recorded events; got %d events without one", len(evs))
+}
+
 // sampleProposal is a stable EditProposal value used across tests.
 func sampleProposal() tools.EditProposal {
 	return tools.EditProposal{
@@ -229,6 +248,7 @@ func TestHandle_HappyPath_ApproveAndContinue(t *testing.T) {
 	}()
 
 	body, isError := o.Handle(context.Background(), coord, p)
+	assertHasEditProposed(t, r.snapshotEvents())
 	if isError {
 		t.Errorf("happy path should not be a tool error, body=%q", body)
 	}
@@ -261,6 +281,7 @@ func TestHandle_DeveloperModifiedContinue(t *testing.T) {
 	}()
 
 	body, isError := o.Handle(context.Background(), coord, p)
+	assertHasEditProposed(t, r.snapshotEvents())
 	if isError {
 		t.Errorf("developer-modified continue is normal flow (outcomeOK), not a tool error; body=%q", body)
 	}
@@ -301,6 +322,7 @@ func TestHandle_Reject(t *testing.T) {
 	}()
 
 	body, isError := o.Handle(context.Background(), coord, p)
+	assertHasEditProposed(t, r.snapshotEvents())
 	if isError {
 		t.Errorf("reject is normal flow, not a tool error (poisoned cache content must not trigger isError); body=%q", body)
 	}
@@ -347,6 +369,7 @@ func TestHandle_CtxCanceled_DuringApproval(t *testing.T) {
 	}()
 
 	body, isError := o.Handle(ctx, coord, sampleProposal())
+	assertHasEditProposed(t, r.snapshotEvents())
 	if !isError {
 		t.Errorf("ctx cancel should produce an isError result; body=%q", body)
 	}
@@ -409,6 +432,7 @@ func TestHandle_AutonomousMode_SuppressesContinueHint(t *testing.T) {
 			}()
 
 			body, isError := o.Handle(context.Background(), coord, p)
+			assertHasEditProposed(t, r.snapshotEvents())
 			if isError {
 				t.Errorf("approve+continue is normal flow (outcomeOK), not a tool error; body=%q", body)
 			}

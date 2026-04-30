@@ -3,8 +3,8 @@
 // These events describe what the loop is doing: starting a run, finishing
 // a turn, streaming text, executing a tool. They carry no application
 // knowledge — no edit proposals, no approval state, no UI status kinds.
-// Application-specific events (e.g. coding/event.AgentStatus,
-// coding/event.AgentEditProposed) flow on the same channel and satisfy
+// Application-specific events (e.g. engine/event.AgentStatus,
+// engine/event.AgentEditProposed) flow on the same channel and satisfy
 // this package's [Event] interface so frontends can type-switch over a
 // unified stream.
 package event

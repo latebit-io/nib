@@ -2,23 +2,10 @@ package agent
 
 import (
 	"context"
-	"strings"
 
 	"github.com/latebit-io/junto/coding/tools"
 	"github.com/latebit-io/junto/engine/event"
 )
-
-// fatalProposalMarkers are the unrecoverable outcomes [handleEditProposal]
-// can produce. Matched as substrings so the IsError flag stays accurate
-// even if the upstream message gains a wrapped error suffix. Rejection
-// notes ("The developer rejected this edit…") and validator
-// recalibration are normal flow and intentionally NOT listed here.
-var fatalProposalMarkers = []string{
-	"Error: agent canceled",
-	"Error: could not deliver edit proposal to frontend",
-	"Error: continue channel closed",
-	"Error: approval channel closed",
-}
 
 // Propose satisfies [tools.Approver]. Tools in coding/tools call this
 // when they want an edit reviewed; the body returned is fed to the LLM
@@ -32,19 +19,16 @@ var fatalProposalMarkers = []string{
 // means the tool is being invoked outside an active run — a
 // programming error worth surfacing as a tool error rather than
 // silently routing through [Agent.coord], which the run-handoff
-// race may have swapped to a different run's channels.
+// race may have swapped to a different run's channels. The full
+// orchestration (validation, proposal delivery, await, recordEdit,
+// continue, diagnostics) lives in [approval.Orchestrator]; this
+// method is just the agent-side bridge from the tool world to it.
 func (a *Agent) Propose(ctx context.Context, p tools.EditProposal) (string, bool) {
 	coord := coordFromCtx(ctx)
 	if coord == nil {
 		return "Error: edit proposal received without a run-scoped approval coordinator (no active run?)", true
 	}
-	body := a.handleEditProposal(ctx, coord, p)
-	for _, marker := range fatalProposalMarkers {
-		if strings.Contains(body, marker) {
-			return body, true
-		}
-	}
-	return body, false
+	return a.approvalFlow.Handle(ctx, coord, p)
 }
 
 // Navigate satisfies [tools.Navigator]. The go_to_line tool calls this

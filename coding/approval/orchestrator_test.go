@@ -260,7 +260,10 @@ func TestHandle_DeveloperModifiedContinue(t *testing.T) {
 		coord.Continue(developerEdited)
 	}()
 
-	body, _ := o.Handle(context.Background(), coord, p)
+	body, isError := o.Handle(context.Background(), coord, p)
+	if isError {
+		t.Errorf("developer-modified continue is normal flow (outcomeOK), not a tool error; body=%q", body)
+	}
 	if !strings.Contains(body, "developer modified your edit") {
 		t.Errorf("body should flag developer modification, got %q", body)
 	}
@@ -319,8 +322,14 @@ func TestHandle_Reject(t *testing.T) {
 	}
 }
 
-// TestHandle_CtxCanceled_DuringApproval returns the canceled marker
-// (which Handle then surfaces as a tool error via the marker scan).
+// TestHandle_CtxCanceled_DuringApproval verifies that a ctx cancel
+// while [Orchestrator] is parked in AwaitApproval yields the
+// "Error: agent canceled" body with isError=true. The fatal flag is
+// driven by the typed [outcomeFatal] returned from the inner handle
+// — never by scanning the body string for a marker. [Handle] maps
+// outcomeFatal → isError=true and outcomeOK → isError=false
+// directly, so cache content or any other body substring cannot
+// influence the flag.
 func TestHandle_CtxCanceled_DuringApproval(t *testing.T) {
 	t.Parallel()
 	r := newRig()
@@ -399,7 +408,13 @@ func TestHandle_AutonomousMode_SuppressesContinueHint(t *testing.T) {
 				coord.Continue(p.ExpectedContent)
 			}()
 
-			_, _ = o.Handle(context.Background(), coord, p)
+			body, isError := o.Handle(context.Background(), coord, p)
+			if isError {
+				t.Errorf("approve+continue is normal flow (outcomeOK), not a tool error; body=%q", body)
+			}
+			if !strings.Contains(body, "Edit applied successfully") {
+				t.Errorf("body should report success in both autonomy modes, got %q", body)
+			}
 
 			var sawHint bool
 			for _, ev := range r.snapshotEvents() {

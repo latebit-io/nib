@@ -319,11 +319,12 @@ func (a *Agent) Approve() { a.activeCoord().Approve() }
 func (a *Agent) Reject() { a.activeCoord().Reject() }
 
 // Continue signals the user is done editing and sends the current
-// buffer content for the file that was just edited. See
-// [Agent.Approve] for the snapshot rationale.
+// buffer content for the file that was just edited. The cache write
+// happens on the receive side ([approval.Orchestrator.waitForContinue])
+// using the canonical path, so this method only transports the new
+// content. See [Agent.Approve] for the snapshot rationale.
 func (a *Agent) Continue(path, bufferContent string) {
 	slog.Debug("agent.Continue", "path", path, "content_len", len(bufferContent))
-	a.cache.Set(path, bufferContent)
 	a.activeCoord().Continue(bufferContent)
 }
 

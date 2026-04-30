@@ -457,12 +457,13 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResul
 //
 // The cache is kept in sync with the editor buffer between agent
 // turns: after each approved edit the TUI feeds buffer content via
-// continueCh, which Agent.waitForContinue stores into the cache
-// (engine/agent/agent.go:cache.Set). So in steady state, "cache
-// content" is the same bytes Session.ReviewEdit will search against
-// in the buffer. The rare divergence — the developer typing
-// concurrently during an agent run — is not yet addressed and would
-// surface as an auto-reject the agent then retries.
+// the approval Coordinator's continueCh, which
+// Orchestrator.waitForContinue stores into the cache under the
+// canonical path. So in steady state, "cache content" is the same
+// bytes Session.ReviewEdit will search against in the buffer. The
+// rare divergence — the developer typing concurrently during an
+// agent run — is not yet addressed and would surface as an
+// auto-reject the agent then retries.
 //
 // A previous CurrentContentReader-based fix tried to bypass the
 // cache by reading the buffer directly. That introduced a

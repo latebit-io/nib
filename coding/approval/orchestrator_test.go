@@ -242,10 +242,21 @@ func TestHandle_DeveloperModifiedContinue(t *testing.T) {
 // TestHandle_Reject covers the rejection path: Reject is signaled,
 // the body carries the rejection message with current cache content,
 // no AddContext call, no RecordEdit.
+//
+// The cache is deliberately poisoned with a string that — under the
+// older marker-scan implementation of [Handle] — would have been
+// matched as a fatal error and triggered isError=true on what is
+// actually a normal rejection. Locking this case prevents
+// regression to the body-string-scan approach: a file's content is
+// arbitrary developer text and may contain ANY substring including
+// the literal "Error: agent canceled" or "Error: approval channel
+// closed". The typed outcome carried by the inner handle is what
+// drives isError now, so cache content cannot mislead it.
 func TestHandle_Reject(t *testing.T) {
 	t.Parallel()
 	r := newRig()
-	r.cache.Set("/proj/main.go", "package main\n// pre-edit content\n")
+	const poisonedContent = "package main\n// notes:\n//   Error: agent canceled — the test wrote this on purpose\n//   Error: approval channel closed — also on purpose\n// pre-edit content\n"
+	r.cache.Set("/proj/main.go", poisonedContent)
 	o := NewOrchestrator(r.deps())
 	coord := New()
 	p := sampleProposal()
@@ -257,13 +268,17 @@ func TestHandle_Reject(t *testing.T) {
 
 	body, isError := o.Handle(context.Background(), coord, p)
 	if isError {
-		t.Errorf("reject is normal flow, not a tool error; body=%q", body)
+		t.Errorf("reject is normal flow, not a tool error (poisoned cache content must not trigger isError); body=%q", body)
 	}
 	if !strings.Contains(body, "rejected this edit") {
 		t.Errorf("body should report rejection, got %q", body)
 	}
 	if !strings.Contains(body, "pre-edit content") {
 		t.Errorf("body should include current cache content, got %q", body)
+	}
+	if !strings.Contains(body, "Error: agent canceled") {
+		t.Errorf("body should include the poisoned cache substring verbatim "+
+			"(proves we are testing what we think we are testing); got %q", body)
 	}
 	if r.ctxSet.InContext(p.Path) {
 		t.Errorf("AddContext should NOT be invoked on reject")

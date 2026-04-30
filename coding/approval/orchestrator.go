@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/latebit-io/junto/coding/tools"
@@ -132,18 +131,25 @@ func NewOrchestrator(deps Deps) *Orchestrator {
 	return &Orchestrator{deps: deps}
 }
 
-// fatalProposalMarkers are the unrecoverable outcomes [Orchestrator.Handle]
-// can produce. Matched as substrings so the IsError flag stays
-// accurate even if the upstream message gains a wrapped error
-// suffix. Rejection notes ("The developer rejected this edit…") and
-// validator recalibration are normal flow and intentionally NOT
-// listed here.
-var fatalProposalMarkers = []string{
-	"Error: agent canceled",
-	"Error: could not deliver edit proposal to frontend",
-	"Error: continue channel closed",
-	"Error: approval channel closed",
-}
+// outcome reports whether a flow path produced a body the agent
+// should treat as a tool error or as normal flow. Carrying this
+// alongside the body string avoids the brittleness of scanning the
+// rendered tool body for marker substrings — cached file content
+// could contain the marker text by accident and trigger a false
+// isError=true on a normal rejection.
+type outcome int
+
+const (
+	// outcomeOK marks a body that is normal LLM-facing flow:
+	// validator retry, rejection note, applied-successfully
+	// message, developer-modified-edit recalibration. The agent
+	// should pass these through as ordinary tool results.
+	outcomeOK outcome = iota
+	// outcomeFatal marks a body produced by a delivery failure,
+	// channel close, or ctx cancel. The agent should surface these
+	// as tool errors so the frontend renders them distinctively.
+	outcomeFatal
+)
 
 // Handle runs the full approval flow for proposal. Returns the body
 // the LLM should see as the tool result, plus a flag reporting
@@ -158,19 +164,17 @@ var fatalProposalMarkers = []string{
 // agent's coord field from redirecting this proposal to a different
 // run's channels.
 func (o *Orchestrator) Handle(ctx context.Context, coord *Coordinator, p tools.EditProposal) (body string, isError bool) {
-	body = o.handle(ctx, coord, p)
-	for _, marker := range fatalProposalMarkers {
-		if strings.Contains(body, marker) {
-			return body, true
-		}
-	}
-	return body, false
+	body, oc := o.handle(ctx, coord, p)
+	return body, oc == outcomeFatal
 }
 
-// handle is the inner flow that returns just the body string.
-// Split from [Handle] so the marker-based isError detection stays at
-// a single call site even when the flow grows new return paths.
-func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.EditProposal) string {
+// handle is the inner flow that returns the body and an explicit
+// outcome marker. The outcome is what [Handle] uses to set the
+// public isError flag — never the body string. New fatal exit
+// points must return outcomeFatal explicitly; the type system
+// catches forgotten paths because the function won't compile
+// without an outcome value on each return.
+func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.EditProposal) (string, outcome) {
 	// Pre-approval validation. A non-empty retryFeedback short-
 	// circuits approval and hands the feedback back to the LLM so
 	// the proposal is regenerated; exhaustion (or any other
@@ -178,7 +182,7 @@ func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.E
 	// summaries attached to the event.
 	summaries, retryFeedback := o.deps.Validate(ctx, p)
 	if retryFeedback != "" {
-		return retryFeedback
+		return retryFeedback, outcomeOK
 	}
 
 	o.deps.Send(event.AgentStatus{Status: event.StatusReviewing})
@@ -191,15 +195,19 @@ func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.E
 		ValidatorSummaries: summaries,
 	}); err != nil {
 		slog.Error("edit proposal delivery failed", "err", err)
-		return fmt.Sprintf("Error: could not deliver edit proposal to frontend: %v", err)
+		return fmt.Sprintf("Error: could not deliver edit proposal to frontend: %v", err), outcomeFatal
 	}
 
-	msg, canceled := o.waitForApproval(ctx, coord, p)
-	if canceled {
-		return "Error: agent canceled"
+	msg, oc := o.waitForApproval(ctx, coord, p)
+	if oc == outcomeFatal {
+		return msg, outcomeFatal
 	}
 	if msg != "" {
-		return msg
+		// Rejection note — normal flow. Pass through as outcomeOK
+		// so a stray fatal-marker substring inside the cached file
+		// content (which the rejection body embeds) cannot fool a
+		// caller into treating reject as a tool error.
+		return msg, outcomeOK
 	}
 
 	// Approved — record for end-of-turn review and add to context set.
@@ -213,19 +221,28 @@ func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.E
 }
 
 // waitForApproval blocks until the developer approves or rejects
-// the edit, ctx is canceled, or the channel is closed. Returns
-// (rejectionMsg, false) on reject, ("", true) on cancel or channel
-// closed, ("", false) on approve.
-func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, p tools.EditProposal) (msg string, canceled bool) {
+// the edit, ctx is canceled, or the channel is closed. Outcome
+// matrix:
+//
+//   - approve  → ("", outcomeOK)
+//   - reject   → (rejectionMsg, outcomeOK)
+//   - ctx cancel → ("Error: agent canceled", outcomeFatal)
+//   - channel closed → ("Error: approval channel closed", outcomeFatal)
+//
+// The channel-closed branch is preserved as a distinct message so
+// the caller can tell the LLM precisely what happened — earlier
+// versions collapsed both fatal paths into "Error: agent canceled"
+// via a wrapper, which masked an actual closed-channel failure.
+func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, p tools.EditProposal) (string, outcome) {
 	approved, err := coord.AwaitApproval(ctx)
 	if err != nil {
 		if errors.Is(err, ErrChannelClosed) {
-			return "Error: approval channel closed", true
+			return "Error: approval channel closed", outcomeFatal
 		}
-		return "", true
+		return "Error: agent canceled", outcomeFatal
 	}
 	if approved {
-		return "", false
+		return "", outcomeOK
 	}
 
 	o.deps.Send(event.AgentStatus{Status: event.StatusThinking})
@@ -236,14 +253,20 @@ func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, 
 		content = c
 	}
 	return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
-		p.Path, tools.TruncateForPreview(content)), false
+		p.Path, tools.TruncateForPreview(content)), outcomeOK
 }
 
 // waitForContinue blocks until the developer finishes editing and
 // signals continue, or the context is canceled. Compares the new
 // content against the expected result to detect developer
-// modifications and surfaces them to the LLM with a diff.
-func (o *Orchestrator) waitForContinue(ctx context.Context, coord *Coordinator, p tools.EditProposal) string {
+// modifications and surfaces them to the LLM with a diff. Outcome
+// matrix:
+//
+//   - normal continue → (resultBody, outcomeOK) — applied or
+//     applied-with-developer-modifications, both normal flow
+//   - ctx cancel → ("Error: agent canceled", outcomeFatal)
+//   - channel closed → ("Error: continue channel closed", outcomeFatal)
+func (o *Orchestrator) waitForContinue(ctx context.Context, coord *Coordinator, p tools.EditProposal) (string, outcome) {
 	o.deps.Send(event.AgentStatus{Status: event.StatusEditing})
 	// Render the "press Ctrl+N to continue" prompt only at
 	// LevelGuided (where the developer actually has to press
@@ -260,9 +283,9 @@ func (o *Orchestrator) waitForContinue(ctx context.Context, coord *Coordinator, 
 	newContent, err := coord.AwaitContinue(ctx)
 	if err != nil {
 		if errors.Is(err, ErrChannelClosed) {
-			return "Error: continue channel closed"
+			return "Error: continue channel closed", outcomeFatal
 		}
-		return "Error: agent canceled"
+		return "Error: agent canceled", outcomeFatal
 	}
 	o.deps.Cache.Set(p.CanonPath, newContent)
 	o.deps.Send(event.AgentStatus{Status: event.StatusThinking})
@@ -292,5 +315,5 @@ func (o *Orchestrator) waitForContinue(ctx context.Context, coord *Coordinator, 
 		result += "\n\nDiagnostics after edit:\n" + diagResult
 	}
 
-	return result
+	return result, outcomeOK
 }

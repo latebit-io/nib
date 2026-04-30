@@ -166,21 +166,6 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event, result *Result
 	case event.AgentWaiting:
 		return r.handleWaiting(ctx, result, summary, truncated)
 
-	case event.AgentAwaitingInput:
-		// request_input is currently unregistered (see agent
-		// composition). If a future revision re-introduces the tool,
-		// the headless runner has no path to surface a developer
-		// prompt and answer back, so the conservative default is to
-		// surface the prompt to stderr and end the run cleanly with
-		// the unanswered request recorded as an error rather than
-		// dropping it silently.
-		msg := fmt.Sprintf("agent requested input but headless runner cannot answer: %q", e.Prompt)
-		slog.Warn(msg)
-		result.Errors = append(result.Errors, msg)
-		r.agent.Cancel()
-		result.Success = false
-		return true
-
 	case event.AgentDone:
 		result.Success = e.Success
 		result.Summary = summary.String()

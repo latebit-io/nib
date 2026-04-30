@@ -1,17 +1,16 @@
 // Package approval owns the coordination channels between the agent
 // and its frontend. The agent blocks on these channels for edit
-// approval, post-approval continue, conversational replies between
-// turns, and (currently dormant) request_input answers; the frontend
-// drives the channels via the corresponding non-blocking signal
-// methods.
+// approval, post-approval continue, and conversational replies between
+// turns; the frontend drives the channels via the corresponding
+// non-blocking signal methods.
 //
 // Splitting the channels out of [Agent] keeps the agent's run loop
 // focused on conversational state, validation, budget, and event
 // emission — coordination plumbing has its own home where the drain
 // semantics, capacity choices, and ctx-cancellable awaits can be
 // reviewed and tested without standing up a full agent. The agent
-// retains the public API (Approve / Reject / Continue / AnswerInput /
-// Reply); those methods now delegate to a [Coordinator] so the channels
+// retains the public API (Approve / Reject / Continue / Reply);
+// those methods now delegate to a [Coordinator] so the channels
 // stay private to this package.
 package approval
 
@@ -24,7 +23,7 @@ import (
 // Coordinator owns the agent <-> frontend coordination channels.
 //
 // Channel capacities are deliberately 1, and the signal methods
-// (Approve / Reject / Continue / Answer / Reply) are non-blocking
+// (Approve / Reject / Continue / Reply) are non-blocking
 // `select { case ch <- v: default: }` sends. Two things follow from
 // that contract:
 //
@@ -37,8 +36,8 @@ import (
 //     agent picks the signal up the instant it parks.
 //
 //  2. A signal whose buffer is FULL is dropped (with a warning for
-//     Answer/Reply). One pending signal per channel is meaningful;
-//     a duplicate while the first is still queued is a redundant
+//     Reply). One pending signal per channel is meaningful; a
+//     duplicate while the first is still queued is a redundant
 //     keystroke or a frontend bug, not a queue we want to grow.
 //
 // Stale-signal isolation across runs is the caller's job: Agent
@@ -51,10 +50,9 @@ type Coordinator struct {
 	approveCh  chan bool   // true=approved, false=rejected
 	continueCh chan string // post-approval buffer content
 	inputCh    chan string // developer reply between turns
-	answerCh   chan string // request_input answer (currently dormant)
 }
 
-// New returns a Coordinator with all four channels allocated. Safe to
+// New returns a Coordinator with all three channels allocated. Safe to
 // use immediately; callers should retain the returned pointer for the
 // lifetime of the agent.
 func New() *Coordinator {
@@ -62,7 +60,6 @@ func New() *Coordinator {
 		approveCh:  make(chan bool, 1),
 		continueCh: make(chan string, 1),
 		inputCh:    make(chan string, 1),
-		answerCh:   make(chan string, 1),
 	}
 }
 
@@ -73,7 +70,6 @@ func (c *Coordinator) Reset() {
 	drain(c.approveCh)
 	drain(c.continueCh)
 	drain(c.inputCh)
-	drain(c.answerCh)
 }
 
 // Approve signals approval for the pending edit. Non-blocking: if the
@@ -105,24 +101,6 @@ func (c *Coordinator) Continue(content string) {
 	select {
 	case c.continueCh <- content:
 	default:
-	}
-}
-
-// Answer delivers the developer's typed answer to a pending
-// request_input prompt. Same buffered-send semantics as Approve, but
-// a full-buffer drop is logged at warn level — for the answer flow a
-// dropped value is more often a frontend bug than an intentional
-// no-op, since request_input prompts are emitted explicitly by the
-// agent rather than implied by an editor approval gesture.
-//
-// The request_input tool is currently unregistered in the agent (see
-// agent composition); the channel and method are kept so the surface
-// stays defensive and a future re-introduction has a wire ready.
-func (c *Coordinator) Answer(text string) {
-	select {
-	case c.answerCh <- text:
-	default:
-		slog.Warn("approval.Answer: answer buffer full, dropping answer")
 	}
 }
 
@@ -190,22 +168,6 @@ func (c *Coordinator) AwaitInput(ctx context.Context) (string, error) {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	case text, ok := <-c.inputCh:
-		if !ok {
-			return "", ErrChannelClosed
-		}
-		return text, nil
-	}
-}
-
-// AwaitAnswer blocks until Answer is signaled for a pending
-// request_input prompt, ctx is canceled, or the channel is closed.
-// Currently unused by the live agent; preserved for the dormant
-// request_input flow.
-func (c *Coordinator) AwaitAnswer(ctx context.Context) (string, error) {
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case text, ok := <-c.answerCh:
 		if !ok {
 			return "", ErrChannelClosed
 		}

@@ -5,7 +5,6 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/latebit-io/junto/engine/event"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -415,32 +414,6 @@ func TestAgentPaneModel_AppendMeta_NoBleedIntoNextChunk(t *testing.T) {
 	}
 	if !foundApplied || !foundNext {
 		t.Fatalf("expected both raw lines to be present; got RawLines=%v", m.RawLines)
-	}
-}
-
-// TestAgentPaneModel_isCodeLine_AwaitingInputFenceNoBleed verifies that an
-// unmatched fence inside an awaiting-input prompt (agent-supplied content)
-// does not open a code block for subsequent agent output. Without the
-// plainRawLines skip in recomputeCodeBlock, a prompt containing ``` would
-// style the rest of the turn as code.
-func TestAgentPaneModel_isCodeLine_AwaitingInputFenceNoBleed(t *testing.T) {
-	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
-	m.SetSize(80, 30)
-
-	m.AppendText("agent before")
-	m.ShowAwaitingInput(event.AgentAwaitingInput{
-		Prompt: "Which file? Maybe ```one``` or this:\n```",
-		CallID: "c1",
-	})
-	m.AppendText("agent after line 1\nagent after line 2")
-
-	for i, line := range m.Lines {
-		if m.isPlain(i) {
-			continue
-		}
-		if m.isCodeLine(i) {
-			t.Errorf("isCodeLine(%d)=true — awaiting-input fence bled into line %q", i, line)
-		}
 	}
 }
 

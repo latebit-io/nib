@@ -481,18 +481,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.AgentPane.Clear()
 		return m, nil
 
-	// Answer to a pending request_input prompt — route to the session so
-	// the agent goroutine unblocks with the typed answer as a tool result.
-	case InputAnsweredMsg:
-		m.AgentPane.AppendUserMessage(msg.Text)
-		m.Session.AnswerInput(msg.Text)
-		return m, nil
-
-	// Esc while awaiting input — cancel the run (matches Esc-rejects-edit).
-	case CancelAgentMsg:
-		m.Session.CancelAgent()
-		return m, nil
-
 	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
@@ -973,7 +961,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		// stops rescheduling and any in-flight streaming tint settles.
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
 		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
-		m.AgentPane.ClearAwaitingInput()
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
 		switch {
@@ -988,11 +975,8 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		m.AgentPane.ResetInput()
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
-	case event.AgentAwaitingInput:
-		m.AgentPane.ShowAwaitingInput(e)
 	case event.AgentDone:
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
-		m.AgentPane.ClearAwaitingInput()
 		summary := formatSessionSummary(m.AgentPane.usage)
 		if summary != "" {
 			m.AgentPane.AppendMeta("\n--- Done ---\n" + summary + "\n")

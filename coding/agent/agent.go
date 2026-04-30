@@ -549,7 +549,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 // Run starts a new conversation in execution mode. See RunWithMode for details.
 // Public lifecycle and signal API (Run, RunWithMode, Reply, Cancel,
 // IsWaiting, IsRunning, SetProvider/Style/Terse/Autonomous/Evaluator,
-// Approve, Reject, Continue, AnswerInput, activeCoord, drainPendingLint,
+// Approve, Reject, Continue, activeCoord, drainPendingLint,
 // hasLintPending, currentTerse/Autonomous/CodingStyle/Provider, Usage,
 // send, sendCritical) lives in lifecycle.go.
 

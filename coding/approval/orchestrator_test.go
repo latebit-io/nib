@@ -350,7 +350,6 @@ func TestHandle_SendCriticalFailure(t *testing.T) {
 func TestHandle_AutonomousMode_SuppressesContinueHint(t *testing.T) {
 	t.Parallel()
 	for _, autonomous := range []bool{false, true} {
-		autonomous := autonomous
 		t.Run(map[bool]string{false: "guided", true: "autonomous"}[autonomous], func(t *testing.T) {
 			t.Parallel()
 			r := newRig()

@@ -117,11 +117,6 @@ const (
 	StatusFinished StatusKind = "finished"
 	// StatusLinting means the agent is running post-edit style lint commands.
 	StatusLinting StatusKind = "linting"
-	// StatusAwaitingInput means the agent is blocked mid-turn on a developer
-	// response to a request_input tool call. Distinct from StatusWaiting —
-	// StatusWaiting is the turn-end idle state, StatusAwaitingInput is a
-	// structural pause on a specific question.
-	StatusAwaitingInput StatusKind = "awaiting-input"
 )
 
 // AgentStatus updates the agent status display.
@@ -165,37 +160,10 @@ type AgentWaiting struct {
 	Finished bool
 }
 
-// AwaitingInputOption is a suggested choice presented with an AgentAwaitingInput
-// prompt. The developer may type the ID to pick the option, or any free-form
-// text — the typed answer is delivered to the agent verbatim.
-type AwaitingInputOption struct {
-	// ID is the short machine identifier returned to the agent when picked.
-	ID string
-	// Label is the human-readable description.
-	Label string
-}
-
-// AgentAwaitingInput signals the agent is blocked mid-turn on a developer
-// response to a request_input tool call. Unlike AgentWaiting (turn-end),
-// this is a structural pause on a specific question with suggested options.
-// The agent goroutine is blocked until Session.AnswerInput is called.
-type AgentAwaitingInput struct {
-	// Prompt is the question to show the developer.
-	Prompt string
-	// Options are suggested choices. Empty means free-form answer expected.
-	Options []AwaitingInputOption
-	// Reason explains why input is needed. Optional.
-	Reason string
-	// CallID correlates the answer back to the originating tool call so
-	// concurrent prompts (future work) cannot cross-wire.
-	CallID string
-}
-
-func (AgentDone) eventTag()          {}
-func (AgentError) eventTag()         {}
-func (AgentStatus) eventTag()        {}
-func (AgentWaiting) eventTag()       {}
-func (AgentAwaitingInput) eventTag() {}
+func (AgentDone) eventTag()    {}
+func (AgentError) eventTag()   {}
+func (AgentStatus) eventTag()  {}
+func (AgentWaiting) eventTag() {}
 
 // AgentTurnUsage reports token consumption for a single agent turn
 // (one or more LLM calls within processLLMTurn). Combines provider-reported

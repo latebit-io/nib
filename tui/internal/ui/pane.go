@@ -35,20 +35,6 @@ type PlanningGoalSubmittedMsg struct {
 	Goal string
 }
 
-// InputAnsweredMsg is emitted by the agent pane when the user answers a
-// request_input prompt. AppModel routes Text to Session.AnswerInput, which
-// unblocks the agent goroutine waiting on the structured prompt.
-type InputAnsweredMsg struct {
-	// Text is the developer's verbatim answer — typically an option ID,
-	// but free-form text is valid.
-	Text string
-}
-
-// CancelAgentMsg is emitted by the agent pane when the user presses Esc
-// while the agent is awaiting a structured input answer. AppModel routes
-// this to Session.CancelAgent — matches the Esc-rejects-edit model.
-type CancelAgentMsg struct{}
-
 // clampScrollOffset returns the scroll offset needed to keep selected visible
 // within a list that shows maxVisible items at a time.
 func clampScrollOffset(selected, current, maxVisible int) int {

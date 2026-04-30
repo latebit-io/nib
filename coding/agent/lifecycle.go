@@ -20,7 +20,7 @@ import (
 // RunWithMode / Reply / Cancel for conversation control,
 // IsWaiting / IsRunning for state queries, the Set* family for
 // runtime configuration, and Approve / Reject / Continue /
-// AnswerInput for the four edit-flow signals. Plus the internal
+// for the three edit-flow signals. Plus the internal
 // state getters (currentProvider / currentTerse /
 // currentAutonomous / currentCodingStyle / hasLintPending /
 // drainPendingLint) and event emitters (send / sendCritical /
@@ -326,13 +326,6 @@ func (a *Agent) Continue(path, bufferContent string) {
 	a.cache.Set(path, bufferContent)
 	a.activeCoord().Continue(bufferContent)
 }
-
-// AnswerInput delivers the developer's answer to a pending request_input
-// prompt. Text is the verbatim typed answer — typically an option ID, but
-// free-form is valid. Non-blocking: if no prompt is pending, the answer
-// is dropped (same shape as Approve/Reject/Continue). See
-// [Agent.Approve] for the snapshot rationale.
-func (a *Agent) AnswerInput(text string) { a.activeCoord().Answer(text) }
 
 // activeCoord snapshots the active run's coordinator under [Agent.mu]
 // so frontend signal methods do not read a.coord while RunWithMode /

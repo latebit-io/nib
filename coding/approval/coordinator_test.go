@@ -105,46 +105,12 @@ func TestCoordinator_Reply_DropsWhenFull(t *testing.T) {
 	c.Reset()
 }
 
-func TestCoordinator_AwaitAnswer_DeliversText(t *testing.T) {
-	t.Parallel()
-	c := New()
-	c.Answer("option-a")
-	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
-	defer cancel()
-
-	got, err := c.AwaitAnswer(ctx)
-	if err != nil {
-		t.Fatalf("AwaitAnswer err = %v, want nil", err)
-	}
-	if got != "option-a" {
-		t.Errorf("AwaitAnswer got %q, want %q", got, "option-a")
-	}
-}
-
-func TestCoordinator_Answer_DropsWhenFull(t *testing.T) {
-	t.Parallel()
-	c := New()
-	c.Answer("first")
-	c.Answer("second-dropped") // capacity 1, second is silently dropped
-	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
-	defer cancel()
-
-	got, err := c.AwaitAnswer(ctx)
-	if err != nil {
-		t.Fatalf("AwaitAnswer err = %v, want nil", err)
-	}
-	if got != "first" {
-		t.Errorf("AwaitAnswer got %q, want first (second.Answer should be dropped, not overwrite)", got)
-	}
-}
-
 func TestCoordinator_Reset_DrainsAllChannels(t *testing.T) {
 	t.Parallel()
 	c := New()
 	c.Approve()
 	c.Continue("stale")
 	c.Reply("stale-reply")
-	c.Answer("stale-answer")
 
 	c.Reset()
 
@@ -166,12 +132,6 @@ func TestCoordinator_Reset_DrainsAllChannels(t *testing.T) {
 	if _, err := c.AwaitInput(ctx3); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("inputCh not drained: err=%v, want DeadlineExceeded", err)
 	}
-
-	ctx4, cancel4 := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel4()
-	if _, err := c.AwaitAnswer(ctx4); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("answerCh not drained: err=%v, want DeadlineExceeded", err)
-	}
 }
 
 func TestCoordinator_SignalsAreNonBlocking(t *testing.T) {
@@ -181,7 +141,6 @@ func TestCoordinator_SignalsAreNonBlocking(t *testing.T) {
 	c.Approve()
 	c.Continue("saturated")
 	c.Reply("saturated")
-	c.Answer("saturated")
 
 	done := make(chan struct{})
 	go func() {
@@ -189,7 +148,6 @@ func TestCoordinator_SignalsAreNonBlocking(t *testing.T) {
 		c.Reject()  // approveCh still saturated by the earlier Approve
 		c.Continue("dropped")
 		c.Reply("dropped") // Reply returns false; not measured here
-		c.Answer("dropped")
 		close(done)
 	}()
 	select {
@@ -216,16 +174,6 @@ func TestCoordinator_AwaitInput_CtxCancel(t *testing.T) {
 	defer cancel()
 	if _, err := c.AwaitInput(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("AwaitInput err = %v, want DeadlineExceeded", err)
-	}
-}
-
-func TestCoordinator_AwaitAnswer_CtxCancel(t *testing.T) {
-	t.Parallel()
-	c := New()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	if _, err := c.AwaitAnswer(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("AwaitAnswer err = %v, want DeadlineExceeded", err)
 	}
 }
 

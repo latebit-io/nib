@@ -216,62 +216,6 @@ func TestCompleteApprovalSignalsAgent(t *testing.T) {
 	s.CompleteApproval()
 }
 
-func TestAnswerInput_NoPendingPromptIsNoOp(t *testing.T) {
-	// Without a prior AgentAwaitingInput event, AnswerInput must not mutate
-	// session state or leak text onto the agent's answer channel — otherwise
-	// a late keystroke after cancel/done could queue a stale answer for the
-	// next prompt.
-	s := newTestSession("x")
-	s.AnswerInput("should-be-dropped")
-	if s.awaitingInputCallID != "" {
-		t.Errorf("awaitingInputCallID = %q, want empty", s.awaitingInputCallID)
-	}
-}
-
-func TestAnswerInput_ClearsPromptStateAfterForwarding(t *testing.T) {
-	s := newTestSession("x")
-	s.HandleEvent(event.AgentAwaitingInput{Prompt: "pick", CallID: "c1"})
-	if s.awaitingInputCallID != "c1" {
-		t.Fatalf("awaitingInputCallID = %q, want c1", s.awaitingInputCallID)
-	}
-	s.AnswerInput("fix-all")
-	if s.awaitingInputCallID != "" {
-		t.Errorf("awaitingInputCallID should clear after forwarding, got %q", s.awaitingInputCallID)
-	}
-	// A second AnswerInput with no fresh prompt must be a no-op.
-	s.AnswerInput("late-answer")
-	if s.awaitingInputCallID != "" {
-		t.Errorf("second AnswerInput must not resurrect state, got %q", s.awaitingInputCallID)
-	}
-}
-
-func TestHandleEvent_AgentDoneClearsAwaitingInput(t *testing.T) {
-	s := newTestSession("x")
-	s.HandleEvent(event.AgentAwaitingInput{Prompt: "pick", CallID: "c1"})
-	s.HandleEvent(event.AgentDone{Success: false})
-	if s.awaitingInputCallID != "" {
-		t.Errorf("AgentDone should clear awaitingInputCallID, got %q", s.awaitingInputCallID)
-	}
-}
-
-func TestHandleEvent_AgentErrorClearsAwaitingInput(t *testing.T) {
-	s := newTestSession("x")
-	s.HandleEvent(event.AgentAwaitingInput{Prompt: "pick", CallID: "c1"})
-	s.HandleEvent(event.AgentError{Err: "boom"})
-	if s.awaitingInputCallID != "" {
-		t.Errorf("AgentError should clear awaitingInputCallID, got %q", s.awaitingInputCallID)
-	}
-}
-
-func TestCancelAgent_ClearsAwaitingInput(t *testing.T) {
-	s := newTestSession("x")
-	s.HandleEvent(event.AgentAwaitingInput{Prompt: "pick", CallID: "c1"})
-	s.CancelAgent()
-	if s.awaitingInputCallID != "" {
-		t.Errorf("CancelAgent should clear awaitingInputCallID, got %q", s.awaitingInputCallID)
-	}
-}
-
 func TestPrepareApprovalRejectsOnLocationFailure(t *testing.T) {
 	s := newTestSession("hello world")
 	s.pendingEdit = &event.PendingEdit{Search: "missing", Replace: "found"}

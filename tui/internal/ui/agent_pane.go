@@ -133,7 +133,6 @@ var (
 	chipStyleBlock   = chipBase.Background(lipgloss.Color("160")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleEditing = chipBase.Background(lipgloss.Color("28")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleWaiting = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
-	chipStyleAnswer  = chipBase.Background(lipgloss.Color("162")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleLinting = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
 	// chipStyleFinished marks "all tracked tasks complete" yields. Green
 	// like editing-success but with a heavier weight so the developer
@@ -149,19 +148,6 @@ var (
 	// muted tone that reads as metadata.
 	statusLeftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 )
-
-// awaitingInputState tracks a pending request_input prompt from the agent.
-// Non-nil means the agent is blocked on the developer's typed answer.
-// Typing + Enter sends the answer; Esc cancels the agent run.
-type awaitingInputState struct {
-	// Prompt is the question shown to the developer (for reference; the
-	// text has already been appended to the transcript by ShowAwaitingInput).
-	Prompt string
-	// Options were the suggested choices (for reference).
-	Options []event.AwaitingInputOption
-	// CallID correlates the answer back to the originating tool call.
-	CallID string
-}
 
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
 type AgentPaneModel struct {
@@ -286,11 +272,6 @@ type AgentPaneModel struct {
 	// hasAgent is true when an LLM provider is configured.
 	hasAgent bool
 
-	// awaitingInput is non-nil when the agent is blocked on a request_input
-	// prompt. Controls status-bar rendering and rewires Enter/Esc so the
-	// textarea submits an answer (or cancels the run) instead of a goal.
-	awaitingInput *awaitingInputState
-
 	// renderBuf is the per-frame output slice. Hoisted onto the model so
 	// each Render call resizes/clears in place rather than allocating a
 	// fresh []string. Capacity grows to the largest m.height seen.
@@ -334,97 +315,6 @@ func (m *AgentPaneModel) SetStatus(s event.StatusKind) tea.Cmd {
 		return spinnerTickCmd()
 	}
 	return nil
-}
-
-// ShowAwaitingInput registers a pending request_input prompt. Renders a
-// styled prompt block into the transcript (so it scrolls with content and
-// survives rewrap on resize), focuses the textarea, and flips the pane
-// into awaiting mode so Enter submits an answer instead of a goal. The
-// textarea is reset so any lingering draft from a prior mode cannot be
-// accidentally submitted as the answer.
-func (m *AgentPaneModel) ShowAwaitingInput(e event.AgentAwaitingInput) {
-	m.awaitingInput = &awaitingInputState{
-		Prompt:  e.Prompt,
-		Options: e.Options,
-		CallID:  e.CallID,
-	}
-	// The block carries the agent's actual question, so it must stay at
-	// default foreground (not dimmed as meta) AND bypass the markdown /
-	// fence pipeline — an unmatched backtick in Prompt or Reason would
-	// otherwise open a code fence that styles the rest of the turn. We
-	// append through the raw path and mark the new raw lines as plain
-	// so recomputeCodeBlock skips them and Render renders them as-is.
-	var s sanitize.Sanitizer
-	firstRaw := len(m.RawLines)
-	m.AppendText(s.Sanitize(renderAwaitingInputBlock(e)))
-	endRaw := len(m.RawLines)
-	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
-		endRaw--
-	}
-	if m.plainRawLines == nil {
-		m.plainRawLines = make(map[int]bool)
-	}
-	for i := firstRaw; i < endRaw; i++ {
-		m.plainRawLines[i] = true
-	}
-	// Re-run fence detection from firstRaw now that plainRawLines is
-	// populated — AppendText already ran recomputeCodeBlock, but it saw
-	// the block as untagged, so an embedded fence might have leaked into
-	// rawFenceAfter. This call resets that.
-	m.recomputeCodeBlock(firstRaw)
-	m.invalidateMdCache()
-	m.input.Reset()
-	m.inputActive = true
-	m.recomputeInputLayout()
-}
-
-// ClearAwaitingInput drops any pending request_input state without
-// appending transcript output. Called when the agent run ends (AgentDone,
-// AgentError) so a cancel or failure leaves the pane in a clean state.
-// Also drops any draft answer in the textarea — it belonged to the
-// abandoned prompt and must not leak into the next goal submission.
-func (m *AgentPaneModel) ClearAwaitingInput() {
-	if m.awaitingInput == nil {
-		return
-	}
-	m.awaitingInput = nil
-	m.input.Reset()
-	m.recomputeInputLayout()
-}
-
-// IsAwaitingInput reports whether the agent is blocked on a structured
-// input answer. Used by tests and by callers that want to gate UI based
-// on the agent's mid-turn state.
-func (m *AgentPaneModel) IsAwaitingInput() bool { return m.awaitingInput != nil }
-
-// renderAwaitingInputBlock formats the prompt, reason, and options into a
-// styled transcript block. Kept as a pure function so the test suite can
-// assert on the rendered output without a live pane model.
-func renderAwaitingInputBlock(e event.AgentAwaitingInput) string {
-	var b strings.Builder
-	b.WriteString("\n┌─ Agent needs your input ─\n")
-	b.WriteString("│ ")
-	b.WriteString(e.Prompt)
-	b.WriteString("\n")
-	if strings.TrimSpace(e.Reason) != "" {
-		b.WriteString("│ ")
-		b.WriteString(e.Reason)
-		b.WriteString("\n")
-	}
-	if len(e.Options) > 0 {
-		b.WriteString("│\n")
-		for _, opt := range e.Options {
-			b.WriteString("│   ")
-			b.WriteString(opt.ID)
-			b.WriteString(" — ")
-			b.WriteString(opt.Label)
-			b.WriteString("\n")
-		}
-	}
-	b.WriteString("│\n")
-	b.WriteString("│ Type your answer and press Enter. Esc cancels the run.\n")
-	b.WriteString("└─\n")
-	return b.String()
 }
 
 // StatusKind returns the current agent status.
@@ -760,53 +650,25 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	case textarea.SubmitMsg:
 		text := m.input.Content()
 		if strings.TrimSpace(text) == "" {
-			if m.awaitingInput != nil {
-				// Empty Enter while a prompt is pending: keep the
-				// prompt visible, keep focus, let the developer keep
-				// typing. Deactivating here would strand them with a
-				// visible prompt and no way to answer without clicking.
-				return nil
-			}
-			// Empty Enter outside awaiting: existing behavior — drop
-			// focus and reset planning bit so the next click doesn't
-			// silently submit as a plan.
+			// Empty Enter: drop focus and reset planning bit so the
+			// next click doesn't silently submit as a plan.
 			m.inputActive = false
 			m.planningMode = false
 			m.input.Reset()
 			return nil
 		}
 		planning := m.planningMode
-		awaiting := m.awaitingInput != nil
 		m.inputActive = false
 		m.input.Reset()
 		m.planningMode = false
-		if awaiting {
-			// Answer the pending request_input prompt. Clearing
-			// awaitingInput optimistically keeps state in sync with
-			// what the agent will do next; a subsequent prompt will
-			// re-establish it via ShowAwaitingInput.
-			m.awaitingInput = nil
-			return func() tea.Msg { return InputAnsweredMsg{Text: text} }
-		}
 		if planning {
 			return func() tea.Msg { return PlanningGoalSubmittedMsg{Goal: text} }
 		}
 		return func() tea.Msg { return GoalSubmittedMsg{Goal: text} }
 	case textarea.CancelMsg:
-		// Esc while awaiting an input answer cancels the whole agent
-		// run (matches Esc-rejects-edit semantics). Any other Esc just
-		// deactivates focus and preserves content. The draft answer is
-		// dropped — it belonged to the prompt we're abandoning, and
-		// must not leak into the next goal submission.
-		if m.awaitingInput != nil {
-			m.awaitingInput = nil
-			m.input.Reset()
-			m.inputActive = false
-			m.planningMode = false
-			return func() tea.Msg { return CancelAgentMsg{} }
-		}
-		// Deactivate focus but preserve content — Ctrl+G or click restores it.
-		// Clear planningMode so refocus via click doesn't silently submit as a plan.
+		// Esc deactivates focus but preserves content — Ctrl+G or
+		// click restores it. Clear planningMode so refocus via click
+		// doesn't silently submit as a plan.
 		m.inputActive = false
 		m.planningMode = false
 		return nil
@@ -1010,7 +872,6 @@ func (m *AgentPaneModel) Clear() {
 	m.status = event.StatusIdle
 	m.sanitizer = sanitize.Sanitizer{}
 	m.usage = usageState{}
-	m.awaitingInput = nil
 	m.turnCounter = 1
 	m.turnStartRaw = 0
 	m.streamingStartRaw = -1
@@ -1476,8 +1337,6 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 		spec = statusChipSpec{label: "REPLY", hint: "Enter send", style: chipStyleWaiting}
 	case event.StatusFinished:
 		spec = statusChipSpec{label: "DONE", hint: "all tracked tasks complete · type to continue", style: chipStyleFinished}
-	case event.StatusAwaitingInput:
-		spec = statusChipSpec{label: "ANSWER", hint: "Enter send · Esc cancel", style: chipStyleAnswer}
 	case event.StatusLinting:
 		spec = statusChipSpec{label: "LINTING", style: chipStyleLinting}
 	default:

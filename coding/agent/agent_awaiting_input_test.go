@@ -341,25 +341,3 @@ func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 		t.Errorf("truncation rejection not delivered to LLM for call-trunc; got %+v", provider.toolInputs)
 	}
 }
-
-// TestAgent_AnswerInput_NoPendingIsNoOp verifies that calling
-// AnswerInput when no prompt is pending is safe (drops the answer
-// without blocking or panicking). This guards the dormant
-// awaiting-input infrastructure that remains wired into the Session
-// and TUI even though the LLM-facing request_input tool was
-// removed — the surface API stays defensive.
-func TestAgent_AnswerInput_NoPendingIsNoOp(t *testing.T) {
-	events := make(chan event.Event, 8)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, nil)
-
-	done := make(chan struct{})
-	go func() {
-		ag.AnswerInput("anything")
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("AnswerInput blocked with no pending prompt")
-	}
-}

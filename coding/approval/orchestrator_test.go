@@ -40,19 +40,27 @@ func (c *stubContextSet) AddContext(path string) {
 }
 
 // orchTestRig bundles the moving parts of an Orchestrator test so
-// each case stays compact. eventBus is buffered large enough that
-// the orchestrator never blocks on critical sends; recordedEdits
-// captures RecordEdit invocations; validateFn / autonomousFn /
-// sendCriticalFn can be overridden per test.
+// each case stays compact. The Send and SendCritical wrappers both
+// record into the same events slice — that's the only way assertions
+// against critical events (e.g. AgentEditProposed) can fire, since
+// the orchestrator routes the proposal event through SendCritical
+// rather than Send. proposalDelivered is closed (exactly once) when
+// AgentEditProposed is delivered, giving goroutine-driven tests a
+// deterministic rendezvous point in place of racy time.Sleep.
+//
+// validateFn / autonomousFn / sendCriticalFn can be overridden per
+// test; recordedEdits captures RecordEdit invocations.
 type orchTestRig struct {
-	cache          *tools.FileCache
-	ctxSet         *stubContextSet
-	events         []event.Event
-	eventsMu       sync.Mutex
-	recordedEdits  []tools.EditProposal
-	validateFn     func(ctx context.Context, p tools.EditProposal) ([]event.ValidatorSummary, string)
-	autonomousFn   func() bool
-	sendCriticalFn func(ctx context.Context, ev event.Event) error
+	cache                 *tools.FileCache
+	ctxSet                *stubContextSet
+	events                []event.Event
+	eventsMu              sync.Mutex
+	recordedEdits         []tools.EditProposal
+	validateFn            func(ctx context.Context, p tools.EditProposal) ([]event.ValidatorSummary, string)
+	autonomousFn          func() bool
+	sendCriticalFn        func(ctx context.Context, ev event.Event) error
+	proposalDelivered     chan struct{}
+	proposalDeliveredOnce sync.Once
 }
 
 func newRig() *orchTestRig {
@@ -64,6 +72,7 @@ func newRig() *orchTestRig {
 		sendCriticalFn: func(_ context.Context, _ event.Event) error {
 			return nil
 		},
+		proposalDelivered: make(chan struct{}),
 	}
 }
 
@@ -72,7 +81,7 @@ func (r *orchTestRig) deps() Deps {
 		Cache:        r.cache,
 		Workspace:    r.ctxSet,
 		Send:         r.recordEvent,
-		SendCritical: func(ctx context.Context, ev event.Event) error { return r.sendCriticalFn(ctx, ev) },
+		SendCritical: r.sendCriticalDelivery,
 		Validate: func(ctx context.Context, p tools.EditProposal) ([]event.ValidatorSummary, string) {
 			return r.validateFn(ctx, p)
 		},
@@ -80,6 +89,25 @@ func (r *orchTestRig) deps() Deps {
 		Autonomous: func() bool { return r.autonomousFn() },
 		DiagDelay:  0, // skip the post-Continue diagnostic sleep in tests
 	}
+}
+
+// sendCriticalDelivery is the rig's SendCritical wrapper. It calls
+// the test-overridable [orchTestRig.sendCriticalFn] (so tests can
+// inject a delivery failure), and on successful delivery records
+// the event AND signals proposalDelivered for any AgentEditProposed
+// event so goroutine-driven tests can rendezvous on actual delivery
+// instead of a wall-clock sleep.
+func (r *orchTestRig) sendCriticalDelivery(ctx context.Context, ev event.Event) error {
+	if err := r.sendCriticalFn(ctx, ev); err != nil {
+		return err
+	}
+	r.recordEvent(ev)
+	if _, ok := ev.(event.AgentEditProposed); ok {
+		r.proposalDeliveredOnce.Do(func() {
+			close(r.proposalDelivered)
+		})
+	}
+	return nil
 }
 
 func (r *orchTestRig) recordEvent(ev event.Event) {
@@ -189,10 +217,14 @@ func TestHandle_HappyPath_ApproveAndContinue(t *testing.T) {
 	p := sampleProposal()
 
 	go func() {
-		// Wait briefly so the orchestrator parks in AwaitApproval first.
-		time.Sleep(10 * time.Millisecond)
+		// Block until the orchestrator has actually delivered the
+		// proposal event — i.e. it's about to park (or has just
+		// parked) in AwaitApproval. coord.Continue is buffered, so
+		// firing both signals back-to-back is safe: Approve
+		// releases AwaitApproval, Continue queues for the
+		// AwaitContinue that follows.
+		<-r.proposalDelivered
 		coord.Approve()
-		time.Sleep(10 * time.Millisecond)
 		coord.Continue(p.ExpectedContent)
 	}()
 
@@ -223,9 +255,8 @@ func TestHandle_DeveloperModifiedContinue(t *testing.T) {
 	developerEdited := p.ExpectedContent + "\n// developer added this line\n"
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		<-r.proposalDelivered
 		coord.Approve()
-		time.Sleep(10 * time.Millisecond)
 		coord.Continue(developerEdited)
 	}()
 
@@ -262,7 +293,7 @@ func TestHandle_Reject(t *testing.T) {
 	p := sampleProposal()
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		<-r.proposalDelivered
 		coord.Reject()
 	}()
 
@@ -298,7 +329,11 @@ func TestHandle_CtxCanceled_DuringApproval(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		// Wait for proposal delivery so we exercise the
+		// AwaitApproval cancel path specifically — a cancel that
+		// fired before SendCritical would test a different return
+		// path inside handle().
+		<-r.proposalDelivered
 		cancel()
 	}()
 
@@ -359,9 +394,8 @@ func TestHandle_AutonomousMode_SuppressesContinueHint(t *testing.T) {
 			p := sampleProposal()
 
 			go func() {
-				time.Sleep(10 * time.Millisecond)
+				<-r.proposalDelivered
 				coord.Approve()
-				time.Sleep(10 * time.Millisecond)
 				coord.Continue(p.ExpectedContent)
 			}()
 

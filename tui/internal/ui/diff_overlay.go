@@ -3,8 +3,8 @@ package ui
 import (
 	"strings"
 
-	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/editor"
 )
 
 // DiffOverlay manages the inline diff preview and editable replacement lines.

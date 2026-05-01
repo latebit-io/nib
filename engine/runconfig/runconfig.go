@@ -43,7 +43,7 @@ func EffectiveTimeout(r Resolved) time.Duration {
 }
 
 // Config is the on-disk shape of `.project/run.json`. Fields are
-// lowercase JSON keys to match the rest of junto's project config
+// lowercase JSON keys to match the rest of the project config
 // surface.
 type Config struct {
 	// SmokeCommand is the shell command (passed to `sh -c`) that
@@ -194,7 +194,7 @@ func detectDefault(projectRoot string) (cmd, source string) {
 
 // hasMakefileTarget reports whether projectRoot/Makefile defines a
 // target named name. Uses a coarse text scan rather than full Make
-// parsing — sufficient for the .PHONY-style targets junto cares about
+// parsing — sufficient for the .PHONY-style targets the runner cares about
 // and avoids pulling in a Makefile parser.
 func hasMakefileTarget(projectRoot, name string) bool {
 	data, err := os.ReadFile(filepath.Join(projectRoot, "Makefile"))

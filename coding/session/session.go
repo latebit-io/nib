@@ -14,15 +14,15 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/latebit-io/junto/engine/search"
+	"github.com/latebit-io/nib/engine/search"
 	"time"
 
-	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/capture"
-	"github.com/latebit-io/junto/engine/editor"
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/filelist"
-	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/capture"
+	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/filelist"
+	"github.com/latebit-io/nib/engine/lang"
 )
 
 // agentLifecycle is the subset of agent operations that start, extend, or
@@ -128,7 +128,7 @@ type Session struct {
 	// live adapter via SetEventSink at the composition root.
 	sink capture.SessionEventSink
 
-	// sessionID groups capture events emitted during this Junto process
+	// sessionID groups capture events emitted during this host process
 	// lifetime. Generated once in New; the demarkus adapter uses it as
 	// the per-process document identifier.
 	sessionID string
@@ -189,7 +189,7 @@ type Session struct {
 
 	// highlighterFactory produces a [editor.Highlighter] for a given file
 	// path. Frontends that render source (TUI) install the real factory via
-	// [SetHighlighterFactory]; headless binaries (junto-agent) leave it nil
+	// [SetHighlighterFactory]; headless binaries (the headless binary) leaves it nil
 	// so tree-sitter grammar blobs are never linked in. Guarded by mu.
 	highlighterFactory editor.HighlighterFactory
 

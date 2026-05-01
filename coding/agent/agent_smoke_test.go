@@ -4,19 +4,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/runconfig"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/runconfig"
 )
 
-// TestAgent_SmokeRunUnregisteredWhenDisabled verifies
-// JUNTO_SMOKE_DISABLED is a complete kill-switch — when set, the
+// TestAgent_SmokeRunUnregisteredWhenDisabled verifies the
+// smoke-disabled env var is a complete kill-switch — when set, the
 // LLM does NOT see smoke_run as an available tool, matching the
 // auto-invocation suppression in runTaskReview. Pre-fix, the env
 // var only gated the auto-run path; the LLM could still invoke
 // smoke_run directly, defeating the disable in exactly the
 // environments that set the flag.
 func TestAgent_SmokeRunUnregisteredWhenDisabled(t *testing.T) {
-	t.Setenv("JUNTO_SMOKE_DISABLED", "1")
+	t.Setenv(brand.EnvKeySmokeDisabled, "1")
 
 	events := make(chan event.Event, 8)
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
@@ -27,11 +28,11 @@ func TestAgent_SmokeRunUnregisteredWhenDisabled(t *testing.T) {
 		}})
 
 	if _, ok := ag.tools["smoke_run"]; ok {
-		t.Errorf("smoke_run registered with JUNTO_SMOKE_DISABLED set; want absent")
+		t.Errorf("smoke_run registered with %s set; want absent", brand.EnvKeySmokeDisabled)
 	}
 	for _, def := range ag.toolDefs {
 		if def.Function.Name == "smoke_run" {
-			t.Errorf("smoke_run advertised in tool defs with JUNTO_SMOKE_DISABLED set")
+			t.Errorf("smoke_run advertised in tool defs with %s set", brand.EnvKeySmokeDisabled)
 		}
 	}
 }
@@ -42,7 +43,7 @@ func TestAgent_SmokeRunUnregisteredWhenDisabled(t *testing.T) {
 // of appendSmokeTool that accidentally disables the happy path.
 func TestAgent_SmokeRunRegisteredWhenEnabled(t *testing.T) {
 	// Explicitly clear in case the test runner inherited it.
-	t.Setenv("JUNTO_SMOKE_DISABLED", "")
+	t.Setenv(brand.EnvKeySmokeDisabled, "")
 
 	events := make(chan event.Event, 8)
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,

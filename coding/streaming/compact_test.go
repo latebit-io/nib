@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // TestMaybeCompact_BelowThresholdNoOp verifies that a small history

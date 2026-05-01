@@ -8,7 +8,7 @@ import (
 	tree_sitter_lua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // luaLang returns a Lua grammar instance for tests. Cached per-process

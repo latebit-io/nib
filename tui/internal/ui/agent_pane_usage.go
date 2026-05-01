@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // Token-usage tracking and formatting for AgentPaneModel.

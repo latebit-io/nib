@@ -20,9 +20,9 @@ import (
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 
-	"github.com/latebit-io/junto/engine/lint"
-	"github.com/latebit-io/junto/engine/styleconfig"
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/engine/lint"
+	"github.com/latebit-io/nib/engine/styleconfig"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // StageName identifies this validator in [validate.Result.Stage] and
@@ -226,8 +226,8 @@ func parseFunctionSpans(ctx context.Context, lang *sitter.Language, src string) 
 
 // functionLikeKinds is the explicit allow-list of tree-sitter node type
 // names that count as function or method declarations. Drawn from the
-// grammars junto supports today (Go, Lua) plus common shapes for
-// languages junto is likely to grow into (JS/TS, Python, Rust). A
+// grammars we support today (Go, Lua) plus common shapes for
+// languages we are likely to grow into (JS/TS, Python, Rust). A
 // substring match like "contains function" was tried first but
 // double-counted Lua `function_name` child nodes inside
 // `function_declaration` parents — explicit names are deterministic.

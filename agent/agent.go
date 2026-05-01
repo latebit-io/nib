@@ -13,7 +13,7 @@
 //
 // This file currently contains the public surface only. The loop body
 // is filled in during phase 3 of the layering refactor; see
-// /junto/plans/pi-mono-layering.md.
+// /nib/plans/pi-mono-layering.md.
 package agent
 
 import (
@@ -21,8 +21,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/latebit-io/junto/agent/event"
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/agent/event"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // Options bundles the construction-time inputs for [New]. Every field

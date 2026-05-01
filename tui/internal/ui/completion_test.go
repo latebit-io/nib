@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/nib/engine/lang"
 )
 
 func completionTestItems() []lang.CompletionItem {

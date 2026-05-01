@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/lang"
 )
 
 // defWorkspace returns a testWorkspace configured with a project root.

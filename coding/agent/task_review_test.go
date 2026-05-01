@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/lint"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/lint"
 )
 
 // fakeLinter implements lint.Linter with a scripted result for testing

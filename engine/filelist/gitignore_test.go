@@ -3,7 +3,7 @@ package filelist
 import (
 	"testing"
 
-	"github.com/latebit-io/junto/engine/glob"
+	"github.com/latebit-io/nib/engine/glob"
 )
 
 func TestParseLine(t *testing.T) {

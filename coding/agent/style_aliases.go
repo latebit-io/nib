@@ -3,8 +3,8 @@ package agent
 import (
 	"time"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/coding/style"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/style"
 )
 
 // StyleEvaluator aliases [style.StyleEvaluator] so wire/tui callers

@@ -6,7 +6,7 @@ import (
 
 func TestSerialize_Roundtrip(t *testing.T) {
 	input := `---
-project: Junto
+project: TestProject
 ---
 
 # TUI Editor + Agent
@@ -45,14 +45,14 @@ func TestSerialize_NoFrontmatter(t *testing.T) {
 
 func TestSerialize_WithFrontmatter(t *testing.T) {
 	tree := &Tree{
-		ProjectName: "Junto",
+		ProjectName: "TestProject",
 		Roots: []*Node{
 			{Title: "Component", Depth: 0, IsHeading: true},
 		},
 	}
 	output := Serialize(tree)
 
-	want := "---\nproject: Junto\n---\n\n# Component\n"
+	want := "---\nproject: TestProject\n---\n\n# Component\n"
 	if output != want {
 		t.Errorf("output = %q, want %q", output, want)
 	}

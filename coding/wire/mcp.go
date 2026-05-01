@@ -10,9 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/latebit-io/junto/coding/agent"
-	codingtools "github.com/latebit-io/junto/coding/tools"
-	"github.com/latebit-io/junto/engine/mcp"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/coding/agent"
+	codingtools "github.com/latebit-io/nib/coding/tools"
+	"github.com/latebit-io/nib/engine/mcp"
 )
 
 // mcpServerConfig describes one MCP server in .mcp.json.
@@ -131,8 +132,8 @@ func initMCPServer(client *mcp.Client, name string) ([]mcp.ToolInfo, error) {
 	return tools, nil
 }
 
-// loadMCPConfigs reads MCP server configurations from .mcp.json
-// or the JUNTO_MCP environment variable.
+// loadMCPConfigs reads MCP server configurations from .mcp.json or the
+// brand-prefixed MCP environment variable.
 func loadMCPConfigs(projectRoot string) map[string]mcpServerConfig {
 	// Try .mcp.json at project root (same location as Claude Code).
 	configPath := filepath.Join(projectRoot, ".mcp.json")
@@ -146,9 +147,9 @@ func loadMCPConfigs(projectRoot string) map[string]mcpServerConfig {
 		}
 	}
 
-	// Fall back to JUNTO_MCP env var: "name=command arg1 arg2"
+	// Fall back to the brand-prefixed MCP env var: "name=command arg1 arg2"
 	// Multiple servers separated by semicolons.
-	mcpEnv := os.Getenv("JUNTO_MCP")
+	mcpEnv := os.Getenv(brand.EnvKeyMCP)
 	if mcpEnv == "" {
 		return nil
 	}
@@ -161,7 +162,7 @@ func loadMCPConfigs(projectRoot string) map[string]mcpServerConfig {
 		}
 		name, cmd, found := strings.Cut(entry, "=")
 		if !found || cmd == "" {
-			slog.Warn("mcp: invalid JUNTO_MCP entry", "entry", entry)
+			slog.Warn("mcp: invalid env entry", "envvar", brand.EnvKeyMCP, "entry", entry)
 			continue
 		}
 		configs[name] = mcpServerConfig{Command: cmd}

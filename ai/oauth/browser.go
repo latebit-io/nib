@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 // BrowserFlowConfig holds the endpoint configuration for Authorization Code + PKCE.
@@ -127,7 +129,7 @@ func startCallbackServer(host string, port int, state, callbackPath string) (*ca
 			return
 		}
 		trySendCode(code)
-		_, _ = fmt.Fprint(w, "<html><body><h1>Authentication successful!</h1><p>You can close this tab and return to Junto.</p></body></html>") // client may have disconnected; not actionable
+		_, _ = fmt.Fprintf(w, "<html><body><h1>Authentication successful!</h1><p>You can close this tab and return to %s.</p></body></html>", html.EscapeString(brand.Name)) // client may have disconnected; not actionable
 	})
 
 	srv := &http.Server{Handler: mux}

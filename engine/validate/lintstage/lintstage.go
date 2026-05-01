@@ -17,8 +17,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/lint"
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/engine/lint"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // StageName identifies this validator in [validate.Result.Stage] and
@@ -83,7 +84,7 @@ func (v *Validator) Applicable(c validate.Candidate) bool {
 // Validate writes c.After to a temp file with the original extension
 // preserved, runs each per-file linter against it, aggregates findings,
 // and rewrites their Path fields back to c.Path so the LLM sees the
-// real source location instead of /tmp/junto-lint-…/main.lua.
+// real source location instead of the [brand.TempDirPrefix] sandbox path.
 //
 // Verdict is Retry on findings, Pass on clean. An infrastructure error
 // from a linter (missing binary, parse failure) does not produce Retry
@@ -162,7 +163,7 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 // surface to callers because a leaked tempfile is preferable to a
 // confusing error tail on a successful validation.
 func writeCandidate(originalPath, content string) (dir, file string, cleanup func(), err error) {
-	tempDir, err := os.MkdirTemp("", "junto-lint-")
+	tempDir, err := os.MkdirTemp("", brand.TempDirPrefix)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("mkdir temp: %w", err)
 	}

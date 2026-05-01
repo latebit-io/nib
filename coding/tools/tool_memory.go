@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/memory"
-	"github.com/latebit-io/junto/engine/project"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/engine/project"
 )
 
 // ProjectWorkTreePath is the canonical demarkus path of the strict

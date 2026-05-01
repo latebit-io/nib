@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/junto/engine/mcp"
-	"github.com/latebit-io/junto/engine/memory"
-	"github.com/latebit-io/junto/engine/memory/mcpadapter"
-	"github.com/latebit-io/junto/engine/memory/server"
+	"github.com/latebit-io/nib/engine/mcp"
+	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/engine/memory/mcpadapter"
+	"github.com/latebit-io/nib/engine/memory/server"
 )
 
 // integrationEnv holds the shared state for integration tests.

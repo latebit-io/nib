@@ -12,8 +12,8 @@ func TestResolveModuleDir(t *testing.T) {
 	//   root/
 	//     engine/go.mod
 	//     engine/lint/foo.go
-	//     cmd/junto-agent/go.mod
-	//     cmd/junto-agent/main.go
+	//     cmd/agent/go.mod
+	//     cmd/agent/main.go
 	root := t.TempDir()
 	must := func(path string) {
 		t.Helper()
@@ -25,7 +25,7 @@ func TestResolveModuleDir(t *testing.T) {
 		}
 	}
 	must(filepath.Join(root, "engine", "go.mod"))
-	must(filepath.Join(root, "cmd", "junto-agent", "go.mod"))
+	must(filepath.Join(root, "cmd", "agent", "go.mod"))
 	if err := os.MkdirAll(filepath.Join(root, "engine", "lint"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestResolveModuleDir(t *testing.T) {
 	}{
 		{"engine/lint", filepath.Join(root, "engine"), "lint"},
 		{"engine", filepath.Join(root, "engine"), "."},
-		{"cmd/junto-agent", filepath.Join(root, "cmd", "junto-agent"), "."},
+		{"cmd/agent", filepath.Join(root, "cmd", "agent"), "."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.dir, func(t *testing.T) {

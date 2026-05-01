@@ -4,9 +4,9 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/latebit-io/junto/coding/validation"
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/coding/validation"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // Validation gate for Agent.

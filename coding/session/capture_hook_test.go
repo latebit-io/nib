@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/capture"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/engine/capture"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // fakeSink records every Append call so tests can assert on the emitted

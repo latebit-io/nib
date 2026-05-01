@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/coding/agent"
-	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/editor"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/agent"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // stubProvider satisfies llm.Provider for constructing an agent in tests.

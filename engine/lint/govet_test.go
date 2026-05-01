@@ -21,7 +21,7 @@ func captureSlog(t *testing.T, level slog.Level) *bytes.Buffer {
 }
 
 func TestParseGoVetOutput_findings(t *testing.T) {
-	output := `# github.com/latebit-io/junto/coding/agent
+	output := `# github.com/latebit-io/nib/coding/agent
 coding/agent/agent.go:1510:13: unreachable code
 coding/agent/tool.go:42:5: printf format %d has arg x of wrong type string
 `

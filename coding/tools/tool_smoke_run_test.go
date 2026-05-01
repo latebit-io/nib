@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/runconfig"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/runconfig"
 )
 
 // TestSmokeToolDefinitionAdvertisesSource verifies the tool definition

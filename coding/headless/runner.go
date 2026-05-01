@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // agentPort is the narrow interface Runner needs from the agent.

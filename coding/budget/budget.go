@@ -10,7 +10,7 @@ package budget
 import (
 	"fmt"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // DefaultTaskTokens caps prompt+completion tokens for a single agent

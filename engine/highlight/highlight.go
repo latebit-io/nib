@@ -14,7 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/nib/engine/editor"
 	tree_sitter_lua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
 	tree_sitter_yaml "github.com/tree-sitter-grammars/tree-sitter-yaml/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
@@ -33,7 +33,7 @@ var yamlHighlightsSCM string
 // Re-export the editor types so existing references to e.g. highlight.Token
 // continue to resolve. Everything below is a thin alias — the canonical
 // definitions live in the editor package so binaries that never render
-// (junto-agent) can skip the tree-sitter grammar imports entirely.
+// (the headless agent) can skip the tree-sitter grammar imports entirely.
 type (
 	// TokenKind aliases [editor.TokenKind].
 	TokenKind = editor.TokenKind

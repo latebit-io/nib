@@ -11,9 +11,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/tui/internal/sanitize"
-	"github.com/latebit-io/junto/tui/internal/ui/textarea"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/tui/internal/sanitize"
+	"github.com/latebit-io/nib/tui/internal/ui/textarea"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -428,7 +429,7 @@ func (m *AgentPaneModel) Clipboard() ClipboardService { return m.services.Clipbo
 
 // Title returns the pane title for display in the border. Implements Titled.
 func (m *AgentPaneModel) Title() string {
-	return "Junto"
+	return brand.Name
 }
 
 // SetSize updates the agent pane dimensions and clamps scroll. Implements Pane.

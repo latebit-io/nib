@@ -1,4 +1,4 @@
-// Package ui provides the Bubble Tea TUI components for junto.
+// Package ui provides the Bubble Tea TUI components for the editor.
 package ui
 
 import (
@@ -10,10 +10,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/latebit-io/junto/engine/editor"
-	"github.com/latebit-io/junto/engine/highlight"
-	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/tui/internal/sanitize"
+	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/highlight"
+	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/tui/internal/sanitize"
 	"github.com/mattn/go-runewidth"
 )
 

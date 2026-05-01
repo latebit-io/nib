@@ -11,9 +11,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/latebit-io/junto/engine/filelist"
-	"github.com/latebit-io/junto/engine/project"
-	"github.com/latebit-io/junto/tui/internal/ui/textarea"
+	"github.com/latebit-io/nib/engine/filelist"
+	"github.com/latebit-io/nib/engine/project"
+	"github.com/latebit-io/nib/tui/internal/ui/textarea"
 )
 
 // ProjectOpenFileMsg is sent when the user selects a file in the project pane.

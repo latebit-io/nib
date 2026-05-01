@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/latebit-io/junto/engine/capture"
-	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/nib/engine/capture"
+	"github.com/latebit-io/nib/engine/memory"
 )
 
 // fakeStore is an in-memory memory.Store for tests. Records every call so

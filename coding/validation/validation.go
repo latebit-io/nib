@@ -10,8 +10,8 @@ package validation
 import (
 	"strings"
 
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // MaxValidatorRetries caps the per-CanonPath silent-retry budget the

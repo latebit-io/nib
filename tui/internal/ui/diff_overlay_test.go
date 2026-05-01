@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/nib/engine/editor"
 )
 
 func TestNewDiffOverlay(t *testing.T) {

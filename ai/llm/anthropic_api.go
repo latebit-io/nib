@@ -22,7 +22,7 @@ import (
 const anthropicDefaultMaxTokens = 16384
 
 // AnthropicAPI implements Provider using the Anthropic Messages API.
-// It translates junto's OpenAI-shaped Message/ToolCall types to the Anthropic
+// It translates the codebase's OpenAI-shaped Message/ToolCall types to the Anthropic
 // content-block format and parses the Anthropic SSE streaming response.
 type AnthropicAPI struct {
 	auth          Auth
@@ -226,7 +226,7 @@ func batchToolResult(msgs []anthropicMessage, block anthropicContent) []anthropi
 	})
 }
 
-// convertToolDefs converts junto tool definitions to the Anthropic format.
+// convertToolDefs converts internal tool definitions to the Anthropic format.
 func convertToolDefs(tools []ToolDef, promptCaching bool) []anthropicToolDef {
 	result := make([]anthropicToolDef, len(tools))
 	for i, t := range tools {
@@ -242,7 +242,7 @@ func convertToolDefs(tools []ToolDef, promptCaching bool) []anthropicToolDef {
 	return result
 }
 
-// buildAnthropicRequest translates junto's types into the Anthropic wire format.
+// buildAnthropicRequest translates the codebase's typed into the Anthropic wire format.
 func (a *AnthropicAPI) buildAnthropicRequest(messages []Message, tools []ToolDef) *anthropicRequest {
 	var system []anthropicContent
 	var anthropicMsgs []anthropicMessage
@@ -515,7 +515,7 @@ func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, resp *http.Response
 }
 
 // mergeAnthropicUsage combines input usage (from message_start) with output
-// usage (from message_delta) into the junto Usage type.
+// usage (from message_delta) into the internal Usage type.
 func mergeAnthropicUsage(input, output *anthropicUsage) *Usage {
 	u := &Usage{}
 	if input != nil {

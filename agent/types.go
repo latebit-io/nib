@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // Tool is a capability the agent can invoke during the LLM loop. Each tool

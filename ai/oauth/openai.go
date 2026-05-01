@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 // OpenAI OAuth constants — matches the Codex CLI client registration.
@@ -145,7 +147,7 @@ func OpenAIBrowserFlow(ctx context.Context, store *Store, callbacks *FlowCallbac
 		ExtraParams: map[string]string{
 			"id_token_add_organizations": "true",
 			"codex_cli_simplified_flow":  "true",
-			"originator":                 "junto",
+			"originator":                 brand.OAuthOriginator,
 		},
 	}
 

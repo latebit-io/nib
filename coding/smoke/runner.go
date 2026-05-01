@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/latebit-io/junto/engine/run/proc"
-	"github.com/latebit-io/junto/engine/runconfig"
+	"github.com/latebit-io/nib/engine/run/proc"
+	"github.com/latebit-io/nib/engine/runconfig"
 )
 
 // RunSmoke invokes the configured smoke command via [proc.Run]. The
@@ -37,7 +37,7 @@ func RunSmoke(ctx context.Context, projectRoot string, cfg runconfig.Resolved) p
 	// may contain inline env assignments or auth flags. The
 	// FormatSmokeResult comment lays out the same redaction policy
 	// for LLM-facing/persisted surfaces; debug logs can flow to
-	// JUNTO_LOG files, bug reports, and CI captures, so they get
+	// debug-log files, bug reports, and CI captures, so they get
 	// the same treatment. cfg.Source identifies which command ran.
 	slog.Debug("smoke: running", "source", cfg.Source, "timeout", timeout)
 

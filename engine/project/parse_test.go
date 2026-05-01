@@ -12,8 +12,8 @@ func TestParse_Frontmatter(t *testing.T) {
 	}{
 		{
 			name:    "extracts project name",
-			input:   "---\nproject: Junto\n---\n# Component",
-			wantPrj: "Junto",
+			input:   "---\nproject: TestProject\n---\n# Component",
+			wantPrj: "TestProject",
 		},
 		{
 			name:    "no frontmatter",
@@ -22,8 +22,8 @@ func TestParse_Frontmatter(t *testing.T) {
 		},
 		{
 			name:    "frontmatter with extra fields",
-			input:   "---\nproject: Junto\nversion: 1\n---\n# Component",
-			wantPrj: "Junto",
+			input:   "---\nproject: TestProject\nversion: 1\n---\n# Component",
+			wantPrj: "TestProject",
 		},
 		{
 			name:    "empty frontmatter",
@@ -37,7 +37,7 @@ func TestParse_Frontmatter(t *testing.T) {
 		},
 		{
 			name:    "unterminated frontmatter ignores fields",
-			input:   "---\nproject: Junto\n# Component",
+			input:   "---\nproject: TestProject\n# Component",
 			wantPrj: "",
 		},
 	}
@@ -53,7 +53,7 @@ func TestParse_Frontmatter(t *testing.T) {
 }
 
 func TestParse_UnterminatedFrontmatter_PreservesContent(t *testing.T) {
-	input := "---\nproject: Junto\n# Component\n- [ ] task"
+	input := "---\nproject: TestProject\n# Component\n- [ ] task"
 	tree := Parse(input)
 
 	if tree.ProjectName != "" {
@@ -156,7 +156,7 @@ func TestParse_TasksWithoutHeading(t *testing.T) {
 
 func TestParse_MixedContent(t *testing.T) {
 	input := `---
-project: Junto
+project: TestProject
 ---
 
 # TUI Editor + Agent
@@ -178,8 +178,8 @@ More prose here.
 `
 	tree := Parse(input)
 
-	if tree.ProjectName != "Junto" {
-		t.Errorf("ProjectName = %q, want %q", tree.ProjectName, "Junto")
+	if tree.ProjectName != "TestProject" {
+		t.Errorf("ProjectName = %q, want %q", tree.ProjectName, "TestProject")
 	}
 	if len(tree.Roots) != 1 {
 		t.Fatalf("Roots = %d, want 1", len(tree.Roots))

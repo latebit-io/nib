@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/engine/lsp"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/engine/lsp"
 )
 
 // lspServerConfig describes one LSP server in .project/lsp.json.

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 // KeyStore persists API keys entered via the TUI to disk.
@@ -31,14 +33,15 @@ func NewKeyStore(path string) (*KeyStore, error) {
 	return s, nil
 }
 
-// DefaultKeyStorePath returns ~/.config/junto/keys.json (or platform equivalent).
-// Returns empty string and an error if the config directory cannot be resolved.
+// DefaultKeyStorePath returns <UserConfigDir>/<brand.ConfigDirName>/keys.json
+// (e.g. ~/.config/<brand>/keys.json on Linux). Returns empty string and an
+// error if the user config directory cannot be resolved.
 func DefaultKeyStorePath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("keystore: resolve config dir: %w", err)
 	}
-	return filepath.Join(dir, "junto", "keys.json"), nil
+	return filepath.Join(dir, brand.ConfigDirName, "keys.json"), nil
 }
 
 // Get returns the stored API key for a profile, or empty if none exists.

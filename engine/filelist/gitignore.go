@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/glob"
+	"github.com/latebit-io/nib/engine/glob"
 )
 
 // matcher checks paths against a set of gitignore patterns.

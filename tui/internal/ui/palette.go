@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/latebit-io/junto/engine/fuzzy"
+	"github.com/latebit-io/nib/engine/fuzzy"
 )
 
 // PaletteItem represents an entry in the command palette.

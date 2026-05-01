@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/mcp"
-	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/nib/engine/mcp"
+	"github.com/latebit-io/nib/engine/memory"
 )
 
 // stubCaller records calls and returns canned results keyed by tool name.

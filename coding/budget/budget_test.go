@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 func TestResolve(t *testing.T) {

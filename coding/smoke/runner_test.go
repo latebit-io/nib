@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/junto/engine/run/proc"
-	"github.com/latebit-io/junto/engine/runconfig"
+	"github.com/latebit-io/nib/engine/run/proc"
+	"github.com/latebit-io/nib/engine/runconfig"
 )
 
 // TestFormatSmokeResultDoesNotLeakCommand verifies the LLM-facing

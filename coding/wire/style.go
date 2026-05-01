@@ -4,12 +4,12 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/ai/llmconfig"
-	"github.com/latebit-io/junto/coding/agent"
-	"github.com/latebit-io/junto/engine/lint"
-	"github.com/latebit-io/junto/engine/styleconfig"
-	"github.com/latebit-io/junto/engine/validate/architecture"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmconfig"
+	"github.com/latebit-io/nib/coding/agent"
+	"github.com/latebit-io/nib/engine/lint"
+	"github.com/latebit-io/nib/engine/styleconfig"
+	"github.com/latebit-io/nib/engine/validate/architecture"
 )
 
 // PerFileLinterHolder is a thread-safe holder for the active style's

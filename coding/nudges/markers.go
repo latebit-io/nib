@@ -11,7 +11,7 @@ package nudges
 import (
 	"strings"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // OutstandingNudgeMessage is the synthetic user message the narrative

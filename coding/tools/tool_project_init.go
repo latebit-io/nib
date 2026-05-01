@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // ProjectInitTool bootstraps the project's task-tracking document at

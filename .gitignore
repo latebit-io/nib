@@ -27,7 +27,7 @@ go.work.sum
 # env file
 .env
 bin
-cmd/junto-agent/junto-agent
+cmd/agent/bin/nib-agent
 .mcp.json
 log.txt
 .project

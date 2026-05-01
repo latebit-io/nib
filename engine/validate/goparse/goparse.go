@@ -19,8 +19,8 @@ import (
 	"go/token"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/lint"
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/engine/lint"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // StageName identifies this validator in Result.Stage and capture payloads.

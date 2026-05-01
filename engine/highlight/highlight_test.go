@@ -128,10 +128,10 @@ return M
 
 func TestParse_YAMLProducesExpectedKinds(t *testing.T) {
 	src := `---
-project: junto
+project: TestProject
 enabled: true
 count: 42
-name: "Junto"
+name: "TestProject"
 tags:
   - ai
   - editor

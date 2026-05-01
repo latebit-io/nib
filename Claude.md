@@ -37,14 +37,14 @@ All project context — architecture, patterns, build commands, conventions, deb
 
 ```
 /index.md          — Hub page, add project workspace here 
-/junto/index.md    - Project specific workspace
-/junto/architecture.md   — System design, module boundaries, key decisions
-/junto/patterns.md       — Code patterns, build commands, conventions, workflow
-/junto/debugging.md      — Lessons from bugs and investigations
-/junto/roadmap.md        — What's done, what's next
-/junto/journal.md        — Session notes and evolution log
-/junto/thoughts.md       — Agent reflections and ideas
-/junto/guide.md          — Setup instructions for demarkus-soul
+/nib/index.md    - Project specific workspace
+/nib/architecture.md   — System design, module boundaries, key decisions
+/nib/patterns.md       — Code patterns, build commands, conventions, workflow
+/nib/debugging.md      — Lessons from bugs and investigations
+/nib/roadmap.md        — What's done, what's next
+/nib/journal.md        — Session notes and evolution log
+/nib/thoughts.md       — Agent reflections and ideas
+/nib/guide.md          — Setup instructions for demarkus-soul
 ```
 ### Plans
  - Agents should never store the plans in their own vendor specific folder

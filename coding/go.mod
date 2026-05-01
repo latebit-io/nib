@@ -1,11 +1,11 @@
-module github.com/latebit-io/junto/coding
+module github.com/latebit-io/nib/coding
 
 go 1.26
 
 require (
-	github.com/latebit-io/junto/agent v0.0.0
-	github.com/latebit-io/junto/ai v0.0.0
-	github.com/latebit-io/junto/engine v0.0.0
+	github.com/latebit-io/nib/agent v0.0.0
+	github.com/latebit-io/nib/ai v0.0.0
+	github.com/latebit-io/nib/engine v0.0.0
 )
 
 require (
@@ -13,8 +13,8 @@ require (
 	github.com/tree-sitter/go-tree-sitter v0.25.0 // indirect
 )
 
-replace github.com/latebit-io/junto/agent => ../agent
+replace github.com/latebit-io/nib/agent => ../agent
 
-replace github.com/latebit-io/junto/ai => ../ai
+replace github.com/latebit-io/nib/ai => ../ai
 
-replace github.com/latebit-io/junto/engine => ../engine
+replace github.com/latebit-io/nib/engine => ../engine

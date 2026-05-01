@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // TestApplicable pins the file-extension gate. Non-Go files must be

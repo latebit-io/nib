@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // defaultBashTimeout is the maximum duration a bash command can run.

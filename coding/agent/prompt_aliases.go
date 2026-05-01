@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"github.com/latebit-io/junto/coding/prompts"
+	"github.com/latebit-io/nib/coding/prompts"
 )
 
 // CodingStyleData aliases [prompts.CodingStyleData] so wire/tui

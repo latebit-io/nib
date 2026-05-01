@@ -10,8 +10,8 @@ import (
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
 
-	"github.com/latebit-io/junto/engine/styleconfig"
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/engine/styleconfig"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // stubProvider is the test double for [Provider]. The Architecture is

@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/lang"
 )
 
 // Manager implements lang.DocumentSyncer (and optional capability interfaces)

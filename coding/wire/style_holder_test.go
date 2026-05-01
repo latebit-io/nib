@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/lint"
+	"github.com/latebit-io/nib/engine/lint"
 )
 
 // stubLinter is the minimal Linter implementation tests need.

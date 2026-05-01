@@ -291,7 +291,7 @@ func TestTerminatePID_AlreadyGone(t *testing.T) {
 func TestAcquireLock_BlocksSecondInstance(t *testing.T) {
 	// Two Managers pointed at the same project directory must not be able
 	// to both hold the lock. This is the single-instance guarantee that
-	// prevents two junto processes from racing on — and clobbering — the
+	// prevents two host processes from racing on — and clobbering — the
 	// same memory server.
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".project"), 0755); err != nil {
@@ -349,7 +349,7 @@ func TestReuseExisting_DoesNotKillRecycledUnrelatedPID(t *testing.T) {
 	// fails unless the PID is actually a demarkus-server for this
 	// content dir. Otherwise a stale .memory-pid whose PID got recycled
 	// by an unrelated process (editor, shell, etc.) would be SIGKILL'd
-	// on the next junto launch — a real data-loss risk for the user.
+	// on the next host launch — a real data-loss risk for the user.
 	m := New(t.TempDir())
 
 	// Set up state-files pointing at a live but unrelated PID.
@@ -410,7 +410,7 @@ func TestStop_ReapsOwnedChildWithoutZombie(t *testing.T) {
 	// owned-child bookkeeping (m.cmd/m.waitDone) was set only after
 	// waitReady returned, so any early-startup failure took the
 	// terminatePID path that signals but cannot reap, leaving a zombie
-	// until junto exited.
+	// until the host exited.
 	m := New(t.TempDir())
 
 	cmd := exec.Command("sleep", "60")

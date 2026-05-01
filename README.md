@@ -1,10 +1,14 @@
-# Junto
+# nib
 
-Collaborative AI engineering — a TUI where engineer and AI agent work on the same file simultaneously.
+A coding agent that writes code — embedded in a TUI editor that keeps the engineer in the loop.
+
+Three panes (project, editor, agent) give live observability into what the agent is doing as it does it. The agent owns the write loop; you intervene with high-leverage signals — approve an edit, reject it, redirect the goal. An autonomy dial controls how often you're asked: review every edit (Guided), let routine work through (Trusted), or run autonomously (Yolo).
+
+This isn't pair programming. The agent doesn't co-type alongside you, and you don't take turns at the keyboard. The editor is your read view and intervention surface — you watch edits stream in, approve them, and steer the run when it drifts off-course.
 
 ## Architecture: Composite TUI Pattern
 
-Junto uses a **Composite TUI** architecture inspired by WPF/Prism, adapted for Go and [Bubble Tea](https://github.com/charmbracelet/bubbletea). The pattern solves a common problem in terminal UIs: as you add panes, panels, and features, the main model becomes a god object that routes every event, manages every layout detail, and tangles every concern together.
+nib uses a **Composite TUI** architecture inspired by WPF/Prism, adapted for Go and [Bubble Tea](https://github.com/charmbracelet/bubbletea). The pattern solves a common problem in terminal UIs: as you add panes, panels, and features, the main model becomes a god object that routes every event, manages every layout detail, and tangles every concern together.
 
 This pattern is general-purpose. It works for any Bubble Tea application with multiple independent UI regions.
 
@@ -240,13 +244,13 @@ p.Run()
 
 ```bash
 # Editor only
-tui/bin/junto /path/to/file.go
+tui/bin/nib /path/to/file.go
 
 # With AI agent
-LLM_API_KEY=<key> tui/bin/junto /path/to/file.go
+LLM_API_KEY=<key> tui/bin/nib /path/to/file.go
 
 # Debug mode
-tui/bin/junto --debug /path/to/file.go
+tui/bin/nib --debug /path/to/file.go
 ```
 
 ## License

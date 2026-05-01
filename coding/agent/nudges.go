@@ -1,9 +1,9 @@
 package agent
 
 import (
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/coding/nudges"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/nudges"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // Post-turn nudge integration for Agent.

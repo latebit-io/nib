@@ -3,24 +3,17 @@
 // These events describe what the loop is doing: starting a run, finishing
 // a turn, streaming text, executing a tool. They carry no application
 // knowledge — no edit proposals, no approval state, no UI status kinds.
-// Application-specific events (e.g. engine/event.AgentStatus,
-// engine/event.AgentEditProposed) flow on the same channel and satisfy
-// this package's [Event] interface so frontends can type-switch over a
-// unified stream.
+// Applications consume this stream and translate into their own event
+// vocabulary at the application boundary.
 package event
 
 import "github.com/latebit-io/nib/ai/llm"
 
-// Event is the interface satisfied by every loop event AND by application-layer
-// events that share the agent's event channel. The marker method is exported so
-// that coding/event types in a downstream module can implement it — Go has no
-// declaration-merging or cross-module sealing, so this is the trade-off for
-// keeping a single typed channel on the frontend. Within the agent module the
-// family stays sealed by convention: only types defined in this file emit it.
+// Event is the sealed interface for every event the agent loop emits. The
+// marker is unexported so the family is closed at the package boundary:
+// only types defined in this file can implement Event.
 type Event interface {
-	// IsAgentEvent is a marker method. Implementing it (with an empty body)
-	// declares a type as a member of the agent-event family.
-	IsAgentEvent()
+	agentEvent()
 }
 
 // AgentStart marks the beginning of a run (one Prompt or Continue invocation).
@@ -154,44 +147,44 @@ type Error struct {
 	Err string
 }
 
-// IsAgentEvent satisfies [Event].
-func (AgentStart) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (AgentStart) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (AgentEnd) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (AgentEnd) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (TurnStart) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (TurnStart) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (TurnEnd) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (TurnEnd) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (MessageStart) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (MessageStart) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (MessageUpdate) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (MessageUpdate) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (MessageEnd) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (MessageEnd) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (ToolStart) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (ToolStart) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (ToolUpdate) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (ToolUpdate) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (ToolEnd) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (ToolEnd) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (TurnUsage) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (TurnUsage) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (InputEstimate) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (InputEstimate) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (Compacted) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (Compacted) agentEvent() {}
 
-// IsAgentEvent satisfies [Event].
-func (Error) IsAgentEvent() {}
+// agentEvent satisfies [Event].
+func (Error) agentEvent() {}

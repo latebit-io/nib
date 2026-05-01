@@ -1,19 +1,19 @@
 // Package agent implements a generic, application-agnostic LLM agent loop.
 //
-// The agent owns the multi-turn conversation, dispatches tool calls, and
-// emits lifecycle events on a typed channel. It does NOT know about file
-// edits, validation, lint, memory, approval flow, prompts, or any other
-// application concept — those live in the consuming application (in this
-// repo, the `coding` module). Application logic plugs in via [Hooks] and
-// custom [Tool] implementations.
+// This is a bare-bones, embeddable foundation for building any agent. It
+// owns the multi-turn conversation, dispatches tool calls, and emits
+// lifecycle events on a typed channel. It does NOT know about file edits,
+// validation, lint, memory, approval flow, prompts, or any other
+// application concept — those live in the consuming application.
 //
-// The design mirrors badlogic/pi-mono's `packages/agent`: tools are
-// plugins, hooks own all app-specific extension, and the agent stays a
-// few hundred lines of focused control flow.
+// The agent ships with zero tools. Consumers register their own tools via
+// [Tool] and extend behavior via [Hooks] (BeforeToolCall, AfterToolCall,
+// TransformContext, GetSteeringMessages, GetFollowUpMessages). Anything an
+// application needs to layer on top of the loop happens through those two
+// extension points.
 //
-// This file currently contains the public surface only. The loop body
-// is filled in during phase 3 of the layering refactor; see
-// /nib/plans/pi-mono-layering.md.
+// This file currently contains the public surface only; the loop body is
+// in progress.
 package agent
 
 import (

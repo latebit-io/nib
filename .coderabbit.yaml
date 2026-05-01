@@ -180,8 +180,8 @@ reviews:
         5. Attach agent to session via SetAgent()
         Session must exist before Agent (breaks the circular
         Session-needs-agentPort vs Agent-needs-Workspace dependency).
-        OnDialChange handlers must consult AutoApproveEdits() — there
-        is no separate AutoContinue gate.
+        OnDialChange handlers consult AutoApproveEdits() — that is the
+        single approval gate.
 
 chat:
   auto_reply: true

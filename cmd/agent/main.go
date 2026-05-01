@@ -74,7 +74,7 @@ func parseArgs() config {
 	flag.StringVar(&c.output, "output", "", "Output format: json or text (default: text if TTY, json if piped)")
 	flag.StringVar(&c.project, "project", "", "Project root directory (default: git root or cwd)")
 	flag.BoolVar(&c.verbose, "verbose", false, "Stream status to stderr")
-	flag.BoolVar(&c.debug, "debug", false, "Debug logging to /tmp/"+brand.Name+"-agent-debug.log")
+	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/agent-debug.log")
 	flag.Parse()
 
 	// Remaining args: [goal] [files...]
@@ -104,9 +104,15 @@ func run() error {
 
 	// Setup logging.
 	if cfg.debug {
-		logFile, err := os.OpenFile("/tmp/"+brand.Name+"-agent-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		// Cache dir is a single-user trust boundary — safe against the
+		// symlink-clobber pattern that /tmp + O_TRUNC is vulnerable to.
+		logPath, err := brand.DebugLogPath("agent-debug.log")
 		if err != nil {
-			return setupErr("open debug log: %v", err)
+			return setupErr("debug log path: %v", err)
+		}
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		if err != nil {
+			return setupErr("open debug log %s: %v", logPath, err)
 		}
 		defer func() {
 			if err := logFile.Close(); err != nil {

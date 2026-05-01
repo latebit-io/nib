@@ -6,6 +6,12 @@
 // the lookup via these constants instead.
 package brand
 
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
 const (
 	// Name is the product's user-facing name. To rebrand, change this
 	// and EnvPrefix below; everything else derives from Name.
@@ -54,3 +60,25 @@ const (
 	// arguments to MkdirTemp.
 	TempDirPrefix = Name + "-lint-"
 )
+
+// DebugLogPath resolves a debug-log path under the user's cache directory
+// ([os.UserCacheDir]/[ConfigDirName]/<name>) and ensures the parent
+// directory exists with mode 0700. The user-cache directory is a
+// single-user trust boundary, which makes symlink-clobber attacks (a real
+// concern with /tmp + O_TRUNC patterns) a non-issue without needing
+// O_NOFOLLOW or random suffixes — we get a stable, predictable path the
+// developer can `tail -F` across runs.
+//
+// name is the basename (e.g. "debug.log", "agent-debug.log"); callers
+// should not include path separators.
+func DebugLogPath(name string) (string, error) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("brand: resolve user cache dir: %w", err)
+	}
+	logDir := filepath.Join(cacheDir, ConfigDirName)
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return "", fmt.Errorf("brand: create log dir %s: %w", logDir, err)
+	}
+	return filepath.Join(logDir, name), nil
+}

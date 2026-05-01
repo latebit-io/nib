@@ -61,8 +61,18 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	if debug {
-		logFile, err := os.OpenFile("/tmp/"+brand.Name+"-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-		if err == nil {
+		// Cache dir is a single-user trust boundary — safe against the
+		// symlink-clobber pattern that /tmp + O_TRUNC is vulnerable to.
+		// Surface failures BEFORE entering alt-screen so the user sees
+		// them; once Bubble Tea takes over stderr corrupts the TUI.
+		logPath, err := brand.DebugLogPath("debug.log")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "debug log path: %v — proceeding without debug log\n", err)
+			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		} else if logFile, openErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); openErr != nil {
+			fmt.Fprintf(os.Stderr, "open debug log %s: %v — proceeding without debug log\n", logPath, openErr)
+			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		} else {
 			defer func() { _ = logFile.Close() }()
 			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		}

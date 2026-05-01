@@ -182,7 +182,7 @@ func TestPromptLoaderBrokenOverrideFallsBackToEmbedded(t *testing.T) {
 
 	loader := NewPromptLoader(dir)
 	system := loader.SystemPrompt(SystemPromptData{})
-	if !strings.Contains(system, "pair-programming agent") {
+	if !strings.Contains(system, "The developer steers") {
 		t.Error("broken project override should fall back to embedded default, got: " + system[:min(80, len(system))])
 	}
 	if strings.Contains(system, "broken") {
@@ -193,7 +193,7 @@ func TestPromptLoaderBrokenOverrideFallsBackToEmbedded(t *testing.T) {
 func TestPromptLoaderFallsBackToEmbedded(t *testing.T) {
 	loader := NewPromptLoader(t.TempDir()) // empty project dir
 	system := loader.SystemPrompt(SystemPromptData{})
-	if !strings.Contains(system, "pair-programming agent") {
+	if !strings.Contains(system, "The developer steers") {
 		t.Error("expected embedded default system prompt")
 	}
 }
@@ -253,8 +253,8 @@ func TestSystemPromptInteractiveMode(t *testing.T) {
 	loader := NewPromptLoader("")
 	system := loader.SystemPrompt(SystemPromptData{Headless: false})
 
-	if !strings.Contains(system, "pair-programming agent") {
-		t.Error("interactive system prompt should contain 'pair-programming agent'")
+	if !strings.Contains(system, "The developer steers") {
+		t.Error("interactive system prompt should contain 'The developer steers'")
 	}
 	if !strings.Contains(system, "Context Set") {
 		t.Error("interactive system prompt should include Context Set section")
@@ -281,8 +281,8 @@ func TestSystemPromptHeadlessMode(t *testing.T) {
 	if !strings.Contains(system, "headless mode") {
 		t.Error("headless system prompt should mention headless mode")
 	}
-	if strings.Contains(system, "pair-programming agent") {
-		t.Error("headless system prompt should not contain 'pair-programming agent'")
+	if strings.Contains(system, "The developer steers") {
+		t.Error("headless system prompt should not contain 'The developer steers'")
 	}
 	if strings.Contains(system, "Context Set") {
 		t.Error("headless system prompt should not include Context Set section")
@@ -312,8 +312,8 @@ func TestPlanningPromptInteractiveMode(t *testing.T) {
 	loader := NewPromptLoader("")
 	planning := loader.PlanningSystemPrompt(SystemPromptData{Headless: false})
 
-	if !strings.Contains(planning, "pair-programming agent") {
-		t.Error("interactive planning prompt should contain 'pair-programming agent'")
+	if !strings.Contains(planning, "The developer steers") {
+		t.Error("interactive planning prompt should contain 'The developer steers'")
 	}
 	if !strings.Contains(planning, ":done") {
 		t.Error("interactive planning prompt should mention :done command")
@@ -330,8 +330,8 @@ func TestPlanningPromptHeadlessMode(t *testing.T) {
 	if !strings.Contains(planning, "autonomous planning agent") {
 		t.Error("headless planning prompt should contain 'autonomous planning agent'")
 	}
-	if strings.Contains(planning, "pair-programming agent") {
-		t.Error("headless planning prompt should not contain 'pair-programming agent'")
+	if strings.Contains(planning, "The developer steers") {
+		t.Error("headless planning prompt should not contain 'The developer steers'")
 	}
 	if strings.Contains(planning, ":done") {
 		t.Error("headless planning prompt should not mention :done command")
@@ -354,43 +354,8 @@ func TestBuildMessagesHeadlessMode(t *testing.T) {
 	if !strings.Contains(system, "autonomous coding agent") {
 		t.Error("headless buildMessages should produce headless system prompt")
 	}
-	if strings.Contains(system, "pair-programming agent") {
+	if strings.Contains(system, "The developer steers") {
 		t.Error("headless buildMessages should not produce interactive system prompt")
-	}
-}
-
-func TestDetectDistributedMemory(t *testing.T) {
-	tests := []struct {
-		name string
-		want bool
-	}{
-		{"team-demarkus", true},
-		{"shared-docs", true},
-		{"distributed-wiki", true},
-		{"demarkus-soul", true},
-		{"Team-Server", true},  // case-insensitive
-		{"my-SHARED-db", true}, // keyword anywhere
-		{"project-tools", false},
-		{"memory", false},
-		{"lsp-server", false},
-		{"", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := DetectDistributedMemory([]string{tt.name})
-			got := len(result) > 0
-			if got != tt.want {
-				t.Errorf("DetectDistributedMemory([%q]) returned %v, want match=%v", tt.name, result, tt.want)
-			}
-		})
-	}
-}
-
-func TestDetectDistributedMemoryFiltersCorrectly(t *testing.T) {
-	input := []string{"team-wiki", "lsp-server", "shared-docs", "my-linter"}
-	got := DetectDistributedMemory(input)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 distributed servers, got %d: %v", len(got), got)
 	}
 }
 

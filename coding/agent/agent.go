@@ -92,28 +92,6 @@ func coordFromCtx(ctx context.Context) *approval.Coordinator {
 // normal error path and yield an AgentWaiting for the wrong run.
 var errStaleRun = errors.New("agent run replaced by a newer run")
 
-// distributedKeywords are substrings that identify an MCP server as
-// distributed (team/shared) memory. If any keyword appears in the server
-// name (case-insensitive), the server is classified as distributed memory
-// and the system prompt explains local vs shared usage to the LLM.
-var distributedKeywords = []string{"team", "shared", "distributed", "soul"}
-
-// DetectDistributedMemory filters server names by naming convention,
-// returning those that indicate a shared/team memory server.
-func DetectDistributedMemory(serverNames []string) []string {
-	var result []string
-	for _, name := range serverNames {
-		lower := strings.ToLower(name)
-		for _, kw := range distributedKeywords {
-			if strings.Contains(lower, kw) {
-				result = append(result, name)
-				break
-			}
-		}
-	}
-	return result
-}
-
 // mutatingTools contains tool names that modify filesystem or shell state.
 // In execution mode these require an active `[>]` task in /project.md —
 // the gate enforces "all agent work is tracked in the project tree."

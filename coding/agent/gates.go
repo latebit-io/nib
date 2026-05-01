@@ -3,7 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
-	"log/slog"
+
+	"github.com/latebit-io/nib/coding/memory"
 )
 
 // Agent-internal gates and intent helpers.
@@ -47,19 +48,11 @@ func (a *Agent) recordEdit(proposal EditProposal) {
 const maxValidatorRetries = 3
 
 // fetchMemorySummary re-fetches /summary.md from the memory store so each
-// conversation sees the latest state. Returns the fetched summary, or falls
-// back to the startup summary on error. The result is returned (not stored
-// on the struct) to avoid data races between concurrent run() goroutines.
+// conversation sees the latest state. Thin wrapper around
+// [memory.FetchSummary]; the result is returned (not stored on the struct)
+// to avoid data races between concurrent run() goroutines.
 func (a *Agent) fetchMemorySummary(ctx context.Context) string {
-	if a.memoryStore == nil {
-		return a.memorySummary
-	}
-	doc, err := a.memoryStore.Fetch(ctx, "/summary.md")
-	if err != nil {
-		slog.Debug("memory: refresh summary failed, using startup value", "err", err)
-		return a.memorySummary
-	}
-	return doc.Body
+	return memory.FetchSummary(ctx, a.memoryStore, a.memorySummary)
 }
 
 // enforceActiveTaskGate blocks mutating tools in execution mode when the

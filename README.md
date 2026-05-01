@@ -1,14 +1,16 @@
 # nib
 
-A coding agent that writes code — embedded in a TUI editor that keeps the engineer in the loop.
+> **Craftsmanship at agent speed.**
 
-Three panes (project, editor, agent) give live observability into what the agent is doing as it does it. The agent owns the write loop; you intervene with high-leverage signals — approve an edit, reject it, redirect the goal. An autonomy dial controls how often you're asked: review every edit (Guided), let routine work through (Trusted), or run autonomously (Yolo).
+A coding agent that develops projects end-to-end — for developers who want agentic speed without losing craftsman control. The agent writes the code, respects the architecture, follows the language's idioms, plans against a work tree, and remembers across sessions. **The agent is the product** — embeddable, extensible, frontend-agnostic. Everything else is built on top of it.
 
-This isn't pair programming. The agent doesn't co-type alongside you, and you don't take turns at the keyboard. The editor is your read view and intervention surface — you watch edits stream in, approve them, and steer the run when it drifts off-course.
+This repo also ships an opinionated reference **TUI** — a polished add-on that turns the agent into a daily-driver experience. Three panes — project, editor, agent — give you live observability and high-leverage intervention. Edits stream into a real editor with real syntax highlighting, not a wall of streaming chat. An autonomy dial controls how often you're asked: **Trusted** (default; agent runs, routine edits land), **Guided** (drop here for more control; every edit waits for approval), or **Yolo** (just do it). A headless mode ships today for CI and scripting; the long-term direction is a stable surface and a custom-tool registry so others can build their own frontends, plug in their own tools, or use the agent as the foundation of a different product.
 
-## Architecture: Composite TUI Pattern
+This isn't pair programming. The agent doesn't co-type alongside you, and you don't take turns at the keyboard. The editor (in the reference TUI) is your read view and intervention surface — you watch edits stream in, approve them, and steer the run when it drifts off-course.
 
-nib uses a **Composite TUI** architecture inspired by WPF/Prism, adapted for Go and [Bubble Tea](https://github.com/charmbracelet/bubbletea). The pattern solves a common problem in terminal UIs: as you add panes, panels, and features, the main model becomes a god object that routes every event, manages every layout detail, and tangles every concern together.
+## Reference TUI Architecture: Composite TUI Pattern
+
+The reference TUI uses a **Composite TUI** architecture inspired by WPF/Prism, adapted for Go and [Bubble Tea](https://github.com/charmbracelet/bubbletea). The pattern solves a common problem in terminal UIs: as you add panes, panels, and features, the main model becomes a god object that routes every event, manages every layout detail, and tangles every concern together.
 
 This pattern is general-purpose. It works for any Bubble Tea application with multiple independent UI regions.
 

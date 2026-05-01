@@ -312,6 +312,12 @@ func saveSelectionToPath(path, profile, modelID string) error {
 
 	cfg.Active = profile
 	if modelID != "" {
+		// loadFile returns whatever JSON unmarshalled — a config with
+		// only `active` set (no `profiles` key) leaves the map nil, so
+		// the assignment below would panic without this guard.
+		if cfg.Profiles == nil {
+			cfg.Profiles = make(map[string]Profile)
+		}
 		p := cfg.Profiles[profile]
 		p.Model = modelID
 		cfg.Profiles[profile] = p

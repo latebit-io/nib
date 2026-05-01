@@ -513,6 +513,45 @@ func TestSaveSelection_ProfileAndModel(t *testing.T) {
 	}
 }
 
+// TestSaveSelection_NoProfilesSection regression-tests a panic surfaced
+// in the wild: a previously-saved config that contains only `active`
+// (no `profiles` key) leaves cfg.Profiles nil after JSON unmarshal,
+// and the subsequent map assignment panics with "assignment to entry
+// in nil map" when modelID is non-empty. The fix lazy-initialises the
+// map at the assignment site.
+func TestSaveSelection_NoProfilesSection(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, brand.ConfigDirName)
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "llm.json")
+	// Mimic the in-the-wild file: active set, no profiles map.
+	if err := os.WriteFile(path, []byte(`{"active":"chatgpt"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-fix this panicked. Test passes once the nil-map guard lands.
+	if err := saveSelectionToPath(path, "chatgpt", "gpt-5"); err != nil {
+		t.Fatalf("saveSelectionToPath: %v", err)
+	}
+
+	cfg := loadFile(path)
+	if cfg == nil {
+		t.Fatal("config not saved")
+	}
+	if cfg.Active != "chatgpt" {
+		t.Errorf("Active = %q, want %q", cfg.Active, "chatgpt")
+	}
+	p, ok := cfg.Profiles["chatgpt"]
+	if !ok {
+		t.Fatal("chatgpt profile entry not created")
+	}
+	if p.Model != "gpt-5" {
+		t.Errorf("Model = %q, want %q", p.Model, "gpt-5")
+	}
+}
+
 func TestSaveSelection_PreservesExisting(t *testing.T) {
 	dir := t.TempDir()
 	configDir := filepath.Join(dir, brand.ConfigDirName)

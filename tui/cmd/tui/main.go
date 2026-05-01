@@ -73,7 +73,16 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			fmt.Fprintf(os.Stderr, "open debug log %s: %v — proceeding without debug log\n", logPath, openErr)
 			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		} else {
-			defer func() { _ = logFile.Close() }()
+			// The deferred close runs after p.Run() returns, by which
+			// point Bubble Tea has restored the original screen — so
+			// stderr is safe to write to and a buffered-flush failure
+			// (ENOSPC, EIO) is surfaced where the user will see it
+			// rather than being swallowed.
+			defer func() {
+				if err := logFile.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: close debug log: %v\n", err)
+				}
+			}()
 			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		}
 	} else {

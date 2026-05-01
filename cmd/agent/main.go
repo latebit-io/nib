@@ -23,6 +23,7 @@ import (
 	"syscall"
 
 	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/coding/agent"
 	"github.com/latebit-io/nib/coding/headless"
 	"github.com/latebit-io/nib/coding/session"
@@ -189,9 +190,17 @@ func run() error {
 	pr := wire.NewProvider(projectRoot)
 	provider, llmCfg, llmResolved := pr.Provider, pr.Config, pr.Resolved
 	if provider == nil {
-		hint := fmt.Sprintf("set LLM_API_KEY or configure ~/.config/%s/llm.json", brand.ConfigDirName)
+		// Use the resolved global config path so the hint shows the
+		// correct platform-specific location (~/.config/<brand>/llm.json
+		// on Linux, ~/Library/Application Support/<brand>/llm.json on
+		// macOS). Falls back to a placeholder if UserConfigDir fails.
+		cfgPath := llmconfig.GlobalConfigPath()
+		if cfgPath == "" {
+			cfgPath = "<user-config-dir>/" + brand.ConfigDirName + "/llm.json"
+		}
+		hint := fmt.Sprintf("set LLM_API_KEY or configure %s", cfgPath)
 		if llmResolved != nil && llmResolved.APIKeyEnv != "" {
-			hint = fmt.Sprintf("set %s or configure ~/.config/%s/llm.json", llmResolved.APIKeyEnv, brand.ConfigDirName)
+			hint = fmt.Sprintf("set %s or configure %s", llmResolved.APIKeyEnv, cfgPath)
 		}
 		return setupErr("no LLM API key — %s", hint)
 	}

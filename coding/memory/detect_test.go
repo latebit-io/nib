@@ -1,6 +1,9 @@
 package memory
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestDetectDistributedMemory(t *testing.T) {
 	tests := []struct {
@@ -32,7 +35,8 @@ func TestDetectDistributedMemory(t *testing.T) {
 func TestDetectDistributedMemoryFiltersCorrectly(t *testing.T) {
 	input := []string{"team-wiki", "lsp-server", "shared-docs", "my-linter"}
 	got := DetectDistributedMemory(input)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 distributed servers, got %d: %v", len(got), got)
+	want := []string{"team-wiki", "shared-docs"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("DetectDistributedMemory(%v) = %v, want %v", input, got, want)
 	}
 }

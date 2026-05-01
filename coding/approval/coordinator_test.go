@@ -57,23 +57,6 @@ func TestCoordinator_AwaitApproval_CtxCancel(t *testing.T) {
 	}
 }
 
-func TestCoordinator_AwaitContinue_DeliversContent(t *testing.T) {
-	t.Parallel()
-	c := New()
-	want := "buffer state after approval"
-	c.Continue(want)
-	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
-	defer cancel()
-
-	got, err := c.AwaitContinue(ctx)
-	if err != nil {
-		t.Fatalf("AwaitContinue err = %v, want nil", err)
-	}
-	if got != want {
-		t.Errorf("AwaitContinue content = %q, want %q", got, want)
-	}
-}
-
 func TestCoordinator_AwaitInput_DeliversReply(t *testing.T) {
 	t.Parallel()
 	c := New()
@@ -109,7 +92,6 @@ func TestCoordinator_Reset_DrainsAllChannels(t *testing.T) {
 	t.Parallel()
 	c := New()
 	c.Approve()
-	c.Continue("stale")
 	c.Reply("stale-reply")
 
 	c.Reset()
@@ -119,12 +101,6 @@ func TestCoordinator_Reset_DrainsAllChannels(t *testing.T) {
 	defer cancel()
 	if _, err := c.AwaitApproval(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("approveCh not drained: err=%v, want DeadlineExceeded", err)
-	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel2()
-	if _, err := c.AwaitContinue(ctx2); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("continueCh not drained: err=%v, want DeadlineExceeded", err)
 	}
 
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -139,14 +115,12 @@ func TestCoordinator_SignalsAreNonBlocking(t *testing.T) {
 	c := New()
 	// Saturate every channel; subsequent signals must NOT block.
 	c.Approve()
-	c.Continue("saturated")
 	c.Reply("saturated")
 
 	done := make(chan struct{})
 	go func() {
-		c.Approve() // already-saturated approveCh — must drop, not block
-		c.Reject()  // approveCh still saturated by the earlier Approve
-		c.Continue("dropped")
+		c.Approve()        // already-saturated approveCh — must drop, not block
+		c.Reject()         // approveCh still saturated by the earlier Approve
 		c.Reply("dropped") // Reply returns false; not measured here
 		close(done)
 	}()
@@ -154,16 +128,6 @@ func TestCoordinator_SignalsAreNonBlocking(t *testing.T) {
 	case <-done:
 	case <-time.After(shortTimeout):
 		t.Fatal("signal methods blocked when channels were saturated")
-	}
-}
-
-func TestCoordinator_AwaitContinue_CtxCancel(t *testing.T) {
-	t.Parallel()
-	c := New()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	if _, err := c.AwaitContinue(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("AwaitContinue err = %v, want DeadlineExceeded", err)
 	}
 }
 

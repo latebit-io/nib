@@ -205,13 +205,12 @@ func TestReplaceFileTool_DefinitionAdvertisesSchema(t *testing.T) {
 	}
 }
 
-// TestReplaceFileTool_UsesCacheConsistentWithBufferAfterContinue
-// documents the architectural invariant replace_file relies on: the
-// cache reflects buffer content between agent turns, fed by the
-// continueCh path that snapshots Buf.Content() on the TUI goroutine
-// after each approved edit. The tool reads cache via FileReader —
-// never the buffer directly.
-func TestReplaceFileTool_UsesCacheConsistentWithBufferAfterContinue(t *testing.T) {
+// TestReplaceFileTool_UsesCachePostApproval documents the
+// architectural invariant replace_file relies on: the cache reflects
+// post-approval content between agent turns, seeded by the
+// orchestrator after each approved edit. The tool reads cache via
+// FileReader — never the buffer directly.
+func TestReplaceFileTool_UsesCachePostApproval(t *testing.T) {
 	t.Parallel()
 
 	const content = "old content\n"

@@ -20,11 +20,10 @@ import (
 // agent proposes before anything is applied. No blind approvals.
 //
 // The "two-step approval" variants (PrepareApproval / CompleteApproval /
-// AbortApproval / ApproveAndContinue) decouple "produce the plan" from
-// "signal the agent" so the frontend can apply the edit and signal the
-// agent as separate, atomic steps. This file covers both variants — the
-// state they touch (pendingEdit, stagedEditFile, editReviewed,
-// pendingContinue*) is shared.
+// AbortApproval) decouple "produce the plan" from "signal the agent" so
+// the frontend can apply the edit and signal the agent as separate,
+// atomic steps. This file covers both variants — the state they touch
+// (pendingEdit, stagedEditFile, editReviewed) is shared.
 //
 // State remains on Session (the fields straddle approval, file I/O, and
 // agent-event handling). The methods are grouped here so the SRP
@@ -96,12 +95,6 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 		s.mu.Lock()
 		s.modifiedFiles[editPath] = true
 		s.mu.Unlock()
-		// Stash the post-apply buffer content so the subsequent
-		// Continue() call can detect developer edits made to the
-		// buffer between approval and continue (continue-diff capture).
-		s.pendingContinuePath = editPath
-		s.pendingContinueExpected = e.Buf.Content()
-		s.pendingContinueSet = true
 		s.agent.Approve()
 		modified := replace != proposedReplace
 		accepted := map[string]any{
@@ -235,14 +228,8 @@ func computeLineOrigins(search, originalReplace, finalReplace string) []*buffer.
 // approvals that would advance the run with no recorded edit).
 //
 // Promotes the staged edit path to lastEditedFile, marks the file as
-// modified, emits the "accepted" capture event with the same shape as
-// ApproveEdit, and seeds pendingContinue* so Continue can detect
-// developer edits made between approve and continue.
-//
-// Sets awaitingContinue eagerly — the agent will shortly emit
-// StatusEditing on the best-effort event path, but that event can be dropped
-// under channel pressure. Gating on our own action keeps CanContinue honest
-// even when the event is lost.
+// modified, and emits the "accepted" capture event with the same shape
+// as ApproveEdit.
 func (s *Session) CompleteApproval() {
 	if !s.HasAgent() || s.stagedEditFile == "" || s.pendingApproval == nil {
 		return
@@ -253,13 +240,7 @@ func (s *Session) CompleteApproval() {
 	s.lastEditedFile = editPath
 	s.mu.Lock()
 	s.modifiedFiles[editPath] = true
-	e := s.editors[editPath]
 	s.mu.Unlock()
-	if e != nil {
-		s.pendingContinuePath = editPath
-		s.pendingContinueExpected = e.Buf.Content()
-		s.pendingContinueSet = true
-	}
 
 	modified := staged.replace != s.pendingProposedReplace
 	accepted := map[string]any{
@@ -277,9 +258,6 @@ func (s *Session) CompleteApproval() {
 	s.stagedEditFile = ""
 	s.pendingApproval = nil
 	s.pendingProposedReplace = ""
-	s.mu.Lock()
-	s.awaitingContinue = true
-	s.mu.Unlock()
 	s.agent.Approve()
 }
 
@@ -336,21 +314,8 @@ func (s *Session) RejectEdit(source string) {
 	})
 	s.pendingEdit = nil
 	s.pendingProposedReplace = ""
-	s.pendingContinuePath = ""
-	s.pendingContinueExpected = ""
-	s.pendingContinueSet = false
 	s.editReviewed = false
 	s.stagedEditFile = ""
 	s.pendingApproval = nil
 	s.agent.Reject()
-}
-
-// ApproveAndContinue atomically approves the edit and continues the agent.
-// Use this when the agent should proceed immediately after approval (e.g.
-// instant-apply, auto-continue at higher autonomy levels). Serialising both
-// steps inside the session avoids the TUI orchestrating multi-step engine
-// transitions.
-func (s *Session) ApproveAndContinue() {
-	s.CompleteApproval()
-	s.Continue()
 }

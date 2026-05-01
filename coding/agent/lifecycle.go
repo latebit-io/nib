@@ -318,16 +318,6 @@ func (a *Agent) Approve() { a.activeCoord().Approve() }
 // [Agent.Approve] for the snapshot rationale.
 func (a *Agent) Reject() { a.activeCoord().Reject() }
 
-// Continue signals the user is done editing and sends the current
-// buffer content for the file that was just edited. The cache write
-// happens on the receive side ([approval.Orchestrator.waitForContinue])
-// using the canonical path, so this method only transports the new
-// content. See [Agent.Approve] for the snapshot rationale.
-func (a *Agent) Continue(path, bufferContent string) {
-	slog.Debug("agent.Continue", "path", path, "content_len", len(bufferContent))
-	a.activeCoord().Continue(bufferContent)
-}
-
 // activeCoord snapshots the active run's coordinator under [Agent.mu]
 // so frontend signal methods do not read a.coord while RunWithMode /
 // Reply are mid-swap. The snapshot may belong to a run that is about

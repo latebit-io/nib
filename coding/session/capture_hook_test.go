@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 
@@ -269,98 +268,6 @@ func TestCaptureNoValidatorKindWhenSummariesEmpty(t *testing.T) {
 	kinds := sink.kinds()
 	if len(kinds) != 1 || kinds[0] != "proposal" {
 		t.Errorf("kinds = %v, want [proposal] only", kinds)
-	}
-}
-
-// TestCaptureContinueNotModified verifies that a Continue with an
-// unchanged buffer still emits a "continue" event, tagged
-// was_modified=false and without the full-content fields — so the log
-// records the fact without bloating with identical payloads.
-func TestCaptureContinueNotModified(t *testing.T) {
-	t.Parallel()
-
-	sess := newTestSession("hello world")
-	sink := &fakeSink{}
-	sess.SetEventSink(sink)
-
-	// Simulate a proposal → review → approve flow.
-	sess.HandleEvent(event.AgentEditProposed{Edit: event.PendingEdit{
-		ID: "e5", Path: "", Search: "hello", Replace: "goodbye",
-	}})
-	if diff, _ := sess.ReviewEdit(); diff == nil {
-		t.Fatalf("ReviewEdit returned nil diff")
-	}
-	if ok, reason := sess.ApproveEdit("hello", "goodbye"); !ok {
-		t.Fatalf("ApproveEdit: %s", reason)
-	}
-
-	// Continue without any developer edits to the buffer.
-	sess.Continue()
-
-	kinds := sink.kinds()
-	var contEv capture.Event
-	for _, ev := range sink.snapshot() {
-		if ev.Kind == "continue" {
-			contEv = ev
-		}
-	}
-	if contEv.Kind == "" {
-		t.Fatalf("no continue event; kinds = %v", kinds)
-	}
-	if got := contEv.Payload["was_modified"]; got != false {
-		t.Errorf("was_modified = %v, want false", got)
-	}
-	if _, has := contEv.Payload["proposed_content"]; has {
-		t.Errorf("proposed_content present on unmodified continue: %+v", contEv.Payload)
-	}
-}
-
-// TestCaptureContinueWithDevModification verifies that if the developer
-// edits the buffer between approval and continue, the capture payload
-// includes both the expected (post-approval) and actual (dev-edited)
-// content so downstream consumers can reconstruct the refinement diff.
-func TestCaptureContinueWithDevModification(t *testing.T) {
-	t.Parallel()
-
-	sess := newTestSession("hello world")
-	sink := &fakeSink{}
-	sess.SetEventSink(sink)
-
-	sess.HandleEvent(event.AgentEditProposed{Edit: event.PendingEdit{
-		ID: "e6", Path: "", Search: "hello", Replace: "goodbye",
-	}})
-	if diff, _ := sess.ReviewEdit(); diff == nil {
-		t.Fatalf("ReviewEdit returned nil diff")
-	}
-	if ok, reason := sess.ApproveEdit("hello", "goodbye"); !ok {
-		t.Fatalf("ApproveEdit: %s", reason)
-	}
-
-	// Developer edits the buffer between approval and continue.
-	ed := sess.ActiveEditor()
-	ed.Buf.Insert(0, ed.Buf.LineLen(0), " NEW")
-
-	sess.Continue()
-
-	var contEv capture.Event
-	for _, ev := range sink.snapshot() {
-		if ev.Kind == "continue" {
-			contEv = ev
-		}
-	}
-	if contEv.Kind == "" {
-		t.Fatalf("no continue event captured")
-	}
-	if got := contEv.Payload["was_modified"]; got != true {
-		t.Errorf("was_modified = %v, want true", got)
-	}
-	actual, _ := contEv.Payload["actual_content"].(string)
-	if !strings.Contains(actual, "NEW") {
-		t.Errorf("actual_content missing dev edit: %q", actual)
-	}
-	proposed, _ := contEv.Payload["proposed_content"].(string)
-	if strings.Contains(proposed, "NEW") {
-		t.Errorf("proposed_content should predate dev edit: %q", proposed)
 	}
 }
 

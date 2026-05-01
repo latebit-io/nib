@@ -777,23 +777,22 @@ func (w *readCountingWorkspace) ReadFile(path string) (string, error) {
 	return w.testWorkspace.ReadFile(path)
 }
 
-// TestEditFileTool_UsesCacheConsistentWithBufferAfterContinue
-// documents the architectural invariant edit_file relies on: the
-// cache reflects buffer content between agent turns, fed by the
-// continueCh path that snapshots Buf.Content() on the TUI goroutine
-// after each approved edit. The tool reads cache (or falls back to
-// disk via ReadFile) — never the buffer directly, because that
-// would race against TUI-owned mutations. This test guards against
-// a regression that re-introduces direct buffer access from the
-// agent goroutine; the test passes when resolveContent only
-// consults cache+disk via the FileReader surface.
+// TestEditFileTool_UsesCachePostApproval documents the architectural
+// invariant edit_file relies on: the cache reflects post-approval
+// content between agent turns, seeded by the orchestrator after each
+// approved edit. The tool reads cache (or falls back to disk via
+// ReadFile) — never the buffer directly, because that would race
+// against TUI-owned mutations. This test guards against a regression
+// that re-introduces direct buffer access from the agent goroutine;
+// the test passes when resolveContent only consults cache+disk via
+// the FileReader surface.
 //
 // The cache is primed with content that diverges from disk so a
 // regression bypassing cache would (a) read divergent disk bytes
 // and (b) fail to match the cache-only Search marker, dropping the
 // effect off EffectEditProposed. A ReadFile call counter proves
 // disk was not consulted on the cache-hit path.
-func TestEditFileTool_UsesCacheConsistentWithBufferAfterContinue(t *testing.T) {
+func TestEditFileTool_UsesCachePostApproval(t *testing.T) {
 	t.Parallel()
 
 	const diskContent = "package main\n\nfunc main() {}\n"

@@ -41,8 +41,8 @@ reviews:
         Check for:
         - Data races: FileCache has its own mutex, but tools must not access
           session/editor state directly
-        - Channel deadlocks: approveCh and continueCh are buffered(1), sends
-          use select/default to avoid blocking
+        - Channel deadlocks: the Coordinator's approveCh and inputCh are
+          buffered(1); sends use select/default to avoid blocking
         - Silent retry state (EditFileTool) must be reset between runs
         - Tool results must not include sensitive information
 

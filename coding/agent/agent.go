@@ -431,7 +431,6 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		SendCritical: a.sendCritical,
 		Validate:     a.runValidationPipeline,
 		RecordEdit:   a.recordEdit,
-		Autonomous:   a.currentAutonomous,
 		DiagProvider: diagProvider,
 		DiagDelay:    a.diagDelay,
 	})

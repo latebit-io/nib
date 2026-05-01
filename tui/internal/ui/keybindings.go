@@ -36,7 +36,6 @@ const (
 	ActionAgentPlan       = keymap.ActionAgentPlan
 	ActionAgentApprove    = keymap.ActionAgentApprove
 	ActionAgentReject     = keymap.ActionAgentReject
-	ActionAgentContinue   = keymap.ActionAgentContinue
 	ActionDialCycle       = keymap.ActionDialCycle
 	ActionModelSelector   = keymap.ActionModelSelector
 	ActionStyleCycle      = keymap.ActionStyleCycle
@@ -128,7 +127,6 @@ func DefaultKeymap() *Keymap {
 			{code: '†', mod: 0}:           ActionTerseToggle, // macOS: Option+T sends †
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
 			{code: tea.KeyEscape, mod: 0}: ActionAgentReject,
-			{code: 'n', mod: tea.ModCtrl}: ActionAgentContinue,
 
 			// Find
 			{code: 'f', mod: tea.ModCtrl}:                ActionFind,

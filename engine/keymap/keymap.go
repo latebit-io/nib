@@ -64,9 +64,7 @@ const (
 	ActionAgentApprove
 	// ActionAgentReject rejects the pending edit.
 	ActionAgentReject
-	// ActionAgentContinue continues the agent after an approved edit.
-	ActionAgentContinue
-	// ActionDialCycle cycles the autonomy level dial (guided → collaborate → trust → guided).
+	// ActionDialCycle cycles the autonomy level dial (guided → trust → yolo → guided).
 	ActionDialCycle
 	// ActionModelSelector opens the LLM model/profile selector overlay.
 	ActionModelSelector
@@ -185,7 +183,6 @@ func DefaultBindings() []Binding {
 		{ActionAgentPlan, "Plan mode", []string{"Alt+G"}, CatAgent},
 		{ActionAgentApprove, "Approve edit", []string{"Ctrl+O"}, CatAgent},
 		{ActionAgentReject, "Reject / Cancel", []string{"Escape"}, CatAgent},
-		{ActionAgentContinue, "Continue agent", []string{"Ctrl+N"}, CatAgent},
 		{ActionDialCycle, "Cycle autonomy dial", []string{"Alt+A"}, CatAgent},
 		{ActionModelSelector, "Select model", []string{"Alt+M"}, CatAgent},
 		{ActionStyleCycle, "Cycle coding style", []string{"Alt+S"}, CatAgent},

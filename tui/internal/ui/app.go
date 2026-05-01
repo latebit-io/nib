@@ -1127,12 +1127,6 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// No intent either — fall through to focused pane
 
-	case ActionAgentContinue:
-		if m.Session.CanContinue() {
-			m.Session.Continue()
-		}
-		return m, nil
-
 	case ActionDialCycle:
 		m.cycleDial()
 		return m, nil
@@ -1727,12 +1721,12 @@ const (
 	outcomeApplyFailed
 )
 
-// applyApproval validates the reviewed edit and applies it atomically.
-// At dial levels with AutoContinue, the agent is also signalled to
-// continue; otherwise the user must press Ctrl+N.
+// applyApproval validates the reviewed edit and applies it
+// atomically; CompleteApproval signals the agent which proceeds
+// without an additional developer step.
 //
 // The flow splits cleanly: tryApplyApproval runs the prepare → apply
-// → continue pipeline and returns an [approvalOutcome];
+// pipeline and returns an [approvalOutcome];
 // reconcilePendingBlockOnOutcome decides snoozing based on that
 // outcome. Centralising the snooze decision in one
 // data-driven helper is what protects the
@@ -1799,14 +1793,8 @@ func (m *AppModel) tryApplyApproval() (approvalOutcome, tea.Cmd) {
 
 	// Refresh after CompleteApproval — that's when modifiedFiles is populated,
 	// which the project pane reads to render the modified badge.
-	var statusCmd tea.Cmd
-	if m.dial.AutoContinue() {
-		m.Session.ApproveAndContinue()
-		statusCmd = m.AgentPane.SetStatus(event.StatusThinking)
-	} else {
-		m.Session.CompleteApproval()
-		statusCmd = m.AgentPane.SetStatus(event.StatusEditing)
-	}
+	m.Session.CompleteApproval()
+	statusCmd := m.AgentPane.SetStatus(event.StatusThinking)
 	m.refreshProjectPane()
 	return outcomeSucceeded, statusCmd
 }

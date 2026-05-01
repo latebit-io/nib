@@ -48,8 +48,8 @@ func (c *stubContextSet) AddContext(path string) {
 // AgentEditProposed is delivered, giving goroutine-driven tests a
 // deterministic rendezvous point in place of racy time.Sleep.
 //
-// validateFn / autonomousFn / sendCriticalFn can be overridden per
-// test; recordedEdits captures RecordEdit invocations.
+// validateFn / sendCriticalFn can be overridden per test;
+// recordedEdits captures RecordEdit invocations.
 type orchTestRig struct {
 	cache                 *tools.FileCache
 	ctxSet                *stubContextSet
@@ -57,7 +57,6 @@ type orchTestRig struct {
 	eventsMu              sync.Mutex
 	recordedEdits         []tools.EditProposal
 	validateFn            func(ctx context.Context, p tools.EditProposal) ([]event.ValidatorSummary, string)
-	autonomousFn          func() bool
 	sendCriticalFn        func(ctx context.Context, ev event.Event) error
 	proposalDelivered     chan struct{}
 	proposalDeliveredOnce sync.Once
@@ -65,10 +64,9 @@ type orchTestRig struct {
 
 func newRig() *orchTestRig {
 	return &orchTestRig{
-		cache:        tools.NewFileCache(),
-		ctxSet:       newStubContextSet(),
-		validateFn:   func(context.Context, tools.EditProposal) ([]event.ValidatorSummary, string) { return nil, "" },
-		autonomousFn: func() bool { return false },
+		cache:      tools.NewFileCache(),
+		ctxSet:     newStubContextSet(),
+		validateFn: func(context.Context, tools.EditProposal) ([]event.ValidatorSummary, string) { return nil, "" },
 		sendCriticalFn: func(_ context.Context, _ event.Event) error {
 			return nil
 		},
@@ -86,8 +84,7 @@ func (r *orchTestRig) deps() Deps {
 			return r.validateFn(ctx, p)
 		},
 		RecordEdit: r.recordEdit,
-		Autonomous: func() bool { return r.autonomousFn() },
-		DiagDelay:  0, // skip the post-Continue diagnostic sleep in tests
+		DiagDelay:  0, // skip the post-approval diagnostic sleep in tests
 	}
 }
 
@@ -177,7 +174,6 @@ func TestNewOrchestrator_PanicsOnMissingDeps(t *testing.T) {
 		{"nil SendCritical", func(d *Deps) { d.SendCritical = nil }},
 		{"nil Validate", func(d *Deps) { d.Validate = nil }},
 		{"nil RecordEdit", func(d *Deps) { d.RecordEdit = nil }},
-		{"nil Autonomous", func(d *Deps) { d.Autonomous = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,11 +220,11 @@ func TestHandle_ValidationShortCircuit(t *testing.T) {
 	}
 }
 
-// TestHandle_HappyPath_ApproveAndContinue covers the full success
-// flow: validation passes, EditProposed is delivered, Approve fires,
-// Continue delivers identical content, the file is added to the
-// context set, and RecordEdit is invoked exactly once.
-func TestHandle_HappyPath_ApproveAndContinue(t *testing.T) {
+// TestHandle_HappyPath_Approve covers the full success flow:
+// validation passes, EditProposed is delivered, Approve fires, the
+// file is added to the context set, RecordEdit is invoked exactly
+// once, and the cache is seeded with the proposal's expected content.
+func TestHandle_HappyPath_Approve(t *testing.T) {
 	t.Parallel()
 	r := newRig()
 	o := NewOrchestrator(r.deps())
@@ -236,15 +232,8 @@ func TestHandle_HappyPath_ApproveAndContinue(t *testing.T) {
 	p := sampleProposal()
 
 	go func() {
-		// Block until the orchestrator has actually delivered the
-		// proposal event — i.e. it's about to park (or has just
-		// parked) in AwaitApproval. coord.Continue is buffered, so
-		// firing both signals back-to-back is safe: Approve
-		// releases AwaitApproval, Continue queues for the
-		// AwaitContinue that follows.
 		<-r.proposalDelivered
 		coord.Approve()
-		coord.Continue(p.ExpectedContent)
 	}()
 
 	body, isError := o.Handle(context.Background(), coord, p)
@@ -261,36 +250,9 @@ func TestHandle_HappyPath_ApproveAndContinue(t *testing.T) {
 	if len(r.recordedEdits) != 1 || r.recordedEdits[0].CanonPath != p.CanonPath {
 		t.Errorf("RecordEdit not invoked exactly once for the proposal: %+v", r.recordedEdits)
 	}
-}
-
-// TestHandle_DeveloperModifiedContinue surfaces the diff in the body
-// and notes the LLM should recalibrate. The cache is updated to the
-// new content so subsequent tool calls see the post-edit state.
-func TestHandle_DeveloperModifiedContinue(t *testing.T) {
-	t.Parallel()
-	r := newRig()
-	o := NewOrchestrator(r.deps())
-	coord := New()
-	p := sampleProposal()
-	developerEdited := p.ExpectedContent + "\n// developer added this line\n"
-
-	go func() {
-		<-r.proposalDelivered
-		coord.Approve()
-		coord.Continue(developerEdited)
-	}()
-
-	body, isError := o.Handle(context.Background(), coord, p)
-	assertHasEditProposed(t, r.snapshotEvents())
-	if isError {
-		t.Errorf("developer-modified continue is normal flow (outcomeOK), not a tool error; body=%q", body)
-	}
-	if !strings.Contains(body, "developer modified your edit") {
-		t.Errorf("body should flag developer modification, got %q", body)
-	}
 	cached, ok := r.cache.Get(p.CanonPath)
-	if !ok || cached != developerEdited {
-		t.Errorf("cache not updated to developer-edited content: ok=%v cached=%q", ok, cached)
+	if !ok || cached != p.ExpectedContent {
+		t.Errorf("cache not seeded with ExpectedContent: ok=%v cached=%q", ok, cached)
 	}
 }
 
@@ -406,53 +368,5 @@ func TestHandle_SendCriticalFailure(t *testing.T) {
 	}
 	if !strings.Contains(body, "could not deliver edit proposal") {
 		t.Errorf("body = %q, want substring 'could not deliver edit proposal'", body)
-	}
-}
-
-// TestHandle_AutonomousMode_SuppressesContinueHint asserts the
-// "press Ctrl+N to continue" banner is rendered ONLY when the
-// Autonomous callback returns false. At higher autonomy levels the
-// continue fires automatically and the message is misleading visual
-// noise.
-func TestHandle_AutonomousMode_SuppressesContinueHint(t *testing.T) {
-	t.Parallel()
-	for _, autonomous := range []bool{false, true} {
-		t.Run(map[bool]string{false: "guided", true: "autonomous"}[autonomous], func(t *testing.T) {
-			t.Parallel()
-			r := newRig()
-			r.autonomousFn = func() bool { return autonomous }
-			o := NewOrchestrator(r.deps())
-			coord := New()
-			p := sampleProposal()
-
-			go func() {
-				<-r.proposalDelivered
-				coord.Approve()
-				coord.Continue(p.ExpectedContent)
-			}()
-
-			body, isError := o.Handle(context.Background(), coord, p)
-			assertHasEditProposed(t, r.snapshotEvents())
-			if isError {
-				t.Errorf("approve+continue is normal flow (outcomeOK), not a tool error; body=%q", body)
-			}
-			if !strings.Contains(body, "Edit applied successfully") {
-				t.Errorf("body should report success in both autonomy modes, got %q", body)
-			}
-
-			var sawHint bool
-			for _, ev := range r.snapshotEvents() {
-				if tok, ok := ev.(event.AgentToken); ok && strings.Contains(tok.Text, "waiting for continue") {
-					sawHint = true
-					break
-				}
-			}
-			if autonomous && sawHint {
-				t.Errorf("autonomous mode emitted 'waiting for continue' hint")
-			}
-			if !autonomous && !sawHint {
-				t.Errorf("guided mode did NOT emit 'waiting for continue' hint")
-			}
-		})
 	}
 }

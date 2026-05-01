@@ -3,17 +3,14 @@ package session
 import "testing"
 
 // TestAutonomyLevelCycle verifies the dial wraps from LevelYolo back
-// to LevelGuided. Pre-Yolo this wrapped at LevelTrusted; the test
-// locks the new max in so a future "let me also add LevelMaster"
-// PR has to update this assertion deliberately.
+// to LevelGuided.
 func TestAutonomyLevelCycle(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		from, to AutonomyLevel
 	}{
-		{LevelGuided, LevelCollaborate},
-		{LevelCollaborate, LevelTrusted},
+		{LevelGuided, LevelTrusted},
 		{LevelTrusted, LevelYolo},
 		{LevelYolo, LevelGuided},
 	}
@@ -34,12 +31,10 @@ func TestAutonomyLevelFlags(t *testing.T) {
 		level        AutonomyLevel
 		approveEdits bool
 		approveBlock bool
-		autoContinue bool
 	}{
-		{LevelGuided, false, false, false},
-		{LevelCollaborate, false, false, true},
-		{LevelTrusted, true, false, true},
-		{LevelYolo, true, true, true},
+		{LevelGuided, false, false},
+		{LevelTrusted, true, false},
+		{LevelYolo, true, true},
 	}
 	for _, tc := range cases {
 		if got := tc.level.AutoApproveEdits(); got != tc.approveEdits {
@@ -47,9 +42,6 @@ func TestAutonomyLevelFlags(t *testing.T) {
 		}
 		if got := tc.level.AutoApproveBlock(); got != tc.approveBlock {
 			t.Errorf("%s.AutoApproveBlock() = %v, want %v", tc.level.Name(), got, tc.approveBlock)
-		}
-		if got := tc.level.AutoContinue(); got != tc.autoContinue {
-			t.Errorf("%s.AutoContinue() = %v, want %v", tc.level.Name(), got, tc.autoContinue)
 		}
 	}
 }
@@ -64,7 +56,6 @@ func TestAutonomyLevelNames(t *testing.T) {
 		name  string
 	}{
 		{LevelGuided, "guided"},
-		{LevelCollaborate, "collaborate"},
 		{LevelTrusted, "trust"},
 		{LevelYolo, "yolo"},
 	}

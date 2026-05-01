@@ -286,7 +286,7 @@ func (a *Agent) dispatchTool(ctx context.Context, tc llm.ToolCall) string {
 	// Enforce planning mode blocklist at dispatch time — the schema filter
 	// removes tools from the advertised list, but a model could still emit
 	// a blocked tool call. Reject it before execution.
-	if a.mode == ModePlanning && a.planningBlocklist[name] {
+	if a.currentMode() == ModePlanning && a.planningBlocklist[name] {
 		return fmt.Sprintf("Error: tool %q is not available in planning mode", tc.Function.Name)
 	}
 

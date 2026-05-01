@@ -288,6 +288,17 @@ func (a *Agent) currentTerse() bool {
 	return a.terse
 }
 
+// currentMode returns the active conversation mode under lock.
+// Mode is mutated by RunWithMode (lifecycle.go:76) under a.mu; every
+// read site routes through this helper so a stale goroutine cannot
+// observe a torn / partially-updated value while a new RunWithMode is
+// landing.
+func (a *Agent) currentMode() Mode {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.mode
+}
+
 func (a *Agent) currentAutonomous() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()

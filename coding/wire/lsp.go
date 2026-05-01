@@ -8,7 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
+	engineevent "github.com/latebit-io/nib/engine/event"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/lsp"
 )
@@ -27,6 +28,10 @@ type lspServerConfig struct {
 // benefit from the DiagProvider interface for agent diagnostics after edits.
 // Returns nil if no language servers are configured or available.
 //
+// engine/lsp emits engine/event.Event types; this function fans them into
+// the application's coding/event.Event stream so frontends consume a single
+// unified channel.
+//
 // The returned [lang.ServiceManager] is the canonical port; consumers
 // import engine/lang for the type rather than reaching into wire.
 func InitLSP(projectRoot string, events chan<- event.Event) lang.ServiceManager {
@@ -37,7 +42,23 @@ func InitLSP(projectRoot string, events chan<- event.Event) lang.ServiceManager 
 	if len(configs) == 0 {
 		return nil
 	}
-	return lsp.NewManager(configs, projectRoot, events)
+	engineEvents := make(chan engineevent.Event, 32)
+	go fanInEngineEvents(engineEvents, events)
+	return lsp.NewManager(configs, projectRoot, engineEvents)
+}
+
+// fanInEngineEvents translates editor-domain events from engine/event into
+// the application's coding/event vocabulary so frontends consume a single
+// channel. Runs until the engine channel is closed.
+func fanInEngineEvents(in <-chan engineevent.Event, out chan<- event.Event) {
+	for ev := range in {
+		switch e := ev.(type) {
+		case engineevent.DiagnosticsUpdated:
+			out <- event.DiagnosticsUpdated{Path: e.Path}
+		default:
+			slog.Warn("wire: dropping unknown engine event", "type", ev)
+		}
+	}
 }
 
 // loadLSPConfigs reads .project/lsp.json from the project root.

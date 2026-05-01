@@ -10,10 +10,10 @@ import (
 	upagent "github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/budget"
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/nudges"
 	"github.com/latebit-io/nib/coding/streaming"
 	"github.com/latebit-io/nib/coding/truncation"
-	"github.com/latebit-io/nib/engine/event"
 )
 
 // errBudgetExceeded is the sentinel TransformContext returns when the

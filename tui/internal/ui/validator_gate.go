@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // Validator-gate helpers used by the EditProposed handler in app.go.

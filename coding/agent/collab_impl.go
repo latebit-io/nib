@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/tools"
-	"github.com/latebit-io/nib/engine/event"
 )
 
 // Propose satisfies [tools.Approver]. Tools in coding/tools call this

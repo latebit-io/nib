@@ -17,10 +17,10 @@ import (
 	"github.com/latebit-io/nib/engine/search"
 	"time"
 
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/engine/buffer"
 	"github.com/latebit-io/nib/engine/capture"
 	"github.com/latebit-io/nib/engine/editor"
-	"github.com/latebit-io/nib/engine/event"
 	"github.com/latebit-io/nib/engine/filelist"
 	"github.com/latebit-io/nib/engine/lang"
 )

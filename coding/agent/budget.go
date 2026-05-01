@@ -3,7 +3,7 @@ package agent
 import (
 	upevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/coding/budget"
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // Per-run budget integration for Agent.

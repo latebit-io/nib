@@ -8,7 +8,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/budget"
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // TestCheckTaskBudget_Disabled covers the three non-firing branches of

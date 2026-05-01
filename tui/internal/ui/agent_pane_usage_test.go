@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 type mockClipboard struct{ content string }

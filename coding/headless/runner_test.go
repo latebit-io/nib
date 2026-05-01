@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // mockAgent simulates an agent for testing the runner's event handling.

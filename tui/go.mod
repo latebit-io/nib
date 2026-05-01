@@ -13,13 +13,12 @@ require (
 	github.com/mattn/go-runewidth v0.0.19
 )
 
-replace github.com/latebit-io/nib/engine => ../engine
-
-replace github.com/latebit-io/nib/ai => ../ai
-
-replace github.com/latebit-io/nib/agent => ../agent
-
-replace github.com/latebit-io/nib/coding => ../coding
+replace (
+	github.com/latebit-io/nib/agent => ../agent
+	github.com/latebit-io/nib/ai => ../ai
+	github.com/latebit-io/nib/coding => ../coding
+	github.com/latebit-io/nib/engine => ../engine
+)
 
 require (
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect

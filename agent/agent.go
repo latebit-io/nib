@@ -11,15 +11,13 @@
 // TransformContext, GetSteeringMessages, GetFollowUpMessages). Anything an
 // application needs to layer on top of the loop happens through those two
 // extension points.
-//
-// This file currently contains the public surface only; the loop body is
-// in progress.
 package agent
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
@@ -33,14 +31,14 @@ type Options struct {
 
 	// Events is the channel the agent writes lifecycle events to.
 	// Required. The caller must drain this channel; the agent blocks
-	// briefly on control-flow events (limit specified by future
-	// implementation) and drops streaming events when the channel is
-	// full.
+	// briefly on control-flow events (5s) and drops high-volume
+	// streaming events ([event.MessageUpdate], [event.TurnUsage],
+	// [event.InputEstimate]) when the channel is full.
 	Events chan<- event.Event
 
-	// SystemPrompt is the system message prepended to every LLM call.
-	// Empty means "no system prompt." Application layers compose their
-	// prompt and pass the result here.
+	// SystemPrompt is the system message prepended to every run's
+	// transcript. Empty means "no system message." Application layers
+	// compose their prompt and pass the result here.
 	SystemPrompt string
 
 	// Tools are the tool implementations registered against this agent.
@@ -57,10 +55,10 @@ type Options struct {
 // [Agent.Prompt] / [Agent.Reply]; observe via the events channel from
 // [Options].
 //
-// Concurrency: Agent serializes its own loop on a single goroutine.
-// Public methods (Prompt, Reply, Abort, State) are safe to call from
-// any goroutine. Hooks run on the loop goroutine and must not block
-// indefinitely.
+// Concurrency: Agent serializes its loop on a single goroutine.
+// [Agent.Prompt], [Agent.Reply], [Agent.Abort], [Agent.State], and
+// [Agent.WaitForIdle] are safe to call from any goroutine. Hooks run on
+// the loop goroutine and must not block indefinitely.
 type Agent struct {
 	provider     llm.Provider
 	events       chan<- event.Event
@@ -69,14 +67,30 @@ type Agent struct {
 	toolDefs     []llm.ToolDef
 	hooks        Hooks
 
-	// Run-state fields (mutex, cancellation, transcript, etc.) are
-	// added during phase 3 alongside the loop implementation.
+	// mu guards the run-state fields below. It is NOT held while
+	// invoking the provider, hooks, or tool Execute calls — those
+	// would deadlock the public surface (Reply, State, Abort) the loop
+	// must remain responsive to.
+	mu               sync.Mutex
+	running          bool
+	streaming        bool
+	cancel           context.CancelFunc
+	doneCh           chan struct{}
+	inputCh          chan string
+	messages         []llm.Message
+	pendingToolCalls map[string]bool
+	lastError        string
 }
 
 // ErrInvalidOptions is returned by [New] when Options is missing a required
 // field or contains an inconsistency that would produce an unusable agent
 // (nil tool, empty tool name, duplicate tool name).
 var ErrInvalidOptions = errors.New("agent: invalid options")
+
+// ErrRunInProgress is returned by [Agent.Prompt] when called while a run
+// is already active. Callers must Abort the existing run (and optionally
+// WaitForIdle) before starting a new one.
+var ErrRunInProgress = errors.New("agent: a run is already in progress")
 
 // New constructs an Agent from Options. Returns ErrInvalidOptions wrapped
 // with a specific reason when validation fails.
@@ -125,49 +139,117 @@ func New(opts Options) (*Agent, error) {
 	}, nil
 }
 
-// Prompt starts a new run with the given user message. Blocks the caller
-// only long enough to launch the loop goroutine; lifecycle progress flows
-// through the events channel and a final completion blocks on
-// [Agent.WaitForIdle] when callers need it.
+// Prompt starts a new run with the given user message. Returns
+// [ErrRunInProgress] when a run is already active; callers must
+// [Agent.Abort] the previous run (and optionally [Agent.WaitForIdle])
+// before starting a new one. Lifecycle progress flows through the events
+// channel; [Agent.WaitForIdle] blocks for run completion.
 //
-// Returns an error if a run is already active. The current implementation
-// is a stub — phase 3 fills in the loop.
+// The provided context governs the run's lifetime. Cancelling it is
+// equivalent to [Agent.Abort]: the loop unwinds and emits
+// [event.AgentEnd]. Hooks and tool Execute calls receive a child context
+// derived from this ctx so they unblock alongside the run.
 func (a *Agent) Prompt(ctx context.Context, content string) error {
-	_ = ctx
-	_ = content
-	panic("agent.Agent.Prompt: not yet implemented (phase 3)")
+	a.mu.Lock()
+	if a.running {
+		a.mu.Unlock()
+		return ErrRunInProgress
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	doneCh := make(chan struct{})
+	inputCh := make(chan string, 1)
+
+	msgs := make([]llm.Message, 0, 2)
+	if a.systemPrompt != "" {
+		msgs = append(msgs, llm.Message{Role: "system", Content: a.systemPrompt})
+	}
+	msgs = append(msgs, llm.Message{Role: "user", Content: content})
+
+	a.running = true
+	a.streaming = false
+	a.cancel = cancel
+	a.doneCh = doneCh
+	a.inputCh = inputCh
+	a.messages = msgs
+	a.pendingToolCalls = nil
+	a.lastError = ""
+	a.mu.Unlock()
+
+	go a.runLoop(runCtx)
+	return nil
 }
 
-// Reply delivers a developer follow-up. Behavior depends on the agent's
-// current state: when waiting between turns the message becomes the next
-// user turn; when running it queues for injection after the current turn
-// finishes. The boolean return indicates whether the reply was accepted.
+// Reply queues a developer follow-up for the active run. Returns true
+// when the message was accepted, false when no run is active or the
+// reply queue is full.
 //
-// Phase 3 fills in the implementation.
-func (a *Agent) Reply(ctx context.Context, content string) bool {
-	_ = ctx
-	_ = content
-	panic("agent.Agent.Reply: not yet implemented (phase 3)")
+// 8a semantics: the queue is a buffered channel of capacity 1. A second
+// Reply before the loop drains the first is rejected with false; the
+// caller can retry after [Agent.WaitForIdle] reaches the next idle
+// point or after observing a [event.TurnEnd] without tool calls.
+func (a *Agent) Reply(_ context.Context, content string) bool {
+	a.mu.Lock()
+	ch := a.inputCh
+	running := a.running
+	a.mu.Unlock()
+	if !running || ch == nil {
+		return false
+	}
+	select {
+	case ch <- content:
+		return true
+	default:
+		return false
+	}
 }
 
 // Abort cancels the current run. Safe to call when no run is active —
-// it is a no-op in that case. The events channel receives an [event.AgentEnd]
-// once the loop unwinds.
+// it is a no-op in that case. The events channel receives an
+// [event.AgentEnd] once the loop unwinds; use [Agent.WaitForIdle] to
+// block until that happens.
 func (a *Agent) Abort() {
-	panic("agent.Agent.Abort: not yet implemented (phase 3)")
+	a.mu.Lock()
+	cancel := a.cancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
-// State returns a read-only snapshot of the agent's current state. Slices
-// and maps in the result are safe to read without further synchronization;
-// modifying them does NOT affect the agent.
+// State returns a read-only snapshot of the agent's current state.
+// Slices and maps in the result are safe to read without further
+// synchronization; modifying them does NOT affect the agent.
 func (a *Agent) State() State {
-	panic("agent.Agent.State: not yet implemented (phase 3)")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	msgs := make([]llm.Message, len(a.messages))
+	copy(msgs, a.messages)
+
+	pending := make(map[string]bool, len(a.pendingToolCalls))
+	for k, v := range a.pendingToolCalls {
+		pending[k] = v
+	}
+
+	return State{
+		Messages:         msgs,
+		Streaming:        a.streaming,
+		PendingToolCalls: pending,
+		LastError:        a.lastError,
+	}
 }
 
-// WaitForIdle blocks until the current run (if any) has finished and all
-// loop goroutines have unwound. Returns immediately when no run is active.
-//
-// Phase 3 fills in the implementation.
+// WaitForIdle blocks until the current run (if any) has finished and
+// the loop goroutine has unwound. Returns immediately when no run is
+// active.
 func (a *Agent) WaitForIdle() {
-	panic("agent.Agent.WaitForIdle: not yet implemented (phase 3)")
+	a.mu.Lock()
+	ch := a.doneCh
+	running := a.running
+	a.mu.Unlock()
+	if !running || ch == nil {
+		return
+	}
+	<-ch
 }

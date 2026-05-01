@@ -1,6 +1,47 @@
 package agent
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"testing"
+
+	"github.com/latebit-io/nib/engine/event"
+)
+
+// mustDrainEvents returns a buffered events channel with a background
+// drainer that auto-resolves [event.FlushBuffers] requests. Tests
+// that exercise [Agent.FoundationHooks].BeforeToolCall directly use
+// this so the flush-dirty-buffers step inside the hook does not stall
+// for its 5-second response timeout.
+//
+// The drainer also keeps the channel from filling up — control-flow
+// events ([event.AgentEditProposed], [event.AgentDone]) would
+// otherwise block past their 5-second deliver timeout and cascade
+// failures into apparently-unrelated tests.
+func mustDrainEvents(t *testing.T) chan event.Event {
+	t.Helper()
+	ch := make(chan event.Event, 128)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
+				if fb, ok := ev.(event.FlushBuffers); ok {
+					select {
+					case fb.Result <- event.FlushResult{}:
+					default:
+					}
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { close(done) })
+	return ch
+}
 
 // stubWorkspace is a no-op workspace used by tests that drive the
 // Agent through tool registration paths and do not exercise actual

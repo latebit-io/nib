@@ -20,11 +20,11 @@ import (
 // silent partial completion.
 var errProviderClosedEarly = errors.New("agent: provider closed stream before completion")
 
-// errProviderTruncated is returned by processTurn when the terminal
-// stream event reports Truncated=true. The foundation does not attempt
-// recovery — applications that want truncation retries should wrap
-// the [llm.Provider] with their own retry layer. The loop surfaces
-// this as an [event.Error] and ends the run.
+// errProviderTruncated is the sentinel surfaced when the provider's
+// terminal Done reports Truncated=true and either no [Hooks.OnTruncated]
+// is registered or the registered hook returns Retry=false without
+// emitting its own error event. Applications that want recovery wire
+// the hook; without it the foundation defaults to ending the run.
 var errProviderTruncated = errors.New("agent: provider truncated response")
 
 // runLoop is the per-run goroutine driver. Owns the multi-turn cycle:
@@ -53,7 +53,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 
 		a.send(event.TurnStart{})
 
-		assistant, terminate, err := a.processTurn(ctx, msgs)
+		result, err := a.processTurn(ctx, msgs)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
@@ -62,10 +62,26 @@ func (a *Agent) runLoop(ctx context.Context) {
 			return
 		}
 
+		assistant := result.Assistant
 		a.appendMessage(assistant)
 		a.send(event.TurnEnd{Message: assistant})
 
-		if terminate {
+		if result.Truncated {
+			retry, err := a.handleTruncation(ctx, assistant)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return
+				}
+				a.emitError(err)
+				return
+			}
+			if !retry {
+				return
+			}
+			continue
+		}
+
+		if result.Terminate {
 			return
 		}
 
@@ -114,23 +130,44 @@ func (a *Agent) runLoop(ctx context.Context) {
 	}
 }
 
+// turnResult bundles the per-turn outcomes [processTurn] computes.
+// Splitting truncated and terminate from the error channel lets the
+// loop dispatch them through their own paths — truncation goes to the
+// [Hooks.OnTruncated] hook, terminate ends the run cleanly, and
+// errors funnel into [Agent.emitError].
+type turnResult struct {
+	// Assistant is the finalized assistant message for this turn.
+	// Always populated on a non-error return — including truncated
+	// turns, where the hook needs the assistant message and its
+	// (possibly partial) tool calls to build rejection replies.
+	Assistant llm.Message
+	// Truncated mirrors the provider's terminal-event Truncated flag.
+	// True means the LLM ran out of output budget mid-generation; the
+	// caller invokes [Hooks.OnTruncated] before deciding whether to
+	// retry or end the run.
+	Truncated bool
+	// Terminate is reserved for future early-termination paths from
+	// inside the stream consumer itself; today only the post-tool-batch
+	// hook can terminate, so this flag is always false.
+	Terminate bool
+}
+
 // processTurn drives one Stream → drain cycle and returns the
-// finalized assistant message. The terminate return flag is reserved
-// for future early-termination paths from inside the stream consumer
-// itself; today only the post-tool-batch hook can terminate, so the
-// flag is always false from this layer.
+// finalized assistant message plus the truncation/terminate signals
+// the loop dispatches on.
 //
 // Streaming events ([event.MessageStart], [event.MessageUpdate],
 // [event.MessageEnd]) are emitted as the stream progresses. A truncated
-// terminal event is treated as an error (see [errProviderTruncated]).
-func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message) (llm.Message, bool, error) {
+// terminal event is reported via [turnResult.Truncated] (NOT as an
+// error) so the loop can route it to the [Hooks.OnTruncated] hook.
+func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message) (turnResult, error) {
 	a.send(event.MessageStart{})
 
 	a.setStreaming(true)
 	ch, err := a.provider.Stream(ctx, msgs, a.toolDefs)
 	if err != nil {
 		a.setStreaming(false)
-		return llm.Message{}, false, fmt.Errorf("provider.Stream: %w", err)
+		return turnResult{}, fmt.Errorf("provider.Stream: %w", err)
 	}
 
 	var (
@@ -144,14 +181,14 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message) (llm.Messag
 		select {
 		case <-ctx.Done():
 			a.setStreaming(false)
-			return llm.Message{}, false, ctx.Err()
+			return turnResult{}, ctx.Err()
 		case ev, ok := <-ch:
 			if !ok {
 				a.setStreaming(false)
 				if err := ctx.Err(); err != nil {
-					return llm.Message{}, false, err
+					return turnResult{}, err
 				}
-				return llm.Message{}, false, errProviderClosedEarly
+				return turnResult{}, errProviderClosedEarly
 			}
 			if ev.Token != "" {
 				content.WriteString(ev.Token)
@@ -172,12 +209,37 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message) (llm.Messag
 			a.send(event.MessageEnd{Message: assistant})
 			a.emitTurnUsage(usage, len(toolCalls))
 
-			if truncated {
-				return llm.Message{}, false, errProviderTruncated
-			}
-			return assistant, false, nil
+			return turnResult{Assistant: assistant, Truncated: truncated}, nil
 		}
 	}
+}
+
+// handleTruncation invokes the [Hooks.OnTruncated] hook (when
+// configured) on a truncated turn and returns whether the loop should
+// retry. Splice messages from the hook are appended before the next
+// turn — or before run-end on Retry=false.
+//
+// When no hook is registered, the foundation emits its own
+// [event.Error] for [errProviderTruncated] and returns retry=false. With
+// a hook, the hook owns user-facing error emission on Retry=false; the
+// foundation ends the run silently. A hook error is treated as terminal
+// and surfaced through [Agent.emitError] by the caller.
+func (a *Agent) handleTruncation(ctx context.Context, assistant llm.Message) (retry bool, err error) {
+	if a.hooks.OnTruncated == nil {
+		a.emitError(errProviderTruncated)
+		return false, nil
+	}
+	res, hookErr := a.hooks.OnTruncated(ctx, TruncationContext{
+		Assistant: assistant,
+		ToolCalls: assistant.ToolCalls,
+	})
+	if hookErr != nil {
+		return false, fmt.Errorf("OnTruncated: %w", hookErr)
+	}
+	if len(res.Messages) > 0 {
+		a.appendMessages(res.Messages)
+	}
+	return res.Retry, nil
 }
 
 // executeToolCalls dispatches every call in the batch through the

@@ -70,6 +70,23 @@ type Hooks struct {
 	// after the agent would otherwise stop. Distinct from steering: these
 	// are NOT injected mid-run; they trigger a fresh continuation.
 	GetFollowUpMessages func(ctx context.Context) ([]llm.Message, error)
+
+	// OnTruncated fires when the provider's terminal Done event reports
+	// Truncated=true, before the foundation surfaces the truncation as a
+	// run-ending error. The hook owns the recovery decision: splice
+	// rejection or recovery messages into the transcript and either retry
+	// the turn or end the run.
+	//
+	// Returning Retry=true continues the loop after appending Messages —
+	// the truncated tool calls are NEVER executed (partial arguments may
+	// corrupt state) but their tool-role rejections in Messages keep the
+	// transcript well-formed for the next provider call. Returning
+	// Retry=false ends the run silently after appending Messages — the
+	// hook is responsible for surfacing a user-facing [event.Error] (or an
+	// application-shaped error event) before returning. A nil hook is
+	// equivalent to Retry=false with the foundation emitting a generic
+	// "provider truncated response" error.
+	OnTruncated func(ctx context.Context, c TruncationContext) (TruncationResult, error)
 }
 
 // BeforeToolCallContext carries the data BeforeToolCall needs to evaluate a
@@ -119,6 +136,38 @@ type AfterToolCallResult struct {
 	// batch. Early termination only fires when every finalized tool
 	// result in the batch sets this to true.
 	Terminate bool
+}
+
+// TruncationContext carries the data [Hooks.OnTruncated] needs to decide
+// whether to retry the turn or end the run.
+type TruncationContext struct {
+	// Assistant is the truncated assistant message. The foundation has
+	// ALREADY appended it to the transcript before invoking the hook so
+	// any rejection messages the hook returns slot in immediately after
+	// it. ToolCalls (if any) carry possibly-partial argument JSON; the
+	// hook must NOT attempt to execute them.
+	Assistant llm.Message
+	// ToolCalls is the pending tool call slice from the truncated
+	// assistant message — equivalent to Assistant.ToolCalls but lifted
+	// for ergonomic access. Chat-completion transcripts require a
+	// tool-role reply for every entry before the next assistant turn;
+	// hooks that retry must include those replies in [TruncationResult].
+	ToolCalls []llm.ToolCall
+}
+
+// TruncationResult is the optional decision returned from
+// [Hooks.OnTruncated]. The zero value (Retry=false, Messages=nil) ends
+// the run without appending anything.
+type TruncationResult struct {
+	// Retry continues the loop with another turn after appending
+	// Messages. False ends the run after appending Messages.
+	Retry bool
+	// Messages are appended to the transcript before retry — typically
+	// a tool-role rejection for each pending tool call (chat-completion
+	// transcripts validate the pairing) plus an optional user-role
+	// nudge. Empty/nil is allowed; the foundation just continues with
+	// the transcript as the hook left it.
+	Messages []llm.Message
 }
 
 // State is the public snapshot of an agent's runtime state. Returned by

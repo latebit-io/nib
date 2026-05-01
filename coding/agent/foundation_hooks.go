@@ -12,6 +12,7 @@ import (
 	"github.com/latebit-io/nib/coding/budget"
 	"github.com/latebit-io/nib/coding/nudges"
 	"github.com/latebit-io/nib/coding/streaming"
+	"github.com/latebit-io/nib/coding/truncation"
 	"github.com/latebit-io/nib/engine/event"
 )
 
@@ -40,18 +41,15 @@ var errBudgetExceeded = errors.New("coding/agent: per-task token budget exceeded
 
 // FoundationHooks returns the [upagent.Hooks] value bound to this
 // agent. Closure-captured state (singleEditFired, narrativeFired,
-// permissionFired) lives for the lifetime of the returned Hooks; a
-// fresh FoundationHooks call yields a fresh closure.
+// permissionFired, truncationRetries) lives for the lifetime of the
+// returned Hooks; a fresh FoundationHooks call yields a fresh closure.
 //
 // liveMessages is the snapshotter the steering hook uses to read the
 // transcript including the assistant turn that just ended (TransformContext
-// only sees the pre-Stream slice). 8c wires it to
+// only sees the pre-Stream slice). The wrapper wires it to
 // [upagent.Agent.State]'s Messages; tests pass a fixture function.
 // Nil is tolerated — treated as "no messages" — for unit tests that
 // don't exercise steering.
-//
-// Hooks not yet migrated stay nil; the foundation skips them, so
-// partial wiring is safe.
 func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks {
 	if liveMessages == nil {
 		liveMessages = func() []llm.Message { return nil }
@@ -62,9 +60,9 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	// dispatch.
 	var singleEditFired bool
 	// narrativeFired and permissionFired are the per-developer-input
-	// guards mirroring the local bools in [Agent.runLoop]. Reset by
-	// TransformContext when a fresh user message lands at the tail of
-	// the transcript (one not authored by a nudge).
+	// guards mirroring the local bools the inline run loop carried.
+	// Reset by TransformContext when a fresh user message lands at the
+	// tail of the transcript (one not authored by a nudge).
 	var (
 		narrativeFired  bool
 		permissionFired bool
@@ -72,22 +70,28 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	// lastWasBlocked records whether the most recent BeforeToolCall
 	// returned Block=true. AfterToolCall reads + clears it so the
 	// intent-reminder append is skipped on the Block path (mirrors the
-	// inline behavior — dispatchTool returns early before the reminder
-	// is appended for planning-mode + active-task rejections, but
-	// includes the reminder on tool-execute and unknown-tool paths).
+	// inline behavior — dispatchTool returned early before
+	// [Agent.intentReminder] on planning-mode + active-task rejections,
+	// but included the reminder on tool-execute and unknown-tool paths).
 	// Safe with a single bool because BeforeToolCall and AfterToolCall
-	// always pair within one [agent.dispatchTool] call.
+	// always pair within one foundation tool dispatch.
 	var lastWasBlocked bool
+	// truncationRetries counts consecutive truncated turns within the
+	// run. Reset implicitly each new run because FoundationHooks is
+	// called fresh in [New]; survives across non-truncated turns
+	// because the hook value itself outlives turns.
+	var truncationRetries int
 
 	before := func(ctx context.Context, c upagent.BeforeToolCallContext) (upagent.BeforeToolCallResult, error) {
-		// Order mirrors the inline path: executeToolCalls'
-		// lint-pending skip (turn.go:188) → single-edit (turn.go:198)
-		// → dispatchTool's planning blocklist (turn.go:289) →
-		// active-task gate (turn.go:295). lastWasBlocked is set on
-		// every path so AfterToolCall can decide whether to apply
-		// the intent-reminder override (matches inline: dispatchTool
-		// returns early before [Agent.intentReminder] runs on the
-		// blocked branches).
+		// Order mirrors the inline path:
+		//   1. lint-pending skip (was turn.go:188)
+		//   2. single-edit (was turn.go:198)
+		//   3. flush dirty buffers + emit AgentToolCall (was turn.go:214-224)
+		//   4. planning blocklist (was turn.go:289 inside dispatchTool)
+		//   5. active-task gate (was turn.go:295 inside dispatchTool)
+		//
+		// lastWasBlocked is set on every Block path so AfterToolCall
+		// can decide whether to apply the intent-reminder override.
 		if res := a.lintPendingGate(); res.Block {
 			lastWasBlocked = true
 			return res, nil
@@ -96,6 +100,21 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 			lastWasBlocked = true
 			return res, nil
 		}
+		if err := a.flushDirtyBuffers(ctx); err != nil {
+			a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
+			lastWasBlocked = true
+			return upagent.BeforeToolCallResult{
+				Block:  true,
+				Reason: fmt.Sprintf("Skipped — autosave failed: %v", err),
+			}, nil
+		}
+		// Mirrors turn.go:222-224: emit AgentToolCall AFTER the
+		// gates that suppress dispatch entirely (lint, single-edit)
+		// but BEFORE planning + active-task gates so the frontend
+		// sees the call attempt even when it's about to be
+		// rejected. Inline behavior: planning + active-task
+		// rejections still emit AgentToolCall.
+		a.send(event.AgentToolCall{Name: c.Name, Args: c.Args})
 		if res := a.planningBlocklistGate(c); res.Block {
 			lastWasBlocked = true
 			return res, nil
@@ -116,27 +135,78 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 
 	transform := func(ctx context.Context, msgs []llm.Message) ([]llm.Message, error) {
 		singleEditFired = false
-		if isFreshUserInput(msgs) {
+		fresh := isFreshUserInput(msgs)
+		if fresh {
 			narrativeFired = false
 			permissionFired = false
 		}
-		// Per-task budget gate (concern #6). Mirrors
-		// [Agent.abortIfBudgetExceeded] in the inline post-turn check
-		// (run.go:162). TransformContext fires before each Stream so
-		// catching the latched flag here halts the loop before the
-		// next provider call commits more tokens. Inline's pre-Stream
-		// gate (turn.go:101) considers in-flight `tu` PromptTokens; the
-		// foundation only sees committed totals, so we catch one
-		// Stream later in the worst case — acceptable because the
-		// hard cap still terminates the run.
+		// Per-task budget gate. Mirrors the inline post-turn budget
+		// abort: TransformContext fires before each Stream so the
+		// latched flag halts the loop before another provider call
+		// commits more tokens. The hard cap still terminates the run.
 		if err := a.foundationBudgetCheck(); err != nil {
 			return nil, err
 		}
-		return a.foundationCompactAndLint(ctx, msgs)
+		msgs, err := a.foundationCompactAndLint(ctx, msgs)
+		if err != nil {
+			return nil, err
+		}
+		// Refresh the system prompt on fresh developer input so style
+		// /terse/autonomous toggles between turns take effect on the
+		// next provider call. Mirrors the inline run loop's
+		// post-AwaitInput rebuild. Skipped on intra-turn re-entries
+		// (steering, follow-up, tool-result-driven loops) where the
+		// trailing message is NOT a fresh user input — re-rendering
+		// every iteration is wasteful and can race with mid-batch
+		// SetTerse/SetStyle calls.
+		if fresh && len(msgs) > 0 && msgs[0].Role == "system" {
+			msgs[0].Content = a.rebuildSystemPrompt(a.currentMode())
+		}
+		// Emit AgentInputEstimate + capture the estimate so the
+		// translator's TurnUsage handler can populate the *Est fields
+		// on AgentTurnUsage. Inline path (turn.go:116) accumulated
+		// this into budget.Turn.LastEstimate; under the foundation we
+		// stash it on the agent struct, snapshotted under mu.
+		est := streaming.EstimateAndBroadcast(msgs, a.activeToolDefs(), a.send)
+		a.mu.Lock()
+		a.lastEstimate = est
+		a.mu.Unlock()
+		return msgs, nil
 	}
 
 	steering := func(_ context.Context) ([]llm.Message, error) {
 		return a.foundationSteering(liveMessages(), &narrativeFired, &permissionFired), nil
+	}
+
+	followUp := func(_ context.Context) ([]llm.Message, error) {
+		// GetFollowUpMessages fires after a turn with no tool calls AND
+		// after steering returned nothing. From here the foundation
+		// parks on awaitReply for the developer's next message — which
+		// is precisely the inline "AgentWaiting" boundary. Emit it
+		// here so frontends know to enable input AND so the wrapper's
+		// IsWaiting() flag flips before the foundation parks.
+		finished := a.tasksAllComplete()
+		a.mu.Lock()
+		a.waiting = true
+		a.mu.Unlock()
+		a.send(event.AgentWaiting{Finished: finished})
+		return nil, nil
+	}
+
+	onTruncated := func(_ context.Context, c upagent.TruncationContext) (upagent.TruncationResult, error) {
+		// Delegate to truncation.Recover with an empty initial slice so
+		// the returned messages are exactly the rejection (and optional
+		// user nudge) splice we hand back to the foundation. Recover
+		// emits its own AgentError to the frontend on every iteration
+		// (recovery banner) and on retries-exhausted (terminal abort);
+		// returning Retry=false suppresses the foundation's fallback
+		// emission so frontends see one error, not two.
+		splice, newRetries, err := truncation.Recover(nil, c.ToolCalls, truncationRetries, a.currentProvider(), a.send)
+		truncationRetries = newRetries
+		if err != nil {
+			return upagent.TruncationResult{Retry: false, Messages: splice}, nil
+		}
+		return upagent.TruncationResult{Retry: true, Messages: splice}, nil
 	}
 
 	return upagent.Hooks{
@@ -144,6 +214,8 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		AfterToolCall:       after,
 		TransformContext:    transform,
 		GetSteeringMessages: steering,
+		GetFollowUpMessages: followUp,
+		OnTruncated:         onTruncated,
 	}
 }
 
@@ -364,21 +436,18 @@ func (a *Agent) activeToolDefs() []llm.ToolDef {
 	return a.toolDefs
 }
 
-// foundationBudgetCheck mirrors [Agent.checkTaskBudget] +
-// [Agent.abortIfBudgetExceeded] (budget.go:91-122) without the runID
-// gate (the runID race lives at the inline-runLoop layer; the
-// foundation wrapper handles stale-run distinction differently). When
-// the per-task cap is crossed the latch flips, an
-// [event.AgentError] is emitted (matching the inline frontend
-// contract), and [errBudgetExceeded] is returned for the caller to
-// translate into a run-end.
+// foundationBudgetCheck mirrors the inline post-turn budget gate
+// without the retired runID race guard. When the per-task cap is
+// crossed the latch flips and a wrapped [errBudgetExceeded] carrying
+// the formatted budget message is returned; the foundation's
+// TransformContext-error path emits [event.Error] which the
+// translator re-emits as [event.AgentError] — single user-facing
+// emission, no double-error.
 //
-// Returns nil when the cap is disabled or not yet crossed.
-//
-// The latch (a.budgetExceeded) prevents the AgentError from
-// re-emitting on subsequent TransformContext calls if the run somehow
-// continues past the abort signal — defensive parity with
-// [Agent.checkTaskBudget].
+// Returns nil when the cap is disabled or not yet crossed. The latch
+// (a.budgetExceeded) prevents the abort from re-firing on subsequent
+// TransformContext calls if a turn somehow re-enters past the abort
+// signal — defensive parity with the inline check.
 func (a *Agent) foundationBudgetCheck() error {
 	a.mu.Lock()
 	if a.budgetExceeded {
@@ -394,6 +463,5 @@ func (a *Agent) foundationBudgetCheck() error {
 	a.mu.Unlock()
 
 	slog.Warn("agent: task token budget exceeded; aborting (foundation hook)", "msg", msg)
-	a.send(event.AgentError{Err: msg})
-	return errBudgetExceeded
+	return fmt.Errorf("%w: %s", errBudgetExceeded, msg)
 }

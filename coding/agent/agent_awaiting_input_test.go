@@ -192,21 +192,20 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 
 	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
 
-	// Non-fatal errors (including the abort) leave runLoop in AgentWaiting
-	// rather than exiting — wait for that, then cancel ctx to force the
-	// run goroutine to return so its defer populates savedMessages.
-	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentWaiting)
-		return ok
-	}) == nil {
-		t.Fatal("timeout waiting for AgentWaiting after truncation retry exhaustion")
-	}
-	cancel()
-	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+	// After retry exhaustion the OnTruncated hook returns Retry=false
+	// and the foundation ends the run via AgentEnd. The translator
+	// emits AgentDone(success=false) directly — no intervening
+	// AgentWaiting park (the inline-loop "park on error" path is gone
+	// post-cutover; errors unwind cleanly through AgentDone).
+	done := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentDone)
 		return ok
-	}) == nil {
-		t.Fatal("timeout waiting for AgentDone after ctx cancel")
+	})
+	if done == nil {
+		t.Fatal("timeout waiting for AgentDone after truncation retry exhaustion")
+	}
+	if done.(event.AgentDone).Success {
+		t.Errorf("AgentDone.Success = true on truncation abort, want false")
 	}
 
 	// The provider should have been called exactly truncation.MaxRetries+1

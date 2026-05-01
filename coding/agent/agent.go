@@ -5,7 +5,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -85,15 +84,6 @@ func coordFromCtx(ctx context.Context) *approval.Coordinator {
 	c, _ := ctx.Value(coordCtxKey{}).(*approval.Coordinator)
 	return c
 }
-
-// errStaleRun is the sentinel returned by [Agent.processLLMTurn] when
-// it detects mid-turn that the agent's runID has advanced (a competing
-// RunWithMode/Reply replaced this run). Distinct from context.Canceled
-// so [Agent.runLoop] can short-circuit without emitting the post-turn
-// AgentWaiting event for a run that has already been replaced — using
-// context.Canceled here would route the stale goroutine through the
-// normal error path and yield an AgentWaiting for the wrong run.
-var errStaleRun = errors.New("agent run replaced by a newer run")
 
 // mutatingTools contains tool names that modify filesystem or shell state.
 // In execution mode these require an active `[>]` task in /project.md —
@@ -250,11 +240,23 @@ type Agent struct {
 	// turn checks (e.g. on a Resume of a saved conversation) do not double-
 	// emit the AgentError. Reset alongside sessionUsage on RunWithMode/Reply.
 	budgetExceeded bool
+	// runUnsuccessful is set by [Agent.send] when an [event.AgentError]
+	// is emitted and by [Agent.Cancel]. The translator goroutine reads
+	// it on [upevent.AgentEnd] to decide [event.AgentDone].Success —
+	// the foundation event stream alone cannot distinguish "clean
+	// run-end" from "user-cancelled" or from "engine-side AgentError
+	// emitted by truncation.Recover or autosave-failed", so the wrapper
+	// tracks the unsuccess decision explicitly. Reset on each new run.
+	runUnsuccessful bool
 	// turnCounter is the 1-indexed turn number within the current run.
 	turnCounter int
-	// runID is a generation token incremented on each RunWithMode call.
-	// recordTurnUsage checks this to ignore late updates from canceled runs.
-	runID uint64
+	// lastEstimate holds the most recent client-side input estimate from
+	// [streaming.EstimateAndBroadcast], stashed by TransformContext so the
+	// translator goroutine's TurnUsage handler can populate the *Est
+	// fields on [event.AgentTurnUsage] without re-computing. Mirrors
+	// the inline pattern of accumulating `tu.LastEstimate` between
+	// pre-Stream estimation and post-Stream usage commitment.
+	lastEstimate llm.InputEstimate
 
 	// providerProxy is the [llm.Provider] handed to [foundation]. It
 	// shadows [Agent.provider] so [SetProvider] can hot-swap the live
@@ -504,21 +506,6 @@ func (a *Agent) buildFoundation() {
 	go a.translateFoundationEvents()
 }
 
-// translateFoundationEvents drains [Agent.foundationEvents] and
-// re-emits each event as an [engine/event.Event] through [Agent.send]
-// — the application boundary where the generic foundation vocabulary
-// becomes the coding agent's vocabulary.
-//
-// Step 1 of 8c ships this as a no-op drain: the foundation is not yet
-// wired into [RunWithMode] / [Reply], so no events fire. Step 3 fills
-// in the translation table. The goroutine never exits — its lifetime
-// is the agent's lifetime, matching cmd/agent and tui/cmd/tui where
-// the agent lives the program's lifetime.
-func (a *Agent) translateFoundationEvents() {
-	for range a.foundationEvents {
-	}
-}
-
 // registerTools builds the tool registry. Built-in tools are registered first
 // and cannot be overridden by extraTools (e.g. MCP).
 //
@@ -624,34 +611,40 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	}
 }
 
-// Run starts a new conversation in execution mode. See RunWithMode for details.
 // Public lifecycle and signal API (Run, RunWithMode, Reply, Cancel,
-// IsWaiting, IsRunning, SetProvider/Style/Terse/Autonomous/Evaluator,
-// Approve, Reject, Continue, activeCoord, drainPendingLint,
-// hasLintPending, currentTerse/Autonomous/CodingStyle/Provider, Usage,
-// send, sendCritical) lives in lifecycle.go.
+// IsWaiting, IsRunning, SetProvider / Style / Terse / Autonomous /
+// Evaluator, Approve, Reject, activeCoord, drainPendingLint,
+// hasLintPending, currentTerse / Autonomous / CodingStyle / Provider /
+// Mode, Usage, emitOpening, send, sendCritical) lives in lifecycle.go.
 
-// Per-turn budget integration (recordTurnUsage, shouldAbortForBudget,
-// checkTaskBudget, abortIfBudgetExceeded) lives in budget.go.
+// Per-run budget integration (recordTurnUsage, checkTaskBudget) lives
+// in budget.go. The pure budget math + types live in [coding/budget].
 
-// Run goroutine + main loop (run, resumeRun, runLoop) live in run.go.
+// Foundation event translation (translateFoundationEvents,
+// commitRunEnd) lives in translator.go. The translator drains the
+// foundation's [upevent.Event] stream and re-emits as
+// [engine/event.Event] for frontends.
 
-// Post-turn nudges (tryInjectPostTurnNudge, shouldNudgeOutstanding,
-// tasksAllComplete) live in nudges.go.
+// Foundation hook bridge (FoundationHooks + every gate it composes)
+// lives in foundation_hooks.go. The foundation [upagent.Agent]
+// captures these once at construction; closure-scoped per-turn state
+// stays out of the [Agent] struct.
 
-// Per-turn pipeline (planningToolDefs, afterToolDispatch,
-// processLLMTurn, executeToolCalls, flushDirtyBuffers, dispatchTool)
-// lives in turn.go. Streaming + compaction primitives live in
-// [coding/streaming]; truncation recovery in [coding/truncation].
+// Wrapper-side I/O helpers (planningToolDefs, flushDirtyBuffers) live
+// in io.go. Both used to live in the inline turn pipeline; after the
+// 8c cutover they are wrapper-private utilities the foundation hook
+// wiring calls into.
 
-// Truncation handling (Recover, Escalate, RecoveryMessages,
-// AppendRejections, MaxRetries) lives in [coding/truncation]. Agent
-// invokes [truncation.Recover] from processLLMTurn after a Truncated
-// stream event.
+// Post-turn nudge math (shouldNudgeOutstanding, tasksAllComplete)
+// lives in nudges.go. The string-pattern detectors themselves live in
+// [coding/nudges]; nudges.go is the agent-side glue.
+
+// Streaming + compaction primitives live in [coding/streaming];
+// truncation recovery in [coding/truncation].
 
 // Task-review pipeline (runTaskReview, nextTaskHint, groupEditsByDir,
-// runLinters, infraError, runSmokeReview, formatFindings, evaluateTurn)
-// lives in task_review.go.
+// runLinters, infraError, runSmokeReview, formatFindings,
+// evaluateTurn) lives in task_review.go.
 
 // appendSmokeTool registers the smoke_run tool when the project's
 // smokeConfig is non-Skipped and resolves to a real command. Extracted

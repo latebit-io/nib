@@ -196,6 +196,8 @@ func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
 	// One file-edit per turn. After TransformContext fires, the next
 	// turn's first edit should pass.
 	a := &Agent{
+		events:          mustDrainEvents(t),
+		cache:           NewFileCache(),
 		mode:            ModeExecution,
 		interactionMode: Interactive,
 		autonomous:      false,
@@ -236,14 +238,17 @@ func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
 
 func TestFoundationHooks_MigratedHooksPresent(t *testing.T) {
 	// Pin the wiring contract so future commits notice when the
-	// migrated set changes.
+	// migrated set changes. After the 8c cutover every hook the
+	// foundation exposes is wired by the application — the bare
+	// foundation has nothing application-specific to layer on, so
+	// missing wiring would silently drop a behavior.
 	a := &Agent{}
 	hooks := a.FoundationHooks(nil)
 	if hooks.BeforeToolCall == nil {
-		t.Errorf("BeforeToolCall must be wired (concerns #1, #2)")
+		t.Errorf("BeforeToolCall must be wired (concerns #1, #2 + flushDirtyBuffers + AgentToolCall emit)")
 	}
 	if hooks.TransformContext == nil {
-		t.Errorf("TransformContext must be wired (concerns #2, #3)")
+		t.Errorf("TransformContext must be wired (concerns #2, #3, #6 + system prompt rebuild + EstimateAndBroadcast)")
 	}
 	if hooks.GetSteeringMessages == nil {
 		t.Errorf("GetSteeringMessages must be wired (concern #4)")
@@ -251,8 +256,11 @@ func TestFoundationHooks_MigratedHooksPresent(t *testing.T) {
 	if hooks.AfterToolCall == nil {
 		t.Errorf("AfterToolCall must be wired (concern #5)")
 	}
-	if hooks.GetFollowUpMessages != nil {
-		t.Errorf("GetFollowUpMessages not yet migrated")
+	if hooks.GetFollowUpMessages == nil {
+		t.Errorf("GetFollowUpMessages must be wired — drives AgentWaiting emission at the loop-park boundary")
+	}
+	if hooks.OnTruncated == nil {
+		t.Errorf("OnTruncated must be wired — preserves the truncation-recovery contract from the inline path")
 	}
 }
 
@@ -724,9 +732,8 @@ func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
 	}
-	events := make(chan event.Event, 16)
 	a := &Agent{
-		events:    events,
+		events:    mustDrainEvents(t),
 		cache:     NewFileCache(),
 		workspace: ws,
 		mode:      ModeExecution,
@@ -801,9 +808,13 @@ func TestFoundationBudgetCheck_UnderThresholdPasses(t *testing.T) {
 }
 
 func TestFoundationBudgetCheck_OverThresholdAbortsAndLatches(t *testing.T) {
-	events := make(chan event.Event, 4)
+	// foundationBudgetCheck used to emit AgentError directly. After
+	// the 8c cutover the user-facing emission is owned by the
+	// foundation→engine event translator (Error → AgentError); this
+	// hook's contract is now "return a wrapped errBudgetExceeded with
+	// the formatted budget message; latch budgetExceeded so subsequent
+	// calls return without re-warning."
 	a := &Agent{
-		events:          events,
 		taskTokenBudget: 1_000,
 		sessionUsage:    budget.Session{TotalPromptTokens: 600, TotalCompletionTokens: 600, Turns: 3},
 	}
@@ -812,29 +823,22 @@ func TestFoundationBudgetCheck_OverThresholdAbortsAndLatches(t *testing.T) {
 	if !errors.Is(err, errBudgetExceeded) {
 		t.Fatalf("expected errBudgetExceeded, got %v", err)
 	}
+	if !strings.Contains(err.Error(), "budget exceeded") {
+		t.Errorf("expected wrapped error to carry the budget message, got %q", err.Error())
+	}
 	if !a.budgetExceeded {
 		t.Errorf("expected budgetExceeded=true after abort")
-	}
-	select {
-	case ev := <-events:
-		ae, ok := ev.(event.AgentError)
-		if !ok {
-			t.Fatalf("expected AgentError event, got %T", ev)
-		}
-		if !strings.Contains(ae.Err, "budget exceeded") {
-			t.Errorf("expected budget message, got: %q", ae.Err)
-		}
-	default:
-		t.Errorf("expected AgentError event to be emitted")
 	}
 }
 
 func TestFoundationBudgetCheck_LatchedDoesNotReEmit(t *testing.T) {
-	events := make(chan event.Event, 4)
+	// Already-latched: foundationBudgetCheck must return errBudgetExceeded
+	// without re-running the math. Its err.Error() carries only the
+	// sentinel text (no formatted budget message) because the latch
+	// short-circuits before the wrap.
 	a := &Agent{
-		events:          events,
 		taskTokenBudget: 1_000,
-		budgetExceeded:  true, // already latched
+		budgetExceeded:  true,
 		sessionUsage:    budget.Session{TotalPromptTokens: 999_999_999},
 	}
 
@@ -842,11 +846,8 @@ func TestFoundationBudgetCheck_LatchedDoesNotReEmit(t *testing.T) {
 	if !errors.Is(err, errBudgetExceeded) {
 		t.Fatalf("expected errBudgetExceeded, got %v", err)
 	}
-	select {
-	case ev := <-events:
-		t.Errorf("expected NO event (already latched), got %T", ev)
-	default:
-		// expected
+	if strings.Contains(err.Error(), "tokens used") {
+		t.Errorf("latched return should NOT re-format the budget message; got %q", err.Error())
 	}
 }
 
@@ -877,9 +878,9 @@ func TestFoundationHooks_TransformContext_ResetAndCompactAndLint(t *testing.T) {
 	// turn start (drains pendingLint into messages), THEN BeforeToolCall
 	// fires per tool. lintPendingGate would short-circuit any
 	// BeforeToolCall that ran with pendingLint still set.
-	events := make(chan event.Event, 16)
 	a := &Agent{
-		events:          events,
+		events:          mustDrainEvents(t),
+		cache:           NewFileCache(),
 		mode:            ModeExecution,
 		interactionMode: Interactive,
 		autonomous:      false,

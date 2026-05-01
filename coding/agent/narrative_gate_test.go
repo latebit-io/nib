@@ -305,14 +305,18 @@ func TestAgent_NarrativeGate_ActiveTaskInProgress_NoFire(t *testing.T) {
 	}
 }
 
-// TestAgent_AgentWaiting_NotFinishedOnErrorTurn verifies that a turn
-// ending in error does NOT light up Finished, even when the task tree
-// is empty. Without this guard a provider failure on an empty-tree run
-// would render DONE — telling the developer the work completed when in
-// reality the turn bailed out and is awaiting retry.
-func TestAgent_AgentWaiting_NotFinishedOnErrorTurn(t *testing.T) {
-	// Stream closes without Done: drainStream surfaces a stream-error,
-	// processLLMTurn returns it, runLoop falls through to AgentWaiting.
+// TestAgent_StreamError_EndsRunUnsuccessfully verifies that a turn
+// ending in error ends the run cleanly with AgentDone.Success=false,
+// not via a Finished AgentWaiting. The original guard (no DONE on
+// errored turn) is now structurally enforced: AgentWaiting only fires
+// from the foundation's GetFollowUpMessages hook on a clean turn-park,
+// which an error path never reaches. The test pins the new contract
+// so a regression that re-routes errors through AgentWaiting{Finished}
+// surfaces immediately.
+func TestAgent_StreamError_EndsRunUnsuccessfully(t *testing.T) {
+	// Stream closes without Done: foundation processTurn surfaces a
+	// stream-error, runLoop emits Error and unwinds via AgentEnd.
+	// Translator emits AgentError + AgentDone(success=false).
 	provider := &multiTurnProvider{
 		turns: [][]llm.StreamEvent{
 			{
@@ -330,16 +334,42 @@ func TestAgent_AgentWaiting_NotFinishedOnErrorTurn(t *testing.T) {
 
 	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
 
-	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
-		_, ok := ev.(event.AgentWaiting)
-		return ok
-	})
-	if ev == nil {
-		t.Fatal("timeout waiting for AgentWaiting after errored turn")
+	var (
+		errSeen     bool
+		waitingSeen bool
+		done        event.AgentDone
+		doneSeen    bool
+	)
+	deadline := time.After(2 * time.Second)
+	for !doneSeen {
+		select {
+		case ev := <-events:
+			if fb, ok := ev.(event.FlushBuffers); ok {
+				fb.Result <- event.FlushResult{}
+				continue
+			}
+			switch e := ev.(type) {
+			case event.AgentError:
+				errSeen = true
+			case event.AgentWaiting:
+				waitingSeen = true
+			case event.AgentDone:
+				done = e
+				doneSeen = true
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for AgentDone after stream error")
+		}
 	}
-	w := ev.(event.AgentWaiting)
-	if w.Finished {
-		t.Error("AgentWaiting.Finished = true on errored turn, want false (error != sanctioned completion)")
+
+	if !errSeen {
+		t.Error("missing AgentError for stream error")
+	}
+	if waitingSeen {
+		t.Error("AgentWaiting fired on errored turn; foundation contract is direct AgentDone")
+	}
+	if done.Success {
+		t.Error("AgentDone.Success = true on errored turn, want false")
 	}
 }
 

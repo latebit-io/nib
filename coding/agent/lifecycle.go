@@ -50,7 +50,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	// Allocate a fresh coordinator for the new run instead of draining
 	// the existing one. The previous goroutine may still be parked
 	// inside a Coordinator.Await* call on the old channels; if we
-	// reused the same coordinator, a Reply / Approve / Continue that
+	// reused the same coordinator, a Reply / Approve / Reject that
 	// landed in the gap between this Unlock and prevCancel would race
 	// with the stale goroutine — the stale select can pick the channel
 	// arm before ctx.Done and consume a signal meant for the new run.
@@ -308,25 +308,19 @@ func (a *Agent) currentProvider() llm.Provider {
 	return a.provider
 }
 
-// Approve signals that the user approved the pending edit. The active
-// coordinator is snapshotted under the lock so a concurrent
-// RunWithMode that swaps a.coord cannot redirect this signal to a
-// different run's channels mid-call.
-func (a *Agent) Approve() { a.activeCoord().Approve() }
+// Approve signals that the user approved the pending edit and
+// delivers the post-apply buffer content the orchestrator should
+// seed into the file cache. Callers must pass the actual buffer
+// state after ApplyEdit (which may differ from the agent's predicted
+// ExpectedContent if the developer modified the replacement text in
+// the diff overlay). The active coordinator is snapshotted under the
+// lock so a concurrent RunWithMode that swaps a.coord cannot
+// redirect this signal to a different run's channels mid-call.
+func (a *Agent) Approve(content string) { a.activeCoord().Approve(content) }
 
 // Reject signals that the user rejected the pending edit. See
 // [Agent.Approve] for the snapshot rationale.
 func (a *Agent) Reject() { a.activeCoord().Reject() }
-
-// Continue signals the user is done editing and sends the current
-// buffer content for the file that was just edited. The cache write
-// happens on the receive side ([approval.Orchestrator.waitForContinue])
-// using the canonical path, so this method only transports the new
-// content. See [Agent.Approve] for the snapshot rationale.
-func (a *Agent) Continue(path, bufferContent string) {
-	slog.Debug("agent.Continue", "path", path, "content_len", len(bufferContent))
-	a.activeCoord().Continue(bufferContent)
-}
 
 // activeCoord snapshots the active run's coordinator under [Agent.mu]
 // so frontend signal methods do not read a.coord while RunWithMode /

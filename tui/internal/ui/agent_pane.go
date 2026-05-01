@@ -131,7 +131,6 @@ var (
 	// not the routine review-and-approve they'd see at lower
 	// autonomy levels.
 	chipStyleBlock   = chipBase.Background(lipgloss.Color("160")).Foreground(lipgloss.Color("231")).Bold(true)
-	chipStyleEditing = chipBase.Background(lipgloss.Color("28")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleWaiting = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleLinting = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
 	// chipStyleFinished marks "all tracked tasks complete" yields. Green
@@ -1331,8 +1330,6 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 		spec = statusChipSpec{label: "REVIEW", hint: "Ctrl+O approve · Esc reject", style: chipStyleReview}
 	case event.StatusBlockReview:
 		spec = statusChipSpec{label: "BLOCK", hint: "Ctrl+O approve · Esc reject", style: chipStyleBlock}
-	case event.StatusEditing:
-		spec = statusChipSpec{label: "EDIT", hint: "Ctrl+N continue", style: chipStyleEditing}
 	case event.StatusWaiting:
 		spec = statusChipSpec{label: "REPLY", hint: "Enter send", style: chipStyleWaiting}
 	case event.StatusFinished:

@@ -104,8 +104,6 @@ const (
 	// not the routine review-and-approve flow they'd see at lower
 	// autonomy levels.
 	StatusBlockReview StatusKind = "block-review"
-	// StatusEditing means an approved edit is being applied and the user may continue.
-	StatusEditing StatusKind = "editing"
 	// StatusWaiting means the agent is waiting for user input.
 	StatusWaiting StatusKind = "waiting"
 	// StatusFinished is a turn-end idle state like StatusWaiting, but the

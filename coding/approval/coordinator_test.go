@@ -16,16 +16,20 @@ const shortTimeout = 200 * time.Millisecond
 func TestCoordinator_AwaitApproval_Approved(t *testing.T) {
 	t.Parallel()
 	c := New()
-	c.Approve()
+	want := "post-apply buffer content"
+	c.Approve(want)
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
 
-	approved, err := c.AwaitApproval(ctx)
+	a, err := c.AwaitApproval(ctx)
 	if err != nil {
 		t.Fatalf("AwaitApproval err = %v, want nil", err)
 	}
-	if !approved {
-		t.Errorf("AwaitApproval approved = false, want true")
+	if !a.Approved {
+		t.Errorf("AwaitApproval Approved = false, want true")
+	}
+	if a.Content != want {
+		t.Errorf("AwaitApproval Content = %q, want %q", a.Content, want)
 	}
 }
 
@@ -36,12 +40,15 @@ func TestCoordinator_AwaitApproval_Rejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
 
-	approved, err := c.AwaitApproval(ctx)
+	a, err := c.AwaitApproval(ctx)
 	if err != nil {
 		t.Fatalf("AwaitApproval err = %v, want nil", err)
 	}
-	if approved {
-		t.Errorf("AwaitApproval approved = true, want false")
+	if a.Approved {
+		t.Errorf("AwaitApproval Approved = true, want false")
+	}
+	if a.Content != "" {
+		t.Errorf("AwaitApproval Content = %q, want empty on reject", a.Content)
 	}
 }
 
@@ -54,23 +61,6 @@ func TestCoordinator_AwaitApproval_CtxCancel(t *testing.T) {
 	_, err := c.AwaitApproval(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("AwaitApproval err = %v, want DeadlineExceeded", err)
-	}
-}
-
-func TestCoordinator_AwaitContinue_DeliversContent(t *testing.T) {
-	t.Parallel()
-	c := New()
-	want := "buffer state after approval"
-	c.Continue(want)
-	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
-	defer cancel()
-
-	got, err := c.AwaitContinue(ctx)
-	if err != nil {
-		t.Fatalf("AwaitContinue err = %v, want nil", err)
-	}
-	if got != want {
-		t.Errorf("AwaitContinue content = %q, want %q", got, want)
 	}
 }
 
@@ -108,8 +98,7 @@ func TestCoordinator_Reply_DropsWhenFull(t *testing.T) {
 func TestCoordinator_Reset_DrainsAllChannels(t *testing.T) {
 	t.Parallel()
 	c := New()
-	c.Approve()
-	c.Continue("stale")
+	c.Approve("stale")
 	c.Reply("stale-reply")
 
 	c.Reset()
@@ -119,12 +108,6 @@ func TestCoordinator_Reset_DrainsAllChannels(t *testing.T) {
 	defer cancel()
 	if _, err := c.AwaitApproval(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("approveCh not drained: err=%v, want DeadlineExceeded", err)
-	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel2()
-	if _, err := c.AwaitContinue(ctx2); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("continueCh not drained: err=%v, want DeadlineExceeded", err)
 	}
 
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -138,32 +121,20 @@ func TestCoordinator_SignalsAreNonBlocking(t *testing.T) {
 	t.Parallel()
 	c := New()
 	// Saturate every channel; subsequent signals must NOT block.
-	c.Approve()
-	c.Continue("saturated")
+	c.Approve("saturated")
 	c.Reply("saturated")
 
 	done := make(chan struct{})
 	go func() {
-		c.Approve() // already-saturated approveCh — must drop, not block
-		c.Reject()  // approveCh still saturated by the earlier Approve
-		c.Continue("dropped")
-		c.Reply("dropped") // Reply returns false; not measured here
+		c.Approve("dropped") // already-saturated approveCh — must drop, not block
+		c.Reject()           // approveCh still saturated by the earlier Approve
+		c.Reply("dropped")   // Reply returns false; not measured here
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(shortTimeout):
 		t.Fatal("signal methods blocked when channels were saturated")
-	}
-}
-
-func TestCoordinator_AwaitContinue_CtxCancel(t *testing.T) {
-	t.Parallel()
-	c := New()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	if _, err := c.AwaitContinue(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("AwaitContinue err = %v, want DeadlineExceeded", err)
 	}
 }
 

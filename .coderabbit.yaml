@@ -22,73 +22,166 @@ reviews:
   path_instructions:
     - path: "engine/**"
       instructions: >
-        This is the hexagonal architecture engine layer. It must have ZERO
-        UI framework imports (no bubbletea, no lipgloss). Dependencies point
-        inward only: buffer ← editor ← session, llm.Provider ← agent ← session.
-        Flag any import from tui/ or any UI framework.
+        Engine primitives layer (buffer, editor, event, lang, lsp, mcp,
+        memory, highlight, project, validate). Hexagonal core — must
+        have ZERO UI framework imports (no bubbletea, no lipgloss) and
+        ZERO imports from coding/ or tui/. Dependencies point inward
+        only: buffer ← editor; events flow outward via the engine/event
+        bus. Flag any import from tui/, coding/, or any UI framework.
 
         Key contracts to verify:
-        - Every error must be explicitly handled (no _ = fn() without comment)
+        - Every error must be explicitly handled (no _ = fn() without a
+          comment explaining why)
         - Buffer operations must be grouped for undo (BeginGroup/EndGroup)
-        - Channel operations must not block indefinitely — check for ctx.Done()
-        - The agent.Workspace interface is called from the agent goroutine;
-          implementations must not touch shared TUI state without synchronization
+        - Channel operations must not block indefinitely — check for
+          ctx.Done()
 
-    - path: "engine/agent/**"
+    - path: "coding/**"
       instructions: >
-        Agent loop runs in a goroutine. Tool implementations receive dependencies
-        via constructor injection (Workspace, FileCache, channels).
-        Check for:
-        - Data races: FileCache has its own mutex, but tools must not access
-          session/editor state directly
-        - Channel deadlocks: approveCh and continueCh are buffered(1), sends
-          use select/default to avoid blocking
-        - Silent retry state (EditFileTool) must be reset between runs
-        - Tool results must not include sensitive information
+        Agent + session orchestration on top of engine primitives.
+        Depends on engine/ and ai/llm. Must NOT import tui/ or any UI
+        framework (no bubbletea, no lipgloss). The agent loop runs in
+        its own goroutine; the TUI runs on the bubbletea goroutine.
 
-    - path: "engine/session/**"
+        Cross-cutting rules:
+        - Every error must be explicitly handled
+        - All Workspace interface methods (ProjectRoot, ReadFile,
+          WriteFile, ListFiles, CanonPath, InContext, AddContext —
+          composed from FileReader/FileWriter/ContextSet) are called
+          from the agent goroutine and must not touch shared TUI state
+          without synchronization. Same rule applies to any future
+          method added to the Workspace surface.
+        - No package may import tui/
+
+    - path: "coding/agent/**"
+      instructions: >
+        Agent loop. Run + Reply schedule a single goroutine that drives
+        the LLM stream and dispatches tools. Per-run state lives on
+        Agent (taskEdits, validatorRetries, file cache, mode); the
+        Approval Coordinator is allocated fresh at every
+        RunWithMode/Reply-resume so stale signals from a prior run can
+        never leak.
+
+        Check for:
+        - Data races: FileCache has its own mutex; access to per-run
+          fields (taskEdits, validatorRetries) goes through Agent.mu
+        - The active Coordinator must be snapshotted under Agent.mu by
+          signal methods (Approve/Reject) so a competing RunWithMode
+          can't redirect a signal to a different run's channels
+        - Silent retry state must be reset between runs (Reset()
+          callbacks on stateful tools)
+
+    - path: "coding/approval/**"
+      instructions: >
+        Coordinator owns the approve/reply channels between agent and
+        frontend. Channel capacities are deliberately 1 and signal
+        methods (Approve/Reject/Reply) are non-blocking
+        select+default sends. Orchestrator runs the full review flow on
+        top of a Coordinator.
+
+        Check for:
+        - Channel deadlocks: approveCh and inputCh are buffered(1);
+          sends MUST use select/default to avoid blocking
+        - Reset must drain every channel; coordinators are per-run, but
+          tests reuse them
+        - Orchestrator must thread the run's *Coordinator down through
+          Handle rather than reading agent state — passing it
+          explicitly prevents a competing run from redirecting signals
+        - Outcome must be carried by a typed marker (outcomeFatal vs
+          outcomeOK), never by scanning the body string for substrings:
+          cached file content can contain any text including marker
+          strings
+
+    - path: "coding/tools/**"
+      instructions: >
+        Tool implementations. Tools depend on narrow collaborator
+        interfaces (FileReader, Approver, Navigator, FileCreator,
+        TaskReviewer) — NEVER on Session or Agent directly. Constructor
+        injection only.
+
+        Check for:
+        - Tools must not access TUI state or read editor buffers
+          directly (would race against TUI-owned mutations); reads go
+          through the FileCache (canonical-path keyed) or
+          Workspace.ReadFile fallback
+        - Tool results must not include sensitive information
+          (credentials, tokens, full file contents from outside the
+          project)
+        - The cache key contract is canonical absolute path — every
+          cache.Set/Get/Invalidate must use CanonPath, not the raw
+          relative path
+
+    - path: "coding/session/**"
       instructions: >
         Session orchestrates the developer-agent collaboration workflow.
         Key invariants:
         - Edit approval is two-step: ReviewEdit (marks reviewed) then
-          ApproveEdit/PrepareApproval (fails if not reviewed). No blind approvals.
-        - All editor map keys must go through canonPath() for consistency
+          ApproveEdit / PrepareApproval+CompleteApproval (fail if not
+          reviewed). No blind approvals.
+        - All editor map keys must go through CanonPath() for consistency
         - resolvePath() must reject paths escaping projectRoot
         - SwitchTo() must NOT cancel the agent (multi-file work continues)
-        - Continue() must send lastEditedFile content, not activeFile
         - editorForEdit() auto-opens files from disk if not in editors map
+        - HandleEvent must not block; status events are best-effort —
+          session state must not depend on a status event arriving
 
-    - path: "engine/llm/**"
+    - path: "coding/wire/**"
       instructions: >
-        LLM provider abstraction. Provider is an interface (inbound port).
-        AgentAPI is the adapter (OpenAI-compatible HTTP + SSE).
-        - ToolDef types are exported — used by agent/tool implementations
-        - Stream() takes tools parameter — tools are not hardcoded
-        - SSE parsing handles both "data: " and "data:" formats
+        Composition layer shared by the TUI and headless binaries —
+        wires LLM providers, memory servers, LSP, and MCP from
+        environment + project config. No business logic. Must NOT
+        import tui/. Constructors return errors; do not panic on
+        missing config.
+
+    - path: "ai/llm/**"
+      instructions: >
+        LLM provider abstraction. Provider is the interface (inbound
+        port); AgentAPI is the adapter (OpenAI-compatible HTTP + SSE).
+        Other adapters (Anthropic native, OAuth subscription) implement
+        the same Provider surface.
+
+        Check for:
+        - ToolDef types must stay exported (used by coding/tools and
+          coding/agent)
+        - Stream() takes tools as a parameter — tools must not be
+          hardcoded into provider implementations
+        - SSE parsing must handle both "data: " (with space) and
+          "data:" (without) prefix forms
+        - Prompt-caching control blocks must not leak across providers
+          that don't support them — guard with provider capability flags
 
     - path: "tui/**"
       instructions: >
-        Bubble Tea frontend — thin adapter around the engine. Prism-style
-        pane architecture (each pane implements Update/Render/SetSize).
+        Bubble Tea frontend — thin adapter around session + agent.
+        Prism-style pane architecture (each pane implements
+        Update/Render/SetSize).
 
         Check for:
-        - Engine logic leaking into TUI (business logic belongs in session/agent)
-        - RegionManager handles layout — panes should not calculate their own
-          global positions
-        - AppModel is a thin adapter: maps input → session methods, reads
-          session state to render, adapts agent events to tea.Msg
+        - Business logic leaking into TUI (logic belongs in coding/session
+          or coding/agent, not in app.go or pane code)
+        - No imports from coding/agent internals — only the public
+          Session/Agent surface
+        - RegionManager handles layout — panes should not calculate
+          their own global positions
+        - AppModel is a thin adapter: maps input → session methods,
+          reads session state to render, adapts agent events to tea.Msg
         - File switching must be blocked while PendingEdit != nil
         - EditorModel must be rebuilt when session auto-switches files
+        - lipgloss styles must be hoisted to package-level vars — never
+          allocated per-frame in render methods
 
     - path: "tui/cmd/junto/main.go"
       instructions: >
         Entry point wiring. Bootstrap order matters:
-        1. Create editor + buffer
-        2. Determine project root
-        3. Create session (editor-only mode)
-        4. Create agent with session as Workspace
-        5. Wire agent into session via SetAgent()
-        Session must exist before agent (breaks circular dependency).
+        1. Resolve config + project root
+        2. Build editor + initial buffer
+        3. Construct Session (editor-only mode)
+        4. Construct Agent (via coding/wire) with Session as Workspace
+        5. Attach agent to session via SetAgent()
+        Session must exist before Agent (breaks the circular
+        Session-needs-agentPort vs Agent-needs-Workspace dependency).
+        OnDialChange handlers must consult AutoApproveEdits() — there
+        is no separate AutoContinue gate.
 
 chat:
   auto_reply: true

@@ -17,8 +17,8 @@ import (
 type agentPort interface {
 	Run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string)
 	Reply(ctx context.Context, input string) bool
-	Approve()
-	Continue(path, bufferContent string)
+	Approve(content string)
+	Reject()
 	Cancel()
 	IsWaiting() bool
 }
@@ -248,18 +248,23 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 	return false
 }
 
-// applyEdit writes the edit directly to disk and signals the agent to continue.
-// Reads raw bytes to preserve the file's trailing newline state, then
-// performs the replacement on the normalized content (matching the agent's
-// view) and restores the original newline suffix before writing back.
+// applyEdit writes the edit directly to disk and approves it so the
+// agent advances. Reads raw bytes to preserve the file's trailing
+// newline state, then performs the replacement on the normalized
+// content (matching the agent's view) and restores the original
+// newline suffix before writing back. On any failure the edit is
+// rejected so the agent recalibrates rather than proceeding with a
+// false "applied successfully" signal.
 func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
-	raw, absPath, err := r.workspace.ReadFileRaw(edit.Path)
-	if err != nil {
-		msg := fmt.Sprintf("cannot read %s for edit: %v", edit.Path, err)
+	rejectWith := func(msg string) {
 		slog.Error(msg)
 		result.Errors = append(result.Errors, msg)
-		r.agent.Approve()
-		r.agent.Continue(edit.Path, "")
+		r.agent.Reject()
+	}
+
+	raw, absPath, err := r.workspace.ReadFileRaw(edit.Path)
+	if err != nil {
+		rejectWith(fmt.Sprintf("cannot read %s for edit: %v", edit.Path, err))
 		return
 	}
 
@@ -270,19 +275,11 @@ func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
 
 	matches := strings.Count(content, edit.Search)
 	if matches == 0 {
-		msg := fmt.Sprintf("edit search text not found in %s", edit.Path)
-		slog.Error(msg)
-		result.Errors = append(result.Errors, msg)
-		r.agent.Approve()
-		r.agent.Continue(edit.Path, content)
+		rejectWith(fmt.Sprintf("edit search text not found in %s", edit.Path))
 		return
 	}
 	if matches > 1 {
-		msg := fmt.Sprintf("edit search text is ambiguous in %s (%d matches)", edit.Path, matches)
-		slog.Error(msg)
-		result.Errors = append(result.Errors, msg)
-		r.agent.Approve()
-		r.agent.Continue(edit.Path, content)
+		rejectWith(fmt.Sprintf("edit search text is ambiguous in %s (%d matches)", edit.Path, matches))
 		return
 	}
 
@@ -295,20 +292,17 @@ func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
 	}
 
 	if err := r.workspace.OverwriteFile(edit.Path, writeContent); err != nil {
-		msg := fmt.Sprintf("cannot write %s: %v", edit.Path, err)
-		slog.Error(msg)
-		result.Errors = append(result.Errors, msg)
-		r.agent.Approve()
-		r.agent.Continue(edit.Path, content)
+		rejectWith(fmt.Sprintf("cannot write %s: %v", edit.Path, err))
 		return
 	}
 
 	result.FilesChanged = append(result.FilesChanged, absPath)
 	r.status("[edited %s]\n", edit.Path)
 
-	// Continue with the normalized content (agent's view, no trailing \n).
-	r.agent.Approve()
-	r.agent.Continue(edit.Path, newContent)
+	// Approve carries the post-apply content (matching the agent's
+	// view: no trailing \n) so the orchestrator's cache reflects the
+	// real file state, not the agent's predicted ExpectedContent.
+	r.agent.Approve(newContent)
 }
 
 // status writes a formatted message to stderr when in TTY mode.

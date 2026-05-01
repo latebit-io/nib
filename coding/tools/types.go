@@ -163,14 +163,14 @@ type EditProposal struct {
 	CanonPath string
 
 	// ExpectedContent is what the file should contain after applying
-	// the edit. The Approver compares this against the actual buffer
-	// content after Continue to detect developer modifications.
+	// the edit. The orchestrator seeds the cache with this value
+	// post-approval so subsequent tool reads see the post-edit state.
 	ExpectedContent string
 }
 
 // FileCache is a concurrency-safe cache of file contents. The agent
-// maintains its own view of file state, updated only through explicit
-// channels (Run, Continue), to avoid races with user edits.
+// maintains its own view of file state, updated through tool reads
+// and post-approval seeding, to avoid races with user edits.
 type FileCache struct {
 	mu    sync.Mutex
 	files map[string]string

@@ -106,14 +106,12 @@ func (t *ReplaceFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolRe
 	}
 
 	// Read existing content via cache (populated by prior read_file
-	// calls or by the continueCh path that snapshots buffer content
-	// on the TUI goroutine after every approved edit). Reading the
-	// editor buffer directly from the agent goroutine would race
-	// against TUI-owned buffer mutations — the existing architecture
-	// avoids that by keeping buffer reads on the TUI goroutine and
-	// pushing snapshots to the agent via channels. The cache is in
-	// sync between agent turns; rare developer-typing-during-run
-	// divergence is not yet addressed.
+	// calls or seeded by the orchestrator after every approved edit
+	// with the proposal's expected content). Reading the editor
+	// buffer directly from the agent goroutine would race against
+	// TUI-owned buffer mutations — the existing architecture avoids
+	// that by keeping buffer reads on the TUI goroutine. The cache
+	// is in sync between agent turns.
 	existing, err := t.cache.LoadOrRead(canon, func() (string, error) {
 		return t.workspace.ReadFile(args.Path)
 	})

@@ -1,5 +1,5 @@
 // Package session orchestrates the developer-agent collaboration workflow.
-// It owns the intent lifecycle, pending edit state, and the approve/reject/continue
+// It owns the intent lifecycle, pending edit state, and the approve/reject
 // flow — domain logic that every frontend must enforce identically.
 package session
 
@@ -34,12 +34,14 @@ type agentLifecycle interface {
 }
 
 // agentSignals is the subset of agent operations that deliver developer
-// responses during an active run — edit approval and continue-after-edit.
-// All are non-blocking sends.
+// responses during an active run — edit approve / reject. All are
+// non-blocking sends. Approve carries the post-apply buffer content
+// so the orchestrator seeds its file cache from the truth, not the
+// agent's predicted ExpectedContent (which can diverge when the
+// developer modifies the replacement text in the diff overlay).
 type agentSignals interface {
-	Approve()
+	Approve(content string)
 	Reject()
-	Continue(path, bufferContent string)
 }
 
 // agentPort is the narrow interface Session needs from an agent implementation.
@@ -101,9 +103,9 @@ type Session struct {
 	// pendingEdit is the edit currently awaiting approval (nil = none)
 	pendingEdit *event.PendingEdit
 
-	// lastEditedFile tracks which file was successfully edited. Used by
-	// Continue to send the correct file's content even if the user switches
-	// to a different file before pressing Continue.
+	// lastEditedFile tracks the canonical path of the file most recently
+	// edited via the approval flow. Used to attribute the "modified"
+	// badge in the project pane.
 	lastEditedFile string
 
 	// stagedEditFile is set by PrepareApproval and promoted to lastEditedFile
@@ -115,12 +117,6 @@ type Session struct {
 	// This enforces the contract: every frontend must compute and present
 	// the diff before approving — no blind approvals.
 	editReviewed bool
-
-	// awaitingContinue is set when the agent emits StatusEditing and
-	// cleared when the agent moves past the continue gate. Frontends call
-	// CanContinue() instead of sampling their own status widgets so the
-	// gate stays authoritative even when UI state lags.
-	awaitingContinue bool
 
 	// modifiedFiles tracks files changed by agent edits this session.
 	// Canonical absolute paths as keys. Guarded by mu.
@@ -136,17 +132,6 @@ type Session struct {
 	// lifetime. Generated once in New; the demarkus adapter uses it as
 	// the per-process document identifier.
 	sessionID string
-
-	// pendingContinuePath holds the canonical path of the most recent
-	// approved edit awaiting Continue. Paired with pendingContinueExpected
-	// so the "continue" capture event can detect whether the developer
-	// modified the buffer between approve and continue. pendingContinueSet
-	// distinguishes "stashed, expected content may legitimately be empty"
-	// from "no stash" — comparing paths alone would miss edits to the
-	// no-path test buffer or to an empty file.
-	pendingContinuePath     string
-	pendingContinueExpected string
-	pendingContinueSet      bool
 
 	// pendingProposedReplace stores the agent's originally-proposed
 	// replacement text for the active proposal. Compared to the applied
@@ -699,8 +684,8 @@ func (s *Session) AgentModifiedFiles() []string {
 // ReadFile returns a file's content from disk. Called from the agent goroutine
 // via Workspace — reads from disk only to avoid data races with TUI-side
 // buffer mutations. The agent's FileCache is the source of truth for
-// in-flight content (seeded by Run, updated by Continue). This method is
-// only called for files not yet in the cache.
+// in-flight content (seeded by Run, updated after each approved edit).
+// This method is only called for files not yet in the cache.
 func (s *Session) ReadFile(path string) (string, error) {
 	absPath, err := s.resolvePath(path)
 	if err != nil {
@@ -1086,12 +1071,19 @@ func (s *Session) ClearIntent() {
 	s.intentDone = false
 }
 
-// CancelAgent cancels the current agent run, clears intent, and resets pending edit.
+// CancelAgent cancels the current agent run, clears intent, and
+// resets every approval-flow field so a cancel mid-staged-apply does
+// not leave stagedEditFile/pendingApproval latched — those gate
+// SwitchTo/ReloadFile/DeleteFile, so leaking them locks the editor
+// against further file operations until restart.
 func (s *Session) CancelAgent() {
 	if s.HasAgent() {
 		s.ClearIntent()
 		s.agent.Cancel()
 		s.pendingEdit = nil
+		s.pendingProposedReplace = ""
+		s.pendingApproval = nil
+		s.stagedEditFile = ""
 		s.editReviewed = false
 	}
 }
@@ -1222,72 +1214,7 @@ func (s *Session) Close() {
 
 // Edit-approval methods (ReviewEdit, ApproveEdit, PrepareApproval,
 // ApprovalPlan, CompleteApproval, AbortApproval, RejectEdit,
-// ApproveAndContinue, computeLineOrigins) live in approval.go.
-
-// Continue signals the agent to proceed after the developer has finished editing.
-// Sends the content of the file that was last edited (not necessarily the
-// currently active file, in case the user switched files after approving).
-//
-// Clears awaitingContinue eagerly so a second press during the same agent
-// turn is a no-op. agent.Continue uses a non-blocking send on a cap-1 channel,
-// so the first call either lands or coincides with an already-pending message
-// the agent will read — retrying adds no value and can leave a stale message
-// buffered for the next waitForContinue.
-func (s *Session) Continue() {
-	if !s.HasAgent() {
-		return
-	}
-	// Resolve path+editor atomically: cleanupDeletedPath and SwitchTo mutate
-	// lastEditedFile, activeFile, activeEditor, and editors under mu.Lock, so
-	// all four reads must happen together under a single lock scope.
-	s.mu.Lock()
-	path := s.lastEditedFile
-	if path == "" {
-		path = s.activeFile
-	}
-	e, ok := s.editors[path]
-	if !ok {
-		e = s.activeEditor
-		path = s.activeFile
-	}
-	s.awaitingContinue = false
-	// Snapshot the continue-diff tracking state under the same lock.
-	expectedPath := s.pendingContinuePath
-	expectedContent := s.pendingContinueExpected
-	haveExpected := s.pendingContinueSet
-	s.pendingContinuePath = ""
-	s.pendingContinueExpected = ""
-	s.pendingContinueSet = false
-	s.mu.Unlock()
-
-	currentContent := e.Buf.Content()
-	if haveExpected && expectedPath == path {
-		modified := currentContent != expectedContent
-		payload := map[string]any{
-			"path":         path,
-			"was_modified": modified,
-		}
-		if modified {
-			payload["proposed_content"] = expectedContent
-			payload["actual_content"] = currentContent
-		}
-		s.emitCapture("continue", payload)
-	}
-
-	s.agent.Continue(path, currentContent)
-}
-
-// CanContinue reports whether the agent has applied an edit and is waiting
-// for the developer to press Continue. Use this to gate the continue hotkey
-// rather than sampling frontend status widgets — Session owns the truth.
-func (s *Session) CanContinue() bool {
-	if !s.HasAgent() {
-		return false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.awaitingContinue
-}
+// computeLineOrigins) live in approval.go.
 
 // --- Agent Event Handling ---
 
@@ -1315,24 +1242,16 @@ func (s *Session) HandleEvent(ev event.Event) {
 	case event.AgentError:
 		s.pendingEdit = nil
 		s.pendingProposedReplace = ""
-		s.pendingContinuePath = ""
-		s.pendingContinueExpected = ""
-		s.pendingContinueSet = false
+		s.pendingApproval = nil
+		s.stagedEditFile = ""
 		s.editReviewed = false
-		s.mu.Lock()
-		s.awaitingContinue = false
-		s.mu.Unlock()
 		_ = e // error text is in the event for the frontend to display
 	case event.AgentDone:
 		s.pendingEdit = nil
 		s.pendingProposedReplace = ""
-		s.pendingContinuePath = ""
-		s.pendingContinueExpected = ""
-		s.pendingContinueSet = false
+		s.pendingApproval = nil
+		s.stagedEditFile = ""
 		s.editReviewed = false
-		s.mu.Lock()
-		s.awaitingContinue = false
-		s.mu.Unlock()
 		if e.Success {
 			s.ArchiveIntent()
 		}
@@ -1344,12 +1263,8 @@ func (s *Session) HandleEvent(ev event.Event) {
 		// Agent finished its turn, waiting for developer input.
 		// No session state changes — intent stays active.
 	case event.AgentStatus:
-		// Track the continue gate: StatusEditing means the agent applied the
-		// edit and is blocked on the developer's Continue signal. Any other
-		// status clears the flag so CanContinue reflects the live state.
-		s.mu.Lock()
-		s.awaitingContinue = e.Status == event.StatusEditing
-		s.mu.Unlock()
+		// Status events are forwarded to the frontend's status chip;
+		// session state does not mutate based on chip transitions.
 	case event.AgentToken, event.AgentToolCall, event.AgentNavigate:
 		// No session state changes — frontend renders these directly.
 	case event.AgentTurnUsage, event.AgentInputEstimate:

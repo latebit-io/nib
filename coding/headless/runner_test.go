@@ -16,19 +16,24 @@ import (
 // mockAgent simulates an agent for testing the runner's event handling.
 // It sends pre-configured events on the shared channel when Run is called.
 type mockAgent struct {
-	events      chan<- event.Event
-	runFunc     func() // custom behavior on Run — sends events to channel
-	approved    bool
-	continued   bool
-	lastPath    string
-	lastContent string
-	cancelled   bool
-	replied     bool
+	events    chan<- event.Event
+	runFunc   func() // custom behavior on Run — sends events to channel
+	approved  bool
+	rejected  bool
+	cancelled bool
+	replied   bool
 
-	// continueDone is signaled when Continue() is called. Tests that send
-	// AgentEditProposed should wait on this before sending AgentDone to
-	// avoid a race between applyEdit and the done event.
-	continueDone chan struct{}
+	// approvedContent is the content the runner passed to Approve —
+	// captured so tests can verify the runner ships the post-apply
+	// buffer content (and not stale data) through the approval
+	// channel. The orchestrator seeds its file cache from this value.
+	approvedContent string
+
+	// signalDone is signaled when Approve() or Reject() is called.
+	// Tests that send AgentEditProposed should wait on this before
+	// sending AgentDone to avoid a race between applyEdit and the
+	// done event.
+	signalDone chan struct{}
 
 	// Captured from Run — used to verify pre-read behavior.
 	runFileName     string
@@ -52,20 +57,24 @@ func (m *mockAgent) Reply(_ context.Context, _ string) bool {
 	return true
 }
 
-func (m *mockAgent) Approve() {
-	m.approved = true
-}
-
-func (m *mockAgent) Continue(path, content string) {
-	m.continued = true
-	m.lastPath = path
-	m.lastContent = content
-	if m.continueDone != nil {
+func (m *mockAgent) signal() {
+	if m.signalDone != nil {
 		select {
-		case m.continueDone <- struct{}{}:
+		case m.signalDone <- struct{}{}:
 		default:
 		}
 	}
+}
+
+func (m *mockAgent) Approve(content string) {
+	m.approved = true
+	m.approvedContent = content
+	m.signal()
+}
+
+func (m *mockAgent) Reject() {
+	m.rejected = true
+	m.signal()
 }
 
 func (m *mockAgent) Cancel() {
@@ -122,7 +131,7 @@ func TestRunner_TTY_StreamsToStderr(t *testing.T) {
 	}
 }
 
-func TestRunner_EditProposed_AppliesAndContinues(t *testing.T) {
+func TestRunner_EditProposed_AppliesAndApproves(t *testing.T) {
 	dir := t.TempDir()
 	ws := NewDiskWorkspace(dir)
 
@@ -134,7 +143,7 @@ func TestRunner_EditProposed_AppliesAndContinues(t *testing.T) {
 
 	events := make(chan event.Event, 64)
 	done := make(chan struct{}, 1)
-	mock := &mockAgent{events: events, continueDone: done}
+	mock := &mockAgent{events: events, signalDone: done}
 	mock.runFunc = func() {
 		events <- event.AgentEditProposed{Edit: event.PendingEdit{
 			ID:      "edit-1",
@@ -142,7 +151,7 @@ func TestRunner_EditProposed_AppliesAndContinues(t *testing.T) {
 			Search:  "func old() {}",
 			Replace: "func new() {}",
 		}}
-		<-done // wait for applyEdit to call Continue
+		<-done // wait for applyEdit to signal Approve
 		events <- event.AgentDone{Success: true}
 	}
 
@@ -156,9 +165,6 @@ func TestRunner_EditProposed_AppliesAndContinues(t *testing.T) {
 	}
 	if !mock.approved {
 		t.Error("expected agent.Approve() to be called")
-	}
-	if !mock.continued {
-		t.Error("expected agent.Continue() to be called")
 	}
 
 	// Verify the file was modified on disk.
@@ -191,7 +197,7 @@ func TestRunner_EditProposed_PreservesTrailingNewline(t *testing.T) {
 
 	events := make(chan event.Event, 64)
 	done := make(chan struct{}, 1)
-	mock := &mockAgent{events: events, continueDone: done}
+	mock := &mockAgent{events: events, signalDone: done}
 	mock.runFunc = func() {
 		events <- event.AgentEditProposed{Edit: event.PendingEdit{
 			ID:      "edit-nl",
@@ -220,9 +226,13 @@ func TestRunner_EditProposed_PreservesTrailingNewline(t *testing.T) {
 		t.Errorf("on-disk content = %q, want %q (trailing newline preserved)", got, want)
 	}
 
-	// Agent receives normalized content (no trailing \n), matching its view.
-	if mock.lastContent != "package main\n\nfunc new() {}" {
-		t.Errorf("agent received content = %q, want without trailing newline", mock.lastContent)
+	// The agent receives the normalized content (no trailing \n)
+	// matching the agent's view. Verifying the approval-channel
+	// payload locks the contract that the runner ships post-apply
+	// buffer state, not the disk bytes — those differ on
+	// trailing-newline handling.
+	if mock.approvedContent != "package main\n\nfunc new() {}" {
+		t.Errorf("agent received approve content = %q, want without trailing newline", mock.approvedContent)
 	}
 }
 
@@ -391,7 +401,7 @@ func TestRunner_EditSearchNotFound(t *testing.T) {
 
 	events := make(chan event.Event, 64)
 	done := make(chan struct{}, 1)
-	mock := &mockAgent{events: events, continueDone: done}
+	mock := &mockAgent{events: events, signalDone: done}
 	mock.runFunc = func() {
 		events <- event.AgentEditProposed{Edit: event.PendingEdit{
 			ID:      "edit-1",
@@ -399,7 +409,7 @@ func TestRunner_EditSearchNotFound(t *testing.T) {
 			Search:  "nonexistent text",
 			Replace: "replacement",
 		}}
-		<-done // wait for applyEdit to call Continue (even on error)
+		<-done // wait for applyEdit to signal Reject
 		events <- event.AgentDone{Success: true}
 	}
 
@@ -417,6 +427,12 @@ func TestRunner_EditSearchNotFound(t *testing.T) {
 	if !strings.Contains(result.Errors[0], "not found") {
 		t.Errorf("error %q does not mention 'not found'", result.Errors[0])
 	}
+	if !mock.rejected {
+		t.Error("expected agent.Reject() on failed edit application")
+	}
+	if mock.approved {
+		t.Error("agent.Approve() must NOT be called on a failed edit — it would mislead the LLM into treating ExpectedContent as authoritative")
+	}
 }
 
 func TestRunner_EditSearchAmbiguous(t *testing.T) {
@@ -427,7 +443,7 @@ func TestRunner_EditSearchAmbiguous(t *testing.T) {
 
 	events := make(chan event.Event, 64)
 	done := make(chan struct{}, 1)
-	mock := &mockAgent{events: events, continueDone: done}
+	mock := &mockAgent{events: events, signalDone: done}
 	mock.runFunc = func() {
 		events <- event.AgentEditProposed{Edit: event.PendingEdit{
 			ID:      "edit-1",
@@ -447,6 +463,12 @@ func TestRunner_EditSearchAmbiguous(t *testing.T) {
 	}
 	if !strings.Contains(result.Errors[0], "ambiguous") {
 		t.Errorf("error %q does not mention 'ambiguous'", result.Errors[0])
+	}
+	if !mock.rejected {
+		t.Error("expected agent.Reject() on ambiguous edit")
+	}
+	if mock.approved {
+		t.Error("agent.Approve() must NOT be called on an ambiguous edit")
 	}
 
 	// Verify the file was NOT modified.

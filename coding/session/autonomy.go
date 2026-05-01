@@ -12,22 +12,15 @@ import "fmt"
 type AutonomyLevel int
 
 const (
-	// LevelGuided requires explicit approval for every proposed edit (Ctrl+O)
-	// and an explicit continue signal after each edit (Ctrl+N).
+	// LevelGuided requires explicit approval for every proposed edit (Ctrl+O).
 	LevelGuided AutonomyLevel = 1
 
-	// LevelCollaborate requires explicit approval for each proposed edit (Ctrl+O)
-	// but continues the agent automatically after the animation completes,
-	// removing the need to press Ctrl+N after every edit.
-	LevelCollaborate AutonomyLevel = 2
-
-	// LevelTrusted applies proposed edits instantly without requiring approval
-	// or animation, and continues the agent automatically. The developer can
-	// still cancel an in-progress run with Escape. Validator Block verdicts
-	// (the safety valve for "this edit is structurally wrong") still surface
-	// the diff for review — auto-approval is for routine work, not for edits
-	// the validators flagged as needing developer attention.
-	LevelTrusted AutonomyLevel = 3
+	// LevelTrusted applies proposed edits instantly without requiring approval.
+	// The developer can still cancel an in-progress run with Escape. Validator
+	// Block verdicts (the safety valve for "this edit is structurally wrong")
+	// still surface the diff for review — auto-approval is for routine work,
+	// not for edits the validators flagged as needing developer attention.
+	LevelTrusted AutonomyLevel = 2
 
 	// LevelYolo extends LevelTrusted by ALSO auto-applying edits whose
 	// validator summaries carry a Block verdict. This is an opt-in escape
@@ -41,7 +34,7 @@ const (
 	// (oversized files, broken structure) at PR review or after the
 	// fact rather than at edit time. The autonomy dial defaults to
 	// LevelTrusted on every TUI startup; LevelYolo never persists.
-	LevelYolo AutonomyLevel = 4
+	LevelYolo AutonomyLevel = 3
 )
 
 // Name returns the short display name for the autonomy level.
@@ -49,8 +42,6 @@ func (l AutonomyLevel) Name() string {
 	switch l {
 	case LevelGuided:
 		return "guided"
-	case LevelCollaborate:
-		return "collaborate"
 	case LevelTrusted:
 		return "trust"
 	case LevelYolo:
@@ -82,7 +73,3 @@ func (l AutonomyLevel) AutoApproveEdits() bool { return l >= LevelTrusted }
 // LevelYolo opts into this — under LevelTrusted the safety valve
 // holds (Block surfaces the diff for explicit Ctrl+O / Esc).
 func (l AutonomyLevel) AutoApproveBlock() bool { return l >= LevelYolo }
-
-// AutoContinue reports whether the agent should continue automatically after
-// an approved edit without requiring an explicit Ctrl+N.
-func (l AutonomyLevel) AutoContinue() bool { return l >= LevelCollaborate }

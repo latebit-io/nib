@@ -75,7 +75,7 @@ func (s *Session) InitProject(name string, phases []string) error {
 // the first leaf task in document order with status TaskPending, or
 // "" when none remains. The agent's runTaskReview hook appends this
 // to the task-completion review so the LLM has a clear next step
-// without the developer typing "continue" between every task.
+// without the developer prompting between every task.
 func (s *Session) NextPendingTask() string {
 	t := s.WorkTree()
 	if t == nil {

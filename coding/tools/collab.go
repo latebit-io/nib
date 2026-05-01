@@ -7,18 +7,18 @@ import (
 )
 
 // Approver mediates the edit_file / replace_file approval flow. The
-// implementation in `coding/agent` owns the approveCh / continueCh
-// channels and the validation pipeline; tools just submit a proposal
-// and receive the final tool-result body the LLM should see.
+// implementation in `coding/agent` owns the approve channel and the
+// validation pipeline; tools just submit a proposal and receive the
+// final tool-result body the LLM should see.
 //
 // Propose runs the validation pipeline, sends the proposal to the
-// frontend, blocks on approval, blocks on continue, and returns the
-// outcome message together with a flag indicating whether that
-// outcome was a fatal failure (delivery timeout, agent cancel,
-// continue-channel closed). When isError is true the tool should
-// surface the body as a tool error so the frontend can render it
-// distinctively; otherwise the body is normal flow (validation
-// recalibration, rejection note, applied notice).
+// frontend, blocks on approval, and returns the outcome message
+// together with a flag indicating whether that outcome was a fatal
+// failure (delivery timeout, agent cancel, channel closed). When
+// isError is true the tool should surface the body as a tool error
+// so the frontend can render it distinctively; otherwise the body
+// is normal flow (validation recalibration, rejection note, applied
+// notice).
 type Approver interface {
 	// Propose runs the proposal through the configured validation
 	// pipeline and approval flow. The returned string is the body the

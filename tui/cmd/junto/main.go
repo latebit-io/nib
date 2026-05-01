@@ -383,7 +383,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		ag.SetAutonomous(true)
 
 		app.OnDialChange = func(level session.AutonomyLevel) {
-			ag.SetAutonomous(level.AutoContinue())
+			ag.SetAutonomous(level.AutoApproveEdits())
 		}
 
 		app.SetTerse(true)

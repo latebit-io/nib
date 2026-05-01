@@ -14,12 +14,11 @@ import (
 
 // Edit-approval orchestration.
 //
-// [Orchestrator] runs the full review-and-continue dance the
-// `edit_file` / `replace_file` tools trigger via the
-// [tools.Approver.Propose] collaborator method. It threads the
-// validation pipeline, EditProposed event delivery, approve/reject
-// wait, edit-record callback, context-set update, and the post-
-// approval continue with diagnostics injection.
+// [Orchestrator] runs the review flow the `edit_file` / `replace_file`
+// tools trigger via the [tools.Approver.Propose] collaborator method.
+// It threads the validation pipeline, EditProposed event delivery,
+// approve/reject wait, edit-record callback, context-set update, and
+// post-approval cache update with diagnostics injection.
 //
 // State stays on the agent (taskEdits, validatorRetries, file cache)
 // — the Orchestrator only sees those fields through the [Deps]
@@ -42,8 +41,8 @@ import (
 type Deps struct {
 	// Cache is the agent-shared file-content view. The orchestrator
 	// reads it on rejection (to surface "current file" content to
-	// the LLM) and writes it on Continue (so subsequent tool calls
-	// see the post-edit state without re-reading from disk).
+	// the LLM) and writes it after approval (so subsequent tool
+	// calls see the post-edit state without re-reading from disk).
 	Cache *tools.FileCache
 
 	// Workspace exposes the developer's context set. After approval,
@@ -76,22 +75,14 @@ type Deps struct {
 	// approval means the retry budget resets).
 	RecordEdit func(p tools.EditProposal)
 
-	// Autonomous reports whether the agent is in autonomous mode.
-	// Used only to decide whether to render the "press Ctrl+N to
-	// continue" hint — at autonomous-or-higher levels the continue
-	// fires automatically and the message is misleading visual
-	// noise. The lock-protected getter on the agent is what's
-	// passed in; this struct never reads autonomy state directly.
-	Autonomous func() bool
-
 	// DiagProvider is the optional language-server diagnostics
-	// injector. When non-nil, post-Continue diagnostics are
+	// injector. When non-nil, post-approval diagnostics are
 	// appended to the tool result so the LLM can self-correct
 	// errors that the validation pipeline did not catch (LSP
 	// findings often arrive after the edit lands).
 	DiagProvider lang.DiagnosticProvider
 
-	// DiagDelay is the wait time between Continue arriving and the
+	// DiagDelay is the wait time between approval landing and the
 	// diagnostics fetch — language servers need a beat to re-parse
 	// the file before they can return findings.
 	DiagDelay time.Duration
@@ -106,9 +97,9 @@ type Orchestrator struct {
 
 // NewOrchestrator returns an Orchestrator wired with the given
 // dependencies. Panics if any non-optional callback (Validate,
-// RecordEdit, Autonomous, Send, SendCritical) is nil — these are
-// load-bearing for the flow and a nil callback would silently
-// produce wrong behaviour rather than failing visibly.
+// RecordEdit, Send, SendCritical) is nil — these are load-bearing
+// for the flow and a nil callback would silently produce wrong
+// behaviour rather than failing visibly.
 func NewOrchestrator(deps Deps) *Orchestrator {
 	if deps.Cache == nil {
 		panic("approval.NewOrchestrator: Cache is required")
@@ -124,9 +115,6 @@ func NewOrchestrator(deps Deps) *Orchestrator {
 	}
 	if deps.RecordEdit == nil {
 		panic("approval.NewOrchestrator: RecordEdit is required")
-	}
-	if deps.Autonomous == nil {
-		panic("approval.NewOrchestrator: Autonomous is required")
 	}
 	return &Orchestrator{deps: deps}
 }
@@ -198,7 +186,7 @@ func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.E
 		return fmt.Sprintf("Error: could not deliver edit proposal to frontend: %v", err), outcomeFatal
 	}
 
-	msg, oc := o.waitForApproval(ctx, coord, p)
+	approved, msg, oc := o.waitForApproval(ctx, coord, p)
 	if oc == outcomeFatal {
 		return msg, outcomeFatal
 	}
@@ -216,33 +204,34 @@ func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.E
 		o.deps.Workspace.AddContext(p.Path)
 	}
 
-	// Wait for the developer to continue with updated buffer content.
-	return o.waitForContinue(ctx, coord, p)
+	return o.afterApproval(p, approved.Content)
 }
 
 // waitForApproval blocks until the developer approves or rejects
-// the edit, ctx is canceled, or the channel is closed. Outcome
-// matrix:
+// the edit, ctx is canceled, or the channel is closed. Returns the
+// [Approval] (carrying the approved flag and post-apply content) on
+// the approval path so the orchestrator can seed the cache from the
+// real buffer state. Outcome matrix:
 //
-//   - approve  → ("", outcomeOK)
-//   - reject   → (rejectionMsg, outcomeOK)
-//   - ctx cancel → ("Error: agent canceled", outcomeFatal)
-//   - channel closed → ("Error: approval channel closed", outcomeFatal)
+//   - approve  → (approval, "", outcomeOK)
+//   - reject   → (zero, rejectionMsg, outcomeOK)
+//   - ctx cancel → (zero, "Error: agent canceled", outcomeFatal)
+//   - channel closed → (zero, "Error: approval channel closed", outcomeFatal)
 //
 // The channel-closed branch is preserved as a distinct message so
 // the caller can tell the LLM precisely what happened — earlier
 // versions collapsed both fatal paths into "Error: agent canceled"
 // via a wrapper, which masked an actual closed-channel failure.
-func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, p tools.EditProposal) (string, outcome) {
-	approved, err := coord.AwaitApproval(ctx)
+func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, p tools.EditProposal) (Approval, string, outcome) {
+	a, err := coord.AwaitApproval(ctx)
 	if err != nil {
 		if errors.Is(err, ErrChannelClosed) {
-			return "Error: approval channel closed", outcomeFatal
+			return Approval{}, "Error: approval channel closed", outcomeFatal
 		}
-		return "Error: agent canceled", outcomeFatal
+		return Approval{}, "Error: agent canceled", outcomeFatal
 	}
-	if approved {
-		return "", outcomeOK
+	if a.Approved {
+		return a, "", outcomeOK
 	}
 
 	o.deps.Send(event.AgentStatus{Status: event.StatusThinking})
@@ -252,63 +241,25 @@ func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, 
 	if c, ok := o.deps.Cache.Get(p.CanonPath); ok {
 		content = c
 	}
-	return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
+	return Approval{}, fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
 		p.Path, tools.TruncateForPreview(content)), outcomeOK
 }
 
-// waitForContinue blocks until the developer finishes editing and
-// signals continue, or the context is canceled. Compares the new
-// content against the expected result to detect developer
-// modifications and surfaces them to the LLM with a diff. Outcome
-// matrix:
-//
-//   - normal continue → (resultBody, outcomeOK) — applied or
-//     applied-with-developer-modifications, both normal flow
-//   - ctx cancel → ("Error: agent canceled", outcomeFatal)
-//   - channel closed → ("Error: continue channel closed", outcomeFatal)
-func (o *Orchestrator) waitForContinue(ctx context.Context, coord *Coordinator, p tools.EditProposal) (string, outcome) {
-	o.deps.Send(event.AgentStatus{Status: event.StatusEditing})
-	// Render the "press Ctrl+N to continue" prompt only at
-	// LevelGuided (where the developer actually has to press
-	// Ctrl+N). At LevelCollaborate+ the autonomous flag is set and
-	// continue fires automatically — the message is then visual
-	// noise that reads like an approval prompt and confused
-	// testers ("why did it ask for my approval?"). The
-	// StatusEditing chip transition is the signal in autonomous
-	// modes.
-	if !o.deps.Autonomous() {
-		o.deps.Send(event.AgentToken{Text: "\n[Edit approved — waiting for continue]\n"})
-	}
-
-	newContent, err := coord.AwaitContinue(ctx)
-	if err != nil {
-		if errors.Is(err, ErrChannelClosed) {
-			return "Error: continue channel closed", outcomeFatal
-		}
-		return "Error: agent canceled", outcomeFatal
-	}
-	o.deps.Cache.Set(p.CanonPath, newContent)
+// afterApproval seeds the cache with the post-apply buffer content
+// (delivered through the Approve signal) and returns the success body
+// for the LLM. Using the buffer-derived content rather than
+// p.ExpectedContent matters whenever the developer modified the
+// replacement text in the diff overlay before approving — the buffer
+// holds the true post-apply state; ExpectedContent holds the agent's
+// prediction. Diagnostics, when configured, are appended after a
+// brief delay so the language server has time to re-parse.
+func (o *Orchestrator) afterApproval(p tools.EditProposal, applied string) (string, outcome) {
+	o.deps.Cache.Set(p.CanonPath, applied)
 	o.deps.Send(event.AgentStatus{Status: event.StatusThinking})
-	o.deps.Send(event.AgentToken{Text: "\n"})
 
-	var result string
-	if newContent != p.ExpectedContent {
-		diff := tools.SimpleDiff(p.ExpectedContent, newContent)
-		result = fmt.Sprintf("Edit applied, but the developer modified your edit. "+
-			"IMPORTANT: The file content below is the AUTHORITATIVE current state. "+
-			"Do NOT use any earlier version of this file from the conversation — only use what is shown here.\n\n"+
-			"Developer's changes (what they changed from your proposal):\n```diff\n%s\n```\n\n"+
-			"Recalibrate: study the diff — it signals the developer's intent. "+
-			"Align your next steps with their direction. "+
-			"If you notice a syntax error or bug in their edit, point it out and propose a fix.\n\n"+
-			"Current file (%s):\n```\n%s\n```",
-			diff, p.Path, tools.TruncateForPreview(newContent))
-	} else {
-		result = fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-			p.Path, tools.TruncateForPreview(newContent))
-	}
+	result := fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
+		p.Path, tools.TruncateForPreview(applied))
 
-	// Auto-inject diagnostics so the agent can self-correct errors.
 	if o.deps.DiagProvider != nil {
 		time.Sleep(o.deps.DiagDelay)
 		diagResult := tools.FormatDiagnostics(o.deps.DiagProvider, p.CanonPath, p.Path)

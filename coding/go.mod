@@ -13,8 +13,8 @@ require (
 	github.com/tree-sitter/go-tree-sitter v0.25.0 // indirect
 )
 
-replace github.com/latebit-io/nib/agent => ../agent
-
-replace github.com/latebit-io/nib/ai => ../ai
-
-replace github.com/latebit-io/nib/engine => ../engine
+replace (
+	github.com/latebit-io/nib/agent => ../agent
+	github.com/latebit-io/nib/ai => ../ai
+	github.com/latebit-io/nib/engine => ../engine
+)

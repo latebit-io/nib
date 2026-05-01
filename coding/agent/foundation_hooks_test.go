@@ -204,11 +204,17 @@ func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
 	ctx := context.Background()
 
 	// Turn 1: first edit passes, second blocked.
-	res1, _ := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	res1, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	if err != nil {
+		t.Fatalf("turn 1 first BeforeToolCall: %v", err)
+	}
 	if res1.Block {
 		t.Fatalf("turn 1 first edit should pass; reason=%q", res1.Reason)
 	}
-	res2, _ := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	res2, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	if err != nil {
+		t.Fatalf("turn 1 second BeforeToolCall: %v", err)
+	}
 	if !res2.Block {
 		t.Fatalf("turn 1 second edit should be blocked")
 	}
@@ -219,7 +225,10 @@ func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
 	}
 
 	// Turn 2: first edit passes again.
-	res3, _ := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	res3, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	if err != nil {
+		t.Fatalf("turn 2 BeforeToolCall: %v", err)
+	}
 	if res3.Block {
 		t.Errorf("turn 2 first edit should pass after reset; reason=%q", res3.Reason)
 	}
@@ -299,11 +308,17 @@ func TestFoundationCompactAndLint_DrainOnlyOnce(t *testing.T) {
 	a := &Agent{pendingLint: "some violation"}
 	msgs := []llm.Message{{Role: "user", Content: "."}}
 
-	out1, _ := a.foundationCompactAndLint(context.Background(), msgs)
+	out1, err := a.foundationCompactAndLint(context.Background(), msgs)
+	if err != nil {
+		t.Fatalf("first foundationCompactAndLint: %v", err)
+	}
 	if len(out1) != 2 {
 		t.Fatalf("first call: expected len=2, got %d", len(out1))
 	}
-	out2, _ := a.foundationCompactAndLint(context.Background(), msgs)
+	out2, err := a.foundationCompactAndLint(context.Background(), msgs)
+	if err != nil {
+		t.Fatalf("second foundationCompactAndLint: %v", err)
+	}
 	if len(out2) != 1 {
 		t.Errorf("second call: expected drained pendingLint to leave msgs unchanged, len=%d", len(out2))
 	}
@@ -517,7 +532,10 @@ func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 	transcript = append(transcript, out...)
 
 	// Second steering call within the same input window: one-shot.
-	out, _ = hooks.GetSteeringMessages(ctx)
+	out, err = hooks.GetSteeringMessages(ctx)
+	if err != nil {
+		t.Fatalf("second steering: %v", err)
+	}
 	if out != nil {
 		t.Errorf("expected nil on second call (one-shot), got %d msgs", len(out))
 	}
@@ -532,7 +550,10 @@ func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 	transcript = append(transcript, llm.Message{Role: "assistant", Content: "Still done. Items still needed: tests."})
 
 	// Steering must fire again (budget reset).
-	out, _ = hooks.GetSteeringMessages(ctx)
+	out, err = hooks.GetSteeringMessages(ctx)
+	if err != nil {
+		t.Fatalf("third steering: %v", err)
+	}
 	if len(out) != 1 || out[0].Content != nudges.OutstandingNudgeMessage {
 		t.Errorf("expected narrative nudge after fresh input reset; got %+v", out)
 	}
@@ -716,14 +737,20 @@ func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. edit_file blocks (no active task) → AfterToolCall must be a no-op.
-	br, _ := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	br, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	if err != nil {
+		t.Fatalf("blocked-path BeforeToolCall: %v", err)
+	}
 	if !br.Block {
 		t.Fatalf("expected first call to be blocked")
 	}
-	ar, _ := hooks.AfterToolCall(ctx, upagent.AfterToolCallContext{
+	ar, err := hooks.AfterToolCall(ctx, upagent.AfterToolCallContext{
 		Name:   "edit_file",
 		Result: upagent.ToolResult{Content: br.Reason, IsError: true},
 	})
+	if err != nil {
+		t.Fatalf("blocked-path AfterToolCall: %v", err)
+	}
 	if ar.Content != nil {
 		t.Errorf("expected blocked path to skip reminder; got %q", *ar.Content)
 	}
@@ -731,14 +758,20 @@ func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
 	// 2. Activate a task and try a non-edit tool: BeforeToolCall passes,
 	// AfterToolCall appends reminder.
 	tracker.activePath = "Phase 1 > task"
-	br, _ = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "read_file"})
+	br, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "read_file"})
+	if err != nil {
+		t.Fatalf("non-blocked BeforeToolCall: %v", err)
+	}
 	if br.Block {
 		t.Fatalf("expected read_file to pass; reason=%q", br.Reason)
 	}
-	ar, _ = hooks.AfterToolCall(ctx, upagent.AfterToolCallContext{
+	ar, err = hooks.AfterToolCall(ctx, upagent.AfterToolCallContext{
 		Name:   "read_file",
 		Result: upagent.ToolResult{Content: "file body"},
 	})
+	if err != nil {
+		t.Fatalf("non-blocked AfterToolCall: %v", err)
+	}
 	if ar.Content == nil || !strings.Contains(*ar.Content, "do the thing") {
 		t.Errorf("expected reminder appended on non-blocked path, got %v", ar.Content)
 	}
@@ -865,10 +898,18 @@ func TestFoundationHooks_TransformContext_ResetAndCompactAndLint(t *testing.T) {
 	}
 
 	// Turn 1 dispatch: pendingLint drained, first edit passes, second blocked.
-	if r, _ := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"}); r.Block {
+	r, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	if err != nil {
+		t.Fatalf("turn 1 first BeforeToolCall: %v", err)
+	}
+	if r.Block {
 		t.Fatalf("first edit should pass after lint drained, got Block=%q", r.Reason)
 	}
-	if r, _ := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"}); !r.Block {
+	r, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	if err != nil {
+		t.Fatalf("turn 1 second BeforeToolCall: %v", err)
+	}
+	if !r.Block {
 		t.Fatalf("second edit should be blocked")
 	}
 
@@ -878,7 +919,11 @@ func TestFoundationHooks_TransformContext_ResetAndCompactAndLint(t *testing.T) {
 	}
 
 	// Turn 2 dispatch: first edit must pass again (single-edit reset).
-	if r, _ := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"}); r.Block {
+	r, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	if err != nil {
+		t.Fatalf("turn 2 BeforeToolCall: %v", err)
+	}
+	if r.Block {
 		t.Errorf("post-reset first edit should pass; reason=%q", r.Reason)
 	}
 }

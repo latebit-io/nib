@@ -239,7 +239,7 @@ func (a *Agent) foundationSteering(msgs []llm.Message, narrativeFired, permissio
 // that name-collides; this gate is the dispatch-time backstop.
 func (a *Agent) planningBlocklistGate(c upagent.BeforeToolCallContext) upagent.BeforeToolCallResult {
 	name := strings.ToLower(c.Name)
-	if a.mode != ModePlanning {
+	if a.currentMode() != ModePlanning {
 		return upagent.BeforeToolCallResult{}
 	}
 	if !a.planningBlocklist[name] {
@@ -358,7 +358,7 @@ func (a *Agent) foundationCompactAndLint(_ context.Context, msgs []llm.Message) 
 // subset; everything else returns the full set unchanged. Mirrors the
 // activeDefs computation at [Agent.runLoop] (run.go:121-124).
 func (a *Agent) activeToolDefs() []llm.ToolDef {
-	if a.mode == ModePlanning {
+	if a.currentMode() == ModePlanning {
 		return a.planningToolDefs()
 	}
 	return a.toolDefs

@@ -78,7 +78,7 @@ func (a *Agent) fetchMemorySummary(ctx context.Context) string {
 //   - Work tree loaded, no active task → blocked with guidance.
 //   - Work tree loaded, active task present → proceed.
 func (a *Agent) enforceActiveTaskGate(_ context.Context, toolName string) string {
-	if a.mode == ModePlanning {
+	if a.currentMode() == ModePlanning {
 		return ""
 	}
 	if !mutatingTools[toolName] {

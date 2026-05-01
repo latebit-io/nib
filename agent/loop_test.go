@@ -837,6 +837,211 @@ func TestTruncated_EndsRunWithError(t *testing.T) {
 	}
 }
 
+// TestOnTruncated_RetrySplicesAndContinues verifies the OnTruncated
+// hook drives a recovery turn. Provider scripts a truncated turn 1
+// that emits a tool call with partial args, then a clean turn 2. The
+// hook returns Retry=true with rejection messages; the loop must
+// append them, NOT execute the truncated tool calls, run turn 2, and
+// finish with a parked AgentWaiting/TurnEnd. The truncated assistant
+// message itself ends up in the transcript so the rejection messages
+// pair with their tool_call IDs (chat-completion format).
+func TestOnTruncated_RetrySplicesAndContinues(t *testing.T) {
+	t.Parallel()
+
+	tc := llm.ToolCall{
+		ID:       "trunc-1",
+		Type:     "function",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"x"`},
+	}
+	provider := newScriptedProvider(
+		[]llm.StreamEvent{
+			{Done: true, Truncated: true, ToolCalls: []llm.ToolCall{tc}},
+		},
+		streamText([]string{"recovered"}, nil),
+	)
+	tool := &recordingTool{def: llm.ToolDef{Function: llm.FunctionDef{Name: "edit_file"}}}
+
+	events := make(chan event.Event, 64)
+
+	var hookCalls int
+	hook := func(_ context.Context, c TruncationContext) (TruncationResult, error) {
+		hookCalls++
+		if len(c.ToolCalls) != 1 || c.ToolCalls[0].ID != "trunc-1" {
+			t.Errorf("hook ToolCalls = %+v; want trunc-1 only", c.ToolCalls)
+		}
+		return TruncationResult{
+			Retry: true,
+			Messages: []llm.Message{
+				{Role: "tool", ToolCallID: "trunc-1", Content: "rejected: truncated"},
+			},
+		}, nil
+	}
+
+	a, err := New(Options{
+		Provider: provider,
+		Events:   events,
+		Tools:    []Tool{tool},
+		Hooks:    Hooks{OnTruncated: hook},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	turnEnds := 0
+	for turnEnds < 2 {
+		select {
+		case ev := <-events:
+			if _, ok := ev.(event.TurnEnd); ok {
+				turnEnds++
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for both TurnEnd events; got %d", turnEnds)
+		}
+	}
+
+	a.Abort()
+	a.WaitForIdle()
+
+	if hookCalls != 1 {
+		t.Errorf("OnTruncated calls = %d; want 1", hookCalls)
+	}
+	if got := len(tool.Calls()); got != 0 {
+		t.Errorf("tool dispatched %d times; want 0 (truncated tool calls must NEVER execute)", got)
+	}
+
+	state := a.State()
+	if len(state.Messages) < 4 {
+		t.Fatalf("State.Messages length = %d; want >=4 (user, truncated assistant, rejection, recovered assistant)", len(state.Messages))
+	}
+	// Order: user, truncated assistant, rejection tool, recovered assistant
+	if state.Messages[1].Role != "assistant" || len(state.Messages[1].ToolCalls) != 1 {
+		t.Errorf("messages[1] = %+v; want truncated assistant with 1 tool call", state.Messages[1])
+	}
+	if state.Messages[2].Role != "tool" || state.Messages[2].ToolCallID != "trunc-1" {
+		t.Errorf("messages[2] = %+v; want tool rejection for trunc-1", state.Messages[2])
+	}
+	if state.Messages[3].Role != "assistant" || state.Messages[3].Content != "recovered" {
+		t.Errorf("messages[3] = %+v; want clean recovered assistant", state.Messages[3])
+	}
+}
+
+// TestOnTruncated_NoRetryEndsRunSilently locks the contract that a
+// hook returning Retry=false ends the run WITHOUT the foundation
+// emitting its own [event.Error]. The hook owns user-facing error
+// emission; the foundation's emit-on-no-hook fallback would otherwise
+// duplicate the application's already-emitted message.
+func TestOnTruncated_NoRetryEndsRunSilently(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider([]llm.StreamEvent{
+		{Done: true, Truncated: true},
+	})
+	events := make(chan event.Event, 32)
+
+	hook := func(_ context.Context, _ TruncationContext) (TruncationResult, error) {
+		return TruncationResult{
+			Retry: false,
+			Messages: []llm.Message{
+				{Role: "user", Content: "abandoned: out of retries"},
+			},
+		}, nil
+	}
+
+	a, err := New(Options{
+		Provider: provider,
+		Events:   events,
+		Hooks:    Hooks{OnTruncated: hook},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	all := drainUntilEnd(events)
+	a.WaitForIdle()
+
+	if _, ok := findEvent[event.Error](all); ok {
+		t.Errorf("foundation emitted Error event; hook owns error emission on Retry=false")
+	}
+	if _, ok := findEvent[event.AgentEnd](all); !ok {
+		t.Errorf("missing AgentEnd; run did not unwind on Retry=false")
+	}
+
+	state := a.State()
+	// The hook's splice message should land in the final transcript so
+	// AgentEnd snapshots include it.
+	var found bool
+	for _, msg := range state.Messages {
+		if msg.Role == "user" && msg.Content == "abandoned: out of retries" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("hook splice not appended to transcript; messages=%+v", state.Messages)
+	}
+}
+
+// TestOnTruncated_HookErrorIsTerminal verifies a hook returning a
+// non-nil error short-circuits the run with [event.Error] (consistent
+// with how every other hook handles error returns).
+func TestOnTruncated_HookErrorIsTerminal(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider([]llm.StreamEvent{
+		{Done: true, Truncated: true},
+	})
+	events := make(chan event.Event, 32)
+
+	hookErr := errors.New("recovery rejected the proposal")
+	hook := func(_ context.Context, _ TruncationContext) (TruncationResult, error) {
+		return TruncationResult{}, hookErr
+	}
+
+	a, err := New(Options{
+		Provider: provider,
+		Events:   events,
+		Hooks:    Hooks{OnTruncated: hook},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	all := drainUntilEnd(events)
+	a.WaitForIdle()
+
+	gotErr, ok := findEvent[event.Error](all)
+	if !ok {
+		t.Fatalf("missing Error event for hook failure")
+	}
+	if !contains(gotErr.Err, "OnTruncated") || !contains(gotErr.Err, hookErr.Error()) {
+		t.Errorf("Error.Err = %q; want substrings 'OnTruncated' and %q", gotErr.Err, hookErr.Error())
+	}
+}
+
+// contains is a tiny helper so the test does not pull strings just for
+// substring assertions in error messages.
+func contains(s, sub string) bool {
+	if sub == "" {
+		return true
+	}
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 // TestSystemPrompt_PrependedToTranscript confirms that a non-empty
 // SystemPrompt is included as the first message of the run.
 func TestSystemPrompt_PrependedToTranscript(t *testing.T) {

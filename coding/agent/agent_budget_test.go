@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,42 +11,27 @@ import (
 	"github.com/latebit-io/nib/engine/event"
 )
 
-// TestCheckTaskBudget_Disabled covers the four non-firing branches of
-// [Agent.checkTaskBudget]: zero budget, negative-budget unlimited resolved
-// by [New], stale runID, and already-latched. The check must return ""
-// from each so the run loop never erroneously aborts a healthy turn.
+// TestCheckTaskBudget_Disabled covers the three non-firing branches of
+// [Agent.checkTaskBudget]: zero budget (disabled), already-latched, and
+// under-cap. The check must return "" from each so a healthy turn is
+// never erroneously aborted.
+//
+// The runID stale-guard branch the inline path carried (decision #19)
+// was retired alongside the loop swap — the foundation owns run
+// lifecycle and the wrapper waits for [upagent.Agent.WaitForIdle]
+// before starting a new run, so a stale check cannot fire.
 func TestCheckTaskBudget_Disabled(t *testing.T) {
 	t.Parallel()
 
-	const useAgentRunID = -1 // sentinel: tc.runID == useAgentRunID → use ag.runID
-
 	cases := []struct {
-		name string
-		opts *NewOptions
-		// mutate runs after construction so the test can poke runID,
-		// sessionUsage, or budgetExceeded into the state under test.
+		name   string
+		opts   *NewOptions
 		mutate func(a *Agent)
-		// runID is the value passed to checkTaskBudget. useAgentRunID
-		// (default-equivalent for any case that does not opt in) means
-		// "use the agent's current runID"; any other value (e.g. 0) is
-		// passed verbatim to exercise the stale-runID branch without a
-		// brittle string-match on tc.name.
-		runID int64
 	}{
 		{
 			name:   "zero budget skips check",
 			opts:   &NewOptions{TaskTokenBudget: -1}, // -1 → unlimited (zero internally)
 			mutate: func(a *Agent) { a.sessionUsage.TotalPromptTokens = 1_000_000 },
-			runID:  useAgentRunID,
-		},
-		{
-			name: "stale runID returns early",
-			opts: &NewOptions{TaskTokenBudget: 100},
-			mutate: func(a *Agent) {
-				a.sessionUsage.TotalPromptTokens = 200
-				a.runID = 5
-			},
-			runID: 0, // intentionally mismatched against the agent's runID=5
 		},
 		{
 			name: "already-latched returns empty",
@@ -56,13 +40,11 @@ func TestCheckTaskBudget_Disabled(t *testing.T) {
 				a.sessionUsage.TotalPromptTokens = 200
 				a.budgetExceeded = true
 			},
-			runID: useAgentRunID,
 		},
 		{
 			name:   "under cap returns empty",
 			opts:   &NewOptions{TaskTokenBudget: 1000},
 			mutate: func(a *Agent) { a.sessionUsage.TotalPromptTokens = 500 },
-			runID:  useAgentRunID,
 		},
 	}
 
@@ -72,93 +54,17 @@ func TestCheckTaskBudget_Disabled(t *testing.T) {
 			events := make(chan event.Event, 4)
 			ag := New(&multiTurnProvider{}, stubWorkspace{}, events, tc.opts)
 			tc.mutate(ag)
-			runID := uint64(ag.runID)
-			if tc.runID != useAgentRunID {
-				runID = uint64(tc.runID)
-			}
-			if msg := ag.checkTaskBudget(runID); msg != "" {
+			if msg := ag.checkTaskBudget(); msg != "" {
 				t.Errorf("checkTaskBudget returned %q, want empty", msg)
 			}
 		})
 	}
 }
 
-// TestShouldAbortForBudget covers the inner-loop budget gate that
-// processLLMTurn consults BETWEEN provider Stream calls. Distinct from
-// checkTaskBudget in two ways: it sums committed+pending usage (so a
-// turn that has not yet been recorded is still counted), and it does
-// not latch budgetExceeded (the abort path owns the latch). Each row
-// confirms one branch of the gate.
-func TestShouldAbortForBudget(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name    string
-		opts    *NewOptions
-		mutate  func(a *Agent)
-		pending budget.Turn
-		want    bool
-	}{
-		{
-			name:    "zero budget disables gate",
-			opts:    &NewOptions{TaskTokenBudget: -1}, // -1 → unlimited (zero internally)
-			pending: budget.Turn{PromptTokens: 1_000_000},
-			want:    false,
-		},
-		{
-			name: "already latched suppresses gate",
-			opts: &NewOptions{TaskTokenBudget: 100},
-			mutate: func(a *Agent) {
-				a.budgetExceeded = true
-				a.sessionUsage.TotalPromptTokens = 200
-			},
-			want: false,
-		},
-		{
-			// Wiring smoke: confirms shouldAbortForBudget delegates to
-			// budget.WouldExceed for the math (committed + pending). The
-			// pure-math edge cases are exhaustively covered in
-			// coding/budget; this single positive row is enough to catch
-			// a wiring regression here.
-			name:    "math is wired through to budget.WouldExceed",
-			opts:    &NewOptions{TaskTokenBudget: 100},
-			mutate:  func(a *Agent) { a.sessionUsage.TotalPromptTokens = 60 },
-			pending: budget.Turn{PromptTokens: 50}, // 60+50 = 110 > 100
-			want:    true,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			events := make(chan event.Event, 4)
-			ag := New(&multiTurnProvider{}, stubWorkspace{}, events, tc.opts)
-			if tc.mutate != nil {
-				tc.mutate(ag)
-			}
-			// Capture the latch state before the call. shouldAbortForBudget
-			// must NOT mutate budgetExceeded — only the abort path
-			// (checkTaskBudget after recordTurnUsage commits) is allowed
-			// to latch. If this helper accidentally latched, a later
-			// checkTaskBudget call would short-circuit and the abort
-			// AgentError would never fire. Locking the invariant in tests
-			// keeps that pre-condition load-bearing.
-			latchBefore := ag.budgetExceeded
-			if got := ag.shouldAbortForBudget(tc.pending); got != tc.want {
-				t.Errorf("shouldAbortForBudget(%+v) = %v, want %v", tc.pending, got, tc.want)
-			}
-			if ag.budgetExceeded != latchBefore {
-				t.Errorf("shouldAbortForBudget mutated budgetExceeded latch: before=%v, after=%v",
-					latchBefore, ag.budgetExceeded)
-			}
-		})
-	}
-}
-
-// TestCheckTaskBudget_FiresAndLatches verifies that a single check fires
-// once when the budget is crossed, and subsequent checks return empty
-// because budgetExceeded latches. The latch keeps an Resume after abort
-// from emitting a duplicate AgentError.
+// TestCheckTaskBudget_FiresAndLatches verifies that a single check
+// fires once when the budget is crossed and subsequent checks return
+// empty because budgetExceeded latches. The latch keeps a Resume
+// after abort from emitting a duplicate AgentError.
 func TestCheckTaskBudget_FiresAndLatches(t *testing.T) {
 	t.Parallel()
 	events := make(chan event.Event, 4)
@@ -169,7 +75,7 @@ func TestCheckTaskBudget_FiresAndLatches(t *testing.T) {
 	ag.sessionUsage.TotalCompletionTokens = 300 // 1100 > 1000
 	ag.sessionUsage.Turns = 1
 
-	msg := ag.checkTaskBudget(ag.runID)
+	msg := ag.checkTaskBudget()
 	if msg == "" {
 		t.Fatal("checkTaskBudget returned empty; want budget-exceeded message")
 	}
@@ -183,23 +89,26 @@ func TestCheckTaskBudget_FiresAndLatches(t *testing.T) {
 		t.Error("budgetExceeded did not latch after first overrun")
 	}
 
-	// Subsequent calls return empty even though usage is still over.
-	if msg := ag.checkTaskBudget(ag.runID); msg != "" {
+	if msg := ag.checkTaskBudget(); msg != "" {
 		t.Errorf("second checkTaskBudget returned %q, want empty (latched)", msg)
 	}
 }
 
-// TestAgent_TokenBudget_AbortsRun drives the agent through a turn whose
-// provider-reported usage crosses an explicit small budget, and verifies
-// the run aborts with an AgentError before another LLM call. The test
-// guards the regression that motivated the budget: a runaway loop that
-// burned 55M+ tokens on a broken pacman game.
+// TestAgent_TokenBudget_AbortsRun drives the agent through a turn
+// whose provider-reported usage crosses an explicit small budget, and
+// verifies the run aborts with an AgentError before another LLM call.
+// The test guards the regression that motivated the budget: a runaway
+// loop that burned 55M+ tokens on a broken pacman game.
+//
+// Post-cutover the abort flows through the foundation's
+// TransformContext hook ([Agent.foundationBudgetCheck]) returning
+// errBudgetExceeded; the foundation emits Error which the translator
+// re-emits as AgentError + AgentDone(success=false). The user-visible
+// shape (AgentError with "budget exceeded" substring + AgentDone with
+// Success=false) is unchanged.
 func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 	t.Parallel()
 
-	// One scripted turn reporting 1500 prompt tokens via Usage. The default
-	// budget is irrelevant — we override to 500 so the first turn alone
-	// exceeds the cap.
 	provider := &multiTurnProvider{
 		turns: [][]llm.StreamEvent{
 			{
@@ -211,6 +120,13 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 						CompletionTokens: 50,
 					},
 				},
+			},
+			// Second scripted turn that must NEVER fire — the abort
+			// fires on the next TransformContext (which precedes the
+			// next Stream). If this turn runs the budget gate failed.
+			{
+				{Token: "should not see"},
+				{Done: true},
 			},
 		},
 	}
@@ -233,8 +149,6 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 		t.Error("AgentDone.Success = true, want false on budget abort")
 	}
 
-	// The provider must have been called exactly once — the abort cuts the
-	// run before a second LLM round-trip can commit more tokens.
 	provider.mu.Lock()
 	calls := provider.call
 	provider.mu.Unlock()
@@ -251,10 +165,6 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 // proposals) are silently discarded. [event.FlushBuffers] is auto-
 // resolved with an empty result so the agent does not block on a flush
 // that the test harness has no real buffer to satisfy.
-//
-// Used by every test that asserts on the budget-abort surface so the
-// drain logic stays in one place — duplicating it across tests
-// historically silently dropped one event when its order shifted.
 func collectAbortEvents(t *testing.T, events <-chan event.Event, timeout time.Duration) (errMsg string, doneSuccess bool) {
 	t.Helper()
 	var (
@@ -271,8 +181,10 @@ func collectAbortEvents(t *testing.T, events <-chan event.Event, timeout time.Du
 			}
 			switch e := ev.(type) {
 			case event.AgentError:
+				if !errSeen {
+					errMsg = e.Err
+				}
 				errSeen = true
-				errMsg = e.Err
 			case event.AgentDone:
 				doneSeen = true
 				doneSuccess = e.Success
@@ -290,17 +202,17 @@ func collectAbortEvents(t *testing.T, events <-chan event.Event, timeout time.Du
 	return errMsg, doneSuccess
 }
 
-// TestAgent_TokenBudget_AbortsBetweenInnerStreams verifies the inner-
-// loop budget gate: a single agent turn can call Stream multiple times
-// (once per tool-call round-trip), and the budget must abort BETWEEN
-// those calls — not just after the whole turn finishes. The scripted
-// provider emits a tool call to a non-existent tool on the first
-// Stream; the agent dispatches it (gets an error reply), then loops to
-// call Stream a second time. With the budget set so the FIRST stream's
-// usage already crosses the cap, the second Stream must never fire.
+// TestAgent_TokenBudget_AbortsBetweenInnerStreams verifies the
+// per-Stream budget gate. A single agent turn can call Stream
+// multiple times (one per tool-call round-trip); the budget must
+// abort BEFORE the next Stream — not just after the outer turn
+// finishes. The scripted provider emits a tool call to a non-existent
+// tool on the first Stream; the agent dispatches it (gets an error
+// reply), then the foundation's TransformContext fires before the
+// next Stream and aborts.
 //
-// Without the inner gate, processLLMTurn would loop indefinitely (or
-// until truncation) and runLoop's outer abort would only fire after
+// Without the per-Stream gate, processLLMTurn would loop indefinitely
+// (or until truncation) and the run-end abort would only fire after
 // sessionUsage caught up — many tokens too late.
 func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 	t.Parallel()
@@ -325,7 +237,7 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 				},
 			},
 			// Inner Stream #2: must NEVER be invoked. If the test
-			// reaches this turn, the inner-loop gate failed.
+			// reaches this turn, the per-Stream gate failed.
 			{
 				{Token: "should not see"},
 				{Done: true},
@@ -348,117 +260,22 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 		t.Errorf("AgentError = %q, want substring 'budget exceeded'", errMsg)
 	}
 	if doneSuccess {
-		t.Error("AgentDone.Success = true, want false on inner-loop budget abort")
+		t.Error("AgentDone.Success = true, want false on per-Stream budget abort")
 	}
 
-	// The inner gate must have prevented the second Stream call.
 	provider.mu.Lock()
 	calls := provider.call
 	provider.mu.Unlock()
 	if calls != 1 {
-		t.Errorf("provider Stream calls = %d, want 1 (inner-loop budget gate failed)", calls)
+		t.Errorf("provider Stream calls = %d, want 1 (per-Stream budget gate failed)", calls)
 	}
 }
 
-// TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun verifies the
-// stale-run guard at the top of processLLMTurn's inner for-loop.
-// Calling processLLMTurn with a runID that does not match a.runID
-// must return errStaleRun before any side effect — most importantly
-// before any Stream call. Synchronous: no goroutine race, no
-// timers. The integration with runLoop's `errors.Is(err, errStaleRun)
-// { return }` short-circuit is verifiable by reading runLoop and
-// does not need its own goroutine-orchestrated test.
-func TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun(t *testing.T) {
-	t.Parallel()
-
-	provider := &multiTurnProvider{
-		// Single scripted turn — the guard must fire before this is
-		// ever requested. If Stream is called, the test fails on the
-		// call-count assertion, not on a missing turn.
-		turns: [][]llm.StreamEvent{{{Token: "should not see", Done: true}}},
-	}
-	events := make(chan event.Event, 16)
-	ag := New(provider, stubWorkspace{}, events, nil)
-
-	// Pin the agent's runID to a known value so the test's stale
-	// runID is unambiguous. New() initializes runID to 0; setting
-	// it under the lock keeps the race detector happy.
-	ag.mu.Lock()
-	ag.runID = 5
-	ag.mu.Unlock()
-
-	thinkState := false
-	_, _, err := ag.processLLMTurn(context.Background(), 999, nil, &thinkState, nil)
-
-	if !errors.Is(err, errStaleRun) {
-		t.Errorf("err = %v, want errStaleRun", err)
-	}
-	provider.mu.Lock()
-	calls := provider.call
-	provider.mu.Unlock()
-	if calls != 0 {
-		t.Errorf("provider Stream calls = %d, want 0 (guard must fire before Stream)", calls)
-	}
-}
-
-// TestProcessLLMTurn_FreshRunIDProceeds is the negative control:
-// when runID matches a.runID, the guard does NOT fire and Stream
-// is invoked normally. Locks the guard's selectivity — without
-// this, a regression that always returned errStaleRun would still
-// pass [TestProcessLLMTurn_StaleRunIDReturnsErrStaleRun].
-func TestProcessLLMTurn_FreshRunIDProceeds(t *testing.T) {
-	t.Parallel()
-
-	provider := &multiTurnProvider{
-		turns: [][]llm.StreamEvent{{{Token: "ok", Done: true}}},
-	}
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
-
-	ag.mu.Lock()
-	ag.runID = 7
-	ag.mu.Unlock()
-
-	// Drain events so the agent does not block on a full channel
-	// while processLLMTurn sends its status/token/estimate events.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for ev := range events {
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-			}
-		}
-	}()
-	t.Cleanup(func() {
-		close(events)
-		<-done
-	})
-
-	thinkState := false
-	_, _, err := ag.processLLMTurn(context.Background(), 7, nil, &thinkState, nil)
-
-	// Asserting err == nil (rather than just !errors.Is(err, errStaleRun))
-	// catches any unexpected error from processLLMTurn — truncation
-	// retry exhaustion, drainStream failures, ctx cancellation. The
-	// stale-guard regression is just one shape of failure this test
-	// should catch; the broader assertion is the actually-load-bearing
-	// one for a "happy path proceeds" negative control.
-	if err != nil {
-		t.Fatalf("processLLMTurn returned %v, want nil (fresh runID)", err)
-	}
-	provider.mu.Lock()
-	calls := provider.call
-	provider.mu.Unlock()
-	if calls != 1 {
-		t.Errorf("provider Stream calls = %d, want 1 (guard must NOT fire on matching runID)", calls)
-	}
-}
-
-// TestAgent_TokenBudget_DefaultApplied checks that when NewOptions.TaskTokenBudget
-// is left zero, [New] resolves it to [budget.DefaultTaskTokens] rather than
-// leaving the budget disabled. Disabling the budget by default would make
-// the safety net silently absent — the regression guard would not fire.
+// TestAgent_TokenBudget_DefaultApplied checks that when
+// NewOptions.TaskTokenBudget is left zero, [New] resolves it to
+// [budget.DefaultTaskTokens] rather than leaving the budget disabled.
+// Disabling the budget by default would make the safety net silently
+// absent — the regression guard would not fire.
 func TestAgent_TokenBudget_DefaultApplied(t *testing.T) {
 	t.Parallel()
 	events := make(chan event.Event, 1)
@@ -469,9 +286,10 @@ func TestAgent_TokenBudget_DefaultApplied(t *testing.T) {
 	}
 }
 
-// TestAgent_TokenBudget_NegativeMeansUnlimited covers the explicit opt-out:
-// passing a negative budget resolves to zero (the disable sentinel) so a
-// developer who knows what they're doing can turn the safety net off.
+// TestAgent_TokenBudget_NegativeMeansUnlimited covers the explicit
+// opt-out: passing a negative budget resolves to zero (the disable
+// sentinel) so a developer who knows what they're doing can turn the
+// safety net off.
 func TestAgent_TokenBudget_NegativeMeansUnlimited(t *testing.T) {
 	t.Parallel()
 	events := make(chan event.Event, 1)

@@ -3,7 +3,6 @@ package agent
 import (
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/nudges"
-	"github.com/latebit-io/nib/engine/event"
 )
 
 // Post-turn nudge integration for Agent.
@@ -20,44 +19,9 @@ import (
 //     should turn back into action.
 //
 // Both gates use string-pattern detectors that live in
-// [coding/nudges]; the agent-side glue here owns the message-slice
-// mutation and the once-per-input guard.
-
-// tryInjectPostTurnNudge runs the post-turn nudge gates (narrative,
-// permission) in order and returns true when one fires so the caller
-// should `continue` the run loop. The narrative gate flags wrap-ups that
-// enumerate outstanding work while the task tree is empty. The
-// permission gate (autonomous mode only) flags turns that yielded with a
-// question instead of a tool call.
-//
-// Each gate is one-shot per developer input — narrativeFired and
-// permissionFired are mutated in place when their gate fires. Both
-// gates skip on error turns; the caller is responsible for that check
-// so a turn whose model errored does not consume a one-shot slot for
-// the next clean turn.
-func (a *Agent) tryInjectPostTurnNudge(messages *[]llm.Message, narrativeFired, permissionFired *bool) bool {
-	if !*narrativeFired && a.shouldNudgeOutstanding(*messages) {
-		*narrativeFired = true
-		*messages = append(*messages, llm.Message{
-			Role:    "user",
-			Content: nudges.OutstandingNudgeMessage,
-		})
-		a.send(event.AgentToken{Text: "\n[Nudge: outstanding-work language detected — track or scrub it]\n"})
-		a.send(event.AgentStatus{Status: event.StatusThinking})
-		return true
-	}
-	if !*permissionFired && a.currentAutonomous() && nudges.ShouldNudgePermissionQuestion(*messages) {
-		*permissionFired = true
-		*messages = append(*messages, llm.Message{
-			Role:    "user",
-			Content: nudges.PermissionNudgeMessage,
-		})
-		a.send(event.AgentToken{Text: "\n[Nudge: permission-seeking question detected in autonomous mode — act, don't ask]\n"})
-		a.send(event.AgentStatus{Status: event.StatusThinking})
-		return true
-	}
-	return false
-}
+// [coding/nudges]; the agent-side glue here owns the per-call
+// gating math (consulted by [Agent.foundationSteering] in
+// foundation_hooks.go).
 
 // shouldNudgeOutstanding reports whether the most recent assistant message
 // enumerates outstanding work AND the tracked task tree is empty — the

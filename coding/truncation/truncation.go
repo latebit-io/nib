@@ -31,7 +31,7 @@ import (
 	"log/slog"
 
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // MaxRetries bounds consecutive truncated turns before [Recover]

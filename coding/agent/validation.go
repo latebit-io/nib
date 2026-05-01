@@ -4,8 +4,8 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/validation"
-	"github.com/latebit-io/nib/engine/event"
 	"github.com/latebit-io/nib/engine/validate"
 )
 
@@ -58,7 +58,6 @@ func (a *Agent) runValidationPipeline(ctx context.Context, proposal EditProposal
 		CanonPath: proposal.CanonPath,
 		Before:    before,
 		After:     proposal.ExpectedContent,
-		Edit:      proposal.Edit,
 	})
 	if len(results) == 0 {
 		return nil, ""

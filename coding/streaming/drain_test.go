@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // TestDrain_ResetsThinkStateOnReturn locks in that Drain never leaks

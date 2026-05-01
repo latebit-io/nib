@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // taskTreeWorkspace is a stubWorkspace that also satisfies TaskReader.

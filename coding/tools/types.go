@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/agent"
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // Tool aliases the upstream generic [agent.Tool] interface so each

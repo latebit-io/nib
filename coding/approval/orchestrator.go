@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/tools"
-	"github.com/latebit-io/nib/engine/event"
 	"github.com/latebit-io/nib/engine/lang"
 )
 

@@ -15,7 +15,6 @@ import (
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 
-	"github.com/latebit-io/nib/engine/event"
 	"github.com/latebit-io/nib/engine/lint"
 )
 
@@ -49,11 +48,6 @@ type Candidate struct {
 	// applied as proposed. Validators analyse After, not the edit
 	// fragment, so line-number feedback is globally accurate.
 	After string
-
-	// Edit is the original pending edit — preserved so validators can
-	// emit findings that reference the proposed replacement text or the
-	// edit's identifying metadata.
-	Edit event.PendingEdit
 }
 
 // Verdict describes a validator's overall judgement on a candidate.

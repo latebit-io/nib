@@ -3,7 +3,7 @@ package tools
 import (
 	"context"
 
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // Approver mediates the edit_file / replace_file approval flow. The

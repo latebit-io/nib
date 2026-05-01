@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
+	engineevent "github.com/latebit-io/nib/engine/event"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/lsp"
 )
@@ -27,6 +29,13 @@ type lspServerConfig struct {
 // benefit from the DiagProvider interface for agent diagnostics after edits.
 // Returns nil if no language servers are configured or available.
 //
+// engine/lsp emits engine/event.Event types; this function fans them into
+// the application's coding/event.Event stream so frontends consume a single
+// unified channel. The returned ServiceManager wraps the underlying
+// [*lsp.Manager] so that Close() drains the manager AND closes the engine
+// event channel — without that, the fan-in goroutine would leak (it ranges
+// over a channel only the wire layer can close).
+//
 // The returned [lang.ServiceManager] is the canonical port; consumers
 // import engine/lang for the type rather than reaching into wire.
 func InitLSP(projectRoot string, events chan<- event.Event) lang.ServiceManager {
@@ -37,7 +46,56 @@ func InitLSP(projectRoot string, events chan<- event.Event) lang.ServiceManager 
 	if len(configs) == 0 {
 		return nil
 	}
-	return lsp.NewManager(configs, projectRoot, events)
+	engineEvents := make(chan engineevent.Event, 32)
+	go fanInEngineEvents(engineEvents, events)
+	return &lspWithCleanup{
+		Manager:      lsp.NewManager(configs, projectRoot, engineEvents),
+		engineEvents: engineEvents,
+	}
+}
+
+// lspWithCleanup wraps [*lsp.Manager] so Close() also shuts the engine event
+// channel that feeds [fanInEngineEvents]. The fan-in goroutine ranges over
+// that channel — without an explicit close it would block forever after the
+// LSP manager stops sending. Channel ownership stays with the wire layer
+// (creator-closes convention); the engine package is unaware of the fan-in.
+type lspWithCleanup struct {
+	*lsp.Manager
+	engineEvents chan engineevent.Event
+	closeOnce    sync.Once
+}
+
+// Close shuts down the LSP manager (joining every server goroutine, so no
+// more sends to engineEvents are in flight) and then closes the engine
+// event channel so the fan-in goroutine exits cleanly. Idempotent via
+// sync.Once — closing a channel twice would panic.
+func (l *lspWithCleanup) Close() error {
+	err := l.Manager.Close()
+	l.closeOnce.Do(func() {
+		close(l.engineEvents)
+	})
+	return err
+}
+
+// fanInEngineEvents translates editor-domain events from engine/event into
+// the application's coding/event vocabulary so frontends consume a single
+// channel. Drops events when the application channel is full — mirrors the
+// drop-on-full semantics [*lsp.Manager] applies on its own send so
+// shutdown cannot block this goroutine on a stalled consumer.
+// Returns when the engine channel is closed (see [lspWithCleanup.Close]).
+func fanInEngineEvents(in <-chan engineevent.Event, out chan<- event.Event) {
+	for ev := range in {
+		switch e := ev.(type) {
+		case engineevent.DiagnosticsUpdated:
+			select {
+			case out <- event.DiagnosticsUpdated{Path: e.Path}:
+			default:
+				slog.Warn("wire: dropping diagnostics event (channel full)", "path", e.Path)
+			}
+		default:
+			slog.Warn("wire: dropping unknown engine event", "type", ev)
+		}
+	}
 }
 
 // loadLSPConfigs reads .project/lsp.json from the project root.

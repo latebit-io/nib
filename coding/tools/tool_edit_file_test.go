@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // fakeApprover captures the [EditProposal] passed through the

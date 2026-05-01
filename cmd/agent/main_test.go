@@ -11,8 +11,8 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/agent"
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/headless"
-	"github.com/latebit-io/nib/engine/event"
 )
 
 // mockProvider returns pre-configured streaming responses for each turn.

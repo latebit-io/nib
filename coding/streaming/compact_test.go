@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // TestMaybeCompact_BelowThresholdNoOp verifies that a small history

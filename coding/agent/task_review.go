@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/lint"
 	"github.com/latebit-io/nib/coding/smoke"
-	"github.com/latebit-io/nib/engine/event"
 	enginelint "github.com/latebit-io/nib/engine/lint"
 )
 

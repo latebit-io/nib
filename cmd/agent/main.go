@@ -1,12 +1,12 @@
-// junto-agent runs the Junto agent headlessly — same engine, same tools,
-// same memory as the TUI, but without the interactive editor. Edits are
-// auto-approved and written directly to disk.
+// Command nib-agent runs the coding agent headlessly — same engine,
+// same tools, same memory as the TUI, but without the interactive
+// editor. Edits are auto-approved and written directly to disk.
 //
 // Usage:
 //
-//	junto-agent [flags] ["goal"] [files...]
-//	echo "fix lint" | junto-agent --output json
-//	junto-agent  # REPL mode when stdin is a TTY
+//	nib-agent [flags] ["goal"] [files...]
+//	echo "fix lint" | nib-agent --output json
+//	nib-agent  # REPL mode when stdin is a TTY
 package main
 
 import (
@@ -22,18 +22,20 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/latebit-io/junto/coding/agent"
-	"github.com/latebit-io/junto/coding/headless"
-	"github.com/latebit-io/junto/coding/session"
-	"github.com/latebit-io/junto/coding/wire"
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/highlight"
-	"github.com/latebit-io/junto/engine/runconfig"
-	"github.com/latebit-io/junto/engine/validate"
-	"github.com/latebit-io/junto/engine/validate/architecture"
-	"github.com/latebit-io/junto/engine/validate/goparse"
-	"github.com/latebit-io/junto/engine/validate/lintstage"
-	"github.com/latebit-io/junto/engine/validate/treesitter"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/ai/llmconfig"
+	"github.com/latebit-io/nib/coding/agent"
+	"github.com/latebit-io/nib/coding/headless"
+	"github.com/latebit-io/nib/coding/session"
+	"github.com/latebit-io/nib/coding/wire"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/highlight"
+	"github.com/latebit-io/nib/engine/runconfig"
+	"github.com/latebit-io/nib/engine/validate"
+	"github.com/latebit-io/nib/engine/validate/architecture"
+	"github.com/latebit-io/nib/engine/validate/goparse"
+	"github.com/latebit-io/nib/engine/validate/lintstage"
+	"github.com/latebit-io/nib/engine/validate/treesitter"
 )
 
 // errSetup is a sentinel wrapped into setup errors so main can distinguish
@@ -73,7 +75,7 @@ func parseArgs() config {
 	flag.StringVar(&c.output, "output", "", "Output format: json or text (default: text if TTY, json if piped)")
 	flag.StringVar(&c.project, "project", "", "Project root directory (default: git root or cwd)")
 	flag.BoolVar(&c.verbose, "verbose", false, "Stream status to stderr")
-	flag.BoolVar(&c.debug, "debug", false, "Debug logging to /tmp/junto-agent-debug.log")
+	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/agent-debug.log")
 	flag.Parse()
 
 	// Remaining args: [goal] [files...]
@@ -103,9 +105,15 @@ func run() error {
 
 	// Setup logging.
 	if cfg.debug {
-		logFile, err := os.OpenFile("/tmp/junto-agent-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		// Cache dir is a single-user trust boundary — safe against the
+		// symlink-clobber pattern that /tmp + O_TRUNC is vulnerable to.
+		logPath, err := brand.DebugLogPath("agent-debug.log")
 		if err != nil {
-			return setupErr("open debug log: %v", err)
+			return setupErr("debug log path: %v", err)
+		}
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		if err != nil {
+			return setupErr("open debug log %s: %v", logPath, err)
 		}
 		defer func() {
 			if err := logFile.Close(); err != nil {
@@ -182,9 +190,17 @@ func run() error {
 	pr := wire.NewProvider(projectRoot)
 	provider, llmCfg, llmResolved := pr.Provider, pr.Config, pr.Resolved
 	if provider == nil {
-		hint := "set LLM_API_KEY or configure ~/.config/junto/llm.json"
+		// Use the resolved global config path so the hint shows the
+		// correct platform-specific location (~/.config/<brand>/llm.json
+		// on Linux, ~/Library/Application Support/<brand>/llm.json on
+		// macOS). Falls back to a placeholder if UserConfigDir fails.
+		cfgPath := llmconfig.GlobalConfigPath()
+		if cfgPath == "" {
+			cfgPath = "<user-config-dir>/" + brand.ConfigDirName + "/llm.json"
+		}
+		hint := fmt.Sprintf("set LLM_API_KEY or configure %s", cfgPath)
 		if llmResolved != nil && llmResolved.APIKeyEnv != "" {
-			hint = fmt.Sprintf("set %s or configure ~/.config/junto/llm.json", llmResolved.APIKeyEnv)
+			hint = fmt.Sprintf("set %s or configure %s", llmResolved.APIKeyEnv, cfgPath)
 		}
 		return setupErr("no LLM API key — %s", hint)
 	}
@@ -226,7 +242,7 @@ func run() error {
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr
 	}
-	if os.Getenv("JUNTO_VALIDATORS_DISABLED") == "" {
+	if os.Getenv(brand.EnvKeyValidatorsDisabled) == "" {
 		// Headless / CI mode wires the same validator stages as the
 		// TUI. Architecture caps and syntax-regression checks matter
 		// MORE here, not less — there's no developer to notice a

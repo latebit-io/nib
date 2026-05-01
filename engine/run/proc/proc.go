@@ -208,7 +208,7 @@ func Run(ctx context.Context, req Request) Result {
 					"err", err, "duration", elapsed)
 			}
 		}
-		// Log without `req.Shell` — slog reaches /tmp/junto-debug.log
+		// Log without `req.Shell` — slog reaches /tmp/nib-debug.log
 		// under --debug, and that file gets attached to bug reports,
 		// pasted into chat threads, etc. Per CLAUDE.md no API keys or
 		// secrets in debug output. Duration is the diagnostic signal:

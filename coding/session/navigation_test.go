@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/editor"
-	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/lang"
 )
 
 // mockDefinitionProvider implements lang.DocumentSyncer + lang.DefinitionProvider.

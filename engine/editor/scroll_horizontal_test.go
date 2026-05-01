@@ -3,7 +3,7 @@ package editor
 import (
 	"testing"
 
-	"github.com/latebit-io/junto/engine/buffer"
+	"github.com/latebit-io/nib/engine/buffer"
 )
 
 func newScrollEditor(content string, width, height int) *Editor {

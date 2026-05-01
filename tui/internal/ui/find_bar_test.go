@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/editor"
 )
 
 func newTestEditor(content string) *editor.Editor {

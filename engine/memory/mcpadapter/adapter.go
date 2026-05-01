@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/mcp"
-	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/nib/engine/mcp"
+	"github.com/latebit-io/nib/engine/memory"
 )
 
 // caller is the narrow surface of mcp.Client used by the adapter. Defined

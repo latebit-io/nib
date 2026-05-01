@@ -15,7 +15,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/filelist"
+	"github.com/latebit-io/nib/engine/filelist"
 )
 
 // maxScanToken is the maximum line length the scanner will handle (1MB).

@@ -4,7 +4,7 @@ package editor
 // Frontends map these to their own styling (lipgloss, CSS, etc.).
 //
 // These types live in the editor package — not the highlight package —
-// so binaries that never highlight (e.g. junto-agent) do not transitively
+// so binaries that never highlight (e.g. the headless binary) does not transitively
 // link in tree-sitter grammar blobs.
 type TokenKind string
 
@@ -65,5 +65,5 @@ type Highlighter interface {
 // HighlighterFactory constructs a [Highlighter] for a given file path,
 // or returns nil when the path has no supported language. Sessions that
 // want syntax highlighting wire in a factory via [Session.SetHighlighterFactory];
-// binaries that don't render (e.g. junto-agent) leave it unset.
+// binaries that don't render (e.g. headless agent) leave it unset.
 type HighlighterFactory func(filename string) Highlighter

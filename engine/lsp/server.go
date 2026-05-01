@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/latebit-io/junto/engine/lang"
+	"github.com/latebit-io/nib/engine/lang"
 )
 
 // Server manages the lifecycle of a single LSP server process.

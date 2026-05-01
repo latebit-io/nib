@@ -13,17 +13,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/coding/approval"
-	"github.com/latebit-io/junto/coding/budget"
-	"github.com/latebit-io/junto/coding/nudges"
-	"github.com/latebit-io/junto/coding/tools"
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/engine/lint"
-	"github.com/latebit-io/junto/engine/memory"
-	"github.com/latebit-io/junto/engine/runconfig"
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/approval"
+	"github.com/latebit-io/nib/coding/budget"
+	"github.com/latebit-io/nib/coding/nudges"
+	"github.com/latebit-io/nib/coding/tools"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/engine/lint"
+	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/engine/runconfig"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // Mode is an alias for event.Mode so existing callers within the agent
@@ -579,17 +580,17 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 // from registerTools so the latter stays under the func-length cap and
 // the gate logic is easier to review in isolation.
 //
-// Honours JUNTO_SMOKE_DISABLED end-to-end: when the env var is set
-// the tool is NOT advertised to the LLM at all, matching the
+// Honours [brand.EnvKeySmokeDisabled] end-to-end: when set, the
+// tool is NOT advertised to the LLM at all, matching the
 // auto-invocation suppression in runTaskReview. Without this guard
 // the kill-switch was a half-disable — auto-runs went silent but the
 // LLM could still invoke smoke_run directly, which is the opposite
 // of what an operator setting the env var wants. Read at agent-
-// construction time, matching how JUNTO_VALIDATORS_DISABLED gates
-// the validation pipeline at the composition root; flipping the
-// env var mid-session does not toggle live behaviour.
+// construction time, matching how [brand.EnvKeyValidatorsDisabled]
+// gates the validation pipeline at the composition root; flipping
+// the env var mid-session does not toggle live behaviour.
 func (a *Agent) appendSmokeTool(builtins []Tool, projectRoot string) []Tool {
-	if os.Getenv("JUNTO_SMOKE_DISABLED") != "" {
+	if os.Getenv(brand.EnvKeySmokeDisabled) != "" {
 		return builtins
 	}
 	if a.smokeConfig.Skipped {

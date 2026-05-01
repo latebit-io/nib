@@ -11,7 +11,7 @@ if ! command -v golangci-lint &>/dev/null; then
   exit 1
 fi
 
-for mod in ai agent engine coding tui cmd/junto-agent; do
+for mod in ai agent engine coding tui cmd/agent; do
   echo "Linting ${mod}..."
   (cd "$mod" && golangci-lint run ./...)
 done

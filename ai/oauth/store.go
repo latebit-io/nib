@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 // Store persists OAuth tokens to disk. It is safe for concurrent use.
@@ -29,14 +31,15 @@ func NewStore(path string) (*Store, error) {
 	return s, nil
 }
 
-// DefaultStorePath returns ~/.config/junto/auth.json (or platform equivalent).
-// Returns empty string and an error if the config directory cannot be resolved.
+// DefaultStorePath returns <UserConfigDir>/<brand.ConfigDirName>/auth.json
+// (e.g. ~/.config/<brand>/auth.json on Linux). Returns empty string and an
+// error if the user config directory cannot be resolved.
 func DefaultStorePath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("oauth: resolve config dir: %w", err)
 	}
-	return filepath.Join(dir, "junto", "auth.json"), nil
+	return filepath.Join(dir, brand.ConfigDirName, "auth.json"), nil
 }
 
 // Get returns the stored token for a provider, or nil if none exists.

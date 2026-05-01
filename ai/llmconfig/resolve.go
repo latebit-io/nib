@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 const (
@@ -66,7 +68,7 @@ func ptrBool(b bool) *bool { return &b }
 // The merge order (each layer overrides the previous):
 //
 //  1. Hardcoded defaults
-//  2. Global config file (<UserConfigDir>/junto/llm.json)
+//  2. Global config file (<UserConfigDir>/<brand.ConfigDirName>/llm.json)
 //  3. Project config file (<projectRoot>/.project/llm.json)
 //  4. Environment variables (LLM_BASE_URL, LLM_MODEL, LLM_API_KEY)
 //
@@ -336,7 +338,7 @@ func saveSelectionToPath(path, profile, modelID string) error {
 	return nil
 }
 
-// GlobalConfigPath returns <UserConfigDir>/junto/llm.json.
+// GlobalConfigPath returns <UserConfigDir>/<brand.ConfigDirName>/llm.json.
 // Returns empty string if the user config directory cannot be resolved.
 func GlobalConfigPath() string {
 	dir, err := os.UserConfigDir()
@@ -344,7 +346,7 @@ func GlobalConfigPath() string {
 		slog.Warn("llmconfig: cannot resolve user config dir", "err", err)
 		return ""
 	}
-	return filepath.Join(dir, "junto", "llm.json")
+	return filepath.Join(dir, brand.ConfigDirName, "llm.json")
 }
 
 // projectConfigPath returns <projectRoot>/.project/llm.json.

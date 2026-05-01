@@ -9,7 +9,7 @@
 // unified stream.
 package event
 
-import "github.com/latebit-io/junto/ai/llm"
+import "github.com/latebit-io/nib/ai/llm"
 
 // Event is the interface satisfied by every loop event AND by application-layer
 // events that share the agent's event channel. The marker method is exported so

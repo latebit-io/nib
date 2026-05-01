@@ -1,7 +1,7 @@
-// Package seed contains the canonical Junto project-memory document
-// templates installed when a memory store is empty. Lives in its own
-// package so the composition root (engine/wire) carries wiring code
-// only — what a Junto project memory looks like is domain content.
+// Package seed contains the canonical project-memory document templates
+// installed when a memory store is empty. Lives in its own package so the
+// composition root (engine/wire) carries wiring code only — what a project
+// memory looks like is domain content.
 package seed
 
 import (
@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/nib/engine/memory"
 )
 
 // indexTemplate is the seed body for /index.md. The seven canonical

@@ -26,7 +26,7 @@ type Event struct {
 	// Timestamp is the wall-clock time the event occurred.
 	Timestamp time.Time
 
-	// SessionID identifies the Junto process-lifetime session this event
+	// SessionID identifies the host process-lifetime session this event
 	// belongs to. Adapters use it to group or route events (e.g. into a
 	// per-session document path).
 	SessionID string

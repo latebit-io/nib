@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 // ErrClientClosed is returned by [Client] methods after [Client.Close]
@@ -270,7 +272,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]string{
-			"name":    "junto",
+			"name":    brand.MCPServerName,
 			"version": "0.1.0",
 		},
 	}

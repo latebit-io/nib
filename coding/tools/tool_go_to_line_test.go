@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 type mockNavWorkspace struct {

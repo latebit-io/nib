@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // packageInfoTimeout is the max duration for package manager commands.

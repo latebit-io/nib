@@ -7,8 +7,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/glob"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/glob"
 )
 
 // maxGlobResults caps the number of files returned by the glob tool.

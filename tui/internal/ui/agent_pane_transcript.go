@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/tui/internal/sanitize"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/tui/internal/sanitize"
 )
 
 // Streaming-text transcript pipeline for AgentPaneModel.

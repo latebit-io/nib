@@ -3,7 +3,7 @@ package session
 import (
 	"log/slog"
 
-	"github.com/latebit-io/junto/engine/project"
+	"github.com/latebit-io/nib/engine/project"
 )
 
 // SetMemoryStore injects the memory store for work tree persistence.

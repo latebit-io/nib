@@ -9,8 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/lint"
-	"github.com/latebit-io/junto/engine/validate"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/engine/lint"
+	"github.com/latebit-io/nib/engine/validate"
 )
 
 // stubLinter is a controllable test double for [lint.Linter]. The
@@ -163,8 +164,8 @@ func TestStagesContentToTempFile(t *testing.T) {
 	if got := string(stub.lastDB); got != content {
 		t.Errorf("staged content = %q, want %q", got, content)
 	}
-	if !strings.Contains(stub.lastDir, "junto-lint-") {
-		t.Errorf("staging dir %q does not look like a junto-lint sandbox", stub.lastDir)
+	if !strings.Contains(stub.lastDir, brand.TempDirPrefix) {
+		t.Errorf("staging dir %q does not contain prefix %q", stub.lastDir, brand.TempDirPrefix)
 	}
 }
 
@@ -194,7 +195,7 @@ func TestTempCleanup(t *testing.T) {
 // to the candidate's real path. The validator runs the linter on a
 // single staged file in an isolated sandbox, so any finding emitted is
 // necessarily about that file — rewriting unconditionally lets the LLM
-// localise the issue without seeing /tmp/junto-lint-… paths.
+// localise the issue without seeing /tmp/<brand.TempDirPrefix>… paths.
 func TestPathsRewrittenToReal(t *testing.T) {
 	t.Parallel()
 
@@ -202,7 +203,7 @@ func TestPathsRewrittenToReal(t *testing.T) {
 		name: "stub",
 		result: lint.Result{Findings: []lint.Finding{
 			{Path: "candidate.lua", Line: 1, Message: "first"},
-			{Path: "/tmp/junto-lint-xyz/candidate.lua", Line: 2, Message: "absolute"},
+			{Path: "/tmp/" + brand.TempDirPrefix + "xyz/candidate.lua", Line: 2, Message: "absolute"},
 			{Path: "", Line: 3, Message: "no path"},
 			{Path: "/some/unrelated/path.lua", Line: 4, Message: "still gets rewritten"},
 		}},

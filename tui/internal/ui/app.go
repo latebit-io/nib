@@ -12,11 +12,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/latebit-io/junto/coding/session"
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/filelist"
-	"github.com/latebit-io/junto/engine/lang"
-	"github.com/latebit-io/junto/engine/search"
+	"github.com/latebit-io/nib/coding/session"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/filelist"
+	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/engine/search"
 )
 
 // engineEventMsg wraps an engine event.Event for delivery through Bubble Tea.

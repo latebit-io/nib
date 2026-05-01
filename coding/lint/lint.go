@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	enginelint "github.com/latebit-io/junto/engine/lint"
+	enginelint "github.com/latebit-io/nib/engine/lint"
 )
 
 // GroupPathsByDir returns the unique edited file paths, unique

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 type resolveTestCase struct {
@@ -19,15 +21,16 @@ type resolveTestCase struct {
 var resolveTests = []resolveTestCase{
 	{
 		// Production default since 2026-04-26: no style is active unless the
-		// developer opts in via JUNTO_STYLE or .project/style.json. This
-		// keeps the architecture validator, style evaluator, and prompt
-		// style section all off by default — governance is opt-in.
+		// developer opts in via the brand-prefixed STYLE env var or
+		// .project/style.json. This keeps the architecture validator, style
+		// evaluator, and prompt style section all off by default — governance
+		// is opt-in.
 		name:    "default is no active style",
 		wantNil: true,
 	},
 	{
 		name:         "env var selects builtin style",
-		env:          map[string]string{"JUNTO_STYLE": "idiomatic-go"},
+		env:          map[string]string{brand.EnvKeyStyle: "idiomatic-go"},
 		wantName:     "Idiomatic Go",
 		wantRulesCnt: 12,
 	},
@@ -47,13 +50,13 @@ var resolveTests = []resolveTestCase{
 	{
 		name:         "env var overrides project active",
 		projectJSON:  `{"active": "solid-hexagonal"}`,
-		env:          map[string]string{"JUNTO_STYLE": "bdd"},
+		env:          map[string]string{brand.EnvKeyStyle: "bdd"},
 		wantName:     "Behavior-Driven Development",
 		wantRulesCnt: 9,
 	},
 	{
 		name:    "unknown style name returns nil",
-		env:     map[string]string{"JUNTO_STYLE": "nonexistent"},
+		env:     map[string]string{brand.EnvKeyStyle: "nonexistent"},
 		wantNil: true,
 	},
 	{
@@ -194,7 +197,8 @@ func TestLoadBuiltins(t *testing.T) {
 	cfg := loadBuiltins()
 
 	// Default-none policy (2026-04-26): Active stays empty until the
-	// developer opts in via JUNTO_STYLE or .project/style.json.
+	// developer opts in via the brand-prefixed STYLE env var or
+	// .project/style.json.
 	if cfg.Active != "" {
 		t.Fatalf("Active = %q, want empty (default-none policy)", cfg.Active)
 	}

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/editor"
 )
 
 // Edit-approval flow for Session.

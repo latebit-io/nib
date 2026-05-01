@@ -5,11 +5,11 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/coding/approval"
-	"github.com/latebit-io/junto/coding/budget"
-	"github.com/latebit-io/junto/coding/streaming"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/approval"
+	"github.com/latebit-io/nib/coding/budget"
+	"github.com/latebit-io/nib/coding/streaming"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // Run-goroutine driver for Agent.

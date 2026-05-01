@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/latebit-io/junto/engine/search"
+	"github.com/latebit-io/nib/engine/search"
 	"github.com/mattn/go-runewidth"
 )
 

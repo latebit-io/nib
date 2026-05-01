@@ -3,8 +3,8 @@ package agent
 import (
 	"log/slog"
 
-	"github.com/latebit-io/junto/coding/budget"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/coding/budget"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // Per-turn budget integration for Agent.

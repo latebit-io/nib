@@ -21,8 +21,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/latebit-io/junto/engine/capture"
-	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/nib/engine/capture"
+	"github.com/latebit-io/nib/engine/memory"
 )
 
 // DefaultBufferSize is the number of pending events the sink buffers before
@@ -33,7 +33,7 @@ const DefaultBufferSize = 64
 
 // DefaultMaxFieldBytes caps the size of any single payload string to prevent
 // a runaway edit (e.g. a 10 MB buffer paste) from bloating the session doc.
-// 8 KB matches Junto's existing maxContentPreview constant for symmetry
+// 8 KB matches the codebase's existing maxContentPreview constant for symmetry
 // with the tools pipeline.
 const DefaultMaxFieldBytes = 8 * 1024
 
@@ -52,7 +52,7 @@ type Config struct {
 	Redactor capture.Redactor
 
 	// DocRoot is the Mark path prefix used for session documents.
-	// Defaults to "/junto/sessions".
+	// Defaults to "/nib/sessions".
 	DocRoot string
 
 	// Clock provides the current time; overridable for tests. nil uses
@@ -93,7 +93,7 @@ func New(store memory.Store, sessionID string, cfg Config) *Sink {
 		cfg.MaxFieldBytes = DefaultMaxFieldBytes
 	}
 	if cfg.DocRoot == "" {
-		cfg.DocRoot = "/junto/sessions"
+		cfg.DocRoot = "/nib/sessions"
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
@@ -332,7 +332,7 @@ func formatHeader(sessionID string, started time.Time) string {
 	b.WriteString("\n")
 	b.WriteString("started: ")
 	b.WriteString(started.UTC().Format(time.RFC3339))
-	b.WriteString("\n---\n\n# Junto Session\n")
+	b.WriteString("\n---\n\n# nib Session\n")
 	return b.String()
 }
 

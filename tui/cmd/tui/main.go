@@ -12,25 +12,26 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/ai/llmconfig"
-	"github.com/latebit-io/junto/ai/oauth"
-	"github.com/latebit-io/junto/coding/agent"
-	"github.com/latebit-io/junto/coding/session"
-	"github.com/latebit-io/junto/coding/wire"
-	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/capture/demarkus"
-	"github.com/latebit-io/junto/engine/editor"
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/highlight"
-	"github.com/latebit-io/junto/engine/runconfig"
-	"github.com/latebit-io/junto/engine/styleconfig"
-	"github.com/latebit-io/junto/engine/validate"
-	"github.com/latebit-io/junto/engine/validate/architecture"
-	"github.com/latebit-io/junto/engine/validate/goparse"
-	"github.com/latebit-io/junto/engine/validate/lintstage"
-	"github.com/latebit-io/junto/engine/validate/treesitter"
-	"github.com/latebit-io/junto/tui/internal/ui"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmconfig"
+	"github.com/latebit-io/nib/ai/oauth"
+	"github.com/latebit-io/nib/coding/agent"
+	"github.com/latebit-io/nib/coding/session"
+	"github.com/latebit-io/nib/coding/wire"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/capture/demarkus"
+	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/highlight"
+	"github.com/latebit-io/nib/engine/runconfig"
+	"github.com/latebit-io/nib/engine/styleconfig"
+	"github.com/latebit-io/nib/engine/validate"
+	"github.com/latebit-io/nib/engine/validate/architecture"
+	"github.com/latebit-io/nib/engine/validate/goparse"
+	"github.com/latebit-io/nib/engine/validate/lintstage"
+	"github.com/latebit-io/nib/engine/validate/treesitter"
+	"github.com/latebit-io/nib/tui/internal/ui"
 )
 
 func main() {
@@ -60,9 +61,28 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	if debug {
-		logFile, err := os.OpenFile("/tmp/junto-debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-		if err == nil {
-			defer func() { _ = logFile.Close() }()
+		// Cache dir is a single-user trust boundary — safe against the
+		// symlink-clobber pattern that /tmp + O_TRUNC is vulnerable to.
+		// Surface failures BEFORE entering alt-screen so the user sees
+		// them; once Bubble Tea takes over stderr corrupts the TUI.
+		logPath, err := brand.DebugLogPath("debug.log")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "debug log path: %v — proceeding without debug log\n", err)
+			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		} else if logFile, openErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); openErr != nil {
+			fmt.Fprintf(os.Stderr, "open debug log %s: %v — proceeding without debug log\n", logPath, openErr)
+			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		} else {
+			// The deferred close runs after p.Run() returns, by which
+			// point Bubble Tea has restored the original screen — so
+			// stderr is safe to write to and a buffered-flush failure
+			// (ENOSPC, EIO) is surfaced where the user will see it
+			// rather than being swallowed.
+			defer func() {
+				if err := logFile.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: close debug log: %v\n", err)
+				}
+			}()
 			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		}
 	} else {
@@ -115,10 +135,10 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Install the highlighter factory so every editor the session creates
 	// (via OpenFile / auto-open / file-switch) gets tree-sitter highlighting.
 	// Headless binaries never make this call, which keeps grammar blobs out
-	// of the junto-agent binary.
+	// of the headless agent binary.
 	sess.SetHighlighterFactory(highlight.NewHighlighter)
 
-	// Discover MCP tools from .mcp.json or JUNTO_MCP env var.
+	// Discover MCP tools from .mcp.json or the brand-prefixed MCP env var.
 	mcpResult := wire.DiscoverMCPTools(projectRoot)
 	defer mcpResult.Cleanup()
 
@@ -177,7 +197,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Wire session-event capture to a per-process Demarkus document unless
 	// explicitly disabled. The sink runs async with a bounded buffer — the
 	// session's hot path never blocks on it.
-	if os.Getenv("JUNTO_CAPTURE_DISABLED") == "" {
+	if os.Getenv(brand.EnvKeyCaptureDisabled) == "" {
 		captureSink := demarkus.New(mem.Store, sess.SessionID(), demarkus.Config{})
 		sess.SetEventSink(captureSink)
 		defer func() {
@@ -221,7 +241,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
 		}
-		if os.Getenv("JUNTO_VALIDATORS_DISABLED") == "" {
+		if os.Getenv(brand.EnvKeyValidatorsDisabled) == "" {
 			// lintstage reads the per-file linter set through the
 			// holder so a runtime style cycle (Alt+S) takes effect
 			// on the next edit instead of getting stuck on the
@@ -308,10 +328,10 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if cfgPath := llmconfig.GlobalConfigPath(); cfgPath != "" {
 		registryCacheDir = filepath.Dir(cfgPath)
 	} else if cacheDir, err := os.UserCacheDir(); err == nil {
-		registryCacheDir = filepath.Join(cacheDir, "junto")
+		registryCacheDir = filepath.Join(cacheDir, brand.ConfigDirName)
 	} else {
 		slog.Warn("model registry: cannot resolve cache directory, using temp")
-		registryCacheDir = filepath.Join(os.TempDir(), "junto")
+		registryCacheDir = filepath.Join(os.TempDir(), brand.ConfigDirName)
 	}
 	modelRegistry := llm.NewModelRegistry(registryCacheDir, time.Hour)
 
@@ -607,7 +627,7 @@ func connectCopilotCmd(profile string, store *oauth.Store, p *tea.Program) tea.C
 	}
 }
 
-// profileToRegistry maps a Junto profile name to the models.dev provider key.
+// profileToRegistry maps a configured profile name to the models.dev provider key.
 // Returns empty string for custom/unknown profiles (fall back to provider API).
 var profileToRegistry = map[string]string{
 	"chatgpt":    "openai",

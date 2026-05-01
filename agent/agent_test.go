@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/agent/event"
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/agent/event"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // stubProvider is the minimum llm.Provider stand-in for construction tests.

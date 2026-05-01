@@ -1,8 +1,8 @@
 package agent
 
 import (
-	upagent "github.com/latebit-io/junto/agent"
-	"github.com/latebit-io/junto/coding/tools"
+	upagent "github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/coding/tools"
 )
 
 // Tool aliases the upstream generic [agent.Tool] interface so the

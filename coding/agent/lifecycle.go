@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/coding/approval"
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/lint"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/approval"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/lint"
 )
 
 // Public lifecycle and signal API for Agent.

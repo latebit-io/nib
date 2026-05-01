@@ -38,7 +38,7 @@ func TestURIToPath(t *testing.T) {
 func TestURIRoundTrip(t *testing.T) {
 	paths := []string{
 		"/Users/test/main.go",
-		"/tmp/junto/file.ts",
+		"/tmp/test/file.ts",
 	}
 	for _, path := range paths {
 		got := uriToPath(pathToURI(path))

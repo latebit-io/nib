@@ -179,9 +179,9 @@ type codexOutputItem struct {
 	Status    string `json:"status,omitempty"`
 }
 
-// --- Conversion: Junto messages → Codex input ---
+// --- Conversion: internal messages → Codex input ---
 
-// messagesToCodexInput converts Junto messages to Codex input items.
+// messagesToCodexInput converts internal messages to Codex input items.
 // Returns the system instruction (extracted from the first system message)
 // and the remaining input items as typed structs.
 func messagesToCodexInput(messages []Message) (string, []any) {
@@ -254,7 +254,7 @@ func toolsToCodexTools(tools []ToolDef) []codexTool {
 // --- Provider implementation ---
 
 // Stream sends a Responses API request to the Codex endpoint and returns
-// streaming events compatible with Junto's StreamEvent type.
+// streaming events compatible with the codebase's StreamEvent type.
 // MaxTokens returns the current max_output_tokens value sent on requests.
 // Zero means no value is sent and the provider's default applies.
 func (c *CodexAPI) MaxTokens() int {

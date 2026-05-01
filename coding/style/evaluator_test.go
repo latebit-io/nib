@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // mockStreamProvider returns canned stream events for testing.

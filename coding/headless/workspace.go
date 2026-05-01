@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/latebit-io/junto/engine/filelist"
+	"github.com/latebit-io/nib/engine/filelist"
 )
 
 // DiskWorkspace implements agent.Workspace with direct file I/O.

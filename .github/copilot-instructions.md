@@ -2,10 +2,14 @@
 
 ## Project Context
 
-Junto is a pair-programming code editor with an AI agent. It is a Go monorepo with two modules:
+nib is a TUI-native coding agent. The agent owns the write loop; the editor is the read view and intervention surface (observability + per-edit approval, not co-typing). It is a Go monorepo split into focused modules:
 
-- **`engine/`** — Frontend-agnostic library: buffer, editor, agent, session, LLM integration. Hexagonal architecture — no UI imports.
-- **`tui/`** — Bubble Tea terminal frontend. Imports engine as a dependency.
+- **`ai/`** — LLM clients and OAuth. Provider-agnostic message types.
+- **`agent/`** — Generic agent loop primitives (events, tool registration).
+- **`engine/`** — Frontend-agnostic library: buffer, editor, syntax highlight, language services, project memory, validators, lint runner. Hexagonal architecture — no UI imports.
+- **`coding/`** — Coding-specific agent: tool implementations, session, approval orchestrator, headless runner. Composes `ai` + `agent` + `engine`.
+- **`tui/`** — Bubble Tea terminal frontend. Imports engine + coding as dependencies.
+- **`cmd/agent/`** — Headless `nib-agent` binary entry point.
 
 ## Go Version
 

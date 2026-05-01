@@ -5,7 +5,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/latebit-io/junto/ai/llmconfig"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/ai/llmconfig"
 )
 
 // Model-selector + OAuth connect flow for AppModel.
@@ -68,7 +69,7 @@ func (m *AppModel) openModelSelector() tea.Cmd {
 		}
 		globalPath := llmconfig.GlobalConfigPath()
 		if globalPath == "" {
-			globalPath = "<user-config-dir>/junto/llm.json"
+			globalPath = "<user-config-dir>/" + brand.ConfigDirName + "/llm.json"
 		}
 		m.AgentPane.AppendMeta("\n[no LLM configured — create " + globalPath + " or .project/llm.json]\n")
 		return nil

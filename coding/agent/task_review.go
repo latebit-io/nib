@@ -8,10 +8,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/latebit-io/junto/coding/lint"
-	"github.com/latebit-io/junto/coding/smoke"
-	"github.com/latebit-io/junto/engine/event"
-	enginelint "github.com/latebit-io/junto/engine/lint"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/coding/lint"
+	"github.com/latebit-io/nib/coding/smoke"
+	"github.com/latebit-io/nib/engine/event"
+	enginelint "github.com/latebit-io/nib/engine/lint"
 )
 
 // Post-task review pipeline for Agent.
@@ -74,7 +75,7 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 	lintWillRun := len(editedFiles) > 0 && len(linters) > 0
 	evalWillRun := len(edits) > 0 && evalConfigured
 	smokeWillRun := len(editedFiles) > 0 && !a.smokeConfig.Skipped &&
-		a.smokeConfig.Command != "" && os.Getenv("JUNTO_SMOKE_DISABLED") == ""
+		a.smokeConfig.Command != "" && os.Getenv(brand.EnvKeySmokeDisabled) == ""
 
 	// Surface "no review configured" when we have work but nothing to check it
 	// with. Silent return used to be indistinguishable from "clean"; now the
@@ -209,8 +210,8 @@ type infraError struct {
 // runSmokeReview invokes the configured smoke-run command once at task
 // completion and returns a formatted result for inclusion in the
 // runTaskReview output. Returns an empty string only when the
-// configuration is Skipped at call time (the JUNTO_SMOKE_DISABLED env
-// var path is checked by the caller).
+// configuration is Skipped at call time (the [brand.EnvKeySmokeDisabled]
+// env var path is checked by the caller).
 //
 // Smoke runs do not consume the per-path validatorRetries budget — that
 // counter is per-edit, while smoke fires per task. The LLM's incentive

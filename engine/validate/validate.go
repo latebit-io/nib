@@ -15,8 +15,8 @@ import (
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 
-	"github.com/latebit-io/junto/engine/event"
-	"github.com/latebit-io/junto/engine/lint"
+	"github.com/latebit-io/nib/engine/event"
+	"github.com/latebit-io/nib/engine/lint"
 )
 
 // LanguageFunc returns the tree-sitter grammar for a given path, or nil
@@ -154,7 +154,7 @@ type Pipeline interface {
 }
 
 // NoopPipeline is the null-object implementation of Pipeline. It is the
-// default installed by [github.com/latebit-io/junto/coding/agent.New]
+// default installed by [github.com/latebit-io/nib/coding/agent.New]
 // when no validators are registered; swap it out at the composition
 // root to enable pre-approval checks.
 type NoopPipeline struct{}

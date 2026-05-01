@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/junto/engine/buffer"
-	"github.com/latebit-io/junto/engine/editor"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/editor"
 )
 
 // fakeHighlighter records Close calls so tests can verify the old

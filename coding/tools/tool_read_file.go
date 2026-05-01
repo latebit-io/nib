@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // ReadFileTool lets the LLM read any file in the project.

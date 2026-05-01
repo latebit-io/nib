@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/junto/coding/tools"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/coding/tools"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // stubContextSet is a minimal ContextSet implementation for tests.

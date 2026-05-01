@@ -9,7 +9,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/latebit-io/junto/engine/buffer"
+	"github.com/latebit-io/nib/engine/buffer"
 )
 
 // TabWidth is the display width of a tab character. Frontends must use

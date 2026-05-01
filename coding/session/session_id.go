@@ -8,7 +8,7 @@ import (
 )
 
 // newSessionID returns a new session identifier with the shape
-// "YYYY-MM-DD-<8hex>". Used to group capture events for one Junto process
+// "YYYY-MM-DD-<8hex>". Used to group capture events for one host process
 // lifetime. The random suffix distinguishes multiple processes started on
 // the same day; callers treat the value as opaque.
 //

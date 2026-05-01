@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io/fs"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // ReplaceFileTool replaces the entire contents of an existing file in

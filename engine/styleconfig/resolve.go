@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 //go:embed styles/*.json
@@ -17,9 +19,9 @@ var builtinStyles embed.FS
 // The merge order (each layer overrides the previous):
 //
 //  1. Embedded built-in styles
-//  2. Global config file (<UserConfigDir>/junto/style.json)
+//  2. Global config file (<UserConfigDir>/<brand.ConfigDirName>/style.json)
 //  3. Project config file (<projectRoot>/.project/style.json)
-//  4. JUNTO_STYLE environment variable (overrides active style name)
+//  4. brand.EnvKeyStyle environment variable (overrides active style name)
 //
 // Missing files are silently skipped. Parse errors are logged and skipped.
 // Config is always non-nil (builtins are loaded even without config files).
@@ -44,7 +46,7 @@ func resolveWithPaths(globalPath, projectRoot string) (*Config, *Resolved) {
 	}
 
 	// Environment variable override for active style.
-	if v := os.Getenv("JUNTO_STYLE"); v != "" {
+	if v := os.Getenv(brand.EnvKeyStyle); v != "" {
 		cfg.Active = v
 	}
 
@@ -76,15 +78,15 @@ func resolve(cfg *Config) *Resolved {
 }
 
 // defaultActiveStyle is the built-in style activated when no config file or
-// environment variable selects a different one. File configs and JUNTO_STYLE
-// override this.
+// environment variable selects a different one. File configs and the
+// brand-prefixed STYLE env var override this.
 //
 // Empty means "no active style" — the prompt skips the style section, the
 // architecture validator and style evaluator are disabled, and per-edit
 // linting depends only on auto-detected per-file linters. This is the
-// production default since 2026-04-26: governance is opt-in. Set
-// JUNTO_STYLE=clean-code (or similar) or write `.project/style.json` with
-// an `active` field to opt into a style.
+// production default since 2026-04-26: governance is opt-in. Set the
+// brand-prefixed STYLE env var (e.g. NIB_STYLE=clean-code) or write
+// `.project/style.json` with an `active` field to opt into a style.
 const defaultActiveStyle = ""
 
 // loadBuiltins reads all embedded style JSON files into a Config.
@@ -125,8 +127,8 @@ func loadBuiltins() *Config {
 	// successfully. When defaultActiveStyle is empty (the production default
 	// since 2026-04-26), Active stays "" — meaning no style is active and
 	// the architecture validator, style evaluator, and prompt style section
-	// are all disabled. The developer opts in via JUNTO_STYLE or
-	// .project/style.json.
+	// are all disabled. The developer opts in via the brand-prefixed STYLE
+	// env var or `.project/style.json`.
 	//
 	// retained for future reactivation if defaultActiveStyle policy
 	// changes — the body is dormant today (the constant is "") but kept
@@ -289,7 +291,7 @@ func mergeConfigs(dst, src *Config) {
 	}
 }
 
-// globalConfigPath returns <UserConfigDir>/junto/style.json.
+// globalConfigPath returns <UserConfigDir>/<brand.ConfigDirName>/style.json.
 // Returns empty string if the user config directory cannot be resolved.
 func globalConfigPath() string {
 	dir, err := os.UserConfigDir()
@@ -297,7 +299,7 @@ func globalConfigPath() string {
 		slog.Warn("styleconfig: cannot resolve user config dir", "err", err)
 		return ""
 	}
-	return filepath.Join(dir, "junto", "style.json")
+	return filepath.Join(dir, brand.ConfigDirName, "style.json")
 }
 
 // projectConfigPath returns <projectRoot>/.project/style.json.

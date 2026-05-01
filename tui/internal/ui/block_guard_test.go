@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // TestSummaryRequiresReview locks the verdict-string comparison used

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/junto/ai/llm"
+	"github.com/latebit-io/nib/ai/llm"
 )
 
 // errWorkspace returns an error for files not in its map, unlike testWorkspace

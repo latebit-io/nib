@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/latebit-io/nib/ai/brand"
 )
 
 type resolveTestCase struct {
@@ -469,7 +471,7 @@ func TestResolveProfile(t *testing.T) {
 
 func TestSaveSelection_ProfileOnly(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "junto", "llm.json")
+	path := filepath.Join(dir, brand.ConfigDirName, "llm.json")
 
 	if err := saveSelectionToPath(path, "gemini", ""); err != nil {
 		t.Fatal(err)
@@ -489,7 +491,7 @@ func TestSaveSelection_ProfileOnly(t *testing.T) {
 
 func TestSaveSelection_ProfileAndModel(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "junto", "llm.json")
+	path := filepath.Join(dir, brand.ConfigDirName, "llm.json")
 
 	if err := saveSelectionToPath(path, "openrouter", "anthropic/claude-sonnet-4"); err != nil {
 		t.Fatal(err)
@@ -513,11 +515,11 @@ func TestSaveSelection_ProfileAndModel(t *testing.T) {
 
 func TestSaveSelection_PreservesExisting(t *testing.T) {
 	dir := t.TempDir()
-	juntoDir := filepath.Join(dir, "junto")
-	if err := os.MkdirAll(juntoDir, 0o755); err != nil {
+	configDir := filepath.Join(dir, brand.ConfigDirName)
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(juntoDir, "llm.json")
+	path := filepath.Join(configDir, "llm.json")
 	existing := `{
 		"profiles": {
 			"custom": {
@@ -570,7 +572,7 @@ func TestSaveSelection_RoundtripWithResolve(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "or-key")
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "junto", "llm.json")
+	path := filepath.Join(dir, brand.ConfigDirName, "llm.json")
 
 	if err := saveSelectionToPath(path, "openrouter", "anthropic/claude-sonnet-4"); err != nil {
 		t.Fatal(err)
@@ -602,7 +604,7 @@ func setupResolveTest(t *testing.T, globalJSON, projectJSON string, env map[stri
 	}
 
 	tmpDir := t.TempDir()
-	globalDir := filepath.Join(tmpDir, "global", "junto")
+	globalDir := filepath.Join(tmpDir, "global", brand.ConfigDirName)
 	if globalJSON != "" {
 		if err := os.MkdirAll(globalDir, 0o755); err != nil {
 			t.Fatal(err)

@@ -30,8 +30,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/latebit-io/junto/ai/llm"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // MaxRetries bounds consecutive truncated turns before [Recover]

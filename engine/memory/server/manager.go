@@ -17,8 +17,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/latebit-io/junto/engine/mcp"
-	"github.com/latebit-io/junto/engine/memory"
+	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/engine/mcp"
+	"github.com/latebit-io/nib/engine/memory"
 )
 
 // StoreFactory wraps a connected demarkus-mcp client into a memory.Store.
@@ -55,7 +56,7 @@ type Manager struct {
 	waitDone chan struct{}
 
 	// lockFile holds the exclusive flock on lockPath while a session is
-	// active. Prevents two concurrent junto instances from sharing — and
+	// active. Prevents two concurrent host instances from sharing — and
 	// clobbering — the same memory server. Released in Stop() or when the
 	// process exits (kernel releases the fd).
 	lockFile *os.File
@@ -76,17 +77,17 @@ func New(projectRoot string) *Manager {
 	}
 }
 
-// ErrInstanceAlreadyRunning is returned when another junto process is
+// ErrInstanceAlreadyRunning is returned when another host instance is
 // actively managing this project's memory server. Concurrent instances
 // would race on PID/port files and (worse) kill each other's servers at
 // teardown — the flock prevents that.
-var ErrInstanceAlreadyRunning = errors.New("another junto instance is managing this project")
+var ErrInstanceAlreadyRunning = fmt.Errorf("another %s instance is managing this project", brand.Name)
 
 // Start launches the demarkus-server. Returns the port it's listening on.
 // If a server is already running (detected via PID file), reuses it.
 // Any orphaned demarkus-server processes bound to this project's content
 // directory are reaped before returning — unresponsive servers from
-// earlier sessions (e.g. junto crashed before Stop() ran, or the PID file
+// earlier sessions (e.g. the host crashed before Stop() ran, or the PID file
 // was lost) would otherwise accumulate alongside the live one.
 func (m *Manager) Start() (int, error) {
 	// Ensure content directory exists.
@@ -95,7 +96,7 @@ func (m *Manager) Start() (int, error) {
 	}
 
 	// Acquire the single-instance lock before touching any state files. A
-	// second junto instance that reached this point concurrently would call
+	// second host instance that reached this point concurrently would call
 	// reuseExisting, adopt this instance's server, and then kill it at its
 	// own teardown — leaving this instance's MCP client talking to a dead
 	// port for the rest of its session (the exact timeout-storm we've seen
@@ -151,7 +152,7 @@ func (m *Manager) startFresh() (int, error) {
 		"-port", strconv.Itoa(port),
 		"-tokens", m.tokensFile,
 	)
-	// Detach from parent process group so the server survives if Junto crashes.
+	// Detach from parent process group so the server survives if the host crashes.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -166,7 +167,7 @@ func (m *Manager) startFresh() (int, error) {
 	// uses waitDone to reap. Setting m.cmd/m.waitDone later (after
 	// waitReady) would leave an early-failure window where Stop() falls
 	// back to terminatePID — that path signals but cannot reap, so a
-	// server exiting during startup would linger as a zombie until junto
+	// server exiting during startup would linger as a zombie until the host
 	// itself exits.
 	m.cmd = cmd
 	m.waitDone = make(chan struct{})
@@ -200,7 +201,7 @@ func (m *Manager) startFresh() (int, error) {
 }
 
 // writePIDPortFiles persists the spawned server's PID and port for
-// adoption by future junto launches. Pure I/O — cleanup on failure is
+// adoption by future host launches. Pure I/O — cleanup on failure is
 // the caller's responsibility (via [Manager.Stop]), so both
 // file-write failures and readiness failures share one cleanup path.
 func (m *Manager) writePIDPortFiles(pid, port int) error {
@@ -214,7 +215,7 @@ func (m *Manager) writePIDPortFiles(pid, port int) error {
 }
 
 // acquireLock takes an exclusive, non-blocking flock on lockPath. Fails
-// fast with [ErrInstanceAlreadyRunning] when another junto holds it. The
+// fast with [ErrInstanceAlreadyRunning] when another host instance holds it. The
 // OS releases the flock when the process exits, so crashes don't wedge
 // the next launch.
 func (m *Manager) acquireLock() error {
@@ -364,8 +365,8 @@ func terminateOwnedChild(proc *os.Process, done <-chan struct{}, graceful time.D
 // content directory, except sparePID. sparePID=0 means kill all matches.
 //
 // This exists because demarkus-server, combined with SysProcAttr.Setpgid
-// and Process.Release() at launch, deliberately survives an unclean junto
-// exit. That only works if the next junto launch reliably adopts (via PID
+// and Process.Release() at launch, deliberately survives an unclean host
+// exit. That only works if the next host launch reliably adopts (via PID
 // file) or reaps (via this sweep) the survivor. The PID file is fragile:
 // reuseExisting deletes it whenever the live PID can't be probed, so a
 // subsequent launch sees no PID reference and would otherwise spawn a
@@ -418,7 +419,7 @@ func (m *Manager) pidOwnsDemarkusServer(pid int) bool {
 
 // findDemarkusServerPIDs returns PIDs of demarkus-server processes whose
 // `-root <contentDir>` argument matches the given path. Uses ps since
-// junto already depends on POSIX process semantics. The `-ww` flag
+// the host already depends on POSIX process semantics. The `-ww` flag
 // disables terminal-width truncation; without it, long project paths
 // get clipped and matches silently fail.
 func findDemarkusServerPIDs(contentDir string) ([]int, error) {
@@ -556,7 +557,7 @@ func (m *Manager) EnsureToken() (string, error) {
 
 	tokenBin := filepath.Join(m.binDir, "demarkus-token")
 	cmd := exec.Command(tokenBin, "generate",
-		"-label", "junto",
+		"-label", brand.ProcessLabel,
 		"-paths", "/**",
 		"-ops", "publish,append",
 		"-tokens", m.tokensFile,
@@ -689,7 +690,7 @@ func (m *Manager) reuseExisting() (int, error) {
 		//   a) demarkus-server is wedged (original bug we're guarding).
 		//      Terminate it so Start() can launch a healthy replacement;
 		//      without this, cleanupFiles() below drops the PID reference
-		//      and the next junto launch orphans it permanently.
+		//      and the next host launch orphans it permanently.
 		//   b) PID was recycled by an unrelated process after the prior
 		//      demarkus-server exited (e.g. the user's editor now holds
 		//      this PID). signal(0) earlier proved "a process exists";

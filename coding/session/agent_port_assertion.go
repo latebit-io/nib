@@ -1,6 +1,6 @@
 package session
 
-import "github.com/latebit-io/junto/coding/agent"
+import "github.com/latebit-io/nib/coding/agent"
 
 // Compile-time guarantee that *agent.Agent satisfies the local agentPort
 // interface. Without this, a method rename on *agent.Agent would only

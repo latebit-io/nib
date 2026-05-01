@@ -1,6 +1,6 @@
 // Package tools holds the application-layer tool implementations the
-// junto agent dispatches against. Each file in this package is a
-// junto-domain tool (read_file, edit_file, …) that satisfies the
+// the agent dispatches against. Each file in this package is a
+// agent tool (read_file, edit_file, …) that satisfies the
 // generic [agent.Tool] interface defined in the upstream
 // `agent` module.
 //
@@ -24,8 +24,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/latebit-io/junto/agent"
-	"github.com/latebit-io/junto/engine/event"
+	"github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/engine/event"
 )
 
 // Tool aliases the upstream generic [agent.Tool] interface so each

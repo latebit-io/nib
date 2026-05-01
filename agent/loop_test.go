@@ -881,3 +881,174 @@ Done:
 	a.Abort()
 	a.WaitForIdle()
 }
+
+// TestPromptWithMessages_UsesCallerSuppliedTranscript verifies the new
+// entry point bypasses the [system?, user] build and runs with the
+// transcript the caller hands in. The caller-side use case is an
+// application that needs file content, context files, memory summaries,
+// or other prefill in the initial transcript — beyond what
+// [Options.SystemPrompt] + a single content string can express.
+func TestPromptWithMessages_UsesCallerSuppliedTranscript(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamDone())
+	events := make(chan event.Event, 32)
+
+	a, err := New(Options{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	initial := []llm.Message{
+		{Role: "system", Content: "shaped by the application"},
+		{Role: "user", Content: "with prefilled context"},
+		{Role: "assistant", Content: "and a prior turn"},
+		{Role: "user", Content: "do the thing"},
+	}
+	if err := a.PromptWithMessages(context.Background(), initial); err != nil {
+		t.Fatalf("PromptWithMessages: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			if _, ok := ev.(event.TurnEnd); ok {
+				goto Done
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for TurnEnd")
+		}
+	}
+Done:
+
+	state := a.State()
+	// 4 supplied + 1 assistant turn appended by the loop.
+	if got := len(state.Messages); got != 5 {
+		t.Fatalf("State.Messages length = %d; want 5", got)
+	}
+	for i, want := range initial {
+		if state.Messages[i].Role != want.Role || state.Messages[i].Content != want.Content {
+			t.Errorf("messages[%d] = %+v; want %+v", i, state.Messages[i], want)
+		}
+	}
+
+	a.Abort()
+	a.WaitForIdle()
+}
+
+// TestPromptWithMessages_DefensiveCopy verifies the agent does not
+// share storage with the caller's slice. A caller mutation after the
+// call must not leak into the live transcript.
+func TestPromptWithMessages_DefensiveCopy(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamDone())
+	events := make(chan event.Event, 32)
+
+	a, err := New(Options{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	initial := []llm.Message{
+		{Role: "system", Content: "original system"},
+		{Role: "user", Content: "original user"},
+	}
+	if err := a.PromptWithMessages(context.Background(), initial); err != nil {
+		t.Fatalf("PromptWithMessages: %v", err)
+	}
+
+	// Mutate the caller's slice while the loop is running. The agent's
+	// copy must remain untouched.
+	initial[0].Content = "MUTATED"
+	initial[1].Content = "MUTATED"
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			if _, ok := ev.(event.TurnEnd); ok {
+				goto Done
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for TurnEnd")
+		}
+	}
+Done:
+
+	state := a.State()
+	if state.Messages[0].Content != "original system" {
+		t.Errorf("messages[0].Content = %q; want %q (caller mutation leaked)", state.Messages[0].Content, "original system")
+	}
+	if state.Messages[1].Content != "original user" {
+		t.Errorf("messages[1].Content = %q; want %q (caller mutation leaked)", state.Messages[1].Content, "original user")
+	}
+
+	a.Abort()
+	a.WaitForIdle()
+}
+
+// TestPromptWithMessages_RejectsEmpty verifies the empty-slice guard.
+// A run with zero messages would have nothing to send to the provider
+// on the first turn, so the entry point must refuse rather than start
+// a useless run that would error on the first Stream call.
+func TestPromptWithMessages_RejectsEmpty(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamDone())
+	events := make(chan event.Event, 1)
+
+	a, err := New(Options{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = a.PromptWithMessages(context.Background(), nil)
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("PromptWithMessages(nil) error = %v; want ErrInvalidOptions", err)
+	}
+
+	err = a.PromptWithMessages(context.Background(), []llm.Message{})
+	if !errors.Is(err, ErrInvalidOptions) {
+		t.Fatalf("PromptWithMessages(empty) error = %v; want ErrInvalidOptions", err)
+	}
+}
+
+// TestPromptWithMessages_RejectsConcurrentRun verifies the entry point
+// shares the [ErrRunInProgress] guard with [Agent.Prompt].
+func TestPromptWithMessages_RejectsConcurrentRun(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamDone(), streamDone())
+	events := make(chan event.Event, 32)
+
+	a, err := New(Options{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := a.PromptWithMessages(context.Background(), []llm.Message{
+		{Role: "user", Content: "first"},
+	}); err != nil {
+		t.Fatalf("first PromptWithMessages: %v", err)
+	}
+	defer func() {
+		a.Abort()
+		a.WaitForIdle()
+		for {
+			select {
+			case <-events:
+			default:
+				return
+			}
+		}
+	}()
+
+	err = a.PromptWithMessages(context.Background(), []llm.Message{
+		{Role: "user", Content: "second"},
+	})
+	if !errors.Is(err, ErrRunInProgress) {
+		t.Errorf("second PromptWithMessages error = %v; want ErrRunInProgress", err)
+	}
+}

@@ -206,10 +206,21 @@ func (a *Agent) Cancel() {
 // SetProvider replaces the LLM provider for subsequent turns.
 // Safe to call while the agent is waiting for input — the next
 // processLLMTurn call will use the new provider.
+//
+// Updates [Agent.provider] (used by the inline run loop) and the
+// [providerProxy] backing [Agent.foundation] (used by the foundation
+// loop after the 8c cutover). Both fields stay in sync until the
+// inline loop is retired in 8c step 4 — at that point [Agent.provider]
+// becomes redundant and is removed, leaving the proxy as the single
+// source of truth.
 func (a *Agent) SetProvider(p llm.Provider) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.provider = p
+	proxy := a.providerProxy
+	a.mu.Unlock()
+	if proxy != nil {
+		proxy.Set(p)
+	}
 }
 
 // SetStyle atomically replaces the active coding style and post-task linters.

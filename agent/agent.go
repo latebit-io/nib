@@ -150,6 +150,46 @@ func New(opts Options) (*Agent, error) {
 // [event.AgentEnd]. Hooks and tool Execute calls receive a child context
 // derived from this ctx so they unblock alongside the run.
 func (a *Agent) Prompt(ctx context.Context, content string) error {
+	msgs := make([]llm.Message, 0, 2)
+	if a.systemPrompt != "" {
+		msgs = append(msgs, llm.Message{Role: "system", Content: a.systemPrompt})
+	}
+	msgs = append(msgs, llm.Message{Role: "user", Content: content})
+	return a.startRun(ctx, msgs)
+}
+
+// PromptWithMessages starts a new run with a caller-supplied initial
+// transcript instead of the [system?, user] slice [Agent.Prompt] builds
+// from [Options.SystemPrompt] + content.
+//
+// Useful for applications that compose dynamic per-run transcripts —
+// e.g. a coding agent that injects file content, context files, and a
+// memory summary alongside the user's goal, with system text that
+// depends on runtime mode and configuration. Such applications should
+// leave [Options.SystemPrompt] empty and drive every run through this
+// method.
+//
+// The agent takes a defensive copy of messages; the caller may mutate
+// its slice after the call returns. An empty slice is rejected with
+// [ErrInvalidOptions] — a run with no initial messages would have
+// nothing to send to the provider on the first turn.
+//
+// Same lifecycle semantics as [Agent.Prompt]: [ErrRunInProgress] when a
+// run is active, ctx cancellation unwinds the loop, [event.AgentEnd]
+// signals completion.
+func (a *Agent) PromptWithMessages(ctx context.Context, messages []llm.Message) error {
+	if len(messages) == 0 {
+		return fmt.Errorf("%w: messages is empty", ErrInvalidOptions)
+	}
+	msgs := make([]llm.Message, len(messages))
+	copy(msgs, messages)
+	return a.startRun(ctx, msgs)
+}
+
+// startRun is the shared launch path for [Agent.Prompt] and
+// [Agent.PromptWithMessages]. msgs is taken as-is — callers must clone
+// before passing if they intend to mutate after the call returns.
+func (a *Agent) startRun(ctx context.Context, msgs []llm.Message) error {
 	a.mu.Lock()
 	if a.running {
 		a.mu.Unlock()
@@ -159,12 +199,6 @@ func (a *Agent) Prompt(ctx context.Context, content string) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	doneCh := make(chan struct{})
 	inputCh := make(chan string, 1)
-
-	msgs := make([]llm.Message, 0, 2)
-	if a.systemPrompt != "" {
-		msgs = append(msgs, llm.Message{Role: "system", Content: a.systemPrompt})
-	}
-	msgs = append(msgs, llm.Message{Role: "user", Content: content})
 
 	a.running = true
 	a.streaming = false

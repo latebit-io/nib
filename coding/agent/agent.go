@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"slices"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	upagent "github.com/latebit-io/nib/agent"
+	upevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/approval"
@@ -252,6 +255,30 @@ type Agent struct {
 	// runID is a generation token incremented on each RunWithMode call.
 	// recordTurnUsage checks this to ignore late updates from canceled runs.
 	runID uint64
+
+	// providerProxy is the [llm.Provider] handed to [foundation]. It
+	// shadows [Agent.provider] so [SetProvider] can hot-swap the live
+	// provider mid-session even though the foundation captures its
+	// provider once at [upagent.New] time. Both fields are kept in
+	// sync until the inline run loop is retired in 8c step 4 — at
+	// that point [Agent.provider] becomes redundant and is removed.
+	providerProxy *providerProxy
+
+	// foundation is the embeddable [upagent.Agent] that drives the run
+	// loop after sub-phase 8c. Built in [New] with [providerProxy],
+	// [foundationEvents], and [Agent.FoundationHooks]; not yet wired
+	// to [RunWithMode] / [Reply] (steps 2-7 of 8c).
+	foundation *upagent.Agent
+
+	// foundationEvents is the channel [foundation] emits its
+	// [upevent.Event] stream on. Drained by a translator goroutine
+	// spawned in [New] that re-emits as [engine/event.Event] through
+	// [Agent.send] — the application boundary where the generic
+	// foundation events become the coding agent's vocabulary.
+	// Step 3 of 8c fills the goroutine body in; step 1 spawns a stub
+	// drain so the channel cannot back-pressure the foundation if
+	// any unexpected event fires before the cutover.
+	foundationEvents chan upevent.Event
 }
 
 // taskEdit records a single edit made during an agent task, for end-of-task
@@ -416,7 +443,80 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 
 	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
 
+	a.buildFoundation()
+
 	return a
+}
+
+// buildFoundation constructs [Agent.foundation], the [upagent.Agent]
+// that 8c step 2 will swap into the run loop. Wires the [providerProxy]
+// (so SetProvider survives the foundation's frozen provider field), a
+// dedicated events channel drained by a translator goroutine, and the
+// [Agent.FoundationHooks] bridge that delegates the inline gates and
+// nudges into the foundation's hook surface.
+//
+// The Tool slice is iterated in [Agent.toolDefs] order so the
+// foundation's internal toolDefs (built by [upagent.New]) match the
+// inline advertisement order — keeping LLM tool-list ordering stable
+// across the cutover so model behavior does not drift.
+//
+// Validation failures from [upagent.New] panic: the inputs are
+// statically known at this composition root (proxy never nil, events
+// channel allocated, tool definitions vetted by [registerTools] which
+// already drops duplicates), so a non-nil error indicates a programming
+// error caught at startup rather than a runtime condition. Returning
+// an error would force every existing [agent.New] caller and test
+// helper to add error handling for a path that is unreachable in
+// practice.
+func (a *Agent) buildFoundation() {
+	a.providerProxy = newProviderProxy(a.provider)
+
+	foundationTools := make([]upagent.Tool, 0, len(a.toolDefs))
+	for _, def := range a.toolDefs {
+		t, ok := a.tools[strings.ToLower(def.Function.Name)]
+		if !ok {
+			panic(fmt.Sprintf("agent.New: tool %q advertised in toolDefs but missing from tools map", def.Function.Name))
+		}
+		foundationTools = append(foundationTools, t)
+	}
+
+	a.foundationEvents = make(chan upevent.Event, 64)
+
+	hooks := a.FoundationHooks(func() []llm.Message {
+		f := a.foundation
+		if f == nil {
+			return nil
+		}
+		return f.State().Messages
+	})
+
+	foundation, err := upagent.New(upagent.Options{
+		Provider: a.providerProxy,
+		Events:   a.foundationEvents,
+		Tools:    foundationTools,
+		Hooks:    hooks,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("agent.New: foundation construction failed: %v", err))
+	}
+	a.foundation = foundation
+
+	go a.translateFoundationEvents()
+}
+
+// translateFoundationEvents drains [Agent.foundationEvents] and
+// re-emits each event as an [engine/event.Event] through [Agent.send]
+// — the application boundary where the generic foundation vocabulary
+// becomes the coding agent's vocabulary.
+//
+// Step 1 of 8c ships this as a no-op drain: the foundation is not yet
+// wired into [RunWithMode] / [Reply], so no events fire. Step 3 fills
+// in the translation table. The goroutine never exits — its lifetime
+// is the agent's lifetime, matching cmd/agent and tui/cmd/tui where
+// the agent lives the program's lifetime.
+func (a *Agent) translateFoundationEvents() {
+	for range a.foundationEvents {
+	}
 }
 
 // registerTools builds the tool registry. Built-in tools are registered first

@@ -50,7 +50,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	// Allocate a fresh coordinator for the new run instead of draining
 	// the existing one. The previous goroutine may still be parked
 	// inside a Coordinator.Await* call on the old channels; if we
-	// reused the same coordinator, a Reply / Approve / Continue that
+	// reused the same coordinator, a Reply / Approve / Reject that
 	// landed in the gap between this Unlock and prevCancel would race
 	// with the stale goroutine — the stale select can pick the channel
 	// arm before ctx.Done and consume a signal meant for the new run.

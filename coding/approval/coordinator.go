@@ -65,8 +65,10 @@ type Coordinator struct {
 }
 
 // New returns a Coordinator with both channels allocated. Safe to
-// use immediately; callers should retain the returned pointer for the
-// lifetime of the agent.
+// use immediately. The Coordinator is per-run: Agent allocates a
+// fresh one at every RunWithMode / Reply-resume rather than reusing
+// one across the run boundary (see the package doc above for why).
+// Callers retain the pointer only for the lifetime of a single run.
 func New() *Coordinator {
 	return &Coordinator{
 		approveCh: make(chan Approval, 1),

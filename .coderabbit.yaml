@@ -45,9 +45,12 @@ reviews:
 
         Cross-cutting rules:
         - Every error must be explicitly handled
-        - Methods called from the agent goroutine via the Workspace
-          interface (ReadFile/WriteFile/CanonPath/ListFiles) must not
-          touch shared TUI state without synchronization
+        - All Workspace interface methods (ProjectRoot, ReadFile,
+          WriteFile, ListFiles, CanonPath, InContext, AddContext —
+          composed from FileReader/FileWriter/ContextSet) are called
+          from the agent goroutine and must not touch shared TUI state
+          without synchronization. Same rule applies to any future
+          method added to the Workspace surface.
         - No package may import tui/
 
     - path: "coding/agent/**"

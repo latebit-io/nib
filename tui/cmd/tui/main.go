@@ -18,6 +18,8 @@ import (
 	"github.com/latebit-io/nib/ai/oauth"
 	"github.com/latebit-io/nib/coding/agent"
 	"github.com/latebit-io/nib/coding/event"
+	codingmemory "github.com/latebit-io/nib/coding/memory"
+	"github.com/latebit-io/nib/coding/prompts"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/coding/wire"
 	"github.com/latebit-io/nib/engine/buffer"
@@ -143,7 +145,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	defer mcpResult.Cleanup()
 
 	// Classify distributed memory servers and expose to the session for UI display.
-	distributed := agent.DetectDistributedMemory(mcpResult.ServerNames)
+	distributed := codingmemory.DetectDistributedMemory(mcpResult.ServerNames)
 	if len(distributed) > 0 {
 		sess.SetDistributedMemory(distributed)
 	}
@@ -451,7 +453,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				}
 				currentStyleKey = styleNames[idx]
 				s := styleResult.Config.Styles[currentStyleKey]
-				data := agent.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
+				data := prompts.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
 				linters := wire.LintersForStyle(s.LintCmd, styleResult.DefaultLinters)
 				ag.SetStyle(data, linters)
 				styleResult.SetArchitecture(s.Architecture)

@@ -75,3 +75,14 @@ linters:
           deny:
             - pkg: "github.com/latebit-io/nib/tui"
               desc: "engine must never import tui — dependencies point inward only"
+
+        # No engine package may import any coding package. Phase 5 split
+        # the application event vocabulary out of engine/event into
+        # coding/event so engine can stay reusable as an editor library;
+        # this rule locks the invariant in.
+        engine-no-coding:
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding"
+              desc: "engine must never import coding — engine is editor + shared infra; application logic lives in coding"
+            - pkg: "github.com/latebit-io/nib/agent"
+              desc: "engine must never import agent — agent composes engine, not the reverse"

@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+
+  settings:
+    depguard:
+      rules:
+        # ai/ is the foundation. It depends on nothing nib-internal other
+        # than other ai/* packages. Locks in the architectural invariant
+        # that ai/ stays portable enough to be lifted out as a generic
+        # SDK without dragging the rest of the tree along.
+        ai-foundation:
+          deny:
+            - pkg: "github.com/latebit-io/nib/agent"
+              desc: "ai must not import agent — ai is the foundation; agent depends on ai, not the other way"
+            - pkg: "github.com/latebit-io/nib/engine"
+              desc: "ai must not import engine"
+            - pkg: "github.com/latebit-io/nib/coding"
+              desc: "ai must not import coding"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "ai must not import tui"
+            - pkg: "github.com/latebit-io/nib/cmd"
+              desc: "ai must not import cmd"

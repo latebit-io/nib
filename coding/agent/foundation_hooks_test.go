@@ -21,7 +21,7 @@ import (
 
 func TestPlanningBlocklistGate_BlocksInPlanningMode(t *testing.T) {
 	a := &Agent{
-		mode:              ModePlanning,
+		mode:              event.ModePlanning,
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
 
@@ -36,7 +36,7 @@ func TestPlanningBlocklistGate_BlocksInPlanningMode(t *testing.T) {
 
 func TestPlanningBlocklistGate_CaseInsensitive(t *testing.T) {
 	a := &Agent{
-		mode:              ModePlanning,
+		mode:              event.ModePlanning,
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
 	res := a.planningBlocklistGate(upagent.BeforeToolCallContext{Name: "Edit_File"})
@@ -47,7 +47,7 @@ func TestPlanningBlocklistGate_CaseInsensitive(t *testing.T) {
 
 func TestPlanningBlocklistGate_AllowsNonBlocklisted(t *testing.T) {
 	a := &Agent{
-		mode:              ModePlanning,
+		mode:              event.ModePlanning,
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
 	res := a.planningBlocklistGate(upagent.BeforeToolCallContext{Name: "read_file"})
@@ -58,7 +58,7 @@ func TestPlanningBlocklistGate_AllowsNonBlocklisted(t *testing.T) {
 
 func TestPlanningBlocklistGate_OffInExecution(t *testing.T) {
 	a := &Agent{
-		mode:              ModeExecution,
+		mode:              event.ModeExecution,
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
 	res := a.planningBlocklistGate(upagent.BeforeToolCallContext{Name: "edit_file"})
@@ -75,7 +75,7 @@ func TestActiveTaskGate_BlocksWhenNoActiveTask(t *testing.T) {
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
 	}
-	a := &Agent{mode: ModeExecution, workspace: ws}
+	a := &Agent{mode: event.ModeExecution, workspace: ws}
 
 	res := a.activeTaskGate(context.Background(), upagent.BeforeToolCallContext{Name: "edit_file"})
 	if !res.Block {
@@ -92,7 +92,7 @@ func TestActiveTaskGate_AllowsWhenActiveTaskSet(t *testing.T) {
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
 	}
-	a := &Agent{mode: ModeExecution, workspace: ws}
+	a := &Agent{mode: event.ModeExecution, workspace: ws}
 
 	res := a.activeTaskGate(context.Background(), upagent.BeforeToolCallContext{Name: "edit_file"})
 	if res.Block {
@@ -169,7 +169,7 @@ func TestFoundationHooks_BeforeToolCallChain_Order(t *testing.T) {
 	// preserves that ordering. With singleEditFired pre-flipped to true
 	// AND a planning-mode blocklist match, the single-edit message wins.
 	a := &Agent{
-		mode:              ModePlanning,
+		mode:              event.ModePlanning,
 		planningBlocklist: map[string]bool{"edit_file": true},
 		interactionMode:   Interactive,
 		autonomous:        false,
@@ -198,7 +198,7 @@ func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
 	a := &Agent{
 		events:          mustDrainEvents(t),
 		cache:           NewFileCache(),
-		mode:            ModeExecution,
+		mode:            event.ModeExecution,
 		interactionMode: Interactive,
 		autonomous:      false,
 	}
@@ -341,7 +341,7 @@ func TestActiveToolDefs_PlanningFiltersBlocklist(t *testing.T) {
 		{Function: llm.FunctionDef{Name: "bash"}},
 	}
 	a := &Agent{
-		mode:              ModePlanning,
+		mode:              event.ModePlanning,
 		toolDefs:          defs,
 		planningBlocklist: map[string]bool{"edit_file": true, "bash": true},
 	}
@@ -360,7 +360,7 @@ func TestActiveToolDefs_ExecutionReturnsAll(t *testing.T) {
 		{Function: llm.FunctionDef{Name: "edit_file"}},
 	}
 	a := &Agent{
-		mode:              ModeExecution,
+		mode:              event.ModeExecution,
 		toolDefs:          defs,
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
@@ -512,7 +512,7 @@ func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 	a := &Agent{
 		events:          events,
 		workspace:       ws,
-		mode:            ModeExecution,
+		mode:            event.ModeExecution,
 		interactionMode: Interactive,
 		autonomous:      false,
 	}
@@ -736,7 +736,7 @@ func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
 		events:    mustDrainEvents(t),
 		cache:     NewFileCache(),
 		workspace: ws,
-		mode:      ModeExecution,
+		mode:      event.ModeExecution,
 		intent:    "do the thing",
 	}
 
@@ -881,7 +881,7 @@ func TestFoundationHooks_TransformContext_ResetAndCompactAndLint(t *testing.T) {
 	a := &Agent{
 		events:          mustDrainEvents(t),
 		cache:           NewFileCache(),
-		mode:            ModeExecution,
+		mode:            event.ModeExecution,
 		interactionMode: Interactive,
 		autonomous:      false,
 		pendingLint:     "violation",

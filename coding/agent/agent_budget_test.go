@@ -139,7 +139,7 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
 
 	errMsg, doneSuccess := collectAbortEvents(t, events, 2*time.Second)
 	if !strings.Contains(errMsg, "budget exceeded") {
@@ -253,7 +253,7 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
 
 	errMsg, doneSuccess := collectAbortEvents(t, events, 2*time.Second)
 	if !strings.Contains(errMsg, "budget exceeded") {

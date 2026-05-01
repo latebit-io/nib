@@ -6,6 +6,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/event"
+	"github.com/latebit-io/nib/coding/prompts"
 )
 
 // maxContextInPrompt caps how many context files are listed in the prompt.
@@ -23,7 +25,7 @@ const maxActiveTaskPathBytes = 1024
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
 // contextFiles lists the files the agent is allowed to edit.
 // memorySummary is the project memory snapshot (passed in to avoid shared state races).
-func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles []string, memorySummary string, mode Mode) []llm.Message {
+func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles []string, memorySummary string, mode event.Mode) []llm.Message {
 	// Number the lines for the LLM
 	lines := strings.Split(fileContent, "\n")
 	var numbered strings.Builder
@@ -67,9 +69,9 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		}
 	}
 
-	userContent, err := a.prompts.RenderUserMessage(UserPromptData{
+	userContent, err := a.prompts.RenderUserMessage(prompts.UserPromptData{
 		FileName:       fileName,
-		Language:       DetectLanguage(fileName),
+		Language:       prompts.DetectLanguage(fileName),
 		FileContent:    numbered.String(),
 		Fence:          fence,
 		ContextFiles:   shown,
@@ -85,7 +87,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		userContent = fmt.Sprintf("## File: %s\n\n## Task\n\n%s", fileName, goal)
 	}
 
-	sysData := SystemPromptData{
+	sysData := prompts.SystemPromptData{
 		Headless:          a.interactionMode == Headless,
 		Autonomous:        a.currentAutonomous(),
 		DistributedMemory: a.distributedMemory,
@@ -93,7 +95,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		Terse:             a.currentTerse(),
 	}
 	systemPrompt := a.prompts.SystemPrompt(sysData)
-	if mode == ModePlanning {
+	if mode == event.ModePlanning {
 		systemPrompt = a.prompts.PlanningSystemPrompt(sysData)
 	}
 
@@ -107,15 +109,15 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 // runtime state (e.g. coding style). Called between conversation turns so
 // that changes from SetCodingStyle take effect immediately without requiring
 // a new RunWithMode call.
-func (a *Agent) rebuildSystemPrompt(mode Mode) string {
-	sysData := SystemPromptData{
+func (a *Agent) rebuildSystemPrompt(mode event.Mode) string {
+	sysData := prompts.SystemPromptData{
 		Headless:          a.interactionMode == Headless,
 		Autonomous:        a.currentAutonomous(),
 		DistributedMemory: a.distributedMemory,
 		CodingStyle:       a.currentCodingStyle(),
 		Terse:             a.currentTerse(),
 	}
-	if mode == ModePlanning {
+	if mode == event.ModePlanning {
 		return a.prompts.PlanningSystemPrompt(sysData)
 	}
 	return a.prompts.SystemPrompt(sysData)

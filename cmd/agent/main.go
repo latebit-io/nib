@@ -27,6 +27,7 @@ import (
 	"github.com/latebit-io/nib/coding/agent"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/headless"
+	codingmemory "github.com/latebit-io/nib/coding/memory"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/coding/wire"
 	"github.com/latebit-io/nib/engine/highlight"
@@ -231,7 +232,7 @@ func run() error {
 		MemoryStore:       mem.Store,
 		MemorySummary:     mem.Summary,
 		Interaction:       agent.Headless,
-		DistributedMemory: agent.DetectDistributedMemory(mcpResult.ServerNames),
+		DistributedMemory: codingmemory.DetectDistributedMemory(mcpResult.ServerNames),
 		CodingStyle:       styleResult.AgentStyle,
 		SmokeConfig:       smokeCfg,
 	}

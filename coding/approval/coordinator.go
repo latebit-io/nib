@@ -20,6 +20,19 @@ import (
 	"log/slog"
 )
 
+// Approval carries the result of an approve/reject decision from the
+// frontend back to the agent. Content is the post-apply buffer
+// content for the edited file when Approved is true, used by the
+// orchestrator to seed the file cache so subsequent tool reads
+// observe the truth on disk/buffer — not the agent's predicted
+// post-edit content (which can diverge from reality when the
+// developer modifies the replacement text in the diff overlay
+// before approving). Content is empty when Approved is false.
+type Approval struct {
+	Approved bool
+	Content  string
+}
+
 // Coordinator owns the agent <-> frontend coordination channels.
 //
 // Channel capacities are deliberately 1, and the signal methods
@@ -47,7 +60,7 @@ import (
 // Reset (drain in place) is retained for tests and for callers that
 // want to clear stale state without replacing the Coordinator.
 type Coordinator struct {
-	approveCh chan bool   // true=approved, false=rejected
+	approveCh chan Approval
 	inputCh   chan string // developer reply between turns
 }
 
@@ -56,7 +69,7 @@ type Coordinator struct {
 // lifetime of the agent.
 func New() *Coordinator {
 	return &Coordinator{
-		approveCh: make(chan bool, 1),
+		approveCh: make(chan Approval, 1),
 		inputCh:   make(chan string, 1),
 	}
 }
@@ -69,14 +82,21 @@ func (c *Coordinator) Reset() {
 	drain(c.inputCh)
 }
 
-// Approve signals approval for the pending edit. Non-blocking: if the
-// approve buffer is empty, the value queues for the next AwaitApproval
-// caller; if the buffer already holds a pending signal, the new value
-// is dropped (the existing queued signal is the one that will be
-// delivered).
-func (c *Coordinator) Approve() {
+// Approve signals approval for the pending edit and delivers the
+// post-apply buffer content the orchestrator should seed into the
+// file cache. Non-blocking: if the approve buffer is empty, the
+// value queues for the next AwaitApproval caller; if the buffer
+// already holds a pending signal, the new value is dropped (the
+// existing queued signal is the one that will be delivered).
+//
+// Pass the actual buffer content after ApplyEdit, not the agent's
+// predicted ExpectedContent — when the developer modifies the
+// replacement text in the diff overlay before approving, those two
+// diverge and the cache MUST hold the real post-apply state or
+// subsequent read_file tool calls return stale data.
+func (c *Coordinator) Approve(content string) {
 	select {
-	case c.approveCh <- true:
+	case c.approveCh <- Approval{Approved: true, Content: content}:
 	default:
 	}
 }
@@ -86,7 +106,7 @@ func (c *Coordinator) Approve() {
 // buffer.
 func (c *Coordinator) Reject() {
 	select {
-	case c.approveCh <- false:
+	case c.approveCh <- Approval{Approved: false}:
 	default:
 	}
 }
@@ -118,18 +138,19 @@ func (c *Coordinator) Reply(text string) bool {
 var ErrChannelClosed = errors.New("approval channel closed")
 
 // AwaitApproval blocks until Approve or Reject is signaled, ctx is
-// canceled, or the channel is closed. Returns the approval bool when
-// a value arrived, ctx.Err() on cancellation, or [ErrChannelClosed]
-// when the channel was closed (not expected under normal operation).
-func (c *Coordinator) AwaitApproval(ctx context.Context) (bool, error) {
+// canceled, or the channel is closed. Returns the [Approval] (carrying
+// the approved bool and post-apply content) when a value arrived,
+// ctx.Err() on cancellation, or [ErrChannelClosed] when the channel
+// was closed (not expected under normal operation).
+func (c *Coordinator) AwaitApproval(ctx context.Context) (Approval, error) {
 	select {
 	case <-ctx.Done():
-		return false, ctx.Err()
-	case approved, ok := <-c.approveCh:
+		return Approval{}, ctx.Err()
+	case a, ok := <-c.approveCh:
 		if !ok {
-			return false, ErrChannelClosed
+			return Approval{}, ErrChannelClosed
 		}
-		return approved, nil
+		return a, nil
 	}
 }
 

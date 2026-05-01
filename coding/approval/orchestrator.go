@@ -186,7 +186,7 @@ func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.E
 		return fmt.Sprintf("Error: could not deliver edit proposal to frontend: %v", err), outcomeFatal
 	}
 
-	msg, oc := o.waitForApproval(ctx, coord, p)
+	approved, msg, oc := o.waitForApproval(ctx, coord, p)
 	if oc == outcomeFatal {
 		return msg, outcomeFatal
 	}
@@ -204,32 +204,34 @@ func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.E
 		o.deps.Workspace.AddContext(p.Path)
 	}
 
-	return o.afterApproval(p)
+	return o.afterApproval(p, approved.Content)
 }
 
 // waitForApproval blocks until the developer approves or rejects
-// the edit, ctx is canceled, or the channel is closed. Outcome
-// matrix:
+// the edit, ctx is canceled, or the channel is closed. Returns the
+// [Approval] (carrying the approved flag and post-apply content) on
+// the approval path so the orchestrator can seed the cache from the
+// real buffer state. Outcome matrix:
 //
-//   - approve  → ("", outcomeOK)
-//   - reject   → (rejectionMsg, outcomeOK)
-//   - ctx cancel → ("Error: agent canceled", outcomeFatal)
-//   - channel closed → ("Error: approval channel closed", outcomeFatal)
+//   - approve  → (approval, "", outcomeOK)
+//   - reject   → (zero, rejectionMsg, outcomeOK)
+//   - ctx cancel → (zero, "Error: agent canceled", outcomeFatal)
+//   - channel closed → (zero, "Error: approval channel closed", outcomeFatal)
 //
 // The channel-closed branch is preserved as a distinct message so
 // the caller can tell the LLM precisely what happened — earlier
 // versions collapsed both fatal paths into "Error: agent canceled"
 // via a wrapper, which masked an actual closed-channel failure.
-func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, p tools.EditProposal) (string, outcome) {
-	approved, err := coord.AwaitApproval(ctx)
+func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, p tools.EditProposal) (Approval, string, outcome) {
+	a, err := coord.AwaitApproval(ctx)
 	if err != nil {
 		if errors.Is(err, ErrChannelClosed) {
-			return "Error: approval channel closed", outcomeFatal
+			return Approval{}, "Error: approval channel closed", outcomeFatal
 		}
-		return "Error: agent canceled", outcomeFatal
+		return Approval{}, "Error: agent canceled", outcomeFatal
 	}
-	if approved {
-		return "", outcomeOK
+	if a.Approved {
+		return a, "", outcomeOK
 	}
 
 	o.deps.Send(event.AgentStatus{Status: event.StatusThinking})
@@ -239,22 +241,24 @@ func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, 
 	if c, ok := o.deps.Cache.Get(p.CanonPath); ok {
 		content = c
 	}
-	return fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
+	return Approval{}, fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
 		p.Path, tools.TruncateForPreview(content)), outcomeOK
 }
 
-// afterApproval seeds the cache with the post-edit content and
-// returns the success body for the LLM. The frontend has already
-// applied the edit to the buffer (or accepted it for instant-apply
-// flows); the orchestrator does not wait for a separate continue
-// signal. Diagnostics, when configured, are appended after a brief
-// delay so the language server has time to re-parse.
-func (o *Orchestrator) afterApproval(p tools.EditProposal) (string, outcome) {
-	o.deps.Cache.Set(p.CanonPath, p.ExpectedContent)
+// afterApproval seeds the cache with the post-apply buffer content
+// (delivered through the Approve signal) and returns the success body
+// for the LLM. Using the buffer-derived content rather than
+// p.ExpectedContent matters whenever the developer modified the
+// replacement text in the diff overlay before approving — the buffer
+// holds the true post-apply state; ExpectedContent holds the agent's
+// prediction. Diagnostics, when configured, are appended after a
+// brief delay so the language server has time to re-parse.
+func (o *Orchestrator) afterApproval(p tools.EditProposal, applied string) (string, outcome) {
+	o.deps.Cache.Set(p.CanonPath, applied)
 	o.deps.Send(event.AgentStatus{Status: event.StatusThinking})
 
 	result := fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-		p.Path, tools.TruncateForPreview(p.ExpectedContent))
+		p.Path, tools.TruncateForPreview(applied))
 
 	if o.deps.DiagProvider != nil {
 		time.Sleep(o.deps.DiagDelay)

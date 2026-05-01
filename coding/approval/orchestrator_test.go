@@ -221,9 +221,11 @@ func TestHandle_ValidationShortCircuit(t *testing.T) {
 }
 
 // TestHandle_HappyPath_Approve covers the full success flow:
-// validation passes, EditProposed is delivered, Approve fires, the
-// file is added to the context set, RecordEdit is invoked exactly
-// once, and the cache is seeded with the proposal's expected content.
+// validation passes, EditProposed is delivered, Approve fires
+// (carrying the post-apply buffer content — identical to
+// ExpectedContent on the simple path), the file is added to the
+// context set, RecordEdit is invoked exactly once, and the cache is
+// seeded with the delivered content.
 func TestHandle_HappyPath_Approve(t *testing.T) {
 	t.Parallel()
 	r := newRig()
@@ -233,7 +235,7 @@ func TestHandle_HappyPath_Approve(t *testing.T) {
 
 	go func() {
 		<-r.proposalDelivered
-		coord.Approve()
+		coord.Approve(p.ExpectedContent)
 	}()
 
 	body, isError := o.Handle(context.Background(), coord, p)
@@ -252,7 +254,50 @@ func TestHandle_HappyPath_Approve(t *testing.T) {
 	}
 	cached, ok := r.cache.Get(p.CanonPath)
 	if !ok || cached != p.ExpectedContent {
-		t.Errorf("cache not seeded with ExpectedContent: ok=%v cached=%q", ok, cached)
+		t.Errorf("cache not seeded with delivered content: ok=%v cached=%q", ok, cached)
+	}
+}
+
+// TestHandle_Approve_DeveloperModifiedReplace locks the bug fix:
+// when the developer edits the replacement text in the diff overlay
+// before approving, the buffer ends up with content that diverges
+// from the agent's predicted ExpectedContent. The frontend must
+// deliver the actual post-apply buffer content via Approve(content),
+// and the orchestrator MUST seed the cache from that — not from
+// ExpectedContent. Otherwise subsequent read_file tool calls return
+// the agent's prediction, not the truth, and read→edit→repeat
+// corrupts the file. Lock this against regression to a "use
+// ExpectedContent" shortcut.
+func TestHandle_Approve_DeveloperModifiedReplace(t *testing.T) {
+	t.Parallel()
+	r := newRig()
+	o := NewOrchestrator(r.deps())
+	coord := New()
+	p := sampleProposal()
+	developerModified := p.ExpectedContent + "\n// developer edited the overlay before approving\n"
+
+	go func() {
+		<-r.proposalDelivered
+		coord.Approve(developerModified)
+	}()
+
+	body, isError := o.Handle(context.Background(), coord, p)
+	assertHasEditProposed(t, r.snapshotEvents())
+	if isError {
+		t.Errorf("approve is normal flow, not a tool error; body=%q", body)
+	}
+	cached, ok := r.cache.Get(p.CanonPath)
+	if !ok {
+		t.Fatalf("cache not seeded after approval")
+	}
+	if cached != developerModified {
+		t.Errorf("cache seeded with stale content: got %q, want %q (the post-apply buffer state, not ExpectedContent)", cached, developerModified)
+	}
+	if cached == p.ExpectedContent {
+		t.Errorf("cache equals ExpectedContent — orchestrator regressed to using the prediction; subsequent read_file would return stale data")
+	}
+	if !strings.Contains(body, developerModified) {
+		t.Errorf("body should embed the developer-modified content, got %q", body)
 	}
 }
 

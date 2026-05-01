@@ -23,6 +23,12 @@ type mockAgent struct {
 	cancelled bool
 	replied   bool
 
+	// approvedContent is the content the runner passed to Approve —
+	// captured so tests can verify the runner ships the post-apply
+	// buffer content (and not stale data) through the approval
+	// channel. The orchestrator seeds its file cache from this value.
+	approvedContent string
+
 	// signalDone is signaled when Approve() or Reject() is called.
 	// Tests that send AgentEditProposed should wait on this before
 	// sending AgentDone to avoid a race between applyEdit and the
@@ -60,8 +66,9 @@ func (m *mockAgent) signal() {
 	}
 }
 
-func (m *mockAgent) Approve() {
+func (m *mockAgent) Approve(content string) {
 	m.approved = true
+	m.approvedContent = content
 	m.signal()
 }
 
@@ -217,6 +224,15 @@ func TestRunner_EditProposed_PreservesTrailingNewline(t *testing.T) {
 	want := "package main\n\nfunc new() {}\n"
 	if got != want {
 		t.Errorf("on-disk content = %q, want %q (trailing newline preserved)", got, want)
+	}
+
+	// The agent receives the normalized content (no trailing \n)
+	// matching the agent's view. Verifying the approval-channel
+	// payload locks the contract that the runner ships post-apply
+	// buffer state, not the disk bytes — those differ on
+	// trailing-newline handling.
+	if mock.approvedContent != "package main\n\nfunc new() {}" {
+		t.Errorf("agent received approve content = %q, want without trailing newline", mock.approvedContent)
 	}
 }
 
@@ -411,6 +427,12 @@ func TestRunner_EditSearchNotFound(t *testing.T) {
 	if !strings.Contains(result.Errors[0], "not found") {
 		t.Errorf("error %q does not mention 'not found'", result.Errors[0])
 	}
+	if !mock.rejected {
+		t.Error("expected agent.Reject() on failed edit application")
+	}
+	if mock.approved {
+		t.Error("agent.Approve() must NOT be called on a failed edit — it would mislead the LLM into treating ExpectedContent as authoritative")
+	}
 }
 
 func TestRunner_EditSearchAmbiguous(t *testing.T) {
@@ -441,6 +463,12 @@ func TestRunner_EditSearchAmbiguous(t *testing.T) {
 	}
 	if !strings.Contains(result.Errors[0], "ambiguous") {
 		t.Errorf("error %q does not mention 'ambiguous'", result.Errors[0])
+	}
+	if !mock.rejected {
+		t.Error("expected agent.Reject() on ambiguous edit")
+	}
+	if mock.approved {
+		t.Error("agent.Approve() must NOT be called on an ambiguous edit")
 	}
 
 	// Verify the file was NOT modified.

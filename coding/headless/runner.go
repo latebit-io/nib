@@ -17,7 +17,7 @@ import (
 type agentPort interface {
 	Run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string)
 	Reply(ctx context.Context, input string) bool
-	Approve()
+	Approve(content string)
 	Reject()
 	Cancel()
 	IsWaiting() bool
@@ -299,7 +299,10 @@ func (r *Runner) applyEdit(edit event.PendingEdit, result *Result) {
 	result.FilesChanged = append(result.FilesChanged, absPath)
 	r.status("[edited %s]\n", edit.Path)
 
-	r.agent.Approve()
+	// Approve carries the post-apply content (matching the agent's
+	// view: no trailing \n) so the orchestrator's cache reflects the
+	// real file state, not the agent's predicted ExpectedContent.
+	r.agent.Approve(newContent)
 }
 
 // status writes a formatted message to stderr when in TTY mode.

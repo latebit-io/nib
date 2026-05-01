@@ -95,7 +95,10 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 		s.mu.Lock()
 		s.modifiedFiles[editPath] = true
 		s.mu.Unlock()
-		s.agent.Approve()
+		// Pass post-apply buffer content (not pendingEdit.Replace
+		// alone — replace may have been modified in the overlay) so
+		// the orchestrator seeds its file cache from the truth.
+		s.agent.Approve(e.Buf.Content())
 		modified := replace != proposedReplace
 		accepted := map[string]any{
 			"id":               editID,
@@ -240,6 +243,7 @@ func (s *Session) CompleteApproval() {
 	s.lastEditedFile = editPath
 	s.mu.Lock()
 	s.modifiedFiles[editPath] = true
+	e := s.editors[editPath]
 	s.mu.Unlock()
 
 	modified := staged.replace != s.pendingProposedReplace
@@ -258,7 +262,16 @@ func (s *Session) CompleteApproval() {
 	s.stagedEditFile = ""
 	s.pendingApproval = nil
 	s.pendingProposedReplace = ""
-	s.agent.Approve()
+	// Pass the post-apply buffer content so the orchestrator seeds
+	// its file cache from the truth. If the editor is somehow gone
+	// (closed/reloaded between PrepareApproval and now) fall back to
+	// empty content rather than panicking — Approve still has to fire
+	// to unblock the agent.
+	var content string
+	if e != nil {
+		content = e.Buf.Content()
+	}
+	s.agent.Approve(content)
 }
 
 // AbortApproval rejects a prepared approval that was never completed.

@@ -16,16 +16,20 @@ const shortTimeout = 200 * time.Millisecond
 func TestCoordinator_AwaitApproval_Approved(t *testing.T) {
 	t.Parallel()
 	c := New()
-	c.Approve()
+	want := "post-apply buffer content"
+	c.Approve(want)
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
 
-	approved, err := c.AwaitApproval(ctx)
+	a, err := c.AwaitApproval(ctx)
 	if err != nil {
 		t.Fatalf("AwaitApproval err = %v, want nil", err)
 	}
-	if !approved {
-		t.Errorf("AwaitApproval approved = false, want true")
+	if !a.Approved {
+		t.Errorf("AwaitApproval Approved = false, want true")
+	}
+	if a.Content != want {
+		t.Errorf("AwaitApproval Content = %q, want %q", a.Content, want)
 	}
 }
 
@@ -36,12 +40,15 @@ func TestCoordinator_AwaitApproval_Rejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
 
-	approved, err := c.AwaitApproval(ctx)
+	a, err := c.AwaitApproval(ctx)
 	if err != nil {
 		t.Fatalf("AwaitApproval err = %v, want nil", err)
 	}
-	if approved {
-		t.Errorf("AwaitApproval approved = true, want false")
+	if a.Approved {
+		t.Errorf("AwaitApproval Approved = true, want false")
+	}
+	if a.Content != "" {
+		t.Errorf("AwaitApproval Content = %q, want empty on reject", a.Content)
 	}
 }
 
@@ -91,7 +98,7 @@ func TestCoordinator_Reply_DropsWhenFull(t *testing.T) {
 func TestCoordinator_Reset_DrainsAllChannels(t *testing.T) {
 	t.Parallel()
 	c := New()
-	c.Approve()
+	c.Approve("stale")
 	c.Reply("stale-reply")
 
 	c.Reset()
@@ -114,14 +121,14 @@ func TestCoordinator_SignalsAreNonBlocking(t *testing.T) {
 	t.Parallel()
 	c := New()
 	// Saturate every channel; subsequent signals must NOT block.
-	c.Approve()
+	c.Approve("saturated")
 	c.Reply("saturated")
 
 	done := make(chan struct{})
 	go func() {
-		c.Approve()        // already-saturated approveCh — must drop, not block
-		c.Reject()         // approveCh still saturated by the earlier Approve
-		c.Reply("dropped") // Reply returns false; not measured here
+		c.Approve("dropped") // already-saturated approveCh — must drop, not block
+		c.Reject()           // approveCh still saturated by the earlier Approve
+		c.Reply("dropped")   // Reply returns false; not measured here
 		close(done)
 	}()
 	select {

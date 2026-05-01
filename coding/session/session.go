@@ -35,9 +35,12 @@ type agentLifecycle interface {
 
 // agentSignals is the subset of agent operations that deliver developer
 // responses during an active run — edit approve / reject. All are
-// non-blocking sends.
+// non-blocking sends. Approve carries the post-apply buffer content
+// so the orchestrator seeds its file cache from the truth, not the
+// agent's predicted ExpectedContent (which can diverge when the
+// developer modifies the replacement text in the diff overlay).
 type agentSignals interface {
-	Approve()
+	Approve(content string)
 	Reject()
 }
 
@@ -1068,12 +1071,19 @@ func (s *Session) ClearIntent() {
 	s.intentDone = false
 }
 
-// CancelAgent cancels the current agent run, clears intent, and resets pending edit.
+// CancelAgent cancels the current agent run, clears intent, and
+// resets every approval-flow field so a cancel mid-staged-apply does
+// not leave stagedEditFile/pendingApproval latched — those gate
+// SwitchTo/ReloadFile/DeleteFile, so leaking them locks the editor
+// against further file operations until restart.
 func (s *Session) CancelAgent() {
 	if s.HasAgent() {
 		s.ClearIntent()
 		s.agent.Cancel()
 		s.pendingEdit = nil
+		s.pendingProposedReplace = ""
+		s.pendingApproval = nil
+		s.stagedEditFile = ""
 		s.editReviewed = false
 	}
 }
@@ -1232,11 +1242,15 @@ func (s *Session) HandleEvent(ev event.Event) {
 	case event.AgentError:
 		s.pendingEdit = nil
 		s.pendingProposedReplace = ""
+		s.pendingApproval = nil
+		s.stagedEditFile = ""
 		s.editReviewed = false
 		_ = e // error text is in the event for the frontend to display
 	case event.AgentDone:
 		s.pendingEdit = nil
 		s.pendingProposedReplace = ""
+		s.pendingApproval = nil
+		s.stagedEditFile = ""
 		s.editReviewed = false
 		if e.Success {
 			s.ArchiveIntent()

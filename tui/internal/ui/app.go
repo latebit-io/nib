@@ -1739,11 +1739,11 @@ func (m *AppModel) applyApproval() tea.Cmd {
 	return cmd
 }
 
-// tryApplyApproval runs the prepare → apply → continue pipeline and
-// returns the outcome plus any tea.Cmd the success branch produced.
-// It does NOT touch pendingBlockedPath / blockedPaths — that
-// reconciliation is the caller's responsibility, see
-// [reconcilePendingBlockOnOutcome].
+// tryApplyApproval runs the prepare → apply pipeline and signals the
+// agent via CompleteApproval. Returns the outcome plus any tea.Cmd
+// the success branch produced. It does NOT touch pendingBlockedPath /
+// blockedPaths — that reconciliation is the caller's responsibility,
+// see [reconcilePendingBlockOnOutcome].
 func (m *AppModel) tryApplyApproval() (approvalOutcome, tea.Cmd) {
 	o := m.Editor.Overlay
 	oldLines := make([]string, 0, o.EndLine-o.StartLine+1)

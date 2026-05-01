@@ -308,11 +308,15 @@ func (a *Agent) currentProvider() llm.Provider {
 	return a.provider
 }
 
-// Approve signals that the user approved the pending edit. The active
-// coordinator is snapshotted under the lock so a concurrent
-// RunWithMode that swaps a.coord cannot redirect this signal to a
-// different run's channels mid-call.
-func (a *Agent) Approve() { a.activeCoord().Approve() }
+// Approve signals that the user approved the pending edit and
+// delivers the post-apply buffer content the orchestrator should
+// seed into the file cache. Callers must pass the actual buffer
+// state after ApplyEdit (which may differ from the agent's predicted
+// ExpectedContent if the developer modified the replacement text in
+// the diff overlay). The active coordinator is snapshotted under the
+// lock so a concurrent RunWithMode that swaps a.coord cannot
+// redirect this signal to a different run's channels mid-call.
+func (a *Agent) Approve(content string) { a.activeCoord().Approve(content) }
 
 // Reject signals that the user rejected the pending edit. See
 // [Agent.Approve] for the snapshot rationale.

@@ -66,11 +66,6 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	// BeforeToolCall and AfterToolCall always pair within one foundation
 	// tool dispatch.
 	var lastWasBlocked bool
-	// truncationRetries counts consecutive truncated turns within the
-	// run. Reset implicitly each new run because FoundationHooks is
-	// called fresh in [New]; survives across non-truncated turns
-	// because the hook value itself outlives turns.
-	var truncationRetries int
 
 	before := func(ctx context.Context, c upagent.BeforeToolCallContext) (upagent.BeforeToolCallResult, error) {
 		// Dispatch order:
@@ -187,8 +182,18 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		// (recovery banner) and on retries-exhausted (terminal abort);
 		// returning Retry=false suppresses the foundation's fallback
 		// emission so frontends see one error, not two.
-		splice, newRetries, err := recoverFromTruncation(nil, c.ToolCalls, truncationRetries, a.currentProvider(), a.send)
-		truncationRetries = newRetries
+		//
+		// The retry counter lives on [Agent.truncationRetries] (reset
+		// at each run boundary in RunWithMode/Reply) — closure state
+		// would leak across runs because FoundationHooks is built once
+		// at [New] time.
+		a.mu.Lock()
+		retries := a.truncationRetries
+		a.mu.Unlock()
+		splice, newRetries, err := recoverFromTruncation(nil, c.ToolCalls, retries, a.currentProvider(), a.send)
+		a.mu.Lock()
+		a.truncationRetries = newRetries
+		a.mu.Unlock()
 		if err != nil {
 			return upagent.TruncationResult{Retry: false, Messages: splice}, nil
 		}

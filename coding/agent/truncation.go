@@ -11,10 +11,10 @@
 //     reject dangling tool_calls on the next request).
 //  3. Try to give the next attempt more headroom: when the provider
 //     supports runtime escalation, double its max-tokens cap (or seed
-//     it at [truncationtruncationInitialEscalation] when previously unset),
-//     capped at [truncationtruncationCeiling].
+//     it at [truncationInitialEscalation] when previously unset),
+//     capped at [truncationCeiling].
 //
-// After [truncationtruncationMaxRetries] consecutive truncations the run
+// After [truncationMaxRetries] consecutive truncations the run
 // abandons the turn rather than loop against a model that will not
 // fit in-budget.
 //

@@ -245,6 +245,15 @@ type Agent struct {
 	// translator goroutine's TurnUsage handler can populate the *Est
 	// fields on [event.AgentTurnUsage] without re-computing.
 	lastEstimate llm.InputEstimate
+	// truncationRetries counts truncated turns within the current run.
+	// Read + incremented by the OnTruncated foundation hook; reset to
+	// zero on each new run alongside the other per-run state. Lives on
+	// the agent (rather than as closure state in [Agent.FoundationHooks])
+	// because FoundationHooks is built once at [New] time — closure
+	// state would persist across runs and cause a previous run's
+	// truncations to count against the next run's [truncationMaxRetries]
+	// budget.
+	truncationRetries int
 
 	// providerProxy is the [llm.Provider] handed to [foundation]. It
 	// shadows [Agent.provider] so [SetProvider] can hot-swap the live

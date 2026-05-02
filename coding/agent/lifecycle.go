@@ -80,6 +80,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
 	a.lastEstimate = llm.InputEstimate{}
+	a.truncationRetries = 0
 
 	for _, t := range a.tools {
 		if r, ok := t.(Resettable); ok {
@@ -180,6 +181,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
 	a.lastEstimate = llm.InputEstimate{}
+	a.truncationRetries = 0
 	a.intent = input
 
 	for _, t := range a.tools {

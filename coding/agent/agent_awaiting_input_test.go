@@ -338,3 +338,83 @@ func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 		t.Errorf("truncation rejection not delivered to LLM for call-trunc; got %+v", provider.toolInputs)
 	}
 }
+
+// TestAgent_TruncationRetries_ResetAcrossRuns locks the per-run reset
+// of [Agent.truncationRetries]. The closure that drives the OnTruncated
+// hook is built once at New time, so without an explicit reset in
+// RunWithMode/Reply a previous run's truncations would count against
+// the next run's [truncationMaxRetries] budget.
+//
+// Run 1 truncates twice (counter 0→1→2 cumulative across runs without
+// the reset). Run 2 also truncates twice; with the reset, each run
+// has its own 0-based counter and both recover. Without the reset,
+// run 2's first truncation reads counter=2, hits the cap, and aborts.
+func TestAgent_TruncationRetries_ResetAcrossRuns(t *testing.T) {
+	truncatedTurn := []llm.StreamEvent{
+		{
+			ToolCalls: []llm.ToolCall{{
+				ID:       "call-trunc",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"x"`},
+			}},
+			Done:      true,
+			Truncated: true,
+		},
+	}
+	cleanTurn := []llm.StreamEvent{
+		{Token: "ok retrying smaller"},
+		{Done: true},
+	}
+	inner := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			truncatedTurn, truncatedTurn, cleanTurn, // run 1: trunc x2 → recover both → park
+			truncatedTurn, truncatedTurn, cleanTurn, // run 2: trunc x2 → recover both → park
+		},
+	}
+	provider := &escalatingProvider{multiTurnProvider: inner}
+
+	events := make(chan event.Event, 64)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// Run 1 — truncation, recovery, park.
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentWaiting)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for AgentWaiting at end of run 1")
+	}
+
+	// Run 2 — second truncation must NOT abort. With the reset in
+	// place, the OnTruncated hook reads truncationRetries=0 and
+	// recovers; without it, the leftover counter from run 1 (=1)
+	// pushes it to truncationMaxRetries on first try and aborts.
+	//
+	// RunWithMode #2 cancels run 1's parked goroutine, which emits an
+	// AgentDone for the cancelled run before run 2 starts streaming.
+	// Drain past it so the assertion below reflects run 2's outcome,
+	// not the wind-down of run 1.
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		_, ok := ev.(event.AgentDone)
+		return ok
+	}) == nil {
+		t.Fatal("timeout waiting for run 1 AgentDone after RunWithMode #2 cancelled it")
+	}
+	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
+		switch ev.(type) {
+		case event.AgentWaiting, event.AgentDone:
+			return true
+		}
+		return false
+	})
+	if ev == nil {
+		t.Fatal("timeout waiting for AgentWaiting / AgentDone at end of run 2")
+	}
+	if done, ok := ev.(event.AgentDone); ok {
+		t.Errorf("run 2 ended with AgentDone(success=%v); want AgentWaiting (truncation should have been recovered)", done.Success)
+	}
+}

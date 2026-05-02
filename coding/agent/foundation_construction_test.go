@@ -29,7 +29,10 @@ func (noopProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) 
 func TestFoundationBuilt_FoundationAndProxyInstalled(t *testing.T) {
 	t.Parallel()
 
-	provider := noopProvider{}
+	// Pointer instance so the equality assertion below has identity
+	// semantics — comparing two value-type noopProvider{} structs
+	// always returns true and would mask a wiring bug.
+	provider := &noopProvider{}
 	events := make(chan event.Event, 8)
 
 	ag := New(provider, stubWorkspace{}, events, nil)
@@ -62,8 +65,11 @@ func TestFoundationBuilt_FoundationAndProxyInstalled(t *testing.T) {
 func TestFoundationBuilt_SetProviderSwapsProxy(t *testing.T) {
 	t.Parallel()
 
-	original := noopProvider{}
-	replacement := noopProvider{}
+	// Pointer instances so original and replacement are distinct under
+	// `==`. Value-type noopProvider{} structs all compare equal, which
+	// would mask a SetProvider that silently no-ops.
+	original := &noopProvider{}
+	replacement := &noopProvider{}
 	events := make(chan event.Event, 8)
 
 	ag := New(original, stubWorkspace{}, events, nil)

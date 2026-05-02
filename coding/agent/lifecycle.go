@@ -10,7 +10,10 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/approval"
+	"github.com/latebit-io/nib/coding/budget"
 	"github.com/latebit-io/nib/coding/event"
+	"github.com/latebit-io/nib/coding/prompts"
+	"github.com/latebit-io/nib/coding/style"
 	"github.com/latebit-io/nib/engine/lint"
 )
 
@@ -33,7 +36,7 @@ import (
 
 // Run starts a new conversation in execution mode. See RunWithMode for details.
 func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
-	a.RunWithMode(ctx, fileName, fileContent, goal, contextFiles, ModeExecution)
+	a.RunWithMode(ctx, fileName, fileContent, goal, contextFiles, event.ModeExecution)
 }
 
 // RunWithMode starts a new conversation in the specified mode.
@@ -49,7 +52,7 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, con
 // [upagent.Agent.PromptWithMessages]. The translator goroutine spawned
 // in [New] re-emits foundation events as engine events so frontends
 // see the same vocabulary they always have.
-func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode Mode) {
+func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode event.Mode) {
 	a.mu.Lock()
 	prevCancel := a.cancel
 	// Allocate a fresh coordinator for the new run instead of reusing
@@ -72,7 +75,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	clear(a.validatorRetries)
 	a.savedMessages = nil
 	a.savedMode = 0
-	a.sessionUsage = SessionUsage{}
+	a.sessionUsage = budget.Session{}
 	a.turnCounter = 0
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
@@ -124,8 +127,8 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 // uses to render the "Thinking..." / "Planning..." preface. Mirrors
 // the inline run goroutine's first action so frontends see the same
 // pre-Stream feedback they always have.
-func (a *Agent) emitOpening(mode Mode) {
-	if mode == ModePlanning {
+func (a *Agent) emitOpening(mode event.Mode) {
+	if mode == event.ModePlanning {
 		a.send(event.AgentToken{Text: "Planning...\n\n"})
 		a.send(event.AgentStatus{Status: event.StatusPlanning})
 		return
@@ -172,7 +175,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	clear(a.validatorRetries)
 	a.savedMessages = nil
 	a.savedMode = 0
-	a.sessionUsage = SessionUsage{}
+	a.sessionUsage = budget.Session{}
 	a.turnCounter = 0
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
@@ -274,10 +277,10 @@ func (a *Agent) SetProvider(p llm.Provider) {
 // SetStyle atomically replaces the active coding style and post-task linters.
 // Pass nil style and nil linters to disable style enforcement.
 // Safe to call between turns.
-func (a *Agent) SetStyle(style *CodingStyleData, linters []lint.Linter) {
+func (a *Agent) SetStyle(cs *prompts.CodingStyleData, linters []lint.Linter) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.codingStyle = style
+	a.codingStyle = cs
 	a.linters = slices.Clone(linters)
 	if len(linters) == 0 {
 		a.pendingLint = ""
@@ -304,14 +307,14 @@ func (a *Agent) SetAutonomous(on bool) {
 
 // SetEvaluator replaces the style evaluator. Pass nil to disable.
 // Safe to call between turns.
-func (a *Agent) SetEvaluator(eval StyleEvaluatorPort) {
+func (a *Agent) SetEvaluator(eval style.StyleEvaluatorPort) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.evaluator = eval
 }
 
 // Usage returns the accumulated token consumption for the current session.
-func (a *Agent) Usage() SessionUsage {
+func (a *Agent) Usage() budget.Session {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.sessionUsage
@@ -352,7 +355,7 @@ func (a *Agent) currentTerse() bool {
 // Mode is mutated by RunWithMode under a.mu; every read site routes
 // through this helper so concurrent runtime configuration cannot
 // observe a torn / partially-updated value.
-func (a *Agent) currentMode() Mode {
+func (a *Agent) currentMode() event.Mode {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.mode
@@ -366,7 +369,7 @@ func (a *Agent) currentAutonomous() bool {
 }
 
 // currentCodingStyle returns the active coding style under lock.
-func (a *Agent) currentCodingStyle() *CodingStyleData {
+func (a *Agent) currentCodingStyle() *prompts.CodingStyleData {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.codingStyle

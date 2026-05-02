@@ -6,7 +6,8 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/ai/llmconfig"
-	"github.com/latebit-io/nib/coding/agent"
+	"github.com/latebit-io/nib/coding/prompts"
+	"github.com/latebit-io/nib/coding/style"
 	"github.com/latebit-io/nib/engine/lint"
 	"github.com/latebit-io/nib/engine/styleconfig"
 	"github.com/latebit-io/nib/engine/validate/architecture"
@@ -86,7 +87,7 @@ type StyleResult struct {
 	// Resolved is the active style after merge. Nil when no style is active.
 	Resolved *styleconfig.Resolved
 	// AgentStyle is the prompt-ready data for the agent. Nil when no style is active.
-	AgentStyle *agent.CodingStyleData
+	AgentStyle *prompts.CodingStyleData
 	// Linters is the effective set of linters for the active style. It is
 	// either the style's configured lint_cmd wrapped as raw adapters, or
 	// DefaultLinters when the style has no explicit lint_cmd. Nil when no
@@ -160,7 +161,7 @@ func NewStyle(projectRoot string) StyleResult {
 	return StyleResult{
 		Config:                cfg,
 		Resolved:              resolved,
-		AgentStyle:            agent.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules)),
+		AgentStyle:            prompts.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules)),
 		Linters:               LintersForStyle(resolved.LintCmd, defaults),
 		DefaultLinters:        defaults,
 		PerFileLinters:        perFileHolder,
@@ -198,7 +199,7 @@ func LintersForStylePerFile(lintCmd []string, perFileDefaults []lint.Linter) []l
 // is created for that model using the given LLM config. Returns nil when the
 // evaluator is disabled in config or no provider is available.
 // Use [ForceStyleEvaluator] when the developer explicitly toggles the evaluator on.
-func NewStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider, llmCfg *llmconfig.Config) *agent.StyleEvaluator {
+func NewStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider, llmCfg *llmconfig.Config) *style.StyleEvaluator {
 	if resolved == nil || !resolved.Evaluator {
 		return nil
 	}
@@ -209,7 +210,7 @@ func NewStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider
 // Evaluator flag. Used when the developer explicitly enables the evaluator
 // at runtime via Alt+V. Honors EvaluatorModel if configured.
 // Returns nil when no provider is available.
-func ForceStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider, llmCfg *llmconfig.Config) *agent.StyleEvaluator {
+func ForceStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provider, llmCfg *llmconfig.Config) *style.StyleEvaluator {
 	if resolved == nil {
 		return nil
 	}
@@ -231,18 +232,18 @@ func ForceStyleEvaluator(resolved *styleconfig.Resolved, mainProvider llm.Provid
 		return nil
 	}
 
-	data := agent.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules))
+	data := prompts.NewCodingStyleData(resolved.Name, ConvertRules(resolved.Rules))
 
 	slog.Info("wire: style evaluator enabled", "style", resolved.Name, "rules", len(data.Rules))
-	return agent.NewStyleEvaluator(provider, data.Rules, 0) // 0 = default timeout
+	return style.NewStyleEvaluator(provider, data.Rules, 0) // 0 = default timeout
 }
 
-// ConvertRules translates styleconfig rules into agent-ready StyleRule values.
+// ConvertRules translates styleconfig rules into prompt-ready StyleRule values.
 // Used by NewStyle and by the TUI for runtime style switching.
-func ConvertRules(rules []styleconfig.Rule) []agent.StyleRule {
-	out := make([]agent.StyleRule, len(rules))
+func ConvertRules(rules []styleconfig.Rule) []prompts.StyleRule {
+	out := make([]prompts.StyleRule, len(rules))
 	for i, r := range rules {
-		out[i] = agent.StyleRule{Name: r.Name, Instruction: r.Instruction, Enforcement: r.Enforcement}
+		out[i] = prompts.StyleRule{Name: r.Name, Instruction: r.Instruction, Enforcement: r.Enforcement}
 	}
 	return out
 }

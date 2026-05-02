@@ -21,25 +21,14 @@ import (
 	"github.com/latebit-io/nib/coding/budget"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/nudges"
+	"github.com/latebit-io/nib/coding/prompts"
+	"github.com/latebit-io/nib/coding/style"
 	"github.com/latebit-io/nib/coding/tools"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/lint"
 	"github.com/latebit-io/nib/engine/memory"
 	"github.com/latebit-io/nib/engine/runconfig"
 	"github.com/latebit-io/nib/engine/validate"
-)
-
-// Mode is an alias for event.Mode so existing callers within the agent
-// package can use the unqualified names. The canonical definition lives
-// in the event package (shared domain types).
-type Mode = event.Mode
-
-const (
-	// ModeExecution is the default mode: all tools available, execution prompt.
-	ModeExecution = event.ModeExecution
-	// ModePlanning restricts the agent to read-only and memory tools,
-	// using a planning-focused prompt for conversational design.
-	ModePlanning = event.ModePlanning
 )
 
 // InteractionMode controls prompt framing — how the agent describes its
@@ -116,13 +105,13 @@ type Agent struct {
 	tools    map[string]Tool
 	toolDefs []llm.ToolDef
 	cache    *FileCache
-	prompts  *PromptLoader
+	prompts  *prompts.PromptLoader
 
 	mu         sync.Mutex
 	cancel     context.CancelFunc
 	activeFile string
-	intent     string // current developer intent — included in every tool result
-	mode       Mode   // current conversation mode (execution or planning)
+	intent     string     // current developer intent — included in every tool result
+	mode       event.Mode // current conversation mode (execution or planning)
 
 	// coord owns the four coordination channels (approve/continue/
 	// reply/answer) the agent uses to talk to the frontend. Replaced
@@ -148,7 +137,7 @@ type Agent struct {
 	// exits (cancel, fatal error). Resume picks these up to continue
 	// from where the conversation left off instead of starting fresh.
 	savedMessages []llm.Message
-	savedMode     Mode
+	savedMode     event.Mode
 
 	// diagProvider is optionally set to auto-inject diagnostics after edits.
 	diagProvider lang.DiagnosticProvider
@@ -176,7 +165,7 @@ type Agent struct {
 
 	// codingStyle holds the active coding style rules for prompt injection.
 	// Nil when no style is configured.
-	codingStyle *CodingStyleData
+	codingStyle *prompts.CodingStyleData
 
 	// linters is the set of lint adapters to run at task completion.
 	// Nil when no linter is configured. Each adapter returns a structured
@@ -219,9 +208,9 @@ type Agent struct {
 
 	// evaluator is the optional style evaluator that reviews edits after
 	// each turn completes. Nil when the feature is disabled. Typed as
-	// [StyleEvaluatorPort] so tests can substitute a deterministic stub
+	// [style.StyleEvaluatorPort] so tests can substitute a deterministic stub
 	// without spinning up a real LLM provider.
-	evaluator StyleEvaluatorPort
+	evaluator style.StyleEvaluatorPort
 	// taskEdits collects edits made during the current task for end-of-task
 	// review. Accumulates across many LLM turns; cleared on RunWithMode and
 	// on task completion. Named for the task boundary (not turn) — lint and
@@ -316,7 +305,7 @@ type NewOptions struct {
 	DistributedMemory []string
 	// CodingStyle holds the resolved coding style. When non-nil, style rules
 	// are injected into the system prompt as architectural constraints.
-	CodingStyle *CodingStyleData
+	CodingStyle *prompts.CodingStyleData
 	// Linters is the set of lint adapters to run at task completion. Each
 	// adapter returns a structured lint.Result (findings or error). Nil
 	// disables post-task lint. Use lint.Detect or lint.FromShellCommands to
@@ -329,10 +318,10 @@ type NewOptions struct {
 	ValidationPipeline validate.Pipeline
 	// StyleEvaluator is the optional style reviewer. When non-nil, proposed
 	// edits are reviewed against style rules before being shown to the
-	// developer. Typed as [StyleEvaluatorPort] so callers can inject a
+	// developer. Typed as [style.StyleEvaluatorPort] so callers can inject a
 	// stub or alternative implementation; the LLM-backed
-	// [*StyleEvaluator] satisfies the interface.
-	StyleEvaluator StyleEvaluatorPort
+	// [*style.StyleEvaluator] satisfies the interface.
+	StyleEvaluator style.StyleEvaluatorPort
 	// Terse enables terse output mode at startup. When true, the system
 	// prompt instructs the LLM to minimize explanatory text, reducing
 	// output tokens by ~65%. Switchable at runtime via SetTerse.
@@ -375,9 +364,9 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var extraBlocklist []string
 	var interaction InteractionMode
 	var distributedMemory []string
-	var codingStyle *CodingStyleData
+	var codingStyle *prompts.CodingStyleData
 	var linters []lint.Linter
-	var evaluator StyleEvaluatorPort
+	var evaluator style.StyleEvaluatorPort
 	var terse bool
 	var smokeCfg runconfig.Resolved
 	var pipeline validate.Pipeline = validate.NoopPipeline{}
@@ -412,7 +401,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		provider:          provider,
 		events:            events,
 		cache:             cache,
-		prompts:           NewPromptLoader(projectRoot),
+		prompts:           prompts.NewPromptLoader(projectRoot),
 		coord:             coord,
 		diagProvider:      diagProvider,
 		planningBlocklist: merged,

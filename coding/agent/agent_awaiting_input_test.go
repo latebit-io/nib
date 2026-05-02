@@ -146,7 +146,7 @@ func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
 
 	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
@@ -190,7 +190,7 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
 
 	// After retry exhaustion the OnTruncated hook returns Retry=false
 	// and the foundation ends the run via AgentEnd. The translator
@@ -261,7 +261,7 @@ func TestAgent_StreamClosedBeforeDone_SurfacesError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
 
 	// The agent must emit an AgentError describing the stream failure —
 	// never reach AgentWaiting treating the partial tokens as a clean turn.
@@ -316,7 +316,7 @@ func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
 
 	// Wait for the turn to end.
 	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {

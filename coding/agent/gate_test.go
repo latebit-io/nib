@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/latebit-io/nib/coding/event"
 )
 
 // gateTracker is a TaskTracker stub that drives enforceActiveTaskGate
@@ -28,7 +30,7 @@ type gateTestWorkspace struct {
 	*gateTracker
 }
 
-func newGateTestAgent(tracker *gateTracker, mode Mode) *Agent {
+func newGateTestAgent(tracker *gateTracker, mode event.Mode) *Agent {
 	ws := &gateTestWorkspace{
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
@@ -38,7 +40,7 @@ func newGateTestAgent(tracker *gateTracker, mode Mode) *Agent {
 
 func TestEnforceActiveTaskGate_NoTaskTracker(t *testing.T) {
 	// Workspace that doesn't implement TaskTracker — gate stays off.
-	a := &Agent{workspace: &testWorkspace{}, mode: ModeExecution}
+	a := &Agent{workspace: &testWorkspace{}, mode: event.ModeExecution}
 	if msg := a.enforceActiveTaskGate(context.Background(), "edit_file"); msg != "" {
 		t.Errorf("expected empty, got: %s", msg)
 	}
@@ -48,7 +50,7 @@ func TestEnforceActiveTaskGate_PlanningMode(t *testing.T) {
 	// Planning mode doesn't gate — the planning-mode blocklist already
 	// rejects mutating tools.
 	tracker := &gateTracker{loaded: true, activePath: ""}
-	a := newGateTestAgent(tracker, ModePlanning)
+	a := newGateTestAgent(tracker, event.ModePlanning)
 	if msg := a.enforceActiveTaskGate(context.Background(), "edit_file"); msg != "" {
 		t.Errorf("expected empty in planning mode, got: %s", msg)
 	}
@@ -56,7 +58,7 @@ func TestEnforceActiveTaskGate_PlanningMode(t *testing.T) {
 
 func TestEnforceActiveTaskGate_NonMutatingTool(t *testing.T) {
 	tracker := &gateTracker{loaded: true, activePath: ""}
-	a := newGateTestAgent(tracker, ModeExecution)
+	a := newGateTestAgent(tracker, event.ModeExecution)
 	for _, tool := range []string{"read_file", "search_project", "glob", "list_files"} {
 		if msg := a.enforceActiveTaskGate(context.Background(), tool); msg != "" {
 			t.Errorf("%s should not gate: %s", tool, msg)
@@ -70,7 +72,7 @@ func TestEnforceActiveTaskGate_TreeNotLoadedAllows(t *testing.T) {
 	// what prevents the startup deadlock: the gate and the task tools
 	// used to both require a loaded tree, leaving no escape path.
 	tracker := &gateTracker{loaded: false}
-	a := newGateTestAgent(tracker, ModeExecution)
+	a := newGateTestAgent(tracker, event.ModeExecution)
 	if msg := a.enforceActiveTaskGate(context.Background(), "edit_file"); msg != "" {
 		t.Errorf("expected empty when tree not loaded, got: %s", msg)
 	}
@@ -78,7 +80,7 @@ func TestEnforceActiveTaskGate_TreeNotLoadedAllows(t *testing.T) {
 
 func TestEnforceActiveTaskGate_NoActiveTaskBlocks(t *testing.T) {
 	tracker := &gateTracker{loaded: true, activePath: ""}
-	a := newGateTestAgent(tracker, ModeExecution)
+	a := newGateTestAgent(tracker, event.ModeExecution)
 	for _, tool := range []string{"edit_file", "write_file", "replace_file", "bash", "smoke_run"} {
 		msg := a.enforceActiveTaskGate(context.Background(), tool)
 		if msg == "" {
@@ -96,7 +98,7 @@ func TestEnforceActiveTaskGate_NoActiveTaskBlocks(t *testing.T) {
 
 func TestEnforceActiveTaskGate_ActiveTaskPasses(t *testing.T) {
 	tracker := &gateTracker{loaded: true, activePath: "Phase 1 > Setup > task"}
-	a := newGateTestAgent(tracker, ModeExecution)
+	a := newGateTestAgent(tracker, event.ModeExecution)
 	if msg := a.enforceActiveTaskGate(context.Background(), "edit_file"); msg != "" {
 		t.Errorf("expected empty when active task present, got: %s", msg)
 	}

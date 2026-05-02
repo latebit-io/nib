@@ -1,4 +1,4 @@
-package streaming
+package agent
 
 import (
 	"log/slog"
@@ -7,40 +7,40 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 )
 
-// CompactHistoryThreshold is the estimated history token count above
+// compactHistoryThreshold is the estimated history token count above
 // which old tool results are truncated to reduce input cost.
 // Compaction is triggered before each LLM call so the next request
 // fits a smaller window without losing the recent conversation.
-const CompactHistoryThreshold = 30_000
+const compactHistoryThreshold = 30_000
 
-// CompactKeepTurns is the number of recent user turns whose tool
+// compactKeepTurns is the number of recent user turns whose tool
 // results are preserved verbatim during compaction. Older tool
 // results are summarised so the model still sees the conversation
 // shape but not its full historical detail.
-const CompactKeepTurns = 3
+const compactKeepTurns = 3
 
-// CompactMinBytes is the minimum tool result size (bytes) below
+// compactMinBytes is the minimum tool result size (bytes) below
 // which compaction leaves the result untouched. Smaller results
 // cost little to keep and pruning them yields negligible savings.
-const CompactMinBytes = 200
+const compactMinBytes = 200
 
-// MaybeCompact checks whether the conversation history is large
+// maybeCompact checks whether the conversation history is large
 // enough to warrant compaction. If so, truncates old tool results
 // (delegating to [llm.CompactMessages]) and emits an AgentCompacted
 // event. Returns the (possibly compacted) message slice.
 //
 // The decision is based on [llm.EstimateMessageTokens] against
-// [CompactHistoryThreshold]; estimation runs on every turn but
+// [compactHistoryThreshold]; estimation runs on every turn but
 // compaction itself only fires when the threshold is crossed AND
 // [llm.CompactMessages] reports that something actually changed
 // (a tree of small tool results may estimate over the threshold
 // but contain nothing prunable).
-func MaybeCompact(messages []llm.Message, toolDefs []llm.ToolDef, send Sender) []llm.Message {
+func maybeCompact(messages []llm.Message, toolDefs []llm.ToolDef, send sender) []llm.Message {
 	est := llm.EstimateMessageTokens(messages, toolDefs)
-	if est.History < CompactHistoryThreshold {
+	if est.History < compactHistoryThreshold {
 		return messages
 	}
-	compacted, changed := llm.CompactMessages(messages, CompactKeepTurns, CompactMinBytes)
+	compacted, changed := llm.CompactMessages(messages, compactKeepTurns, compactMinBytes)
 	if !changed {
 		return messages
 	}
@@ -57,12 +57,12 @@ func MaybeCompact(messages []llm.Message, toolDefs []llm.ToolDef, send Sender) [
 	return compacted
 }
 
-// EstimateAndBroadcast computes a client-side input estimate and
+// estimateAndBroadcast computes a client-side input estimate and
 // emits an AgentInputEstimate event so the frontend status bar
 // updates before the LLM call starts. Returns the same estimate so
 // the caller can store it for budget bookkeeping without re-
 // computing.
-func EstimateAndBroadcast(messages []llm.Message, toolDefs []llm.ToolDef, send Sender) llm.InputEstimate {
+func estimateAndBroadcast(messages []llm.Message, toolDefs []llm.ToolDef, send sender) llm.InputEstimate {
 	est := llm.EstimateMessageTokens(messages, toolDefs)
 	send(event.AgentInputEstimate{
 		System:  est.System,

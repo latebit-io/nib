@@ -10,7 +10,6 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
-	"github.com/latebit-io/nib/coding/truncation"
 )
 
 // multiTurnProvider serves pre-canned stream events for each successive
@@ -106,7 +105,7 @@ func TestAgent_RequestInputUnregisteredAcrossModes(t *testing.T) {
 }
 
 // escalatingProvider wraps multiTurnProvider and also implements
-// truncation.Escalator, so the agent-loop escalation path fires during the
+// escalator, so the agent-loop escalation path fires during the
 // truncation test. Embedding preserves the scripted-stream Stream() method.
 type escalatingProvider struct {
 	*multiTurnProvider
@@ -157,16 +156,16 @@ func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
 
 	// The provider's max_tokens should have been bumped to the initial
 	// escalation value (started at 0 → unset → jumps to the floor).
-	if provider.MaxTokens() != truncation.InitialEscalation {
+	if provider.MaxTokens() != truncationInitialEscalation {
 		t.Errorf("MaxTokens after escalation = %d, want %d",
-			provider.MaxTokens(), truncation.InitialEscalation)
+			provider.MaxTokens(), truncationInitialEscalation)
 	}
 }
 
 func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 	// A misbehaving model (or one already at the output-token ceiling) that
 	// keeps returning Truncated=true must not loop forever — the agent
-	// abandons the turn after truncation.MaxRetries consecutive truncations.
+	// abandons the turn after truncationMaxRetries consecutive truncations.
 	truncatedTurn := []llm.StreamEvent{
 		{
 			ToolCalls: []llm.ToolCall{{
@@ -178,8 +177,8 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 			Truncated: true,
 		},
 	}
-	turns := make([][]llm.StreamEvent, 0, truncation.MaxRetries+2)
-	for i := 0; i < truncation.MaxRetries+2; i++ {
+	turns := make([][]llm.StreamEvent, 0, truncationMaxRetries+2)
+	for i := 0; i < truncationMaxRetries+2; i++ {
 		turns = append(turns, truncatedTurn)
 	}
 	provider := &multiTurnProvider{turns: turns}
@@ -194,9 +193,8 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 
 	// After retry exhaustion the OnTruncated hook returns Retry=false
 	// and the foundation ends the run via AgentEnd. The translator
-	// emits AgentDone(success=false) directly — no intervening
-	// AgentWaiting park (the inline-loop "park on error" path is gone
-	// post-cutover; errors unwind cleanly through AgentDone).
+	// emits AgentDone(success=false) directly — errors unwind cleanly
+	// through AgentDone, no intervening AgentWaiting park.
 	done := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentDone)
 		return ok
@@ -208,10 +206,10 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 		t.Errorf("AgentDone.Success = true on truncation abort, want false")
 	}
 
-	// The provider should have been called exactly truncation.MaxRetries+1
+	// The provider should have been called exactly truncationMaxRetries+1
 	// times — retries capped, no infinite loop.
 	provider.mu.Lock()
-	wantCalls := truncation.MaxRetries + 1
+	wantCalls := truncationMaxRetries + 1
 	if provider.call != wantCalls {
 		t.Errorf("provider calls = %d, want %d", provider.call, wantCalls)
 	}

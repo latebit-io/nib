@@ -1,4 +1,4 @@
-package truncation
+package agent
 
 import (
 	"context"
@@ -16,20 +16,20 @@ func TestEscalateValue(t *testing.T) {
 		current int
 		want    int
 	}{
-		{"unset starts at initial escalation", 0, InitialEscalation},
-		{"small value jumps to initial", 1024, InitialEscalation},
-		{"below-initial doubles below initial → floor to initial", 8000, InitialEscalation},
-		{"at initial doubles", InitialEscalation, InitialEscalation * 2},
-		{"caps at ceiling", Ceiling / 2, Ceiling},
-		{"beyond ceiling stays at ceiling", Ceiling + 10_000, Ceiling},
-		{"at ceiling does not move", Ceiling, Ceiling},
+		{"unset starts at initial escalation", 0, truncationInitialEscalation},
+		{"small value jumps to initial", 1024, truncationInitialEscalation},
+		{"below-initial doubles below initial → floor to initial", 8000, truncationInitialEscalation},
+		{"at initial doubles", truncationInitialEscalation, truncationInitialEscalation * 2},
+		{"caps at ceiling", truncationCeiling / 2, truncationCeiling},
+		{"beyond ceiling stays at ceiling", truncationCeiling + 10_000, truncationCeiling},
+		{"at ceiling does not move", truncationCeiling, truncationCeiling},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := EscalateValue(tc.current); got != tc.want {
-				t.Errorf("EscalateValue(%d) = %d, want %d", tc.current, got, tc.want)
+			if got := escalateValue(tc.current); got != tc.want {
+				t.Errorf("escalateValue(%d) = %d, want %d", tc.current, got, tc.want)
 			}
 		})
 	}
@@ -54,32 +54,32 @@ func (s *stubEscalator) SetMaxTokens(v int) { s.max = v }
 func TestEscalate_DoublesUnsetToInitial(t *testing.T) {
 	t.Parallel()
 	esc := &stubEscalator{max: 0}
-	from, to, ok := Escalate(esc)
+	from, to, ok := escalate(esc)
 	if !ok {
 		t.Fatal("expected escalation to succeed")
 	}
 	if from != 0 {
 		t.Errorf("from = %d, want 0", from)
 	}
-	if to != InitialEscalation {
-		t.Errorf("to = %d, want %d", to, InitialEscalation)
+	if to != truncationInitialEscalation {
+		t.Errorf("to = %d, want %d", to, truncationInitialEscalation)
 	}
-	if esc.max != InitialEscalation {
-		t.Errorf("provider max = %d, want %d", esc.max, InitialEscalation)
+	if esc.max != truncationInitialEscalation {
+		t.Errorf("provider max = %d, want %d", esc.max, truncationInitialEscalation)
 	}
 }
 
-func TestEscalate_NoMoveAtCeiling(t *testing.T) {
+func TestEscalate_NoMoveAttruncationCeiling(t *testing.T) {
 	t.Parallel()
-	esc := &stubEscalator{max: Ceiling}
-	from, to, ok := Escalate(esc)
+	esc := &stubEscalator{max: truncationCeiling}
+	from, to, ok := escalate(esc)
 	if ok {
 		t.Fatal("expected no escalation at ceiling")
 	}
-	if from != Ceiling || to != Ceiling {
-		t.Errorf("from=%d to=%d, want both %d", from, to, Ceiling)
+	if from != truncationCeiling || to != truncationCeiling {
+		t.Errorf("from=%d to=%d, want both %d", from, to, truncationCeiling)
 	}
-	if esc.max != Ceiling {
+	if esc.max != truncationCeiling {
 		t.Errorf("provider max changed unexpectedly: %d", esc.max)
 	}
 }
@@ -89,7 +89,7 @@ func TestAppendRejections_OnePerToolCall(t *testing.T) {
 	calls := []llm.ToolCall{
 		{ID: "a"}, {ID: "b"}, {ID: "c"},
 	}
-	got := AppendRejections(nil, calls, "rej")
+	got := appendRejections(nil, calls, "rej")
 	if len(got) != 3 {
 		t.Fatalf("got %d messages, want 3", len(got))
 	}
@@ -109,7 +109,7 @@ func TestAppendRejections_OnePerToolCall(t *testing.T) {
 func TestAppendRejections_EmptyCallsIsNoop(t *testing.T) {
 	t.Parallel()
 	in := []llm.Message{{Role: "user", Content: "hi"}}
-	got := AppendRejections(in, nil, "rej")
+	got := appendRejections(in, nil, "rej")
 	if len(got) != len(in) {
 		t.Errorf("len(got) = %d, want %d (no-op when toolCalls empty)", len(got), len(in))
 	}
@@ -117,7 +117,7 @@ func TestAppendRejections_EmptyCallsIsNoop(t *testing.T) {
 
 func TestRecoveryMessages_AppliedPhrasing(t *testing.T) {
 	t.Parallel()
-	tool, user, ui := RecoveryMessages(8192, 16384, EscalationApplied)
+	tool, user, ui := recoveryMessages(8192, 16384, escalationApplied)
 	if !strings.Contains(tool, "8192") || !strings.Contains(tool, "16384") {
 		t.Errorf("tool message missing from/to numbers: %q", tool)
 	}
@@ -129,9 +129,9 @@ func TestRecoveryMessages_AppliedPhrasing(t *testing.T) {
 	}
 }
 
-func TestRecoveryMessages_AtCeilingPhrasing(t *testing.T) {
+func TestRecoveryMessages_AttruncationCeilingPhrasing(t *testing.T) {
 	t.Parallel()
-	tool, user, ui := RecoveryMessages(Ceiling, Ceiling, EscalationAtCeiling)
+	tool, user, ui := recoveryMessages(truncationCeiling, truncationCeiling, escalationAtCeiling)
 	if !strings.Contains(tool, "ceiling") {
 		t.Errorf("tool message should mention ceiling: %q", tool)
 	}
@@ -146,7 +146,7 @@ func TestRecoveryMessages_AtCeilingPhrasing(t *testing.T) {
 func TestRecoveryMessages_UnsupportedPhrasing(t *testing.T) {
 	t.Parallel()
 	// from/to stay zero when the provider doesn't implement Escalator.
-	tool, user, ui := RecoveryMessages(0, 0, EscalationUnsupported)
+	tool, user, ui := recoveryMessages(0, 0, escalationUnsupported)
 	for _, msg := range []string{tool, user, ui} {
 		if strings.Contains(msg, "ceiling") {
 			t.Errorf("unsupported phrasing must not mention 'ceiling' "+
@@ -165,15 +165,15 @@ func TestRecover_UnderRetryCap_EscalatesAndContinues(t *testing.T) {
 	var sent []event.Event
 	sender := func(ev event.Event) { sent = append(sent, ev) }
 
-	msgs, retries, err := Recover(nil, calls, 0, provider, sender)
+	msgs, retries, err := recoverFromTruncation(nil, calls, 0, provider, sender)
 	if err != nil {
 		t.Fatalf("Recover err = %v, want nil", err)
 	}
 	if retries != 1 {
 		t.Errorf("retries = %d, want 1 (incremented)", retries)
 	}
-	if provider.max != InitialEscalation {
-		t.Errorf("provider not escalated: max=%d, want %d", provider.max, InitialEscalation)
+	if provider.max != truncationInitialEscalation {
+		t.Errorf("provider not escalated: max=%d, want %d", provider.max, truncationInitialEscalation)
 	}
 	if len(msgs) != 1 || msgs[0].ToolCallID != "x" {
 		t.Errorf("expected one tool-role rejection for call x, got %+v", msgs)
@@ -185,8 +185,8 @@ func TestRecover_UnderRetryCap_EscalatesAndContinues(t *testing.T) {
 
 func TestRecover_NoToolCalls_AppendsUserNudge(t *testing.T) {
 	t.Parallel()
-	provider := &stubEscalator{max: InitialEscalation}
-	msgs, _, err := Recover(nil, nil, 0, provider, nil)
+	provider := &stubEscalator{max: truncationInitialEscalation}
+	msgs, _, err := recoverFromTruncation(nil, nil, 0, provider, nil)
 	if err != nil {
 		t.Fatalf("Recover err = %v, want nil", err)
 	}
@@ -200,20 +200,20 @@ func TestRecover_NoToolCalls_AppendsUserNudge(t *testing.T) {
 
 func TestRecover_AtRetryCap_ReturnsTerminalError(t *testing.T) {
 	t.Parallel()
-	provider := &stubEscalator{max: InitialEscalation}
+	provider := &stubEscalator{max: truncationInitialEscalation}
 	calls := []llm.ToolCall{{ID: "x"}, {ID: "y"}}
 	var sent []event.Event
 	sender := func(ev event.Event) { sent = append(sent, ev) }
 
-	msgs, retries, err := Recover(nil, calls, MaxRetries, provider, sender)
+	msgs, retries, err := recoverFromTruncation(nil, calls, truncationMaxRetries, provider, sender)
 	if err == nil {
 		t.Fatal("Recover err = nil, want terminal error at retry cap")
 	}
 	if !strings.Contains(err.Error(), "abandoning turn") {
 		t.Errorf("err = %q, want substring 'abandoning turn'", err)
 	}
-	if retries != MaxRetries {
-		t.Errorf("retries = %d, want %d (NOT incremented on abort)", retries, MaxRetries)
+	if retries != truncationMaxRetries {
+		t.Errorf("retries = %d, want %d (NOT incremented on abort)", retries, truncationMaxRetries)
 	}
 	if len(msgs) != len(calls) {
 		t.Errorf("got %d rejections, want %d (one per pending call)", len(msgs), len(calls))
@@ -222,7 +222,7 @@ func TestRecover_AtRetryCap_ReturnsTerminalError(t *testing.T) {
 		t.Errorf("expected one AgentError event on abort, got %d", len(sent))
 	}
 	// Provider should NOT have been escalated on abort — we're abandoning.
-	if provider.max != InitialEscalation {
+	if provider.max != truncationInitialEscalation {
 		t.Errorf("provider escalated during abort: max=%d", provider.max)
 	}
 }
@@ -232,7 +232,7 @@ func TestRecover_NonEscalatorProvider_NoOpsEscalation(t *testing.T) {
 	// noEscProvider satisfies llm.Provider but NOT Escalator.
 	provider := noEscProvider{}
 	calls := []llm.ToolCall{{ID: "x"}}
-	msgs, retries, err := Recover(nil, calls, 0, provider, nil)
+	msgs, retries, err := recoverFromTruncation(nil, calls, 0, provider, nil)
 	if err != nil {
 		t.Fatalf("Recover err = %v, want nil", err)
 	}
@@ -258,10 +258,10 @@ func TestRecover_NilSender_DoesNotPanic(t *testing.T) {
 			t.Errorf("Recover panicked with nil sender: %v", r)
 		}
 	}()
-	if _, _, err := Recover(nil, nil, 0, provider, nil); err != nil {
+	if _, _, err := recoverFromTruncation(nil, nil, 0, provider, nil); err != nil {
 		t.Errorf("under-cap path err = %v, want nil", err)
 	}
-	if _, _, err := Recover(nil, nil, MaxRetries, provider, nil); err == nil {
+	if _, _, err := recoverFromTruncation(nil, nil, truncationMaxRetries, provider, nil); err == nil {
 		t.Error("at-cap path err = nil, want non-nil terminal error")
 	}
 }

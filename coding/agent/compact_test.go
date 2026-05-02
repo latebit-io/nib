@@ -1,4 +1,4 @@
-package streaming
+package agent
 
 import (
 	"strings"
@@ -21,7 +21,7 @@ func TestMaybeCompact_BelowThresholdNoOp(t *testing.T) {
 	var sent []event.Event
 	send := func(ev event.Event) { sent = append(sent, ev) }
 
-	out := MaybeCompact(in, nil, send)
+	out := maybeCompact(in, nil, send)
 
 	if len(out) != len(in) {
 		t.Errorf("len(out) = %d, want %d (no-op below threshold)", len(out), len(in))
@@ -32,7 +32,7 @@ func TestMaybeCompact_BelowThresholdNoOp(t *testing.T) {
 }
 
 // TestMaybeCompact_AboveThresholdCompactsAndEmits builds a history
-// large enough to cross [CompactHistoryThreshold] (via a heavy tool
+// large enough to cross [compactHistoryThreshold] (via a heavy tool
 // result that [llm.CompactMessages] will prune) and asserts that the
 // returned slice is shorter in token estimate AND an AgentCompacted
 // event fires with the before/after counts.
@@ -61,15 +61,15 @@ func TestMaybeCompact_AboveThresholdCompactsAndEmits(t *testing.T) {
 	}
 
 	before := llm.EstimateMessageTokens(msgs, nil)
-	if before.History < CompactHistoryThreshold {
+	if before.History < compactHistoryThreshold {
 		t.Skipf("test fixture below threshold: history=%d threshold=%d — adjust heavy text",
-			before.History, CompactHistoryThreshold)
+			before.History, compactHistoryThreshold)
 	}
 
 	var sent []event.Event
 	send := func(ev event.Event) { sent = append(sent, ev) }
 
-	out := MaybeCompact(msgs, nil, send)
+	out := maybeCompact(msgs, nil, send)
 
 	after := llm.EstimateMessageTokens(out, nil)
 	if after.History >= before.History {
@@ -104,7 +104,7 @@ func TestEstimateAndBroadcast_EmitsEventAndReturnsEstimate(t *testing.T) {
 	var sent []event.Event
 	send := func(ev event.Event) { sent = append(sent, ev) }
 
-	got := EstimateAndBroadcast(msgs, nil, send)
+	got := estimateAndBroadcast(msgs, nil, send)
 
 	if len(sent) != 1 {
 		t.Fatalf("sent %d events, want 1 (AgentInputEstimate)", len(sent))

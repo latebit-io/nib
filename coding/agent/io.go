@@ -16,10 +16,8 @@ import (
 // buffers before each tool dispatch — bypassing the agent goroutine's
 // no-touch policy on TUI buffer state by routing the I/O through a
 // FlushBuffers event with a result channel. planningToolDefs filters
-// the advertised tool slice to the planning-mode subset.
-//
-// Both used to live in the inline turn pipeline; after the 8c cutover
-// they are wrapper-private utilities the foundation hooks call into.
+// the advertised tool slice to the planning-mode subset. Both are
+// wrapper-private utilities the foundation hooks call into.
 
 // planningToolDefs returns the agent's tool definitions with the
 // planning-mode blocklist applied. The full set lives on

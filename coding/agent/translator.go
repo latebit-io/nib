@@ -27,26 +27,23 @@ import (
 //   - [Agent.running] flips (true on AgentStart, false on AgentEnd)
 //   - [Agent.savedMessages] / [Agent.savedMode] commits at run-end so
 //     [Agent.Reply]'s resume path has somewhere to read from
-//   - [Agent.recordTurnUsage] dispatch on TurnUsage events (the
-//     concern-#6 accumulator side that 8b deferred to 8c)
+//   - [Agent.recordTurnUsage] dispatch on TurnUsage events
 //   - [event.AgentToken] streaming text to the frontend
 //   - [event.AgentDone] success/failure dispatch (success := !errored)
-//   - the inter-turn `\n\n` separator that the inline run loop
-//     emitted after AwaitInput
+//   - the inter-turn `\n\n` separator emitted after AwaitInput
 //
 // What the translator does NOT do:
 //   - Translate ToolStart / ToolEnd / ToolUpdate. The wrapper's
 //     BeforeToolCall hook emits [event.AgentToolCall] directly after
-//     the lint+single-edit gates clear, mirroring the inline ordering
-//     so blocked-by-lint and blocked-by-single-edit calls never reach
-//     the frontend.
+//     the lint+single-edit gates clear, so blocked-by-lint and
+//     blocked-by-single-edit calls never reach the frontend.
 //   - Translate Compacted. Compaction events come from
-//     [streaming.MaybeCompact] inside TransformContext, which sends
+//     [maybeCompact] inside TransformContext, which sends
 //     [event.AgentCompacted] directly to the engine channel — the
 //     foundation's own Compacted event is unused by this application.
 //   - Translate InputEstimate. Same pattern: the application's
 //     TransformContext computes the estimate via
-//     [streaming.EstimateAndBroadcast] and emits AgentInputEstimate
+//     [estimateAndBroadcast] and emits AgentInputEstimate
 //     directly.
 
 // translateFoundationEvents drains [Agent.foundationEvents] and
@@ -89,10 +86,9 @@ func (a *Agent) translateFoundationEvents() {
 			// Capture the streamed assistant content size so the
 			// next TurnUsage event can populate
 			// AgentTurnUsage.CompletionEst. The foundation's
-			// TurnUsage carries provider counts only; this estimate
-			// is the inline equivalent of the `tu.CompletionEst +=
-			// llm.EstimateTokens(result.Content)` accumulation the
-			// turn pipeline did before each record commit.
+			// TurnUsage carries provider counts only; the client-side
+			// estimate covers cases where the provider doesn't report
+			// completion tokens.
 			lastContentEst = llm.EstimateTokens(e.Message.Content)
 		case upevent.TurnEnd:
 			// AgentWaiting fires from the GetFollowUpMessages hook;
@@ -102,7 +98,7 @@ func (a *Agent) translateFoundationEvents() {
 		case upevent.TurnUsage:
 			a.recordTurnUsage(e, lastContentEst)
 			lastContentEst = 0
-			// Inline post-turn budget gate. The foundation's
+			// Post-turn budget gate. The foundation's
 			// TransformContext-side check fires only on the next
 			// turn — for a single-turn overrun where the agent
 			// would otherwise park at AgentWaiting, the developer

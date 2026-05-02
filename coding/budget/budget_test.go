@@ -128,8 +128,8 @@ func TestWouldExceed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := WouldExceed(tc.committed, tc.pending, tc.limit); got != tc.want {
-				t.Errorf("WouldExceed(%+v, %+v, %d) = %v, want %v",
+			if got := wouldExceed(tc.committed, tc.pending, tc.limit); got != tc.want {
+				t.Errorf("wouldExceed(%+v, %+v, %d) = %v, want %v",
 					tc.committed, tc.pending, tc.limit, got, tc.want)
 			}
 		})

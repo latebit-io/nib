@@ -16,12 +16,6 @@ import (
 // touch [Agent.sessionUsage] / [Agent.budgetExceeded] under
 // [Agent.mu]; ordering between read and write is documented at each
 // call site.
-//
-// The runID staleness gate the inline path used (decision #19) was
-// retired alongside the loop swap: the foundation owns run lifecycle,
-// the wrapper waits for [upagent.Agent.WaitForIdle] before starting a
-// new run, so a stale goroutine cannot accumulate against the new
-// run's totals.
 
 // recordTurnUsage accumulates one foundation [upevent.TurnUsage] event
 // into the session total and emits the engine-level

@@ -169,8 +169,8 @@ func (AgentStatus) codingEvent()  {}
 func (AgentWaiting) codingEvent() {}
 
 // AgentTurnUsage reports token consumption for a single agent turn
-// (one or more LLM calls within processLLMTurn). Combines provider-reported
-// exact counts with client-side composition estimates.
+// (one or more LLM Stream calls). Combines provider-reported exact
+// counts with client-side composition estimates.
 type AgentTurnUsage struct {
 	// Turn is the 1-indexed turn number within this agent run.
 	Turn int

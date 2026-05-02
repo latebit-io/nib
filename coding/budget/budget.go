@@ -2,7 +2,7 @@
 // used by the agent's per-task budget enforcement. The Agent owns the
 // runtime concerns (mutex, runID, latching, event emission); this
 // package owns the data shapes (Session, Turn) and the math
-// (Resolve, WouldExceed, Exceeded). Splitting the math out lets it be
+// (Resolve, wouldExceed, Exceeded). Splitting the math out lets it be
 // table-driven tested without an Agent and keeps the Agent's budget
 // methods focused on coordination rather than arithmetic.
 package budget
@@ -91,7 +91,7 @@ func Resolve(input int) int {
 	}
 }
 
-// WouldExceed reports whether committed + pending usage crosses the
+// wouldExceed reports whether committed + pending usage crosses the
 // cap. Pure projection of the math used by the Agent's inner-loop
 // gate (between provider Stream calls within a single turn). Returns
 // false when the cap is disabled (cap <= 0).
@@ -102,7 +102,7 @@ func Resolve(input int) int {
 // Comparator is `>=` (not `>`) so the cap value itself is over the
 // line — a turn whose accounting lands exactly at the budget triggers
 // the abort rather than letting one more Stream call slip through.
-func WouldExceed(committed Session, pending Turn, limit int) bool {
+func wouldExceed(committed Session, pending Turn, limit int) bool {
 	if limit <= 0 {
 		return false
 	}

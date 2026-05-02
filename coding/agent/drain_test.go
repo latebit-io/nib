@@ -1,4 +1,4 @@
-package streaming
+package agent
 
 import (
 	"context"
@@ -20,7 +20,7 @@ func TestDrain_ResetsThinkStateOnReturn(t *testing.T) {
 	tests := []struct {
 		name    string
 		events  []llm.StreamEvent
-		wantErr error // nil for Done-event paths, ErrClosedEarly for EOF
+		wantErr error // nil for Done-event paths, errStreamClosedEarly for EOF
 	}{
 		{
 			name: "clean think block closes state",
@@ -41,7 +41,7 @@ func TestDrain_ResetsThinkStateOnReturn(t *testing.T) {
 			events: []llm.StreamEvent{
 				{Token: "<think>incomplete"},
 			},
-			wantErr: ErrClosedEarly,
+			wantErr: errStreamClosedEarly,
 		},
 	}
 
@@ -58,7 +58,7 @@ func TestDrain_ResetsThinkStateOnReturn(t *testing.T) {
 			close(ch) // safe for both paths — Done-event tests still read their event first
 
 			thinkState := true // start dirty to prove defer reset fires
-			_, err := Drain(context.Background(), ch, &thinkState, send)
+			_, err := drainStream(context.Background(), ch, &thinkState, send)
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("Drain error = %v, want %v", err, tc.wantErr)
 			}
@@ -83,10 +83,10 @@ func TestDrain_ResetsThinkStateOnCtxCancel(t *testing.T) {
 	cancel() // cancel immediately so the select races to ctx.Done
 
 	thinkState := true
-	// ctx cancellation has its own handling path in processLLMTurn
-	// (via ctx.Err() check), so Drain returns nil on this path —
-	// see the function's doc comment.
-	_, err := Drain(ctx, ch, &thinkState, send)
+	// ctx cancellation is handled by the run loop's ctx.Err() check,
+	// so Drain returns nil on this path — see the function's doc
+	// comment.
+	_, err := drainStream(ctx, ch, &thinkState, send)
 	if err != nil {
 		t.Errorf("Drain error on ctx cancel = %v, want nil", err)
 	}
@@ -137,7 +137,7 @@ func TestDrain_StripsThinkTagsSplitAcrossChunks(t *testing.T) {
 			}
 
 			thinkState := false
-			res, err := Drain(context.Background(), ch, &thinkState, send)
+			res, err := drainStream(context.Background(), ch, &thinkState, send)
 			if err != nil {
 				t.Fatalf("Drain err = %v, want nil", err)
 			}
@@ -181,7 +181,7 @@ func TestDrain_TrailingPartialTag_FlushesAtStreamEnd(t *testing.T) {
 	}
 
 	thinkState := false
-	res, err := Drain(context.Background(), ch, &thinkState, send)
+	res, err := drainStream(context.Background(), ch, &thinkState, send)
 	if err != nil {
 		t.Fatalf("Drain err = %v, want nil", err)
 	}
@@ -213,7 +213,7 @@ func TestDrain_TrailingPartialTagInThink_DoesNotLeak(t *testing.T) {
 	}
 
 	thinkState := false
-	res, err := Drain(context.Background(), ch, &thinkState, send)
+	res, err := drainStream(context.Background(), ch, &thinkState, send)
 	if err != nil {
 		t.Fatalf("Drain err = %v, want nil", err)
 	}
@@ -252,7 +252,7 @@ func TestDrain_ForwardsTokensAndCollectsTerminalState(t *testing.T) {
 	}
 
 	thinkState := false
-	res, err := Drain(context.Background(), ch, &thinkState, send)
+	res, err := drainStream(context.Background(), ch, &thinkState, send)
 	if err != nil {
 		t.Fatalf("Drain err = %v, want nil", err)
 	}

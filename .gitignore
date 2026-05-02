@@ -26,8 +26,14 @@ go.work.sum
 
 # env file
 .env
-bin
-cmd/agent/bin/nib-agent
+
+# Build output — Makefile builds into <module>/bin/, never the package dir.
+# Bare-binary patterns catch `go build` runs that drop the binary in the
+# package directory (default output name = directory name).
+bin/
+cmd/agent/agent
+tui/cmd/tui/tui
+
 .mcp.json
 log.txt
 .project

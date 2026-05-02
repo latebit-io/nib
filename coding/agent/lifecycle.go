@@ -80,6 +80,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
 	a.lastEstimate = llm.InputEstimate{}
+	a.truncationRetries = 0
 
 	for _, t := range a.tools {
 		if r, ok := t.(Resettable); ok {
@@ -124,9 +125,9 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 }
 
 // emitOpening sends the per-run opening tokens + status the frontend
-// uses to render the "Thinking..." / "Planning..." preface. Mirrors
-// the inline run goroutine's first action so frontends see the same
-// pre-Stream feedback they always have.
+// uses to render the "Thinking..." / "Planning..." preface — issued
+// before the foundation's first Stream so the user sees immediate
+// feedback.
 func (a *Agent) emitOpening(mode event.Mode) {
 	if mode == event.ModePlanning {
 		a.send(event.AgentToken{Text: "Planning...\n\n"})
@@ -180,6 +181,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
 	a.lastEstimate = llm.InputEstimate{}
+	a.truncationRetries = 0
 	a.intent = input
 
 	for _, t := range a.tools {
@@ -243,8 +245,7 @@ func (a *Agent) IsRunning() bool {
 // a no-op in that case. The foundation's runCtx is derived from the
 // wrapper's, so cancelling here unwinds the foundation loop and the
 // translator goroutine emits the resulting [event.AgentDone] with
-// Success=false (cancellation is treated as an unsuccessful outcome
-// for parity with the inline run loop's success-flag handling).
+// Success=false (cancellation is treated as an unsuccessful outcome).
 func (a *Agent) Cancel() {
 	a.mu.Lock()
 	cancel := a.cancel
@@ -261,8 +262,8 @@ func (a *Agent) Cancel() {
 //
 // Updates [Agent.provider] (used by tools and truncation escalation)
 // AND the [providerProxy] (used by the foundation). Both must stay
-// in sync because [truncation.Recover] type-asserts the active
-// provider against [truncation.Escalator]; the proxy delegates Stream
+// in sync because [recoverFromTruncation] type-asserts the active
+// provider against [escalator]; the proxy delegates Stream
 // only and would fail the assertion silently.
 func (a *Agent) SetProvider(p llm.Provider) {
 	a.mu.Lock()
@@ -419,7 +420,7 @@ func (a *Agent) activeCoord() *approval.Coordinator {
 // flips [Agent.runUnsuccessful] under the lock. The translator
 // goroutine reads that flag on [upevent.AgentEnd] to decide
 // [event.AgentDone].Success — engine-side AgentErrors (from
-// truncation.Recover, autosave failures, RunWithMode/Reply rejection)
+// recoverFromTruncation, autosave failures, RunWithMode/Reply rejection)
 // never appear in the foundation's event stream, so this is the only
 // observable signal that the run failed. Setting the flag at every
 // emission point (rather than at every callsite) means future call

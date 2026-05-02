@@ -12,8 +12,6 @@ import (
 	"github.com/latebit-io/nib/coding/budget"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/nudges"
-	"github.com/latebit-io/nib/coding/streaming"
-	"github.com/latebit-io/nib/coding/truncation"
 )
 
 // errBudgetExceeded is the sentinel TransformContext returns when the
@@ -26,18 +24,11 @@ var errBudgetExceeded = errors.New("coding/agent: per-task token budget exceeded
 
 // Foundation-hook bridge.
 //
-// FoundationHooks builds the [upagent.Hooks] value the soon-to-be-driver
-// of the run loop ([upagent.Agent]) consumes in sub-phase 8c. Each gate
-// is a small, stateless method on *Agent that mirrors one decision the
-// inline run loop makes today; FoundationHooks composes them and
-// captures any per-turn state in closure variables so the Agent struct
-// stays free of hook-only fields.
-//
-// During sub-phase 8b each concern from [coding/agent]'s loop migrates
-// into one of these gates. The inline logic in turn.go / run.go stays
-// untouched until 8c swaps the loops; the gates are exercised
-// independently by tests so each concern is proven in isolation before
-// the cutover.
+// FoundationHooks builds the [upagent.Hooks] value the foundation
+// [upagent.Agent] consumes to drive the run loop. Each gate is a small,
+// stateless method on *Agent that owns one decision the loop makes;
+// FoundationHooks composes them and captures any per-turn state in
+// closure variables so the Agent struct stays free of hook-only fields.
 
 // FoundationHooks returns the [upagent.Hooks] value bound to this
 // agent. Closure-captured state (singleEditFired, narrativeFired,
@@ -60,35 +51,29 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	// dispatch.
 	var singleEditFired bool
 	// narrativeFired and permissionFired are the per-developer-input
-	// guards mirroring the local bools the inline run loop carried.
-	// Reset by TransformContext when a fresh user message lands at the
-	// tail of the transcript (one not authored by a nudge).
+	// guards. Reset by TransformContext when a fresh user message
+	// lands at the tail of the transcript (one not authored by a
+	// nudge).
 	var (
 		narrativeFired  bool
 		permissionFired bool
 	)
 	// lastWasBlocked records whether the most recent BeforeToolCall
 	// returned Block=true. AfterToolCall reads + clears it so the
-	// intent-reminder append is skipped on the Block path (mirrors the
-	// inline behavior — dispatchTool returned early before
-	// [Agent.intentReminder] on planning-mode + active-task rejections,
-	// but included the reminder on tool-execute and unknown-tool paths).
-	// Safe with a single bool because BeforeToolCall and AfterToolCall
-	// always pair within one foundation tool dispatch.
+	// intent-reminder append is skipped on the Block path (planning-mode
+	// and active-task rejections never see the reminder; tool-execute
+	// and unknown-tool paths do). Safe with a single bool because
+	// BeforeToolCall and AfterToolCall always pair within one foundation
+	// tool dispatch.
 	var lastWasBlocked bool
-	// truncationRetries counts consecutive truncated turns within the
-	// run. Reset implicitly each new run because FoundationHooks is
-	// called fresh in [New]; survives across non-truncated turns
-	// because the hook value itself outlives turns.
-	var truncationRetries int
 
 	before := func(ctx context.Context, c upagent.BeforeToolCallContext) (upagent.BeforeToolCallResult, error) {
-		// Order mirrors the inline path:
-		//   1. lint-pending skip (was turn.go:188)
-		//   2. single-edit (was turn.go:198)
-		//   3. flush dirty buffers + emit AgentToolCall (was turn.go:214-224)
-		//   4. planning blocklist (was turn.go:289 inside dispatchTool)
-		//   5. active-task gate (was turn.go:295 inside dispatchTool)
+		// Dispatch order:
+		//   1. lint-pending skip
+		//   2. single-edit
+		//   3. flush dirty buffers + emit AgentToolCall
+		//   4. planning blocklist
+		//   5. active-task gate
 		//
 		// lastWasBlocked is set on every Block path so AfterToolCall
 		// can decide whether to apply the intent-reminder override.
@@ -140,10 +125,9 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 			narrativeFired = false
 			permissionFired = false
 		}
-		// Per-task budget gate. Mirrors the inline post-turn budget
-		// abort: TransformContext fires before each Stream so the
-		// latched flag halts the loop before another provider call
-		// commits more tokens. The hard cap still terminates the run.
+		// Per-task budget gate. TransformContext fires before each
+		// Stream so the latched flag halts the loop before another
+		// provider call commits more tokens.
 		if err := a.foundationBudgetCheck(); err != nil {
 			return nil, err
 		}
@@ -151,10 +135,9 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		if err != nil {
 			return nil, err
 		}
-		// Refresh the system prompt on fresh developer input so style
-		// /terse/autonomous toggles between turns take effect on the
-		// next provider call. Mirrors the inline run loop's
-		// post-AwaitInput rebuild. Skipped on intra-turn re-entries
+		// Refresh the system prompt on fresh developer input so
+		// style/terse/autonomous toggles between turns take effect on
+		// the next provider call. Skipped on intra-turn re-entries
 		// (steering, follow-up, tool-result-driven loops) where the
 		// trailing message is NOT a fresh user input — re-rendering
 		// every iteration is wasteful and can race with mid-batch
@@ -164,10 +147,8 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		}
 		// Emit AgentInputEstimate + capture the estimate so the
 		// translator's TurnUsage handler can populate the *Est fields
-		// on AgentTurnUsage. Inline path (turn.go:116) accumulated
-		// this into budget.Turn.LastEstimate; under the foundation we
-		// stash it on the agent struct, snapshotted under mu.
-		est := streaming.EstimateAndBroadcast(msgs, a.activeToolDefs(), a.send)
+		// on AgentTurnUsage. Stashed on the agent struct under mu.
+		est := estimateAndBroadcast(msgs, a.activeToolDefs(), a.send)
 		a.mu.Lock()
 		a.lastEstimate = est
 		a.mu.Unlock()
@@ -181,10 +162,10 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	followUp := func(_ context.Context) ([]llm.Message, error) {
 		// GetFollowUpMessages fires after a turn with no tool calls AND
 		// after steering returned nothing. From here the foundation
-		// parks on awaitReply for the developer's next message — which
-		// is precisely the inline "AgentWaiting" boundary. Emit it
-		// here so frontends know to enable input AND so the wrapper's
-		// IsWaiting() flag flips before the foundation parks.
+		// parks on awaitReply for the developer's next message — the
+		// AgentWaiting boundary. Emit it here so frontends know to
+		// enable input AND so the wrapper's IsWaiting() flag flips
+		// before the foundation parks.
 		finished := a.tasksAllComplete()
 		a.mu.Lock()
 		a.waiting = true
@@ -194,15 +175,25 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	}
 
 	onTruncated := func(_ context.Context, c upagent.TruncationContext) (upagent.TruncationResult, error) {
-		// Delegate to truncation.Recover with an empty initial slice so
+		// Delegate to recoverFromTruncation with an empty initial slice so
 		// the returned messages are exactly the rejection (and optional
 		// user nudge) splice we hand back to the foundation. Recover
 		// emits its own AgentError to the frontend on every iteration
 		// (recovery banner) and on retries-exhausted (terminal abort);
 		// returning Retry=false suppresses the foundation's fallback
 		// emission so frontends see one error, not two.
-		splice, newRetries, err := truncation.Recover(nil, c.ToolCalls, truncationRetries, a.currentProvider(), a.send)
-		truncationRetries = newRetries
+		//
+		// The retry counter lives on [Agent.truncationRetries] (reset
+		// at each run boundary in RunWithMode/Reply) — closure state
+		// would leak across runs because FoundationHooks is built once
+		// at [New] time.
+		a.mu.Lock()
+		retries := a.truncationRetries
+		a.mu.Unlock()
+		splice, newRetries, err := recoverFromTruncation(nil, c.ToolCalls, retries, a.currentProvider(), a.send)
+		a.mu.Lock()
+		a.truncationRetries = newRetries
+		a.mu.Unlock()
 		if err != nil {
 			return upagent.TruncationResult{Retry: false, Messages: splice}, nil
 		}
@@ -219,25 +210,20 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	}
 }
 
-// foundationAfterToolCall mirrors two inline post-dispatch concerns
-// from [coding/agent]:
+// foundationAfterToolCall handles two post-dispatch concerns:
 //
-//   - bash-tool side effects ([Agent.afterToolDispatch], turn.go:46-54):
-//     invalidate the file cache and ask the frontend to reload open
-//     buffers because bash can mutate disk outside the edit-approval
-//     flow. Fires for every "bash" tool call regardless of dispatch
-//     outcome — the inline triggers it after dispatchTool returns,
-//     including the planning-blocked + active-task-blocked early
-//     returns; we preserve that behavior so the frontend stays
-//     synchronized.
+//   - bash-tool side effects: invalidate the file cache and ask the
+//     frontend to reload open buffers because bash can mutate disk
+//     outside the edit-approval flow. Fires for every "bash" tool call
+//     regardless of dispatch outcome (including planning-blocked and
+//     active-task-blocked) so the frontend stays synchronized.
 //
-//   - intent-reminder appending ([Agent.intentReminder], gates.go:107):
-//     append the developer's current intent to the tool result so the
-//     LLM sees it on every successful or unknown-tool turn. NOT
-//     appended on the BeforeToolCall.Block path because the inline
-//     dispatchTool returns early before [Agent.intentReminder]
-//     appends. The blocked argument carries that signal — true means
-//     suppress the reminder.
+//   - intent-reminder appending: append the developer's current intent
+//     ([Agent.intentReminder]) to the tool result so the LLM sees it on
+//     every successful or unknown-tool turn. NOT appended on the
+//     BeforeToolCall.Block path — planning + active-task rejections
+//     never get the reminder. The blocked argument carries that signal:
+//     true means suppress.
 //
 // The reminder is appended via [upagent.AfterToolCallResult.Content]
 // override; bash side effects run as method calls on a so they fire
@@ -260,8 +246,7 @@ func (a *Agent) foundationAfterToolCall(c upagent.AfterToolCallContext, blocked 
 
 // isFreshUserInput reports whether the trailing message of msgs is a
 // developer input (role=user, content not authored by a known nudge).
-// Used as the per-developer-input boundary signal in TransformContext;
-// matches the inline reset point in [Agent.runLoop] (run.go:212-213).
+// Used as the per-developer-input boundary signal in TransformContext.
 //
 // The content comparison is conservative — a developer who echoes a
 // nudge string verbatim will not refresh their nudge budget. Acceptable
@@ -280,14 +265,13 @@ func isFreshUserInput(msgs []llm.Message) bool {
 		tail.Content != nudges.PermissionNudgeMessage
 }
 
-// foundationSteering mirrors [Agent.tryInjectPostTurnNudge] in
-// GetSteeringMessages shape: returns the steering message slice (or
-// nil) instead of mutating a shared *[]llm.Message. Each gate is
-// one-shot per developer input; firedFlags is shared with
-// TransformContext via the closure so resets cross hook boundaries.
+// foundationSteering returns the steering message slice (or nil) for
+// the GetSteeringMessages hook. Each gate is one-shot per developer
+// input; firedFlags is shared with TransformContext via the closure so
+// resets cross hook boundaries.
 //
-// Order matches inline: narrative first, then permission. Permission
-// is autonomous-only.
+// Order: narrative first, then permission. Permission is
+// autonomous-only.
 func (a *Agent) foundationSteering(msgs []llm.Message, narrativeFired, permissionFired *bool) []llm.Message {
 	if !*narrativeFired && a.shouldNudgeOutstanding(msgs) {
 		*narrativeFired = true
@@ -304,7 +288,7 @@ func (a *Agent) foundationSteering(msgs []llm.Message, narrativeFired, permissio
 	return nil
 }
 
-// planningBlocklistGate mirrors the planning-mode check at turn.go:289.
+// planningBlocklistGate enforces the planning-mode tool blocklist.
 // Stateless: reads [Agent.mode] and [Agent.planningBlocklist]. The
 // schema filter ([Agent.planningToolDefs]) already removes blocked
 // tools from the advertised list, but a model can still dispatch one
@@ -326,8 +310,8 @@ func (a *Agent) planningBlocklistGate(c upagent.BeforeToolCallContext) upagent.B
 // activeTaskGate wraps [Agent.enforceActiveTaskGate] in the
 // [upagent.BeforeToolCallResult] shape. The underlying gate handles
 // the planning-mode carve-out, the non-mutating-tool carve-out, the
-// missing-TaskReader carve-out, and the work-tree-not-loaded carve-out
-// — see gates.go:80 for the full table.
+// missing-TaskReader carve-out, and the work-tree-not-loaded
+// carve-out — see [Agent.enforceActiveTaskGate] for the full table.
 func (a *Agent) activeTaskGate(ctx context.Context, c upagent.BeforeToolCallContext) upagent.BeforeToolCallResult {
 	msg := a.enforceActiveTaskGate(ctx, strings.ToLower(c.Name))
 	if msg == "" {
@@ -336,12 +320,12 @@ func (a *Agent) activeTaskGate(ctx context.Context, c upagent.BeforeToolCallCont
 	return upagent.BeforeToolCallResult{Block: true, Reason: msg}
 }
 
-// singleEditGate mirrors the one-file-edit-per-turn enforcement at
-// turn.go:198. In non-autonomous, non-headless (interactive) mode the
-// agent must wait for the developer to review the previous edit before
-// proposing the next one; the gate flips firedThisTurn the first time
-// a file-edit tool dispatches in a turn and rejects every subsequent
-// file-edit until TransformContext clears the flag.
+// singleEditGate enforces one-file-edit-per-turn. In non-autonomous,
+// non-headless (interactive) mode the agent must wait for the
+// developer to review the previous edit before proposing the next one;
+// the gate flips firedThisTurn the first time a file-edit tool
+// dispatches in a turn and rejects every subsequent file-edit until
+// TransformContext clears the flag.
 //
 // firedThisTurn is a pointer so the closure in [Agent.FoundationHooks]
 // owns the state; the gate function itself is stateless.
@@ -367,18 +351,17 @@ func (a *Agent) singleEditGate(c upagent.BeforeToolCallContext, firedThisTurn *b
 	return upagent.BeforeToolCallResult{}
 }
 
-// lintPendingGate mirrors the per-call skip at
-// [Agent.executeToolCalls] (turn.go:188-194). When a previous edit's
-// lint run set [Agent.pendingLint] mid-batch, every subsequent tool
-// in the batch is rejected with the "fix lint first" placeholder so
-// the LLM cannot work around the diagnostic.
+// lintPendingGate skips dispatch when a previous edit's lint run set
+// [Agent.pendingLint]. Every tool call in the batch is rejected with
+// the "fix lint first" placeholder so the LLM cannot work around the
+// diagnostic.
 //
 // Distinct from [Agent.foundationCompactAndLint] which DRAINS
-// pendingLint into the message slice at TransformContext time
-// (concern #3): drain runs once per Stream, this gate runs once per
-// tool call within the resulting batch. The two cooperate — the
-// drained message arrives at the LLM's next turn while the gate
-// keeps the current batch from making progress on the broken state.
+// pendingLint into the message slice at TransformContext time: drain
+// runs once per Stream, this gate runs once per tool call within the
+// resulting batch. The two cooperate — the drained message arrives at
+// the LLM's next turn while the gate keeps the current batch from
+// making progress on the broken state.
 func (a *Agent) lintPendingGate() upagent.BeforeToolCallResult {
 	if !a.hasLintPending() {
 		return upagent.BeforeToolCallResult{}
@@ -390,35 +373,21 @@ func (a *Agent) lintPendingGate() upagent.BeforeToolCallResult {
 }
 
 // shouldEnforceSingleEdit returns true when one-edit-per-turn applies:
-// non-autonomous, non-headless mode. Mirrors the inline expression in
-// [Agent.executeToolCalls] (turn.go:184).
+// non-autonomous, non-headless mode.
 func (a *Agent) shouldEnforceSingleEdit() bool {
 	return !a.currentAutonomous() && a.interactionMode != Headless
 }
 
-// foundationCompactAndLint runs the per-Stream context-shaping the
-// inline path performs in two places: [streaming.MaybeCompact] at the
-// outer runLoop boundary (run.go:137) and [Agent.drainPendingLint]
-// inside processLLMTurn (turn.go:112). Both cluster naturally on
-// TransformContext because they decide what the message slice looks
-// like just before the provider sees it.
-//
-// Cadence note: TransformContext fires once per Stream, so
-// MaybeCompact runs more often than the inline once-per-processLLMTurn
-// call. The token-threshold guard inside MaybeCompact short-circuits
-// when nothing's changed, so the only added cost is one
-// [llm.EstimateMessageTokens] call per Stream.
-//
-// Out of scope (the plan groups them under concern #3 but they
-// don't fit TransformContext):
-//   - Intent reminder appends to every tool result Content; routed
-//     to AfterToolCall (concern #5) so the application-level shape
-//     mirrors inline.
-//   - [streaming.EstimateAndBroadcast] (frontend input-estimate
-//     event); deferred until the post-cutover wrapper can accumulate
-//     [budget.Turn].LastEstimate where the inline accumulator lives.
+// foundationCompactAndLint runs the per-Stream context shaping:
+// [maybeCompact] for token-budget compaction and
+// [Agent.drainPendingLint] for surfacing pending lint as a user
+// message. Both cluster on TransformContext because they decide what
+// the message slice looks like just before the provider sees it. The
+// token-threshold guard inside MaybeCompact short-circuits when
+// nothing has changed, so the per-Stream cost is one
+// [llm.EstimateMessageTokens] call.
 func (a *Agent) foundationCompactAndLint(_ context.Context, msgs []llm.Message) ([]llm.Message, error) {
-	msgs = streaming.MaybeCompact(msgs, a.activeToolDefs(), a.send)
+	msgs = maybeCompact(msgs, a.activeToolDefs(), a.send)
 	if lint := a.drainPendingLint(); lint != "" {
 		msgs = append(msgs, llm.Message{Role: "user", Content: lint})
 	}
@@ -426,9 +395,8 @@ func (a *Agent) foundationCompactAndLint(_ context.Context, msgs []llm.Message) 
 }
 
 // activeToolDefs returns the tool-definition slice the LLM sees for
-// the agent's current mode. event.ModePlanning gets the blocklist-filtered
-// subset; everything else returns the full set unchanged. Mirrors the
-// activeDefs computation at [Agent.runLoop] (run.go:121-124).
+// the agent's current mode. event.ModePlanning gets the blocklist-
+// filtered subset; everything else returns the full set unchanged.
 func (a *Agent) activeToolDefs() []llm.ToolDef {
 	if a.currentMode() == event.ModePlanning {
 		return a.planningToolDefs()
@@ -436,18 +404,17 @@ func (a *Agent) activeToolDefs() []llm.ToolDef {
 	return a.toolDefs
 }
 
-// foundationBudgetCheck mirrors the inline post-turn budget gate
-// without the retired runID race guard. When the per-task cap is
-// crossed the latch flips and a wrapped [errBudgetExceeded] carrying
-// the formatted budget message is returned; the foundation's
-// TransformContext-error path emits [event.Error] which the
-// translator re-emits as [event.AgentError] — single user-facing
-// emission, no double-error.
+// foundationBudgetCheck enforces the per-task token cap. When crossed,
+// the latch flips and a wrapped [errBudgetExceeded] carrying the
+// formatted budget message is returned; the foundation's
+// TransformContext-error path emits [event.Error] which the translator
+// re-emits as [event.AgentError] — single user-facing emission, no
+// double-error.
 //
 // Returns nil when the cap is disabled or not yet crossed. The latch
 // (a.budgetExceeded) prevents the abort from re-firing on subsequent
 // TransformContext calls if a turn somehow re-enters past the abort
-// signal — defensive parity with the inline check.
+// signal.
 func (a *Agent) foundationBudgetCheck() error {
 	a.mu.Lock()
 	if a.budgetExceeded {

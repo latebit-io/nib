@@ -15,11 +15,6 @@ import (
 // [Agent.checkTaskBudget]: zero budget (disabled), already-latched, and
 // under-cap. The check must return "" from each so a healthy turn is
 // never erroneously aborted.
-//
-// The runID stale-guard branch the inline path carried (decision #19)
-// was retired alongside the loop swap — the foundation owns run
-// lifecycle and the wrapper waits for [upagent.Agent.WaitForIdle]
-// before starting a new run, so a stale check cannot fire.
 func TestCheckTaskBudget_Disabled(t *testing.T) {
 	t.Parallel()
 
@@ -211,7 +206,7 @@ func collectAbortEvents(t *testing.T, events <-chan event.Event, timeout time.Du
 // reply), then the foundation's TransformContext fires before the
 // next Stream and aborts.
 //
-// Without the per-Stream gate, processLLMTurn would loop indefinitely
+// Without the per-Stream gate, the run loop would loop indefinitely
 // (or until truncation) and the run-end abort would only fire after
 // sessionUsage caught up — many tokens too late.
 func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {

@@ -243,9 +243,9 @@ func formatFindings(findings []enginelint.Finding) string {
 	return lint.FormatFindings(findings)
 }
 
-// evaluateTurn runs the style evaluator on all edits made during the turn.
-// Called after processLLMTurn completes. Returns a user message with violations
-// to inject into the next turn, or empty string if everything passes.
+// evaluateTurn runs the style evaluator on all edits made during the
+// turn. Returns a user message with violations to inject into the next
+// turn, or empty string if everything passes.
 func (a *Agent) evaluateTurn(ctx context.Context) string {
 	a.mu.Lock()
 	eval := a.evaluator

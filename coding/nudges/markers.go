@@ -112,12 +112,12 @@ var permissionSeekingMarkers = []string{
 	"on your go",
 }
 
-// ContainsPermissionSeekingMarker reports whether s contains any of
+// containsPermissionSeekingMarker reports whether s contains any of
 // the [permissionSeekingMarkers] phrases under case-insensitive
 // comparison. Whitespace and punctuation in s are not normalised — the
 // marker set already uses lowercased phrase fragments that survive the
 // strings.ToLower of typical assistant prose.
-func ContainsPermissionSeekingMarker(s string) bool {
+func containsPermissionSeekingMarker(s string) bool {
 	lower := strings.ToLower(s)
 	for _, marker := range permissionSeekingMarkers {
 		if strings.Contains(lower, marker) {
@@ -136,7 +136,7 @@ func ContainsPermissionSeekingMarker(s string) bool {
 // [permissionSeekingMarkers] phrase. Used by the autonomous-mode
 // permission gate in the agent run loop.
 func ShouldNudgePermissionQuestion(messages []llm.Message) bool {
-	last := LastAssistantMessage(messages)
+	last := lastAssistantMessage(messages)
 	if last == nil {
 		return false
 	}
@@ -150,7 +150,7 @@ func ShouldNudgePermissionQuestion(messages []llm.Message) bool {
 	if strings.HasSuffix(trimmed, "?") {
 		return true
 	}
-	return ContainsPermissionSeekingMarker(trimmed)
+	return containsPermissionSeekingMarker(trimmed)
 }
 
 // LastAssistantContent returns the Content of the most recent
@@ -165,11 +165,11 @@ func LastAssistantContent(messages []llm.Message) string {
 	return ""
 }
 
-// LastAssistantMessage returns the most recent assistant message in
+// lastAssistantMessage returns the most recent assistant message in
 // the slice, or nil when none exists. Distinct from
 // [LastAssistantContent] (which returns Content) because the
 // permission-question gate also needs to inspect ToolCalls.
-func LastAssistantMessage(messages []llm.Message) *llm.Message {
+func lastAssistantMessage(messages []llm.Message) *llm.Message {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "assistant" {
 			return &messages[i]

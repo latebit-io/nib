@@ -260,7 +260,7 @@ func TestFoundationHooks_MigratedHooksPresent(t *testing.T) {
 		t.Errorf("GetFollowUpMessages must be wired — drives AgentWaiting emission at the loop-park boundary")
 	}
 	if hooks.OnTruncated == nil {
-		t.Errorf("OnTruncated must be wired — preserves the truncation-recovery contract from the inline path")
+		t.Errorf("OnTruncated must be wired — drives the truncation-recovery contract")
 	}
 }
 
@@ -675,9 +675,10 @@ func TestFoundationAfterToolCall_BashFiresReloadBuffers(t *testing.T) {
 }
 
 func TestFoundationAfterToolCall_BashFiresEvenWhenBlocked(t *testing.T) {
-	// Inline behavior: afterToolDispatch fires unconditionally after
-	// dispatchTool, including the planning + active-task blocked early
-	// returns. Preserve that.
+	// Bash side effects (cache invalidation + ReloadBuffers) must fire
+	// for every "bash" tool call regardless of whether BeforeToolCall
+	// blocked the dispatch — the developer's filesystem may have
+	// changed even if the call was rejected.
 	events := make(chan event.Event, 4)
 	a := &Agent{
 		events: events,

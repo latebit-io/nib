@@ -45,10 +45,8 @@ linters:
             - "**/nudges/*.go"
             - "**/prompts/*.go"
             - "**/smoke/*.go"
-            - "**/streaming/*.go"
             - "**/style/*.go"
             - "**/tools/*.go"
-            - "**/truncation/*.go"
             - "**/validation/*.go"
           deny:
             - pkg: "github.com/latebit-io/nib/coding/agent"

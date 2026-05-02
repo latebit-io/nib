@@ -91,7 +91,7 @@ var mutatingTools = map[string]bool{
 // because bash and smoke_run can legitimately chain after an edit (e.g.
 // "edit then verify with go test"), but a second file edit in the same
 // turn means the model is bypassing the developer's review-and-continue
-// flow. Enforcement happens in [Agent.executeToolCalls].
+// flow. Enforced by [Agent.singleEditGate] in BeforeToolCall.
 var fileEditTools = map[string]bool{
 	"edit_file":    true,
 	"write_file":   true,
@@ -186,10 +186,11 @@ type Agent struct {
 	// run boundaries.
 	validatorRetries map[string]int
 
-	// pendingLint holds lint violations from the last edit. When non-empty,
-	// processLLMTurn injects a user message before the next LLM call,
-	// then clears it. This ensures lint violations are seen as user-priority
-	// instructions rather than buried in tool results.
+	// pendingLint holds lint violations from the last edit. When
+	// non-empty, [Agent.foundationCompactAndLint] drains it as a user
+	// message into the next Stream call. This ensures lint violations
+	// are seen as user-priority instructions rather than buried in tool
+	// results.
 	pendingLint string
 
 	// smokeConfig is the resolved smoke-run configuration. Skipped means
@@ -234,41 +235,42 @@ type Agent struct {
 	// it on [upevent.AgentEnd] to decide [event.AgentDone].Success —
 	// the foundation event stream alone cannot distinguish "clean
 	// run-end" from "user-cancelled" or from "engine-side AgentError
-	// emitted by truncation.Recover or autosave-failed", so the wrapper
+	// emitted by recoverFromTruncation or autosave-failed", so the wrapper
 	// tracks the unsuccess decision explicitly. Reset on each new run.
 	runUnsuccessful bool
 	// turnCounter is the 1-indexed turn number within the current run.
 	turnCounter int
 	// lastEstimate holds the most recent client-side input estimate from
-	// [streaming.EstimateAndBroadcast], stashed by TransformContext so the
+	// [estimateAndBroadcast], stashed by TransformContext so the
 	// translator goroutine's TurnUsage handler can populate the *Est
-	// fields on [event.AgentTurnUsage] without re-computing. Mirrors
-	// the inline pattern of accumulating `tu.LastEstimate` between
-	// pre-Stream estimation and post-Stream usage commitment.
+	// fields on [event.AgentTurnUsage] without re-computing.
 	lastEstimate llm.InputEstimate
+	// truncationRetries counts truncated turns within the current run.
+	// Read + incremented by the OnTruncated foundation hook; reset to
+	// zero on each new run alongside the other per-run state. Lives on
+	// the agent (rather than as closure state in [Agent.FoundationHooks])
+	// because FoundationHooks is built once at [New] time — closure
+	// state would persist across runs and cause a previous run's
+	// truncations to count against the next run's [truncationMaxRetries]
+	// budget.
+	truncationRetries int
 
 	// providerProxy is the [llm.Provider] handed to [foundation]. It
 	// shadows [Agent.provider] so [SetProvider] can hot-swap the live
 	// provider mid-session even though the foundation captures its
-	// provider once at [upagent.New] time. Both fields are kept in
-	// sync until the inline run loop is retired in 8c step 4 — at
-	// that point [Agent.provider] becomes redundant and is removed.
+	// provider once at [upagent.New] time.
 	providerProxy *providerProxy
 
 	// foundation is the embeddable [upagent.Agent] that drives the run
-	// loop after sub-phase 8c. Built in [New] with [providerProxy],
-	// [foundationEvents], and [Agent.FoundationHooks]; not yet wired
-	// to [RunWithMode] / [Reply] (steps 2-7 of 8c).
+	// loop. Built in [New] with [providerProxy], [foundationEvents], and
+	// [Agent.FoundationHooks].
 	foundation *upagent.Agent
 
 	// foundationEvents is the channel [foundation] emits its
 	// [upevent.Event] stream on. Drained by a translator goroutine
-	// spawned in [New] that re-emits as [engine/event.Event] through
+	// spawned in [New] that re-emits as [event.Event] through
 	// [Agent.send] — the application boundary where the generic
 	// foundation events become the coding agent's vocabulary.
-	// Step 3 of 8c fills the goroutine body in; step 1 spawns a stub
-	// drain so the channel cannot back-pressure the foundation if
-	// any unexpected event fires before the cutover.
 	foundationEvents chan upevent.Event
 }
 
@@ -440,16 +442,16 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 }
 
 // buildFoundation constructs [Agent.foundation], the [upagent.Agent]
-// that 8c step 2 will swap into the run loop. Wires the [providerProxy]
-// (so SetProvider survives the foundation's frozen provider field), a
-// dedicated events channel drained by a translator goroutine, and the
-// [Agent.FoundationHooks] bridge that delegates the inline gates and
-// nudges into the foundation's hook surface.
+// that drives the run loop. Wires the [providerProxy] (so SetProvider
+// survives the foundation's frozen provider field), a dedicated events
+// channel drained by a translator goroutine, and the
+// [Agent.FoundationHooks] bridge that delegates gating and nudges into
+// the foundation's hook surface.
 //
 // The Tool slice is iterated in [Agent.toolDefs] order so the
 // foundation's internal toolDefs (built by [upagent.New]) match the
-// inline advertisement order — keeping LLM tool-list ordering stable
-// across the cutover so model behavior does not drift.
+// advertised order — keeping LLM tool-list ordering stable so model
+// behavior is reproducible across runs.
 //
 // Validation failures from [upagent.New] panic: the inputs are
 // statically known at this composition root (proxy never nil, events
@@ -620,9 +622,8 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 // stays out of the [Agent] struct.
 
 // Wrapper-side I/O helpers (planningToolDefs, flushDirtyBuffers) live
-// in io.go. Both used to live in the inline turn pipeline; after the
-// 8c cutover they are wrapper-private utilities the foundation hook
-// wiring calls into.
+// in io.go — wrapper-private utilities the foundation hooks call
+// into.
 
 // Post-turn nudge math (shouldNudgeOutstanding, tasksAllComplete)
 // lives in nudges.go. The string-pattern detectors themselves live in

@@ -21,19 +21,18 @@ func (noopProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) 
 	return ch, nil
 }
 
-// TestFoundationBuilt_FoundationAndProxyInstalled verifies sub-phase
-// 8c step 1 wired the foundation into [New]: the foundation pointer is
-// non-nil, the [providerProxy] is non-nil and seeded with the
-// constructor's provider, and a [foundationEvents] channel exists for
-// the translator goroutine to drain.
-//
-// Pre-cutover (steps 2+) the foundation is unused machinery — but the
-// plumbing has to be in place so the swap in step 2 is purely
-// substitution, not new construction.
+// TestFoundationBuilt_FoundationAndProxyInstalled verifies [New] wires
+// the foundation: the foundation pointer is non-nil, the [providerProxy]
+// is non-nil and seeded with the constructor's provider, and a
+// [foundationEvents] channel exists for the translator goroutine to
+// drain.
 func TestFoundationBuilt_FoundationAndProxyInstalled(t *testing.T) {
 	t.Parallel()
 
-	provider := noopProvider{}
+	// Pointer instance so the equality assertion below has identity
+	// semantics — comparing two value-type noopProvider{} structs
+	// always returns true and would mask a wiring bug.
+	provider := &noopProvider{}
 	events := make(chan event.Event, 8)
 
 	ag := New(provider, stubWorkspace{}, events, nil)
@@ -59,15 +58,18 @@ func TestFoundationBuilt_FoundationAndProxyInstalled(t *testing.T) {
 }
 
 // TestFoundationBuilt_SetProviderSwapsProxy verifies [SetProvider]
-// updates both [Agent.provider] (used by the inline run loop) and the
-// [providerProxy] (used by the foundation). Without the proxy update,
-// SetProvider would silently no-op for the foundation post-cutover —
-// the developer would toggle a model in the TUI and see nothing change.
+// updates both [Agent.provider] and the [providerProxy] (used by the
+// foundation). Without the proxy update, SetProvider would silently
+// no-op for the foundation — the developer would toggle a model in the
+// TUI and see nothing change.
 func TestFoundationBuilt_SetProviderSwapsProxy(t *testing.T) {
 	t.Parallel()
 
-	original := noopProvider{}
-	replacement := noopProvider{}
+	// Pointer instances so original and replacement are distinct under
+	// `==`. Value-type noopProvider{} structs all compare equal, which
+	// would mask a SetProvider that silently no-ops.
+	original := &noopProvider{}
+	replacement := &noopProvider{}
 	events := make(chan event.Event, 8)
 
 	ag := New(original, stubWorkspace{}, events, nil)
@@ -95,10 +97,10 @@ func TestFoundationBuilt_SetProviderSwapsProxy(t *testing.T) {
 }
 
 // TestFoundationBuilt_ToolsMirrorAdvertisedSet verifies the foundation
-// receives the same tool set the inline loop advertises. Sub-phase 8c
-// step 1 builds the foundation tool slice from [Agent.toolDefs] order
-// (looking each tool up in [Agent.tools]) so the foundation's internal
-// toolDefs match what the inline path passes to [llm.Provider.Stream].
+// receives the same tool set the wrapper advertises. The foundation
+// tool slice is built from [Agent.toolDefs] order (looking each tool up
+// in [Agent.tools]) so the foundation's internal toolDefs match what
+// the wrapper passes to [llm.Provider.Stream].
 //
 // We can't reach inside [upagent.Agent] to compare the slice directly,
 // so the test approximates via the [State] surface: a fresh agent has

@@ -29,6 +29,7 @@ package agent
 import (
 	"fmt"
 	"log/slog"
+	"reflect"
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
@@ -117,6 +118,19 @@ func escalateValue(current int) int {
 		next = truncationCeiling
 	}
 	return next
+}
+
+// isNilEscalator returns true when esc holds a typed-nil pointer.
+// Distinguishes the typed-nil case (`(*Concrete)(nil)` wrapped in the
+// interface) from a genuinely-non-nil escalator. Required because the
+// type assertion on [llm.Provider] cannot tell the two apart, and
+// every shipped provider that satisfies [escalator] has pointer
+// receivers — calling MaxTokens() on a typed-nil panics on the
+// receiver's mu.Lock(). Returns false for non-pointer types so a
+// future value-type escalator (uncommon but legal) is not misflagged.
+func isNilEscalator(esc escalator) bool {
+	v := reflect.ValueOf(esc)
+	return v.Kind() == reflect.Ptr && v.IsNil()
 }
 
 // escalate doubles the provider's max-tokens cap (best effort). The
@@ -222,7 +236,16 @@ func recoverFromTruncation(
 
 	var from, to int
 	outcome := escalationUnsupported
-	if esc, ok := provider.(escalator); ok {
+	// The type assertion succeeds for a typed-nil concrete value (e.g.
+	// `(*llm.AgentAPI)(nil)` wrapped in the [llm.Provider] interface),
+	// because the interface still carries the type descriptor.
+	// [SetProvider] does not validate non-nil-ness, so a typed-nil
+	// can reach here. Calling [escalate] on it would panic on the
+	// MaxTokens() pointer-receiver call. Treat typed-nil as
+	// escalationUnsupported — no escalation possible against a nil
+	// provider, same as a provider that doesn't implement [escalator]
+	// at all.
+	if esc, ok := provider.(escalator); ok && !isNilEscalator(esc) {
 		var moved bool
 		from, to, moved = escalate(esc)
 		if moved {

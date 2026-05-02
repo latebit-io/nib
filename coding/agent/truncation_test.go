@@ -275,3 +275,41 @@ func (noEscProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef)
 	close(ch)
 	return ch, nil
 }
+
+// TestRecover_TypedNilEscalator_DoesNotPanic locks in the typed-nil
+// guard: a (*stubEscalator)(nil) wrapped in [llm.Provider] passes the
+// `provider.(escalator)` assertion (the interface still carries the
+// type), so without the [isNilEscalator] guard the subsequent
+// MaxTokens() pointer-receiver call panics on the stub's mu.Lock.
+//
+// SetProvider does not validate non-nil-ness and the provider types in
+// ai/llm have pointer receivers, so this is a real reachable path
+// rather than a contrived edge case.
+func TestRecover_TypedNilEscalator_DoesNotPanic(t *testing.T) {
+	t.Parallel()
+	var nilEsc *stubEscalator
+	provider := llm.Provider(nilEsc) // typed-nil interface value
+	calls := []llm.ToolCall{{ID: "x"}}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("recoverFromTruncation panicked with typed-nil escalator: %v", r)
+		}
+	}()
+
+	msgs, retries, err := recoverFromTruncation(nil, calls, 0, provider, nil)
+	if err != nil {
+		t.Fatalf("err = %v, want nil (typed-nil should fall through to escalationUnsupported)", err)
+	}
+	if retries != 1 {
+		t.Errorf("retries = %d, want 1 (incremented on recovery)", retries)
+	}
+	// Tool message must use the unsupported phrasing — same as a
+	// provider that doesn't implement escalator at all.
+	if strings.Contains(msgs[0].Content, "ceiling") {
+		t.Errorf("typed-nil escalator must not surface 'ceiling' phrasing: %q", msgs[0].Content)
+	}
+	if !strings.Contains(msgs[0].Content, "escalation") {
+		t.Errorf("typed-nil escalator should surface unsupported phrasing: %q", msgs[0].Content)
+	}
+}

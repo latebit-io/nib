@@ -6,6 +6,7 @@ require (
 	github.com/latebit-io/nib/agent v0.0.0
 	github.com/latebit-io/nib/ai v0.0.0
 	github.com/latebit-io/nib/engine v0.0.0
+	github.com/latebit-io/nib/kit v0.0.0
 )
 
 require (
@@ -17,4 +18,5 @@ replace (
 	github.com/latebit-io/nib/agent => ../agent
 	github.com/latebit-io/nib/ai => ../ai
 	github.com/latebit-io/nib/engine => ../engine
+	github.com/latebit-io/nib/kit => ../kit
 )

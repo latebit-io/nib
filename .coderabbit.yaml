@@ -71,7 +71,7 @@ reviews:
         - Silent retry state must be reset between runs (Reset()
           callbacks on stateful tools)
 
-    - path: "coding/approval/**"
+    - path: "{kit/approval,coding/editflow}/**"
       instructions: >
         Coordinator owns the approve/reply channels between agent and
         frontend. Channel capacities are deliberately 1 and signal

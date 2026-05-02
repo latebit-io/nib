@@ -2,13 +2,13 @@ package agent
 
 import (
 	upevent "github.com/latebit-io/nib/agent/event"
-	"github.com/latebit-io/nib/coding/budget"
 	"github.com/latebit-io/nib/coding/event"
+	"github.com/latebit-io/nib/kit/budget"
 )
 
 // Per-run budget integration for Agent.
 //
-// The pure budget math + types live in [coding/budget]; this file is
+// The pure budget math + types live in [kit/budget]; this file is
 // the agent-side glue: per-run accounting (recordTurnUsage), the
 // post-Stream latch ([Agent.checkTaskBudget]), and the abort path
 // fired from the foundation TransformContext hook

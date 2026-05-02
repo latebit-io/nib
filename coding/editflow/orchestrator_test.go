@@ -1,4 +1,4 @@
-package approval
+package editflow
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/tools"
+	"github.com/latebit-io/nib/kit/approval"
 )
 
 // stubContextSet is a minimal ContextSet implementation for tests.
@@ -202,7 +203,7 @@ func TestHandle_ValidationShortCircuit(t *testing.T) {
 	}
 	o := NewOrchestrator(r.deps())
 
-	body, isError := o.Handle(context.Background(), New(), sampleProposal())
+	body, isError := o.Handle(context.Background(), approval.New(), sampleProposal())
 
 	if isError {
 		t.Errorf("validation retry should not be a tool error, got isError=true")
@@ -230,7 +231,7 @@ func TestHandle_HappyPath_Approve(t *testing.T) {
 	t.Parallel()
 	r := newRig()
 	o := NewOrchestrator(r.deps())
-	coord := New()
+	coord := approval.New()
 	p := sampleProposal()
 
 	go func() {
@@ -272,7 +273,7 @@ func TestHandle_Approve_DeveloperModifiedReplace(t *testing.T) {
 	t.Parallel()
 	r := newRig()
 	o := NewOrchestrator(r.deps())
-	coord := New()
+	coord := approval.New()
 	p := sampleProposal()
 	developerModified := p.ExpectedContent + "\n// developer edited the overlay before approving\n"
 
@@ -320,7 +321,7 @@ func TestHandle_Reject(t *testing.T) {
 	const poisonedContent = "package main\n// notes:\n//   Error: agent canceled — the test wrote this on purpose\n//   Error: approval channel closed — also on purpose\n// pre-edit content\n"
 	r.cache.Set("/proj/main.go", poisonedContent)
 	o := NewOrchestrator(r.deps())
-	coord := New()
+	coord := approval.New()
 	p := sampleProposal()
 
 	go func() {
@@ -363,7 +364,7 @@ func TestHandle_CtxCanceled_DuringApproval(t *testing.T) {
 	t.Parallel()
 	r := newRig()
 	o := NewOrchestrator(r.deps())
-	coord := New()
+	coord := approval.New()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
@@ -400,7 +401,7 @@ func TestHandle_SendCriticalFailure(t *testing.T) {
 	var body string
 	var isError bool
 	go func() {
-		body, isError = o.Handle(context.Background(), New(), sampleProposal())
+		body, isError = o.Handle(context.Background(), approval.New(), sampleProposal())
 		close(done)
 	}()
 	select {

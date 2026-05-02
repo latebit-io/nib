@@ -1,4 +1,4 @@
-package approval
+package editflow
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/tools"
 	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/kit/approval"
 )
 
 // Edit-approval orchestration.
@@ -102,19 +103,19 @@ type Orchestrator struct {
 // behaviour rather than failing visibly.
 func NewOrchestrator(deps Deps) *Orchestrator {
 	if deps.Cache == nil {
-		panic("approval.NewOrchestrator: Cache is required")
+		panic("editflow.NewOrchestrator: Cache is required")
 	}
 	if deps.Workspace == nil {
-		panic("approval.NewOrchestrator: Workspace is required")
+		panic("editflow.NewOrchestrator: Workspace is required")
 	}
 	if deps.Send == nil || deps.SendCritical == nil {
-		panic("approval.NewOrchestrator: Send and SendCritical are required")
+		panic("editflow.NewOrchestrator: Send and SendCritical are required")
 	}
 	if deps.Validate == nil {
-		panic("approval.NewOrchestrator: Validate is required")
+		panic("editflow.NewOrchestrator: Validate is required")
 	}
 	if deps.RecordEdit == nil {
-		panic("approval.NewOrchestrator: RecordEdit is required")
+		panic("editflow.NewOrchestrator: RecordEdit is required")
 	}
 	return &Orchestrator{deps: deps}
 }
@@ -151,7 +152,7 @@ const (
 // agent.coord) prevents a competing RunWithMode that swaps the
 // agent's coord field from redirecting this proposal to a different
 // run's channels.
-func (o *Orchestrator) Handle(ctx context.Context, coord *Coordinator, p tools.EditProposal) (body string, isError bool) {
+func (o *Orchestrator) Handle(ctx context.Context, coord *approval.Coordinator, p tools.EditProposal) (body string, isError bool) {
 	body, oc := o.handle(ctx, coord, p)
 	return body, oc == outcomeFatal
 }
@@ -162,7 +163,7 @@ func (o *Orchestrator) Handle(ctx context.Context, coord *Coordinator, p tools.E
 // points must return outcomeFatal explicitly; the type system
 // catches forgotten paths because the function won't compile
 // without an outcome value on each return.
-func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.EditProposal) (string, outcome) {
+func (o *Orchestrator) handle(ctx context.Context, coord *approval.Coordinator, p tools.EditProposal) (string, outcome) {
 	// Pre-approval validation. A non-empty retryFeedback short-
 	// circuits approval and hands the feedback back to the LLM so
 	// the proposal is regenerated; exhaustion (or any other
@@ -222,13 +223,13 @@ func (o *Orchestrator) handle(ctx context.Context, coord *Coordinator, p tools.E
 // the caller can tell the LLM precisely what happened — earlier
 // versions collapsed both fatal paths into "Error: agent canceled"
 // via a wrapper, which masked an actual closed-channel failure.
-func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, p tools.EditProposal) (Approval, string, outcome) {
+func (o *Orchestrator) waitForApproval(ctx context.Context, coord *approval.Coordinator, p tools.EditProposal) (approval.Approval, string, outcome) {
 	a, err := coord.AwaitApproval(ctx)
 	if err != nil {
-		if errors.Is(err, ErrChannelClosed) {
-			return Approval{}, "Error: approval channel closed", outcomeFatal
+		if errors.Is(err, approval.ErrChannelClosed) {
+			return approval.Approval{}, "Error: approval channel closed", outcomeFatal
 		}
-		return Approval{}, "Error: agent canceled", outcomeFatal
+		return approval.Approval{}, "Error: agent canceled", outcomeFatal
 	}
 	if a.Approved {
 		return a, "", outcomeOK
@@ -241,7 +242,7 @@ func (o *Orchestrator) waitForApproval(ctx context.Context, coord *Coordinator, 
 	if c, ok := o.deps.Cache.Get(p.CanonPath); ok {
 		content = c
 	}
-	return Approval{}, fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
+	return approval.Approval{}, fmt.Sprintf("The developer rejected this edit. Try a different approach or move on.\n\nCurrent file (%s):\n\n%s",
 		p.Path, tools.TruncateForPreview(content)), outcomeOK
 }
 

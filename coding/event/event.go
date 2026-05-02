@@ -1,41 +1,109 @@
 // Package event defines the application-domain events emitted by the
 // coding agent and consumed by frontends (TUI, headless runner, tests).
 //
-// This is the application's event vocabulary. The generic agent-loop
-// lifecycle events live in agent/event; pure editor events (e.g.
-// DiagnosticsUpdated) are mirrored here from engine/event so a single
-// channel of coding/event.Event carries everything a frontend cares
-// about. The wire layer fans engine/event into this stream.
+// Coding-specific events live here. Generic agent events (streaming
+// tokens, lifecycle, status, usage, mode) live in
+// [github.com/latebit-io/nib/kit/event] and are re-exported as type
+// aliases below so existing callers continue to type [event.AgentToken],
+// [event.AgentDone], etc. without churn.
 package event
 
-// Event is the sealed interface for all coding-agent → frontend events.
-// Only types in this package implement it.
-type Event interface {
-	codingEvent()
-}
+import (
+	kitevent "github.com/latebit-io/nib/kit/event"
+)
 
-// --- Agent mode ---
+// Event is the marker interface for the coding agent's frontend
+// channel. Aliased to [kitevent.Event] so generic kit events and the
+// coding-specific events declared below flow on the same channel.
+//
+// Intentionally NOT sealed at this layer. The kit's marker method
+// ([kitevent.Event.Event]) is exported by design so library consumers
+// and third-party tools can declare their own event types; aliasing
+// (rather than embedding-plus-private-marker) preserves that openness.
+// Sealing here would break the unified channel — a [kitevent.AgentToken]
+// must satisfy [Event] for streaming text from the LLM to reach the
+// frontend without conversion. Frontends that consume this channel do
+// so via type-switch and should default-case unknown event types.
+type Event = kitevent.Event
 
-// Mode controls the agent's behavior — which tools are available and
-// which prompts are used. Defined here so both session and agent can
-// import it without circular dependencies.
-type Mode int
+// --- Aliased types from kit/event ---
+
+// Mode is the agent execution/planning mode. Aliased to [kitevent.Mode].
+type Mode = kitevent.Mode
 
 const (
 	// ModeExecution is the default mode: all tools available, execution prompt.
-	ModeExecution Mode = iota
-	// ModePlanning restricts the agent to read-only and memory tools,
-	// using a planning-focused prompt for conversational design.
-	ModePlanning
+	ModeExecution = kitevent.ModeExecution
+	// ModePlanning restricts the agent to read-only and memory tools.
+	ModePlanning = kitevent.ModePlanning
 )
 
-// --- Agent events ---
+// AgentToken is the streaming-text-delta event. Aliased to [kitevent.AgentToken].
+type AgentToken = kitevent.AgentToken
 
-// AgentToken delivers streaming text from the LLM.
-type AgentToken struct {
-	// Text is the text delta from the LLM stream.
-	Text string
-}
+// AgentDone is the agent-loop-finished event. Aliased to [kitevent.AgentDone].
+type AgentDone = kitevent.AgentDone
+
+// AgentError is the agent-error event. Aliased to [kitevent.AgentError].
+type AgentError = kitevent.AgentError
+
+// AgentToolCall is the tool-invocation event. Aliased to [kitevent.AgentToolCall].
+type AgentToolCall = kitevent.AgentToolCall
+
+// AgentWaiting is the turn-yield event. Aliased to [kitevent.AgentWaiting].
+type AgentWaiting = kitevent.AgentWaiting
+
+// AgentStatus is the status update event. Aliased to [kitevent.AgentStatus].
+type AgentStatus = kitevent.AgentStatus
+
+// AgentTurnUsage is the per-turn token-usage event. Aliased to [kitevent.AgentTurnUsage].
+type AgentTurnUsage = kitevent.AgentTurnUsage
+
+// AgentInputEstimate is the pre-stream input estimate event.
+// Aliased to [kitevent.AgentInputEstimate].
+type AgentInputEstimate = kitevent.AgentInputEstimate
+
+// AgentCompacted is the history-compacted event. Aliased to [kitevent.AgentCompacted].
+type AgentCompacted = kitevent.AgentCompacted
+
+// StatusKind is the typed enum for agent status values. Aliased to
+// [kitevent.StatusKind] so coding-specific constants below extend the
+// same nominal type as the generic ones in [kitevent].
+type StatusKind = kitevent.StatusKind
+
+const (
+	// StatusIdle means the agent is not active.
+	StatusIdle = kitevent.StatusIdle
+	// StatusThinking means the agent is processing / waiting on the LLM.
+	StatusThinking = kitevent.StatusThinking
+	// StatusPlanning means the agent is in planning mode.
+	StatusPlanning = kitevent.StatusPlanning
+	// StatusPlanningWaiting means planning is done and the agent awaits user action.
+	StatusPlanningWaiting = kitevent.StatusPlanningWaiting
+	// StatusWaiting means the agent is waiting for user input.
+	StatusWaiting = kitevent.StatusWaiting
+	// StatusFinished marks a turn-end where the agent declared its task tree empty.
+	StatusFinished = kitevent.StatusFinished
+)
+
+// --- Coding-specific status constants ---
+
+const (
+	// StatusReviewing means an edit proposal is pending user review.
+	StatusReviewing StatusKind = "reviewing"
+	// StatusBlockReview means an edit proposal is pending user review
+	// SPECIFICALLY because a validator stage flagged it (architecture
+	// cap, lint, etc.). The TUI uses this to render a more
+	// attention-grabbing status indicator than plain "reviewing" —
+	// the developer needs to know this surfaced for a reason and is
+	// not the routine review-and-approve flow they'd see at lower
+	// autonomy levels.
+	StatusBlockReview StatusKind = "block-review"
+	// StatusLinting means the agent is running post-edit style lint commands.
+	StatusLinting StatusKind = "linting"
+)
+
+// --- Coding-specific events ---
 
 // ValidatorSummary is the frontend-facing projection of a pre-approval
 // validator result. The full validate.Result type is intentionally NOT
@@ -73,70 +141,6 @@ type AgentFileCreated struct {
 	Path string
 }
 
-// AgentDone signals the agent loop has finished.
-// Success is true when the loop completed normally (not cancelled or errored).
-type AgentDone struct {
-	// Success is true when the loop completed normally.
-	Success bool
-}
-
-// AgentError carries an error from the agent.
-type AgentError struct {
-	// Err is the error message.
-	Err string
-}
-
-// StatusKind is a typed enum for agent status values.
-// It uses string constants so debug output remains human-readable.
-type StatusKind string
-
-const (
-	// StatusIdle means the agent is not active.
-	StatusIdle StatusKind = "idle"
-	// StatusThinking means the agent is processing / waiting on the LLM.
-	StatusThinking StatusKind = "thinking"
-	// StatusPlanning means the agent is in planning mode.
-	StatusPlanning StatusKind = "planning"
-	// StatusPlanningWaiting means planning is done and the agent awaits user action.
-	StatusPlanningWaiting StatusKind = "planning-waiting"
-	// StatusReviewing means an edit proposal is pending user review.
-	StatusReviewing StatusKind = "reviewing"
-	// StatusBlockReview means an edit proposal is pending user review
-	// SPECIFICALLY because a validator stage flagged it (architecture
-	// cap, lint, etc.). The TUI uses this to render a more
-	// attention-grabbing status indicator than plain "reviewing" —
-	// the developer needs to know this surfaced for a reason and is
-	// not the routine review-and-approve flow they'd see at lower
-	// autonomy levels.
-	StatusBlockReview StatusKind = "block-review"
-	// StatusWaiting means the agent is waiting for user input.
-	StatusWaiting StatusKind = "waiting"
-	// StatusFinished is a turn-end idle state like StatusWaiting, but the
-	// agent yielded after declaring its tracked task tree empty (sanctioned
-	// stop condition #1). Distinct surface so the developer can tell at a
-	// glance whether the pause is "your turn to reply" or "I think all work
-	// is done — type a new goal or close the session." Both states accept
-	// the same input flow; the difference is purely diagnostic.
-	StatusFinished StatusKind = "finished"
-	// StatusLinting means the agent is running post-edit style lint commands.
-	StatusLinting StatusKind = "linting"
-)
-
-// AgentStatus updates the agent status display.
-type AgentStatus struct {
-	// Status is the current agent status kind.
-	Status StatusKind
-}
-
-// AgentToolCall signals the agent is invoking a tool.
-// Emitted before execution so the frontend can show what the agent is doing.
-type AgentToolCall struct {
-	// Name is the tool name (e.g., "search_project", "read_file").
-	Name string
-	// Args is the raw JSON arguments for the tool call.
-	Args string
-}
-
 // AgentNavigate signals the agent wants to navigate the editor to a location.
 // The frontend handles the actual cursor movement on its own goroutine.
 type AgentNavigate struct {
@@ -146,92 +150,18 @@ type AgentNavigate struct {
 	Line int
 }
 
-func (AgentToken) codingEvent()        {}
-func (AgentEditProposed) codingEvent() {}
-func (AgentFileCreated) codingEvent()  {}
-func (AgentToolCall) codingEvent()     {}
-func (AgentNavigate) codingEvent()     {}
-
-// AgentWaiting signals the agent finished its turn and is waiting for user input.
-// The frontend should enable the input prompt so the developer can continue
-// the conversation. The agent goroutine is blocked until Reply() is called.
-type AgentWaiting struct {
-	// Finished is true when the agent yielded after declaring its tracked
-	// task tree empty (sanctioned stop condition #1 — all tasks complete).
-	// Frontends can use this to distinguish "your turn to reply" from
-	// "I'm done with the planned work" without changing the input flow.
-	Finished bool
-}
-
-func (AgentDone) codingEvent()    {}
-func (AgentError) codingEvent()   {}
-func (AgentStatus) codingEvent()  {}
-func (AgentWaiting) codingEvent() {}
-
-// AgentTurnUsage reports token consumption for a single agent turn
-// (one or more LLM Stream calls). Combines provider-reported exact
-// counts with client-side composition estimates.
-type AgentTurnUsage struct {
-	// Turn is the 1-indexed turn number within this agent run.
-	Turn int
-	// PromptTokens is the provider-reported total input tokens (0 if unavailable).
-	PromptTokens int
-	// CompletionTokens is the provider-reported output tokens (0 if unavailable).
-	CompletionTokens int
-	// CachedTokens is the provider-reported cached input tokens (0 if unavailable).
-	CachedTokens int
-	// ToolCalls is the number of tool calls dispatched in this turn.
-	ToolCalls int
-
-	// Client-side estimates (always available).
-	// SystemEst is the estimated system prompt tokens.
-	SystemEst int
-	// ToolsEst is the estimated tool definition tokens.
-	ToolsEst int
-	// HistoryEst is the estimated conversation history tokens.
-	HistoryEst int
-	// NewEst is the estimated new input tokens.
-	NewEst int
-	// CompletionEst is the estimated output tokens (from streamed content length).
-	CompletionEst int
-}
-
-func (AgentTurnUsage) codingEvent() {}
-
-// AgentInputEstimate signals the estimated input token composition before
-// an LLM call starts. Sent right before Stream() so the frontend can show
-// real-time input cost while the response is streaming.
-type AgentInputEstimate struct {
-	// System is the estimated system prompt tokens.
-	System int
-	// Tools is the estimated tool definition tokens.
-	Tools int
-	// History is the estimated conversation history tokens.
-	History int
-	// New is the estimated new input tokens.
-	New int
-}
-
-func (AgentInputEstimate) codingEvent() {}
-
-// AgentCompacted signals that conversation history was compacted to reduce
-// token usage. Emitted once per compaction pass, before the next LLM call.
-type AgentCompacted struct {
-	// BeforeTokens is the estimated history tokens before compaction.
-	BeforeTokens int
-	// AfterTokens is the estimated history tokens after compaction.
-	AfterTokens int
-}
-
-func (AgentCompacted) codingEvent() {}
-
 // ReloadBuffers requests the frontend to re-read all open buffers from disk.
 // Sent after bash tool calls that may have modified files outside the edit
-// approval flow. The frontend should reload buffers whose on-disk content
-// differs from the in-memory content.
+// approval flow.
+//
+// Contract: the frontend MUST skip any buffer with unsaved in-editor changes.
+// "On-disk differs from in-memory" is true for every dirty buffer; a literal
+// reload-on-diff would clobber the developer's work. Reload only clean
+// buffers; dirty buffers are the developer's source of truth and a frontend
+// that wants to surface the conflict should do so explicitly rather than
+// silently overwrite. The reference TUI implementation (handleFileChanged)
+// gates on the buffer's modified flag for exactly this reason.
 type ReloadBuffers struct{}
-
-func (ReloadBuffers) codingEvent() {}
 
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {
@@ -264,8 +194,6 @@ type FlushBuffers struct {
 	Result chan<- FlushResult
 }
 
-func (FlushBuffers) codingEvent() {}
-
 // --- Editor-domain events mirrored from engine/event ---
 
 // DiagnosticsUpdated signals that diagnostics changed for a file.
@@ -279,4 +207,11 @@ type DiagnosticsUpdated struct {
 	Path string
 }
 
-func (DiagnosticsUpdated) codingEvent() {}
+// --- Marker method implementations ---
+
+func (AgentEditProposed) Event()  {}
+func (AgentFileCreated) Event()   {}
+func (AgentNavigate) Event()      {}
+func (ReloadBuffers) Event()      {}
+func (FlushBuffers) Event()       {}
+func (DiagnosticsUpdated) Event() {}

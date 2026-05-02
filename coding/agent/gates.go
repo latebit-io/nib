@@ -11,7 +11,7 @@ import (
 // Agent-internal gates and intent helpers.
 //
 // recordEdit + maxValidatorRetries are the bookkeeping the
-// [coding/approval.Orchestrator] callbacks into when an edit is
+// [coding/editflow.Orchestrator] callbacks into when an edit is
 // approved (append to taskEdits for end-of-task review, clear the
 // per-path retry counter). enforceActiveTaskGate is the dispatch-
 // time check that mutating tools require an active `[>]` task in
@@ -22,7 +22,7 @@ import (
 // These all read or mutate Agent state under [Agent.mu]. They live
 // here together because each represents an "agent-side policy"
 // surface — gates and bookkeeping — distinct from the run loop and
-// turn pipeline. Pure helpers in [coding/nudges] / [coding/budget]
+// turn pipeline. Pure helpers in [coding/nudges] / [kit/budget]
 // / etc. own the math and pattern matching; this file glues them
 // to agent state.
 

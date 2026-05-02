@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/coding/approval"
-	"github.com/latebit-io/nib/coding/budget"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/prompts"
 	"github.com/latebit-io/nib/coding/style"
 	"github.com/latebit-io/nib/engine/lint"
+	"github.com/latebit-io/nib/kit/approval"
+	"github.com/latebit-io/nib/kit/budget"
 )
 
 // Public lifecycle and signal API for Agent.

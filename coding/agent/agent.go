@@ -17,8 +17,7 @@ import (
 	upevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/coding/approval"
-	"github.com/latebit-io/nib/coding/budget"
+	"github.com/latebit-io/nib/coding/editflow"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/nudges"
 	"github.com/latebit-io/nib/coding/prompts"
@@ -29,6 +28,8 @@ import (
 	"github.com/latebit-io/nib/engine/memory"
 	"github.com/latebit-io/nib/engine/runconfig"
 	"github.com/latebit-io/nib/engine/validate"
+	"github.com/latebit-io/nib/kit/approval"
+	"github.com/latebit-io/nib/kit/budget"
 )
 
 // InteractionMode controls prompt framing — how the agent describes its
@@ -125,7 +126,7 @@ type Agent struct {
 	// continue, diagnostics). Constructed once at New() time with
 	// callbacks that close over agent state; the per-run coord is
 	// passed to Handle from the run goroutine via coordFromCtx.
-	approvalFlow *approval.Orchestrator
+	approvalFlow *editflow.Orchestrator
 
 	// waiting is set while the run loop is parked on coord.AwaitInput
 	// between turns, awaiting the developer's next message.
@@ -423,7 +424,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 		taskTokenBudget:   taskTokenBudget,
 	}
 
-	a.approvalFlow = approval.NewOrchestrator(approval.Deps{
+	a.approvalFlow = editflow.NewOrchestrator(editflow.Deps{
 		Cache:        cache,
 		Workspace:    workspace,
 		Send:         a.send,
@@ -609,7 +610,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 // Mode, Usage, emitOpening, send, sendCritical) lives in lifecycle.go.
 
 // Per-run budget integration (recordTurnUsage, checkTaskBudget) lives
-// in budget.go. The pure budget math + types live in [coding/budget].
+// in budget.go. The pure budget math + types live in [kit/budget].
 
 // Foundation event translation (translateFoundationEvents,
 // commitRunEnd) lives in translator.go. The translator drains the
@@ -665,8 +666,8 @@ func (a *Agent) appendSmokeTool(builtins []Tool, projectRoot string) []Tool {
 
 // Edit-approval orchestration (handleEditProposal, waitForApproval,
 // waitForContinue, fatalProposalMarkers) lives in
-// [coding/approval.Orchestrator]. The agent constructs one in New
-// with [approval.Deps] callbacks bound to its own state and routes
+// [coding/editflow.Orchestrator]. The agent constructs one in New
+// with [editflow.Deps] callbacks bound to its own state and routes
 // proposals through it via [Agent.Propose] in collab_impl.go.
 
 // Agent-internal gates + bookkeeping (recordEdit, maxValidatorRetries,

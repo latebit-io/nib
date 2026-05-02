@@ -12,9 +12,18 @@ import (
 	kitevent "github.com/latebit-io/nib/kit/event"
 )
 
-// Event is the sealed marker interface for all events on the coding
-// agent's frontend channel. Aliased to [kitevent.Event] so generic and
-// coding-specific events flow on the same channel.
+// Event is the marker interface for the coding agent's frontend
+// channel. Aliased to [kitevent.Event] so generic kit events and the
+// coding-specific events declared below flow on the same channel.
+//
+// Intentionally NOT sealed at this layer. The kit's marker method
+// ([kitevent.Event.Event]) is exported by design so library consumers
+// and third-party tools can declare their own event types; aliasing
+// (rather than embedding-plus-private-marker) preserves that openness.
+// Sealing here would break the unified channel — a [kitevent.AgentToken]
+// must satisfy [Event] for streaming text from the LLM to reach the
+// frontend without conversion. Frontends that consume this channel do
+// so via type-switch and should default-case unknown event types.
 type Event = kitevent.Event
 
 // --- Aliased types from kit/event ---
@@ -143,8 +152,15 @@ type AgentNavigate struct {
 
 // ReloadBuffers requests the frontend to re-read all open buffers from disk.
 // Sent after bash tool calls that may have modified files outside the edit
-// approval flow. The frontend should reload buffers whose on-disk content
-// differs from the in-memory content.
+// approval flow.
+//
+// Contract: the frontend MUST skip any buffer with unsaved in-editor changes.
+// "On-disk differs from in-memory" is true for every dirty buffer; a literal
+// reload-on-diff would clobber the developer's work. Reload only clean
+// buffers; dirty buffers are the developer's source of truth and a frontend
+// that wants to surface the conflict should do so explicitly rather than
+// silently overwrite. The reference TUI implementation (handleFileChanged)
+// gates on the buffer's modified flag for exactly this reason.
 type ReloadBuffers struct{}
 
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.

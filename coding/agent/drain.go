@@ -185,7 +185,7 @@ func stripThinkTags(s string, inThink *bool) (clean, residue string) {
 				// prefix of "<think>" so the next call can complete
 				// an opener that spans the boundary. The held bytes
 				// are NOT emitted yet — if they don't materialize,
-				// they'll be flushed on stream-end (see [Drain]).
+				// they'll be flushed on stream-end (see [drainStream]).
 				held := trailingTagPrefix(s, "<think>")
 				out.WriteString(s[:len(s)-held])
 				return out.String(), s[len(s)-held:]

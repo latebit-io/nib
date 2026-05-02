@@ -34,7 +34,7 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 )
 
-// truncationMaxRetries bounds consecutive truncated turns before [Recover]
+// truncationMaxRetries bounds consecutive truncated turns before [recoverFromTruncation]
 // returns a terminal error. Three total attempts is enough for the
 // usual escalation path (default → truncationInitialEscalation → truncationCeiling) plus
 // one final "split the work" nudge; beyond that a looping or
@@ -76,7 +76,7 @@ var (
 	_ escalator = (*llm.CodexAPI)(nil)
 )
 
-// escalationOutcome describes what happened when [Recover] tried to
+// escalationOutcome describes what happened when [recoverFromTruncation] tried to
 // bump the provider's max-tokens cap. The three states feed
 // [recoveryMessages] so the model and the status bar see phrasing
 // that matches the actual situation — telling the LLM "the provider

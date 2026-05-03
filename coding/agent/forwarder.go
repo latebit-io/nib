@@ -62,6 +62,20 @@ func (a *Agent) forwardKitEvents() {
 				}
 			}
 		}
+		// Run-boundary signal: close runDone AFTER AgentDone has been
+		// fully forwarded (including any Success override and any
+		// post-turn budget side effects above) so a follow-up
+		// [Agent.RunWithMode] / [Agent.Reply] resume blocked on
+		// [Agent.fenceForwarder] unblocks only once this run's tail
+		// has actually settled.
+		if _, ok := ev.(event.AgentDone); ok {
+			a.runDoneMu.Lock()
+			if a.runDone != nil {
+				close(a.runDone)
+				a.runDone = nil
+			}
+			a.runDoneMu.Unlock()
+		}
 	}
 }
 

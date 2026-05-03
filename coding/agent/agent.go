@@ -270,6 +270,23 @@ type Agent struct {
 	// closeOnce guards [Agent.Close] so concurrent or repeated Close
 	// calls do not double-close the kit agent or its event channel.
 	closeOnce sync.Once
+
+	// runDoneMu guards [Agent.runDone]. Forwarder writes (closes the
+	// channel + nil-clears the field on AgentDone). Run-start methods
+	// read it (block on <- before resetting per-run state) and
+	// allocate a fresh channel for the new run.
+	runDoneMu sync.Mutex
+	// runDone is closed by [Agent.forwardKitEvents] when the active
+	// run's [event.AgentDone] has been fully processed. Run-start
+	// methods (RunWithMode, Reply's resume path) [Agent.fenceForwarder]
+	// on the previously-installed channel before resetting per-run
+	// state ([Agent.sessionUsage], [Agent.turnCounter],
+	// [Agent.runUnsuccessful], [Agent.budgetExceeded], [Agent.running])
+	// and starting the next run — without the fence, a forwarder still
+	// processing the prior run's buffered events would mutate the new
+	// run's state and (worst case) charge the prior run's tokens
+	// against the new run's budget.
+	runDone chan struct{}
 }
 
 // taskEdit records a single edit made during an agent task, for end-of-task

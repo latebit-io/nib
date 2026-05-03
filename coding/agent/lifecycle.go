@@ -34,6 +34,57 @@ import (
 // The foundation drives the loop through its hook surface, which
 // [Agent.FoundationHooks] composes against the same agent instance.
 
+// fenceForwarder blocks until the previously-active run's
+// [event.AgentDone] has been fully forwarded by
+// [Agent.forwardKitEvents]. Returns immediately when no previous run
+// has been armed (fresh agent or the prior run was disarmed via
+// [Agent.disarmRunDone] on a kit-rejection path).
+//
+// Both RunWithMode and Reply's resume path call this between
+// kit.WaitForIdle (which only fences the foundation goroutine) and
+// the per-run state reset. Without the fence a forwarder still
+// processing the prior run's buffered AgentTurnUsage could mutate the
+// new run's [Agent.sessionUsage] / [Agent.turnCounter] and falsely
+// trip the new run's budget gate; a stale AgentDone could flip
+// [Agent.running] off after RunWithMode set it true.
+func (a *Agent) fenceForwarder() {
+	a.runDoneMu.Lock()
+	prev := a.runDone
+	a.runDoneMu.Unlock()
+	if prev != nil {
+		<-prev
+	}
+}
+
+// armRunDone allocates a fresh runDone channel for the run about to
+// start. The forwarder closes it on the next AgentDone event. The
+// returned channel is the local handle the caller passes to
+// [Agent.disarmRunDone] if kit rejects the run before the foundation
+// can emit AgentDone.
+func (a *Agent) armRunDone() chan struct{} {
+	ch := make(chan struct{})
+	a.runDoneMu.Lock()
+	a.runDone = ch
+	a.runDoneMu.Unlock()
+	return ch
+}
+
+// disarmRunDone closes runDone manually because no AgentDone will
+// arrive — kit.PromptWithMessages was rejected before the foundation
+// goroutine started. Without this, the next [Agent.fenceForwarder]
+// would block forever on a channel no one will close. The pointer
+// guard prevents a double-close in the (currently impossible, but
+// defensively safe) case where the forwarder somehow raced ahead of
+// the rejection path.
+func (a *Agent) disarmRunDone(ch chan struct{}) {
+	a.runDoneMu.Lock()
+	if a.runDone == ch {
+		a.runDone = nil
+		close(ch)
+	}
+	a.runDoneMu.Unlock()
+}
+
 // Run starts a new conversation in execution mode. See RunWithMode for details.
 func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
 	a.RunWithMode(ctx, fileName, fileContent, goal, contextFiles, event.ModeExecution)
@@ -54,6 +105,23 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, con
 func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode event.Mode) {
 	a.mu.Lock()
 	prevCancel := a.cancel
+	a.mu.Unlock()
+
+	// Cancel the previous run, then wait for the kit/foundation AND the
+	// forwarder to fully unwind before resetting per-run state. kit.
+	// WaitForIdle only fences the foundation; fenceForwarder waits for
+	// the prior run's AgentDone (and thus all events from that run) to
+	// drain through forwardKitEvents — without this, late
+	// AgentTurnUsage events from the prior run would charge against the
+	// new run's sessionUsage/budget and a late AgentDone would flip
+	// running=false on the fresh run.
+	if prevCancel != nil {
+		prevCancel()
+	}
+	a.kit.WaitForIdle()
+	a.fenceForwarder()
+
+	a.mu.Lock()
 	// Allocate a fresh coordinator for the new run instead of reusing
 	// the existing one. The previous goroutine may still be parked
 	// inside a Coordinator.Await* call on the old channels; swapping
@@ -87,15 +155,6 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	}
 	a.mu.Unlock()
 
-	// Cancel the previous run after releasing mu, then wait for the
-	// kit/foundation to fully unwind before kicking off the next one.
-	// kit.PromptWithMessages refuses overlap with ErrRunInProgress;
-	// without WaitForIdle a fast successive call would race that check.
-	if prevCancel != nil {
-		prevCancel()
-	}
-	a.kit.WaitForIdle()
-
 	if goal == "" {
 		goal = "Review this code and suggest improvements, one step at a time."
 	}
@@ -104,6 +163,11 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	messages := a.buildMessages(fileName, fileContent, goal, contextFiles, memorySummary, mode)
 
 	a.emitOpening(mode)
+
+	// Arm runDone BEFORE PromptWithMessages so a super-fast run that
+	// emits AgentDone before this method returns finds the channel in
+	// place to close. On rejection we disarm manually below.
+	runDone := a.armRunDone()
 
 	// Annotate ctx so [Agent.Propose] (the Approver collaborator entry
 	// point invoked by tools) recovers this run's coord without
@@ -115,11 +179,13 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 		// empty-slice rejection. Surface the error and emit AgentDone
 		// so the frontend unwinds cleanly. running flips back here
 		// because no AgentDone will arrive from kit when the run never
-		// started.
+		// started; disarmRunDone closes runDone for the same reason
+		// (the next fenceForwarder must not block forever).
 		slog.Error("agent: kit rejected new run", "err", err)
 		a.mu.Lock()
 		a.running = false
 		a.mu.Unlock()
+		a.disarmRunDone(runDone)
 		a.send(event.AgentError{Err: fmt.Sprintf("agent run start failed: %v", err)})
 		a.send(event.AgentDone{Success: false})
 		return
@@ -166,7 +232,23 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 		return true
 	}
 
-	// Resume from kit's last transcript.
+	// Resume path: cancel + fence the previous run before reading kit
+	// state and resetting per-run fields. fenceForwarder waits for the
+	// prior run's AgentDone to drain through the forwarder; without it,
+	// kit.State().Messages could include partially-applied edits and
+	// the per-run state reset below would race a forwarder still
+	// processing the prior run's tail.
+	a.mu.Lock()
+	prevCancel := a.cancel
+	a.mu.Unlock()
+	if prevCancel != nil {
+		prevCancel()
+	}
+	a.kit.WaitForIdle()
+	a.fenceForwarder()
+
+	// Snapshot kit's transcript AFTER the fence so the resume seed is
+	// the final, drained state of the previous run.
 	saved := a.kit.State().Messages
 	if len(saved) == 0 {
 		return false
@@ -176,7 +258,6 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.mu.Lock()
 	mode := a.mode
 
-	prevCancel := a.cancel
 	a.coord = approval.New()
 	coord := a.coord
 
@@ -202,11 +283,6 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	}
 	a.mu.Unlock()
 
-	if prevCancel != nil {
-		prevCancel()
-	}
-	a.kit.WaitForIdle()
-
 	// Refresh the system prompt so a runtime style/terse/autonomous
 	// toggle since the original run took effect on the resume's first
 	// turn. The transcript's first message is always the system one
@@ -220,12 +296,15 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.send(event.AgentToken{Text: "Resuming...\n\n"})
 	a.send(event.AgentStatus{Status: event.StatusThinking})
 
+	runDone := a.armRunDone()
+
 	hookCtx := ctxWithCoord(runCtx, coord)
 	if err := a.kit.PromptWithMessages(hookCtx, messages); err != nil {
 		slog.Error("agent: kit rejected resume", "err", err)
 		a.mu.Lock()
 		a.running = false
 		a.mu.Unlock()
+		a.disarmRunDone(runDone)
 		a.send(event.AgentError{Err: fmt.Sprintf("agent resume failed: %v", err)})
 		a.send(event.AgentDone{Success: false})
 		// Resume was attempted with valid saved state — the kit

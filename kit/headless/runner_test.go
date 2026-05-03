@@ -9,13 +9,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/latebit-io/nib/kit/event"
 )
 
 // mockAgent implements [Agent] for tests. runFunc, when set, fires on
-// Prompt to push events onto the supplied channel.
+// Prompt to push events onto the supplied channel. replyCh is a
+// one-shot signal that closes on the first Reply call so runFunc can
+// deterministically wait for follow-up input without spin-waiting.
 type mockAgent struct {
 	mu sync.Mutex
 
@@ -26,10 +27,16 @@ type mockAgent struct {
 	prompted  string
 	promptErr error
 	replyOK   bool
+	replyCh   chan struct{}
+	replyOnce sync.Once
 }
 
 func newMockAgent(events chan<- event.Event) *mockAgent {
-	return &mockAgent{events: events, replyOK: true}
+	return &mockAgent{
+		events:  events,
+		replyOK: true,
+		replyCh: make(chan struct{}),
+	}
 }
 
 func (m *mockAgent) Prompt(_ context.Context, prompt string) error {
@@ -52,6 +59,7 @@ func (m *mockAgent) Reply(_ context.Context, input string) bool {
 	m.replied = input
 	ok := m.replyOK
 	m.mu.Unlock()
+	m.replyOnce.Do(func() { close(m.replyCh) })
 	return ok
 }
 
@@ -208,16 +216,7 @@ func TestRunner_AgentWaiting_TTY_RepliesFromStdin(t *testing.T) {
 	mock.runFunc = func() {
 		events <- event.AgentToken{Text: "first turn"}
 		events <- event.AgentWaiting{}
-		// Wait for the reply, then close.
-		for {
-			mock.mu.Lock()
-			done := mock.replied != ""
-			mock.mu.Unlock()
-			if done {
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
+		<-mock.replyCh // deterministic wait for the runner's Reply call
 		events <- event.AgentDone{Success: true}
 	}
 
@@ -380,9 +379,16 @@ func TestRunner_AgentStatus_GenericKind_NotForwardedToHandler(t *testing.T) {
 		return nil
 	}
 
+	// Every kit-generic StatusKind must be owned by handleStatus —
+	// none should reach the handler. Adding a new generic kind to
+	// kit/event without extending handleStatus would surface here.
 	mock.runFunc = func() {
 		events <- event.AgentStatus{Status: event.StatusThinking}
 		events <- event.AgentStatus{Status: event.StatusPlanning}
+		events <- event.AgentStatus{Status: event.StatusIdle}
+		events <- event.AgentStatus{Status: event.StatusWaiting}
+		events <- event.AgentStatus{Status: event.StatusFinished}
+		events <- event.AgentStatus{Status: event.StatusPlanningWaiting}
 		events <- event.AgentDone{Success: true}
 	}
 
@@ -394,7 +400,7 @@ func TestRunner_AgentStatus_GenericKind_NotForwardedToHandler(t *testing.T) {
 	}
 }
 
-func TestRunner_EventsChannelClosed_ReturnsCleanly(t *testing.T) {
+func TestRunner_EventsChannelClosed_PreservesPartialSummary(t *testing.T) {
 	events := make(chan event.Event, 4)
 	mock := newMockAgent(events)
 	mock.runFunc = func() {
@@ -405,9 +411,14 @@ func TestRunner_EventsChannelClosed_ReturnsCleanly(t *testing.T) {
 	r := New(mock, events)
 	result := r.Run(context.Background(), "x")
 
-	// Closed channel without AgentDone leaves Success as zero value.
+	// Closed channel without AgentDone leaves Success at its zero
+	// value; the partial transcript must still surface so callers
+	// see what arrived before the producer terminated.
 	if result.Success {
 		t.Errorf("Success = true, want false (no AgentDone before close)")
+	}
+	if result.Summary != "partial" {
+		t.Errorf("Summary = %q, want %q (partial summary must be preserved on close)", result.Summary, "partial")
 	}
 }
 

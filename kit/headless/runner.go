@@ -101,8 +101,15 @@ type Runner struct {
 	isTTY   bool
 
 	// lines is the shared stdin reader channel, started lazily on the
-	// first REPL prompt and kept alive for the runner's lifetime so a
-	// cancelled run does not leak a scanner goroutine.
+	// first REPL prompt. The reader goroutine blocks on stdin and
+	// exits only when stdin reaches EOF or errors — context
+	// cancellation cannot abort an in-flight bufio.Scanner.Scan
+	// without closing the underlying io.Reader, which the runner
+	// does not own. In CLI use the goroutine dies with the process;
+	// in a long-lived embedding, callers feeding os.Stdin should
+	// close it (or arrange for EOF) when shutting the runner down.
+	// One goroutine per runner — kept across runs so REPL turns do
+	// not spawn a fresh scanner per turn.
 	lines chan stdinLine
 }
 
@@ -183,8 +190,12 @@ type stdinLine struct {
 }
 
 // startStdinReader launches the single goroutine that reads lines
-// from stdin. Called lazily on the first REPL prompt; the goroutine
-// exits naturally when stdin reaches EOF or errors.
+// from stdin. Called lazily on the first REPL prompt. The goroutine
+// blocks on bufio.Scanner.Scan and exits when stdin reaches EOF or
+// errors; it cannot be cancelled by the runner because [Scanner.Scan]
+// has no cancellation surface and the runner does not own the
+// user-supplied [io.Reader]. See the doc on the [Runner.lines] field
+// for the lifetime contract.
 func (r *Runner) startStdinReader() {
 	r.lines = make(chan stdinLine, 1)
 	go func() {
@@ -223,6 +234,11 @@ func (r *Runner) processEvents(ctx context.Context, result *Result) {
 
 		case ev, ok := <-r.events:
 			if !ok {
+				// Producer closed without AgentDone. Preserve the
+				// partial transcript so callers see what arrived
+				// before the channel terminated; Success stays at
+				// its zero value to flag the incomplete run.
+				result.Summary = summary.String()
 				return
 			}
 			if done := r.handleEvent(ctx, ev, result, &summary, &summaryTruncated); done {
@@ -296,10 +312,14 @@ func appendSummary(summary *strings.Builder, text string, truncated *bool) {
 	summary.WriteString(text)
 }
 
-// handleStatus writes a human-readable status line to stderr in TTY
-// mode for kit-generic status kinds. Returns false when the kind is
-// not generic, so the caller can forward to the [EventHandler] for
-// domain-specific kinds (StatusLinting, StatusReviewing, etc.).
+// handleStatus owns the dispatch for kit-generic [event.StatusKind]
+// values. Thinking and Planning render a stderr status line in TTY
+// mode; the lifecycle/idle markers (Idle, Waiting, Finished,
+// PlanningWaiting) are kit-generic but render no dedicated line
+// (the AgentWaiting event already drives the REPL transition).
+// Returns false only when the kind is unrecognized — the caller
+// then forwards to the [EventHandler] so specializations can react
+// to domain-specific kinds (StatusLinting, StatusReviewing, etc.).
 func (r *Runner) handleStatus(e event.AgentStatus) bool {
 	switch e.Status {
 	case event.StatusThinking:
@@ -307,6 +327,9 @@ func (r *Runner) handleStatus(e event.AgentStatus) bool {
 		return true
 	case event.StatusPlanning:
 		r.status("[planning...]\n")
+		return true
+	case event.StatusIdle, event.StatusWaiting,
+		event.StatusFinished, event.StatusPlanningWaiting:
 		return true
 	}
 	return false

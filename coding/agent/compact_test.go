@@ -91,29 +91,8 @@ func TestMaybeCompact_AboveThresholdCompactsAndEmits(t *testing.T) {
 	}
 }
 
-// TestEstimateAndBroadcast_EmitsEventAndReturnsEstimate locks the
-// pre-call status update: the frontend's input estimate must update
-// BEFORE the LLM call starts, otherwise the status bar lags by one
-// turn. Returns the same estimate so the caller can store it.
-func TestEstimateAndBroadcast_EmitsEventAndReturnsEstimate(t *testing.T) {
-	t.Parallel()
-	msgs := []llm.Message{
-		{Role: "system", Content: "sys"},
-		{Role: "user", Content: "hi"},
-	}
-	var sent []event.Event
-	send := func(ev event.Event) { sent = append(sent, ev) }
-
-	got := estimateAndBroadcast(msgs, nil, send)
-
-	if len(sent) != 1 {
-		t.Fatalf("sent %d events, want 1 (AgentInputEstimate)", len(sent))
-	}
-	ev, ok := sent[0].(event.AgentInputEstimate)
-	if !ok {
-		t.Fatalf("sent event = %T, want AgentInputEstimate", sent[0])
-	}
-	if ev.System != got.System || ev.History != got.History || ev.New != got.New || ev.Tools != got.Tools {
-		t.Errorf("event fields disagree with returned estimate: ev=%+v got=%+v", ev, got)
-	}
-}
+// AgentInputEstimate emission is now exercised end-to-end in
+// TestAgent_TurnUsageSurvivesKitChannelPressure (forwarder_test.go) —
+// providerProxy.Stream emits it synchronously before each LLM call.
+// The standalone unit test for estimateAndBroadcast was retired
+// alongside the helper.

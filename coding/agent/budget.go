@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/kit/budget"
 )
 
@@ -47,6 +48,25 @@ func (a *Agent) checkTaskBudget() string {
 	a.budgetExceeded = true
 	a.mu.Unlock()
 	return msg
+}
+
+// onTurnSettled is the callback providerProxy invokes after emitting
+// AgentTurnUsage on a Stream's Done event. Runs the post-turn budget
+// check and aborts the run if the cap was crossed. Synchronous in
+// the providerProxy Stream wrapper goroutine; abort marks kit's
+// per-run outcome unsuccess so the eventual AgentDone surfaces with
+// Success=false. Lives on Agent (rather than as a closure inside
+// buildKitAgent) so the bound function value is stable across
+// providerProxy reads of [providerProxy.onTurnSettled].
+func (a *Agent) onTurnSettled() {
+	msg := a.checkTaskBudget()
+	if msg == "" {
+		return
+	}
+	a.send(event.AgentError{Err: msg})
+	if a.kit != nil {
+		a.kit.Abort()
+	}
 }
 
 // sessionSnapshot returns the per-run usage snapshot from providerProxy,

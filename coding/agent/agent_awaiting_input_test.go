@@ -416,3 +416,41 @@ func TestAgent_TruncationRetries_ResetAcrossRuns(t *testing.T) {
 		t.Errorf("run 2 ended with AgentDone(success=%v); want AgentWaiting (truncation should have been recovered)", done.Success)
 	}
 }
+
+// TestReply_NoActiveRunDoesNotMutateWaiting locks the contract that
+// [Agent.Reply] must NOT flip [Agent.IsWaiting] or rotate the in-
+// flight intent unless the message actually got accepted somewhere.
+// A previous design eagerly mutated state before kit.Reply, leaving
+// the wrapper claiming "not waiting" even after a reject + no-saved-
+// state bailout returned false.
+func TestReply_NoActiveRunDoesNotMutateWaiting(t *testing.T) {
+	t.Parallel()
+
+	events := make(chan event.Event, 8)
+	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, nil)
+
+	// Pre-condition: simulate a prior session where the agent was
+	// waiting for input but no kit run is active and no transcript
+	// exists. Reply should refuse and leave waiting=true intact.
+	ag.mu.Lock()
+	ag.waiting = true
+	ag.intent = "original intent"
+	ag.mu.Unlock()
+
+	if ok := ag.Reply(context.Background(), "stray reply"); ok {
+		t.Fatal("Reply returned true with no active run + no saved transcript")
+	}
+
+	ag.mu.Lock()
+	waiting := ag.waiting
+	intent := ag.intent
+	ag.mu.Unlock()
+
+	if !waiting {
+		t.Error("Reply rejected the message but flipped waiting=false; IsWaiting now lies")
+	}
+	if intent != "original intent" {
+		t.Errorf("Reply rejected the message but rotated intent to %q; want %q",
+			intent, "original intent")
+	}
+}

@@ -145,17 +145,13 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		if fresh && len(msgs) > 0 && msgs[0].Role == "system" {
 			msgs[0].Content = a.rebuildSystemPrompt(a.currentMode())
 		}
-		// Emit AgentInputEstimate + enqueue the estimate so the
-		// forwarder's AgentTurnUsage handler can pop the matching
-		// per-turn estimate FIFO. Replaces a single mutable
-		// lastEstimate field that, in multi-turn / tool-chained runs,
-		// could be overwritten by the next TransformContext before
-		// the forwarder drained the prior turn's TurnUsage —
-		// stamping turn N with turn N+1's estimate.
-		est := estimateAndBroadcast(msgs, a.activeToolDefs(), a.send)
-		a.mu.Lock()
-		a.estimateQueue = append(a.estimateQueue, est)
-		a.mu.Unlock()
+		// AgentInputEstimate emission and per-turn estimate
+		// pairing live on [providerProxy] — its Stream wrapper is
+		// the only point where we can synchronously commit the
+		// estimate next to the matching usage WITHOUT depending on
+		// kit's lossy AgentTurnUsage delivery (kit drops streaming
+		// events when the consumer channel is full, which would
+		// desync any forwarder-side queue indefinitely).
 		return msgs, nil
 	}
 

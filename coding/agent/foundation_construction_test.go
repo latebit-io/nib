@@ -95,6 +95,30 @@ func TestKitBuilt_SetProviderSwapsProxy(t *testing.T) {
 	}
 }
 
+// TestKitBuilt_NilProviderPanicsAtConstruction locks the fast-fail
+// guard on nil providers. kit.New only sees the providerProxy
+// (always non-nil), so a nil [Agent.provider] would otherwise slip
+// past kit's own validation and panic at first Stream — far from the
+// bad call site. Failing in [Agent.buildKitAgent] surfaces the bug
+// immediately.
+func TestKitBuilt_NilProviderPanicsAtConstruction(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("New(nil provider) did not panic")
+		}
+		msg, _ := r.(string)
+		if !strings.Contains(msg, "provider is required") {
+			t.Errorf("panic message = %q, want substring 'provider is required'", msg)
+		}
+	}()
+
+	events := make(chan event.Event, 1)
+	_ = New(nil, stubWorkspace{}, events, nil)
+}
+
 // TestKitBuilt_ToolsMirrorAdvertisedSet verifies the kit/foundation
 // receives the same tool set the wrapper advertises. The kit tool
 // slice is built from [Agent.toolDefs] order (looking each tool up in

@@ -241,23 +241,14 @@ type Agent struct {
 	runUnsuccessful bool
 	// turnCounter is the 1-indexed turn number within the current run.
 	turnCounter int
-	// estimateQueue is a FIFO of per-turn input estimates from coding's
-	// TransformContext hook ([estimateAndBroadcast]). Each Stream call
-	// pairs one TransformContext invocation with one [event.AgentTurnUsage]
-	// event; the queue preserves that pairing across the foundation→
-	// kit-translator→forwarder pipeline so a slow forwarder does not
-	// stamp turn N's TurnUsage with turn N+1's estimate.
-	//
-	// The foundation goroutine appends as it iterates turns; the
-	// forwarder goroutine pops the front on each AgentTurnUsage. Both
-	// take [Agent.mu] briefly; ordering across goroutines is preserved
-	// because the foundation only emits TurnUsage AFTER the
-	// TransformContext that paired with that Stream returns, and the
-	// kit translator preserves event order. Reset to nil at run-start
-	// boundaries (RunWithMode, Reply resume) — the [Agent.fenceForwarder]
-	// barrier guarantees the prior run's queue is fully drained before
-	// the reset fires.
-	estimateQueue []llm.InputEstimate
+	// Per-turn estimate emission and AgentTurnUsage pairing live on
+	// [providerProxy] — its Stream wrapper is the only point where
+	// the estimate (computed pre-Stream from the exact msgs+tools the
+	// provider sees) can be committed alongside the post-Stream
+	// usage WITHOUT depending on kit's lossy AgentTurnUsage delivery.
+	// A previous design used a forwarder-side FIFO queue, but kit
+	// drops AgentTurnUsage on full consumer channels and the queue
+	// would desync indefinitely after the first drop.
 	// truncationRetries counts truncated turns within the current run.
 	// Read + incremented by the OnTruncated foundation hook; reset to
 	// zero on each new run alongside the other per-run state. Lives on
@@ -515,7 +506,15 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 // so a non-nil error indicates a programming error caught at startup
 // rather than a runtime condition.
 func (a *Agent) buildKitAgent() {
-	a.providerProxy = newProviderProxy(a.provider)
+	// Fail fast on nil provider. kit.New only sees the providerProxy
+	// (always non-nil) so its own provider-validation cannot catch a
+	// nil [Agent.provider] — without this guard the nil interface
+	// would propagate through the proxy and panic on the first
+	// Stream call instead of at construction.
+	if a.provider == nil {
+		panic("agent.New: provider is required")
+	}
+	a.providerProxy = newProviderProxy(a.provider, a.send, a.onTurnSettled)
 
 	kitTools := make([]kit.Tool, 0, len(a.toolDefs))
 	for _, def := range a.toolDefs {

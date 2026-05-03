@@ -794,7 +794,7 @@ func agentWithUsage(taskTokenBudget int, latched bool, prompt, completion int) *
 	a := &Agent{
 		taskTokenBudget: taskTokenBudget,
 		budgetExceeded:  latched,
-		providerProxy:   newProviderProxy(noopProvider{}),
+		providerProxy:   newProviderProxy(noopProvider{}, nil, nil),
 	}
 	if prompt > 0 || completion > 0 {
 		a.providerProxy.recordUsage(&llm.Usage{PromptTokens: prompt, CompletionTokens: completion})

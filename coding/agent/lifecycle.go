@@ -34,6 +34,19 @@ import (
 // The foundation drives the loop through its hook surface, which
 // [Agent.FoundationHooks] composes against the same agent instance.
 
+// markReplyAccepted updates wrapper state after [kit.Agent.Reply]
+// has accepted a message. Records the new developer intent and
+// flips waiting=false (the active run is no longer parked at
+// AwaitInput because input arrived). Called only on the success
+// branch of [Agent.Reply]'s fast path so a rejected reply does
+// not silently mutate state visible through [Agent.IsWaiting].
+func (a *Agent) markReplyAccepted(input string) {
+	a.mu.Lock()
+	a.intent = input
+	a.waiting = false
+	a.mu.Unlock()
+}
+
 // fenceForwarder blocks until the previously-active run's
 // [event.AgentDone] has been fully forwarded by
 // [Agent.forwardKitEvents]. Returns immediately when no previous run
@@ -154,7 +167,6 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.turnCounter = 0
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
-	a.estimateQueue = nil
 	a.truncationRetries = 0
 
 	for _, t := range a.tools {
@@ -233,11 +245,13 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	// path on false covers both "no active run" and the rare
 	// queue-full case (acceptable: queue-full Replies were never
 	// well-defined and a fresh resume is a benign substitution).
-	a.mu.Lock()
-	a.intent = input
-	a.waiting = false
-	a.mu.Unlock()
+	//
+	// Wrapper state (intent / waiting) only mutates AFTER the message
+	// has actually been accepted somewhere — a no-saved-state Reply
+	// that returns false must not flip IsWaiting to false or rotate
+	// the in-flight intent.
 	if a.kit.Reply(ctx, input) {
+		a.markReplyAccepted(input)
 		return true
 	}
 
@@ -254,6 +268,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	// active run picks up the message instead of triggering a
 	// duplicate resume.
 	if a.kit.Reply(ctx, input) {
+		a.markReplyAccepted(input)
 		return true
 	}
 
@@ -297,7 +312,6 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.turnCounter = 0
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
-	a.estimateQueue = nil
 	a.truncationRetries = 0
 	a.intent = input
 

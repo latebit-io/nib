@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -689,16 +688,22 @@ func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 		drainUntil(events, untilDone)
 	}()
 
-	before := runtime.NumGoroutine()
 	a.Close()
 	<-drained
 
-	// Close now waits synchronously on translatorDone. The
-	// translator goroutine MUST be gone by the time Close returns —
-	// no polling, no scheduler ticks. A still-running translator
-	// indicates Close's translatorDone wait was dropped.
-	if got := runtime.NumGoroutine(); got >= before {
-		t.Fatalf("translator goroutine still alive after Close: before=%d after=%d", before, got)
+	// Observable contract: after Close returns, the translator has
+	// fully exited and will not write to `events` again. The only
+	// race-free way to assert that from the consumer side is to
+	// CLOSE the channel ourselves — a still-running translator
+	// would hit the closed channel on its next send and crash the
+	// goroutine (visible as a test panic via the goroutine's
+	// panic propagating up through the runtime). Compared to a
+	// runtime.NumGoroutine sample (polluted by other parallel
+	// tests' goroutines and by the still-alive consumer drainer),
+	// this catches the "Close returned early" failure mode
+	// directly.
+	close(events)
+	for range events {
 	}
 }
 

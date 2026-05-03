@@ -113,9 +113,16 @@ type Config struct {
 	//     cannot reconstruct from later events.
 	//
 	// A consumer that stops draining will wedge the kit translator
-	// goroutine; if the consumer also calls [Agent.Close], Close
-	// still returns but the translator leaks. Size the channel
-	// generously (64+ recommended) so bursts do not block.
+	// goroutine on its next blocking send. Because [Agent.Close]
+	// waits synchronously for the translator to drain remaining
+	// foundation events and exit (the translatorDone barrier),
+	// Close itself will hang indefinitely against a wedged consumer
+	// — Close cannot rescue a stuck translator without violating
+	// the "no further writes to Events after Close returns"
+	// guarantee callers rely on for safe channel cleanup. Size the
+	// channel generously (64+ recommended) and keep the consumer
+	// draining for the lifetime of the agent; close the channel
+	// only AFTER Close returns.
 	Events chan<- event.Event
 
 	// SystemPrompt is the system message prepended to every run's

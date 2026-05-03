@@ -369,21 +369,6 @@ func TestUnsuccessful_ResetBetweenRuns(t *testing.T) {
 	}
 }
 
-// TestUnsuccessful_NoCrossRunPoisoning exercises the race CodeRabbit
-// flagged: WaitForIdle returns when the foundation goroutine exits,
-// but the previous run's AgentEnd may still be in the foundation
-// events buffer awaiting translation. A fast next Prompt that resets
-// shared state on the user's goroutine would race the translator's
-// read of that state on the previous run's AgentEnd, mislabeling
-// run 1's success as the next run's prelude.
-//
-// Per-run outcome state in [Agent] eliminates the race: each run's
-// failure bit is bound to its own [runOutcome] so the next run's
-// allocation cannot poison the previous run's reading.
-//
-// Test shape: run 1 errors, immediately Prompt run 2 (no drain
-// between), then drain both AgentDones. Run 1 must report
-// Success=false; run 2 must report Success=true.
 // TestSend_ControlEventsBlockNotDrop guards the contract that
 // terminal/control events are guaranteed delivery — never silently
 // dropped to a timeout. A slow consumer (here, an unbuffered channel
@@ -437,6 +422,21 @@ func TestSend_ControlEventsBlockNotDrop(t *testing.T) {
 	}
 }
 
+// TestUnsuccessful_NoCrossRunPoisoning exercises the race CodeRabbit
+// flagged: WaitForIdle returns when the foundation goroutine exits,
+// but the previous run's AgentEnd may still be in the foundation
+// events buffer awaiting translation. A fast next Prompt that resets
+// shared state on the user's goroutine would race the translator's
+// read of that state on the previous run's AgentEnd, mislabeling
+// run 1's success as the next run's prelude.
+//
+// Per-run outcome state in [Agent] eliminates the race: each run's
+// failure bit is bound to its own [runOutcome] so the next run's
+// allocation cannot poison the previous run's reading.
+//
+// Test shape: run 1 errors, immediately Prompt run 2 (no drain
+// between), then drain both AgentDones. Run 1 must report
+// Success=false; run 2 must report Success=true.
 func TestUnsuccessful_NoCrossRunPoisoning(t *testing.T) {
 	t.Parallel()
 

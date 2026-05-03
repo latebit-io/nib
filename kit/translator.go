@@ -186,6 +186,12 @@ func (a *Agent) bindOutcome() {
 // by the translator on [agentevent.Error]. A nil currentOutcome means
 // Error fired without a bound run — drop the mark rather than panic;
 // the consumer still observes the AgentError event itself.
+//
+// Lock scope mirrors [Agent.markCurrentOrPendingUnsuccess]: the lock
+// guards the pointer read; the atomic store happens after release
+// because o stays stable until [Agent.consumeCurrentUnsuccess] (same
+// translator goroutine, ordered after this call), and the atomic
+// synchronizes the read on AgentEnd.
 func (a *Agent) markCurrentUnsuccess() {
 	a.outcomeMu.Lock()
 	o := a.currentOutcome

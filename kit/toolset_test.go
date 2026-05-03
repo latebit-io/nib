@@ -111,6 +111,9 @@ func TestMerge_Associative(t *testing.T) {
 	flat := kit.Merge(a, b, c)
 
 	// Tools: order must match across all three forms.
+	if len(left.Tools) != len(flat.Tools) || len(right.Tools) != len(flat.Tools) {
+		t.Fatalf("tool lengths mismatch: left=%d right=%d flat=%d", len(left.Tools), len(right.Tools), len(flat.Tools))
+	}
 	for i := range flat.Tools {
 		ln := left.Tools[i].Definition().Function.Name
 		rn := right.Tools[i].Definition().Function.Name
@@ -123,10 +126,21 @@ func TestMerge_Associative(t *testing.T) {
 	// AfterToolCall: all three forms must produce the same merged result.
 	ctx := context.Background()
 	ac := kit.AfterToolCallContext{}
-	flatRes, _ := flat.Hooks.AfterToolCall(ctx, ac)
-	leftRes, _ := left.Hooks.AfterToolCall(ctx, ac)
-	rightRes, _ := right.Hooks.AfterToolCall(ctx, ac)
-
+	flatRes, err := flat.Hooks.AfterToolCall(ctx, ac)
+	if err != nil {
+		t.Fatalf("flat AfterToolCall error: %v", err)
+	}
+	leftRes, err := left.Hooks.AfterToolCall(ctx, ac)
+	if err != nil {
+		t.Fatalf("left AfterToolCall error: %v", err)
+	}
+	rightRes, err := right.Hooks.AfterToolCall(ctx, ac)
+	if err != nil {
+		t.Fatalf("right AfterToolCall error: %v", err)
+	}
+	if flatRes.Content == nil || leftRes.Content == nil || rightRes.Content == nil {
+		t.Fatalf("expected non-nil Content: flat=%v left=%v right=%v", flatRes.Content, leftRes.Content, rightRes.Content)
+	}
 	if *flatRes.Content != *leftRes.Content || *flatRes.Content != *rightRes.Content {
 		t.Errorf("AfterToolCall Content: flat=%q left=%q right=%q", *flatRes.Content, *leftRes.Content, *rightRes.Content)
 	}
@@ -136,10 +150,21 @@ func TestMerge_Associative(t *testing.T) {
 
 	// OnTruncated: all three forms must produce the same result.
 	tc := kit.TruncationContext{}
-	flatTR, _ := flat.Hooks.OnTruncated(ctx, tc)
-	leftTR, _ := left.Hooks.OnTruncated(ctx, tc)
-	rightTR, _ := right.Hooks.OnTruncated(ctx, tc)
-
+	flatTR, err := flat.Hooks.OnTruncated(ctx, tc)
+	if err != nil {
+		t.Fatalf("flat OnTruncated error: %v", err)
+	}
+	leftTR, err := left.Hooks.OnTruncated(ctx, tc)
+	if err != nil {
+		t.Fatalf("left OnTruncated error: %v", err)
+	}
+	rightTR, err := right.Hooks.OnTruncated(ctx, tc)
+	if err != nil {
+		t.Fatalf("right OnTruncated error: %v", err)
+	}
+	if len(flatTR.Messages) == 0 || len(leftTR.Messages) == 0 || len(rightTR.Messages) == 0 {
+		t.Fatalf("expected non-empty Messages: flat=%+v left=%+v right=%+v", flatTR, leftTR, rightTR)
+	}
 	if flatTR.Retry != leftTR.Retry || flatTR.Retry != rightTR.Retry {
 		t.Errorf("OnTruncated Retry: flat=%v left=%v right=%v", flatTR.Retry, leftTR.Retry, rightTR.Retry)
 	}

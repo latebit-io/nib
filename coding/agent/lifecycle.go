@@ -145,7 +145,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.turnCounter = 0
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
-	a.lastEstimate = llm.InputEstimate{}
+	a.estimateQueue = nil
 	a.truncationRetries = 0
 
 	for _, t := range a.tools {
@@ -272,7 +272,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.turnCounter = 0
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
-	a.lastEstimate = llm.InputEstimate{}
+	a.estimateQueue = nil
 	a.truncationRetries = 0
 	a.intent = input
 

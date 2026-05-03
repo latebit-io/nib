@@ -235,11 +235,23 @@ type Agent struct {
 	runUnsuccessful bool
 	// turnCounter is the 1-indexed turn number within the current run.
 	turnCounter int
-	// lastEstimate holds the most recent client-side input estimate from
-	// [estimateAndBroadcast], stashed by TransformContext so the
-	// translator goroutine's TurnUsage handler can populate the *Est
-	// fields on [event.AgentTurnUsage] without re-computing.
-	lastEstimate llm.InputEstimate
+	// estimateQueue is a FIFO of per-turn input estimates from coding's
+	// TransformContext hook ([estimateAndBroadcast]). Each Stream call
+	// pairs one TransformContext invocation with one [event.AgentTurnUsage]
+	// event; the queue preserves that pairing across the foundation→
+	// kit-translator→forwarder pipeline so a slow forwarder does not
+	// stamp turn N's TurnUsage with turn N+1's estimate.
+	//
+	// The foundation goroutine appends as it iterates turns; the
+	// forwarder goroutine pops the front on each AgentTurnUsage. Both
+	// take [Agent.mu] briefly; ordering across goroutines is preserved
+	// because the foundation only emits TurnUsage AFTER the
+	// TransformContext that paired with that Stream returns, and the
+	// kit translator preserves event order. Reset to nil at run-start
+	// boundaries (RunWithMode, Reply resume) — the [Agent.fenceForwarder]
+	// barrier guarantees the prior run's queue is fully drained before
+	// the reset fires.
+	estimateQueue []llm.InputEstimate
 	// truncationRetries counts truncated turns within the current run.
 	// Read + incremented by the OnTruncated foundation hook; reset to
 	// zero on each new run alongside the other per-run state. Lives on

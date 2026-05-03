@@ -145,12 +145,16 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		if fresh && len(msgs) > 0 && msgs[0].Role == "system" {
 			msgs[0].Content = a.rebuildSystemPrompt(a.currentMode())
 		}
-		// Emit AgentInputEstimate + capture the estimate so the
-		// translator's TurnUsage handler can populate the *Est fields
-		// on AgentTurnUsage. Stashed on the agent struct under mu.
+		// Emit AgentInputEstimate + enqueue the estimate so the
+		// forwarder's AgentTurnUsage handler can pop the matching
+		// per-turn estimate FIFO. Replaces a single mutable
+		// lastEstimate field that, in multi-turn / tool-chained runs,
+		// could be overwritten by the next TransformContext before
+		// the forwarder drained the prior turn's TurnUsage —
+		// stamping turn N with turn N+1's estimate.
 		est := estimateAndBroadcast(msgs, a.activeToolDefs(), a.send)
 		a.mu.Lock()
-		a.lastEstimate = est
+		a.estimateQueue = append(a.estimateQueue, est)
 		a.mu.Unlock()
 		return msgs, nil
 	}

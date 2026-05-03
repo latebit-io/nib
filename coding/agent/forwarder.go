@@ -80,14 +80,27 @@ func (a *Agent) forwardKitEvents() {
 }
 
 // augmentAndAccumulate accumulates one [event.AgentTurnUsage] into
-// [Agent.sessionUsage] and returns a copy with the client-side estimate
-// fields populated. The foundation does not set the *Est fields —
-// applications that want them either layer their own estimation in a
-// TransformContext hook (we do — see [estimateAndBroadcast] in
-// foundation_hooks.go) or compute the post-Stream completion estimate
-// from the most recent assistant message's content. Both paths flow
-// through this single augmentation point so the frontend's status bar
-// sees one consistent shape.
+// [Agent.sessionUsage] and returns a copy with the client-side
+// estimate fields populated. The foundation does not set the *Est
+// fields — applications that want them layer their own estimation in
+// a TransformContext hook (see [estimateAndBroadcast] in
+// foundation_hooks.go) and pair it back to the matching turn here.
+//
+// Per-turn binding:
+//
+//   - System/Tools/History/NewEst are popped from [Agent.estimateQueue]
+//     in FIFO order so each TurnUsage is bound to the estimate from
+//     the TransformContext that paired with its Stream call. A single
+//     mutable lastEstimate field would, in multi-turn / tool-chained
+//     runs, be overwritten by the next TransformContext before the
+//     forwarder drained this turn's TurnUsage.
+//
+//   - CompletionEst is computed from the [Agent.turnCounter]-th
+//     assistant message in the kit transcript. Reading "the most
+//     recent assistant message" from kit.State() at forwarder time
+//     would, in the same multi-turn race, return turn N+1's content
+//     for turn N's event because the foundation can advance several
+//     turns ahead of the forwarder.
 func (a *Agent) augmentAndAccumulate(e event.AgentTurnUsage) event.AgentTurnUsage {
 	a.mu.Lock()
 	a.turnCounter++
@@ -96,17 +109,17 @@ func (a *Agent) augmentAndAccumulate(e event.AgentTurnUsage) event.AgentTurnUsag
 	a.sessionUsage.TotalCompletionTokens += e.CompletionTokens
 	a.sessionUsage.TotalCachedTokens += e.CachedTokens
 	a.sessionUsage.Turns = turn
-	estimate := a.lastEstimate
+	var estimate llm.InputEstimate
+	if len(a.estimateQueue) > 0 {
+		estimate = a.estimateQueue[0]
+		a.estimateQueue = a.estimateQueue[1:]
+	}
 	a.mu.Unlock()
 
 	completionEst := 0
 	if a.kit != nil {
-		msgs := a.kit.State().Messages
-		for i := len(msgs) - 1; i >= 0; i-- {
-			if msgs[i].Role == "assistant" {
-				completionEst = llm.EstimateTokens(msgs[i].Content)
-				break
-			}
+		if msg := nthAssistantMessage(a.kit.State().Messages, turn); msg != nil {
+			completionEst = llm.EstimateTokens(msg.Content)
 		}
 	}
 
@@ -122,4 +135,24 @@ func (a *Agent) augmentAndAccumulate(e event.AgentTurnUsage) event.AgentTurnUsag
 		NewEst:           estimate.New,
 		CompletionEst:    completionEst,
 	}
+}
+
+// nthAssistantMessage returns a pointer to the n-th (1-indexed)
+// assistant-role message in msgs, or nil if fewer than n exist. Used
+// by [Agent.augmentAndAccumulate] to pin CompletionEst to the
+// originating turn's content rather than to the most recent assistant
+// message (which could belong to a later turn the foundation has
+// already advanced to).
+func nthAssistantMessage(msgs []llm.Message, n int) *llm.Message {
+	count := 0
+	for i := range msgs {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		count++
+		if count == n {
+			return &msgs[i]
+		}
+	}
+	return nil
 }

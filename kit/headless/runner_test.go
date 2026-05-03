@@ -1,0 +1,452 @@
+package headless
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/latebit-io/nib/kit/event"
+)
+
+// mockAgent implements [Agent] for tests. runFunc, when set, fires on
+// Prompt to push events onto the supplied channel.
+type mockAgent struct {
+	mu sync.Mutex
+
+	events    chan<- event.Event
+	runFunc   func()
+	cancelled bool
+	replied   string
+	prompted  string
+	promptErr error
+	replyOK   bool
+}
+
+func newMockAgent(events chan<- event.Event) *mockAgent {
+	return &mockAgent{events: events, replyOK: true}
+}
+
+func (m *mockAgent) Prompt(_ context.Context, prompt string) error {
+	m.mu.Lock()
+	m.prompted = prompt
+	rf := m.runFunc
+	err := m.promptErr
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if rf != nil {
+		go rf()
+	}
+	return nil
+}
+
+func (m *mockAgent) Reply(_ context.Context, input string) bool {
+	m.mu.Lock()
+	m.replied = input
+	ok := m.replyOK
+	m.mu.Unlock()
+	return ok
+}
+
+func (m *mockAgent) Cancel() {
+	m.mu.Lock()
+	m.cancelled = true
+	m.mu.Unlock()
+}
+
+func (m *mockAgent) wasCancelled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cancelled
+}
+
+func TestRunner_Run_TokensAndDone(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	mock.runFunc = func() {
+		events <- event.AgentToken{Text: "Hello "}
+		events <- event.AgentToken{Text: "world"}
+		events <- event.AgentDone{Success: true}
+	}
+
+	r := New(mock, events, WithStderr(io.Discard))
+	result := r.Run(context.Background(), "say hi")
+
+	if !result.Success {
+		t.Errorf("Success = false, want true")
+	}
+	if result.Summary != "Hello world" {
+		t.Errorf("Summary = %q, want %q", result.Summary, "Hello world")
+	}
+	if mock.prompted != "say hi" {
+		t.Errorf("prompted = %q, want %q", mock.prompted, "say hi")
+	}
+}
+
+func TestRunner_Run_PromptError_ReturnsErrorResult(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	mock.promptErr = errors.New("agent closed")
+
+	r := New(mock, events)
+	result := r.Run(context.Background(), "x")
+
+	if result.Success {
+		t.Errorf("Success = true, want false on prompt error")
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "agent closed") {
+		t.Errorf("Errors = %v, want contains 'agent closed'", result.Errors)
+	}
+}
+
+func TestRunner_Drive_NoPromptCall(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	go func() {
+		events <- event.AgentToken{Text: "hi"}
+		events <- event.AgentDone{Success: true}
+	}()
+
+	r := New(mock, events)
+	result := r.Drive(context.Background())
+
+	if !result.Success {
+		t.Errorf("Success = false, want true")
+	}
+	if mock.prompted != "" {
+		t.Errorf("prompted = %q, want empty (Drive must not call Prompt)", mock.prompted)
+	}
+}
+
+func TestRunner_TTY_StreamsTokensToStderr(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	mock.runFunc = func() {
+		events <- event.AgentToken{Text: "live output"}
+		events <- event.AgentDone{Success: true}
+	}
+
+	var stderr bytes.Buffer
+	r := New(mock, events, WithStderr(&stderr), WithTTY(true))
+	r.Run(context.Background(), "test")
+
+	if !strings.Contains(stderr.String(), "live output") {
+		t.Errorf("stderr = %q, want to contain 'live output'", stderr.String())
+	}
+}
+
+func TestRunner_NonTTY_StderrSilent(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	mock.runFunc = func() {
+		events <- event.AgentToken{Text: "noisy"}
+		events <- event.AgentDone{Success: true}
+	}
+
+	var stderr bytes.Buffer
+	r := New(mock, events, WithStderr(&stderr), WithTTY(false))
+	r.Run(context.Background(), "test")
+
+	if stderr.Len() != 0 {
+		t.Errorf("stderr in non-TTY mode = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunner_AgentError_CollectedInResult(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	mock.runFunc = func() {
+		events <- event.AgentError{Err: "LLM timeout"}
+		events <- event.AgentDone{Success: false}
+	}
+
+	r := New(mock, events)
+	result := r.Run(context.Background(), "fail")
+
+	if result.Success {
+		t.Errorf("Success = true, want false")
+	}
+	if len(result.Errors) != 1 || result.Errors[0] != "LLM timeout" {
+		t.Errorf("Errors = %v, want [LLM timeout]", result.Errors)
+	}
+}
+
+func TestRunner_AgentWaiting_SingleShot_CancelsAndExits(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	mock.runFunc = func() {
+		events <- event.AgentToken{Text: "thought"}
+		events <- event.AgentWaiting{}
+	}
+
+	r := New(mock, events)
+	result := r.Run(context.Background(), "one shot")
+
+	if !result.Success {
+		t.Errorf("Success = false, want true (clean single-shot exit)")
+	}
+	if !mock.wasCancelled() {
+		t.Errorf("agent.Cancel() not called in single-shot AgentWaiting")
+	}
+	if result.Summary != "thought" {
+		t.Errorf("Summary = %q, want %q", result.Summary, "thought")
+	}
+}
+
+func TestRunner_AgentWaiting_TTY_RepliesFromStdin(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	stdin := strings.NewReader("follow up\n")
+
+	mock.runFunc = func() {
+		events <- event.AgentToken{Text: "first turn"}
+		events <- event.AgentWaiting{}
+		// Wait for the reply, then close.
+		for {
+			mock.mu.Lock()
+			done := mock.replied != ""
+			mock.mu.Unlock()
+			if done {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		events <- event.AgentDone{Success: true}
+	}
+
+	r := New(mock, events,
+		WithStdin(stdin),
+		WithStderr(io.Discard),
+		WithTTY(true),
+	)
+	result := r.Run(context.Background(), "start")
+
+	if !result.Success {
+		t.Errorf("Success = false, want true")
+	}
+	if mock.replied != "follow up" {
+		t.Errorf("replied = %q, want %q", mock.replied, "follow up")
+	}
+}
+
+func TestRunner_AgentWaiting_TTY_StdinEOF_CancelsAndExits(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	stdin := strings.NewReader("") // immediate EOF
+
+	mock.runFunc = func() {
+		events <- event.AgentWaiting{}
+	}
+
+	r := New(mock, events,
+		WithStdin(stdin),
+		WithStderr(io.Discard),
+		WithTTY(true),
+	)
+	result := r.Run(context.Background(), "start")
+
+	if !result.Success {
+		t.Errorf("Success = false, want true on clean EOF")
+	}
+	if !mock.wasCancelled() {
+		t.Errorf("agent.Cancel() not called on stdin EOF")
+	}
+}
+
+func TestRunner_ContextCancelled(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mock.runFunc = func() { cancel() }
+
+	r := New(mock, events)
+	result := r.Run(ctx, "will cancel")
+
+	if result.Success {
+		t.Errorf("Success = true, want false on ctx cancellation")
+	}
+	if len(result.Errors) == 0 || !strings.Contains(result.Errors[0], "cancel") {
+		t.Errorf("Errors = %v, want one mentioning 'cancel'", result.Errors)
+	}
+	if !mock.wasCancelled() {
+		t.Errorf("agent.Cancel() not called on ctx cancellation")
+	}
+}
+
+// customEvent is a domain-specific event used to verify EventHandler
+// dispatch for unknown event types.
+type customEvent struct{ payload string }
+
+func (customEvent) Event() {}
+
+func TestRunner_EventHandler_DispatchesUnknown(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+
+	var seen []event.Event
+	handler := func(_ context.Context, ev event.Event) error {
+		seen = append(seen, ev)
+		return nil
+	}
+
+	mock.runFunc = func() {
+		events <- customEvent{payload: "hello"}
+		events <- event.AgentDone{Success: true}
+	}
+
+	r := New(mock, events, WithHandler(handler))
+	result := r.Run(context.Background(), "x")
+
+	if !result.Success {
+		t.Errorf("Success = false")
+	}
+	if len(seen) != 1 {
+		t.Fatalf("handler called %d times, want 1", len(seen))
+	}
+	if e, ok := seen[0].(customEvent); !ok || e.payload != "hello" {
+		t.Errorf("handler received %+v, want customEvent{hello}", seen[0])
+	}
+}
+
+func TestRunner_EventHandler_ErrorAppendsToResult(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+
+	handler := func(_ context.Context, _ event.Event) error {
+		return errors.New("handler boom")
+	}
+
+	mock.runFunc = func() {
+		events <- customEvent{}
+		events <- event.AgentDone{Success: true}
+	}
+
+	r := New(mock, events, WithHandler(handler))
+	result := r.Run(context.Background(), "x")
+
+	// Run still completes; handler error becomes a non-fatal entry.
+	if !result.Success {
+		t.Errorf("Success = false, want true (handler error is non-fatal)")
+	}
+	if len(result.Errors) != 1 || result.Errors[0] != "handler boom" {
+		t.Errorf("Errors = %v, want [handler boom]", result.Errors)
+	}
+}
+
+// customStatus is a domain-specific status kind used to verify that
+// AgentStatus events with unknown kinds are forwarded to the handler.
+const customStatus event.StatusKind = "custom-domain"
+
+func TestRunner_AgentStatus_UnknownKind_ForwardedToHandler(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+
+	var seenKind event.StatusKind
+	handler := func(_ context.Context, ev event.Event) error {
+		if s, ok := ev.(event.AgentStatus); ok {
+			seenKind = s.Status
+		}
+		return nil
+	}
+
+	mock.runFunc = func() {
+		events <- event.AgentStatus{Status: customStatus}
+		events <- event.AgentDone{Success: true}
+	}
+
+	r := New(mock, events, WithHandler(handler))
+	r.Run(context.Background(), "x")
+
+	if seenKind != customStatus {
+		t.Errorf("handler received status %q, want %q", seenKind, customStatus)
+	}
+}
+
+func TestRunner_AgentStatus_GenericKind_NotForwardedToHandler(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+
+	var handlerCalls int
+	handler := func(_ context.Context, _ event.Event) error {
+		handlerCalls++
+		return nil
+	}
+
+	mock.runFunc = func() {
+		events <- event.AgentStatus{Status: event.StatusThinking}
+		events <- event.AgentStatus{Status: event.StatusPlanning}
+		events <- event.AgentDone{Success: true}
+	}
+
+	r := New(mock, events, WithHandler(handler))
+	r.Run(context.Background(), "x")
+
+	if handlerCalls != 0 {
+		t.Errorf("handler called %d times for generic statuses, want 0", handlerCalls)
+	}
+}
+
+func TestRunner_EventsChannelClosed_ReturnsCleanly(t *testing.T) {
+	events := make(chan event.Event, 4)
+	mock := newMockAgent(events)
+	mock.runFunc = func() {
+		events <- event.AgentToken{Text: "partial"}
+		close(events)
+	}
+
+	r := New(mock, events)
+	result := r.Run(context.Background(), "x")
+
+	// Closed channel without AgentDone leaves Success as zero value.
+	if result.Success {
+		t.Errorf("Success = true, want false (no AgentDone before close)")
+	}
+}
+
+// driveOnlyAgent satisfies [Agent] but NOT [Prompter] — used to
+// verify Run rejects agents whose run-start API is richer than
+// (ctx, prompt).
+type driveOnlyAgent struct {
+	cancelled bool
+}
+
+func (a *driveOnlyAgent) Reply(_ context.Context, _ string) bool { return true }
+func (a *driveOnlyAgent) Cancel()                                { a.cancelled = true }
+
+func TestRunner_Run_NonPrompter_ReturnsErrorResult(t *testing.T) {
+	events := make(chan event.Event, 4)
+	a := &driveOnlyAgent{}
+
+	r := New(a, events)
+	result := r.Run(context.Background(), "x")
+
+	if result.Success {
+		t.Errorf("Success = true, want false")
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "Prompter") {
+		t.Errorf("Errors = %v, want one mentioning 'Prompter'", result.Errors)
+	}
+}
+
+func TestResult_WriteJSON(t *testing.T) {
+	r := &Result{Success: true, Summary: "done"}
+	var buf bytes.Buffer
+	if err := r.WriteJSON(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var decoded Result
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if !decoded.Success || decoded.Summary != "done" {
+		t.Errorf("decoded = %+v, want Success=true Summary=done", decoded)
+	}
+}

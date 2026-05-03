@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/nib/kit/event"
 )
@@ -232,6 +233,120 @@ func TestRunner_AgentWaiting_TTY_RepliesFromStdin(t *testing.T) {
 	}
 	if mock.replied != "follow up" {
 		t.Errorf("replied = %q, want %q", mock.replied, "follow up")
+	}
+}
+
+// TestRunner_AgentWaiting_TTY_BlankLine_RepromptsNotExits locks the
+// REPL convention that a blank line is a no-op (re-prompt), not a
+// termination signal. Pre-fix, an accidental enter on an empty line
+// collapsed onto the same path as Ctrl+D and ended the session.
+func TestRunner_AgentWaiting_TTY_BlankLine_RepromptsNotExits(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	stdin := strings.NewReader("\nactual reply\n")
+
+	mock.runFunc = func() {
+		events <- event.AgentWaiting{}
+		<-mock.replyCh
+		events <- event.AgentDone{Success: true}
+	}
+
+	r := New(mock, events,
+		WithStdin(stdin),
+		WithStderr(io.Discard),
+		WithTTY(true),
+	)
+	result := r.Run(context.Background(), "start")
+
+	if !result.Success {
+		t.Errorf("Success = false, want true")
+	}
+	if mock.replied != "actual reply" {
+		t.Errorf("replied = %q, want %q (blank line must re-prompt, not call Reply)", mock.replied, "actual reply")
+	}
+}
+
+// TestRunner_AgentWaiting_TTY_CtxCancel_SurfacesErrorNotSuccess
+// verifies that context cancellation while readInput is blocked on
+// stdin produces a failed run with the cancellation surfaced —
+// pre-fix, this collapsed onto the clean-EOF path and was reported
+// as Success=true.
+func TestRunner_AgentWaiting_TTY_CtxCancel_SurfacesErrorNotSuccess(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+
+	// Pipe whose writer is never used: Read blocks indefinitely so
+	// readInput sits in its select waiting for ctx.Done() instead
+	// of getting a stdin line.
+	stdinR, stdinW := io.Pipe()
+	t.Cleanup(func() { _ = stdinW.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mock.runFunc = func() {
+		events <- event.AgentWaiting{}
+		// Give the runner a moment to reach handleWaiting →
+		// readInput before cancelling. If scheduling slips and
+		// the outer drain loop sees ctx.Done first, the
+		// observable result is identical (Success=false + ctx
+		// error appended), so the test stays correct either way.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}
+
+	r := New(mock, events,
+		WithStdin(stdinR),
+		WithStderr(io.Discard),
+		WithTTY(true),
+	)
+	result := r.Run(ctx, "start")
+
+	if result.Success {
+		t.Errorf("Success = true, want false on ctx cancellation")
+	}
+	if !mock.wasCancelled() {
+		t.Errorf("agent.Cancel() not called")
+	}
+	if len(result.Errors) == 0 || !strings.Contains(result.Errors[0], "cancel") {
+		t.Errorf("Errors = %v, want one mentioning cancellation", result.Errors)
+	}
+}
+
+// errReader is an io.Reader that always returns the configured error.
+// Used to drive a scanner failure path through bufio.Scanner.
+type errReader struct{ err error }
+
+func (r *errReader) Read(_ []byte) (int, error) { return 0, r.err }
+
+// TestRunner_AgentWaiting_TTY_ScannerError_SurfacesError verifies
+// that a scanner failure during readInput is reported as a failed
+// run with the underlying error attached, not as a clean EOF
+// (pre-fix, the goroutine slog.Error'd and the runner reported
+// Success=true).
+func TestRunner_AgentWaiting_TTY_ScannerError_SurfacesError(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	stdin := &errReader{err: errors.New("disk fail")}
+
+	mock.runFunc = func() {
+		events <- event.AgentWaiting{}
+	}
+
+	r := New(mock, events,
+		WithStdin(stdin),
+		WithStderr(io.Discard),
+		WithTTY(true),
+	)
+	result := r.Run(context.Background(), "start")
+
+	if result.Success {
+		t.Errorf("Success = true, want false on scanner error")
+	}
+	if !mock.wasCancelled() {
+		t.Errorf("agent.Cancel() not called")
+	}
+	if len(result.Errors) == 0 || !strings.Contains(result.Errors[0], "disk fail") {
+		t.Errorf("Errors = %v, want one mentioning 'disk fail'", result.Errors)
 	}
 }
 

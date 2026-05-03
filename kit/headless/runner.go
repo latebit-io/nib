@@ -19,6 +19,7 @@ package headless
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -174,19 +175,17 @@ func (r *Runner) Drive(ctx context.Context) *Result {
 	return result
 }
 
-// Stderr returns the runner's status output destination. Specializations
-// route their domain-specific status writes through the same writer so
-// generic and domain output share a single sink.
-func (r *Runner) Stderr() io.Writer { return r.stderr }
-
-// IsTTY reports whether the runner is in REPL mode. Specializations
-// gate their own status writes on this so non-TTY runs stay quiet.
-func (r *Runner) IsTTY() bool { return r.isTTY }
-
-// stdinLine carries one line read from stdin, or an EOF/error signal.
+// stdinLine carries one signal from the stdin reader goroutine. The
+// three cases are mutually exclusive: a real input line carries text
+// (possibly empty for a blank line) with eof=false and err=nil; a
+// clean end-of-stream sets eof=true; a scanner failure carries err.
+// Distinguishing these prevents a blank line, stdin error, and
+// context cancellation from collapsing into the same "clean exit"
+// path on the receiving side.
 type stdinLine struct {
 	text string
-	ok   bool // false on EOF or error
+	eof  bool
+	err  error
 }
 
 // startStdinReader launches the single goroutine that reads lines
@@ -202,12 +201,13 @@ func (r *Runner) startStdinReader() {
 		scanner := bufio.NewScanner(r.stdin)
 		for scanner.Scan() {
 			text := strings.TrimSpace(scanner.Text())
-			r.lines <- stdinLine{text, text != ""}
+			r.lines <- stdinLine{text: text}
 		}
 		if err := scanner.Err(); err != nil {
-			slog.Error("stdin read failed", "err", err)
+			r.lines <- stdinLine{err: err}
+			return
 		}
-		r.lines <- stdinLine{"", false}
+		r.lines <- stdinLine{eof: true}
 	}()
 }
 
@@ -345,20 +345,40 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 		result.Success = true
 		return true
 	}
-	input, ok := r.readInput(ctx)
-	if !ok {
-		r.agent.Cancel()
-		result.Success = true
-		return true
+	for {
+		input, err := r.readInput(ctx)
+		if err != nil {
+			r.agent.Cancel()
+			if errors.Is(err, io.EOF) {
+				// Clean end-of-stream: standard "user pressed
+				// Ctrl+D" exit. Success stays true.
+				result.Success = true
+				return true
+			}
+			// Scanner failure or context cancellation: the run
+			// did not end on the user's terms. Surface the
+			// error and mark unsuccessful.
+			result.Success = false
+			result.Errors = append(result.Errors, err.Error())
+			return true
+		}
+		if input == "" {
+			// Blank line: standard REPL convention is no-op +
+			// re-prompt, not exit. Falling through to Reply
+			// would queue an empty message; falling through to
+			// EOF would end the session on an accidental
+			// keystroke. Re-prompt instead.
+			continue
+		}
+		summary.Reset()
+		*truncated = false
+		if !r.agent.Reply(ctx, input) {
+			slog.Warn("agent not accepting input, ending conversation")
+			result.Success = true
+			return true
+		}
+		return false
 	}
-	summary.Reset()
-	*truncated = false
-	if !r.agent.Reply(ctx, input) {
-		slog.Warn("agent not accepting input, ending conversation")
-		result.Success = true
-		return true
-	}
-	return false
 }
 
 // status writes a formatted message to stderr when in TTY mode.
@@ -372,17 +392,32 @@ func (r *Runner) status(format string, args ...any) {
 }
 
 // readInput reads a single line from the shared stdin reader,
-// cancellable via ctx. Returns the trimmed input and true on success,
-// or ("", false) on EOF, error, or context cancellation.
-func (r *Runner) readInput(ctx context.Context) (string, bool) {
+// cancellable via ctx. Returns:
+//
+//   - (text, nil) on a real input line (text may be empty for a
+//     blank line — handleWaiting decides whether to act on it);
+//   - ("", io.EOF) on clean end-of-stream;
+//   - ("", err) on any scanner error;
+//   - ("", ctx.Err()) on context cancellation.
+//
+// Callers must distinguish these so cancellation, errors, and clean
+// EOF do not collapse into the same exit path.
+func (r *Runner) readInput(ctx context.Context) (string, error) {
 	if r.lines == nil {
 		r.startStdinReader()
 	}
 	r.status("\n> ")
 	select {
 	case line := <-r.lines:
-		return line.text, line.ok
+		switch {
+		case line.err != nil:
+			return "", line.err
+		case line.eof:
+			return "", io.EOF
+		default:
+			return line.text, nil
+		}
 	case <-ctx.Done():
-		return "", false
+		return "", ctx.Err()
 	}
 }

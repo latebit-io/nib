@@ -119,9 +119,6 @@ func chainAfterToolCall(fns []func(context.Context, AfterToolCallContext) (After
 		var merged AfterToolCallResult
 		for _, fn := range fns {
 			res, err := fn(ctx, c)
-			if err != nil {
-				return merged, err
-			}
 			if res.Content != nil {
 				merged.Content = res.Content
 			}
@@ -130,6 +127,9 @@ func chainAfterToolCall(fns []func(context.Context, AfterToolCallContext) (After
 			}
 			if res.Terminate {
 				merged.Terminate = true
+			}
+			if err != nil {
+				return merged, err
 			}
 		}
 		return merged, nil
@@ -197,11 +197,11 @@ func chainOnTruncated(fns []func(context.Context, TruncationContext) (Truncation
 		var last TruncationResult
 		for _, fn := range fns {
 			res, err := fn(ctx, c)
-			if err != nil {
-				return last, err
-			}
 			if res.Retry || len(res.Messages) > 0 {
 				last = res
+			}
+			if err != nil {
+				return last, err
 			}
 		}
 		return last, nil

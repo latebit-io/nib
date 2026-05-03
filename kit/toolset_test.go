@@ -162,15 +162,19 @@ func TestMerge_Associative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("right OnTruncated error: %v", err)
 	}
-	if len(flatTR.Messages) == 0 || len(leftTR.Messages) == 0 || len(rightTR.Messages) == 0 {
-		t.Fatalf("expected non-empty Messages: flat=%+v left=%+v right=%+v", flatTR, leftTR, rightTR)
-	}
 	if flatTR.Retry != leftTR.Retry || flatTR.Retry != rightTR.Retry {
 		t.Errorf("OnTruncated Retry: flat=%v left=%v right=%v", flatTR.Retry, leftTR.Retry, rightTR.Retry)
 	}
-	if flatTR.Messages[0].Content != leftTR.Messages[0].Content || flatTR.Messages[0].Content != rightTR.Messages[0].Content {
-		t.Errorf("OnTruncated Messages: flat=%q left=%q right=%q",
-			flatTR.Messages[0].Content, leftTR.Messages[0].Content, rightTR.Messages[0].Content)
+	if len(flatTR.Messages) != len(leftTR.Messages) || len(flatTR.Messages) != len(rightTR.Messages) {
+		t.Fatalf("OnTruncated message lengths differ: flat=%d left=%d right=%d",
+			len(flatTR.Messages), len(leftTR.Messages), len(rightTR.Messages))
+	}
+	for i := range flatTR.Messages {
+		if flatTR.Messages[i].Role != leftTR.Messages[i].Role || flatTR.Messages[i].Role != rightTR.Messages[i].Role ||
+			flatTR.Messages[i].Content != leftTR.Messages[i].Content || flatTR.Messages[i].Content != rightTR.Messages[i].Content {
+			t.Errorf("OnTruncated Messages[%d]: flat=%+v left=%+v right=%+v",
+				i, flatTR.Messages[i], leftTR.Messages[i], rightTR.Messages[i])
+		}
 	}
 }
 
@@ -304,7 +308,10 @@ func TestMerge_BeforeToolCall_SinglePassthrough(t *testing.T) {
 		},
 	}}
 	merged := kit.Merge(a)
-	res, _ := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallContext{})
+	res, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallContext{})
+	if err != nil {
+		t.Fatalf("BeforeToolCall error: %v", err)
+	}
 	if !called || !res.Block {
 		t.Fatal("single hook should pass through directly")
 	}
@@ -353,7 +360,10 @@ func TestMerge_AfterToolCall_TerminateORd(t *testing.T) {
 		},
 	}}
 	merged := kit.Merge(a, b)
-	res, _ := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallContext{})
+	res, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallContext{})
+	if err != nil {
+		t.Fatalf("AfterToolCall error: %v", err)
+	}
 	if !res.Terminate {
 		t.Fatal("Terminate should be OR'd to true")
 	}
@@ -559,7 +569,10 @@ func TestMerge_OnTruncated_ZeroSkipped(t *testing.T) {
 		},
 	}}
 	merged := kit.Merge(a, b)
-	res, _ := merged.Hooks.OnTruncated(context.Background(), kit.TruncationContext{})
+	res, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationContext{})
+	if err != nil {
+		t.Fatalf("OnTruncated error: %v", err)
+	}
 	if !res.Retry || len(res.Messages) != 1 || res.Messages[0].Content != "keep" {
 		t.Fatalf("zero result should not override: got %+v", res)
 	}

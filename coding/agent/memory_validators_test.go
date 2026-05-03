@@ -26,6 +26,27 @@ func TestPublishProjectMDValidator(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:       "empty body rejected",
+			path:       projectMDPath,
+			body:       "",
+			wantErr:    true,
+			wantSubstr: "must not be empty",
+		},
+		{
+			name:       "whitespace-only body rejected",
+			path:       projectMDPath,
+			body:       "   \n\t\n  ",
+			wantErr:    true,
+			wantSubstr: "must not be empty",
+		},
+		{
+			name:       "no phase headings rejected",
+			path:       projectMDPath,
+			body:       "some prose without any headings\nmore text\n",
+			wantErr:    true,
+			wantSubstr: "at least one phase heading",
+		},
+		{
 			name:       "invalid project.md body rejected",
 			path:       projectMDPath,
 			body:       "# Not a phase\n### too deep\n- [ ] orphan\n",

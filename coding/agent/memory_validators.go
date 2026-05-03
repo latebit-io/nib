@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/latebit-io/nib/engine/project"
 )
@@ -31,7 +32,18 @@ func publishProjectMDValidator(path, body string) error {
 	if path != projectMDPath {
 		return nil
 	}
-	if errs := project.Validate(project.Parse(body)); errs != nil {
+	if strings.TrimSpace(body) == "" {
+		return llmError(
+			"Error: " + projectMDPath + " rejected — document must not be empty.",
+		)
+	}
+	tree := project.Parse(body)
+	if len(tree.Roots) == 0 {
+		return llmError(
+			"Error: " + projectMDPath + " rejected — document must contain at least one phase heading.",
+		)
+	}
+	if errs := project.Validate(tree); errs != nil {
 		return llmError(fmt.Sprintf(
 			"Error: %s rejected — schema violations below. Fix all and retry.\n%s",
 			projectMDPath,

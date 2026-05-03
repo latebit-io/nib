@@ -643,29 +643,36 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		}
 	}
 
-	// Memory tools — conditionally registered when demarkus is configured.
-	// The publish/append validators enforce coding's /project.md schema
-	// (see [memory_validators.go]); kit-side tools stay generic.
-	if memStore != nil {
-		builtins = append(builtins,
-			memorytools.NewFetchTool(memStore),
-			memorytools.NewPublishTool(memStore, memorytools.WithValidator(publishProjectMDValidator)),
-			memorytools.NewAppendTool(memStore, memorytools.WithValidator(appendProjectMDValidator)),
-			memorytools.NewListTool(memStore),
-		)
-	}
-
 	// Task tracking — conditionally registered via type assertion on workspace.
 	// update_task handles activate/complete; project_task_add handles new-task
 	// creation; project_init bootstraps /project.md so the work tree is loaded
 	// before any of those calls fire on a fresh repo. All three share the same
 	// TaskTracker instance so mutations route through the session's in-memory
 	// work tree.
-	if tt, ok := workspace.(TaskTracker); ok {
+	tt, hasTaskTracker := workspace.(TaskTracker)
+	if hasTaskTracker {
 		builtins = append(builtins,
 			tools.NewTaskTool(tt, a),
 			tools.NewProjectTaskAddTool(tt),
 			tools.NewProjectInitTool(tt),
+		)
+	}
+
+	// Memory tools — conditionally registered when demarkus is configured.
+	// The publish/append validators enforce coding's /project.md schema
+	// (see [memory_validators.go]); kit-side tools stay generic.
+	// The append validator steers the LLM toward task tools, so it is only
+	// wired when the TaskTracker tools are actually registered.
+	if memStore != nil {
+		var appendOpts []memorytools.Option
+		if hasTaskTracker {
+			appendOpts = append(appendOpts, memorytools.WithValidator(appendProjectMDValidator))
+		}
+		builtins = append(builtins,
+			memorytools.NewFetchTool(memStore),
+			memorytools.NewPublishTool(memStore, memorytools.WithValidator(publishProjectMDValidator)),
+			memorytools.NewAppendTool(memStore, appendOpts...),
+			memorytools.NewListTool(memStore),
 		)
 	}
 

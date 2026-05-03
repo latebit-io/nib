@@ -94,10 +94,10 @@ type bashArgs struct {
 func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	var args bashArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Command == "" {
-		return textResult("Error: command is required")
+		return errorResult("Error: command is required")
 	}
 
 	if msg := guardCommand(args.Command); msg != "" {
@@ -109,7 +109,7 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		slog.Warn("bash: blocked by guard",
 			"reason", firstLine(msg),
 			"preview", redactCommandPreview(args.Command))
-		return textResult(msg)
+		return errorResult(msg)
 	}
 
 	timeout := defaultBashTimeout
@@ -163,22 +163,22 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 			slog.Warn("bash: command timed out",
 				"preview", redactCommandPreview(args.Command),
 				"timeout", timeout)
-			return textResult(fmt.Sprintf("Error: command timed out after %s\n\n%s", timeout, output))
+			return errorResult(fmt.Sprintf("Error: command timed out after %s\n\n%s", timeout, output))
 		}
 		if ctx.Err() != nil {
-			return textResult("Error: cancelled")
+			return errorResult("Error: cancelled")
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
-			return textResult(fmt.Sprintf("Error: %v\n\n%s", err, output))
+			return errorResult(fmt.Sprintf("Error: %v\n\n%s", err, output))
 		}
 	}
 
 	slog.Debug("bash: completed", "command", args.Command, "exit_code", exitCode, "output_len", len(output))
 
 	if exitCode != 0 {
-		return textResult(fmt.Sprintf("Exit code: %d\n\n%s", exitCode, output))
+		return errorResult(fmt.Sprintf("Exit code: %d\n\n%s", exitCode, output))
 	}
 	if output == "" {
 		return textResult("(no output)")
@@ -186,11 +186,12 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 	return textResult(output)
 }
 
-// textResult builds a successful tool result whose body is the given
-// string. Local helper so the package depends only on agent.ToolResult,
-// not on coding-side conveniences.
 func textResult(content string) agent.ToolResult {
 	return agent.ToolResult{Content: content}
+}
+
+func errorResult(content string) agent.ToolResult {
+	return agent.ToolResult{Content: content, IsError: true}
 }
 
 // headTailWriter captures the first headSize bytes and the last tailSize bytes

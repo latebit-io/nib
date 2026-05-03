@@ -16,11 +16,11 @@ func assertContains(t *testing.T, got, want string) {
 	}
 }
 
-// toolCall builds an llm.ToolCall with the given name and JSON
+// toolCall builds an llm.ToolCall with the given ID, name and JSON
 // arguments. Convenience for table-driven tool tests.
-func toolCall(name, args string) llm.ToolCall {
+func toolCall(id, name, args string) llm.ToolCall {
 	return llm.ToolCall{
-		ID: "test-id",
+		ID: id,
 		Function: llm.FunctionCall{
 			Name:      name,
 			Arguments: args,

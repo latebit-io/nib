@@ -27,7 +27,7 @@ func TestProjectTaskAddTool_Success(t *testing.T) {
 	tracker := &stubTracker{}
 	tool := NewProjectTaskAddTool(tracker)
 	args := `{"phase": "Phase 1", "feature": "Render", "task": "draw sprites", "link": "/game/sprites.md"}`
-	result := tool.Execute(context.Background(), toolCall("project_task_add", args))
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
 
 	assertContains(t, result.Content, "Added: Phase 1 > Render > draw sprites")
 	if len(tracker.addCalls) != 1 {
@@ -54,7 +54,7 @@ func TestProjectTaskAddTool_Validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := tool.Execute(context.Background(), toolCall("project_task_add", tc.args))
+			result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", tc.args))
 			assertContains(t, result.Content, tc.want)
 		})
 	}
@@ -63,7 +63,7 @@ func TestProjectTaskAddTool_Validation(t *testing.T) {
 func TestProjectTaskAddTool_NilTracker(t *testing.T) {
 	tool := NewProjectTaskAddTool(nil)
 	args := `{"phase": "P", "feature": "F", "task": "t"}`
-	result := tool.Execute(context.Background(), toolCall("project_task_add", args))
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
 	assertContains(t, result.Content, "task tracking not available")
 }
 
@@ -73,7 +73,7 @@ func TestProjectTaskAddTool_NormalizesWhitespace(t *testing.T) {
 	// Whitespace-padded args must reach the tracker trimmed so lookups
 	// against "Phase 1" / "Render" succeed.
 	args := `{"phase": "  Phase 1  ", "feature": "\tRender\n", "task": "  draw  ", "link": "  /x.md  "}`
-	result := tool.Execute(context.Background(), toolCall("project_task_add", args))
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
 	assertContains(t, result.Content, "Added: Phase 1 > Render > draw")
 
 	if len(tracker.addCalls) != 1 {
@@ -97,6 +97,6 @@ func TestProjectTaskAddTool_NormalizesWhitespace(t *testing.T) {
 func TestProjectTaskAddTool_TrackerError(t *testing.T) {
 	tool := NewProjectTaskAddTool(&stubTracker{addErr: errors.New("no such phase")})
 	args := `{"phase": "P", "feature": "F", "task": "t"}`
-	result := tool.Execute(context.Background(), toolCall("project_task_add", args))
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
 	assertContains(t, result.Content, "no such phase")
 }

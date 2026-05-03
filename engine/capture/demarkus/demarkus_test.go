@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/latebit-io/nib/engine/capture"
-	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
 // fakeStore is an in-memory memory.Store for tests. Records every call so

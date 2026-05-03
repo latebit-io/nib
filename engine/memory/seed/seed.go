@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
 // indexTemplate is the seed body for /index.md. The seven canonical

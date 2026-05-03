@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/engine/mcp"
-	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
 // caller is the narrow surface of mcp.Client used by the adapter. Defined

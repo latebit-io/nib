@@ -1,4 +1,4 @@
-package tools
+package bash
 
 import (
 	"context"
@@ -20,9 +20,9 @@ func bashCall(command string) llm.ToolCall {
 	}
 }
 
-func TestBashTool_SimpleCommand(t *testing.T) {
+func TestTool_SimpleCommand(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	result := tool.Execute(context.Background(), bashCall("echo hello"))
 	if !strings.Contains(result.Content, "hello") {
@@ -30,9 +30,9 @@ func TestBashTool_SimpleCommand(t *testing.T) {
 	}
 }
 
-func TestBashTool_ExitCode(t *testing.T) {
+func TestTool_ExitCode(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	result := tool.Execute(context.Background(), bashCall("exit 1"))
 	if !strings.Contains(result.Content, "Exit code: 1") {
@@ -40,9 +40,9 @@ func TestBashTool_ExitCode(t *testing.T) {
 	}
 }
 
-func TestBashTool_WorkingDirectory(t *testing.T) {
+func TestTool_WorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	result := tool.Execute(context.Background(), bashCall("pwd"))
 	if !strings.Contains(result.Content, dir) {
@@ -50,9 +50,9 @@ func TestBashTool_WorkingDirectory(t *testing.T) {
 	}
 }
 
-func TestBashTool_EmptyCommand(t *testing.T) {
+func TestTool_EmptyCommand(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	result := tool.Execute(context.Background(), llm.ToolCall{
 		ID: "test-1",
@@ -66,9 +66,9 @@ func TestBashTool_EmptyCommand(t *testing.T) {
 	}
 }
 
-func TestBashTool_InvalidArgs(t *testing.T) {
+func TestTool_InvalidArgs(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	result := tool.Execute(context.Background(), llm.ToolCall{
 		ID: "test-1",
@@ -82,9 +82,9 @@ func TestBashTool_InvalidArgs(t *testing.T) {
 	}
 }
 
-func TestBashTool_OutputTruncation(t *testing.T) {
+func TestTool_OutputTruncation(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	// Generate output larger than head+tail budget (8KB total).
 	result := tool.Execute(context.Background(), bashCall("yes | head -c 16384"))
@@ -93,9 +93,9 @@ func TestBashTool_OutputTruncation(t *testing.T) {
 	}
 }
 
-func TestBashTool_TailPreservation(t *testing.T) {
+func TestTool_TailPreservation(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	// Emit a large block then a known sentinel at the end.
 	// The sentinel must survive in the tail even though the middle is collapsed.
@@ -110,9 +110,9 @@ func TestBashTool_TailPreservation(t *testing.T) {
 	}
 }
 
-func TestBashTool_ContextCancellation(t *testing.T) {
+func TestTool_ContextCancellation(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -123,9 +123,9 @@ func TestBashTool_ContextCancellation(t *testing.T) {
 	}
 }
 
-func TestBashTool_Timeout(t *testing.T) {
+func TestTool_Timeout(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	call := llm.ToolCall{
 		ID: "test-1",
@@ -140,9 +140,9 @@ func TestBashTool_Timeout(t *testing.T) {
 	}
 }
 
-func TestBashTool_NoOutput(t *testing.T) {
+func TestTool_NoOutput(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	result := tool.Execute(context.Background(), bashCall("true"))
 	if result.Content != "(no output)" {
@@ -150,9 +150,9 @@ func TestBashTool_NoOutput(t *testing.T) {
 	}
 }
 
-func TestBashTool_StderrCaptured(t *testing.T) {
+func TestTool_StderrCaptured(t *testing.T) {
 	dir := t.TempDir()
-	tool := NewBashTool(dir)
+	tool := New(dir)
 
 	result := tool.Execute(context.Background(), bashCall("echo error >&2"))
 	if !strings.Contains(result.Content, "error") {
@@ -160,8 +160,8 @@ func TestBashTool_StderrCaptured(t *testing.T) {
 	}
 }
 
-func TestBashTool_Definition(t *testing.T) {
-	tool := NewBashTool("/tmp")
+func TestTool_Definition(t *testing.T) {
+	tool := New("/tmp")
 	def := tool.Definition()
 	if def.Function.Name != "bash" {
 		t.Errorf("expected tool name 'bash', got %q", def.Function.Name)

@@ -22,7 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/latebit-io/nib/engine/capture"
-	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
 // DefaultBufferSize is the number of pending events the sink buffers before

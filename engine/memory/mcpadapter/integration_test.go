@@ -1,4 +1,4 @@
-package memory_test
+package mcpadapter_test
 
 import (
 	"context"
@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/engine/mcp"
-	"github.com/latebit-io/nib/engine/memory"
 	"github.com/latebit-io/nib/engine/memory/mcpadapter"
 	"github.com/latebit-io/nib/engine/memory/server"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
 // integrationEnv holds the shared state for integration tests.

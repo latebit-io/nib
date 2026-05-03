@@ -1,4 +1,4 @@
-package tools
+package bash
 
 import (
 	"strings"

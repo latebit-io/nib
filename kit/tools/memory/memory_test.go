@@ -1,4 +1,4 @@
-package tools
+package memory
 
 import (
 	"context"
@@ -6,19 +6,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/engine/memory"
+	kitmemory "github.com/latebit-io/nib/kit/memory"
 )
 
-// mockStore implements memory.Store for testing.
+// mockStore implements [kitmemory.Store] for testing.
 type mockStore struct {
-	fetchDoc memory.Document
+	fetchDoc kitmemory.Document
 	fetchErr error
 
-	publishDoc memory.Document
+	publishDoc kitmemory.Document
 	publishErr error
 
-	appendDoc memory.Document
+	appendDoc kitmemory.Document
 	appendErr error
 
 	listPaths []string
@@ -35,19 +36,19 @@ type mockStore struct {
 	lastListPath    string
 }
 
-func (m *mockStore) Fetch(_ context.Context, path string) (memory.Document, error) {
+func (m *mockStore) Fetch(_ context.Context, path string) (kitmemory.Document, error) {
 	m.lastFetchPath = path
 	return m.fetchDoc, m.fetchErr
 }
 
-func (m *mockStore) Publish(_ context.Context, path, body string, expectedVersion int) (memory.Document, error) {
+func (m *mockStore) Publish(_ context.Context, path, body string, expectedVersion int) (kitmemory.Document, error) {
 	m.lastPublishPath = path
 	m.lastPublishBody = body
 	m.lastPublishVer = expectedVersion
 	return m.publishDoc, m.publishErr
 }
 
-func (m *mockStore) Append(_ context.Context, path, body string, expectedVersion int) (memory.Document, error) {
+func (m *mockStore) Append(_ context.Context, path, body string, expectedVersion int) (kitmemory.Document, error) {
 	m.lastAppendPath = path
 	m.lastAppendBody = body
 	m.lastAppendVer = expectedVersion
@@ -82,33 +83,33 @@ var fetchToolTests = []struct {
 	store      mockStore
 	wantSubstr string
 }{
-	{"success", `{"path": "/index.md"}`, mockStore{fetchDoc: memory.Document{Path: "/index.md", Body: "# Hello", Version: 3, Modified: "2026-04-01T00:00:00Z"}}, "version=3"},
+	{"success", `{"path": "/index.md"}`, mockStore{fetchDoc: kitmemory.Document{Path: "/index.md", Body: "# Hello", Version: 3, Modified: "2026-04-01T00:00:00Z"}}, "version=3"},
 	{"missing path", `{}`, mockStore{}, "Error: path is required"},
 	{"invalid json", `{bad`, mockStore{}, "Error: invalid arguments"},
-	{"not found", `{"path": "/nope.md"}`, mockStore{fetchErr: memory.ErrNotFound}, "Error: memory: document not found"},
+	{"not found", `{"path": "/nope.md"}`, mockStore{fetchErr: kitmemory.ErrNotFound}, "Error: memory: document not found"},
 	{"relative path rejected", `{"path": "summary.md"}`, mockStore{}, "Error: path must be absolute"},
 	{"section extraction", `{"path": "/doc.md", "section": "Current State"}`,
-		mockStore{fetchDoc: memory.Document{Path: "/doc.md", Version: 2, Modified: "2026-04-01T00:00:00Z", Body: "# Project\n\n## Current State\n\nBuilding memory.\n\n## Next Steps\n\nShip it.\n"}}, "Building memory."},
+		mockStore{fetchDoc: kitmemory.Document{Path: "/doc.md", Version: 2, Modified: "2026-04-01T00:00:00Z", Body: "# Project\n\n## Current State\n\nBuilding memory.\n\n## Next Steps\n\nShip it.\n"}}, "Building memory."},
 	{"section not found lists available", `{"path": "/doc.md", "section": "Nonexistent"}`,
-		mockStore{fetchDoc: memory.Document{Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z", Body: "# Project\n\n## Alpha\n\nContent.\n\n## Beta\n\nMore.\n"}}, "- Alpha"},
+		mockStore{fetchDoc: kitmemory.Document{Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z", Body: "# Project\n\n## Alpha\n\nContent.\n\n## Beta\n\nMore.\n"}}, "- Alpha"},
 	{"section case insensitive", `{"path": "/doc.md", "section": "current state"}`,
-		mockStore{fetchDoc: memory.Document{Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z", Body: "## Current State\n\nFound it.\n"}}, "Found it."},
+		mockStore{fetchDoc: kitmemory.Document{Path: "/doc.md", Version: 1, Modified: "2026-04-01T00:00:00Z", Body: "## Current State\n\nFound it.\n"}}, "Found it."},
 }
 
-func TestMemoryFetchTool(t *testing.T) {
+func TestFetchTool(t *testing.T) {
 	for _, tt := range fetchToolTests {
 		t.Run(tt.name, func(t *testing.T) {
-			tool := NewMemoryFetchTool(&tt.store)
+			tool := NewFetchTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_fetch", tt.args))
 			assertContains(t, result.Content, tt.wantSubstr)
 		})
 	}
 }
 
-func TestMemoryToolStoreInputs(t *testing.T) {
+func TestStoreInputs(t *testing.T) {
 	t.Run("fetch passes path", func(t *testing.T) {
-		s := &mockStore{fetchDoc: memory.Document{Path: "/x.md", Version: 1}}
-		tool := NewMemoryFetchTool(s)
+		s := &mockStore{fetchDoc: kitmemory.Document{Path: "/x.md", Version: 1}}
+		tool := NewFetchTool(s)
 		tool.Execute(context.Background(), toolCall("memory_fetch", `{"path": "/x.md"}`))
 		if s.lastFetchPath != "/x.md" {
 			t.Errorf("fetch path: got %q, want /x.md", s.lastFetchPath)
@@ -116,8 +117,8 @@ func TestMemoryToolStoreInputs(t *testing.T) {
 	})
 
 	t.Run("publish passes path, body, version", func(t *testing.T) {
-		s := &mockStore{publishDoc: memory.Document{Path: "/a.md", Version: 1}}
-		tool := NewMemoryPublishTool(s)
+		s := &mockStore{publishDoc: kitmemory.Document{Path: "/a.md", Version: 1}}
+		tool := NewPublishTool(s)
 		tool.Execute(context.Background(), toolCall("memory_publish",
 			`{"path": "/a.md", "body": "content", "expected_version": 3}`))
 		if s.lastPublishPath != "/a.md" {
@@ -132,8 +133,8 @@ func TestMemoryToolStoreInputs(t *testing.T) {
 	})
 
 	t.Run("append passes path, body, version", func(t *testing.T) {
-		s := &mockStore{appendDoc: memory.Document{Path: "/j.md", Version: 2}}
-		tool := NewMemoryAppendTool(s)
+		s := &mockStore{appendDoc: kitmemory.Document{Path: "/j.md", Version: 2}}
+		tool := NewAppendTool(s)
 		tool.Execute(context.Background(), toolCall("memory_append",
 			`{"path": "/j.md", "body": "entry", "expected_version": 1}`))
 		if s.lastAppendPath != "/j.md" {
@@ -149,7 +150,7 @@ func TestMemoryToolStoreInputs(t *testing.T) {
 
 	t.Run("list passes path", func(t *testing.T) {
 		s := &mockStore{listPaths: []string{"a.md"}}
-		tool := NewMemoryListTool(s)
+		tool := NewListTool(s)
 		tool.Execute(context.Background(), toolCall("memory_list", `{"path": "/docs/"}`))
 		if s.lastListPath != "/docs/" {
 			t.Errorf("path: got %q", s.lastListPath)
@@ -157,7 +158,7 @@ func TestMemoryToolStoreInputs(t *testing.T) {
 	})
 }
 
-func TestMemoryPublishTool(t *testing.T) {
+func TestPublishTool(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       string
@@ -168,7 +169,7 @@ func TestMemoryPublishTool(t *testing.T) {
 			name: "create success",
 			args: `{"path": "/arch.md", "body": "# Architecture", "expected_version": 0}`,
 			store: mockStore{
-				publishDoc: memory.Document{Path: "/arch.md", Version: 1},
+				publishDoc: kitmemory.Document{Path: "/arch.md", Version: 1},
 			},
 			wantSubstr: "Published /arch.md (version=1)",
 		},
@@ -176,7 +177,7 @@ func TestMemoryPublishTool(t *testing.T) {
 			name: "update success",
 			args: `{"path": "/arch.md", "body": "# Updated", "expected_version": 2}`,
 			store: mockStore{
-				publishDoc: memory.Document{Path: "/arch.md", Version: 3},
+				publishDoc: kitmemory.Document{Path: "/arch.md", Version: 3},
 			},
 			wantSubstr: "Published /arch.md (version=3)",
 		},
@@ -198,39 +199,76 @@ func TestMemoryPublishTool(t *testing.T) {
 		{
 			name:       "conflict error",
 			args:       `{"path": "/x.md", "body": "content", "expected_version": 1}`,
-			store:      mockStore{publishErr: memory.ErrConflict},
+			store:      mockStore{publishErr: kitmemory.ErrConflict},
 			wantSubstr: "Error: memory: version conflict",
-		},
-		{
-			name: "project.md valid body passes through",
-			args: `{"path": "/project.md", "body": "# Phase 1: Setup\n## Feature\n- [ ] task\n", "expected_version": 0}`,
-			store: mockStore{
-				publishDoc: memory.Document{Path: "/project.md", Version: 1},
-			},
-			wantSubstr: "Published /project.md (version=1)",
-		},
-		{
-			name:       "project.md invalid body rejected",
-			args:       `{"path": "/project.md", "body": "# Not a phase\n### too deep\n- [ ] orphan\n", "expected_version": 0}`,
-			wantSubstr: "schema violations",
-		},
-		{
-			name:       "project.md multiple active tasks rejected",
-			args:       `{"path": "/project.md", "body": "# Phase 1: A\n## F\n- [>] one\n- [>] two\n", "expected_version": 1}`,
-			wantSubstr: "multiple-active-tasks",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tool := NewMemoryPublishTool(&tt.store)
+			tool := NewPublishTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_publish", tt.args))
 			assertContains(t, result.Content, tt.wantSubstr)
 		})
 	}
 }
 
-func TestMemoryAppendTool(t *testing.T) {
+// TestPublishTool_Validator locks the contract that a configured
+// [Validator] runs synchronously before the store is called and that
+// a non-nil error blocks the write and surfaces the message verbatim.
+func TestPublishTool_Validator(t *testing.T) {
+	t.Run("nil validator allows all writes", func(t *testing.T) {
+		s := &mockStore{publishDoc: kitmemory.Document{Path: "/x.md", Version: 1}}
+		tool := NewPublishTool(s)
+		result := tool.Execute(context.Background(), toolCall("memory_publish",
+			`{"path": "/x.md", "body": "content", "expected_version": 0}`))
+		assertContains(t, result.Content, "Published /x.md")
+		if s.lastPublishPath != "/x.md" {
+			t.Errorf("validator-less publish should still hit the store")
+		}
+	})
+
+	t.Run("validator error blocks write and surfaces message", func(t *testing.T) {
+		s := &mockStore{publishDoc: kitmemory.Document{Path: "/x.md", Version: 1}}
+		v := func(_ /* path */ string, _ /* body */ string) error {
+			return errors.New("schema violation: detail line")
+		}
+		tool := NewPublishTool(s, WithValidator(v))
+		result := tool.Execute(context.Background(), toolCall("memory_publish",
+			`{"path": "/x.md", "body": "content", "expected_version": 0}`))
+		assertContains(t, result.Content, "schema violation: detail line")
+		if s.lastPublishPath != "" {
+			t.Errorf("validator error must block store call; last publish path = %q", s.lastPublishPath)
+		}
+	})
+
+	t.Run("validator nil error allows write", func(t *testing.T) {
+		s := &mockStore{publishDoc: kitmemory.Document{Path: "/x.md", Version: 1}}
+		v := func(string, string) error { return nil }
+		tool := NewPublishTool(s, WithValidator(v))
+		result := tool.Execute(context.Background(), toolCall("memory_publish",
+			`{"path": "/x.md", "body": "content", "expected_version": 0}`))
+		assertContains(t, result.Content, "Published /x.md")
+	})
+
+	t.Run("validator receives path and body", func(t *testing.T) {
+		s := &mockStore{publishDoc: kitmemory.Document{Path: "/x.md", Version: 1}}
+		var seenPath, seenBody string
+		v := func(p, b string) error {
+			seenPath = p
+			seenBody = b
+			return nil
+		}
+		tool := NewPublishTool(s, WithValidator(v))
+		tool.Execute(context.Background(), toolCall("memory_publish",
+			`{"path": "/x.md", "body": "content", "expected_version": 0}`))
+		if seenPath != "/x.md" || seenBody != "content" {
+			t.Errorf("validator received (%q, %q), want (/x.md, content)", seenPath, seenBody)
+		}
+	})
+}
+
+func TestAppendTool(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       string
@@ -241,7 +279,7 @@ func TestMemoryAppendTool(t *testing.T) {
 			name: "success",
 			args: `{"path": "/journal.md", "body": "## Entry", "expected_version": 2}`,
 			store: mockStore{
-				appendDoc: memory.Document{Path: "/journal.md", Version: 3},
+				appendDoc: kitmemory.Document{Path: "/journal.md", Version: 3},
 			},
 			wantSubstr: "Appended to /journal.md (version=3)",
 		},
@@ -266,23 +304,44 @@ func TestMemoryAppendTool(t *testing.T) {
 			store:      mockStore{appendErr: errors.New("boom")},
 			wantSubstr: "Error: boom",
 		},
-		{
-			name:       "project.md append rejected with guidance",
-			args:       `{"path": "/project.md", "body": "- [ ] extra", "expected_version": 1}`,
-			wantSubstr: "project_task_add",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tool := NewMemoryAppendTool(&tt.store)
+			tool := NewAppendTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_append", tt.args))
 			assertContains(t, result.Content, tt.wantSubstr)
 		})
 	}
 }
 
-func TestMemoryListTool(t *testing.T) {
+// TestAppendTool_Validator — same contract as PublishTool, separate
+// surface so a regression in either tool's hook plumbing fails on its
+// own row instead of hiding behind shared coverage.
+func TestAppendTool_Validator(t *testing.T) {
+	t.Run("validator error blocks append", func(t *testing.T) {
+		s := &mockStore{appendDoc: kitmemory.Document{Path: "/x.md", Version: 2}}
+		v := func(string, string) error { return errors.New("path is read-only") }
+		tool := NewAppendTool(s, WithValidator(v))
+		result := tool.Execute(context.Background(), toolCall("memory_append",
+			`{"path": "/x.md", "body": "extra", "expected_version": 1}`))
+		assertContains(t, result.Content, "path is read-only")
+		if s.lastAppendPath != "" {
+			t.Errorf("validator error must block store call; last append path = %q", s.lastAppendPath)
+		}
+	})
+
+	t.Run("validator allows append", func(t *testing.T) {
+		s := &mockStore{appendDoc: kitmemory.Document{Path: "/x.md", Version: 2}}
+		v := func(string, string) error { return nil }
+		tool := NewAppendTool(s, WithValidator(v))
+		result := tool.Execute(context.Background(), toolCall("memory_append",
+			`{"path": "/x.md", "body": "extra", "expected_version": 1}`))
+		assertContains(t, result.Content, "Appended to /x.md")
+	})
+}
+
+func TestListTool(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       string
@@ -309,36 +368,34 @@ func TestMemoryListTool(t *testing.T) {
 		{
 			name:       "store error",
 			args:       `{"path": "/"}`,
-			store:      mockStore{listErr: memory.ErrServer},
+			store:      mockStore{listErr: kitmemory.ErrServer},
 			wantSubstr: "Error: memory: server error",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tool := NewMemoryListTool(&tt.store)
+			tool := NewListTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_list", tt.args))
 			assertContains(t, result.Content, tt.wantSubstr)
 		})
 	}
 }
 
-func TestMemoryToolsCanceled(t *testing.T) {
+func TestToolsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	store := &mockStore{}
 
-	// Use valid args for each tool so cancellation check is tested,
-	// not argument validation.
 	cases := []struct {
-		tool Tool
+		tool agent.Tool
 		args string
 	}{
-		{NewMemoryFetchTool(store), `{"path": "/x.md"}`},
-		{NewMemoryPublishTool(store), `{"path": "/x.md", "body": "b", "expected_version": 0}`},
-		{NewMemoryAppendTool(store), `{"path": "/x.md", "body": "b", "expected_version": 1}`},
-		{NewMemoryListTool(store), `{"path": "/"}`},
+		{NewFetchTool(store), `{"path": "/x.md"}`},
+		{NewPublishTool(store), `{"path": "/x.md", "body": "b", "expected_version": 0}`},
+		{NewAppendTool(store), `{"path": "/x.md", "body": "b", "expected_version": 1}`},
+		{NewListTool(store), `{"path": "/"}`},
 	}
 
 	for _, tc := range cases {
@@ -457,16 +514,16 @@ func TestListSections(t *testing.T) {
 	})
 }
 
-func TestMemoryToolDefinitions(t *testing.T) {
+func TestToolDefinitions(t *testing.T) {
 	store := &mockStore{}
 	tools := []struct {
 		name string
-		tool Tool
+		tool agent.Tool
 	}{
-		{"memory_fetch", NewMemoryFetchTool(store)},
-		{"memory_publish", NewMemoryPublishTool(store)},
-		{"memory_append", NewMemoryAppendTool(store)},
-		{"memory_list", NewMemoryListTool(store)},
+		{"memory_fetch", NewFetchTool(store)},
+		{"memory_publish", NewPublishTool(store)},
+		{"memory_append", NewAppendTool(store)},
+		{"memory_list", NewListTool(store)},
 	}
 
 	for _, tt := range tools {

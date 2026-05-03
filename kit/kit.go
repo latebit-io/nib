@@ -11,8 +11,9 @@
 //	a, err := kit.New(kit.Config{
 //	    Provider: provider,
 //	    Events:   events,
-//	    Tools:    tools,
-//	    Hooks:    hooks,
+//	    Tools:    coreTools,
+//	    Hooks:    coreHooks,
+//	    Toolsets:  []kit.Toolset{memoryBundle, mcpBundle},
 //	})
 //	if err != nil { ... }
 //	go drain(events)
@@ -131,17 +132,28 @@ type Config struct {
 	// and drive runs through [Agent.PromptWithMessages] instead.
 	SystemPrompt string
 
-	// Tools are the tool implementations registered against this agent.
+	// Tools are the tool implementations registered directly. These
+	// appear BEFORE tools from [Toolsets] in the flattened list, giving
+	// them builtin precedence when names collide (first wins).
 	// Each tool's Definition() schema is advertised to the LLM; tool
 	// calls route to Execute(). Tools share the agent's lifetime and
 	// must be safe to invoke concurrently.
 	Tools []Tool
 
-	// Hooks are the application-layer extension points. Nil disables a
-	// given hook; the agent skips it without ceremony. Hooks run
-	// synchronously on the loop goroutine — long-running work should
-	// be dispatched off the hook's call stack.
+	// Hooks are hooks registered directly. These fire BEFORE any hooks
+	// contributed by [Toolsets]. Nil disables a given hook; the agent
+	// skips it without ceremony. Hooks run synchronously on the loop
+	// goroutine — long-running work should be dispatched off the
+	// hook's call stack.
 	Hooks Hooks
+
+	// Toolsets are composable tool+hook bundles merged in order after
+	// the direct [Tools] and [Hooks] fields. Use for library-provided
+	// bundles that ship their own hooks alongside their tools.
+	// Duplicate tool names across toolsets and direct tools are
+	// resolved at [New] time: first registration wins; later
+	// duplicates are logged and dropped.
+	Toolsets []Toolset
 }
 
 // runOutcome carries the failure bit for a single run from
@@ -242,14 +254,19 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("%w: Events is required", ErrInvalidOptions)
 	}
 
+	merged := Merge(
+		append([]Toolset{{Tools: cfg.Tools, Hooks: cfg.Hooks}}, cfg.Toolsets...)...,
+	)
+	tools := deduplicateTools(merged.Tools)
+
 	foundationEvents := make(chan agentevent.Event, 64)
 
 	f, err := agent.New(agent.Options{
 		Provider:     cfg.Provider,
 		Events:       foundationEvents,
 		SystemPrompt: cfg.SystemPrompt,
-		Tools:        cfg.Tools,
-		Hooks:        cfg.Hooks,
+		Tools:        tools,
+		Hooks:        merged.Hooks,
 	})
 	if err != nil {
 		return nil, err

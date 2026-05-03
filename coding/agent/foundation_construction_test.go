@@ -21,12 +21,11 @@ func (noopProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) 
 	return ch, nil
 }
 
-// TestFoundationBuilt_FoundationAndProxyInstalled verifies [New] wires
-// the foundation: the foundation pointer is non-nil, the [providerProxy]
-// is non-nil and seeded with the constructor's provider, and a
-// [foundationEvents] channel exists for the translator goroutine to
-// drain.
-func TestFoundationBuilt_FoundationAndProxyInstalled(t *testing.T) {
+// TestKitBuilt_KitAndProxyInstalled verifies [New] wires the kit
+// agent: the kit pointer is non-nil, the [providerProxy] is non-nil
+// and seeded with the constructor's provider, and a [kitEvents]
+// channel exists for the forwarder goroutine to drain.
+func TestKitBuilt_KitAndProxyInstalled(t *testing.T) {
 	t.Parallel()
 
 	// Pointer instance so the equality assertion below has identity
@@ -37,14 +36,14 @@ func TestFoundationBuilt_FoundationAndProxyInstalled(t *testing.T) {
 
 	ag := New(provider, stubWorkspace{}, events, nil)
 
-	if ag.foundation == nil {
-		t.Errorf("Agent.foundation is nil; want non-nil after New")
+	if ag.kit == nil {
+		t.Errorf("Agent.kit is nil; want non-nil after New")
 	}
 	if ag.providerProxy == nil {
 		t.Fatalf("Agent.providerProxy is nil; want non-nil after New")
 	}
-	if ag.foundationEvents == nil {
-		t.Errorf("Agent.foundationEvents is nil; want a non-nil channel for the translator")
+	if ag.kitEvents == nil {
+		t.Errorf("Agent.kitEvents is nil; want a non-nil channel for the forwarder")
 	}
 
 	// The proxy must be seeded with the constructor's provider so the
@@ -57,12 +56,12 @@ func TestFoundationBuilt_FoundationAndProxyInstalled(t *testing.T) {
 	}
 }
 
-// TestFoundationBuilt_SetProviderSwapsProxy verifies [SetProvider]
-// updates both [Agent.provider] and the [providerProxy] (used by the
+// TestKitBuilt_SetProviderSwapsProxy verifies [SetProvider] updates
+// both [Agent.provider] and the [providerProxy] (used by the kit/
 // foundation). Without the proxy update, SetProvider would silently
-// no-op for the foundation — the developer would toggle a model in the
-// TUI and see nothing change.
-func TestFoundationBuilt_SetProviderSwapsProxy(t *testing.T) {
+// no-op for the kit — the developer would toggle a model in the TUI
+// and see nothing change.
+func TestKitBuilt_SetProviderSwapsProxy(t *testing.T) {
 	t.Parallel()
 
 	// Pointer instances so original and replacement are distinct under
@@ -96,18 +95,42 @@ func TestFoundationBuilt_SetProviderSwapsProxy(t *testing.T) {
 	}
 }
 
-// TestFoundationBuilt_ToolsMirrorAdvertisedSet verifies the foundation
-// receives the same tool set the wrapper advertises. The foundation
-// tool slice is built from [Agent.toolDefs] order (looking each tool up
-// in [Agent.tools]) so the foundation's internal toolDefs match what
-// the wrapper passes to [llm.Provider.Stream].
+// TestKitBuilt_NilProviderPanicsAtConstruction locks the fast-fail
+// guard on nil providers. kit.New only sees the providerProxy
+// (always non-nil), so a nil [Agent.provider] would otherwise slip
+// past kit's own validation and panic at first Stream — far from the
+// bad call site. Failing in [Agent.buildKitAgent] surfaces the bug
+// immediately.
+func TestKitBuilt_NilProviderPanicsAtConstruction(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("New(nil provider) did not panic")
+		}
+		msg, _ := r.(string)
+		if !strings.Contains(msg, "provider is required") {
+			t.Errorf("panic message = %q, want substring 'provider is required'", msg)
+		}
+	}()
+
+	events := make(chan event.Event, 1)
+	_ = New(nil, stubWorkspace{}, events, nil)
+}
+
+// TestKitBuilt_ToolsMirrorAdvertisedSet verifies the kit/foundation
+// receives the same tool set the wrapper advertises. The kit tool
+// slice is built from [Agent.toolDefs] order (looking each tool up in
+// [Agent.tools]) so the kit's internal toolDefs match what the
+// wrapper passes to [llm.Provider.Stream].
 //
-// We can't reach inside [upagent.Agent] to compare the slice directly,
-// so the test approximates via the [State] surface: a fresh agent has
-// no run, [State.Messages] is nil — but its zero value at least proves
-// foundation.State() is callable, i.e. the foundation built without
-// panicking on the tool list.
-func TestFoundationBuilt_ToolsMirrorAdvertisedSet(t *testing.T) {
+// We can't reach inside [kit.Agent] to compare the slice directly, so
+// the test approximates via the [State] surface: a fresh agent has no
+// run, [State.Messages] is nil — but its zero value at least proves
+// kit.State() is callable, i.e. the kit built without panicking on
+// the tool list.
+func TestKitBuilt_ToolsMirrorAdvertisedSet(t *testing.T) {
 	t.Parallel()
 
 	events := make(chan event.Event, 8)
@@ -123,8 +146,8 @@ func TestFoundationBuilt_ToolsMirrorAdvertisedSet(t *testing.T) {
 		}
 	}
 
-	state := ag.foundation.State()
+	state := ag.kit.State()
 	if len(state.Messages) != 0 {
-		t.Errorf("fresh foundation State.Messages length = %d; want 0 before any Prompt", len(state.Messages))
+		t.Errorf("fresh kit State.Messages length = %d; want 0 before any Prompt", len(state.Messages))
 	}
 }

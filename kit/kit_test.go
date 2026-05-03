@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -680,28 +679,32 @@ func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 
-	// Take a goroutine snapshot before Close, then assert the count
-	// drops after Close. Without the assertion we'd be testing that
-	// Close returns without panicking, which doesn't catch the leak.
-	before := runtime.NumGoroutine()
+	// Drain pending events on a background goroutine so Close's
+	// translator-drain phase has somewhere to send. The drainer
+	// returns once an AgentDone arrives — same as steady-state.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		drainUntil(events, untilDone)
+	}()
+
 	a.Close()
+	<-drained
 
-	// Drain anything Close caused the translator to flush so the
-	// consumer-side goroutine reading `events` doesn't hold a
-	// reference itself.
-	drainUntil(events, untilDone)
-
-	// Allow scheduler ticks for the translator goroutine to actually
-	// exit. Poll rather than sleep — a fixed sleep is either too
-	// short on a slow CI runner or wastefully long on a fast one.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if runtime.NumGoroutine() < before {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Observable contract: after Close returns, the translator has
+	// fully exited and will not write to `events` again. The only
+	// race-free way to assert that from the consumer side is to
+	// CLOSE the channel ourselves — a still-running translator
+	// would hit the closed channel on its next send and crash the
+	// goroutine (visible as a test panic via the goroutine's
+	// panic propagating up through the runtime). Compared to a
+	// runtime.NumGoroutine sample (polluted by other parallel
+	// tests' goroutines and by the still-alive consumer drainer),
+	// this catches the "Close returned early" failure mode
+	// directly.
+	close(events)
+	for range events {
 	}
-	t.Fatalf("goroutine count did not drop after Close: before=%d now=%d", before, runtime.NumGoroutine())
 }
 
 func TestClose_Idempotent(t *testing.T) {

@@ -57,18 +57,10 @@ func maybeCompact(messages []llm.Message, toolDefs []llm.ToolDef, send sender) [
 	return compacted
 }
 
-// estimateAndBroadcast computes a client-side input estimate and
-// emits an AgentInputEstimate event so the frontend status bar
-// updates before the LLM call starts. Returns the same estimate so
-// the caller can store it for budget bookkeeping without re-
-// computing.
-func estimateAndBroadcast(messages []llm.Message, toolDefs []llm.ToolDef, send sender) llm.InputEstimate {
-	est := llm.EstimateMessageTokens(messages, toolDefs)
-	send(event.AgentInputEstimate{
-		System:  est.System,
-		Tools:   est.Tools,
-		History: est.History,
-		New:     est.New,
-	})
-	return est
-}
+// AgentInputEstimate emission lives on [providerProxy.Stream] —
+// computed from the exact (messages, tools) the inner provider
+// receives, emitted synchronously before kicking off the LLM call.
+// A previous design lived in coding's TransformContext but the
+// pairing with the matching post-Stream AgentTurnUsage required
+// reliable kit delivery, which kit explicitly does not guarantee
+// for streaming events.

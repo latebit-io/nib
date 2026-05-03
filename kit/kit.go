@@ -113,9 +113,16 @@ type Config struct {
 	//     cannot reconstruct from later events.
 	//
 	// A consumer that stops draining will wedge the kit translator
-	// goroutine; if the consumer also calls [Agent.Close], Close
-	// still returns but the translator leaks. Size the channel
-	// generously (64+ recommended) so bursts do not block.
+	// goroutine on its next blocking send. Because [Agent.Close]
+	// waits synchronously for the translator to drain remaining
+	// foundation events and exit (the translatorDone barrier),
+	// Close itself will hang indefinitely against a wedged consumer
+	// — Close cannot rescue a stuck translator without violating
+	// the "no further writes to Events after Close returns"
+	// guarantee callers rely on for safe channel cleanup. Size the
+	// channel generously (64+ recommended) and keep the consumer
+	// draining for the lifetime of the agent; close the channel
+	// only AFTER Close returns.
 	Events chan<- event.Event
 
 	// SystemPrompt is the system message prepended to every run's
@@ -195,6 +202,15 @@ type Agent struct {
 	// the foundation has stopped emitting.
 	done chan struct{}
 
+	// translatorDone is closed by [Agent.translateEvents] (via defer)
+	// when the translator goroutine returns. [Agent.Close] blocks on
+	// it after closing [Agent.done] so callers receive a synchronous
+	// "translator has stopped writing to consumerEvents" signal.
+	// Without this guarantee, a caller that closes the consumer
+	// channel right after Close returns can race a translator still
+	// draining buffered foundation events and panic on send-on-closed.
+	translatorDone chan struct{}
+
 	// closeOnce guards [Agent.Close] so concurrent or repeated Close
 	// calls do not double-close [Agent.done] (which would panic) or
 	// double-Abort the foundation (which is safe but pointless).
@@ -244,6 +260,7 @@ func New(cfg Config) (*Agent, error) {
 		foundationEvents: foundationEvents,
 		consumerEvents:   cfg.Events,
 		done:             make(chan struct{}),
+		translatorDone:   make(chan struct{}),
 	}
 
 	go a.translateEvents()
@@ -393,9 +410,15 @@ func (a *Agent) WaitForIdle() {
 // consumer's events channel is NOT closed by Close — that channel
 // belongs to the caller and may be reused for other producers.
 //
-// Close blocks until the foundation has fully unwound. Callers that
-// need force-quit semantics should not rely on Close — they should
-// abandon the agent and accept the leak.
+// Close blocks until the foundation has fully unwound AND the
+// translator goroutine has exited (no further writes to
+// [Config.Events]). Callers that need force-quit semantics should
+// not rely on Close — they should abandon the agent and accept the
+// leak.
+//
+// Synchronous translator exit is the contract callers rely on when
+// they own the consumer channel: closing it right after Close
+// returns must not race a still-draining translator.
 func (a *Agent) Close() {
 	a.closeOnce.Do(func() {
 		atomic.StoreUint32(&a.closed, 1)
@@ -406,5 +429,11 @@ func (a *Agent) Close() {
 		a.Abort()
 		a.foundation.WaitForIdle()
 		close(a.done)
+		// Block until translateEvents has fully drained any buffered
+		// foundation events and exited. If the consumer is no longer
+		// draining [Config.Events], the translator wedges and Close
+		// will hang — same hard contract as steady-state operation
+		// (consumer must drain). Documented on Config.Events.
+		<-a.translatorDone
 	})
 }

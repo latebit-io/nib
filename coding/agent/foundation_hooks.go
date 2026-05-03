@@ -145,13 +145,13 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		if fresh && len(msgs) > 0 && msgs[0].Role == "system" {
 			msgs[0].Content = a.rebuildSystemPrompt(a.currentMode())
 		}
-		// Emit AgentInputEstimate + capture the estimate so the
-		// translator's TurnUsage handler can populate the *Est fields
-		// on AgentTurnUsage. Stashed on the agent struct under mu.
-		est := estimateAndBroadcast(msgs, a.activeToolDefs(), a.send)
-		a.mu.Lock()
-		a.lastEstimate = est
-		a.mu.Unlock()
+		// AgentInputEstimate emission and per-turn estimate
+		// pairing live on [providerProxy] — its Stream wrapper is
+		// the only point where we can synchronously commit the
+		// estimate next to the matching usage WITHOUT depending on
+		// kit's lossy AgentTurnUsage delivery (kit drops streaming
+		// events when the consumer channel is full, which would
+		// desync any forwarder-side queue indefinitely).
 		return msgs, nil
 	}
 
@@ -421,11 +421,14 @@ func (a *Agent) foundationBudgetCheck() error {
 		a.mu.Unlock()
 		return errBudgetExceeded
 	}
-	msg, exceeded := budget.Exceeded(a.sessionUsage, a.taskTokenBudget)
+	a.mu.Unlock()
+
+	msg, exceeded := budget.Exceeded(a.sessionSnapshot(), a.taskTokenBudget)
 	if !exceeded {
-		a.mu.Unlock()
 		return nil
 	}
+
+	a.mu.Lock()
 	a.budgetExceeded = true
 	a.mu.Unlock()
 

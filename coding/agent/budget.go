@@ -1,7 +1,6 @@
 package agent
 
 import (
-	upevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/kit/budget"
 )
@@ -9,53 +8,22 @@ import (
 // Per-run budget integration for Agent.
 //
 // The pure budget math + types live in [kit/budget]; this file is
-// the agent-side glue: per-run accounting (recordTurnUsage), the
-// post-Stream latch ([Agent.checkTaskBudget]), and the abort path
-// fired from the foundation TransformContext hook
-// ([Agent.foundationBudgetCheck] in foundation_hooks.go). All four
-// touch [Agent.sessionUsage] / [Agent.budgetExceeded] under
-// [Agent.mu]; ordering between read and write is documented at each
-// call site.
-
-// recordTurnUsage accumulates one foundation [upevent.TurnUsage] event
-// into the session total and emits the engine-level
-// [event.AgentTurnUsage] for the frontend's status bar / cost panel.
-// completionEst is the streamed assistant content estimate captured
-// by the translator on [upevent.MessageEnd] — provider-reported
-// counts (PromptTokens, CompletionTokens, CachedTokens, ToolCalls)
-// arrive on the TurnUsage event; the *Est fields are the
-// pre-Stream estimate stash from TransformContext combined with this
-// post-Stream content estimate.
-func (a *Agent) recordTurnUsage(tu upevent.TurnUsage, completionEst int) {
-	a.mu.Lock()
-	a.turnCounter++
-	turn := a.turnCounter
-	a.sessionUsage.TotalPromptTokens += tu.PromptTokens
-	a.sessionUsage.TotalCompletionTokens += tu.CompletionTokens
-	a.sessionUsage.TotalCachedTokens += tu.CachedTokens
-	a.sessionUsage.Turns = turn
-	estimate := a.lastEstimate
-	a.mu.Unlock()
-
-	a.send(event.AgentTurnUsage{
-		Turn:             turn,
-		PromptTokens:     tu.PromptTokens,
-		CompletionTokens: tu.CompletionTokens,
-		CachedTokens:     tu.CachedTokens,
-		ToolCalls:        tu.ToolCalls,
-		SystemEst:        estimate.System,
-		ToolsEst:         estimate.Tools,
-		HistoryEst:       estimate.History,
-		NewEst:           estimate.New,
-		CompletionEst:    completionEst,
-	})
-}
+// the agent-side glue: the post-Stream latch ([Agent.checkTaskBudget])
+// and the abort path fired from the foundation TransformContext hook
+// ([Agent.foundationBudgetCheck] in foundation_hooks.go). Both touch
+// [Agent.sessionUsage] / [Agent.budgetExceeded] under [Agent.mu];
+// ordering between read and write is documented at each call site.
+//
+// Per-turn accumulation lives in [Agent.augmentAndAccumulate]
+// (forwarder.go) — the post-translation point where each
+// [event.AgentTurnUsage] from kit gets folded into [Agent.sessionUsage]
+// before reaching the frontend.
 
 // checkTaskBudget reports whether the per-task token budget has been
-// exceeded by the current sessionUsage. Returns the formatted error
-// message on overrun (and latches budgetExceeded so subsequent calls
-// do not double-emit) or "" otherwise. A zero budget disables the
-// check.
+// exceeded by the current session usage (read from [providerProxy.Snapshot]).
+// Returns the formatted error message on overrun (and latches
+// budgetExceeded so subsequent calls do not double-emit) or "" otherwise.
+// A zero budget disables the check.
 //
 // Sums prompt + completion tokens. Cached tokens are already a subset
 // of prompt and would double-count if added separately. Called from
@@ -65,14 +33,50 @@ func (a *Agent) recordTurnUsage(tu upevent.TurnUsage, completionEst int) {
 // tokens.
 func (a *Agent) checkTaskBudget() string {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.budgetExceeded {
+		a.mu.Unlock()
 		return ""
 	}
-	msg, exceeded := budget.Exceeded(a.sessionUsage, a.taskTokenBudget)
+	a.mu.Unlock()
+
+	msg, exceeded := budget.Exceeded(a.sessionSnapshot(), a.taskTokenBudget)
 	if !exceeded {
 		return ""
 	}
+
+	a.mu.Lock()
 	a.budgetExceeded = true
+	a.mu.Unlock()
 	return msg
+}
+
+// onTurnSettled is the callback providerProxy invokes after emitting
+// AgentTurnUsage on a Stream's Done event. Runs the post-turn budget
+// check and aborts the run if the cap was crossed. Synchronous in
+// the providerProxy Stream wrapper goroutine; abort marks kit's
+// per-run outcome unsuccess so the eventual AgentDone surfaces with
+// Success=false. Lives on Agent (rather than as a closure inside
+// buildKitAgent) so the bound function value is stable across
+// providerProxy reads of [providerProxy.onTurnSettled].
+func (a *Agent) onTurnSettled() {
+	msg := a.checkTaskBudget()
+	if msg == "" {
+		return
+	}
+	a.send(event.AgentError{Err: msg})
+	if a.kit != nil {
+		a.kit.Abort()
+	}
+}
+
+// sessionSnapshot returns the per-run usage snapshot from providerProxy,
+// or a zero session when providerProxy is nil. The nil-safe path covers
+// bare-Agent tests that construct an [Agent] without going through
+// [New] — production [Agent.providerProxy] is always non-nil after
+// [Agent.buildKitAgent].
+func (a *Agent) sessionSnapshot() budget.Session {
+	if a.providerProxy == nil {
+		return budget.Session{}
+	}
+	return a.providerProxy.Snapshot()
 }

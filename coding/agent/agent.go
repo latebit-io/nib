@@ -13,8 +13,6 @@ import (
 	"sync"
 	"time"
 
-	upagent "github.com/latebit-io/nib/agent"
-	upevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/editflow"
@@ -28,6 +26,7 @@ import (
 	"github.com/latebit-io/nib/engine/memory"
 	"github.com/latebit-io/nib/engine/runconfig"
 	"github.com/latebit-io/nib/engine/validate"
+	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/budget"
 )
@@ -134,12 +133,6 @@ type Agent struct {
 	// running is true while the run() goroutine is alive.
 	running bool
 
-	// savedMessages and savedMode preserve the conversation when a run
-	// exits (cancel, fatal error). Resume picks these up to continue
-	// from where the conversation left off instead of starting fresh.
-	savedMessages []llm.Message
-	savedMode     event.Mode
-
 	// diagProvider is optionally set to auto-inject diagnostics after edits.
 	diagProvider lang.DiagnosticProvider
 	// diagDelay is the wait time for the language server to push diagnostics after an edit.
@@ -220,32 +213,42 @@ type Agent struct {
 	// every turn.
 	taskEdits []taskEdit
 
-	// sessionUsage accumulates token consumption across the entire agent run.
-	sessionUsage budget.Session
+	// Per-run session usage lives on [providerProxy.session] —
+	// accumulated synchronously inside the Stream channel wrapper so
+	// the foundation's pre-Stream budget check ([Agent.foundationBudgetCheck])
+	// sees fresh totals on the immediately following turn. Read via
+	// [providerProxy.Snapshot]; reset via [providerProxy.ResetSession]
+	// on each new run.
+
 	// taskTokenBudget caps prompt+completion tokens for a single agent run.
 	// Zero means unlimited (the budget check is skipped). Set via
 	// [NewOptions.TaskTokenBudget]; the run loop aborts with an AgentError
-	// when sessionUsage prompt+completion crosses this threshold.
+	// when the session prompt+completion crosses this threshold.
 	taskTokenBudget int
 	// budgetExceeded latches once the budget abort fires so subsequent
 	// turn checks (e.g. on a Resume of a saved conversation) do not double-
-	// emit the AgentError. Reset alongside sessionUsage on RunWithMode/Reply.
+	// emit the AgentError. Reset on RunWithMode/Reply alongside the
+	// providerProxy's session counter.
 	budgetExceeded bool
 	// runUnsuccessful is set by [Agent.send] when an [event.AgentError]
-	// is emitted and by [Agent.Cancel]. The translator goroutine reads
-	// it on [upevent.AgentEnd] to decide [event.AgentDone].Success —
-	// the foundation event stream alone cannot distinguish "clean
-	// run-end" from "user-cancelled" or from "engine-side AgentError
-	// emitted by recoverFromTruncation or autosave-failed", so the wrapper
-	// tracks the unsuccess decision explicitly. Reset on each new run.
+	// is emitted and by [Agent.Cancel]. [Agent.forwardKitEvents] reads
+	// it on [event.AgentDone] to override the kit-derived Success flag
+	// — kit's per-run outcome only knows about Aborts and foundation
+	// Errors, so coding-side AgentErrors emitted via [Agent.send]
+	// (autosave failure, post-turn budget, RunWithMode rejection) need
+	// this wrapper-level flag to surface as Success=false. Reset on
+	// each new run.
 	runUnsuccessful bool
 	// turnCounter is the 1-indexed turn number within the current run.
 	turnCounter int
-	// lastEstimate holds the most recent client-side input estimate from
-	// [estimateAndBroadcast], stashed by TransformContext so the
-	// translator goroutine's TurnUsage handler can populate the *Est
-	// fields on [event.AgentTurnUsage] without re-computing.
-	lastEstimate llm.InputEstimate
+	// Per-turn estimate emission and AgentTurnUsage pairing live on
+	// [providerProxy] — its Stream wrapper is the only point where
+	// the estimate (computed pre-Stream from the exact msgs+tools the
+	// provider sees) can be committed alongside the post-Stream
+	// usage WITHOUT depending on kit's lossy AgentTurnUsage delivery.
+	// A previous design used a forwarder-side FIFO queue, but kit
+	// drops AgentTurnUsage on full consumer channels and the queue
+	// would desync indefinitely after the first drop.
 	// truncationRetries counts truncated turns within the current run.
 	// Read + incremented by the OnTruncated foundation hook; reset to
 	// zero on each new run alongside the other per-run state. Lives on
@@ -256,23 +259,67 @@ type Agent struct {
 	// budget.
 	truncationRetries int
 
-	// providerProxy is the [llm.Provider] handed to [foundation]. It
+	// providerProxy is the [llm.Provider] handed to [kit.New]. It
 	// shadows [Agent.provider] so [SetProvider] can hot-swap the live
-	// provider mid-session even though the foundation captures its
-	// provider once at [upagent.New] time.
+	// provider mid-session even though the kit/foundation captures its
+	// provider once at construction time.
 	providerProxy *providerProxy
 
-	// foundation is the embeddable [upagent.Agent] that drives the run
-	// loop. Built in [New] with [providerProxy], [foundationEvents], and
-	// [Agent.FoundationHooks].
-	foundation *upagent.Agent
+	// kit is the embeddable [kit.Agent] that drives the run loop.
+	// Built in [New] with [providerProxy], [kitEvents], and the
+	// hooks composed by [Agent.FoundationHooks].
+	kit *kit.Agent
 
-	// foundationEvents is the channel [foundation] emits its
-	// [upevent.Event] stream on. Drained by a translator goroutine
-	// spawned in [New] that re-emits as [event.Event] through
-	// [Agent.send] — the application boundary where the generic
-	// foundation events become the coding agent's vocabulary.
-	foundationEvents chan upevent.Event
+	// kitEvents is the channel [kit] emits its [event.Event] stream on.
+	// Drained by [Agent.forwardKitEvents] — the application boundary
+	// where the generic agent events get augmented with coding-specific
+	// per-turn budget accounting and forwarded to the frontend channel.
+	kitEvents chan event.Event
+
+	// forwardDone is closed by [Agent.forwardKitEvents] (via defer)
+	// when the forwarder goroutine returns. [Agent.Close] blocks on
+	// it after closing [Agent.kitEvents] so the wrapper provides the
+	// same "no further writes to the consumer channel" guarantee
+	// kit.Agent.Close provides for [Config.Events] — without this
+	// wait, a consumer that closes the frontend events channel right
+	// after Close returns can race a forwarder still draining the
+	// last buffered AgentDone.
+	forwardDone chan struct{}
+
+	// closeOnce guards [Agent.Close] so concurrent or repeated Close
+	// calls do not double-close the kit agent or its event channel.
+	closeOnce sync.Once
+
+	// startMu serializes the entire run-startup sequence
+	// (cancel-previous + kit.WaitForIdle + fenceForwarder + per-run
+	// state reset + armRunDone + kit.PromptWithMessages). Held by
+	// RunWithMode and by Reply's resume path; runtime signals
+	// (Cancel, Approve, Reject, IsRunning, IsWaiting) acquire only
+	// [Agent.mu] so they cannot deadlock against an in-flight
+	// startup. Without this lock, two concurrent starters that both
+	// passed fenceForwarder could interleave their [Agent.mu]-serialized
+	// resets and arm calls, leaving the foundation run that wins
+	// kit.PromptWithMessages executing against the loser's wrapper
+	// state ([Agent.coord], [Agent.cancel], [Agent.intent], [Agent.mode]),
+	// which would route Approve/Reject signals to the wrong run.
+	startMu sync.Mutex
+
+	// runDoneMu guards [Agent.runDone]. Forwarder writes (closes the
+	// channel + nil-clears the field on AgentDone). Run-start methods
+	// read it (block on <- before resetting per-run state) and
+	// allocate a fresh channel for the new run.
+	runDoneMu sync.Mutex
+	// runDone is closed by [Agent.forwardKitEvents] when the active
+	// run's [event.AgentDone] has been fully processed. Run-start
+	// methods (RunWithMode, Reply's resume path) [Agent.fenceForwarder]
+	// on the previously-installed channel before resetting per-run
+	// state ([Agent.sessionUsage], [Agent.turnCounter],
+	// [Agent.runUnsuccessful], [Agent.budgetExceeded], [Agent.running])
+	// and starting the next run — without the fence, a forwarder still
+	// processing the prior run's buffered events would mutate the new
+	// run's state and (worst case) charge the prior run's tokens
+	// against the new run's budget.
+	runDone chan struct{}
 }
 
 // taskEdit records a single edit made during an agent task, for end-of-task
@@ -437,65 +484,108 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 
 	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
 
-	a.buildFoundation()
+	a.buildKitAgent()
 
 	return a
 }
 
-// buildFoundation constructs [Agent.foundation], the [upagent.Agent]
-// that drives the run loop. Wires the [providerProxy] (so SetProvider
-// survives the foundation's frozen provider field), a dedicated events
-// channel drained by a translator goroutine, and the
-// [Agent.FoundationHooks] bridge that delegates gating and nudges into
-// the foundation's hook surface.
+// buildKitAgent constructs [Agent.kit], the [kit.Agent] that drives the
+// run loop. Wires the [providerProxy] (so SetProvider survives the
+// foundation's frozen provider field), an intercept events channel
+// drained by [Agent.forwardKitEvents], and the hooks composed by
+// [Agent.FoundationHooks].
 //
-// The Tool slice is iterated in [Agent.toolDefs] order so the
-// foundation's internal toolDefs (built by [upagent.New]) match the
-// advertised order — keeping LLM tool-list ordering stable so model
-// behavior is reproducible across runs.
+// The Tool slice is iterated in [Agent.toolDefs] order so the kit/
+// foundation's internal toolDefs match the advertised order — keeping
+// LLM tool-list ordering stable so model behavior is reproducible
+// across runs.
 //
-// Validation failures from [upagent.New] panic: the inputs are
-// statically known at this composition root (proxy never nil, events
-// channel allocated, tool definitions vetted by [registerTools] which
-// already drops duplicates), so a non-nil error indicates a programming
-// error caught at startup rather than a runtime condition. Returning
-// an error would force every existing [agent.New] caller and test
-// helper to add error handling for a path that is unreachable in
-// practice.
-func (a *Agent) buildFoundation() {
-	a.providerProxy = newProviderProxy(a.provider)
+// Validation failures from [kit.New] panic: inputs are statically known
+// at this composition root (proxy never nil, events channel allocated,
+// tool definitions vetted by [registerTools] which drops duplicates),
+// so a non-nil error indicates a programming error caught at startup
+// rather than a runtime condition.
+func (a *Agent) buildKitAgent() {
+	// Fail fast on nil provider. kit.New only sees the providerProxy
+	// (always non-nil) so its own provider-validation cannot catch a
+	// nil [Agent.provider] — without this guard the nil interface
+	// would propagate through the proxy and panic on the first
+	// Stream call instead of at construction.
+	if a.provider == nil {
+		panic("agent.New: provider is required")
+	}
+	a.providerProxy = newProviderProxy(a.provider, a.send, a.onTurnSettled)
 
-	foundationTools := make([]upagent.Tool, 0, len(a.toolDefs))
+	kitTools := make([]kit.Tool, 0, len(a.toolDefs))
 	for _, def := range a.toolDefs {
 		t, ok := a.tools[strings.ToLower(def.Function.Name)]
 		if !ok {
 			panic(fmt.Sprintf("agent.New: tool %q advertised in toolDefs but missing from tools map", def.Function.Name))
 		}
-		foundationTools = append(foundationTools, t)
+		kitTools = append(kitTools, t)
 	}
 
-	a.foundationEvents = make(chan upevent.Event, 64)
+	a.kitEvents = make(chan event.Event, 64)
+	a.forwardDone = make(chan struct{})
 
 	hooks := a.FoundationHooks(func() []llm.Message {
-		f := a.foundation
-		if f == nil {
+		k := a.kit
+		if k == nil {
 			return nil
 		}
-		return f.State().Messages
+		return k.State().Messages
 	})
 
-	foundation, err := upagent.New(upagent.Options{
+	kitAgent, err := kit.New(kit.Config{
 		Provider: a.providerProxy,
-		Events:   a.foundationEvents,
-		Tools:    foundationTools,
+		Events:   a.kitEvents,
+		Tools:    kitTools,
 		Hooks:    hooks,
 	})
 	if err != nil {
-		panic(fmt.Sprintf("agent.New: foundation construction failed: %v", err))
+		panic(fmt.Sprintf("agent.New: kit construction failed: %v", err))
 	}
-	a.foundation = foundation
+	a.kit = kitAgent
 
-	go a.translateFoundationEvents()
+	go a.forwardKitEvents()
+}
+
+// Close gracefully shuts down the agent. Aborts any in-flight run,
+// waits for the kit/foundation AND the kit translator to unwind,
+// closes the intercept events channel so [Agent.forwardKitEvents]
+// drains and exits, then waits for the forwarder. Idempotent.
+//
+// Ordering matters and is the contract callers rely on:
+//
+//  1. kit.Close blocks until the kit translator has fully exited
+//     (no more writes to [Agent.kitEvents]) — otherwise step 3 would
+//     race a still-running translator and panic on send-on-closed.
+//  2. close(kitEvents) signals the forwarder to drain its remaining
+//     events and return.
+//  3. <-forwardDone blocks until forwarder exits, providing the
+//     symmetric "no further writes to the frontend events channel"
+//     guarantee. A consumer that closes the frontend channel
+//     immediately after Close returns is safe.
+//
+// After Close, calls into [Agent.RunWithMode], [Agent.Run], and
+// [Agent.Reply] will fail to start a new run (kit returns ErrClosed).
+// The frontend events channel passed to [New] is NOT closed — that
+// belongs to the caller.
+//
+// Close hangs if the consumer of the frontend events channel has
+// stopped draining — same hard contract as steady-state operation.
+func (a *Agent) Close() {
+	a.closeOnce.Do(func() {
+		if a.kit != nil {
+			a.kit.Close()
+		}
+		if a.kitEvents != nil {
+			close(a.kitEvents)
+		}
+		if a.forwardDone != nil {
+			<-a.forwardDone
+		}
+	})
 }
 
 // registerTools builds the tool registry. Built-in tools are registered first
@@ -609,18 +699,21 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 // hasLintPending, currentTerse / Autonomous / CodingStyle / Provider /
 // Mode, Usage, emitOpening, send, sendCritical) lives in lifecycle.go.
 
-// Per-run budget integration (recordTurnUsage, checkTaskBudget) lives
-// in budget.go. The pure budget math + types live in [kit/budget].
+// Per-run budget integration (checkTaskBudget) lives in budget.go.
+// Per-turn accumulation lives in [Agent.augmentAndAccumulate]
+// (forwarder.go). The pure budget math + types live in [kit/budget].
 
-// Foundation event translation (translateFoundationEvents,
-// commitRunEnd) lives in translator.go. The translator drains the
-// foundation's [upevent.Event] stream and re-emits as
-// [engine/event.Event] for frontends.
+// Kit event forwarding (forwardKitEvents) lives in forwarder.go. The
+// forwarder drains the [kit.Agent]'s event stream, augments
+// AgentTurnUsage with client-side estimates + sessionUsage
+// accounting, overrides AgentDone's Success flag from
+// [Agent.runUnsuccessful], and forwards every event to the frontend
+// channel.
 
 // Foundation hook bridge (FoundationHooks + every gate it composes)
-// lives in foundation_hooks.go. The foundation [upagent.Agent]
-// captures these once at construction; closure-scoped per-turn state
-// stays out of the [Agent] struct.
+// lives in foundation_hooks.go. The kit/foundation captures these
+// once at construction; closure-scoped per-turn state stays out of
+// the [Agent] struct.
 
 // Wrapper-side I/O helpers (planningToolDefs, flushDirtyBuffers) live
 // in io.go — wrapper-private utilities the foundation hooks call

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -210,6 +211,35 @@ func matchRequireLine(line, pkg string) (mod, version string) {
 // maxGoDocOutput caps the output from go doc to prevent unbounded memory use.
 // Matches maxBashOutput for consistency across subprocess-executing tools.
 const maxGoDocOutput = 8 * 1024
+
+// limitedWriter caps writes at a byte limit, discarding excess.
+// Used by tools that need simple end-truncation.
+type limitedWriter struct {
+	w         io.Writer
+	remaining int
+	truncated bool
+}
+
+// Write implements io.Writer. Reports full write length to the caller so
+// the subprocess never stalls on a blocked pipe.
+func (lw *limitedWriter) Write(p []byte) (int, error) {
+	if lw.remaining <= 0 {
+		lw.truncated = true
+		return len(p), nil
+	}
+	if len(p) > lw.remaining {
+		lw.truncated = true
+		n, err := lw.w.Write(p[:lw.remaining])
+		lw.remaining = 0
+		if err != nil {
+			return n, err
+		}
+		return len(p), nil
+	}
+	n, err := lw.w.Write(p)
+	lw.remaining -= n
+	return n, err
+}
 
 // runGoDoc executes "go doc" and returns the output.
 // Uses limitedWriter to cap output during execution, consistent with BashTool.

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/engine/mcp"
-	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
 // stubCaller records calls and returns canned results keyed by tool name.

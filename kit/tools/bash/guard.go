@@ -1,4 +1,4 @@
-package tools
+package bash
 
 import (
 	"fmt"
@@ -187,7 +187,6 @@ var envAssignmentRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)=(\S+)`)
 // UTF-8 sequence (e.g. a CJK glyph in a path, an em-dash in an
 // argument), the cut backs up to the last rune boundary <=
 // redactPreviewBytes so the returned string is always valid UTF-8.
-// Mirrors the truncation pattern at engine/agent/prompt.go:51 and :63.
 //
 // Order: TrimSpace → mask → truncate. Masking must happen before
 // truncation so the cap can't slice through the middle of a secret
@@ -207,7 +206,7 @@ func redactCommandPreview(command string) string {
 
 // guardCommand runs every active bash guard against a command and returns
 // the first non-empty error message, or "" when the command passes them
-// all. This is the single entry point [BashTool.Execute] calls before
+// all. This is the single entry point [Tool.Execute] calls before
 // invoking the shell — adding a new guard means appending one line here
 // rather than threading another check through the call site.
 //

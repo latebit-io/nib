@@ -1,20 +1,31 @@
-package tools
+// Package bash provides a kit-generic shell-execution tool. The tool
+// runs commands inside a project root with a head+tail output cap,
+// timeout enforcement, and a guard layer (see [guard.go]) that blocks
+// destructive or write-bypassing patterns at the shell layer rather
+// than relying solely on system-prompt prose.
+//
+// The tool depends only on [github.com/latebit-io/nib/agent] for the
+// generic Tool/ToolResult types and [github.com/latebit-io/nib/ai/llm]
+// for the tool definition shape — no kit, no coding, no engine
+// imports. Any kit-based agent can register it.
+package bash
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os/exec"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
 )
 
-// defaultBashTimeout is the maximum duration a bash command can run.
+// defaultBashTimeout is the maximum duration a bash command can run
+// when the caller does not supply a timeout argument.
 const defaultBashTimeout = 30 * time.Second
 
 // maxBashTimeout is the absolute maximum timeout the agent can request.
@@ -28,25 +39,26 @@ const maxBashHead = 4 * 1024
 // Captures the most recent output (error messages, test failures).
 const maxBashTail = 4 * 1024
 
-// BashTool lets the LLM execute shell commands in the project directory.
+// Tool lets the LLM execute shell commands in a project directory.
 //
-// Trust model: commands come from the LLM, which is instructed via the system
-// prompt not to run destructive operations. This is prompt-level guidance, not
-// enforcement. The developer can cancel the agent at any time (Esc), and the
-// timeout prevents runaway processes. Per-command approval and sandboxing are
-// planned follow-ups — for now, the developer controls scope via intent and
-// context set, same as with edit_file.
-type BashTool struct {
+// Trust model: commands come from the LLM, which is instructed via
+// the system prompt not to run destructive operations. This is
+// prompt-level guidance, not enforcement; the guards in [guard.go]
+// supplement the prompt with deterministic blocks for the highest-
+// risk shapes (in-place edits, recursive deletes, search-tool
+// invocations, history-rewriting git ops). The developer can cancel
+// the agent at any time, and the timeout prevents runaway processes.
+type Tool struct {
 	projectRoot string
 }
 
-// NewBashTool creates a BashTool rooted at the given project directory.
-func NewBashTool(projectRoot string) *BashTool {
-	return &BashTool{projectRoot: projectRoot}
+// New creates a [Tool] rooted at the given project directory.
+func New(projectRoot string) *Tool {
+	return &Tool{projectRoot: projectRoot}
 }
 
 // Definition returns the OpenAI-compatible tool schema for bash.
-func (t *BashTool) Definition() llm.ToolDef {
+func (t *Tool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
@@ -79,7 +91,7 @@ type bashArgs struct {
 }
 
 // Execute runs a shell command and returns the combined output and exit code.
-func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	var args bashArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
@@ -172,6 +184,13 @@ func (t *BashTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 		return textResult("(no output)")
 	}
 	return textResult(output)
+}
+
+// textResult builds a successful tool result whose body is the given
+// string. Local helper so the package depends only on agent.ToolResult,
+// not on coding-side conveniences.
+func textResult(content string) agent.ToolResult {
+	return agent.ToolResult{Content: content}
 }
 
 // headTailWriter captures the first headSize bytes and the last tailSize bytes
@@ -273,33 +292,4 @@ func (w *headTailWriter) String() string {
 	}
 	return fmt.Sprintf("%s\n\n[... %d bytes collapsed — showing first %d and last %d bytes ...]\n\n%s",
 		headStr, dropped, len(w.head), len(tailStr), tailStr)
-}
-
-// limitedWriter caps writes at a byte limit, discarding excess.
-// Used by tools that need simple end-truncation (e.g. PackageInfoTool).
-type limitedWriter struct {
-	w         io.Writer
-	remaining int
-	truncated bool
-}
-
-// Write implements io.Writer. Reports full write length to the caller so
-// the subprocess never stalls on a blocked pipe.
-func (lw *limitedWriter) Write(p []byte) (int, error) {
-	if lw.remaining <= 0 {
-		lw.truncated = true
-		return len(p), nil
-	}
-	if len(p) > lw.remaining {
-		lw.truncated = true
-		n, err := lw.w.Write(p[:lw.remaining])
-		lw.remaining = 0
-		if err != nil {
-			return n, err
-		}
-		return len(p), nil
-	}
-	n, err := lw.w.Write(p)
-	lw.remaining -= n
-	return n, err
 }

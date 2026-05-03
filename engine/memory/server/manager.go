@@ -19,7 +19,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/engine/mcp"
-	"github.com/latebit-io/nib/engine/memory"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
 // StoreFactory wraps a connected demarkus-mcp client into a memory.Store.

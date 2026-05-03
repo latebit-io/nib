@@ -23,12 +23,14 @@ import (
 	"github.com/latebit-io/nib/coding/tools"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/lint"
-	"github.com/latebit-io/nib/engine/memory"
 	"github.com/latebit-io/nib/engine/runconfig"
 	"github.com/latebit-io/nib/engine/validate"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/budget"
+	"github.com/latebit-io/nib/kit/memory"
+	"github.com/latebit-io/nib/kit/tools/bash"
+	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 )
 
 // InteractionMode controls prompt framing — how the agent describes its
@@ -605,7 +607,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		tools.NewWriteFileTool(workspace, cache, a),
 		tools.NewReplaceFileTool(workspace, cache, a),
 		tools.NewListFilesTool(workspace),
-		tools.NewBashTool(projectRoot),
+		bash.New(projectRoot),
 	}
 
 	if diagProvider != nil {
@@ -642,12 +644,14 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	}
 
 	// Memory tools — conditionally registered when demarkus is configured.
+	// The publish/append validators enforce coding's /project.md schema
+	// (see [memory_validators.go]); kit-side tools stay generic.
 	if memStore != nil {
 		builtins = append(builtins,
-			tools.NewMemoryFetchTool(memStore),
-			tools.NewMemoryPublishTool(memStore),
-			tools.NewMemoryAppendTool(memStore),
-			tools.NewMemoryListTool(memStore),
+			memorytools.NewFetchTool(memStore),
+			memorytools.NewPublishTool(memStore, memorytools.WithValidator(publishProjectMDValidator)),
+			memorytools.NewAppendTool(memStore, memorytools.WithValidator(appendProjectMDValidator)),
+			memorytools.NewListTool(memStore),
 		)
 	}
 

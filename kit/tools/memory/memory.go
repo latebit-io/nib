@@ -1,4 +1,12 @@
-package tools
+// Package memory provides kit-generic LLM tools for structured,
+// versioned memory access. The four tools (Fetch, Publish, Append,
+// List) operate against any [memory.Store] adapter; coding-specific
+// schema enforcement (e.g. /project.md task tree) is layered on top
+// via the [Validator] hook on Publish and Append rather than being
+// hardcoded into the tool itself, so non-coding kit consumers
+// (research agents, ops agents) can reuse the tools without paying
+// for coding's path conventions.
+package memory
 
 import (
 	"context"
@@ -6,19 +14,47 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/engine/memory"
-	"github.com/latebit-io/nib/engine/project"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
-// ProjectWorkTreePath is the canonical demarkus path of the strict
-// project.md document. Writes to this path are validated against the
-// schema in [project.Validate] before reaching the store.
-const ProjectWorkTreePath = "/project.md"
+// Validator is called with (path, body) before a write operation
+// reaches the [memory.Store]. Returning a non-nil error blocks the
+// write and surfaces err.Error() to the LLM as the tool result body;
+// returning nil allows the operation. Used by [PublishTool] and
+// [AppendTool] to enforce path-specific schemas or block forbidden
+// operations on canonical paths (a coding agent's /project.md is the
+// canonical example).
+//
+// The validator runs on the agent's run goroutine, synchronously
+// before the store is called; it must not block on external I/O.
+type Validator func(path, body string) error
+
+// Option configures a memory write tool ([PublishTool] or
+// [AppendTool]) at construction time. Use [WithValidator] to install
+// a write-blocking hook.
+type Option func(*options)
+
+type options struct {
+	validator Validator
+}
+
+// WithValidator installs a [Validator] that runs before each write.
+// Passing nil clears any previously-set validator.
+func WithValidator(v Validator) Option { return func(o *options) { o.validator = v } }
+
+func applyOptions(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
 
 // validateMemoryPath trims whitespace and requires a leading slash.
 // Returns the cleaned path or an error result.
-func validateMemoryPath(raw string) (string, *ToolResult) {
+func validateMemoryPath(raw string) (string, *agent.ToolResult) {
 	p := strings.TrimSpace(raw)
 	if p == "" {
 		r := textResult("Error: path is required")
@@ -31,16 +67,22 @@ func validateMemoryPath(raw string) (string, *ToolResult) {
 	return p, nil
 }
 
+// textResult builds a successful tool result whose body is the given
+// string. Local helper so the package depends only on agent.ToolResult.
+func textResult(content string) agent.ToolResult {
+	return agent.ToolResult{Content: content}
+}
+
 // --- memory_fetch ---
 
-// MemoryFetchTool retrieves a memory document by path.
-type MemoryFetchTool struct {
+// FetchTool retrieves a memory document by path.
+type FetchTool struct {
 	store memory.Store
 }
 
-// NewMemoryFetchTool creates a MemoryFetchTool backed by the given store.
-func NewMemoryFetchTool(store memory.Store) *MemoryFetchTool {
-	return &MemoryFetchTool{store: store}
+// NewFetchTool creates a FetchTool backed by the given store.
+func NewFetchTool(store memory.Store) *FetchTool {
+	return &FetchTool{store: store}
 }
 
 type memoryFetchArgs struct {
@@ -49,7 +91,7 @@ type memoryFetchArgs struct {
 }
 
 // Definition returns the tool schema for the LLM.
-func (t *MemoryFetchTool) Definition() llm.ToolDef {
+func (t *FetchTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
@@ -81,7 +123,7 @@ func (t *MemoryFetchTool) Definition() llm.ToolDef {
 }
 
 // Execute fetches a memory document and returns its content.
-func (t *MemoryFetchTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+func (t *FetchTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	if ctx.Err() != nil {
 		return textResult("Error: agent canceled")
 	}
@@ -189,14 +231,20 @@ func headingLevel(line string) int {
 
 // --- memory_publish ---
 
-// MemoryPublishTool creates or updates a memory document.
-type MemoryPublishTool struct {
-	store memory.Store
+// PublishTool creates or updates a memory document. An optional
+// [Validator] (set via [WithValidator]) runs synchronously before the
+// store is called; non-nil errors block the write.
+type PublishTool struct {
+	store     memory.Store
+	validator Validator
 }
 
-// NewMemoryPublishTool creates a MemoryPublishTool backed by the given store.
-func NewMemoryPublishTool(store memory.Store) *MemoryPublishTool {
-	return &MemoryPublishTool{store: store}
+// NewPublishTool creates a PublishTool backed by the given store.
+// Pass [WithValidator] to install a path-specific schema check or
+// write block.
+func NewPublishTool(store memory.Store, opts ...Option) *PublishTool {
+	o := applyOptions(opts)
+	return &PublishTool{store: store, validator: o.validator}
 }
 
 // memoryWriteArgs holds the JSON-decoded arguments shared by memory_publish
@@ -208,7 +256,7 @@ type memoryWriteArgs struct {
 }
 
 // Definition returns the tool schema for the LLM.
-func (t *MemoryPublishTool) Definition() llm.ToolDef {
+func (t *PublishTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
@@ -239,7 +287,7 @@ func (t *MemoryPublishTool) Definition() llm.ToolDef {
 }
 
 // Execute publishes a memory document and returns the result.
-func (t *MemoryPublishTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+func (t *PublishTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	if ctx.Err() != nil {
 		return textResult("Error: agent canceled")
 	}
@@ -258,13 +306,9 @@ func (t *MemoryPublishTool) Execute(ctx context.Context, call llm.ToolCall) Tool
 		return textResult("Error: expected_version must be >= 0 (0 = create, >0 = update)")
 	}
 
-	if path == ProjectWorkTreePath {
-		if errs := project.Validate(project.Parse(args.Body)); errs != nil {
-			return textResult(fmt.Sprintf(
-				"Error: %s rejected — schema violations below. Fix all and retry.\n%s",
-				ProjectWorkTreePath,
-				errs.Error(),
-			))
+	if t.validator != nil {
+		if err := t.validator(path, args.Body); err != nil {
+			return textResult(err.Error())
 		}
 	}
 
@@ -277,18 +321,24 @@ func (t *MemoryPublishTool) Execute(ctx context.Context, call llm.ToolCall) Tool
 
 // --- memory_append ---
 
-// MemoryAppendTool appends content to an existing memory document.
-type MemoryAppendTool struct {
-	store memory.Store
+// AppendTool appends content to an existing memory document. An
+// optional [Validator] (set via [WithValidator]) runs synchronously
+// before the store is called; non-nil errors block the append.
+type AppendTool struct {
+	store     memory.Store
+	validator Validator
 }
 
-// NewMemoryAppendTool creates a MemoryAppendTool backed by the given store.
-func NewMemoryAppendTool(store memory.Store) *MemoryAppendTool {
-	return &MemoryAppendTool{store: store}
+// NewAppendTool creates an AppendTool backed by the given store.
+// Pass [WithValidator] to install a path-specific schema check or
+// write block.
+func NewAppendTool(store memory.Store, opts ...Option) *AppendTool {
+	o := applyOptions(opts)
+	return &AppendTool{store: store, validator: o.validator}
 }
 
 // Definition returns the tool schema for the LLM.
-func (t *MemoryAppendTool) Definition() llm.ToolDef {
+func (t *AppendTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
@@ -318,7 +368,7 @@ func (t *MemoryAppendTool) Definition() llm.ToolDef {
 }
 
 // Execute appends content to a memory document and returns the result.
-func (t *MemoryAppendTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+func (t *AppendTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	if ctx.Err() != nil {
 		return textResult("Error: agent canceled")
 	}
@@ -337,12 +387,10 @@ func (t *MemoryAppendTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 		return textResult("Error: expected_version must be >= 1 (document must exist)")
 	}
 
-	if path == ProjectWorkTreePath {
-		return textResult(fmt.Sprintf(
-			"Error: raw append to %s is not allowed — it would break the strict schema. "+
-				"Use project_task_add (for new tasks) or update_task (to activate/complete) instead.",
-			ProjectWorkTreePath,
-		))
+	if t.validator != nil {
+		if err := t.validator(path, args.Body); err != nil {
+			return textResult(err.Error())
+		}
 	}
 
 	doc, err := t.store.Append(ctx, path, args.Body, args.ExpectedVersion)
@@ -354,14 +402,14 @@ func (t *MemoryAppendTool) Execute(ctx context.Context, call llm.ToolCall) ToolR
 
 // --- memory_list ---
 
-// MemoryListTool lists memory documents under a directory path.
-type MemoryListTool struct {
+// ListTool lists memory documents under a directory path.
+type ListTool struct {
 	store memory.Store
 }
 
-// NewMemoryListTool creates a MemoryListTool backed by the given store.
-func NewMemoryListTool(store memory.Store) *MemoryListTool {
-	return &MemoryListTool{store: store}
+// NewListTool creates a ListTool backed by the given store.
+func NewListTool(store memory.Store) *ListTool {
+	return &ListTool{store: store}
 }
 
 type memoryListArgs struct {
@@ -369,7 +417,7 @@ type memoryListArgs struct {
 }
 
 // Definition returns the tool schema for the LLM.
-func (t *MemoryListTool) Definition() llm.ToolDef {
+func (t *ListTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
@@ -391,7 +439,7 @@ func (t *MemoryListTool) Definition() llm.ToolDef {
 }
 
 // Execute lists memory documents and returns their paths.
-func (t *MemoryListTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+func (t *ListTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	if ctx.Err() != nil {
 		return textResult("Error: agent canceled")
 	}

@@ -1,5 +1,9 @@
-// Package memory defines the port interface for structured, versioned memory.
-// Implementations execute operations against a Mark Protocol server.
+// Package memory defines the port interface for structured, versioned
+// memory used by kit-based agents. Implementations execute operations
+// against a Mark Protocol server (or any compatible backing store);
+// kit consumers depend on the port, not on a specific adapter, so a
+// research agent and a coding agent can share the contract while
+// pointing at different stores.
 package memory
 
 import (
@@ -34,8 +38,9 @@ type Document struct {
 
 // Store is the port interface for structured memory.
 // Implementations execute operations against a Mark Protocol server.
-// All methods accept a context for cancellation propagation — implementations
-// must respect ctx.Done() so agent cancellation can abort in-flight operations.
+// All methods accept a context for cancellation propagation —
+// implementations must respect ctx.Done() so agent cancellation can
+// abort in-flight operations.
 type Store interface {
 	// Fetch retrieves a document by path.
 	Fetch(ctx context.Context, path string) (Document, error)

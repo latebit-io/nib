@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/latebit-io/nib/engine/memory"
 	"github.com/latebit-io/nib/engine/project"
+	"github.com/latebit-io/nib/kit/memory"
 )
 
 // mockMemoryStore implements the memoryStore interface for testing.

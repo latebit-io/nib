@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -443,5 +442,4 @@ drain:
 		t.Errorf("after fenced run 2, TotalCompletionTokens = %d; run 1 (200) leaked through the fence",
 			usage.TotalCompletionTokens)
 	}
-	_ = strings.TrimSpace(captureErr)
 }

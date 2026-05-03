@@ -42,6 +42,10 @@ import (
 // [event.AgentDone]. Without the drain, a consumer that called Close
 // while a run was unwinding would miss the final lifecycle event.
 func (a *Agent) translateEvents() {
+	// Signal Close that the translator has fully exited and will not
+	// touch consumerEvents again, so a caller that closes its consumer
+	// channel after Close returns cannot race a still-running drain.
+	defer close(a.translatorDone)
 	for {
 		select {
 		case ev := <-a.foundationEvents:

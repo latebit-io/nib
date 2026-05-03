@@ -680,28 +680,26 @@ func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 
-	// Take a goroutine snapshot before Close, then assert the count
-	// drops after Close. Without the assertion we'd be testing that
-	// Close returns without panicking, which doesn't catch the leak.
+	// Drain pending events on a background goroutine so Close's
+	// translator-drain phase has somewhere to send. The drainer
+	// returns once an AgentDone arrives — same as steady-state.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		drainUntil(events, untilDone)
+	}()
+
 	before := runtime.NumGoroutine()
 	a.Close()
+	<-drained
 
-	// Drain anything Close caused the translator to flush so the
-	// consumer-side goroutine reading `events` doesn't hold a
-	// reference itself.
-	drainUntil(events, untilDone)
-
-	// Allow scheduler ticks for the translator goroutine to actually
-	// exit. Poll rather than sleep — a fixed sleep is either too
-	// short on a slow CI runner or wastefully long on a fast one.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if runtime.NumGoroutine() < before {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Close now waits synchronously on translatorDone. The
+	// translator goroutine MUST be gone by the time Close returns —
+	// no polling, no scheduler ticks. A still-running translator
+	// indicates Close's translatorDone wait was dropped.
+	if got := runtime.NumGoroutine(); got >= before {
+		t.Fatalf("translator goroutine still alive after Close: before=%d after=%d", before, got)
 	}
-	t.Fatalf("goroutine count did not drop after Close: before=%d now=%d", before, runtime.NumGoroutine())
 }
 
 func TestClose_Idempotent(t *testing.T) {

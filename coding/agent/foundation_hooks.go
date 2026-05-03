@@ -425,11 +425,14 @@ func (a *Agent) foundationBudgetCheck() error {
 		a.mu.Unlock()
 		return errBudgetExceeded
 	}
-	msg, exceeded := budget.Exceeded(a.sessionUsage, a.taskTokenBudget)
+	a.mu.Unlock()
+
+	msg, exceeded := budget.Exceeded(a.sessionSnapshot(), a.taskTokenBudget)
 	if !exceeded {
-		a.mu.Unlock()
 		return nil
 	}
+
+	a.mu.Lock()
 	a.budgetExceeded = true
 	a.mu.Unlock()
 

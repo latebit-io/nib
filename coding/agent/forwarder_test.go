@@ -112,13 +112,12 @@ func TestAugmentAndAccumulate_PopsEstimateQueueInFIFOOrder(t *testing.T) {
 		t.Errorf("estimateQueue length after three pops = %d, want 0", len(a.estimateQueue))
 	}
 
-	// sessionUsage must reflect the sum, with Turns matching the count.
-	want := 1100 + 1600 + 2100
-	if a.sessionUsage.TotalPromptTokens != want {
-		t.Errorf("TotalPromptTokens = %d, want %d", a.sessionUsage.TotalPromptTokens, want)
-	}
-	if a.sessionUsage.Turns != 3 {
-		t.Errorf("Turns = %d, want 3", a.sessionUsage.Turns)
+	// turnCounter advances 1:1 with augmentAndAccumulate calls.
+	// sessionUsage accumulation is providerProxy's job (synchronous on
+	// each Stream's Done event), not augmentAndAccumulate's — covered
+	// in TestProviderProxy_Stream_AccumulatesUsageOnDone.
+	if a.turnCounter != 3 {
+		t.Errorf("turnCounter = %d, want 3", a.turnCounter)
 	}
 }
 
@@ -143,9 +142,6 @@ func TestAugmentAndAccumulate_EmptyQueueZeroEstimate(t *testing.T) {
 	}
 	if got.Turn != 1 {
 		t.Errorf("Turn = %d, want 1", got.Turn)
-	}
-	if a.sessionUsage.TotalPromptTokens != 100 {
-		t.Errorf("TotalPromptTokens = %d, want 100", a.sessionUsage.TotalPromptTokens)
 	}
 }
 

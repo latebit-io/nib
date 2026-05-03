@@ -10,7 +10,6 @@ import (
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/nudges"
-	"github.com/latebit-io/nib/kit/budget"
 )
 
 // Foundation hook tests cover each gate in isolation, then exercise
@@ -787,22 +786,32 @@ func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
 
 // --- foundationBudgetCheck ---
 
+// agentWithUsage constructs a bare-minimum Agent with a providerProxy
+// seeded to a session-usage snapshot — replaces the earlier pattern
+// of inlining a sessionUsage field literal now that the canonical
+// usage source lives on providerProxy.
+func agentWithUsage(taskTokenBudget int, latched bool, prompt, completion int) *Agent {
+	a := &Agent{
+		taskTokenBudget: taskTokenBudget,
+		budgetExceeded:  latched,
+		providerProxy:   newProviderProxy(noopProvider{}),
+	}
+	if prompt > 0 || completion > 0 {
+		a.providerProxy.recordUsage(&llm.Usage{PromptTokens: prompt, CompletionTokens: completion})
+	}
+	return a
+}
+
 func TestFoundationBudgetCheck_NoBudgetIsNoop(t *testing.T) {
 	// taskTokenBudget == 0 means "disabled" per budget.Exceeded.
-	a := &Agent{
-		taskTokenBudget: 0,
-		sessionUsage:    budget.Session{TotalPromptTokens: 999_999_999},
-	}
+	a := agentWithUsage(0, false, 999_999_999, 0)
 	if err := a.foundationBudgetCheck(); err != nil {
 		t.Errorf("disabled budget must not abort, got: %v", err)
 	}
 }
 
 func TestFoundationBudgetCheck_UnderThresholdPasses(t *testing.T) {
-	a := &Agent{
-		taskTokenBudget: 1_000,
-		sessionUsage:    budget.Session{TotalPromptTokens: 100, TotalCompletionTokens: 200},
-	}
+	a := agentWithUsage(1_000, false, 100, 200)
 	if err := a.foundationBudgetCheck(); err != nil {
 		t.Errorf("under-threshold must not abort, got: %v", err)
 	}
@@ -815,10 +824,7 @@ func TestFoundationBudgetCheck_OverThresholdAbortsAndLatches(t *testing.T) {
 	// hook's contract is now "return a wrapped errBudgetExceeded with
 	// the formatted budget message; latch budgetExceeded so subsequent
 	// calls return without re-warning."
-	a := &Agent{
-		taskTokenBudget: 1_000,
-		sessionUsage:    budget.Session{TotalPromptTokens: 600, TotalCompletionTokens: 600, Turns: 3},
-	}
+	a := agentWithUsage(1_000, false, 600, 600)
 
 	err := a.foundationBudgetCheck()
 	if !errors.Is(err, errBudgetExceeded) {
@@ -837,11 +843,7 @@ func TestFoundationBudgetCheck_LatchedDoesNotReEmit(t *testing.T) {
 	// without re-running the math. Its err.Error() carries only the
 	// sentinel text (no formatted budget message) because the latch
 	// short-circuits before the wrap.
-	a := &Agent{
-		taskTokenBudget: 1_000,
-		budgetExceeded:  true,
-		sessionUsage:    budget.Session{TotalPromptTokens: 999_999_999},
-	}
+	a := agentWithUsage(1_000, true, 999_999_999, 0)
 
 	err := a.foundationBudgetCheck()
 	if !errors.Is(err, errBudgetExceeded) {
@@ -856,11 +858,8 @@ func TestFoundationBudgetCheck_LatchedDoesNotReEmit(t *testing.T) {
 
 func TestFoundationHooks_TransformContext_BudgetAbort(t *testing.T) {
 	events := make(chan event.Event, 4)
-	a := &Agent{
-		events:          events,
-		taskTokenBudget: 100,
-		sessionUsage:    budget.Session{TotalPromptTokens: 80, TotalCompletionTokens: 80},
-	}
+	a := agentWithUsage(100, false, 80, 80)
+	a.events = events
 	hooks := a.FoundationHooks(nil)
 
 	out, err := hooks.TransformContext(context.Background(), nil)

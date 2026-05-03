@@ -150,7 +150,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.pendingLint = ""
 	a.taskEdits = nil
 	clear(a.validatorRetries)
-	a.sessionUsage = budget.Session{}
+	a.providerProxy.ResetSession()
 	a.turnCounter = 0
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
@@ -293,7 +293,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.pendingLint = ""
 	a.taskEdits = nil
 	clear(a.validatorRetries)
-	a.sessionUsage = budget.Session{}
+	a.providerProxy.ResetSession()
 	a.turnCounter = 0
 	a.budgetExceeded = false
 	a.runUnsuccessful = false
@@ -438,10 +438,10 @@ func (a *Agent) SetEvaluator(eval style.StyleEvaluatorPort) {
 }
 
 // Usage returns the accumulated token consumption for the current session.
+// Source of truth is [providerProxy.Snapshot] — accumulated synchronously
+// inside the Stream wrapper goroutine on each Done event.
 func (a *Agent) Usage() budget.Session {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.sessionUsage
+	return a.sessionSnapshot()
 }
 
 // drainPendingLint atomically reads and clears pendingLint, returning a

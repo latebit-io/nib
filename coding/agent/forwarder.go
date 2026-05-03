@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"log/slog"
+
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 )
@@ -12,11 +14,13 @@ import (
 // frontend channel. Two events get coding-specific treatment:
 //
 //   - [event.AgentTurnUsage] is augmented with client-side estimates
-//     (the foundation does not populate them) and accumulated into
-//     [Agent.sessionUsage]. Post-turn budget overrun fires AgentError
-//     + Abort here so a single-turn overrun does not get hidden by
-//     the wrapper parking on AwaitInput before TransformContext can
-//     re-fire its pre-Stream check.
+//     and per-turn metadata (turn number, completion estimate). Per-
+//     Stream usage accumulation lives on [providerProxy] so the
+//     foundation's pre-Stream budget check sees fresh totals
+//     synchronously; the post-turn overrun fired here is a backstop
+//     for the single-turn overrun case where the agent would
+//     otherwise park on AwaitInput before the next TransformContext
+//     check could fire.
 //   - [event.AgentDone] is intercepted to flip [Agent.running] off
 //     and to override Success with [Agent.runUnsuccessful] — kit's
 //     per-run outcome only knows about Aborts and foundation Errors,
@@ -35,7 +39,13 @@ import (
 // forwardKitEvents drains [Agent.kitEvents] and forwards each event
 // (after coding-specific augmentation) to the frontend events channel
 // via [Agent.send].
+//
+// Closes [Agent.forwardDone] on return so [Agent.Close] can block on
+// it after closing kitEvents — providing callers a synchronous "no
+// further writes to the frontend channel" guarantee symmetric to
+// kit.Agent.Close's translatorDone wait.
 func (a *Agent) forwardKitEvents() {
+	defer close(a.forwardDone)
 	for ev := range a.kitEvents {
 		switch e := ev.(type) {
 		case event.AgentTurnUsage:
@@ -79,12 +89,13 @@ func (a *Agent) forwardKitEvents() {
 	}
 }
 
-// augmentAndAccumulate accumulates one [event.AgentTurnUsage] into
-// [Agent.sessionUsage] and returns a copy with the client-side
-// estimate fields populated. The foundation does not set the *Est
-// fields — applications that want them layer their own estimation in
-// a TransformContext hook (see [estimateAndBroadcast] in
-// foundation_hooks.go) and pair it back to the matching turn here.
+// augmentAndAccumulate returns a copy of e with per-turn metadata
+// (turn number, client-side estimate fields, completion estimate)
+// populated. Per-Stream session-usage accumulation lives on
+// [providerProxy] so the foundation's pre-Stream budget check sees
+// fresh totals synchronously; this function only handles the
+// per-turn correlation work that needs to flow through the kit
+// pipeline.
 //
 // Per-turn binding:
 //
@@ -105,16 +116,34 @@ func (a *Agent) augmentAndAccumulate(e event.AgentTurnUsage) event.AgentTurnUsag
 	a.mu.Lock()
 	a.turnCounter++
 	turn := a.turnCounter
-	a.sessionUsage.TotalPromptTokens += e.PromptTokens
-	a.sessionUsage.TotalCompletionTokens += e.CompletionTokens
-	a.sessionUsage.TotalCachedTokens += e.CachedTokens
-	a.sessionUsage.Turns = turn
 	var estimate llm.InputEstimate
-	if len(a.estimateQueue) > 0 {
+	queueDesync := len(a.estimateQueue) == 0
+	if !queueDesync {
 		estimate = a.estimateQueue[0]
 		a.estimateQueue = a.estimateQueue[1:]
 	}
 	a.mu.Unlock()
+
+	// Per-Stream session-usage accumulation lives on [providerProxy] —
+	// updated synchronously in the Stream wrapper goroutine when the
+	// inner provider emits Done. The forwarder's responsibility here
+	// is per-turn metadata (turn number, estimate binding, completion
+	// estimate) only; the budget gate reads providerProxy directly so
+	// it sees fresh data even when this goroutine is behind.
+
+	// Surface foundation-invariant breaks loudly. The pairing assumes
+	// the foundation emits one TurnUsage per TransformContext; if a
+	// future refactor decouples them, the queue desyncs and *Est
+	// fields silently fall back to zero — the cost panel would show
+	// confusing zeros without any signal that something is wrong.
+	// Logging here makes the desync visible during development and
+	// in production telemetry.
+	if queueDesync {
+		slog.Warn("agent: AgentTurnUsage with empty estimateQueue; *Est fields will be zero",
+			"turn", turn,
+			"prompt_tokens", e.PromptTokens,
+			"completion_tokens", e.CompletionTokens)
+	}
 
 	completionEst := 0
 	if a.kit != nil {

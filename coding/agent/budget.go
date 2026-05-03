@@ -19,10 +19,10 @@ import (
 // before reaching the frontend.
 
 // checkTaskBudget reports whether the per-task token budget has been
-// exceeded by the current sessionUsage. Returns the formatted error
-// message on overrun (and latches budgetExceeded so subsequent calls
-// do not double-emit) or "" otherwise. A zero budget disables the
-// check.
+// exceeded by the current session usage (read from [providerProxy.Snapshot]).
+// Returns the formatted error message on overrun (and latches
+// budgetExceeded so subsequent calls do not double-emit) or "" otherwise.
+// A zero budget disables the check.
 //
 // Sums prompt + completion tokens. Cached tokens are already a subset
 // of prompt and would double-count if added separately. Called from
@@ -32,14 +32,31 @@ import (
 // tokens.
 func (a *Agent) checkTaskBudget() string {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.budgetExceeded {
+		a.mu.Unlock()
 		return ""
 	}
-	msg, exceeded := budget.Exceeded(a.sessionUsage, a.taskTokenBudget)
+	a.mu.Unlock()
+
+	msg, exceeded := budget.Exceeded(a.sessionSnapshot(), a.taskTokenBudget)
 	if !exceeded {
 		return ""
 	}
+
+	a.mu.Lock()
 	a.budgetExceeded = true
+	a.mu.Unlock()
 	return msg
+}
+
+// sessionSnapshot returns the per-run usage snapshot from providerProxy,
+// or a zero session when providerProxy is nil. The nil-safe path covers
+// bare-Agent tests that construct an [Agent] without going through
+// [New] — production [Agent.providerProxy] is always non-nil after
+// [Agent.buildKitAgent].
+func (a *Agent) sessionSnapshot() budget.Session {
+	if a.providerProxy == nil {
+		return budget.Session{}
+	}
+	return a.providerProxy.Snapshot()
 }

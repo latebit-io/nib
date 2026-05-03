@@ -26,20 +26,20 @@ func TestCheckTaskBudget_Disabled(t *testing.T) {
 		{
 			name:   "zero budget skips check",
 			opts:   &NewOptions{TaskTokenBudget: -1}, // -1 → unlimited (zero internally)
-			mutate: func(a *Agent) { a.sessionUsage.TotalPromptTokens = 1_000_000 },
+			mutate: func(a *Agent) { a.providerProxy.recordUsage(&llm.Usage{PromptTokens: 1_000_000}) },
 		},
 		{
 			name: "already-latched returns empty",
 			opts: &NewOptions{TaskTokenBudget: 100},
 			mutate: func(a *Agent) {
-				a.sessionUsage.TotalPromptTokens = 200
+				a.providerProxy.recordUsage(&llm.Usage{PromptTokens: 200})
 				a.budgetExceeded = true
 			},
 		},
 		{
 			name:   "under cap returns empty",
 			opts:   &NewOptions{TaskTokenBudget: 1000},
-			mutate: func(a *Agent) { a.sessionUsage.TotalPromptTokens = 500 },
+			mutate: func(a *Agent) { a.providerProxy.recordUsage(&llm.Usage{PromptTokens: 500}) },
 		},
 	}
 
@@ -66,9 +66,7 @@ func TestCheckTaskBudget_FiresAndLatches(t *testing.T) {
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
 		&NewOptions{TaskTokenBudget: 1000})
 
-	ag.sessionUsage.TotalPromptTokens = 800
-	ag.sessionUsage.TotalCompletionTokens = 300 // 1100 > 1000
-	ag.sessionUsage.Turns = 1
+	ag.providerProxy.recordUsage(&llm.Usage{PromptTokens: 800, CompletionTokens: 300}) // 1100 > 1000
 
 	msg := ag.checkTaskBudget()
 	if msg == "" {

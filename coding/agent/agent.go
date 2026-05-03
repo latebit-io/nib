@@ -213,16 +213,22 @@ type Agent struct {
 	// every turn.
 	taskEdits []taskEdit
 
-	// sessionUsage accumulates token consumption across the entire agent run.
-	sessionUsage budget.Session
+	// Per-run session usage lives on [providerProxy.session] —
+	// accumulated synchronously inside the Stream channel wrapper so
+	// the foundation's pre-Stream budget check ([Agent.foundationBudgetCheck])
+	// sees fresh totals on the immediately following turn. Read via
+	// [providerProxy.Snapshot]; reset via [providerProxy.ResetSession]
+	// on each new run.
+
 	// taskTokenBudget caps prompt+completion tokens for a single agent run.
 	// Zero means unlimited (the budget check is skipped). Set via
 	// [NewOptions.TaskTokenBudget]; the run loop aborts with an AgentError
-	// when sessionUsage prompt+completion crosses this threshold.
+	// when the session prompt+completion crosses this threshold.
 	taskTokenBudget int
 	// budgetExceeded latches once the budget abort fires so subsequent
 	// turn checks (e.g. on a Resume of a saved conversation) do not double-
-	// emit the AgentError. Reset alongside sessionUsage on RunWithMode/Reply.
+	// emit the AgentError. Reset on RunWithMode/Reply alongside the
+	// providerProxy's session counter.
 	budgetExceeded bool
 	// runUnsuccessful is set by [Agent.send] when an [event.AgentError]
 	// is emitted and by [Agent.Cancel]. [Agent.forwardKitEvents] reads
@@ -278,6 +284,16 @@ type Agent struct {
 	// where the generic agent events get augmented with coding-specific
 	// per-turn budget accounting and forwarded to the frontend channel.
 	kitEvents chan event.Event
+
+	// forwardDone is closed by [Agent.forwardKitEvents] (via defer)
+	// when the forwarder goroutine returns. [Agent.Close] blocks on
+	// it after closing [Agent.kitEvents] so the wrapper provides the
+	// same "no further writes to the consumer channel" guarantee
+	// kit.Agent.Close provides for [Config.Events] — without this
+	// wait, a consumer that closes the frontend events channel right
+	// after Close returns can race a forwarder still draining the
+	// last buffered AgentDone.
+	forwardDone chan struct{}
 
 	// closeOnce guards [Agent.Close] so concurrent or repeated Close
 	// calls do not double-close the kit agent or its event channel.
@@ -511,6 +527,7 @@ func (a *Agent) buildKitAgent() {
 	}
 
 	a.kitEvents = make(chan event.Event, 64)
+	a.forwardDone = make(chan struct{})
 
 	hooks := a.FoundationHooks(func() []llm.Message {
 		k := a.kit
@@ -534,14 +551,30 @@ func (a *Agent) buildKitAgent() {
 	go a.forwardKitEvents()
 }
 
-// Close gracefully shuts down the agent. Aborts any in-flight run, waits
-// for the kit/foundation to unwind, then closes the intercept events
-// channel so [Agent.forwardKitEvents] drains and exits. Idempotent.
+// Close gracefully shuts down the agent. Aborts any in-flight run,
+// waits for the kit/foundation AND the kit translator to unwind,
+// closes the intercept events channel so [Agent.forwardKitEvents]
+// drains and exits, then waits for the forwarder. Idempotent.
+//
+// Ordering matters and is the contract callers rely on:
+//
+//  1. kit.Close blocks until the kit translator has fully exited
+//     (no more writes to [Agent.kitEvents]) — otherwise step 3 would
+//     race a still-running translator and panic on send-on-closed.
+//  2. close(kitEvents) signals the forwarder to drain its remaining
+//     events and return.
+//  3. <-forwardDone blocks until forwarder exits, providing the
+//     symmetric "no further writes to the frontend events channel"
+//     guarantee. A consumer that closes the frontend channel
+//     immediately after Close returns is safe.
 //
 // After Close, calls into [Agent.RunWithMode], [Agent.Run], and
 // [Agent.Reply] will fail to start a new run (kit returns ErrClosed).
 // The frontend events channel passed to [New] is NOT closed — that
 // belongs to the caller.
+//
+// Close hangs if the consumer of the frontend events channel has
+// stopped draining — same hard contract as steady-state operation.
 func (a *Agent) Close() {
 	a.closeOnce.Do(func() {
 		if a.kit != nil {
@@ -549,6 +582,9 @@ func (a *Agent) Close() {
 		}
 		if a.kitEvents != nil {
 			close(a.kitEvents)
+		}
+		if a.forwardDone != nil {
+			<-a.forwardDone
 		}
 	})
 }

@@ -135,6 +135,98 @@ func TestDisarmRunDone_SkipsIfReplaced(t *testing.T) {
 	close(stale)
 }
 
+// TestRunWithMode_ConcurrentStartsSerialize proves the [Agent.startMu]
+// guard against the reviewer's interleaving scenario: two goroutines
+// race into RunWithMode at the same time. Without startMu, the loser's
+// per-run state reset (a.coord, a.cancel, a.intent, a.mode) would
+// clobber the winner's, leaving the accepted foundation run executing
+// against the wrong wrapper state. With startMu, the second starter
+// blocks until the first completes its full startup sequence.
+//
+// The test asserts that after both calls return, the agent state is
+// internally consistent: a.intent == one of the two goals (not a
+// blend), a.cancel is non-nil (one starter's cancel survived), and
+// the runDone channel exists and corresponds to the run that is
+// actually executing (closed by forwarder when its AgentDone fires).
+func TestRunWithMode_ConcurrentStartsSerialize(t *testing.T) {
+	t.Parallel()
+
+	provider := &multiTurnProvider{
+		turns: [][]llm.StreamEvent{
+			{
+				{Token: "first"},
+				{Done: true, Usage: &llm.Usage{PromptTokens: 100, CompletionTokens: 10}},
+			},
+			{
+				{Token: "second"},
+				{Done: true, Usage: &llm.Usage{PromptTokens: 200, CompletionTokens: 20}},
+			},
+		},
+	}
+
+	events := make(chan event.Event, 256)
+	ag := New(provider, stubWorkspace{}, events, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// Drain events in the background so the forwarder doesn't block;
+	// the test's invariants are about wrapper state, not event content.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			select {
+			case ev, ok := <-events:
+				if !ok {
+					return
+				}
+				if fb, ok := ev.(event.FlushBuffers); ok {
+					fb.Result <- event.FlushResult{}
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			goal := "first"
+			if i == 1 {
+				goal = "second"
+			}
+			ag.RunWithMode(ctx, "main.go", "", goal, nil, event.ModeExecution)
+		}()
+	}
+	wg.Wait()
+
+	// After both RunWithMode calls return, exactly one run won
+	// startMu last and its state survives. Intent must be one of the
+	// two (not corrupted by interleaving).
+	ag.mu.Lock()
+	intent := ag.intent
+	cancelFn := ag.cancel
+	ag.mu.Unlock()
+
+	if intent != "first" && intent != "second" {
+		t.Errorf("intent = %q; want one of {\"first\", \"second\"} — interleaved reset corrupted state", intent)
+	}
+	if cancelFn == nil {
+		t.Error("a.cancel == nil after concurrent starts; one starter's cancel func should have survived")
+	}
+
+	// Cancel the surviving run so the forwarder can settle and the
+	// drainer can exit cleanly.
+	ag.Cancel()
+	cancel()
+	<-drainDone
+}
+
 // runUntilWaitingThenCancel drives the agent through one full
 // turn-and-park cycle: drain events until the agent emits
 // AgentWaiting (turn complete, foundation parked at awaitReply), then

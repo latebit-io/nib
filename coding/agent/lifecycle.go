@@ -103,6 +103,15 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, con
 // [kit.Agent.PromptWithMessages]. The forwarder goroutine spawned in
 // [New] re-emits kit events to the frontend.
 func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode event.Mode) {
+	// Serialize the entire startup sequence so concurrent RunWithMode
+	// callers cannot interleave their per-run state resets and runDone
+	// arms. Without startMu, two starters that both passed
+	// fenceForwarder could clobber each other's coord/cancel/intent
+	// before only one PromptWithMessages succeeded — the accepted run
+	// would execute against the loser's wrapper state.
+	a.startMu.Lock()
+	defer a.startMu.Unlock()
+
 	a.mu.Lock()
 	prevCancel := a.cancel
 	a.mu.Unlock()
@@ -232,9 +241,25 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 		return true
 	}
 
-	// Resume path: cancel + fence the previous run before reading kit
-	// state and resetting per-run fields. fenceForwarder waits for the
-	// prior run's AgentDone to drain through the forwarder; without it,
+	// Resume path: serialize against concurrent RunWithMode/Reply
+	// startups so per-run state and runDone are not interleaved with
+	// another starter's. See [Agent.startMu] for the full rationale.
+	a.startMu.Lock()
+	defer a.startMu.Unlock()
+
+	// Re-check after taking startMu: a concurrent starter may have
+	// installed a fresh run in the interval, in which case our
+	// kit.Reply attempt above raced the new run's PromptWithMessages
+	// and lost. Try the fast path once more under the lock so an
+	// active run picks up the message instead of triggering a
+	// duplicate resume.
+	if a.kit.Reply(ctx, input) {
+		return true
+	}
+
+	// Cancel + fence the previous run before reading kit state and
+	// resetting per-run fields. fenceForwarder waits for the prior
+	// run's AgentDone to drain through the forwarder; without it,
 	// kit.State().Messages could include partially-applied edits and
 	// the per-run state reset below would race a forwarder still
 	// processing the prior run's tail.

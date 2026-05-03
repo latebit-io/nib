@@ -283,6 +283,20 @@ type Agent struct {
 	// calls do not double-close the kit agent or its event channel.
 	closeOnce sync.Once
 
+	// startMu serializes the entire run-startup sequence
+	// (cancel-previous + kit.WaitForIdle + fenceForwarder + per-run
+	// state reset + armRunDone + kit.PromptWithMessages). Held by
+	// RunWithMode and by Reply's resume path; runtime signals
+	// (Cancel, Approve, Reject, IsRunning, IsWaiting) acquire only
+	// [Agent.mu] so they cannot deadlock against an in-flight
+	// startup. Without this lock, two concurrent starters that both
+	// passed fenceForwarder could interleave their [Agent.mu]-serialized
+	// resets and arm calls, leaving the foundation run that wins
+	// kit.PromptWithMessages executing against the loser's wrapper
+	// state ([Agent.coord], [Agent.cancel], [Agent.intent], [Agent.mode]),
+	// which would route Approve/Reject signals to the wrong run.
+	startMu sync.Mutex
+
 	// runDoneMu guards [Agent.runDone]. Forwarder writes (closes the
 	// channel + nil-clears the field on AgentDone). Run-start methods
 	// read it (block on <- before resetting per-run state) and

@@ -522,3 +522,17 @@ func TestNew_ToolsetsHooksChainWithDirectHooks(t *testing.T) {
 		t.Fatalf("hook order = %v, want [direct toolset]", order)
 	}
 }
+
+func TestNew_NilToolPassesToFoundationValidation(t *testing.T) {
+	t.Parallel()
+	_, err := kit.New(kit.Config{
+		Provider: newScriptedProvider(),
+		Events:   make(chan event.Event, 1),
+		Toolsets: []kit.Toolset{
+			{Tools: []kit.Tool{nil}},
+		},
+	})
+	if !errors.Is(err, kit.ErrInvalidOptions) {
+		t.Fatalf("want ErrInvalidOptions for nil tool, got %v", err)
+	}
+}

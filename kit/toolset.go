@@ -215,6 +215,10 @@ func deduplicateTools(tools []Tool) []Tool {
 	seen := make(map[string]bool, len(tools))
 	deduped := make([]Tool, 0, len(tools))
 	for _, t := range tools {
+		if t == nil {
+			deduped = append(deduped, t)
+			continue
+		}
 		name := strings.ToLower(t.Definition().Function.Name)
 		if seen[name] {
 			slog.Warn("kit: duplicate tool dropped", "name", name)

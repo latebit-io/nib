@@ -597,20 +597,9 @@ func TestNew_DeduplicatesToolsFirstWins(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 	a.WaitForIdle()
-	got := drainUntil(events, untilDone)
+	drainUntil(events, untilDone)
 
-	// The tool call must have hit the direct tool (first wins),
-	// not the toolset tool. Verify via the tool result content
-	// surfaced in AfterToolCallContext.
-	for _, ev := range got {
-		if tc, ok := ev.(event.AgentToolCall); ok {
-			_ = tc
-		}
-	}
 
-	// Verify the direct tool was the one registered by checking
-	// that the foundation used it (directResult, not toolsetResult).
-	// The result tool records its execution — check it ran.
 	if !directTool.called {
 		t.Fatal("direct tool should have been called (first wins)")
 	}

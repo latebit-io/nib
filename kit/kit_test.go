@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -169,6 +170,7 @@ func TestPrompt_StreamsTokensAndEndsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	defer a.Close()
 
 	if err := a.Prompt(context.Background(), "hi"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -254,6 +256,7 @@ func TestPrompt_CleanRunDoneSuccessTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	defer a.Close()
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -280,6 +283,7 @@ func TestStreamError_EmitsAgentErrorAndUnsuccessfulDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	defer a.Close()
 
 	if err := a.Prompt(context.Background(), "hi"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -335,6 +339,7 @@ func TestUnsuccessful_ResetBetweenRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	defer a.Close()
 
 	if err := a.Prompt(context.Background(), "first"); err != nil {
 		t.Fatalf("Prompt(first): %v", err)
@@ -364,6 +369,151 @@ func TestUnsuccessful_ResetBetweenRuns(t *testing.T) {
 	}
 }
 
+// TestUnsuccessful_NoCrossRunPoisoning exercises the race CodeRabbit
+// flagged: WaitForIdle returns when the foundation goroutine exits,
+// but the previous run's AgentEnd may still be in the foundation
+// events buffer awaiting translation. A fast next Prompt that resets
+// shared state on the user's goroutine would race the translator's
+// read of that state on the previous run's AgentEnd, mislabeling
+// run 1's success as the next run's prelude.
+//
+// Per-run outcome state in [Agent] eliminates the race: each run's
+// failure bit is bound to its own [runOutcome] so the next run's
+// allocation cannot poison the previous run's reading.
+//
+// Test shape: run 1 errors, immediately Prompt run 2 (no drain
+// between), then drain both AgentDones. Run 1 must report
+// Success=false; run 2 must report Success=true.
+// TestSend_ControlEventsBlockNotDrop guards the contract that
+// terminal/control events are guaranteed delivery — never silently
+// dropped to a timeout. A slow consumer (here, an unbuffered channel
+// drained after a deliberate delay) must still receive AgentError
+// and AgentDone. The previous 5-second-timeout-then-drop policy
+// would have silently lost both signals under sustained
+// backpressure; the new blocking semantics block until the consumer
+// catches up.
+func TestSend_ControlEventsBlockNotDrop(t *testing.T) {
+	t.Parallel()
+
+	provider := errorProvider{err: errors.New("boom")}
+	// Unbuffered channel — every send must wait for a receive.
+	events := make(chan event.Event)
+
+	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// Do not drain immediately. With the previous 5s drop policy a
+	// shorter sleep here would have left the test passing accidentally
+	// (events arrive within the timeout); a longer sleep would have
+	// dropped them. The new blocking policy delivers regardless of
+	// how long this sleep is — pick something well past any
+	// reasonable scheduler delay.
+	time.Sleep(100 * time.Millisecond)
+
+	var sawErr, sawDone bool
+	deadline := time.After(2 * time.Second)
+	for !sawDone {
+		select {
+		case ev := <-events:
+			switch ev.(type) {
+			case event.AgentError:
+				sawErr = true
+			case event.AgentDone:
+				sawDone = true
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for AgentDone (sawErr=%v sawDone=%v)", sawErr, sawDone)
+		}
+	}
+	if !sawErr {
+		t.Fatalf("AgentError not delivered to slow consumer")
+	}
+}
+
+func TestUnsuccessful_NoCrossRunPoisoning(t *testing.T) {
+	t.Parallel()
+
+	provider := &swappableProvider{p: errorProvider{err: errors.New("first")}}
+	hooks := kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: true}, nil
+		},
+	}
+	events := make(chan event.Event, 64)
+
+	a, err := kit.New(kit.Config{
+		Provider: provider,
+		Events:   events,
+		Tools:    []kit.Tool{nopTool{name: "echo"}},
+		Hooks:    hooks,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	if err := a.Prompt(context.Background(), "first"); err != nil {
+		t.Fatalf("Prompt(first): %v", err)
+	}
+	a.WaitForIdle()
+
+	provider.swap(newScriptedProvider(
+		streamWithToolCall("call-1", "echo", `{"text":"hi"}`),
+	))
+
+	// Crucial: no drain between runs. Prompt(second) immediately
+	// after WaitForIdle of first stresses the per-run binding.
+	// foundation.Prompt may return ErrRunInProgress if the
+	// foundation hasn't fully released the running flag yet — retry
+	// briefly to handle that without serializing through a drain
+	// (which would defeat the test's purpose).
+	deadline := time.After(2 * time.Second)
+	for {
+		err := a.Prompt(context.Background(), "second")
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, kit.ErrRunInProgress) {
+			t.Fatalf("Prompt(second): %v", err)
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("Prompt(second) stuck on ErrRunInProgress past deadline")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	a.WaitForIdle()
+
+	// Now drain both AgentDones and verify each run's success bit
+	// reflects that run, not the other.
+	var dones []event.AgentDone
+	drainUntil(events, func(ev event.Event) bool {
+		if d, ok := ev.(event.AgentDone); ok {
+			dones = append(dones, d)
+			return len(dones) == 2
+		}
+		return false
+	})
+
+	if len(dones) < 2 {
+		t.Fatalf("got %d AgentDone events, want 2", len(dones))
+	}
+	if dones[0].Success {
+		t.Fatalf("first AgentDone.Success=true, want false (run errored)")
+	}
+	if !dones[1].Success {
+		t.Fatalf("second AgentDone.Success=false, want true (run completed cleanly)")
+	}
+}
+
 func TestErrRunInProgress(t *testing.T) {
 	t.Parallel()
 
@@ -374,6 +524,7 @@ func TestErrRunInProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	defer a.Close()
 
 	if err := a.Prompt(context.Background(), "first"); err != nil {
 		t.Fatalf("Prompt(first): %v", err)
@@ -403,6 +554,7 @@ func TestState_DelegatesToFoundation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	defer a.Close()
 
 	if err := a.Prompt(context.Background(), "hi"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -450,6 +602,7 @@ func TestEventTranslation_TurnUsageFieldByField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	defer a.Close()
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -486,6 +639,7 @@ func TestFoundationObservability_NotInConsumerStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	defer a.Close()
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -507,6 +661,126 @@ func TestFoundationObservability_NotInConsumerStream(t *testing.T) {
 		default:
 			t.Fatalf("unexpected event type %T leaked from foundation: %+v", ev, ev)
 		}
+	}
+}
+
+func TestClose_StopsTranslatorGoroutine(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
+	events := make(chan event.Event, 32)
+
+	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// Take a goroutine snapshot before Close, then assert the count
+	// drops after Close. Without the assertion we'd be testing that
+	// Close returns without panicking, which doesn't catch the leak.
+	before := runtime.NumGoroutine()
+	a.Close()
+
+	// Drain anything Close caused the translator to flush so the
+	// consumer-side goroutine reading `events` doesn't hold a
+	// reference itself.
+	drainUntil(events, untilDone)
+
+	// Allow scheduler ticks for the translator goroutine to actually
+	// exit. Poll rather than sleep — a fixed sleep is either too
+	// short on a slow CI runner or wastefully long on a fast one.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() < before {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("goroutine count did not drop after Close: before=%d now=%d", before, runtime.NumGoroutine())
+}
+
+func TestClose_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
+	events := make(chan event.Event, 32)
+
+	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// First Close shuts down. Second Close must not panic on
+	// double-close of the done channel — sync.Once protects that.
+	a.Close()
+	a.Close()
+
+	drainUntil(events, untilDone)
+}
+
+func TestClose_DeliversFinalAgentDone(t *testing.T) {
+	t.Parallel()
+
+	provider := blockingProvider{}
+	events := make(chan event.Event, 32)
+
+	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// Close while the run is in flight. The translator's drain path
+	// must still surface AgentDone — without the post-Close drain,
+	// an early select on done would drop the final AgentEnd from
+	// the buffered foundation channel.
+	a.Close()
+
+	got := drainUntil(events, untilDone)
+	d, ok := lastDone(got)
+	if !ok {
+		t.Fatalf("no AgentDone after Close")
+	}
+	// Close calls Abort, which sets the unsuccess flag.
+	if d.Success {
+		t.Fatalf("AgentDone.Success=true after Close, want false (Close aborts)")
+	}
+}
+
+func TestPrompt_AfterCloseReturnsErrClosed(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
+	events := make(chan event.Event, 32)
+
+	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	a.Close()
+	drainUntil(events, untilDone)
+
+	if err := a.Prompt(context.Background(), "after-close"); !errors.Is(err, kit.ErrClosed) {
+		t.Fatalf("Prompt after Close: want ErrClosed, got %v", err)
+	}
+	if err := a.PromptWithMessages(context.Background(), []llm.Message{{Role: "user", Content: "x"}}); !errors.Is(err, kit.ErrClosed) {
+		t.Fatalf("PromptWithMessages after Close: want ErrClosed, got %v", err)
 	}
 }
 

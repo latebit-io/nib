@@ -26,7 +26,10 @@ package kit
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/latebit-io/nib/agent"
 	agentevent "github.com/latebit-io/nib/agent/event"
@@ -79,6 +82,12 @@ var ErrInvalidOptions = agent.ErrInvalidOptions
 // ErrRunInProgress wraps the foundation's [agent.ErrRunInProgress].
 var ErrRunInProgress = agent.ErrRunInProgress
 
+// ErrClosed is returned by [Agent.Prompt] and [Agent.PromptWithMessages]
+// after [Agent.Close] has been called. Reply, Abort, State, and
+// WaitForIdle remain safe after Close — they delegate to the foundation
+// which is already idle by then.
+var ErrClosed = errors.New("kit: agent is closed")
+
 // Config bundles the construction-time inputs for [New]. Provider and
 // Events are required; everything else is optional.
 type Config struct {
@@ -86,11 +95,27 @@ type Config struct {
 	Provider llm.Provider
 
 	// Events is the channel the agent writes consumer-facing events to.
-	// Required. The caller must drain this channel; kit drops
-	// high-volume streaming events ([event.AgentToken],
-	// [event.AgentTurnUsage], [event.AgentInputEstimate]) when the
-	// channel is full and blocks for up to 5 seconds on control-flow
-	// events before logging an error and discarding.
+	// Required. The caller MUST drain this channel.
+	//
+	// Send semantics:
+	//
+	//   - High-volume streaming events ([event.AgentToken],
+	//     [event.AgentTurnUsage], [event.AgentInputEstimate]) drop
+	//     when the channel is full. They are individually
+	//     replaceable — a missing token is visually closed by the
+	//     next one; a missing usage tick is recovered from the next.
+	//
+	//   - Control events ([event.AgentDone], [event.AgentError],
+	//     [event.AgentToolCall], [event.AgentWaiting],
+	//     [event.AgentStatus], [event.AgentCompacted]) block until
+	//     the consumer drains. Guaranteed delivery — these carry
+	//     lifecycle and failure signals an event-driven consumer
+	//     cannot reconstruct from later events.
+	//
+	// A consumer that stops draining will wedge the kit translator
+	// goroutine; if the consumer also calls [Agent.Close], Close
+	// still returns but the translator leaks. Size the channel
+	// generously (64+ recommended) so bursts do not block.
 	Events chan<- event.Event
 
 	// SystemPrompt is the system message prepended to every run's
@@ -112,9 +137,23 @@ type Config struct {
 	Hooks Hooks
 }
 
+// runOutcome carries the failure bit for a single run from
+// [Agent.Prompt] (which allocates it) through the translator (which
+// binds it on AgentStart, may set it on Error/Abort, and consumes it
+// on AgentEnd to emit [event.AgentDone]). Per-run rather than shared
+// so concurrent Aborts and Prompts cannot poison each other's runs.
+type runOutcome struct {
+	// unsuccess flips to 1 when the run fails. Atomic because
+	// [Agent.Abort] and the translator goroutine both write it
+	// (Abort marks the bound outcome; translator marks on Error).
+	unsuccess uint32
+}
+
 // Agent is the kit-level handle on a running agent. Construct with [New];
 // drive with [Agent.Prompt] / [Agent.Reply] / [Agent.Abort]; observe via
-// the events channel from [Config].
+// the events channel from [Config]. Release with [Agent.Close] when the
+// agent is no longer needed — without it the translator goroutine and
+// the foundation hold each other live until process exit.
 //
 // Concurrency: every method on Agent is safe to call from any goroutine.
 // The wrapped foundation serializes its loop on a single goroutine.
@@ -123,26 +162,43 @@ type Agent struct {
 	foundationEvents chan agentevent.Event
 	consumerEvents   chan<- event.Event
 
-	// runUnsuccessful is set by [Agent.Abort] and by the translator on
-	// [agentevent.Error] so that the next [event.AgentDone] derived
-	// from [agentevent.AgentEnd] reports Success=false. The foundation
-	// emits AgentEnd whether the run completed cleanly or unwound on
-	// error/cancel — kit reconstructs the success bit from the
-	// out-of-band signals the foundation does not include in AgentEnd
-	// itself.
+	// outcomeMu guards [Agent.pendingOutcome] and [Agent.currentOutcome].
+	// The two pointers carry per-run failure state across goroutines:
+	// [Agent.Prompt] (user goroutine) creates an outcome and parks it
+	// in pending; the translator binds it to the run on AgentStart by
+	// moving pending → current; the translator reads it on AgentEnd to
+	// emit [event.AgentDone]; [Agent.Abort] marks whichever outcome is
+	// in flight (current preferred, pending fallback) so an Abort that
+	// races AgentStart still poisons the right run.
 	//
-	// The translator goroutine and Abort are the only writers; the
-	// translator is also the only reader. Both writers run on
-	// independent goroutines and the read happens on the translator
-	// goroutine, so a plain bool guarded by [Agent.foundation]'s lock
-	// is unsafe — Abort cannot reach the foundation's lock without
-	// serializing through the foundation API. A dedicated field works
-	// without a lock here only because every writer either precedes
-	// the corresponding AgentEnd (ordered by the foundation lifecycle)
-	// or is the translator itself. To keep that invariant explicit and
-	// guard against future cross-goroutine writes, all access happens
-	// through atomic operations on a uint32 flag.
-	runUnsuccessful uint32
+	// Per-run state replaces the previous shared atomic flag. The
+	// shared flag was racy because (a) WaitForIdle returns on
+	// foundation exit but the translator may still have the previous
+	// run's AgentEnd buffered, and (b) Abort and the translator's
+	// AgentStart-reset are unordered, so a fast Prompt-then-Abort
+	// could have the AgentStart-reset clear an Abort-set flag for the
+	// run the user intended to abort.
+	outcomeMu      sync.Mutex
+	pendingOutcome *runOutcome
+	currentOutcome *runOutcome
+
+	// closed is set by [Agent.Close] before it begins shutdown. Read
+	// by [Agent.Prompt] and [Agent.PromptWithMessages] to refuse new
+	// runs after Close. Atomic so the check is safe from any
+	// goroutine without taking a lock on every Prompt.
+	closed uint32
+
+	// done is closed by [Agent.Close] to signal the translator
+	// goroutine to drain its remaining events and exit. The
+	// translator's select listens on both [Agent.foundationEvents]
+	// and done, so a closed done unblocks the translator even when
+	// the foundation has stopped emitting.
+	done chan struct{}
+
+	// closeOnce guards [Agent.Close] so concurrent or repeated Close
+	// calls do not double-close [Agent.done] (which would panic) or
+	// double-Abort the foundation (which is safe but pointless).
+	closeOnce sync.Once
 }
 
 // New constructs an Agent from cfg. Returns [ErrInvalidOptions] wrapped
@@ -156,9 +212,12 @@ type Agent struct {
 //
 // Side effect: New spawns a translator goroutine that drains the
 // foundation's lifecycle events and re-emits each as the closest
-// [event] equivalent through cfg.Events. The goroutine lives the
-// agent's lifetime — kit has no Close path today and the foundation's
-// events channel is never closed by the foundation itself.
+// [event] equivalent through cfg.Events. The goroutine lives until
+// [Agent.Close] is called — the foundation never closes its own
+// events channel, so without Close the translator and the foundation
+// hold each other live until process exit. Callers that create
+// short-lived agents (tests, daemons that spin up per-request agents)
+// must Close to avoid leaking.
 func New(cfg Config) (*Agent, error) {
 	if cfg.Provider == nil {
 		return nil, fmt.Errorf("%w: Provider is required", ErrInvalidOptions)
@@ -184,6 +243,7 @@ func New(cfg Config) (*Agent, error) {
 		foundation:       f,
 		foundationEvents: foundationEvents,
 		consumerEvents:   cfg.Events,
+		done:             make(chan struct{}),
 	}
 
 	go a.translateEvents()
@@ -191,16 +251,28 @@ func New(cfg Config) (*Agent, error) {
 }
 
 // Prompt starts a new run with the given user message. Returns
-// [ErrRunInProgress] when a run is already active. Lifecycle progress
-// flows through the events channel; [Agent.WaitForIdle] blocks for run
-// completion.
+// [ErrRunInProgress] when a run is already active or [ErrClosed] when
+// the agent has been closed. Lifecycle progress flows through the
+// events channel; [Agent.WaitForIdle] blocks for run completion.
 //
-// Prompt resets the unsuccess flag at the start of each run so a prior
-// run's [Agent.Abort] or error does not poison the next run's
-// [event.AgentDone].
+// Prompt does NOT touch a shared success flag. It parks a fresh
+// [runOutcome] in [Agent.pendingOutcome] for the translator to bind
+// to the run on the next [agentevent.AgentStart]. Per-run state
+// instead of a shared flag eliminates the race where (a) WaitForIdle
+// returns on foundation exit but the translator still has the
+// previous run's AgentEnd buffered, or (b) a fast Prompt-then-Abort
+// has the translator's AgentStart-processing clear an Abort-set
+// flag.
 func (a *Agent) Prompt(ctx context.Context, content string) error {
-	a.resetUnsuccessful()
-	return a.foundation.Prompt(ctx, content)
+	if atomic.LoadUint32(&a.closed) == 1 {
+		return ErrClosed
+	}
+	a.parkPendingOutcome()
+	if err := a.foundation.Prompt(ctx, content); err != nil {
+		a.discardPendingOutcome()
+		return err
+	}
+	return nil
 }
 
 // PromptWithMessages starts a new run with a caller-supplied initial
@@ -209,10 +281,40 @@ func (a *Agent) Prompt(ctx context.Context, content string) error {
 // dynamic per-run transcripts (memory summary, context files, file
 // content) alongside the user's goal.
 //
-// Same lifecycle and unsuccess-reset semantics as [Agent.Prompt].
+// Same lifecycle, close-check, and per-run-outcome semantics as
+// [Agent.Prompt].
 func (a *Agent) PromptWithMessages(ctx context.Context, messages []llm.Message) error {
-	a.resetUnsuccessful()
-	return a.foundation.PromptWithMessages(ctx, messages)
+	if atomic.LoadUint32(&a.closed) == 1 {
+		return ErrClosed
+	}
+	a.parkPendingOutcome()
+	if err := a.foundation.PromptWithMessages(ctx, messages); err != nil {
+		a.discardPendingOutcome()
+		return err
+	}
+	return nil
+}
+
+// parkPendingOutcome installs a fresh outcome in [Agent.pendingOutcome]
+// for the translator to bind on the next AgentStart. Replaces any
+// previous pendingOutcome that did not get bound — happens when the
+// foundation rejects a Prompt with [ErrRunInProgress] before the next
+// successful Prompt is attempted (the unbound outcome is simply
+// discarded).
+func (a *Agent) parkPendingOutcome() {
+	a.outcomeMu.Lock()
+	a.pendingOutcome = &runOutcome{}
+	a.outcomeMu.Unlock()
+}
+
+// discardPendingOutcome clears [Agent.pendingOutcome]. Called when the
+// foundation rejects a Prompt — without it a stray pendingOutcome
+// would bind to a future run's AgentStart and silently survive across
+// the rejection.
+func (a *Agent) discardPendingOutcome() {
+	a.outcomeMu.Lock()
+	a.pendingOutcome = nil
+	a.outcomeMu.Unlock()
 }
 
 // Reply queues a developer follow-up for the active run. Returns true
@@ -223,13 +325,36 @@ func (a *Agent) Reply(ctx context.Context, content string) bool {
 	return a.foundation.Reply(ctx, content)
 }
 
-// Abort cancels the current run. Safe to call when no run is active.
-// The events channel receives an [event.AgentDone] with Success=false
-// once the loop unwinds; use [Agent.WaitForIdle] to block until that
-// happens.
+// Abort cancels the current run. Safe to call when no run is active —
+// it is a no-op in that case. The events channel receives an
+// [event.AgentDone] with Success=false once the loop unwinds; use
+// [Agent.WaitForIdle] to block until that happens.
+//
+// Marks the in-flight run's outcome as unsuccess. Prefers
+// [Agent.currentOutcome] (the translator has bound the run already)
+// over [Agent.pendingOutcome] (the translator has not yet processed
+// AgentStart for this run). If neither exists, Abort does not mark
+// anything — there is no run to fail.
 func (a *Agent) Abort() {
-	a.markUnsuccessful()
+	a.markCurrentOrPendingUnsuccess()
 	a.foundation.Abort()
+}
+
+// markCurrentOrPendingUnsuccess marks the in-flight run's outcome
+// (current first, pending fallback) as unsuccess. Pendant to
+// [runOutcome.unsuccess]'s atomic store: the lock guards which
+// outcome we pick, the atomic guards the write itself so the
+// translator can read it without holding outcomeMu on every event.
+func (a *Agent) markCurrentOrPendingUnsuccess() {
+	a.outcomeMu.Lock()
+	target := a.currentOutcome
+	if target == nil {
+		target = a.pendingOutcome
+	}
+	a.outcomeMu.Unlock()
+	if target != nil {
+		atomic.StoreUint32(&target.unsuccess, 1)
+	}
 }
 
 // State returns a read-only snapshot of the agent's current state.
@@ -244,4 +369,42 @@ func (a *Agent) State() State {
 // run is active.
 func (a *Agent) WaitForIdle() {
 	a.foundation.WaitForIdle()
+}
+
+// Close gracefully shuts down the agent and releases the translator
+// goroutine [New] spawned. Idempotent — repeated Close calls and
+// concurrent Close calls coalesce through [sync.Once].
+//
+// Order of operations:
+//
+//  1. Mark the agent closed so subsequent [Agent.Prompt] and
+//     [Agent.PromptWithMessages] return [ErrClosed].
+//  2. [agent.Agent.Abort] any in-flight run; wait for the foundation
+//     goroutine to unwind via [agent.Agent.WaitForIdle]. The
+//     foundation emits its final [agentevent.AgentEnd] during this
+//     unwind, which the translator receives and forwards as
+//     [event.AgentDone] before exiting.
+//  3. Close the done channel; the translator drains any remaining
+//     buffered foundation events and returns.
+//
+// After Close: [Agent.Reply] returns false (no active run),
+// [Agent.Abort] is a no-op, [Agent.WaitForIdle] returns immediately,
+// [Agent.State] returns the foundation's final snapshot. The
+// consumer's events channel is NOT closed by Close — that channel
+// belongs to the caller and may be reused for other producers.
+//
+// Close blocks until the foundation has fully unwound. Callers that
+// need force-quit semantics should not rely on Close — they should
+// abandon the agent and accept the leak.
+func (a *Agent) Close() {
+	a.closeOnce.Do(func() {
+		atomic.StoreUint32(&a.closed, 1)
+		// Route through [Agent.Abort] (not foundation.Abort directly)
+		// so the kit-level unsuccess flag is set alongside the
+		// foundation cancel — otherwise an in-flight run interrupted
+		// by Close would surface as AgentDone(Success=true).
+		a.Abort()
+		a.foundation.WaitForIdle()
+		close(a.done)
+	})
 }

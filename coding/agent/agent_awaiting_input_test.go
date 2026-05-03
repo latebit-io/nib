@@ -216,12 +216,10 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 	provider.mu.Unlock()
 
 	// Every assistant message with ToolCalls must have a matching tool-role
-	// reply in the saved transcript — including the final abort attempt.
-	// Without this, Resume from savedMessages would send a malformed
+	// reply in the kit's transcript — including the final abort attempt.
+	// Without this, a Resume from kit.State().Messages would send a malformed
 	// request (dangling tool_calls) that the provider rejects on validation.
-	ag.mu.Lock()
-	saved := ag.savedMessages
-	ag.mu.Unlock()
+	saved := ag.kit.State().Messages
 
 	toolCallsEmitted := 0
 	toolRepliesSeen := 0

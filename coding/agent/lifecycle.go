@@ -26,12 +26,12 @@ import (
 // getters (currentProvider / currentTerse / currentAutonomous /
 // currentCodingStyle / hasLintPending / drainPendingLint) and event
 // emitters (send / sendCritical / activeCoord) that hooks and the
-// translator goroutine call into.
+// forwarder goroutine call into.
 //
-// The run loop itself lives on the foundation [upagent.Agent]; this
-// file's RunWithMode is a thin builder that prepares the per-run
-// transcript and hands it to [upagent.Agent.PromptWithMessages]. The
-// foundation drives the loop through its hook surface, which
+// The run loop itself lives on the [kit.Agent] (which wraps the bare
+// foundation); this file's RunWithMode is a thin builder that prepares
+// the per-run transcript and hands it to [kit.Agent.PromptWithMessages].
+// The foundation drives the loop through its hook surface, which
 // [Agent.FoundationHooks] composes against the same agent instance.
 
 // Run starts a new conversation in execution mode. See RunWithMode for details.
@@ -46,12 +46,11 @@ func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, con
 // edit. In ModePlanning, write-side tools (edit_file, write_file,
 // bash) are disabled and a planning-focused prompt is used.
 //
-// The foundation owns the actual run goroutine; this method does the
-// per-run prep (state reset, fresh approval coordinator, opening
+// The kit/foundation owns the actual run goroutine; this method does
+// the per-run prep (state reset, fresh approval coordinator, opening
 // status events) and hands the assembled transcript to
-// [upagent.Agent.PromptWithMessages]. The translator goroutine spawned
-// in [New] re-emits foundation events as engine events so frontends
-// see the same vocabulary they always have.
+// [kit.Agent.PromptWithMessages]. The forwarder goroutine spawned in
+// [New] re-emits kit events to the frontend.
 func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode event.Mode) {
 	a.mu.Lock()
 	prevCancel := a.cancel
@@ -69,12 +68,11 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.cache.Reset(fileName, fileContent)
 	a.intent = goal
 	a.mode = mode
+	a.running = true
 	a.waiting = false
 	a.pendingLint = ""
 	a.taskEdits = nil
 	clear(a.validatorRetries)
-	a.savedMessages = nil
-	a.savedMode = 0
 	a.sessionUsage = budget.Session{}
 	a.turnCounter = 0
 	a.budgetExceeded = false
@@ -90,14 +88,13 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.mu.Unlock()
 
 	// Cancel the previous run after releasing mu, then wait for the
-	// foundation to fully unwind before kicking off the next one. The
-	// foundation's PromptWithMessages refuses overlap with
-	// ErrRunInProgress; without WaitForIdle a fast successive call
-	// would race that check.
+	// kit/foundation to fully unwind before kicking off the next one.
+	// kit.PromptWithMessages refuses overlap with ErrRunInProgress;
+	// without WaitForIdle a fast successive call would race that check.
 	if prevCancel != nil {
 		prevCancel()
 	}
-	a.foundation.WaitForIdle()
+	a.kit.WaitForIdle()
 
 	if goal == "" {
 		goal = "Review this code and suggest improvements, one step at a time."
@@ -112,12 +109,17 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	// point invoked by tools) recovers this run's coord without
 	// reading the racy [Agent.coord] field.
 	hookCtx := ctxWithCoord(runCtx, coord)
-	if err := a.foundation.PromptWithMessages(hookCtx, messages); err != nil {
+	if err := a.kit.PromptWithMessages(hookCtx, messages); err != nil {
 		// PromptWithMessages can fail for a concurrent-run race
 		// (foundation still draining despite our WaitForIdle) or an
 		// empty-slice rejection. Surface the error and emit AgentDone
-		// so the frontend unwinds cleanly.
-		slog.Error("agent: foundation rejected new run", "err", err)
+		// so the frontend unwinds cleanly. running flips back here
+		// because no AgentDone will arrive from kit when the run never
+		// started.
+		slog.Error("agent: kit rejected new run", "err", err)
+		a.mu.Lock()
+		a.running = false
+		a.mu.Unlock()
 		a.send(event.AgentError{Err: fmt.Sprintf("agent run start failed: %v", err)})
 		a.send(event.AgentDone{Success: false})
 		return
@@ -140,29 +142,39 @@ func (a *Agent) emitOpening(mode event.Mode) {
 
 // Reply sends a follow-up message to an ongoing conversation.
 // If the agent is running (waiting or mid-turn), the message is
-// queued to the foundation's per-run input channel. If the run has
-// exited but saved messages exist, it resumes the conversation by
-// rebuilding the system prompt and starting a new foundation run.
-// Returns false only when there is no conversation to continue.
+// queued to the kit's per-run input channel. If the run has exited
+// but a transcript exists in [kit.Agent.State], it resumes the
+// conversation by rebuilding the system prompt and starting a new
+// kit run. Returns false only when there is no conversation to
+// continue.
 //
 // The ctx parameter is used only for the resume path (starting a new
-// foundation run); it is ignored when the agent is already running.
+// kit run); it is ignored when the agent is already running.
 func (a *Agent) Reply(ctx context.Context, input string) bool {
+	// Try queueing into an active run first. kit.Reply returns true iff
+	// the foundation accepted the message (run alive, queue not full),
+	// which is the race-free signal we used to derive from the
+	// translator-maintained `running` flag. Falling back to the resume
+	// path on false covers both "no active run" and the rare
+	// queue-full case (acceptable: queue-full Replies were never
+	// well-defined and a fresh resume is a benign substitution).
 	a.mu.Lock()
-	if a.running {
-		a.intent = input
-		a.waiting = false
-		a.mu.Unlock()
-		return a.foundation.Reply(ctx, input)
+	a.intent = input
+	a.waiting = false
+	a.mu.Unlock()
+	if a.kit.Reply(ctx, input) {
+		return true
 	}
 
-	if len(a.savedMessages) == 0 {
-		a.mu.Unlock()
+	// Resume from kit's last transcript.
+	saved := a.kit.State().Messages
+	if len(saved) == 0 {
 		return false
 	}
+	messages := slices.Clone(saved)
 
-	messages := a.savedMessages
-	mode := a.savedMode
+	a.mu.Lock()
+	mode := a.mode
 
 	prevCancel := a.cancel
 	a.coord = approval.New()
@@ -170,12 +182,11 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
+	a.running = true
 	a.waiting = false
 	a.pendingLint = ""
 	a.taskEdits = nil
 	clear(a.validatorRetries)
-	a.savedMessages = nil
-	a.savedMode = 0
 	a.sessionUsage = budget.Session{}
 	a.turnCounter = 0
 	a.budgetExceeded = false
@@ -194,7 +205,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	if prevCancel != nil {
 		prevCancel()
 	}
-	a.foundation.WaitForIdle()
+	a.kit.WaitForIdle()
 
 	// Refresh the system prompt so a runtime style/terse/autonomous
 	// toggle since the original run took effect on the resume's first
@@ -210,11 +221,14 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	a.send(event.AgentStatus{Status: event.StatusThinking})
 
 	hookCtx := ctxWithCoord(runCtx, coord)
-	if err := a.foundation.PromptWithMessages(hookCtx, messages); err != nil {
-		slog.Error("agent: foundation rejected resume", "err", err)
+	if err := a.kit.PromptWithMessages(hookCtx, messages); err != nil {
+		slog.Error("agent: kit rejected resume", "err", err)
+		a.mu.Lock()
+		a.running = false
+		a.mu.Unlock()
 		a.send(event.AgentError{Err: fmt.Sprintf("agent resume failed: %v", err)})
 		a.send(event.AgentDone{Success: false})
-		// Resume was attempted with valid saved state — the foundation
+		// Resume was attempted with valid saved state — the kit
 		// rejection is a transient condition the frontend can recover
 		// from. Returning true keeps the "we tried" semantics
 		// consistent with successful resumes.
@@ -242,10 +256,12 @@ func (a *Agent) IsRunning() bool {
 
 // Cancel stops the current agent run. Safe to call when no run is
 // active — the wrapper's cancel func is nil between runs and this is
-// a no-op in that case. The foundation's runCtx is derived from the
-// wrapper's, so cancelling here unwinds the foundation loop and the
-// translator goroutine emits the resulting [event.AgentDone] with
-// Success=false (cancellation is treated as an unsuccessful outcome).
+// a no-op in that case. Cancels the wrapper's runCtx (foundation
+// tools see ctx.Done) AND calls [kit.Agent.Abort] so kit's per-run
+// outcome flips to unsuccess and the resulting [event.AgentDone]
+// surfaces with Success=false. runUnsuccessful is also flipped so
+// the forwarder's Success override stays consistent if kit's signal
+// races against a pre-existing AgentError.
 func (a *Agent) Cancel() {
 	a.mu.Lock()
 	cancel := a.cancel
@@ -253,6 +269,9 @@ func (a *Agent) Cancel() {
 	a.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if a.kit != nil {
+		a.kit.Abort()
 	}
 }
 
@@ -417,14 +436,14 @@ func (a *Agent) activeCoord() *approval.Coordinator {
 // draining.
 //
 // Side effect: every [event.AgentError] flowing through this method
-// flips [Agent.runUnsuccessful] under the lock. The translator
-// goroutine reads that flag on [upevent.AgentEnd] to decide
-// [event.AgentDone].Success — engine-side AgentErrors (from
-// recoverFromTruncation, autosave failures, RunWithMode/Reply rejection)
-// never appear in the foundation's event stream, so this is the only
-// observable signal that the run failed. Setting the flag at every
-// emission point (rather than at every callsite) means future call
-// sites stay correct without having to remember the bookkeeping.
+// flips [Agent.runUnsuccessful] under the lock. [Agent.forwardKitEvents]
+// reads that flag on [event.AgentDone] to override kit's derived
+// Success — coding-side AgentErrors (autosave failures, post-turn
+// budget overrun, RunWithMode/Reply rejection) bypass kit's per-run
+// outcome tracking, so this flag is the only observable signal that
+// the run failed. Setting it at every emission point (rather than at
+// every callsite) means future call sites stay correct without having
+// to remember the bookkeeping.
 func (a *Agent) send(ev event.Event) {
 	if _, isErr := ev.(event.AgentError); isErr {
 		a.mu.Lock()

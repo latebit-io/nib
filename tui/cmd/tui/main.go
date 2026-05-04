@@ -585,6 +585,23 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	shutdown := func() {
 		app.CloseWatcher()
 		appCancel() // signal agent goroutines before teardown
+		if ag != nil {
+			// Drain the events channel so the forwarder can exit.
+			// ag.Close() blocks on forwardDone which requires the
+			// forwarder to finish sending — without a consumer it hangs.
+			drainDone := make(chan struct{})
+			go func() {
+				for {
+					select {
+					case <-drainDone:
+						return
+					case <-events:
+					}
+				}
+			}()
+			ag.Close()
+			close(drainDone)
+		}
 		sess.Close()
 	}
 

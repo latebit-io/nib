@@ -16,7 +16,7 @@ func call(args string) llm.ToolCall {
 }
 
 func TestDefinition(t *testing.T) {
-	tool := New("/tmp", func(string, string, Options) ([]Result, error) { return nil, nil })
+	tool := New("/tmp", func(context.Context, string, string, Options) ([]Result, error) { return nil, nil })
 	def := tool.Definition()
 	if def.Function.Name != "search_project" {
 		t.Fatalf("name = %q, want search_project", def.Function.Name)
@@ -37,21 +37,21 @@ func TestExecute(t *testing.T) {
 		{
 			name:       "invalid json",
 			args:       `{bad`,
-			fn:         func(string, string, Options) ([]Result, error) { return nil, nil },
+			fn:         func(context.Context, string, string, Options) ([]Result, error) { return nil, nil },
 			wantErr:    true,
 			wantSubstr: "invalid arguments",
 		},
 		{
 			name:       "empty pattern",
 			args:       `{"pattern":""}`,
-			fn:         func(string, string, Options) ([]Result, error) { return nil, nil },
+			fn:         func(context.Context, string, string, Options) ([]Result, error) { return nil, nil },
 			wantErr:    true,
 			wantSubstr: "pattern is required",
 		},
 		{
 			name: "search backend error",
 			args: `{"pattern":"foo"}`,
-			fn: func(string, string, Options) ([]Result, error) {
+			fn: func(context.Context, string, string, Options) ([]Result, error) {
 				return nil, errors.New("rg not found")
 			},
 			wantErr:    true,
@@ -60,7 +60,7 @@ func TestExecute(t *testing.T) {
 		{
 			name: "no matches",
 			args: `{"pattern":"nonexistent"}`,
-			fn: func(string, string, Options) ([]Result, error) {
+			fn: func(context.Context, string, string, Options) ([]Result, error) {
 				return nil, nil
 			},
 			wantSubstr: "No matches found",
@@ -68,7 +68,7 @@ func TestExecute(t *testing.T) {
 		{
 			name: "results formatted",
 			args: `{"pattern":"hello"}`,
-			fn: func(string, string, Options) ([]Result, error) {
+			fn: func(context.Context, string, string, Options) ([]Result, error) {
 				return []Result{
 					{Path: "main.go", Line: 42, Text: `fmt.Println("hello")`},
 					{Path: "lib.go", Line: 7, Text: `// hello world`},
@@ -79,7 +79,7 @@ func TestExecute(t *testing.T) {
 		{
 			name: "options forwarded",
 			args: `{"pattern":"test","regex":true,"case_sensitive":true,"file_glob":"*.go"}`,
-			fn: func(_ string, pattern string, opts Options) ([]Result, error) {
+			fn: func(_ context.Context, _ string, pattern string, opts Options) ([]Result, error) {
 				if pattern != "test" {
 					return nil, errors.New("wrong pattern")
 				}
@@ -129,7 +129,7 @@ func TestExecute_Truncation(t *testing.T) {
 		})
 	}
 
-	tool := New("/project", func(string, string, Options) ([]Result, error) {
+	tool := New("/project", func(context.Context, string, string, Options) ([]Result, error) {
 		return results, nil
 	})
 	result := tool.Execute(context.Background(), call(`{"pattern":"x"}`))
@@ -147,7 +147,7 @@ func TestExecute_Truncation(t *testing.T) {
 
 func TestExecute_ProjectRootForwarded(t *testing.T) {
 	var gotRoot string
-	tool := New("/my/project", func(root string, _ string, _ Options) ([]Result, error) {
+	tool := New("/my/project", func(_ context.Context, root string, _ string, _ Options) ([]Result, error) {
 		gotRoot = root
 		return nil, nil
 	})

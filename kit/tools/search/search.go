@@ -37,7 +37,7 @@ type Options struct {
 }
 
 // SearchFunc performs a text search under root for the given pattern.
-type SearchFunc func(root, pattern string, opts Options) ([]Result, error)
+type SearchFunc func(ctx context.Context, root, pattern string, opts Options) ([]Result, error)
 
 // Tool lets the LLM search for text patterns across the project.
 type Tool struct {
@@ -92,7 +92,7 @@ type searchArgs struct {
 }
 
 // Execute runs the search and returns formatted results.
-func (t *Tool) Execute(_ context.Context, call llm.ToolCall) agent.ToolResult {
+func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	var args searchArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("Error: invalid arguments: %v", err), IsError: true}
@@ -101,7 +101,7 @@ func (t *Tool) Execute(_ context.Context, call llm.ToolCall) agent.ToolResult {
 		return agent.ToolResult{Content: "Error: pattern is required", IsError: true}
 	}
 
-	results, err := t.search(t.projectRoot, args.Pattern, Options{
+	results, err := t.search(ctx, t.projectRoot, args.Pattern, Options{
 		CaseSensitive: args.CaseSensitive,
 		Regex:         args.Regex,
 		MaxResults:    DefaultMaxResults,

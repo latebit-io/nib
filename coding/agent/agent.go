@@ -708,7 +708,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 
 // adaptEngineSearch bridges engine/search.Search to kit's SearchFunc
 // signature so the kit-level search tool stays free of engine imports.
-func adaptEngineSearch(root, pattern string, opts searchtools.Options) ([]searchtools.Result, error) {
+func adaptEngineSearch(_ context.Context, root, pattern string, opts searchtools.Options) ([]searchtools.Result, error) {
 	results, err := enginesearch.Search(root, pattern, enginesearch.Options{
 		CaseSensitive: opts.CaseSensitive,
 		Regex:         opts.Regex,

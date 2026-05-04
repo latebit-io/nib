@@ -109,7 +109,11 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 	} else {
 		buf = buffer.New()
-		projectRoot, _ = os.Getwd()
+		var err error
+		projectRoot, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("determine project root: %w", err)
+		}
 	}
 
 	e := editor.New(buf)

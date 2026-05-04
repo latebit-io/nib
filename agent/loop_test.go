@@ -624,6 +624,104 @@ func TestGetSteeringMessages_ReentersLoop(t *testing.T) {
 	}
 }
 
+// TestBeforePark_EmitsAgentParkedInStreamOrder verifies that the
+// foundation calls BeforePark immediately before parking and emits the
+// returned [event.AgentParked] through the same event pipeline as
+// every other foundation event. The event must arrive after the
+// turn's MessageEnd / TurnEnd (proves it goes through the queue, not
+// a side channel) and must carry the hook's Finished bit.
+func TestBeforePark_EmitsAgentParkedInStreamOrder(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamText([]string{"hello"}, nil))
+	events := make(chan event.Event, 64)
+
+	hookCalls := 0
+	hooks := Hooks{
+		BeforePark: func(_ context.Context) (event.AgentParked, error) {
+			hookCalls++
+			return event.AgentParked{Finished: true}, nil
+		},
+	}
+
+	a, err := New(Options{Provider: provider, Events: events, Hooks: hooks})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	var (
+		sawTurnEnd  bool
+		sawParked   bool
+		parkedAfter bool
+	)
+	deadline := time.After(2 * time.Second)
+	for !sawParked {
+		select {
+		case ev := <-events:
+			switch e := ev.(type) {
+			case event.TurnEnd:
+				sawTurnEnd = true
+			case event.AgentParked:
+				sawParked = true
+				parkedAfter = sawTurnEnd
+				if !e.Finished {
+					t.Errorf("AgentParked.Finished = false; want true (hook returned true)")
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out before AgentParked: sawTurnEnd=%v hookCalls=%d", sawTurnEnd, hookCalls)
+		}
+	}
+
+	a.Abort()
+	a.WaitForIdle()
+
+	if !parkedAfter {
+		t.Errorf("AgentParked arrived before TurnEnd; ordering violated")
+	}
+	if hookCalls != 1 {
+		t.Errorf("BeforePark called %d times; want exactly 1", hookCalls)
+	}
+}
+
+// TestBeforePark_NilHookEmitsZeroValue verifies that an unset hook
+// still produces an AgentParked event (zero value); kit consumers can
+// rely on AgentWaiting firing for every park, hook or not.
+func TestBeforePark_NilHookEmitsZeroValue(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamDone())
+	events := make(chan event.Event, 64)
+
+	a, err := New(Options{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			if p, ok := ev.(event.AgentParked); ok {
+				if p.Finished {
+					t.Errorf("AgentParked.Finished = true with no hook; want zero value")
+				}
+				a.Abort()
+				a.WaitForIdle()
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out without seeing AgentParked")
+		}
+	}
+}
+
 // TestReply_DeliversBetweenTurns parks the loop on awaitReply, sends
 // a Reply, and confirms the loop consumes it as a user message in the
 // next turn.

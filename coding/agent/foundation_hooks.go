@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	upagent "github.com/latebit-io/nib/agent"
+	upevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/nudges"
@@ -160,18 +161,26 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	}
 
 	followUp := func(_ context.Context) ([]llm.Message, error) {
-		// GetFollowUpMessages fires after a turn with no tool calls AND
-		// after steering returned nothing. From here the foundation
-		// parks on awaitReply for the developer's next message — the
-		// AgentWaiting boundary. Emit it here so frontends know to
-		// enable input AND so the wrapper's IsWaiting() flag flips
-		// before the foundation parks.
+		// No follow-up messages — coding has no run-as-a-whole work
+		// queue beyond what steering injects mid-turn. The
+		// AgentWaiting emission moved to [beforePark] so it flows
+		// through the same translator goroutine as AgentToken; sending
+		// it from here raced trailing AgentTokens still queued in the
+		// foundation→kit translator pipeline.
+		return nil, nil
+	}
+
+	beforePark := func(_ context.Context) (upevent.AgentParked, error) {
+		// BeforePark fires after GetFollowUpMessages returned nothing
+		// and immediately before the foundation parks on awaitReply.
+		// We flip [waiting] here (frontends query IsWaiting) and hand
+		// the foundation the Finished bit so kit's translator can
+		// emit [event.AgentWaiting{Finished}] in stream order.
 		finished := a.tasksAllComplete()
 		a.mu.Lock()
 		a.waiting = true
 		a.mu.Unlock()
-		a.send(event.AgentWaiting{Finished: finished})
-		return nil, nil
+		return upevent.AgentParked{Finished: finished}, nil
 	}
 
 	onTruncated := func(_ context.Context, c upagent.TruncationContext) (upagent.TruncationResult, error) {
@@ -206,6 +215,7 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		TransformContext:    transform,
 		GetSteeringMessages: steering,
 		GetFollowUpMessages: followUp,
+		BeforePark:          beforePark,
 		OnTruncated:         onTruncated,
 	}
 }

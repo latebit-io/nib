@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
 )
 
@@ -44,12 +45,13 @@ func Merge(sets ...Toolset) Toolset {
 // mergeHooks chains every non-nil hook across all toolsets.
 func mergeHooks(sets []Toolset) Hooks {
 	var (
-		befores    []func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error)
-		afters     []func(context.Context, AfterToolCallContext) (AfterToolCallResult, error)
-		transforms []func(context.Context, []llm.Message) ([]llm.Message, error)
-		steerings  []func(context.Context) ([]llm.Message, error)
-		followUps  []func(context.Context) ([]llm.Message, error)
-		truncs     []func(context.Context, TruncationContext) (TruncationResult, error)
+		befores     []func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error)
+		afters      []func(context.Context, AfterToolCallContext) (AfterToolCallResult, error)
+		transforms  []func(context.Context, []llm.Message) ([]llm.Message, error)
+		steerings   []func(context.Context) ([]llm.Message, error)
+		followUps   []func(context.Context) ([]llm.Message, error)
+		beforeParks []func(context.Context) (event.AgentParked, error)
+		truncs      []func(context.Context, TruncationContext) (TruncationResult, error)
 	)
 	for _, s := range sets {
 		if s.Hooks.BeforeToolCall != nil {
@@ -67,6 +69,9 @@ func mergeHooks(sets []Toolset) Hooks {
 		if s.Hooks.GetFollowUpMessages != nil {
 			followUps = append(followUps, s.Hooks.GetFollowUpMessages)
 		}
+		if s.Hooks.BeforePark != nil {
+			beforeParks = append(beforeParks, s.Hooks.BeforePark)
+		}
 		if s.Hooks.OnTruncated != nil {
 			truncs = append(truncs, s.Hooks.OnTruncated)
 		}
@@ -78,7 +83,34 @@ func mergeHooks(sets []Toolset) Hooks {
 		TransformContext:    chainTransformContext(transforms),
 		GetSteeringMessages: chainGetMessages(steerings),
 		GetFollowUpMessages: chainGetMessages(followUps),
+		BeforePark:          chainBeforePark(beforeParks),
 		OnTruncated:         chainOnTruncated(truncs),
+	}
+}
+
+// chainBeforePark chains BeforePark hooks. Each runs in order; the
+// returned [event.AgentParked] OR-aggregates the Finished bool — any
+// hook signalling "finished" carries through. Errors short-circuit.
+// Returns nil when fns is empty.
+func chainBeforePark(fns []func(context.Context) (event.AgentParked, error)) func(context.Context) (event.AgentParked, error) {
+	switch len(fns) {
+	case 0:
+		return nil
+	case 1:
+		return fns[0]
+	}
+	return func(ctx context.Context) (event.AgentParked, error) {
+		var merged event.AgentParked
+		for _, fn := range fns {
+			res, err := fn(ctx)
+			if res.Finished {
+				merged.Finished = true
+			}
+			if err != nil {
+				return merged, err
+			}
+		}
+		return merged, nil
 	}
 }
 

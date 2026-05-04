@@ -16,6 +16,12 @@ import (
 //   - [event.AgentToken] streaming text
 //   - [event.AgentDone] success/failure dispatch (success := !runUnsuccessful)
 //   - [event.AgentError] dispatch on foundation [agentevent.Error]
+//   - [event.AgentWaiting] dispatch on foundation [agentevent.AgentParked].
+//     Routing AgentWaiting through the translator (rather than letting
+//     hooks send it directly to the consumer channel) preserves order
+//     with trailing AgentToken/AgentDone — both writers are now the
+//     translator goroutine, so a consumer's AgentWaiting can never
+//     overtake an in-flight AgentToken from the same turn.
 //   - [event.AgentTurnUsage] / [event.AgentInputEstimate] /
 //     [event.AgentCompacted] passthrough with field-for-field copy
 //
@@ -116,6 +122,8 @@ func (a *Agent) translate(ev agentevent.Event) {
 	case agentevent.Error:
 		a.markCurrentUnsuccess()
 		a.send(event.AgentError{Err: e.Err})
+	case agentevent.AgentParked:
+		a.send(event.AgentWaiting{Finished: e.Finished})
 	case agentevent.AgentEnd:
 		a.send(event.AgentDone{Success: !a.consumeCurrentUnsuccess()})
 	}

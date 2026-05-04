@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
 )
 
@@ -70,6 +71,21 @@ type Hooks struct {
 	// after the agent would otherwise stop. Distinct from steering: these
 	// are NOT injected mid-run; they trigger a fresh continuation.
 	GetFollowUpMessages func(ctx context.Context) ([]llm.Message, error)
+
+	// BeforePark fires after GetFollowUpMessages returns no messages and
+	// before the loop parks on [Agent.awaitReply]. The hook returns the
+	// payload the foundation includes in [event.AgentParked]; the
+	// foundation has no opinion on what Finished means — the hook owns
+	// the application-level "all work done" signal. A nil hook causes
+	// the foundation to emit a zero-value AgentParked.
+	//
+	// BeforePark exists so that the application's "we're parked" signal
+	// flows through the same event pipeline as every other foundation
+	// event, preserving order with trailing MessageUpdate/AgentEnd
+	// events. Sending an application-shaped event directly from
+	// GetFollowUpMessages races the event pipeline and was the
+	// historical source of out-of-order delivery to consumers.
+	BeforePark func(ctx context.Context) (event.AgentParked, error)
 
 	// OnTruncated fires when the provider's terminal Done event reports
 	// Truncated=true, before the foundation surfaces the truncation as a

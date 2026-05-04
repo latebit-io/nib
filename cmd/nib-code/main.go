@@ -33,7 +33,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/lintstage"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
-	"github.com/latebit-io/nib/tui/internal/ui"
+	"github.com/latebit-io/nib/tui/ui"
 )
 
 func main() {

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/latebit-io/nib/engine/mcp"
+	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
 )
 

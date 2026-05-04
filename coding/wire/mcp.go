@@ -13,7 +13,7 @@ import (
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/coding/agent"
 	codingtools "github.com/latebit-io/nib/coding/tools"
-	"github.com/latebit-io/nib/engine/mcp"
+	"github.com/latebit-io/nib/kit/mcp"
 )
 
 // mcpServerConfig describes one MCP server in .mcp.json.

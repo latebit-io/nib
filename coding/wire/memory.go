@@ -8,11 +8,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/latebit-io/nib/engine/mcp"
-	"github.com/latebit-io/nib/engine/memory/mcpadapter"
-	"github.com/latebit-io/nib/engine/memory/seed"
-	memserver "github.com/latebit-io/nib/engine/memory/server"
+	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
+	"github.com/latebit-io/nib/kit/memory/demarkus/mcpadapter"
+	"github.com/latebit-io/nib/kit/memory/demarkus/seed"
+	memserver "github.com/latebit-io/nib/kit/memory/demarkus/server"
 )
 
 // maxSummaryBytes caps the summary fetched at startup. The prompt layer

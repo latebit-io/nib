@@ -7,7 +7,7 @@
 // Agent.
 //
 // The underlying memory store (document fetch/publish) is provided by
-// [github.com/latebit-io/nib/engine/memory]. This package adapts the
+// [github.com/latebit-io/nib/kit/memory/demarkus]. This package adapts the
 // store for the agent's prompting and run-lifecycle needs; it does NOT
 // own the LLM-facing memory tools (those live in [coding/tools]).
 package memory

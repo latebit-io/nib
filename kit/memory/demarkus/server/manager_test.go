@@ -33,7 +33,7 @@ func TestEnsureBinariesShortCircuit(t *testing.T) {
 	}
 
 	// EnsureBinaries should return nil without attempting a download.
-	if err := m.EnsureBinaries(); err != nil {
+	if err := m.EnsureBinaries(t.Context()); err != nil {
 		t.Errorf("expected nil when all binaries present, got: %v", err)
 	}
 }

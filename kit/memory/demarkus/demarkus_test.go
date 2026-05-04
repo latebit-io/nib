@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/nib/kit/memory/demarkus"
 )
@@ -45,9 +46,16 @@ func TestOpen_Integration(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	// Bound the entire test — install + start + round-trip — so a
+	// stalled download or server start cannot hang CI indefinitely.
+	// Real cold-start runs in ~4s; 60s leaves wide margin for slow
+	// network without being unbounded.
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
 	t.Log("opening demarkus...")
 	root := t.TempDir()
-	res, err := demarkus.Open(context.Background(), root)
+	res, err := demarkus.Open(ctx, root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -67,8 +75,9 @@ func TestOpen_Integration(t *testing.T) {
 	// Round-trip a publish/fetch to confirm the wired store actually
 	// talks to the server. Serves as the canonical "is the facade
 	// composing the pieces correctly?" check. Publish returns
-	// metadata; Body is only populated by Fetch.
-	ctx := context.Background()
+	// metadata; Body is only populated by Fetch. Operations share the
+	// outer test deadline so a stuck RPC fails the test rather than
+	// blocking forever.
 	if _, err := res.Store.Publish(ctx, "/test.md", "hello kit", 0); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}

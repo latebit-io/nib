@@ -53,23 +53,38 @@ func (r *Result) Close() error {
 // failure after the server has started, the server is stopped before
 // returning.
 //
-// ctx bounds setup operations that may hit the network (currently none,
-// but reserved). Server lifecycle itself is process-bounded; callers
-// must invoke [Result.Close] to stop it.
-func Open(_ context.Context, projectRoot string) (*Result, error) {
+// ctx bounds binary download (the only network I/O in startup) and is
+// checked between steps so cancellation propagates promptly. The
+// underlying token / start / store-creation operations are filesystem
+// or local-process work and run to completion once started; callers
+// must invoke [Result.Close] to stop the server.
+func Open(ctx context.Context, projectRoot string) (*Result, error) {
 	mgr := server.New(projectRoot)
 
-	if err := mgr.EnsureBinaries(); err != nil {
+	if err := mgr.EnsureBinaries(ctx); err != nil {
 		return nil, fmt.Errorf("demarkus: install binaries: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("demarkus: cancelled before token bootstrap: %w", err)
 	}
 
 	token, err := mgr.EnsureToken()
 	if err != nil {
 		return nil, fmt.Errorf("demarkus: bootstrap token: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("demarkus: cancelled before server start: %w", err)
+	}
 
 	if _, err := mgr.Start(); err != nil {
 		return nil, fmt.Errorf("demarkus: start server: %w", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		if stopErr := mgr.Stop(); stopErr != nil {
+			return nil, fmt.Errorf("demarkus: cancelled after server start: %w (rollback also failed: %v)", err, stopErr)
+		}
+		return nil, fmt.Errorf("demarkus: cancelled after server start: %w", err)
 	}
 
 	store, err := mgr.NewStore(token, func(c *mcp.Client) memory.Store {

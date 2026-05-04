@@ -142,7 +142,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		defer func() { _ = lspMgr.Close() }()
 	}
 
-	if err := wire.EnsureBinaries(projectRoot); err != nil {
+	if err := wire.EnsureBinaries(appCtx, projectRoot); err != nil {
 		return fmt.Errorf("memory: install binaries: %w", err)
 	}
 

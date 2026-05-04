@@ -524,12 +524,14 @@ func (m *Manager) Port() int {
 
 // EnsureBinaries checks .project/bin/ for demarkus binaries.
 // If any are missing, downloads and installs them from GitHub releases.
-func (m *Manager) EnsureBinaries() error {
+// ctx bounds all install-time network I/O so a stalled download can be
+// cancelled.
+func (m *Manager) EnsureBinaries(ctx context.Context) error {
 	for _, name := range strings.Split(requiredBins, ",") {
 		path := filepath.Join(m.binDir, name)
 		if _, err := os.Stat(path); err != nil {
 			versionFile := filepath.Join(m.projectRoot, ".project", ".memory-version")
-			return install(m.binDir, versionFile)
+			return install(ctx, m.binDir, versionFile)
 		}
 	}
 	return nil

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -39,13 +40,14 @@ var httpClient = &http.Client{Timeout: httpTimeout}
 
 // install downloads and installs the demarkus binaries into binDir.
 // version is the pinned version to install (empty means fetch latest).
-func install(binDir, versionFile string) error {
+// ctx bounds all network I/O so a stalled download can be cancelled.
+func install(ctx context.Context, binDir, versionFile string) error {
 	platform, arch, err := detectPlatform()
 	if err != nil {
 		return err
 	}
 
-	version, err := resolveVersion(versionFile)
+	version, err := resolveVersion(ctx, versionFile)
 	if err != nil {
 		return err
 	}
@@ -58,13 +60,13 @@ func install(binDir, versionFile string) error {
 	slog.Info("memory install: downloading server", "version", version, "platform", platform, "arch", arch)
 	serverTag := "server/v" + version
 	serverArchive := fmt.Sprintf("demarkus-server_%s_%s_%s.tar.gz", version, platform, arch)
-	if err := downloadRelease(serverTag, serverArchive, "demarkus-server_checksums.txt", binDir, []string{"demarkus-server", "demarkus-token"}); err != nil {
+	if err := downloadRelease(ctx, serverTag, serverArchive, "demarkus-server_checksums.txt", binDir, []string{"demarkus-server", "demarkus-token"}); err != nil {
 		return fmt.Errorf("server release: %w", err)
 	}
 
 	// Client release: demarkus CLI and demarkus-mcp live in separate archives
 	// under a single release tag and share one checksums file.
-	clientVersion, err := fetchLatestVersion("client")
+	clientVersion, err := fetchLatestVersion(ctx, "client")
 	if err != nil {
 		return fmt.Errorf("fetch client version: %w", err)
 	}
@@ -72,11 +74,11 @@ func install(binDir, versionFile string) error {
 	clientTag := "client/v" + clientVersion
 	clientChecksums := "demarkus-client_checksums.txt"
 	clientArchive := fmt.Sprintf("demarkus-client_%s_%s_%s.tar.gz", clientVersion, platform, arch)
-	if err := downloadRelease(clientTag, clientArchive, clientChecksums, binDir, []string{"demarkus"}); err != nil {
+	if err := downloadRelease(ctx, clientTag, clientArchive, clientChecksums, binDir, []string{"demarkus"}); err != nil {
 		return fmt.Errorf("client release: %w", err)
 	}
 	mcpArchive := fmt.Sprintf("demarkus-mcp_%s_%s_%s.tar.gz", clientVersion, platform, arch)
-	if err := downloadRelease(clientTag, mcpArchive, clientChecksums, binDir, []string{"demarkus-mcp"}); err != nil {
+	if err := downloadRelease(ctx, clientTag, mcpArchive, clientChecksums, binDir, []string{"demarkus-mcp"}); err != nil {
 		return fmt.Errorf("mcp release: %w", err)
 	}
 
@@ -107,7 +109,7 @@ func detectPlatform() (platform, arch string, err error) {
 }
 
 // resolveVersion reads the pinned version from versionFile, or fetches latest from GitHub.
-func resolveVersion(versionFile string) (string, error) {
+func resolveVersion(ctx context.Context, versionFile string) (string, error) {
 	// Check env override first.
 	if v := os.Getenv("MEMORY_VERSION"); v != "" {
 		return v, nil
@@ -125,15 +127,15 @@ func resolveVersion(versionFile string) (string, error) {
 		return "", fmt.Errorf("read pinned version: %w", err)
 	}
 	// Fetch latest.
-	return fetchLatestVersion("server")
+	return fetchLatestVersion(ctx, "server")
 }
 
 // fetchLatestVersion queries the GitHub releases API for the latest version
-// of the given component ("server" or "client").
-func fetchLatestVersion(component string) (string, error) {
+// of the given component ("server" or "client"). ctx bounds the request.
+func fetchLatestVersion(ctx context.Context, component string) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases", githubRepo)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -170,16 +172,16 @@ func fetchLatestVersion(component string) (string, error) {
 // downloadRelease fetches, verifies, and extracts specific binaries from a
 // release asset. tag is the git tag (e.g. "client/v1.2.3"). archiveName and
 // checksumsName are the asset filenames; multiple archives in the same release
-// may share a single checksums file.
-func downloadRelease(tag, archiveName, checksumsName, binDir string, wantBins []string) error {
+// may share a single checksums file. ctx bounds all network I/O.
+func downloadRelease(ctx context.Context, tag, archiveName, checksumsName, binDir string, wantBins []string) error {
 	// Download archive.
-	archiveData, err := downloadAsset(tag, archiveName)
+	archiveData, err := downloadAsset(ctx, tag, archiveName)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", archiveName, err)
 	}
 
 	// Download and verify checksums.
-	checksumsData, err := downloadAsset(tag, checksumsName)
+	checksumsData, err := downloadAsset(ctx, tag, checksumsName)
 	if err != nil {
 		slog.Warn("memory install: checksums unavailable, skipping verification", "err", err)
 	} else {
@@ -192,20 +194,24 @@ func downloadRelease(tag, archiveName, checksumsName, binDir string, wantBins []
 	return extractBinaries(archiveData, binDir, wantBins)
 }
 
-// downloadAsset fetches a release asset from GitHub.
-func downloadAsset(tag, filename string) ([]byte, error) {
+// downloadAsset fetches a release asset from GitHub. ctx bounds the request.
+func downloadAsset(ctx context.Context, tag, filename string) ([]byte, error) {
 	// For private repos with GITHUB_TOKEN, we'd need the asset API.
 	// For public repos, direct download URL works.
 	token := os.Getenv("GITHUB_TOKEN")
 
 	if token != "" {
-		return downloadAssetViaAPI(tag, filename, token)
+		return downloadAssetViaAPI(ctx, tag, filename, token)
 	}
 
 	encodedTag := strings.ReplaceAll(tag, "/", "%2F")
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", githubRepo, encodedTag, filename)
 
-	resp, err := httpClient.Get(url)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -218,11 +224,11 @@ func downloadAsset(tag, filename string) ([]byte, error) {
 }
 
 // downloadAssetViaAPI uses the GitHub releases API to download assets from private repos.
-func downloadAssetViaAPI(tag, filename, token string) ([]byte, error) {
+func downloadAssetViaAPI(ctx context.Context, tag, filename, token string) ([]byte, error) {
 	encodedTag := strings.ReplaceAll(tag, "/", "%2F")
 	releaseURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", githubRepo, encodedTag)
 
-	req, err := http.NewRequest("GET", releaseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", releaseURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +258,7 @@ func downloadAssetViaAPI(tag, filename, token string) ([]byte, error) {
 		if asset.Name != filename {
 			continue
 		}
-		assetReq, err := http.NewRequest("GET", asset.URL, nil)
+		assetReq, err := http.NewRequestWithContext(ctx, "GET", asset.URL, nil)
 		if err != nil {
 			return nil, err
 		}

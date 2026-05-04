@@ -183,7 +183,7 @@ func run() error {
 	defer stop()
 
 	// Ensure demarkus binaries are installed.
-	if err := wire.EnsureBinaries(projectRoot); err != nil {
+	if err := wire.EnsureBinaries(ctx, projectRoot); err != nil {
 		return setupErr("memory: install binaries: %v", err)
 	}
 

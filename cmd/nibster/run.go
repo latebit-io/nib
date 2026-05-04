@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,7 @@ type runResult struct {
 	errs             []string
 	parkedNaturally  bool
 	contextCancelled bool
+	summaryTruncated bool
 }
 
 // runAgent boots a kit agent on the given prompt, drives the event
@@ -120,12 +122,16 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 
 	status := classifyStatusFromResult(result)
 
-	// Best-effort index write — failures are surfaced via slog but do
-	// not mask the agent outcome. Use a fresh context so a cancelled
+	// Best-effort index write — failures do not mask the agent
+	// outcome but DO surface to stderr. Going through slog alone would
+	// be invisible in the default path (setupLogging without --debug
+	// routes slog to io.Discard), leaving --list and --show silently
+	// out of sync with reality. Use a fresh context so a cancelled
 	// parent ctx doesn't also kill the index update.
 	indexCtx, cancel := context.WithTimeout(context.Background(), indexWriteTimeout)
 	defer cancel()
 	if ierr := writeIndexEntry(indexCtx, store, sessionID, message, status); ierr != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to update %s: %v\n", indexPath, ierr)
 		slog.Warn("index entry", "err", ierr)
 	}
 
@@ -170,6 +176,7 @@ func driveAgent(ctx context.Context, ag *kit.Agent, events <-chan event.Event, p
 	var summary strings.Builder
 	var errs []string
 	contextCancelled := false
+	truncated := false
 
 	for {
 		select {
@@ -185,11 +192,12 @@ func driveAgent(ctx context.Context, ag *kit.Agent, events <-chan event.Event, p
 					errs:             errs,
 					parkedNaturally:  parked.Load(),
 					contextCancelled: contextCancelled,
+					summaryTruncated: truncated,
 				}
 			}
 			switch e := ev.(type) {
 			case event.AgentToken:
-				appendBounded(&summary, e.Text)
+				appendBounded(&summary, e.Text, &truncated)
 			case event.AgentError:
 				errs = append(errs, e.Err)
 			case event.AgentDone:
@@ -198,6 +206,7 @@ func driveAgent(ctx context.Context, ag *kit.Agent, events <-chan event.Event, p
 					errs:             errs,
 					parkedNaturally:  parked.Load(),
 					contextCancelled: contextCancelled,
+					summaryTruncated: truncated,
 				}
 			}
 		}
@@ -213,12 +222,19 @@ const maxSummaryBytes = 10 * 1024 * 1024
 // appendBounded adds text to summary, capping at maxSummaryBytes with
 // a one-time truncation marker. Mirrors the policy in kit/headless so
 // nibster's behavior matches what other kit consumers see.
-func appendBounded(summary *strings.Builder, text string) {
-	if summary.Len() >= maxSummaryBytes {
+//
+// truncated is the explicit latch — once set, further calls are
+// no-ops. Without it, a single oversize chunk would write the marker
+// while leaving summary.Len() below the cap, and subsequent small
+// appends would keep growing the summary after the "truncated" notice
+// — breaking the one-time-truncation contract.
+func appendBounded(summary *strings.Builder, text string, truncated *bool) {
+	if *truncated {
 		return
 	}
 	if summary.Len()+len(text) > maxSummaryBytes {
 		summary.WriteString("\n…[summary truncated]")
+		*truncated = true
 		return
 	}
 	summary.WriteString(text)

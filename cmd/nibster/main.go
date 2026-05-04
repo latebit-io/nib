@@ -194,8 +194,14 @@ func listSessions(ctx context.Context, store memory.Store) error {
 	return nil
 }
 
-// showSession prints /nibster/sessions/<id>.md to stdout.
+// showSession prints /nibster/sessions/<id>.md to stdout. Validates id
+// against the canonical session-ID shape so a path-like value (../foo,
+// absolute paths, embedded slashes) cannot escape sessionsDir and read
+// arbitrary documents from the store.
 func showSession(ctx context.Context, store memory.Store, id string) error {
+	if !validSessionID(id) {
+		return setupErr("invalid session id %q (expected <YYYY-MM-DD-HHMMSS>-<slug>-<hex>)", id)
+	}
 	path := sessionsDir + "/" + id + ".md"
 	doc, err := store.Fetch(ctx, path)
 	if errors.Is(err, memory.ErrNotFound) {

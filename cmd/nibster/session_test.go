@@ -46,9 +46,12 @@ func TestNewSessionID_Format(t *testing.T) {
 	now := time.Date(2026, 5, 4, 14, 30, 45, 0, time.UTC)
 	got := newSessionID(now, "Build an e-mower")
 
-	want := "2026-05-04-143045-build-an-e-mower"
-	if got != want {
-		t.Errorf("newSessionID = %q, want %q", got, want)
+	wantPrefix := "2026-05-04-143045-build-an-e-mower-"
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("newSessionID = %q, want prefix %q", got, wantPrefix)
+	}
+	if !validSessionID(got) {
+		t.Errorf("newSessionID = %q does not match canonical pattern", got)
 	}
 }
 
@@ -75,7 +78,53 @@ func TestNewSessionID_FallbackSlugForBlankMessage(t *testing.T) {
 	now := time.Date(2026, 5, 4, 14, 30, 45, 0, time.UTC)
 	got := newSessionID(now, "  \t\n  ")
 
-	if !strings.HasSuffix(got, "-session") {
-		t.Errorf("blank message should produce -session suffix, got %q", got)
+	// Format: <timestamp>-session-<8 hex>. The slug is "session"; entropy follows.
+	wantPrefix := "2026-05-04-143045-session-"
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Errorf("blank message should produce %q prefix, got %q", wantPrefix, got)
+	}
+}
+
+func TestNewSessionID_EntropyCollisionResistance(t *testing.T) {
+	t.Parallel()
+
+	// Same timestamp + same message should still produce distinct IDs
+	// — that's the whole point of the entropy suffix.
+	now := time.Date(2026, 5, 4, 14, 30, 45, 0, time.UTC)
+	a := newSessionID(now, "same prompt")
+	b := newSessionID(now, "same prompt")
+	if a == b {
+		t.Errorf("entropy did not produce distinct IDs: %q == %q", a, b)
+	}
+}
+
+func TestValidSessionID(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"canonical", "2026-05-04-143045-hello-world-deadbeef", true},
+		{"slug-with-numbers", "2026-05-04-143045-build123-emower-cafef00d", true},
+		{"path-traversal", "../../etc/passwd", false},
+		{"absolute-path", "/etc/passwd", false},
+		{"embedded-slash", "2026-05-04-143045-foo/bar-deadbeef", false},
+		{"empty", "", false},
+		{"missing-entropy", "2026-05-04-143045-hello", false},
+		{"short-entropy", "2026-05-04-143045-hello-dead", false},
+		{"non-hex-entropy", "2026-05-04-143045-hello-deadXXXX", false},
+		{"uppercase-slug", "2026-05-04-143045-Hello-deadbeef", false},
+		{"space-in-slug", "2026-05-04-143045-hello world-deadbeef", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := validSessionID(tc.id)
+			if got != tc.want {
+				t.Errorf("validSessionID(%q) = %v, want %v", tc.id, got, tc.want)
+			}
+		})
 	}
 }

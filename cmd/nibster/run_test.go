@@ -162,17 +162,47 @@ func TestAppendBounded_TruncatesAtCap(t *testing.T) {
 	t.Parallel()
 
 	var b strings.Builder
+	var truncated bool
 	// Pre-fill close to the cap.
 	b.WriteString(strings.Repeat("a", maxSummaryBytes-10))
-	appendBounded(&b, strings.Repeat("b", 100))
+	appendBounded(&b, strings.Repeat("b", 100), &truncated)
+	if !truncated {
+		t.Errorf("truncated flag not latched")
+	}
 	if !strings.Contains(b.String(), "[summary truncated]") {
 		t.Errorf("missing truncation marker; len=%d", b.Len())
 	}
 
-	// Subsequent appends are no-ops.
+	// Subsequent appends must be no-ops, even when summary.Len() is
+	// still below maxSummaryBytes — the truncated latch is the
+	// permanent stop, not the byte cap.
 	before := b.Len()
-	appendBounded(&b, "more")
+	appendBounded(&b, "more", &truncated)
 	if b.Len() != before {
 		t.Errorf("appendBounded after truncation grew the buffer: %d → %d", before, b.Len())
+	}
+}
+
+// TestAppendBounded_OversizeChunkLatches verifies the regression CodeRabbit
+// flagged: when a single chunk overflows the remaining budget while
+// summary.Len() is still well below maxSummaryBytes, the truncation must
+// latch so subsequent small appends do not keep growing the summary.
+func TestAppendBounded_OversizeChunkLatches(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	var truncated bool
+	// summary stays small; the overflow comes from a single huge chunk.
+	appendBounded(&b, strings.Repeat("x", maxSummaryBytes+1), &truncated)
+	if !truncated {
+		t.Fatalf("truncated flag not latched after oversize chunk")
+	}
+	before := b.Len()
+	if before >= maxSummaryBytes {
+		t.Fatalf("summary len %d unexpectedly at/above cap before subsequent append", before)
+	}
+	appendBounded(&b, "subsequent", &truncated)
+	if b.Len() != before {
+		t.Errorf("appendBounded grew after oversize-chunk latch: %d → %d", before, b.Len())
 	}
 }

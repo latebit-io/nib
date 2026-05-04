@@ -30,7 +30,8 @@ func TestQuoteMessage(t *testing.T) {
 	}{
 		{"plain", "hello", `"hello"`},
 		{"newline-collapses", "line1\nline2", `"line1 line2"`},
-		{"crlf-collapses", "line1\r\nline2", `"line1  line2"`},
+		{"crlf-collapses", "line1\r\nline2", `"line1 line2"`},
+		{"bare-cr-collapses", "line1\rline2", `"line1 line2"`},
 		{"truncates-long", strings.Repeat("a", 200), `"` + strings.Repeat("a", messageMaxLen-3) + `..."`},
 		{"escapes-quote", `say "hi"`, `"say \"hi\""`},
 	}
@@ -192,4 +193,66 @@ func (s errStore) Append(_ context.Context, _, _ string, _ int) (memory.Document
 }
 func (s errStore) List(_ context.Context, _ string) ([]string, error) {
 	return nil, s.err
+}
+
+// flakyStore wraps fakeStore and returns ErrConflict on the first N
+// Append calls before delegating normally. Used to verify that
+// [writeIndexEntry] retries the optimistic-concurrency path.
+type flakyStore struct {
+	*fakeStore
+	conflictsRemaining int
+	mu                 sync.Mutex
+}
+
+func (s *flakyStore) Append(ctx context.Context, path, body string, expectedVersion int) (memory.Document, error) {
+	s.mu.Lock()
+	if s.conflictsRemaining > 0 {
+		s.conflictsRemaining--
+		s.mu.Unlock()
+		return memory.Document{}, memory.ErrConflict
+	}
+	s.mu.Unlock()
+	return s.fakeStore.Append(ctx, path, body, expectedVersion)
+}
+
+func TestWriteIndexEntry_RetriesOnConflict(t *testing.T) {
+	t.Parallel()
+
+	base := newFakeStore()
+	// Pre-create the index so writeIndexEntry takes the Append path.
+	if _, err := base.Publish(t.Context(), indexPath, indexHeader, 0); err != nil {
+		t.Fatalf("seed index: %v", err)
+	}
+
+	flaky := &flakyStore{fakeStore: base, conflictsRemaining: 2}
+	if err := writeIndexEntry(t.Context(), flaky, "id", "msg", statusSuccess); err != nil {
+		t.Fatalf("writeIndexEntry: %v", err)
+	}
+	doc, err := base.Fetch(t.Context(), indexPath)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !strings.Contains(doc.Body, "id") {
+		t.Errorf("entry not appended after retries: %q", doc.Body)
+	}
+}
+
+func TestWriteIndexEntry_GivesUpAfterRepeatedConflicts(t *testing.T) {
+	t.Parallel()
+
+	base := newFakeStore()
+	if _, err := base.Publish(t.Context(), indexPath, indexHeader, 0); err != nil {
+		t.Fatalf("seed index: %v", err)
+	}
+
+	// More conflicts than the retry budget — writeIndexEntry should
+	// give up and return a wrapped ErrConflict.
+	flaky := &flakyStore{fakeStore: base, conflictsRemaining: indexWriteRetries + 1}
+	err := writeIndexEntry(t.Context(), flaky, "id", "msg", statusSuccess)
+	if err == nil {
+		t.Fatalf("expected error after exhausted retries")
+	}
+	if !errors.Is(err, memory.ErrConflict) {
+		t.Errorf("err = %v, want chain to contain memory.ErrConflict", err)
+	}
 }

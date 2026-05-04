@@ -637,7 +637,6 @@ func TestNew_DeduplicatesToolsFirstWins(t *testing.T) {
 	a.WaitForIdle()
 	drainUntil(events, untilDone)
 
-
 	if !directTool.called {
 		t.Fatal("direct tool should have been called (first wins)")
 	}

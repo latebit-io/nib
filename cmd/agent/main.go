@@ -269,6 +269,7 @@ func run() error {
 	// Run the agent.
 	runner := headless.NewRunner(ag, workspace, events, stderr, stdinTTY)
 	result := runner.Run(ctx, goal, cfg.files)
+	ag.Close()
 
 	// Output result.
 	if outputJSON {

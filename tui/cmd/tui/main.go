@@ -585,6 +585,9 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	shutdown := func() {
 		app.CloseWatcher()
 		appCancel() // signal agent goroutines before teardown
+		if ag != nil {
+			ag.Close()
+		}
 		sess.Close()
 	}
 

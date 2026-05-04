@@ -157,3 +157,12 @@ func TestExecute_ProjectRootForwarded(t *testing.T) {
 		t.Errorf("root = %q, want /my/project", gotRoot)
 	}
 }
+
+func TestNew_NilSearchFuncPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil SearchFunc")
+		}
+	}()
+	New("/tmp", nil)
+}

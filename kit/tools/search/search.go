@@ -48,6 +48,9 @@ type Tool struct {
 // New creates a search tool rooted at projectRoot using the given
 // search backend.
 func New(projectRoot string, fn SearchFunc) *Tool {
+	if fn == nil {
+		panic("search.New: nil SearchFunc")
+	}
 	return &Tool{projectRoot: projectRoot, search: fn}
 }
 

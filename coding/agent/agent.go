@@ -24,6 +24,7 @@ import (
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/lint"
 	"github.com/latebit-io/nib/engine/runconfig"
+	enginesearch "github.com/latebit-io/nib/engine/search"
 	"github.com/latebit-io/nib/engine/validate"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/approval"
@@ -31,6 +32,7 @@ import (
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/tools/bash"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
+	searchtools "github.com/latebit-io/nib/kit/tools/search"
 )
 
 // InteractionMode controls prompt framing — how the agent describes its
@@ -616,7 +618,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 
 	builtins = append(builtins, tools.NewGoToLineTool(workspace, a))
 	builtins = append(builtins, tools.NewGlobTool(workspace))
-	builtins = append(builtins, tools.NewSearchProjectTool(projectRoot))
+	builtins = append(builtins, searchtools.New(projectRoot, adaptEngineSearch))
 	builtins = append(builtins, tools.NewPackageInfoTool(projectRoot))
 	builtins = a.appendSmokeTool(builtins, projectRoot)
 
@@ -702,6 +704,25 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		a.tools[key] = t
 		a.toolDefs = append(a.toolDefs, def)
 	}
+}
+
+// adaptEngineSearch bridges engine/search.Search to kit's SearchFunc
+// signature so the kit-level search tool stays free of engine imports.
+func adaptEngineSearch(_ context.Context, root, pattern string, opts searchtools.Options) ([]searchtools.Result, error) {
+	results, err := enginesearch.Search(root, pattern, enginesearch.Options{
+		CaseSensitive: opts.CaseSensitive,
+		Regex:         opts.Regex,
+		MaxResults:    opts.MaxResults,
+		FileGlob:      opts.FileGlob,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]searchtools.Result, len(results))
+	for i, r := range results {
+		out[i] = searchtools.Result{Path: r.Path, Line: r.Line, Text: r.Text}
+	}
+	return out, nil
 }
 
 // Public lifecycle and signal API (Run, RunWithMode, Reply, Cancel,

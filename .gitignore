@@ -32,7 +32,7 @@ go.work.sum
 # package directory (default output name = directory name).
 bin/
 cmd/agent/agent
-tui/cmd/tui/tui
+tui/cmd/nib-code/nib-code
 
 .mcp.json
 log.txt

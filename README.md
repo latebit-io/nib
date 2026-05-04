@@ -246,13 +246,13 @@ p.Run()
 
 ```bash
 # Editor only
-tui/bin/nib /path/to/file.go
+tui/bin/nib-code /path/to/file.go
 
 # With AI agent
-LLM_API_KEY=<key> tui/bin/nib /path/to/file.go
+LLM_API_KEY=<key> tui/bin/nib-code /path/to/file.go
 
 # Debug mode
-tui/bin/nib --debug /path/to/file.go
+tui/bin/nib-code --debug /path/to/file.go
 ```
 
 ## License

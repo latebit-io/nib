@@ -18,18 +18,19 @@ build:
 	cd kit && go build ./...
 	cd coding && go build ./...
 	mkdir -p tui/bin
-	cd tui && go build -o bin/nib ./cmd/tui
+	cd tui && go build -o bin/nib-code ./cmd/nib-code
 	mkdir -p cmd/agent/bin
 	cd cmd/agent && go build -o bin/nib-agent .
 
 install: build
 	mkdir -p $(BIN_DIR)
-	ln -sf $(CURDIR)/tui/bin/nib $(BIN_DIR)/nib
+	rm -f $(BIN_DIR)/nib
+	ln -sf $(CURDIR)/tui/bin/nib-code $(BIN_DIR)/nib-code
 	ln -sf $(CURDIR)/cmd/agent/bin/nib-agent $(BIN_DIR)/nib-agent
 	@echo "Installed. Ensure $(BIN_DIR) is in PATH."
 
 uninstall:
-	rm -f $(BIN_DIR)/nib $(BIN_DIR)/nib-agent
+	rm -f $(BIN_DIR)/nib $(BIN_DIR)/nib-code $(BIN_DIR)/nib-agent
 
 test:
 	cd ai && go test ./...

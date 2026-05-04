@@ -19,7 +19,7 @@ import (
 //     bookkeeping that depended on its delivery would desync.
 //   - [event.AgentDone] is intercepted to flip [Agent.running] off
 //     and to override Success with [Agent.runUnsuccessful] — kit's
-//     per-run outcome only knows about Aborts and foundation Errors,
+//     per-run outcome only knows about Cancels and foundation Errors,
 //     so coding-side AgentErrors emitted via [Agent.send] (autosave
 //     failure, RunWithMode rejection) need this wrapper-level flag
 //     to surface as Success=false.

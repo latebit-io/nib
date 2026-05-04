@@ -65,7 +65,7 @@ func (a *Agent) onTurnSettled() {
 	}
 	a.send(event.AgentError{Err: msg})
 	if a.kit != nil {
-		a.kit.Abort()
+		a.kit.Cancel()
 	}
 }
 

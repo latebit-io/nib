@@ -50,7 +50,7 @@ func (p errorProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDe
 }
 
 // blockingProvider blocks Stream until ctx cancellation. Used to keep
-// a run alive long enough to observe Abort semantics deterministically.
+// a run alive long enough to observe Cancel semantics deterministically.
 type blockingProvider struct{}
 
 func (blockingProvider) Stream(ctx context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
@@ -176,13 +176,13 @@ func TestPrompt_StreamsTokensAndEndsSuccess(t *testing.T) {
 	}
 
 	// Drain everything the run emits up to AgentTurnUsage so we can
-	// observe the streaming events. Then Abort to unwind from the
+	// observe the streaming events. Then Cancel to unwind from the
 	// awaitReply park; AgentDone arrives with Success=false.
 	got := drainUntil(events, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentTurnUsage)
 		return ok
 	})
-	a.Abort()
+	a.Cancel()
 	a.WaitForIdle()
 	got = append(got, drainUntil(events, untilDone)...)
 	if len(got) == 0 {
@@ -219,17 +219,17 @@ func TestPrompt_StreamsTokensAndEndsSuccess(t *testing.T) {
 		t.Fatalf("no AgentTurnUsage in events")
 	}
 
-	// Abort flips success=false.
+	// Cancel flips success=false.
 	done, _ := lastDone(got)
 	if done.Success {
-		t.Fatalf("AgentDone.Success=true after Abort, want false")
+		t.Fatalf("AgentDone.Success=true after Cancel, want false")
 	}
 }
 
 // TestPrompt_CleanRunDoneSuccessTrue drives a run that completes
 // cleanly via [AfterToolCallResult.Terminate] and asserts the resulting
 // [event.AgentDone] reports Success=true. This is the only path that
-// produces a clean foundation AgentEnd without external Abort or
+// produces a clean foundation AgentEnd without external Cancel or
 // stream error, so it's the only way to observe the success=true
 // branch of the kit translator.
 func TestPrompt_CleanRunDoneSuccessTrue(t *testing.T) {
@@ -529,7 +529,7 @@ func TestErrRunInProgress(t *testing.T) {
 		t.Fatalf("Prompt(first): %v", err)
 	}
 	defer func() {
-		a.Abort()
+		a.Cancel()
 		a.WaitForIdle()
 		drainUntil(events, untilDone)
 	}()
@@ -559,7 +559,7 @@ func TestState_DelegatesToFoundation(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 	defer func() {
-		a.Abort()
+		a.Cancel()
 		a.WaitForIdle()
 		drainUntil(events, untilDone)
 	}()
@@ -607,7 +607,7 @@ func TestEventTranslation_TurnUsageFieldByField(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 	defer func() {
-		a.Abort()
+		a.Cancel()
 		a.WaitForIdle()
 		drainUntil(events, untilDone)
 	}()
@@ -643,7 +643,7 @@ func TestFoundationObservability_NotInConsumerStream(t *testing.T) {
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
-	a.Abort()
+	a.Cancel()
 	a.WaitForIdle()
 
 	got := drainUntil(events, untilDone)
@@ -758,9 +758,9 @@ func TestClose_DeliversFinalAgentDone(t *testing.T) {
 	if !ok {
 		t.Fatalf("no AgentDone after Close")
 	}
-	// Close calls Abort, which sets the unsuccess flag.
+	// Close calls Cancel, which sets the unsuccess flag.
 	if d.Success {
-		t.Fatalf("AgentDone.Success=true after Close, want false (Close aborts)")
+		t.Fatalf("AgentDone.Success=true after Close, want false (Close cancels)")
 	}
 }
 

@@ -375,7 +375,7 @@ func (a *Agent) IsRunning() bool {
 // Cancel stops the current agent run. Safe to call when no run is
 // active — the wrapper's cancel func is nil between runs and this is
 // a no-op in that case. Cancels the wrapper's runCtx (foundation
-// tools see ctx.Done) AND calls [kit.Agent.Abort] so kit's per-run
+// tools see ctx.Done) AND calls [kit.Agent.Cancel] so kit's per-run
 // outcome flips to unsuccess and the resulting [event.AgentDone]
 // surfaces with Success=false. runUnsuccessful is also flipped so
 // the forwarder's Success override stays consistent if kit's signal
@@ -389,7 +389,7 @@ func (a *Agent) Cancel() {
 		cancel()
 	}
 	if a.kit != nil {
-		a.kit.Abort()
+		a.kit.Cancel()
 	}
 }
 

@@ -1,0 +1,21 @@
+version: "2"
+
+# nibster is the kit-boundary smoke test. It must build using only kit/, ai/,
+# and stdlib — never coding/, engine/, or tui/. If a kit consumer needs
+# anything from those packages, the kit boundary has a leak: extend kit
+# rather than reach across.
+linters:
+  enable:
+    - depguard
+  settings:
+    depguard:
+      rules:
+        kit-boundary:
+          list-mode: lax
+          deny:
+            - pkg: github.com/latebit-io/nib/coding
+              desc: nibster proves the kit boundary; it must not depend on coding/. If coding has something kit needs, promote it to kit.
+            - pkg: github.com/latebit-io/nib/engine
+              desc: nibster must not depend on engine/. Engine is the editor module; its presence here means the kit boundary leaked.
+            - pkg: github.com/latebit-io/nib/tui
+              desc: nibster is a CLI; tui/ has no place here.

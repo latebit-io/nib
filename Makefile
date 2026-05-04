@@ -21,16 +21,19 @@ build:
 	cd cmd/nib-code && go build -o bin/nib-code .
 	mkdir -p cmd/agent/bin
 	cd cmd/agent && go build -o bin/nib-agent .
+	mkdir -p cmd/nibster/bin
+	cd cmd/nibster && go build -o bin/nibster .
 
 install: build
 	mkdir -p $(BIN_DIR)
 	rm -f $(BIN_DIR)/nib
 	ln -sf $(CURDIR)/cmd/nib-code/bin/nib-code $(BIN_DIR)/nib-code
 	ln -sf $(CURDIR)/cmd/agent/bin/nib-agent $(BIN_DIR)/nib-agent
+	ln -sf $(CURDIR)/cmd/nibster/bin/nibster $(BIN_DIR)/nibster
 	@echo "Installed. Ensure $(BIN_DIR) is in PATH."
 
 uninstall:
-	rm -f $(BIN_DIR)/nib $(BIN_DIR)/nib-code $(BIN_DIR)/nib-agent
+	rm -f $(BIN_DIR)/nib $(BIN_DIR)/nib-code $(BIN_DIR)/nib-agent $(BIN_DIR)/nibster
 
 test:
 	cd ai && go test ./...
@@ -41,6 +44,7 @@ test:
 	cd tui && go test ./...
 	cd cmd/nib-code && go test ./...
 	cd cmd/agent && go test ./...
+	cd cmd/nibster && go test ./...
 
 fmt:
 	cd ai && go fmt ./...
@@ -51,6 +55,7 @@ fmt:
 	cd tui && go fmt ./...
 	cd cmd/nib-code && go fmt ./...
 	cd cmd/agent && go fmt ./...
+	cd cmd/nibster && go fmt ./...
 
 vet:
 	cd ai && go vet ./...
@@ -61,10 +66,12 @@ vet:
 	cd tui && go vet ./...
 	cd cmd/nib-code && go vet ./...
 	cd cmd/agent && go vet ./...
+	cd cmd/nibster && go vet ./...
 
 clean:
 	rm -f cmd/nib-code/bin/*
 	rm -f cmd/agent/bin/*
+	rm -f cmd/nibster/bin/*
 
 # Re-vendor highlights.scm for every language in QUERY_LANGS, resolving the
 # exact on-disk path from each module's current pinned version. Run after

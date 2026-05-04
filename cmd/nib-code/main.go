@@ -220,47 +220,107 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		sess.SetAgent(ag, events)
 	}
 
-	// Construct the TUI via the facade.
+	// Model registry — fetches from models.dev, caches locally, refreshes hourly.
+	var registryCacheDir string
+	if cfgPath := llmconfig.GlobalConfigPath(); cfgPath != "" {
+		registryCacheDir = filepath.Dir(cfgPath)
+	} else if cacheDir, err := os.UserCacheDir(); err == nil {
+		registryCacheDir = filepath.Join(cacheDir, brand.ConfigDirName)
+	} else {
+		slog.Warn("model registry: cannot resolve cache directory, using temp")
+		registryCacheDir = filepath.Join(os.TempDir(), brand.ConfigDirName)
+	}
+	modelRegistry := llm.NewModelRegistry(registryCacheDir, time.Hour)
+
+	// Build LLM callbacks — available unconditionally for model browsing.
 	var modelLabel string
 	if llmResolved != nil && llmResolved.HasProvider() {
 		modelLabel = llmResolved.Profile + ": " + llmResolved.DisplayModel()
 	}
+	llmCallbacks := &nibTui.LLMCallbacks{
+		ProfileNames: llmCfg.ProfileNames,
+		ModelLabel:   modelLabel,
+		IsOAuthProfile: func(profile string) string {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return ""
+			}
+			return resolved.OAuthProvider
+		},
+		StoreAPIKey: func(profile, key string) error {
+			if pr.KeyStore == nil {
+				return fmt.Errorf("key storage not available")
+			}
+			return pr.KeyStore.Put(profile, key)
+		},
+		HasAPIKey: func(profile string) bool {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return false
+			}
+			return resolved.HasProvider() || (pr.KeyStore != nil && pr.KeyStore.HasKey(profile))
+		},
+		ListModels: func(profile string) ([]nibTui.ModelSelectorItem, error) {
+			resolved := llmconfig.ResolveProfile(llmCfg, profile)
+			if resolved == nil {
+				return nil, fmt.Errorf("unknown profile %q", profile)
+			}
+			wire.WireOAuthProfile(resolved, pr.OAuthStore)
+			wire.WireStoredKey(resolved, pr.KeyStore)
 
+			if !resolved.HasProvider() {
+				return nil, fmt.Errorf("no credentials for profile %q", profile)
+			}
+
+			ctx, cancel := context.WithTimeout(appCtx, 10*time.Second)
+			defer cancel()
+
+			if regID := registryProvider(profile); regID != "" {
+				filter := registryFilter(profile)
+				models, err := modelRegistry.Models(ctx, regID, filter)
+				if err != nil {
+					slog.Debug("llm: registry lookup failed, trying provider API", "profile", profile, "err", err)
+				} else {
+					return modelsToItems(models, profile, resolved.Model), nil
+				}
+			}
+
+			p := resolved.NewProvider()
+			if p == nil {
+				return nil, fmt.Errorf("no API key for profile %q", profile)
+			}
+			lister, ok := p.(llm.ModelLister)
+			if !ok {
+				return nil, fmt.Errorf("provider does not support model listing")
+			}
+			models, err := lister.ListModels(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if profile == "chatgpt" {
+				filtered := models[:0]
+				for _, m := range models {
+					if strings.Contains(m.ID, "codex") || strings.HasPrefix(m.ID, "gpt-5") {
+						filtered = append(filtered, m)
+					}
+				}
+				models = filtered
+			}
+			return modelsToItems(models, profile, resolved.Model), nil
+		},
+	}
+
+	// Construct the TUI via the facade.
 	tuiApp := nibTui.New(nibTui.Config{
 		Session: sess,
 		Events:  events,
 		Agent:   ag,
+		LLM:     llmCallbacks,
 	})
 	app := tuiApp.Model()
 
-	// LLM callbacks — always available for model browsing/switching.
-	app.LLMProfileNames = llmCfg.ProfileNames
-	if modelLabel != "" {
-		app.AgentPane.SetModelLabel(modelLabel)
-	}
-
-	app.IsOAuthProfile = func(profile string) string {
-		resolved := llmconfig.ResolveProfile(llmCfg, profile)
-		if resolved == nil {
-			return ""
-		}
-		return resolved.OAuthProvider
-	}
-	app.StoreAPIKey = func(profile, key string) error {
-		if pr.KeyStore == nil {
-			return fmt.Errorf("key storage not available")
-		}
-		return pr.KeyStore.Put(profile, key)
-	}
-	app.HasAPIKey = func(profile string) bool {
-		resolved := llmconfig.ResolveProfile(llmCfg, profile)
-		if resolved == nil {
-			return false
-		}
-		return resolved.HasProvider() || (pr.KeyStore != nil && pr.KeyStore.HasKey(profile))
-	}
-
-	// OAuth callbacks — only when token store exists.
+	// OAuth callbacks — wired post-construction because ConnectOAuth
+	// needs tuiApp.Program() which only exists after New().
 	if pr.OAuthStore != nil {
 		app.HasOAuthToken = func(profile string) bool {
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
@@ -291,67 +351,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				}
 			}
 		}
-	}
-
-	// Model registry — fetches from models.dev, caches locally, refreshes hourly.
-	var registryCacheDir string
-	if cfgPath := llmconfig.GlobalConfigPath(); cfgPath != "" {
-		registryCacheDir = filepath.Dir(cfgPath)
-	} else if cacheDir, err := os.UserCacheDir(); err == nil {
-		registryCacheDir = filepath.Join(cacheDir, brand.ConfigDirName)
-	} else {
-		slog.Warn("model registry: cannot resolve cache directory, using temp")
-		registryCacheDir = filepath.Join(os.TempDir(), brand.ConfigDirName)
-	}
-	modelRegistry := llm.NewModelRegistry(registryCacheDir, time.Hour)
-
-	app.ListModels = func(profile string) ([]nibTui.ModelSelectorItem, error) {
-		resolved := llmconfig.ResolveProfile(llmCfg, profile)
-		if resolved == nil {
-			return nil, fmt.Errorf("unknown profile %q", profile)
-		}
-		wire.WireOAuthProfile(resolved, pr.OAuthStore)
-		wire.WireStoredKey(resolved, pr.KeyStore)
-
-		if !resolved.HasProvider() {
-			return nil, fmt.Errorf("no credentials for profile %q", profile)
-		}
-
-		ctx, cancel := context.WithTimeout(appCtx, 10*time.Second)
-		defer cancel()
-
-		if regID := registryProvider(profile); regID != "" {
-			filter := registryFilter(profile)
-			models, err := modelRegistry.Models(ctx, regID, filter)
-			if err != nil {
-				slog.Debug("llm: registry lookup failed, trying provider API", "profile", profile, "err", err)
-			} else {
-				return modelsToItems(models, profile, resolved.Model), nil
-			}
-		}
-
-		p := resolved.NewProvider()
-		if p == nil {
-			return nil, fmt.Errorf("no API key for profile %q", profile)
-		}
-		lister, ok := p.(llm.ModelLister)
-		if !ok {
-			return nil, fmt.Errorf("provider does not support model listing")
-		}
-		models, err := lister.ListModels(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if profile == "chatgpt" {
-			filtered := models[:0]
-			for _, m := range models {
-				if strings.Contains(m.ID, "codex") || strings.HasPrefix(m.ID, "gpt-5") {
-					filtered = append(filtered, m)
-				}
-			}
-			models = filtered
-		}
-		return modelsToItems(models, profile, resolved.Model), nil
 	}
 
 	// Shared state for style cycling and evaluator toggle.

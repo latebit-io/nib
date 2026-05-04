@@ -13,8 +13,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/coding/event"
-	"github.com/latebit-io/nib/tui/internal/sanitize"
-	"github.com/latebit-io/nib/tui/internal/ui/textarea"
+	"github.com/latebit-io/nib/tui/sanitize"
+	"github.com/latebit-io/nib/tui/ui/textarea"
 	"github.com/mattn/go-runewidth"
 )
 

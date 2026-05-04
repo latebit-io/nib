@@ -170,7 +170,7 @@ reviews:
         - lipgloss styles must be hoisted to package-level vars — never
           allocated per-frame in render methods
 
-    - path: "tui/cmd/nib-code/main.go"
+    - path: "cmd/nib-code/main.go"
       instructions: >
         Entry point wiring. Bootstrap order matters:
         1. Resolve config + project root

@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/coding/event"
-	"github.com/latebit-io/nib/tui/internal/sanitize"
+	"github.com/latebit-io/nib/tui/sanitize"
 )
 
 // Streaming-text transcript pipeline for AgentPaneModel.

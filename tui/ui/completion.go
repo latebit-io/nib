@@ -5,7 +5,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/nib/engine/lang"
-	"github.com/latebit-io/nib/tui/internal/sanitize"
+	"github.com/latebit-io/nib/tui/sanitize"
 	"github.com/mattn/go-runewidth"
 )
 

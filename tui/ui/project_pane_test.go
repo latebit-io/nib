@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/nib/engine/project"
-	"github.com/latebit-io/nib/tui/internal/ui/textarea"
+	"github.com/latebit-io/nib/tui/ui/textarea"
 )
 
 // mockProjectSession provides the minimal session surface for testing.

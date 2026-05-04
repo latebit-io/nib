@@ -33,6 +33,7 @@ func TestQuoteMessage(t *testing.T) {
 		{"crlf-collapses", "line1\r\nline2", `"line1 line2"`},
 		{"bare-cr-collapses", "line1\rline2", `"line1 line2"`},
 		{"truncates-long", strings.Repeat("a", 200), `"` + strings.Repeat("a", messageMaxLen-3) + `..."`},
+		{"truncates-by-runes-not-bytes", strings.Repeat("漢", 200), `"` + strings.Repeat("漢", messageMaxLen-3) + `..."`},
 		{"escapes-quote", `say "hi"`, `"say \"hi\""`},
 	}
 	for _, tc := range cases {

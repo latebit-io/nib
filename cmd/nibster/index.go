@@ -42,9 +42,10 @@ const (
 	statusCancelled sessionStatus = "cancelled"
 )
 
-// messageMaxLen caps the message text in an index entry. Longer messages
-// are truncated with an ellipsis so a verbose prompt doesn't blow up the
-// width of the index file.
+// messageMaxLen caps the message text in an index entry, in runes (not
+// bytes), so multi-byte international characters count once. Longer
+// messages are truncated with an ellipsis so a verbose prompt doesn't
+// blow up the width of the index file.
 const messageMaxLen = 100
 
 // writeIndexEntry appends one line to /nibster/index.md describing a
@@ -111,12 +112,17 @@ func formatEntry(sessionID, message string, status sessionStatus) string {
 // representation of a free-form prompt for inclusion in the index.
 // CRLF, LF, and bare CR all collapse to a single space so identical
 // logical input renders identically regardless of line-ending source.
+//
+// Truncation operates on runes, not bytes, so multi-byte characters in
+// international text are never split mid-sequence. (A byte slice could
+// land inside a rune; strconv.Quote would then emit \xNN escapes for
+// the orphaned bytes — parseable, but garbled.)
 func quoteMessage(m string) string {
 	m = strings.ReplaceAll(m, "\r\n", " ")
 	m = strings.ReplaceAll(m, "\n", " ")
 	m = strings.ReplaceAll(m, "\r", " ")
-	if len(m) > messageMaxLen {
-		m = m[:messageMaxLen-3] + "..."
+	if runes := []rune(m); len(runes) > messageMaxLen {
+		m = string(runes[:messageMaxLen-3]) + "..."
 	}
 	return strconv.Quote(m)
 }

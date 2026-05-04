@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	agentevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
@@ -596,6 +597,79 @@ func TestMerge_OnTruncated_ErrorShortCircuits(t *testing.T) {
 	_, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationContext{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("want boom, got %v", err)
+	}
+}
+
+func TestMerge_BeforePark_FinishedORd(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			return agentevent.AgentParked{Finished: false}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			return agentevent.AgentParked{Finished: true}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.BeforePark(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Finished {
+		t.Errorf("Finished = false; any-true should win when chained")
+	}
+}
+
+func TestMerge_BeforePark_NilWhenEmpty(t *testing.T) {
+	t.Parallel()
+	merged := kit.Merge(kit.Toolset{}, kit.Toolset{})
+	if merged.Hooks.BeforePark != nil {
+		t.Errorf("BeforePark = non-nil; want nil when no toolset registers one")
+	}
+}
+
+func TestMerge_BeforePark_SinglePassthrough(t *testing.T) {
+	t.Parallel()
+	called := 0
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			called++
+			return agentevent.AgentParked{Finished: true}, nil
+		},
+	}}
+	merged := kit.Merge(a)
+	res, err := merged.Hooks.BeforePark(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Finished || called != 1 {
+		t.Errorf("single-hook passthrough wrong: finished=%v called=%d", res.Finished, called)
+	}
+}
+
+func TestMerge_BeforePark_ErrorShortCircuits(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			return agentevent.AgentParked{Finished: true}, boom
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			t.Fatal("should not be called after error")
+			return agentevent.AgentParked{}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.BeforePark(context.Background())
+	if !errors.Is(err, boom) {
+		t.Fatalf("want boom, got %v", err)
+	}
+	if !res.Finished {
+		t.Errorf("partial Finished should still be returned alongside error")
 	}
 }
 

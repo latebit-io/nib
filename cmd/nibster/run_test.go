@@ -4,13 +4,13 @@ import (
 	"context"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
+	"github.com/latebit-io/nib/kit/headless"
 	"github.com/latebit-io/nib/kit/tools/bash"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 )
@@ -42,11 +42,12 @@ func (p *scriptedProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.To
 
 // TestKitWiring_ToolCallAndPark exercises the kit primitives nibster
 // relies on: bash + memory tools registered through [kit.New], driven
-// by the same drain loop runAgent uses, against a mock provider that
+// by [headless.Runner] in single-shot mode against a mock provider that
 // issues a memory_publish tool call then a final text response. The
-// run should park naturally (no more tool calls), the session page
-// should land in the store, and the summary should contain the final
-// assistant text.
+// run should park naturally (foundation emits AgentParked → kit emits
+// AgentWaiting → Runner cancels and exits Success=true), the session
+// page should land in the store, and the summary should contain the
+// final assistant text.
 //
 // This is the kit-boundary smoke nibster was designed to surface — if
 // any tool-plumbing or event-ordering invariant breaks, the test fails
@@ -73,8 +74,8 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 				}},
 			}},
 			// Turn 2: final assistant text. No tool calls — the foundation
-			// will call GetFollowUpMessages, which our hook uses to
-			// latch parked=true and Cancel the run.
+			// emits AgentParked, the translator forwards AgentWaiting,
+			// and the Runner cancels and exits with Success=true.
 			{
 				{Token: "wrote findings"},
 				{Done: true},
@@ -83,9 +84,6 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 	}
 
 	events := make(chan event.Event, eventBufferSize)
-	var parked atomic.Bool
-	var agRef *kit.Agent
-
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,
 		Events:       events,
@@ -97,31 +95,27 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 			memorytools.NewAppendTool(store),
 			memorytools.NewListTool(store),
 		},
-		Hooks: kit.Hooks{GetFollowUpMessages: parkAndCancel(&parked, &agRef)},
 	})
 	if err != nil {
 		t.Fatalf("kit.New: %v", err)
 	}
-	agRef = ag
 	defer closeAgent(ag, events)
 
 	// Bound the run so a wedged translator/provider cannot hang CI.
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	if err := ag.Prompt(ctx, "write findings to memory"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	result := driveAgent(ctx, ag, events, &parked)
+	runner := headless.New(ag, events)
+	result := runner.Run(ctx, "write findings to memory")
 
-	if !result.parkedNaturally {
-		t.Fatalf("parkedNaturally = false; agent did not reach park state. errs=%v", result.errs)
+	if !result.Success {
+		t.Fatalf("Success=false; runner did not park cleanly. errors=%v", result.Errors)
 	}
-	if len(result.errs) != 0 {
-		t.Fatalf("unexpected errors: %v", result.errs)
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
 	}
-	if !strings.Contains(result.summary, "wrote findings") {
-		t.Errorf("summary missing final answer: %q", result.summary)
+	if !strings.Contains(result.Summary, "wrote findings") {
+		t.Errorf("summary missing final answer: %q", result.Summary)
 	}
 
 	doc, ferr := store.Fetch(t.Context(), sessionPath)
@@ -133,76 +127,92 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 	}
 }
 
-func TestClassifyStatusFromResult(t *testing.T) {
+// TestKitWiring_AgentTokenBeforeAgentWaiting is the regression test
+// for the AgentParked race: with the old hook-based AgentWaiting send,
+// final-turn tokens could arrive on the consumer channel AFTER
+// AgentWaiting because two writers raced (translator + hook). Now
+// AgentWaiting flows through the translator alongside AgentToken,
+// guaranteeing stream order. This test asserts the contract directly
+// by inspecting raw event arrival order, not Runner-derived state.
+func TestKitWiring_AgentTokenBeforeAgentWaiting(t *testing.T) {
 	t.Parallel()
+
+	provider := &scriptedProvider{
+		turns: [][]llm.StreamEvent{
+			{
+				{Token: "first"},
+				{Token: " second"},
+				{Token: " third"},
+				{Done: true},
+			},
+		},
+	}
+
+	events := make(chan event.Event, eventBufferSize)
+	ag, err := kit.New(kit.Config{
+		Provider:     provider,
+		Events:       events,
+		SystemPrompt: "test",
+	})
+	if err != nil {
+		t.Fatalf("kit.New: %v", err)
+	}
+	defer closeAgent(ag, events)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	if err := ag.Prompt(ctx, "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	var sawTokens []string
+	deadline := time.After(5 * time.Second)
+drain:
+	for {
+		select {
+		case ev := <-events:
+			switch e := ev.(type) {
+			case event.AgentToken:
+				sawTokens = append(sawTokens, e.Text)
+			case event.AgentWaiting:
+				if len(sawTokens) != 3 {
+					t.Errorf("AgentWaiting arrived after %d tokens, want 3 (race regression)", len(sawTokens))
+				}
+				ag.Cancel()
+				break drain
+			}
+		case <-deadline:
+			t.Fatalf("timeout waiting for AgentWaiting; saw tokens=%v", sawTokens)
+		}
+	}
+}
+
+func TestClassifyStatus(t *testing.T) {
+	t.Parallel()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	live := context.Background()
 
 	cases := []struct {
 		name string
-		in   runResult
+		ctx  context.Context
+		res  *headless.Result
 		want sessionStatus
 	}{
-		{"parked-no-errors", runResult{parkedNaturally: true}, statusSuccess},
-		{"parked-with-errors", runResult{parkedNaturally: true, errs: []string{"oops"}}, statusFailed},
-		{"context-cancelled", runResult{contextCancelled: true}, statusCancelled},
-		{"no-park-no-cancel", runResult{}, statusFailed},
-		{"errors-and-cancel-prefer-cancel", runResult{contextCancelled: true, errs: []string{"oops"}}, statusCancelled},
+		{"success", live, &headless.Result{Success: true}, statusSuccess},
+		{"failed-no-cancel", live, &headless.Result{Success: false}, statusFailed},
+		{"cancelled", cancelled, &headless.Result{Success: false}, statusCancelled},
+		{"success-trumps-cancel", cancelled, &headless.Result{Success: true}, statusSuccess},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := classifyStatusFromResult(tc.in)
+			got := classifyStatus(tc.ctx, tc.res)
 			if got != tc.want {
-				t.Errorf("classifyStatusFromResult(%+v) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("classifyStatus = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestAppendBounded_TruncatesAtCap(t *testing.T) {
-	t.Parallel()
-
-	var b strings.Builder
-	var truncated bool
-	// Pre-fill close to the cap.
-	b.WriteString(strings.Repeat("a", maxSummaryBytes-10))
-	appendBounded(&b, strings.Repeat("b", 100), &truncated)
-	if !truncated {
-		t.Errorf("truncated flag not latched")
-	}
-	if !strings.Contains(b.String(), "[summary truncated]") {
-		t.Errorf("missing truncation marker; len=%d", b.Len())
-	}
-
-	// Subsequent appends must be no-ops, even when summary.Len() is
-	// still below maxSummaryBytes — the truncated latch is the
-	// permanent stop, not the byte cap.
-	before := b.Len()
-	appendBounded(&b, "more", &truncated)
-	if b.Len() != before {
-		t.Errorf("appendBounded after truncation grew the buffer: %d → %d", before, b.Len())
-	}
-}
-
-// TestAppendBounded_OversizeChunkLatches verifies the regression CodeRabbit
-// flagged: when a single chunk overflows the remaining budget while
-// summary.Len() is still well below maxSummaryBytes, the truncation must
-// latch so subsequent small appends do not keep growing the summary.
-func TestAppendBounded_OversizeChunkLatches(t *testing.T) {
-	t.Parallel()
-
-	var b strings.Builder
-	var truncated bool
-	// summary stays small; the overflow comes from a single huge chunk.
-	appendBounded(&b, strings.Repeat("x", maxSummaryBytes+1), &truncated)
-	if !truncated {
-		t.Fatalf("truncated flag not latched after oversize chunk")
-	}
-	before := b.Len()
-	if before >= maxSummaryBytes {
-		t.Fatalf("summary len %d unexpectedly at/above cap before subsequent append", before)
-	}
-	appendBounded(&b, "subsequent", &truncated)
-	if b.Len() != before {
-		t.Errorf("appendBounded grew after oversize-chunk latch: %d → %d", before, b.Len())
 	}
 }

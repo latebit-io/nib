@@ -147,6 +147,24 @@ type Error struct {
 	Err string
 }
 
+// AgentParked signals the loop has finished a turn with no further work
+// queued (no tool calls, no steering, no follow-up) and is about to park
+// on the reply channel awaiting the next user message. Emitted from
+// inside the loop just before [Agent.awaitReply], routed through the
+// same event pipeline as every other foundation event so consumers see
+// it in stream order relative to the trailing AgentToken/MessageEnd of
+// the parking turn.
+//
+// Finished is populated by the [Hooks.BeforePark] callback (when set);
+// the foundation has no opinion on what "finished" means at the
+// application layer. Coding agents typically populate it from a task
+// tracker; non-coding agents can leave it false.
+type AgentParked struct {
+	// Finished reflects an application-level "all work done" signal,
+	// supplied by [Hooks.BeforePark]. False when the hook is unset.
+	Finished bool
+}
+
 // agentEvent satisfies [Event].
 func (AgentStart) agentEvent() {}
 
@@ -188,3 +206,6 @@ func (Compacted) agentEvent() {}
 
 // agentEvent satisfies [Event].
 func (Error) agentEvent() {}
+
+// agentEvent satisfies [Event].
+func (AgentParked) agentEvent() {}

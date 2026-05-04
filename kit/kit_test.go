@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	agentevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
@@ -269,6 +270,66 @@ func TestPrompt_CleanRunDoneSuccessTrue(t *testing.T) {
 	}
 	if !done.Success {
 		t.Fatalf("AgentDone.Success=false on clean run, want true")
+	}
+}
+
+// TestPark_TranslatesAgentParkedToAgentWaitingInStreamOrder verifies
+// the kit translator emits [event.AgentWaiting] in stream order with
+// [event.AgentToken] when the foundation emits [agentevent.AgentParked].
+// This is the architectural fix for the historical race where the
+// AgentWaiting send originated from a coding hook on the foundation
+// goroutine and could overtake AgentTokens still queued in the
+// translator's foundationEvents buffer.
+func TestPark_TranslatesAgentParkedToAgentWaitingInStreamOrder(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamText([]string{"a", "b", "c"}, nil))
+	events := make(chan event.Event, 64)
+
+	hooks := kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			return agentevent.AgentParked{Finished: true}, nil
+		},
+	}
+
+	a, err := kit.New(kit.Config{Provider: provider, Events: events, Hooks: hooks})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	var (
+		tokens   []string
+		sawWait  bool
+		waitInfo event.AgentWaiting
+	)
+	deadline := time.After(2 * time.Second)
+	for !sawWait {
+		select {
+		case ev := <-events:
+			switch e := ev.(type) {
+			case event.AgentToken:
+				tokens = append(tokens, e.Text)
+			case event.AgentWaiting:
+				sawWait = true
+				waitInfo = e
+			}
+		case <-deadline:
+			t.Fatalf("timed out before AgentWaiting; tokens=%v", tokens)
+		}
+	}
+
+	a.Cancel()
+
+	if !waitInfo.Finished {
+		t.Errorf("AgentWaiting.Finished = false; want true (translator must propagate Finished from AgentParked)")
+	}
+	if len(tokens) != 3 {
+		t.Errorf("AgentWaiting overtook AgentTokens: saw %d/3 tokens before AgentWaiting (race regression)", len(tokens))
 	}
 }
 

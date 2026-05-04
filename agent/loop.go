@@ -122,6 +122,13 @@ func (a *Agent) runLoop(ctx context.Context) {
 			continue
 		}
 
+		parked, err := a.callBeforePark(ctx)
+		if err != nil {
+			a.emitError(fmt.Errorf("BeforePark: %w", err))
+			return
+		}
+		a.send(parked)
+
 		input, ok := a.awaitReply(ctx)
 		if !ok {
 			return
@@ -412,6 +419,17 @@ func (a *Agent) callGetFollowUp(ctx context.Context) ([]llm.Message, error) {
 		return nil, nil
 	}
 	return a.hooks.GetFollowUpMessages(ctx)
+}
+
+// callBeforePark invokes the BeforePark hook (when configured) and
+// returns its [event.AgentParked] payload. The foundation has no
+// opinion on the payload — the hook owns the application-level "all
+// work done" signal. Returns the zero value when the hook is unset.
+func (a *Agent) callBeforePark(ctx context.Context) (event.AgentParked, error) {
+	if a.hooks.BeforePark == nil {
+		return event.AgentParked{}, nil
+	}
+	return a.hooks.BeforePark(ctx)
 }
 
 // awaitReply blocks until [Agent.Reply] delivers a message or ctx is

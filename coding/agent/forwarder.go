@@ -25,7 +25,8 @@ import (
 //     to surface as Success=false.
 //
 // The forwarder also flips [Agent.waiting] off when AgentDone fires
-// — AgentWaiting from [GetFollowUpMessages] sets it on; AgentDone
+// — the BeforePark hook flips it on (synchronously on the foundation
+// goroutine, just before [event.AgentParked] is emitted); AgentDone
 // resets it.
 //
 // Lifecycle: spawned once in [Agent.buildKitAgent]; exits when

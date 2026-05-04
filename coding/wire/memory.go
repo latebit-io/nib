@@ -8,11 +8,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/latebit-io/nib/engine/mcp"
-	"github.com/latebit-io/nib/engine/memory/mcpadapter"
-	"github.com/latebit-io/nib/engine/memory/seed"
-	memserver "github.com/latebit-io/nib/engine/memory/server"
+	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
+	"github.com/latebit-io/nib/kit/memory/demarkus/mcpadapter"
+	"github.com/latebit-io/nib/kit/memory/demarkus/seed"
+	memserver "github.com/latebit-io/nib/kit/memory/demarkus/server"
 )
 
 // maxSummaryBytes caps the summary fetched at startup. The prompt layer
@@ -27,9 +27,10 @@ const memoryOpTimeout = 10 * time.Second
 // EnsureBinaries installs demarkus binaries for the project if not present.
 // Idempotent — skips if already installed. This should always be called,
 // even without an agent, so the binaries are ready when needed.
-func EnsureBinaries(projectRoot string) error {
+// ctx bounds the install-time HTTP downloads.
+func EnsureBinaries(ctx context.Context, projectRoot string) error {
 	mgr := memserver.New(projectRoot)
-	return mgr.EnsureBinaries()
+	return mgr.EnsureBinaries(ctx)
 }
 
 // MemoryResult holds the outputs from StartMemory. Only returned on

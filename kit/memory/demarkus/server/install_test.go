@@ -175,7 +175,7 @@ func TestResolveVersionPinned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	version, err := resolveVersion(versionFile)
+	version, err := resolveVersion(t.Context(), versionFile)
 	if err != nil {
 		t.Fatalf("resolveVersion: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestResolveVersionPinned(t *testing.T) {
 
 func TestResolveVersionEnvOverride(t *testing.T) {
 	t.Setenv("MEMORY_VERSION", "9.9.9")
-	version, err := resolveVersion("/nonexistent")
+	version, err := resolveVersion(t.Context(), "/nonexistent")
 	if err != nil {
 		t.Fatalf("resolveVersion: %v", err)
 	}

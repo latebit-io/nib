@@ -33,8 +33,41 @@ func TestEnsureBinariesShortCircuit(t *testing.T) {
 	}
 
 	// EnsureBinaries should return nil without attempting a download.
-	if err := m.EnsureBinaries(); err != nil {
+	if err := m.EnsureBinaries(t.Context()); err != nil {
 		t.Errorf("expected nil when all binaries present, got: %v", err)
+	}
+}
+
+// TestEnsureBinariesSurfacesStatErrors verifies the contract that stat
+// failures other than os.ErrNotExist abort with the underlying error,
+// rather than silently triggering a reinstall. A permission-denied
+// parent directory is the canonical case — a real install attempt
+// here would mask the underlying fault and cost a network round-trip.
+func TestEnsureBinariesSurfacesStatErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks; cannot simulate EACCES")
+	}
+	m := testManager(t)
+
+	if err := os.MkdirAll(m.binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Strip exec permission so os.Stat of any child returns
+	// "permission denied" rather than "not exist".
+	if err := os.Chmod(m.binDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// Restore permissions so t.TempDir cleanup can remove the dir.
+		_ = os.Chmod(m.binDir, 0o755)
+	})
+
+	err := m.EnsureBinaries(t.Context())
+	if err == nil {
+		t.Fatal("expected stat error to surface, got nil")
+	}
+	if !strings.Contains(err.Error(), "stat") {
+		t.Errorf("error should reference stat, got: %v", err)
 	}
 }
 

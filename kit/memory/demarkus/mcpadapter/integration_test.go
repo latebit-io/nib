@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/nib/engine/mcp"
-	"github.com/latebit-io/nib/engine/memory/mcpadapter"
-	"github.com/latebit-io/nib/engine/memory/server"
+	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
+	"github.com/latebit-io/nib/kit/memory/demarkus/mcpadapter"
+	"github.com/latebit-io/nib/kit/memory/demarkus/server"
 )
 
 // integrationEnv holds the shared state for integration tests.
@@ -34,7 +34,7 @@ func setupIntegration(t *testing.T) *integrationEnv {
 	mgr := server.New(root)
 
 	t.Log("installing demarkus binaries...")
-	if err := mgr.EnsureBinaries(); err != nil {
+	if err := mgr.EnsureBinaries(t.Context()); err != nil {
 		t.Fatalf("EnsureBinaries: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestIntegrationInstall(t *testing.T) {
 	root := t.TempDir()
 	mgr := server.New(root)
 
-	if err := mgr.EnsureBinaries(); err != nil {
+	if err := mgr.EnsureBinaries(t.Context()); err != nil {
 		t.Fatalf("EnsureBinaries: %v", err)
 	}
 
@@ -118,7 +118,7 @@ func TestIntegrationInstall(t *testing.T) {
 	}
 
 	// Second call is a no-op.
-	if err := mgr.EnsureBinaries(); err != nil {
+	if err := mgr.EnsureBinaries(t.Context()); err != nil {
 		t.Fatalf("second EnsureBinaries: %v", err)
 	}
 }
@@ -131,7 +131,7 @@ func TestIntegrationTokenIdempotent(t *testing.T) {
 
 	root := t.TempDir()
 	mgr := server.New(root)
-	if err := mgr.EnsureBinaries(); err != nil {
+	if err := mgr.EnsureBinaries(t.Context()); err != nil {
 		t.Fatalf("EnsureBinaries: %v", err)
 	}
 

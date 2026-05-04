@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/ai/brand"
-	"github.com/latebit-io/nib/engine/mcp"
+	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
 )
 
@@ -524,13 +524,25 @@ func (m *Manager) Port() int {
 
 // EnsureBinaries checks .project/bin/ for demarkus binaries.
 // If any are missing, downloads and installs them from GitHub releases.
-func (m *Manager) EnsureBinaries() error {
+// ctx bounds all install-time network I/O so a stalled download can be
+// cancelled.
+//
+// Stat errors other than "not exist" (permission denied, I/O error,
+// etc.) abort with the underlying error rather than silently triggering
+// a reinstall — a corrupt or unreadable bin dir is a real fault that
+// should surface, not be masked by a download attempt.
+func (m *Manager) EnsureBinaries(ctx context.Context) error {
 	for _, name := range strings.Split(requiredBins, ",") {
 		path := filepath.Join(m.binDir, name)
-		if _, err := os.Stat(path); err != nil {
-			versionFile := filepath.Join(m.projectRoot, ".project", ".memory-version")
-			return install(m.binDir, versionFile)
+		_, err := os.Stat(path)
+		if err == nil {
+			continue
 		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("memory: stat %s: %w", path, err)
+		}
+		versionFile := filepath.Join(m.projectRoot, ".project", ".memory-version")
+		return install(ctx, m.binDir, versionFile)
 	}
 	return nil
 }

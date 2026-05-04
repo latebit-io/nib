@@ -269,7 +269,22 @@ func run() error {
 	// Run the agent.
 	runner := headless.NewRunner(ag, workspace, events, stderr, stdinTTY)
 	result := runner.Run(ctx, goal, cfg.files)
+
+	// Drain the events channel so the forwarder can exit cleanly.
+	// On context cancellation the runner returns before AgentDone,
+	// leaving pending sends that would block without a consumer.
+	drainDone := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-drainDone:
+				return
+			case <-events:
+			}
+		}
+	}()
 	ag.Close()
+	close(drainDone)
 
 	// Output result.
 	if outputJSON {

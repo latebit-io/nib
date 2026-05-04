@@ -117,18 +117,19 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		return agent.ToolResult{Content: "No matches found."}
 	}
 
+	const truncSuffix = "\n\n[... truncated — use read_file for full content]"
+	limit := maxPreviewBytes - len(truncSuffix)
+
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d match(es) found:\n\n", len(results))
 	for _, r := range results {
-		fmt.Fprintf(&sb, "%s:%d: %s\n", r.Path, r.Line, r.Text)
+		line := fmt.Sprintf("%s:%d: %s\n", r.Path, r.Line, r.Text)
+		if sb.Len()+len(line) > limit {
+			sb.WriteString(truncSuffix)
+			return agent.ToolResult{Content: sb.String()}
+		}
+		sb.WriteString(line)
 	}
 
-	return agent.ToolResult{Content: truncate(sb.String())}
-}
-
-func truncate(s string) string {
-	if len(s) <= maxPreviewBytes {
-		return s
-	}
-	return s[:maxPreviewBytes] + "\n\n[... truncated — use read_file for full content]"
+	return agent.ToolResult{Content: sb.String()}
 }

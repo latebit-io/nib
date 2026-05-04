@@ -238,6 +238,47 @@ func TestWriteIndexEntry_RetriesOnConflict(t *testing.T) {
 	}
 }
 
+// publishFlakyStore wraps fakeStore and returns ErrConflict on the
+// first N Publish calls. Used to verify that [writeIndexEntry] retries
+// the create-path (Publish-after-ErrNotFound) conflict, not just the
+// Append-path conflict. The conflict simulates two writers racing to
+// create [indexPath] for the very first time — the loser sees
+// ErrConflict and must retry rather than silently drop the entry.
+type publishFlakyStore struct {
+	*fakeStore
+	conflictsRemaining int
+	mu                 sync.Mutex
+}
+
+func (s *publishFlakyStore) Publish(ctx context.Context, path, body string, expectedVersion int) (memory.Document, error) {
+	s.mu.Lock()
+	if s.conflictsRemaining > 0 {
+		s.conflictsRemaining--
+		s.mu.Unlock()
+		return memory.Document{}, memory.ErrConflict
+	}
+	s.mu.Unlock()
+	return s.fakeStore.Publish(ctx, path, body, expectedVersion)
+}
+
+func TestWriteIndexEntry_RetriesOnCreateConflict(t *testing.T) {
+	t.Parallel()
+
+	// No pre-seed — writeIndexEntry takes the Publish (create) path.
+	base := newFakeStore()
+	flaky := &publishFlakyStore{fakeStore: base, conflictsRemaining: 2}
+	if err := writeIndexEntry(t.Context(), flaky, "id-create", "msg", statusSuccess); err != nil {
+		t.Fatalf("writeIndexEntry: %v", err)
+	}
+	doc, err := base.Fetch(t.Context(), indexPath)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !strings.Contains(doc.Body, "id-create") {
+		t.Errorf("entry not created after publish conflicts: %q", doc.Body)
+	}
+}
+
 func TestWriteIndexEntry_GivesUpAfterRepeatedConflicts(t *testing.T) {
 	t.Parallel()
 

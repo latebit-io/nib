@@ -24,6 +24,7 @@ build:
 
 install: build
 	mkdir -p $(BIN_DIR)
+	rm -f $(BIN_DIR)/nib
 	ln -sf $(CURDIR)/tui/bin/nib-code $(BIN_DIR)/nib-code
 	ln -sf $(CURDIR)/cmd/agent/bin/nib-agent $(BIN_DIR)/nib-agent
 	@echo "Installed. Ensure $(BIN_DIR) is in PATH."

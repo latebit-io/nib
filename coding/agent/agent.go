@@ -237,7 +237,7 @@ type Agent struct {
 	// runUnsuccessful is set by [Agent.send] when an [event.AgentError]
 	// is emitted and by [Agent.Cancel]. [Agent.forwardKitEvents] reads
 	// it on [event.AgentDone] to override the kit-derived Success flag
-	// — kit's per-run outcome only knows about Aborts and foundation
+	// — kit's per-run outcome only knows about Cancels and foundation
 	// Errors, so coding-side AgentErrors emitted via [Agent.send]
 	// (autosave failure, post-turn budget, RunWithMode rejection) need
 	// this wrapper-level flag to surface as Success=false. Reset on
@@ -554,7 +554,7 @@ func (a *Agent) buildKitAgent() {
 	go a.forwardKitEvents()
 }
 
-// Close gracefully shuts down the agent. Aborts any in-flight run,
+// Close gracefully shuts down the agent. Cancels any in-flight run,
 // waits for the kit/foundation AND the kit translator to unwind,
 // closes the intercept events channel so [Agent.forwardKitEvents]
 // drains and exits, then waits for the forwarder. Idempotent.

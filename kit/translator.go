@@ -72,7 +72,7 @@ func (a *Agent) translateEvents() {
 // Per-run outcome lifecycle:
 //
 //   - AgentStart binds [Agent.pendingOutcome] (parked by Prompt) into
-//     [Agent.currentOutcome]. From this point on, [Agent.Abort] and
+//     [Agent.currentOutcome]. From this point on, [Agent.Cancel] and
 //     this function's Error case mark the bound outcome.
 //   - Error sets the current outcome's unsuccess bit. If no outcome
 //     is bound (Error somehow fired before AgentStart was processed),

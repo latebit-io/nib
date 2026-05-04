@@ -33,7 +33,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/lintstage"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
-	"github.com/latebit-io/nib/tui/ui"
+	nibTui "github.com/latebit-io/nib/tui"
 )
 
 func main() {
@@ -63,10 +63,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	if debug {
-		// Cache dir is a single-user trust boundary — safe against the
-		// symlink-clobber pattern that /tmp + O_TRUNC is vulnerable to.
-		// Surface failures BEFORE entering alt-screen so the user sees
-		// them; once Bubble Tea takes over stderr corrupts the TUI.
 		logPath, err := brand.DebugLogPath("debug.log")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "debug log path: %v — proceeding without debug log\n", err)
@@ -75,11 +71,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			fmt.Fprintf(os.Stderr, "open debug log %s: %v — proceeding without debug log\n", logPath, openErr)
 			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		} else {
-			// The deferred close runs after p.Run() returns, by which
-			// point Bubble Tea has restored the original screen — so
-			// stderr is safe to write to and a buffered-flush failure
-			// (ENOSPC, EIO) is surfaced where the user will see it
-			// rather than being swallowed.
 			defer func() {
 				if err := logFile.Close(); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: close debug log: %v\n", err)
@@ -88,7 +79,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		}
 	} else {
-		// Discard all logs — slog defaults to stderr which corrupts the alt-screen TUI.
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
@@ -101,14 +91,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			return err
 		}
 		if info.IsDir() {
-			// Directory argument: use it as the project root directly.
 			projectRoot, err = filepath.Abs(filePath)
 			if err != nil {
 				return err
 			}
 			buf = buffer.New()
 		} else {
-			// Absolutize so buffer.Path matches session.CanonPath.
 			absPath, err := filepath.Abs(filePath)
 			if err != nil {
 				return err
@@ -117,13 +105,11 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			if err != nil {
 				return err
 			}
-			// File argument: walk up from file's parent to find project root.
 			projectRoot = session.ResolveProjectRoot(filepath.Dir(absPath))
 		}
 	} else {
-		// No argument: use cwd as project root.
 		buf = buffer.New()
-		projectRoot, _ = os.Getwd() // safe: Session.New normalizes via filepath.Abs
+		projectRoot, _ = os.Getwd()
 	}
 
 	e := editor.New(buf)
@@ -131,54 +117,39 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		e.SetHighlighter(highlight.NewHighlighter(buf.Path))
 	}
 
-	// Create session first (editor-only mode) — it serves as the agent's Workspace.
 	sess := session.New(e, projectRoot)
 	sess.SetContext(appCtx)
-	// Install the highlighter factory so every editor the session creates
-	// (via OpenFile / auto-open / file-switch) gets tree-sitter highlighting.
-	// Headless binaries never make this call, which keeps grammar blobs out
-	// of the headless agent binary.
 	sess.SetHighlighterFactory(highlight.NewHighlighter)
 
 	// Discover MCP tools from .mcp.json or the brand-prefixed MCP env var.
 	mcpResult := wire.DiscoverMCPTools(projectRoot)
 	defer mcpResult.Cleanup()
 
-	// Classify distributed memory servers and expose to the session for UI display.
 	distributed := codingmemory.DetectDistributedMemory(mcpResult.ServerNames)
 	if len(distributed) > 0 {
 		sess.SetDistributedMemory(distributed)
 	}
 
-	// Shared event channel — agent and LSP both write here, frontend reads one channel.
 	events := make(chan event.Event, 128)
 
-	// Start LSP servers for language intelligence.
 	lspMgr := wire.InitLSP(projectRoot, events)
 	if lspMgr != nil {
 		sess.SetLanguageService(lspMgr)
 		defer func() { _ = lspMgr.Close() }()
 	}
 
-	// Ensure demarkus binaries are installed (idempotent, skips if present).
 	if err := wire.EnsureBinaries(projectRoot); err != nil {
 		return fmt.Errorf("memory: install binaries: %w", err)
 	}
 
-	// Create LLM provider and agent from configuration.
 	pr := wire.NewProvider(projectRoot)
 	provider, llmCfg, llmResolved := pr.Provider, pr.Config, pr.Resolved
 	if llmResolved != nil {
 		sess.SetLLMInfo(llmResolved.Model, llmResolved.Profile)
 	}
 
-	// Resolve coding style — injected into the agent's system prompt.
 	styleResult := wire.NewStyle(projectRoot)
 
-	// Resolve smoke-run configuration. Skipped when no Makefile, no
-	// language default, or no .project/run.json — the agent then
-	// won't register the smoke_run tool or auto-invoke at task
-	// completion.
 	smokeCfg := runconfig.Load(projectRoot)
 	if smokeCfg.Skipped {
 		slog.Info("smoke: skipped", "reason", smokeCfg.SkipReason)
@@ -188,7 +159,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 
 	slog.Debug("startup: provider resolved", "hasProvider", provider != nil)
 
-	// Start memory server — always needed for project plans, independent of LLM.
 	mem, err := wire.StartMemory(appCtx, projectRoot)
 	if err != nil {
 		return fmt.Errorf("memory: %w", err)
@@ -196,9 +166,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	defer mem.Cleanup()
 	sess.SetMemoryStore(mem.Store)
 
-	// Wire session-event capture to a per-process Demarkus document unless
-	// explicitly disabled. The sink runs async with a bounded buffer — the
-	// session's hot path never blocks on it.
 	if os.Getenv(brand.EnvKeyCaptureDisabled) == "" {
 		captureSink := demarkus.New(mem.Store, sess.SessionID(), demarkus.Config{})
 		sess.SetEventSink(captureSink)
@@ -211,22 +178,11 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}()
 	}
 
-	// Wire events on the session unconditionally. The frontend event loop
-	// reads from here; the agent (once constructed) writes to the same channel.
 	sess.SetEvents(events)
 
 	var ag *agent.Agent
-	// switchMu serializes the model switcher closure. Today the only caller is
-	// AppModel.Update on the Bubble Tea main goroutine, so calls are already
-	// serial — this guard is defensive, protecting the build-or-swap logic
-	// against any future path that invokes Session.SwitchModel from a tea.Cmd
-	// or an engine-side goroutine.
 	var switchMu sync.Mutex
 
-	// buildAgent constructs an agent with the pre-resolved wiring (memory,
-	// MCP tools, LSP, coding style). Called either at startup when credentials
-	// already exist, or inside the model switcher on the first successful
-	// connect — the OAuth hot-reload path.
 	buildAgent := func(p llm.Provider) *agent.Agent {
 		opts := &agent.NewOptions{
 			MemoryStore:       mem.Store,
@@ -244,10 +200,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			opts.DiagProvider = lspMgr
 		}
 		if os.Getenv(brand.EnvKeyValidatorsDisabled) == "" {
-			// lintstage reads the per-file linter set through the
-			// holder so a runtime style cycle (Alt+S) takes effect
-			// on the next edit instead of getting stuck on the
-			// startup snapshot.
 			opts.ValidationPipeline = validate.NewPipeline(
 				goparse.Validator{},
 				treesitter.New(highlight.LanguageFor),
@@ -258,14 +210,31 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return agent.New(p, sess, events, opts, mcpResult.Tools...)
 	}
 
-	slog.Debug("startup: creating app")
-	app := ui.NewApp(sess)
-	slog.Debug("startup: app created")
-	if llmResolved != nil && llmResolved.HasProvider() {
-		app.AgentPane.SetModelLabel(llmResolved.Profile + ": " + llmResolved.DisplayModel())
+	// Build the agent now if credentials were already available at startup.
+	if provider != nil {
+		ag = buildAgent(provider)
+		sess.SetAgent(ag, events)
 	}
 
-	// Profile detection and API key storage — always available, independent of OAuth.
+	// Construct the TUI via the facade.
+	var modelLabel string
+	if llmResolved != nil && llmResolved.HasProvider() {
+		modelLabel = llmResolved.Profile + ": " + llmResolved.DisplayModel()
+	}
+
+	tuiApp := nibTui.New(nibTui.Config{
+		Session: sess,
+		Events:  events,
+		Agent:   ag,
+	})
+	app := tuiApp.Model()
+
+	// LLM callbacks — always available for model browsing/switching.
+	app.LLMProfileNames = llmCfg.ProfileNames
+	if modelLabel != "" {
+		app.AgentPane.SetModelLabel(modelLabel)
+	}
+
 	app.IsOAuthProfile = func(profile string) string {
 		resolved := llmconfig.ResolveProfile(llmCfg, profile)
 		if resolved == nil {
@@ -279,7 +248,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		return pr.KeyStore.Put(profile, key)
 	}
-
 	app.HasAPIKey = func(profile string) bool {
 		resolved := llmconfig.ResolveProfile(llmCfg, profile)
 		if resolved == nil {
@@ -288,7 +256,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return resolved.HasProvider() || (pr.KeyStore != nil && pr.KeyStore.HasKey(profile))
 	}
 
-	// OAuth-specific callbacks — only available when the token store exists.
+	// OAuth callbacks — only when token store exists.
 	if pr.OAuthStore != nil {
 		app.HasOAuthToken = func(profile string) bool {
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
@@ -305,25 +273,21 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
 				return func() tea.Msg {
-					return ui.OAuthConnectResult(profile, fmt.Errorf("unknown profile %q", profile))
+					return nibTui.OAuthConnectResult(profile, fmt.Errorf("unknown profile %q", profile))
 				}
 			}
 			switch oauth.ProviderID(resolved.OAuthProvider) {
 			case oauth.ProviderOpenAI:
 				return connectOpenAICmd(profile, pr.OAuthStore)
 			case oauth.ProviderCopilot:
-				return connectCopilotCmd(profile, pr.OAuthStore, app.Program())
+				return connectCopilotCmd(profile, pr.OAuthStore, tuiApp.Program())
 			default:
 				return func() tea.Msg {
-					return ui.OAuthConnectResult(profile, fmt.Errorf("unknown OAuth provider: %s", resolved.OAuthProvider))
+					return nibTui.OAuthConnectResult(profile, fmt.Errorf("unknown OAuth provider: %s", resolved.OAuthProvider))
 				}
 			}
 		}
 	}
-
-	// Profile names are always available — even without a provider,
-	// the user can browse profiles and connect OAuth ones.
-	app.LLMProfileNames = llmCfg.ProfileNames
 
 	// Model registry — fetches from models.dev, caches locally, refreshes hourly.
 	var registryCacheDir string
@@ -337,11 +301,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 	modelRegistry := llm.NewModelRegistry(registryCacheDir, time.Hour)
 
-	// Install ListModels unconditionally — it does not require a live agent.
-	// Credentials are resolved per-call so newly-connected profiles work without
-	// restart. A missing-credential error surfaces through modelListMsg and
-	// triggers the connect/key-entry flow in app.go.
-	app.ListModels = func(profile string) ([]ui.ModelSelectorItem, error) {
+	app.ListModels = func(profile string) ([]nibTui.ModelSelectorItem, error) {
 		resolved := llmconfig.ResolveProfile(llmCfg, profile)
 		if resolved == nil {
 			return nil, fmt.Errorf("unknown profile %q", profile)
@@ -356,7 +316,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		ctx, cancel := context.WithTimeout(appCtx, 10*time.Second)
 		defer cancel()
 
-		// Try model registry (models.dev) first — works for all known providers.
 		if regID := registryProvider(profile); regID != "" {
 			filter := registryFilter(profile)
 			models, err := modelRegistry.Models(ctx, regID, filter)
@@ -367,7 +326,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			}
 		}
 
-		// Fallback: provider's own model listing API.
 		p := resolved.NewProvider()
 		if p == nil {
 			return nil, fmt.Errorf("no API key for profile %q", profile)
@@ -392,8 +350,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return modelsToItems(models, profile, resolved.Model), nil
 	}
 
-	// Shared state for style cycling and evaluator toggle — both closures
-	// need to know the current resolved style to stay in sync.
+	// Shared state for style cycling and evaluator toggle.
 	currentResolved := styleResult.Resolved
 	evaluatorActive := false
 
@@ -401,7 +358,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Called once — on startup (when credentials exist) or on the first
 	// successful connect via the model switcher.
 	wireAgentHandlers := func() {
-		// Default is trust mode — agent works autonomously.
 		ag.SetAutonomous(true)
 
 		app.OnDialChange = func(level session.AutonomyLevel) {
@@ -512,9 +468,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 	}
 
-	// Install the model switcher unconditionally. The first call with valid
-	// credentials constructs the agent (OAuth hot-reload path); subsequent
-	// calls hot-swap the provider on the existing agent.
+	// Model switcher — first call with valid credentials constructs the agent
+	// (OAuth hot-reload path); subsequent calls hot-swap the provider.
 	sess.SetModelSwitcher(func(profile, modelID string) (string, error) {
 		switchMu.Lock()
 		defer switchMu.Unlock()
@@ -533,10 +488,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		if newProvider == nil {
 			return "", fmt.Errorf("no credentials for profile %q", profile)
 		}
-		// Update the outer provider before building the agent so wireAgentHandlers
-		// (called synchronously below on first build) sees the new provider when
-		// it constructs the style evaluator. Otherwise the agent gets an evaluator
-		// from buildAgent but evaluatorActive stays false, desyncing the status bar.
 		provider = newProvider
 		if ag == nil {
 			ag = buildAgent(provider)
@@ -546,10 +497,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			slog.Info("llm: agent constructed", "profile", profile, "model", resolved.Model)
 		} else {
 			ag.SetProvider(provider)
-			// Rebind the style evaluator — it holds its own llm.Provider that
-			// Agent.SetProvider does not touch, so without this it would keep
-			// calling the old provider (possibly stale OAuth token / deprecated
-			// model) for style checks.
 			if evaluatorActive && currentResolved != nil {
 				eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
 				ag.SetEvaluator(eval)
@@ -569,46 +516,16 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return displayModel, nil
 	})
 
-	// Build the agent now if credentials were already available at startup.
-	if provider != nil {
-		ag = buildAgent(provider)
-		sess.SetAgent(ag, events)
-		app.AgentPane.SetHasAgent(true)
+	// Wire agent handlers if credentials were available at startup.
+	if ag != nil {
 		wireAgentHandlers()
 	}
 
-	p := tea.NewProgram(&app,
-		tea.WithoutSignalHandler(), // let Ctrl+C reach us as a key event
-	)
-	app.SetProgram(p)
-
-	shutdown := func() {
-		app.CloseWatcher()
-		appCancel() // signal agent goroutines before teardown
-		if ag != nil {
-			// Drain the events channel so the forwarder can exit.
-			// ag.Close() blocks on forwardDone which requires the
-			// forwarder to finish sending — without a consumer it hangs.
-			drainDone := make(chan struct{})
-			go func() {
-				for {
-					select {
-					case <-drainDone:
-						return
-					case <-events:
-					}
-				}
-			}()
-			ag.Close()
-			close(drainDone)
-		}
-		sess.Close()
-	}
-
 	slog.Debug("startup: running TUI")
-	_, err = p.Run()
+	err = tuiApp.Run()
 	slog.Debug("startup: TUI exited")
-	shutdown()
+	appCancel()
+	sess.Close()
 	return err
 }
 
@@ -618,7 +535,7 @@ func connectOpenAICmd(profile string, store *oauth.Store) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 		err := oauth.OpenAIBrowserFlow(ctx, store, nil)
-		return ui.OAuthConnectResult(profile, err)
+		return nibTui.OAuthConnectResult(profile, err)
 	}
 }
 
@@ -631,23 +548,19 @@ func connectCopilotCmd(profile string, store *oauth.Store, p *tea.Program) tea.C
 		dc, err := oauth.RequestCopilotDeviceCode(ctx)
 		cancel()
 		if err != nil {
-			return ui.OAuthConnectResult(profile, fmt.Errorf("request device code: %w", err))
+			return nibTui.OAuthConnectResult(profile, fmt.Errorf("request device code: %w", err))
 		}
 
-		// Deliver the instruction to the TUI via Program.Send so the user
-		// sees the code immediately while we poll in the background.
 		instruction := fmt.Sprintf("Visit %s and enter code: %s", dc.VerificationURI, dc.UserCode)
-		p.Send(ui.OAuthInstruction(profile, instruction))
+		p.Send(nibTui.OAuthInstruction(profile, instruction))
 
 		pollCtx, pollCancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer pollCancel()
 		err = oauth.CompleteCopilotDeviceFlow(pollCtx, store, dc)
-		return ui.OAuthConnectResult(profile, err)
+		return nibTui.OAuthConnectResult(profile, err)
 	}
 }
 
-// profileToRegistry maps a configured profile name to the models.dev provider key.
-// Returns empty string for custom/unknown profiles (fall back to provider API).
 var profileToRegistry = map[string]string{
 	"chatgpt":    "openai",
 	"copilot":    "github-copilot",
@@ -657,14 +570,10 @@ var profileToRegistry = map[string]string{
 	"anthropic":  "anthropic",
 }
 
-// registryProvider returns the models.dev provider ID for a profile, or empty
-// string if the profile has no known registry mapping.
 func registryProvider(profile string) string {
 	return profileToRegistry[profile]
 }
 
-// registryFilter returns a ModelFilter for the given profile.
-// For the chatgpt profile, only codex/gpt-5 families work with the Codex endpoint.
 func registryFilter(profile string) llm.ModelFilter {
 	if profile != "chatgpt" {
 		return nil
@@ -675,12 +584,11 @@ func registryFilter(profile string) llm.ModelFilter {
 	}
 }
 
-// modelsToItems converts ModelInfo to UI items, placing defaultModel first.
-func modelsToItems(models []llm.ModelInfo, profile, defaultModel string) []ui.ModelSelectorItem {
-	items := make([]ui.ModelSelectorItem, len(models))
+func modelsToItems(models []llm.ModelInfo, profile, defaultModel string) []nibTui.ModelSelectorItem {
+	items := make([]nibTui.ModelSelectorItem, len(models))
 	defaultIdx := -1
 	for i, m := range models {
-		items[i] = ui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
+		items[i] = nibTui.ModelSelectorItem{ID: m.ID, Name: m.Name, Profile: profile}
 		if m.ID == defaultModel {
 			defaultIdx = i
 		}

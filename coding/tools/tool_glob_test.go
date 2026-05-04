@@ -52,7 +52,7 @@ var projectFiles = []string{
 	"engine/filelist/gitignore.go",
 	"tui/internal/ui/app.go",
 	"tui/internal/ui/editor.go",
-	"tui/cmd/tui/main.go",
+	"tui/cmd/nib-code/main.go",
 }
 
 type globTestCase struct {
@@ -110,7 +110,7 @@ func TestGlobTool_Patterns(t *testing.T) {
 		{
 			name:         "match all Go files with double star",
 			args:         globArgs{Pattern: "**/*.go"},
-			wantContains: []string{"engine/agent/agent.go", "tui/cmd/tui/main.go"},
+			wantContains: []string{"engine/agent/agent.go", "tui/cmd/nib-code/main.go"},
 			wantAbsent:   []string{"README.md", "go.mod"},
 			wantCount:    "13 file(s) found.",
 		},
@@ -142,7 +142,7 @@ func TestGlobTool_PathScoping(t *testing.T) {
 			name:         "only engine/agent",
 			args:         globArgs{Pattern: "**/*.go", Path: "engine/agent"},
 			wantContains: []string{"engine/agent/agent.go", "engine/agent/tool_glob.go"},
-			wantAbsent:   []string{"engine/buffer/buffer.go", "tui/cmd/tui/main.go"},
+			wantAbsent:   []string{"engine/buffer/buffer.go", "tui/cmd/nib-code/main.go"},
 		},
 		{
 			name:         "trailing slash normalized",

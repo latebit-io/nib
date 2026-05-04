@@ -29,7 +29,7 @@ install: build
 	@echo "Installed. Ensure $(BIN_DIR) is in PATH."
 
 uninstall:
-	rm -f $(BIN_DIR)/nib-code $(BIN_DIR)/nib-agent
+	rm -f $(BIN_DIR)/nib $(BIN_DIR)/nib-code $(BIN_DIR)/nib-agent
 
 test:
 	cd ai && go test ./...

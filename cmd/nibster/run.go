@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/ai/llmconfig"
+	"github.com/latebit-io/nib/ai/oauth"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
 	"github.com/latebit-io/nib/kit/headless"
@@ -33,6 +34,12 @@ const indexWriteTimeout = 5 * time.Second
 // consistent even when the agent runs out of budget mid-update.
 func runAgent(ctx context.Context, root string, store memory.Store, message string) error {
 	_, resolved := llmconfig.Resolve(root)
+	// OAuth-only profiles (e.g. chatgpt, copilot) need the auth store
+	// attached before HasProvider can succeed. Stored-key wiring is
+	// nib-code-only (TUI-entered keys), so it's intentionally omitted.
+	if oauthStore := openOAuthStore(); oauthStore != nil {
+		llmconfig.WireOAuth(resolved, oauthStore)
+	}
 	if !resolved.HasProvider() {
 		return setupErr("no LLM credentials — %s", credentialHint(resolved))
 	}
@@ -119,6 +126,25 @@ func closeAgent(ag *kit.Agent, events <-chan event.Event) {
 	}()
 	ag.Close()
 	close(drainDone)
+}
+
+// openOAuthStore opens the default OAuth token store. Returns nil on
+// any failure (missing config dir, unreadable file) — callers fall
+// through to the no-credentials error path. Errors are logged at debug
+// because OAuth is optional: most users authenticate via API key env
+// vars and never touch the store.
+func openOAuthStore() *oauth.Store {
+	path, err := oauth.DefaultStorePath()
+	if err != nil {
+		slog.Debug("oauth store path unavailable", "err", err)
+		return nil
+	}
+	store, err := oauth.NewStore(path)
+	if err != nil {
+		slog.Debug("oauth store open failed", "path", path, "err", err)
+		return nil
+	}
+	return store
 }
 
 // classifyStatus derives the index entry's status marker from the

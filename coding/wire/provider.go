@@ -5,7 +5,6 @@ package wire
 
 import (
 	"log/slog"
-	"strings"
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/ai/llmconfig"
@@ -51,11 +50,11 @@ func NewProvider(projectRoot string) *ProviderResult {
 	}
 
 	// If the resolved profile uses OAuth, wire up the authenticator.
-	wireOAuth(resolved, store)
+	llmconfig.WireOAuth(resolved, store)
 
 	// If no provider yet, check the key store for a stored API key.
 	if !resolved.HasProvider() && keyStore != nil {
-		WireStoredKey(resolved, keyStore)
+		llmconfig.WireStoredKey(resolved, keyStore)
 	}
 
 	return &ProviderResult{
@@ -64,52 +63,5 @@ func NewProvider(projectRoot string) *ProviderResult {
 		Resolved:   resolved,
 		OAuthStore: store,
 		KeyStore:   keyStore,
-	}
-}
-
-// WireOAuthProfile sets up OAuth authentication on a resolved profile
-// if it has stored tokens. Returns true if auth was wired.
-func WireOAuthProfile(resolved *llmconfig.Resolved, store *oauth.Store) bool {
-	return wireOAuth(resolved, store)
-}
-
-// WireStoredKey sets the API key on a resolved profile from the key store.
-// Returns true if a stored key was found and applied.
-func WireStoredKey(resolved *llmconfig.Resolved, keyStore *oauth.KeyStore) bool {
-	if resolved == nil || keyStore == nil || resolved.Profile == "" {
-		return false
-	}
-	key := strings.TrimSpace(keyStore.Get(resolved.Profile))
-	if key == "" {
-		return false
-	}
-	resolved.SetAPIKey(key)
-	return true
-}
-
-// wireOAuth checks if a resolved profile needs OAuth and has stored tokens.
-// If so, it sets the Auth field. Returns true if auth was wired.
-func wireOAuth(resolved *llmconfig.Resolved, store *oauth.Store) bool {
-	if resolved == nil || store == nil || resolved.OAuthProvider == "" {
-		return false
-	}
-
-	providerID := oauth.ProviderID(resolved.OAuthProvider)
-	if !store.HasToken(providerID) {
-		return false
-	}
-
-	switch providerID {
-	case oauth.ProviderOpenAI:
-		ts := oauth.NewOpenAITokenSource(store)
-		resolved.Auth = oauth.NewAuthenticator(ts)
-		return true
-	case oauth.ProviderCopilot:
-		ts := oauth.NewCopilotTokenSource(store)
-		resolved.Auth = oauth.NewAuthenticator(ts)
-		return true
-	default:
-		slog.Warn("wire: unknown OAuth provider", "provider", resolved.OAuthProvider)
-		return false
 	}
 }

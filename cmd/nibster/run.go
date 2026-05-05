@@ -37,7 +37,15 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 	// OAuth-only profiles (e.g. chatgpt, copilot) need the auth store
 	// attached before HasProvider can succeed. Stored-key wiring is
 	// nib-code-only (TUI-entered keys), so it's intentionally omitted.
-	if oauthStore := openOAuthStore(); oauthStore != nil {
+	// Gate on OAuthProvider so API-key users never touch the auth file
+	// — and so a corrupt store surfaces as a real setup error here
+	// (not a misleading "no credentials") only when OAuth is actually
+	// the configured auth path.
+	if resolved.OAuthProvider != "" {
+		oauthStore, err := openOAuthStore()
+		if err != nil {
+			return setupErr("oauth store: %v", err)
+		}
 		llmconfig.WireOAuth(resolved, oauthStore)
 	}
 	if !resolved.HasProvider() {
@@ -128,23 +136,21 @@ func closeAgent(ag *kit.Agent, events <-chan event.Event) {
 	close(drainDone)
 }
 
-// openOAuthStore opens the default OAuth token store. Returns nil on
-// any failure (missing config dir, unreadable file) — callers fall
-// through to the no-credentials error path. Errors are logged at debug
-// because OAuth is optional: most users authenticate via API key env
-// vars and never touch the store.
-func openOAuthStore() *oauth.Store {
+// openOAuthStore opens the default OAuth token store. A missing
+// auth.json is not an error ([oauth.NewStore] treats os.ErrNotExist
+// as empty); only real failures (no user config dir, unreadable file,
+// corrupt JSON) surface here so the caller can distinguish "user
+// hasn't logged in yet" from "store is broken."
+func openOAuthStore() (*oauth.Store, error) {
 	path, err := oauth.DefaultStorePath()
 	if err != nil {
-		slog.Debug("oauth store path unavailable", "err", err)
-		return nil
+		return nil, fmt.Errorf("resolve store path: %w", err)
 	}
 	store, err := oauth.NewStore(path)
 	if err != nil {
-		slog.Debug("oauth store open failed", "path", path, "err", err)
-		return nil
+		return nil, fmt.Errorf("open store at %s: %w", path, err)
 	}
-	return store
+	return store, nil
 }
 
 // classifyStatus derives the index entry's status marker from the

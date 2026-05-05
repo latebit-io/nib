@@ -19,28 +19,41 @@ func WireOAuth(resolved *Resolved, store *oauth.Store) bool {
 	if resolved == nil || store == nil || resolved.OAuthProvider == "" {
 		return false
 	}
+	// Validate the provider before probing the store. An unknown provider
+	// must surface as a config error (warn-and-return), not silently
+	// collapse into the same "no token on disk" path as ProviderOpenAI
+	// without a token — callers cannot distinguish the two from the bool
+	// alone, and the warning is the only signal a misconfigured profile
+	// gets.
 	providerID := oauth.ProviderID(resolved.OAuthProvider)
-	if !store.HasToken(providerID) {
-		return false
-	}
+	var tokenSource oauth.TokenSource
 	switch providerID {
 	case oauth.ProviderOpenAI:
-		resolved.Auth = oauth.NewAuthenticator(oauth.NewOpenAITokenSource(store))
-		return true
+		tokenSource = oauth.NewOpenAITokenSource(store)
 	case oauth.ProviderCopilot:
-		resolved.Auth = oauth.NewAuthenticator(oauth.NewCopilotTokenSource(store))
-		return true
+		tokenSource = oauth.NewCopilotTokenSource(store)
 	default:
 		slog.Warn("llmconfig: unknown OAuth provider", "provider", resolved.OAuthProvider)
 		return false
 	}
+	if !store.HasToken(providerID) {
+		return false
+	}
+	resolved.Auth = oauth.NewAuthenticator(tokenSource)
+	return true
 }
 
 // WireStoredKey applies an API key from the key store to a resolved
-// profile, keyed by profile name. Returns true if a key was found and
-// applied. A no-op for OAuth-only profiles (see [Resolved.SetAPIKey]).
+// profile, keyed by profile name. Returns true only when a key was
+// actually applied — OAuth-only profiles short-circuit with false
+// because [Resolved.SetAPIKey] is a no-op for them, and a true return
+// in that case would mislead callers into believing credentials are
+// wired when they aren't.
 func WireStoredKey(resolved *Resolved, keyStore *oauth.KeyStore) bool {
 	if resolved == nil || keyStore == nil || resolved.Profile == "" {
+		return false
+	}
+	if resolved.OAuthProvider != "" {
 		return false
 	}
 	key := strings.TrimSpace(keyStore.Get(resolved.Profile))

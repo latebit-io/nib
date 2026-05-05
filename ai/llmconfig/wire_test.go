@@ -135,10 +135,10 @@ func TestWireStoredKey(t *testing.T) {
 			want:     false,
 		},
 		{
-			name:     "oauth-only profile ignores key",
+			name:     "oauth-only profile short-circuits with false",
 			resolved: &Resolved{Profile: "openrouter", OAuthProvider: "openai"},
 			store:    keyStore,
-			want:     true,
+			want:     false,
 			wantKey:  "",
 		},
 	}

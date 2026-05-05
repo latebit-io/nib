@@ -33,6 +33,7 @@ go.work.sum
 bin/
 cmd/agent/agent
 cmd/nib-code/nib-code
+cmd/nibster/nibster
 
 .mcp.json
 log.txt

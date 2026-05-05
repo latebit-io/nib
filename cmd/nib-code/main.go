@@ -265,8 +265,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			if resolved == nil {
 				return nil, fmt.Errorf("unknown profile %q", profile)
 			}
-			wire.WireOAuthProfile(resolved, pr.OAuthStore)
-			wire.WireStoredKey(resolved, pr.KeyStore)
+			llmconfig.WireOAuth(resolved, pr.OAuthStore)
+			llmconfig.WireStoredKey(resolved, pr.KeyStore)
 
 			if !resolved.HasProvider() {
 				return nil, fmt.Errorf("no credentials for profile %q", profile)
@@ -485,8 +485,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		if modelID != "" {
 			resolved.Model = modelID
 		}
-		wire.WireOAuthProfile(resolved, pr.OAuthStore)
-		wire.WireStoredKey(resolved, pr.KeyStore)
+		llmconfig.WireOAuth(resolved, pr.OAuthStore)
+		llmconfig.WireStoredKey(resolved, pr.KeyStore)
 		newProvider := resolved.NewProvider()
 		if newProvider == nil {
 			return "", fmt.Errorf("no credentials for profile %q", profile)

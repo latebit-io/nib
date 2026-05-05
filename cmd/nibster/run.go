@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/ai/llmconfig"
+	"github.com/latebit-io/nib/ai/oauth"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
 	"github.com/latebit-io/nib/kit/headless"
@@ -33,6 +34,20 @@ const indexWriteTimeout = 5 * time.Second
 // consistent even when the agent runs out of budget mid-update.
 func runAgent(ctx context.Context, root string, store memory.Store, message string) error {
 	_, resolved := llmconfig.Resolve(root)
+	// OAuth-only profiles (e.g. chatgpt, copilot) need the auth store
+	// attached before HasProvider can succeed. Stored-key wiring is
+	// nib-code-only (TUI-entered keys), so it's intentionally omitted.
+	// Gate on OAuthProvider so API-key users never touch the auth file
+	// — and so a corrupt store surfaces as a real setup error here
+	// (not a misleading "no credentials") only when OAuth is actually
+	// the configured auth path.
+	if resolved.OAuthProvider != "" {
+		oauthStore, err := openOAuthStore()
+		if err != nil {
+			return setupErr("oauth store: %v", err)
+		}
+		llmconfig.WireOAuth(resolved, oauthStore)
+	}
 	if !resolved.HasProvider() {
 		return setupErr("no LLM credentials — %s", credentialHint(resolved))
 	}
@@ -119,6 +134,23 @@ func closeAgent(ag *kit.Agent, events <-chan event.Event) {
 	}()
 	ag.Close()
 	close(drainDone)
+}
+
+// openOAuthStore opens the default OAuth token store. A missing
+// auth.json is not an error ([oauth.NewStore] treats os.ErrNotExist
+// as empty); only real failures (no user config dir, unreadable file,
+// corrupt JSON) surface here so the caller can distinguish "user
+// hasn't logged in yet" from "store is broken."
+func openOAuthStore() (*oauth.Store, error) {
+	path, err := oauth.DefaultStorePath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve store path: %w", err)
+	}
+	store, err := oauth.NewStore(path)
+	if err != nil {
+		return nil, fmt.Errorf("open store at %s: %w", path, err)
+	}
+	return store, nil
 }
 
 // classifyStatus derives the index entry's status marker from the

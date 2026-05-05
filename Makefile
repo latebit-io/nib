@@ -7,7 +7,7 @@ QUERY_LANGS := \
 	lua:github.com/tree-sitter-grammars/tree-sitter-lua \
 	yaml:github.com/tree-sitter-grammars/tree-sitter-yaml
 
-.PHONY: all build clean install uninstall test fmt vet sync-queries
+.PHONY: all build clean install uninstall test fmt vet sync-queries run-nibster
 
 all: build
 
@@ -72,6 +72,11 @@ clean:
 	rm -f cmd/nib-code/bin/*
 	rm -f cmd/agent/bin/*
 	rm -f cmd/nibster/bin/*
+
+# Run nibster from source. Pass extra flags via ARGS, e.g.:
+#   make run-nibster ARGS="-m 'list files' -debug"
+run-nibster:
+	cd cmd/nibster && go run . $(ARGS)
 
 # Re-vendor highlights.scm for every language in QUERY_LANGS, resolving the
 # exact on-disk path from each module's current pinned version. Run after

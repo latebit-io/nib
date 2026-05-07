@@ -18,13 +18,25 @@ import (
 	kitcmd "github.com/latebit-io/nib/kit/command"
 )
 
-// Pane is the minimum slice of the agent pane PaneSession writes
-// to. tui/ui's *AgentPaneModel satisfies it via AppendMeta. Kept
-// as a one-method interface so tui/command does not import tui/ui.
+// Pane is the minimum slice of the agent pane the tui/command
+// package writes to. tui/ui's *AgentPaneModel satisfies it. Kept
+// as a small interface so tui/command does not import tui/ui.
+//
+// PaneSession (the kit.Session adapter) consumes only AppendMeta;
+// Clear is consumed by [ClearCommand]. Both methods are grouped on
+// one interface because every implementor that owns the agent pane
+// implements both — splitting them would add a binding step at the
+// composition site without ergonomic benefit.
 type Pane interface {
 	// AppendMeta renders chrome / status text into the transcript
 	// without involving the LLM.
 	AppendMeta(text string)
+
+	// Clear empties the transcript view. Implementations should also
+	// reset transient view state (selection, scroll offset, status)
+	// so the post-Clear pane behaves like a fresh session — see
+	// (*AgentPaneModel).Clear for the canonical reset list.
+	Clear()
 }
 
 // PaneSession is a per-dispatch implementation of

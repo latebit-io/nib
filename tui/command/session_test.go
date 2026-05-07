@@ -6,11 +6,16 @@ import (
 )
 
 type fakePane struct {
-	metas []string
+	metas  []string
+	clears int
 }
 
 func (f *fakePane) AppendMeta(text string) {
 	f.metas = append(f.metas, text)
+}
+
+func (f *fakePane) Clear() {
+	f.clears++
 }
 
 func TestPaneSession_DisplayRoutesToPane(t *testing.T) {

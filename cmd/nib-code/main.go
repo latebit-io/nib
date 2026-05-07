@@ -17,6 +17,7 @@ import (
 	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/ai/oauth"
 	"github.com/latebit-io/nib/coding/agent"
+	codingcmd "github.com/latebit-io/nib/coding/command"
 	"github.com/latebit-io/nib/coding/event"
 	codingmemory "github.com/latebit-io/nib/coding/memory"
 	"github.com/latebit-io/nib/coding/prompts"
@@ -321,12 +322,27 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	})
 	app := tuiApp.Model()
 
-	// Compose the slash-command registry. Frontend-shaped commands
-	// (/quit) live in tui/command; the kit-shipped /help is registered
-	// last so it sees every other command. /quit asks the program to
+	// Compose the slash-command registry. Domain commands (/compact)
+	// live in coding/command; frontend-shaped commands (/clear, /quit)
+	// live in tui/command; the kit-shipped /help is registered last
+	// so it sees every other command. /quit asks the program to
 	// terminate via QuitMsg — same path Ctrl+C takes — so cleanup in
-	// App.Run's deferred shutdown still fires.
+	// App.Run's deferred shutdown still fires. /clear and /compact
+	// are registered eagerly even when ag is nil (no LLM credentials):
+	// they capture *agent.Agent through closures resolved at dispatch
+	// time so the model-switcher's lazy agent construction wires up
+	// without a re-registration step.
 	cmdRegistry := kitcmd.NewRegistry()
+	compactor := agentCompactor{getAgent: func() *agent.Agent { return ag }}
+	if err := cmdRegistry.Register(codingcmd.NewCompact(
+		compactor, agent.ErrNothingToCompact, agent.ErrNoConversation,
+	)); err != nil {
+		return fmt.Errorf("register /compact: %w", err)
+	}
+	resetter := agentResetter{getAgent: func() *agent.Agent { return ag }}
+	if err := cmdRegistry.Register(tuicmd.NewClear(resetter, app.AgentPane)); err != nil {
+		return fmt.Errorf("register /clear: %w", err)
+	}
 	if err := cmdRegistry.Register(tuicmd.NewQuit(func() {
 		tuiApp.Program().Send(tea.Quit())
 	})); err != nil {
@@ -335,12 +351,17 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if err := cmdRegistry.Register(kitcmd.NewHelp(cmdRegistry)); err != nil {
 		return fmt.Errorf("register /help: %w", err)
 	}
-	// Busy probe: when the agent has a turn in flight, refuse
-	// dispatch. nil ag (no LLM credentials) leaves the probe nil so
-	// /help and /quit work even before the agent is built.
+	// Busy probe: refuse dispatch only when a turn is actively in
+	// flight (running AND not parked at AwaitInput). The agent is
+	// "running" between the first prompt and the final AgentDone —
+	// most of that span it sits parked waiting for the user, which
+	// IS the right moment for /clear and /compact. Restricting on
+	// IsRunning alone would gate every command behind a fresh
+	// session restart. nil ag (no LLM credentials) leaves the probe
+	// nil so /help and /quit work even before the agent is built.
 	var cmdBusy func() bool
 	if ag != nil {
-		cmdBusy = ag.IsRunning
+		cmdBusy = func() bool { return ag.IsRunning() && !ag.IsWaiting() }
 	}
 	app.AgentPane.SetCommandDispatch(cmdRegistry, cmdBusy)
 
@@ -555,6 +576,46 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	appCancel()
 	sess.Close()
 	return err
+}
+
+// agentCompactor adapts a lazily-resolved *agent.Agent to
+// codingcmd.Compactor. The agent may not exist at registry-build
+// time (no LLM credentials at startup → model switcher constructs
+// it on first connect), so getAgent is called per dispatch and
+// returns ErrNoConversation when still nil.
+type agentCompactor struct {
+	getAgent func() *agent.Agent
+}
+
+// Compact resolves the active agent and forwards. Returns
+// agent.ErrNoConversation when no agent has been built yet so the
+// command surface shows "No conversation to compact." instead of a
+// nil-pointer panic.
+func (c agentCompactor) Compact(ctx context.Context) error {
+	ag := c.getAgent()
+	if ag == nil {
+		return agent.ErrNoConversation
+	}
+	return ag.Compact(ctx)
+}
+
+// agentResetter adapts a lazily-resolved *agent.Agent to
+// tuicmd.HistoryResetter. See agentCompactor for the lazy-resolve
+// rationale.
+type agentResetter struct {
+	getAgent func() *agent.Agent
+}
+
+// ResetHistory resolves the active agent and forwards. Returns nil
+// when no agent has been built yet — there is no history to reset,
+// and surfacing an error would just block the user's pane clear.
+// The companion view-side Clear still runs.
+func (r agentResetter) ResetHistory(ctx context.Context) error {
+	ag := r.getAgent()
+	if ag == nil {
+		return nil
+	}
+	return ag.ResetHistory(ctx)
 }
 
 // connectOpenAICmd returns a tea.Cmd that runs the OpenAI browser OAuth flow.

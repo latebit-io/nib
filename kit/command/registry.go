@@ -298,29 +298,37 @@ func (r *Registry) Dispatch(
 
 	cmd, found := r.Lookup(name)
 	if !found {
+		// Per CommandError doc: for unknown commands, Name is the name
+		// the user typed (which is what we have — there is no canonical
+		// to substitute).
 		return true, &CommandError{Name: name, Err: ErrUnknownCommand}
 	}
 
+	// Post-lookup, every error must carry the canonical name per the
+	// CommandError contract. The user may have typed an alias; resolve
+	// it to canonical once and reuse for all subsequent errors.
+	canon := strings.ToLower(cmd.Definition().Name)
+
 	if o.busy != nil && o.busy() {
-		return true, &CommandError{Name: name, Err: ErrTurnInFlight}
+		return true, &CommandError{Name: canon, Err: ErrTurnInFlight}
 	}
 
 	switch c := cmd.(type) {
 	case HandlerCommand:
 		if hErr := c.Handle(ctx, sess, args); hErr != nil {
-			return true, &CommandError{Name: name, Err: hErr}
+			return true, &CommandError{Name: canon, Err: hErr}
 		}
 		return true, nil
 	case PromptCommand:
 		rendered, rErr := c.Render(args)
 		if rErr != nil {
-			return true, &CommandError{Name: name, Err: rErr}
+			return true, &CommandError{Name: canon, Err: rErr}
 		}
 		if sErr := sess.SubmitPrompt(ctx, rendered); sErr != nil {
-			return true, &CommandError{Name: name, Err: sErr}
+			return true, &CommandError{Name: canon, Err: sErr}
 		}
 		return true, nil
 	default:
-		return true, &CommandError{Name: name, Err: ErrInvalidCommandShape}
+		return true, &CommandError{Name: canon, Err: ErrInvalidCommandShape}
 	}
 }

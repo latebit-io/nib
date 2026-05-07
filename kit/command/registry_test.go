@@ -487,6 +487,104 @@ func TestDispatch_UnknownTakesPrecedenceOverBusy(t *testing.T) {
 	}
 }
 
+// TestDispatch_AliasErrorsCarryCanonicalName verifies the
+// CommandError.Name contract for post-lookup errors: when the user
+// invokes a command via alias, every post-lookup error must report the
+// canonical name, not the alias the user typed. ErrUnknownCommand is
+// the documented exception (no canonical to substitute).
+func TestDispatch_AliasErrorsCarryCanonicalName(t *testing.T) {
+	const canon = "compact"
+	const alias = "c"
+
+	defWithAlias := func(name string) Definition {
+		d := builtinDef(name)
+		d.Aliases = []string{alias}
+		return d
+	}
+
+	t.Run("handler error", func(t *testing.T) {
+		r := NewRegistry()
+		boom := errors.New("handler boom")
+		if err := r.Register(&fakeHandler{def: defWithAlias(canon), handleErr: boom}); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		_, err := r.Dispatch(context.Background(), &fakeSession{}, "/"+alias)
+		var ce *CommandError
+		if !errors.As(err, &ce) {
+			t.Fatalf("err not *CommandError: %v", err)
+		}
+		if ce.Name != canon {
+			t.Errorf("CommandError.Name = %q, want canonical %q", ce.Name, canon)
+		}
+	})
+
+	t.Run("turn in flight", func(t *testing.T) {
+		r := NewRegistry()
+		if err := r.Register(&fakeHandler{def: defWithAlias(canon)}); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		_, err := r.Dispatch(
+			context.Background(), &fakeSession{}, "/"+alias,
+			WithBusyCheck(func() bool { return true }),
+		)
+		var ce *CommandError
+		if !errors.As(err, &ce) || ce.Name != canon {
+			t.Errorf("CommandError.Name = %q, want %q (err=%v)", ce.Name, canon, err)
+		}
+	})
+
+	t.Run("render error", func(t *testing.T) {
+		r := NewRegistry()
+		rerr := errors.New("render boom")
+		if err := r.Register(&fakePrompt{def: defWithAlias(canon), renderErr: rerr}); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		_, err := r.Dispatch(context.Background(), &fakeSession{}, "/"+alias)
+		var ce *CommandError
+		if !errors.As(err, &ce) || ce.Name != canon {
+			t.Errorf("CommandError.Name = %q, want %q (err=%v)", ce.Name, canon, err)
+		}
+	})
+
+	t.Run("submit error", func(t *testing.T) {
+		r := NewRegistry()
+		serr := errors.New("submit boom")
+		if err := r.Register(&fakePrompt{def: defWithAlias(canon), rendered: "x"}); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		_, err := r.Dispatch(
+			context.Background(), &fakeSession{submitErr: serr}, "/"+alias,
+		)
+		var ce *CommandError
+		if !errors.As(err, &ce) || ce.Name != canon {
+			t.Errorf("CommandError.Name = %q, want %q (err=%v)", ce.Name, canon, err)
+		}
+	})
+
+	t.Run("invalid shape", func(t *testing.T) {
+		r := NewRegistry()
+		if err := r.Register(&fakeBare{def: defWithAlias(canon)}); err != nil {
+			t.Fatalf("register bare: %v", err)
+		}
+		_, err := r.Dispatch(context.Background(), &fakeSession{}, "/"+alias)
+		var ce *CommandError
+		if !errors.As(err, &ce) || ce.Name != canon {
+			t.Errorf("CommandError.Name = %q, want %q (err=%v)", ce.Name, canon, err)
+		}
+	})
+
+	t.Run("unknown command keeps user input", func(t *testing.T) {
+		// Documented exception: ErrUnknownCommand carries what the
+		// user typed because there is no canonical to substitute.
+		r := NewRegistry()
+		_, err := r.Dispatch(context.Background(), &fakeSession{}, "/nope")
+		var ce *CommandError
+		if !errors.As(err, &ce) || ce.Name != "nope" {
+			t.Errorf("CommandError.Name = %q, want %q (err=%v)", ce.Name, "nope", err)
+		}
+	})
+}
+
 func TestDispatch_InvalidShape(t *testing.T) {
 	r := NewRegistry()
 	if err := r.Register(&fakeBare{def: builtinDef("foo")}); err != nil {

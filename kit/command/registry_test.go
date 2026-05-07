@@ -274,6 +274,55 @@ func TestRegister_ReplaceClearsAliases(t *testing.T) {
 	}
 }
 
+// TestRegister_ReplaceAliasCollisionPreservesExisting guards against
+// registry corruption when a higher-precedence replacement fails alias
+// validation: the previously-registered entry must remain intact, not
+// be deleted alongside the rejected replacement.
+func TestRegister_ReplaceAliasCollisionPreservesExisting(t *testing.T) {
+	r := NewRegistry()
+
+	// A third command owns alias "x".
+	otherDef := sourceDef("other", SourceBuiltin)
+	otherDef.Aliases = []string{"x"}
+	other := &fakeHandler{def: otherDef}
+	if err := r.Register(other); err != nil {
+		t.Fatalf("register other: %v", err)
+	}
+
+	// Existing global "foo" with alias "f".
+	gd := sourceDef("foo", SourceGlobal)
+	gd.Aliases = []string{"f"}
+	gCmd := &fakeHandler{def: gd}
+	if err := r.Register(gCmd); err != nil {
+		t.Fatalf("register global: %v", err)
+	}
+
+	// Higher-precedence project replacement whose alias "x" collides
+	// with the third command — must error.
+	pd := sourceDef("foo", SourceProject)
+	pd.Aliases = []string{"x"}
+	pCmd := &fakeHandler{def: pd}
+	if err := r.Register(pCmd); err == nil {
+		t.Fatalf("register project with colliding alias should error")
+	}
+
+	// Existing global "foo" and its alias "f" must still resolve;
+	// the failed replacement must not have deleted them.
+	got, ok := r.Lookup("foo")
+	if !ok || got != gCmd {
+		t.Errorf("Lookup(foo) after failed replacement = (%v, %v), want global, true", got, ok)
+	}
+	got, ok = r.Lookup("f")
+	if !ok || got != gCmd {
+		t.Errorf("Lookup(f) after failed replacement = (%v, %v), want global, true", got, ok)
+	}
+	// Third command must still own "x".
+	got, ok = r.Lookup("x")
+	if !ok || got != other {
+		t.Errorf("Lookup(x) after failed replacement = (%v, %v), want other, true", got, ok)
+	}
+}
+
 // --- Dispatch ------------------------------------------------------
 
 func TestDispatch_NotASlash(t *testing.T) {

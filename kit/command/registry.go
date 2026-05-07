@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -166,6 +166,11 @@ func (r *Registry) Register(c Command) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Resolve precedence against any existing entry, but do not mutate
+	// the registry yet — alias validation below must run while every
+	// invariant still holds, so a validation failure cannot leave the
+	// registry in a partial state.
+	var replacing *registryEntry
 	if existing, ok := r.commands[canon]; ok {
 		if existing.kind == def.Source.Kind {
 			return &CommandError{Name: canon, Err: ErrCollision}
@@ -179,12 +184,7 @@ func (r *Registry) Register(c Command) error {
 			// not errors).
 			return nil
 		}
-		// Replace: clear out old aliases owned by the existing entry
-		// before installing the new aliases.
-		for _, a := range existing.aliases {
-			delete(r.aliases, a)
-		}
-		delete(r.commands, canon)
+		replacing = existing
 	}
 
 	canonAliases := make([]string, 0, len(def.Aliases))
@@ -194,7 +194,9 @@ func (r *Registry) Register(c Command) error {
 			continue // alias matches canonical — silently dedupe
 		}
 		// An alias must not collide with another command's canonical
-		// name or with another alias.
+		// name or with another alias. Aliases owned by the entry
+		// being replaced (owner == canon) are not collisions —
+		// they're about to be released.
 		if _, exists := r.commands[ca]; exists {
 			return fmt.Errorf("command %q: alias %q collides with existing command", canon, a)
 		}
@@ -202,6 +204,14 @@ func (r *Registry) Register(c Command) error {
 			return fmt.Errorf("command %q: alias %q collides with alias on %q", canon, a, owner)
 		}
 		canonAliases = append(canonAliases, ca)
+	}
+
+	// All validation passed. Safe to mutate now.
+	if replacing != nil {
+		for _, a := range replacing.aliases {
+			delete(r.aliases, a)
+		}
+		delete(r.commands, canon)
 	}
 
 	entry := &registryEntry{
@@ -236,24 +246,20 @@ func (r *Registry) Lookup(name string) (Command, bool) {
 }
 
 // List returns all registered commands sorted by canonical name.
-// Stable output makes /help deterministic.
+// The snapshot is taken under a single RLock so a concurrent
+// [Register] cannot interleave between name collection and command
+// resolution. Stable output makes /help deterministic.
 func (r *Registry) List() []Command {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.commands))
 	for name := range r.commands {
 		names = append(names, name)
 	}
-	r.mu.RUnlock()
-
-	sort.Strings(names)
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	slices.Sort(names)
 	out := make([]Command, 0, len(names))
 	for _, name := range names {
-		if entry, ok := r.commands[name]; ok {
-			out = append(out, entry.cmd)
-		}
+		out = append(out, r.commands[name].cmd)
 	}
 	return out
 }

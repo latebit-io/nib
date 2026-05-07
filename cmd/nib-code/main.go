@@ -33,7 +33,9 @@ import (
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/lintstage"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
+	kitcmd "github.com/latebit-io/nib/kit/command"
 	nibTui "github.com/latebit-io/nib/tui"
+	tuicmd "github.com/latebit-io/nib/tui/command"
 )
 
 func main() {
@@ -318,6 +320,29 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		LLM:     llmCallbacks,
 	})
 	app := tuiApp.Model()
+
+	// Compose the slash-command registry. Frontend-shaped commands
+	// (/quit) live in tui/command; the kit-shipped /help is registered
+	// last so it sees every other command. /quit asks the program to
+	// terminate via QuitMsg — same path Ctrl+C takes — so cleanup in
+	// App.Run's deferred shutdown still fires.
+	cmdRegistry := kitcmd.NewRegistry()
+	if err := cmdRegistry.Register(tuicmd.NewQuit(func() {
+		tuiApp.Program().Send(tea.Quit())
+	})); err != nil {
+		return fmt.Errorf("register /quit: %w", err)
+	}
+	if err := cmdRegistry.Register(kitcmd.NewHelp(cmdRegistry)); err != nil {
+		return fmt.Errorf("register /help: %w", err)
+	}
+	// Busy probe: when the agent has a turn in flight, refuse
+	// dispatch. nil ag (no LLM credentials) leaves the probe nil so
+	// /help and /quit work even before the agent is built.
+	var cmdBusy func() bool
+	if ag != nil {
+		cmdBusy = ag.IsRunning
+	}
+	app.AgentPane.SetCommandDispatch(cmdRegistry, cmdBusy)
 
 	// OAuth callbacks — wired post-construction because ConnectOAuth
 	// needs tuiApp.Program() which only exists after New().

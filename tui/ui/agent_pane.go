@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -13,6 +14,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/coding/event"
+	kitcmd "github.com/latebit-io/nib/kit/command"
+	tuicmd "github.com/latebit-io/nib/tui/command"
 	"github.com/latebit-io/nib/tui/sanitize"
 	"github.com/latebit-io/nib/tui/ui/textarea"
 	"github.com/mattn/go-runewidth"
@@ -271,6 +274,20 @@ type AgentPaneModel struct {
 
 	// hasAgent is true when an LLM provider is configured.
 	hasAgent bool
+
+	// commandRegistry, when non-nil, intercepts SubmitMsg input that
+	// parses as a slash command before it becomes a goal submission.
+	// nil means slash dispatch is disabled and every submission goes
+	// directly to GoalSubmittedMsg / PlanningGoalSubmittedMsg, the
+	// pre-command behavior. Set via [SetCommandDispatch].
+	commandRegistry *kitcmd.Registry
+
+	// commandBusy is the optional probe Dispatch consults via
+	// [kitcmd.WithBusyCheck]. Returns true when an agent turn is in
+	// flight; the registry refuses dispatch in that window. nil
+	// disables the busy check (commands always dispatch). Set via
+	// [SetCommandDispatch].
+	commandBusy func() bool
 
 	// renderBuf is the per-frame output slice. Hoisted onto the model so
 	// each Render call resizes/clears in place rather than allocating a
@@ -661,10 +678,7 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 		m.inputActive = false
 		m.input.Reset()
 		m.planningMode = false
-		if planning {
-			return func() tea.Msg { return PlanningGoalSubmittedMsg{Goal: text} }
-		}
-		return func() tea.Msg { return GoalSubmittedMsg{Goal: text} }
+		return m.dispatchOrSubmit(text, planning)
 	case textarea.CancelMsg:
 		// Esc deactivates focus but preserves content — Ctrl+G or
 		// click restores it. Clear planningMode so refocus via click
@@ -676,6 +690,66 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 		// Re-wrap the command — we already consumed the thunk.
 		return func() tea.Msg { return result }
 	}
+}
+
+// SetCommandDispatch wires (or unwires) slash-command dispatch into
+// the input handler. After this call, SubmitMsg input that parses as
+// a slash command runs through reg.Dispatch before falling back to
+// goal submission. Pass (nil, nil) to disable.
+//
+// busy is consulted via [kitcmd.WithBusyCheck]. nil means the busy
+// check is omitted — commands dispatch unconditionally. The binary
+// typically wires busy to coding.Agent.IsRunning so /quit-class
+// commands cannot interleave with an in-flight LLM turn.
+func (m *AgentPaneModel) SetCommandDispatch(reg *kitcmd.Registry, busy func() bool) {
+	m.commandRegistry = reg
+	m.commandBusy = busy
+}
+
+// dispatchOrSubmit is the post-validation tail of the SubmitMsg
+// branch. With no registry wired, it preserves the pre-command
+// behavior (emit goal- or planning-submitted message). With a
+// registry, slash input is offered to Dispatch first; only
+// non-matching input falls through.
+//
+// Return shape:
+//   - matched=true, err=nil: command consumed the input. Returns nil
+//     (or, if the command called SubmitPrompt, a Cmd that emits
+//     GoalSubmittedMsg with the rendered prompt).
+//   - matched=true, err!=nil: command failed. Surface the error
+//     inline via AppendMeta and return nil. Goal submission is
+//     suppressed — the user typed a slash command, even if it
+//     errored, so falling through to the LLM would be surprising.
+//   - matched=false: not a slash command. Behave as before (planning
+//     vs. regular goal submission).
+//
+// Slash commands don't carry a planning-mode submission; the planning
+// bit only applies on the goal-submission fallthrough path. A
+// PromptCommand that wanted planning would need to be authored as a
+// distinct command — keeps the contract narrow.
+func (m *AgentPaneModel) dispatchOrSubmit(text string, planning bool) tea.Cmd {
+	if m.commandRegistry != nil {
+		sess := tuicmd.NewPaneSession(m)
+		var opts []kitcmd.DispatchOption
+		if m.commandBusy != nil {
+			opts = append(opts, kitcmd.WithBusyCheck(m.commandBusy))
+		}
+		matched, err := m.commandRegistry.Dispatch(context.Background(), sess, text, opts...)
+		if matched {
+			if err != nil {
+				m.AppendMeta(fmt.Sprintf("[%s]\n", err.Error()))
+			}
+			if prompt, ok := sess.PendingPrompt(); ok {
+				return func() tea.Msg { return GoalSubmittedMsg{Goal: prompt} }
+			}
+			return nil
+		}
+		// matched=false: input is not a slash command. Fall through.
+	}
+	if planning {
+		return func() tea.Msg { return PlanningGoalSubmittedMsg{Goal: text} }
+	}
+	return func() tea.Msg { return GoalSubmittedMsg{Goal: text} }
 }
 
 func (m *AgentPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {

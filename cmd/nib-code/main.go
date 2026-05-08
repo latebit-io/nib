@@ -35,6 +35,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/lintstage"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
 	kitcmd "github.com/latebit-io/nib/kit/command"
+	cmdloader "github.com/latebit-io/nib/kit/command/loader"
 	nibTui "github.com/latebit-io/nib/tui"
 	tuicmd "github.com/latebit-io/nib/tui/command"
 )
@@ -343,6 +344,33 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if err := cmdRegistry.Register(tuicmd.NewClear(resetter, app.AgentPane)); err != nil {
 		return fmt.Errorf("register /clear: %w", err)
 	}
+	// Markdown-defined PromptCommands. Project-local commands live
+	// under <projectRoot>/.project/commands/ and shadow global
+	// commands at <UserConfigDir>/nib/commands/ via the registry's
+	// precedence model. Per-file parse errors are logged but never
+	// abort startup — the user's other commands still load. A
+	// missing directory is a no-op (most projects won't have one).
+	loadCommandDir := func(dir string, kind kitcmd.SourceKind) {
+		cmds, err := cmdloader.LoadDir(dir, kind)
+		if err != nil {
+			slog.Warn("commands: partial load", "dir", dir, "err", err)
+		}
+		for _, c := range cmds {
+			if regErr := cmdRegistry.Register(c); regErr != nil {
+				slog.Warn("commands: register failed",
+					"name", c.Definition().Name,
+					"path", c.Definition().Source.Path,
+					"err", regErr)
+			}
+		}
+	}
+	loadCommandDir(filepath.Join(projectRoot, ".project", "commands"), kitcmd.SourceProject)
+	if userCfgDir, err := os.UserConfigDir(); err == nil {
+		loadCommandDir(filepath.Join(userCfgDir, brand.ConfigDirName, "commands"), kitcmd.SourceGlobal)
+	} else {
+		slog.Debug("commands: skipping global dir, UserConfigDir unavailable", "err", err)
+	}
+
 	if err := cmdRegistry.Register(tuicmd.NewQuit(func() {
 		// Send must run off the Update goroutine. Program.msgs is an
 		// unbuffered channel; Send blocks until the loop reads, but

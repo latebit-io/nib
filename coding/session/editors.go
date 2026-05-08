@@ -9,14 +9,17 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
-// Editor lifecycle methods — opening, switching, reloading, deleting buffers,
-// plus the highlighter-decoration helpers that every constructor path runs
-// through. State (editors map, activeEditor/activeFile, mu) lives on Session
-// in session.go; this file groups the methods that mutate that state through
-// the workflow-enforcing path.
+// Open-file lifecycle methods — opening, switching, reloading, deleting
+// buffer-bound handles. State (openFiles map, activeOpenFile / activeFile,
+// mu) lives on Session in session.go; this file groups the methods that
+// mutate that state through the workflow-enforcing path.
+//
+// Session never holds a frontend editor controller; the TUI owns its own
+// pool of editors keyed by canonical path and wraps the buffer-only
+// [openfile.OpenFile] handles surfaced here.
 
 // ErrEditPending is returned by SwitchTo when a file switch is blocked
 // because an edit is pending approval or an animated edit is in progress.
@@ -32,86 +35,47 @@ func (s *Session) ActiveFile() string {
 	return f
 }
 
-// ActiveEditor returns the currently active editor. Safe to call from
-// any goroutine — reads under mu.RLock to avoid racing with SwitchTo.
-func (s *Session) ActiveEditor() *editor.Editor {
+// ActiveOpenFile returns the currently active open file. Safe to call
+// from any goroutine — reads under mu.RLock to avoid racing with
+// SwitchTo.
+func (s *Session) ActiveOpenFile() *openfile.OpenFile {
 	s.mu.RLock()
-	e := s.activeEditor
+	of := s.activeOpenFile
 	s.mu.RUnlock()
-	return e
+	return of
 }
 
-// OpenFiles returns the paths of all open editors.
+// OpenFiles returns the paths of all open files.
 func (s *Session) OpenFiles() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	files := make([]string, 0, len(s.editors))
-	for path := range s.editors {
+	files := make([]string, 0, len(s.openFiles))
+	for path := range s.openFiles {
 		files = append(files, path)
 	}
 	return files
 }
 
-// EditorForPath returns the editor for a given path, or nil if not open.
-func (s *Session) EditorForPath(path string) *editor.Editor {
+// OpenFileForPath returns the open file for a given path, or nil if not open.
+func (s *Session) OpenFileForPath(path string) *openfile.OpenFile {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.editors[s.CanonPath(path)]
+	return s.openFiles[s.CanonPath(path)]
 }
 
-// newEditor constructs an editor and installs a highlighter when a factory
-// has been configured. Session-internal editor construction goes through
-// this helper so every editor the session manages is decorated uniformly.
-//
-// Caller must NOT hold s.mu — decorateEditor takes RLock. Use editor.New
-// directly at sites that hold s.mu (write), then call decorateEditor after
-// releasing it.
-func (s *Session) newEditor(buf *buffer.Buffer) *editor.Editor {
-	e := editor.New(buf)
-	s.decorateEditor(e)
-	return e
+// newOpenFile constructs an [openfile.OpenFile] around the given buffer.
+// Session-internal open-file construction goes through this helper so any
+// future cross-cutting concerns (provenance, metadata) flow through one
+// site.
+func (s *Session) newOpenFile(buf *buffer.Buffer) *openfile.OpenFile {
+	return openfile.New(buf)
 }
 
-// decorateEditor installs a highlighter on an already-constructed editor
-// to match the session's current factory. Safe to call on a nil or
-// path-less editor — it no-ops. Must be called with s.mu unlocked.
-//
-// Linearizable w.r.t. concurrent [SetHighlighterFactory] via a
-// generation counter: read (factory, gen) under RLock, install the
-// highlighter outside the lock, then re-read gen — if it changed, the
-// factory was swapped mid-install and we retry with the new one. Each
-// retry overwrites the previous highlighter (SetHighlighter closes the
-// old one), so no resources leak.
-func (s *Session) decorateEditor(e *editor.Editor) {
-	if e == nil || e.Buf == nil || e.Buf.Path == "" {
-		return
-	}
-	for {
-		s.mu.RLock()
-		factory := s.highlighterFactory
-		gen := s.highlighterFactoryGen
-		s.mu.RUnlock()
-
-		if factory == nil {
-			e.SetHighlighter(nil)
-		} else {
-			e.SetHighlighter(factory(e.Buf.Path))
-		}
-
-		s.mu.RLock()
-		stable := gen == s.highlighterFactoryGen
-		s.mu.RUnlock()
-		if stable {
-			return
-		}
-	}
-}
-
-// SwitchTo switches the active editor to a different file. If the file is
-// already open, switches to it. If not, opens it from disk. Does NOT cancel
-// the agent or clear intent — multi-file work continues across switches.
-// Returns ErrEditPending if an edit is awaiting approval or mid-animation.
-// Returns an error if the file cannot be opened.
+// SwitchTo switches the active open file to a different path. If the file
+// is already open, switches to it. If not, opens it from disk. Does NOT
+// cancel the agent or clear intent — multi-file work continues across
+// switches. Returns ErrEditPending if an edit is awaiting approval or
+// mid-animation. Returns an error if the file cannot be opened.
 func (s *Session) SwitchTo(path string) error {
 	canon := s.CanonPath(path)
 
@@ -135,8 +99,8 @@ func (s *Session) SwitchTo(path string) error {
 	}
 
 	// Check if already open
-	if e, ok := s.editors[canon]; ok {
-		s.activeEditor = e
+	if of, ok := s.openFiles[canon]; ok {
+		s.activeOpenFile = of
 		s.activeFile = canon
 		s.mu.Unlock()
 		if !s.isProjectMeta(canon) && !s.InContext(canon) {
@@ -156,21 +120,18 @@ func (s *Session) SwitchTo(path string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("open %s: %w", path, err)
 	}
-	e := editor.New(buf)
-	s.editors[canon] = e
+	of := openfile.New(buf)
+	s.openFiles[canon] = of
 	addToContext := !s.isProjectMeta(canon)
 	if addToContext {
 		s.contextSet[canon] = true
 	}
-	s.activeEditor = e
+	s.activeOpenFile = of
 	s.activeFile = canon
 	s.mu.Unlock()
 
-	// Decorate after unlock — decorateEditor takes s.mu.RLock.
-	s.decorateEditor(e)
-
-	// Wire LSP sync for the new editor.
-	s.wireBufferSync(e)
+	// Wire LSP sync for the newly opened file.
+	s.wireBufferSync(of)
 
 	if addToContext {
 		s.saveContext()
@@ -179,7 +140,7 @@ func (s *Session) SwitchTo(path string) error {
 }
 
 // ReloadFile re-reads a file from disk, replacing the in-memory buffer content.
-// If the file is not currently open in the editors map, this is a no-op.
+// If the file is not currently open, this is a no-op.
 // Returns ErrEditPending if an edit is being reviewed or animated.
 func (s *Session) ReloadFile(path string) error {
 	canon := s.CanonPath(path)
@@ -189,26 +150,23 @@ func (s *Session) ReloadFile(path string) error {
 		s.mu.Unlock()
 		return ErrEditPending
 	}
-	e, ok := s.editors[canon]
+	of, ok := s.openFiles[canon]
 	s.mu.Unlock()
 
 	if !ok {
 		return nil // not open — nothing to reload
 	}
-	if err := e.Buf.ReloadFromDisk(); err != nil {
+	if err := of.Buf.ReloadFromDisk(); err != nil {
 		return fmt.Errorf("reload %s: %w", path, err)
 	}
-	// Clamp cursor and scroll to safe positions after content change.
-	e.MoveCursorTo(e.CursorLine, e.CursorCol)
-	e.ClampScroll()
 	slog.Debug("file reloaded from disk", "path", canon)
 	return nil
 }
 
 // DeleteFile removes a file or directory from disk and cleans up session state.
-// Closes editor buffers, removes context/modified entries, and unwires LSP sync
-// for the deleted path and any children. If the active editor is affected, falls
-// back to another open editor or installs a fresh empty one.
+// Closes session bookkeeping for affected paths. The TUI is responsible for
+// cleaning up its own editor pool entries via the matching navigate/close
+// signals; Session no longer owns any UI state to release here.
 func (s *Session) DeleteFile(path string) error {
 	absPath, err := s.resolvePath(path)
 	if err != nil {
@@ -227,7 +185,10 @@ func (s *Session) DeleteFile(path string) error {
 
 	// Block deletion while an edit is pending approval or mid-animation,
 	// same guard as SwitchTo. Approval state may reference the deleted path.
-	if s.pendingEdit != nil || s.stagedEditFile != "" {
+	s.mu.RLock()
+	pending := s.pendingEdit != nil || s.stagedEditFile != ""
+	s.mu.RUnlock()
+	if pending {
 		return ErrEditPending
 	}
 
@@ -236,9 +197,8 @@ func (s *Session) DeleteFile(path string) error {
 	}
 
 	removed := s.cleanupDeletedPath(canon)
-	for _, e := range removed {
-		s.unwireBufferSync(e)
-		e.Close()
+	for _, of := range removed {
+		s.unwireBufferSync(of)
 	}
 
 	s.saveContext()
@@ -262,10 +222,11 @@ func removeFromDisk(absPath, displayPath string) error {
 	return nil
 }
 
-// cleanupDeletedPath removes all session state (editors, context, modified)
-// for the given canonical path and any children (if a directory was deleted).
-// Returns removed editors so the caller can unwire and close them.
-func (s *Session) cleanupDeletedPath(canon string) []*editor.Editor {
+// cleanupDeletedPath removes all session state (open files, context,
+// modified) for the given canonical path and any children (if a directory
+// was deleted). Returns removed open-file handles so the caller can
+// unwire LSP sync for them.
+func (s *Session) cleanupDeletedPath(canon string) []*openfile.OpenFile {
 	dirPrefix := canon + string(filepath.Separator)
 	matches := func(p string) bool {
 		return p == canon || strings.HasPrefix(p, dirPrefix)
@@ -274,32 +235,35 @@ func (s *Session) cleanupDeletedPath(canon string) []*editor.Editor {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var removed []*editor.Editor
-	for p, e := range s.editors {
+	var removed []*openfile.OpenFile
+	for p, of := range s.openFiles {
 		if matches(p) {
-			removed = append(removed, e)
-			delete(s.editors, p)
+			removed = append(removed, of)
+			delete(s.openFiles, p)
 			if s.activeFile == p {
 				s.activeFile = ""
-				s.activeEditor = nil
+				s.activeOpenFile = nil
 			}
 		}
 	}
 	deleteMatching(s.contextSet, matches)
 	deleteMatching(s.modifiedFiles, matches)
 
-	// Ensure s.activeEditor is never nil.
-	if s.activeEditor == nil {
-		for p, ed := range s.editors {
-			s.activeEditor = ed
+	// Ensure s.activeOpenFile is never nil so callers (intent.go reads
+	// activeOpenFile.Buf.Content() unconditionally) cannot panic on the
+	// turn following a delete.
+	if s.activeOpenFile == nil {
+		for p, of := range s.openFiles {
+			s.activeOpenFile = of
 			s.activeFile = p
 			break
 		}
-		if s.activeEditor == nil {
-			e := editor.New(buffer.New())
-			s.activeEditor = e
-			// Track the empty editor so Session.Close() can release its resources.
-			s.editors[""] = e
+		if s.activeOpenFile == nil {
+			of := openfile.New(buffer.New())
+			s.activeOpenFile = of
+			// Track the empty handle so external observers see a
+			// consistent map.
+			s.openFiles[""] = of
 			s.activeFile = ""
 		}
 	}
@@ -315,49 +279,49 @@ func deleteMatching(m map[string]bool, pred func(string) bool) {
 	}
 }
 
-// editorForEdit returns the editor targeted by the current pending edit.
-// Falls back to the active editor if no path is set (backward compat).
-// If the target file isn't open yet, auto-opens it from disk — the agent
-// may have read the file via read_file (which doesn't create a buffer)
-// and then proposed an edit_file on it.
+// openFileForEdit returns the open file targeted by the current pending
+// edit. Falls back to the active open file if no path is set (backward
+// compat). If the target file isn't open yet, auto-opens it from disk —
+// the agent may have read the file via read_file (which doesn't create a
+// buffer) and then proposed an edit_file on it.
 //
 // Callers must hold a non-nil s.pendingEdit — all public entry points
 // (ReviewEdit, ApproveEdit, PrepareApproval) early-return before reaching
 // here, so the nil case is not defended against.
-func (s *Session) editorForEdit() *editor.Editor {
+func (s *Session) openFileForEdit() *openfile.OpenFile {
 	path := s.pendingEdit.Path
 	if path == "" {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return s.activeEditor
+		return s.activeOpenFile
 	}
 	canon := s.CanonPath(path)
 
 	s.mu.RLock()
-	e, ok := s.editors[canon]
+	of, ok := s.openFiles[canon]
 	s.mu.RUnlock()
 	if ok {
-		return e
+		return of
 	}
 
 	// Auto-open: the agent proposed an edit to a file that isn't open yet.
 	absPath, err := s.resolvePath(path)
 	if err != nil {
-		slog.Warn("editorForEdit: resolve path failed", "path", path, "err", err)
+		slog.Warn("openFileForEdit: resolve path failed", "path", path, "err", err)
 		return nil
 	}
 	buf, err := buffer.NewFromFile(absPath)
 	if err != nil {
-		slog.Warn("editorForEdit: open buffer failed", "path", path, "err", err)
+		slog.Warn("openFileForEdit: open buffer failed", "path", path, "err", err)
 		return nil
 	}
-	e = s.newEditor(buf)
+	of = s.newOpenFile(buf)
 	s.mu.Lock()
-	s.editors[canon] = e
+	s.openFiles[canon] = of
 	s.mu.Unlock()
 
-	// Wire LSP sync for auto-opened editor.
-	s.wireBufferSync(e)
+	// Wire LSP sync for auto-opened file.
+	s.wireBufferSync(of)
 
-	return e
+	return of
 }

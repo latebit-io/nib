@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
 // LSP-bridge methods on Session — wrapping the optional language
@@ -23,18 +23,18 @@ import (
 
 // SetLanguageService injects the language service port (e.g., lsp.Manager).
 // Session depends on the lang.DocumentSyncer interface, not any concrete type.
-// Wires Buffer.OnChange for the current editor to auto-sync with LSP.
+// Wires Buffer.OnChange for every already-open file so changes auto-sync
+// with LSP.
 func (s *Session) SetLanguageService(syncer lang.DocumentSyncer) {
 	s.langSyncer = syncer
-	// Wire all already-open editors, not just the active one.
 	s.mu.RLock()
-	editors := make([]*editor.Editor, 0, len(s.editors))
-	for _, e := range s.editors {
-		editors = append(editors, e)
+	files := make([]*openfile.OpenFile, 0, len(s.openFiles))
+	for _, of := range s.openFiles {
+		files = append(files, of)
 	}
 	s.mu.RUnlock()
-	for _, e := range editors {
-		s.wireBufferSync(e)
+	for _, of := range files {
+		s.wireBufferSync(of)
 	}
 }
 
@@ -97,33 +97,24 @@ func (s *Session) PopNav() {
 }
 
 // NavigateAgent handles an agent-initiated navigation: switches to the
-// requested file if it is not already active, then positions the cursor at
-// (line, 0) with selection cleared and the viewport scrolled to make the
-// position visible. Returns an error from SwitchTo on failure.
+// requested file if it is not already active. Cursor placement is the
+// frontend's responsibility — Session no longer holds an editor
+// controller, so the navigate event the agent emits carries (line, col)
+// and the frontend applies them on its own editor instance after the
+// switch lands.
 //
-// The frontend remains responsible for updating its own UI state (editor
-// model, file watchers, diagnostics, project pane) when ActiveEditor()
-// changes as a side effect of the switch.
-func (s *Session) NavigateAgent(path string, line int) error {
-	if s.CanonPath(path) != s.ActiveFile() {
-		if err := s.SwitchTo(path); err != nil {
-			return err
-		}
+// Returns an error from SwitchTo on failure.
+func (s *Session) NavigateAgent(path string) error {
+	if s.CanonPath(path) == s.ActiveFile() {
+		return nil
 	}
-	s.mu.RLock()
-	e := s.activeEditor
-	s.mu.RUnlock()
-	if e == nil {
-		return errors.New("no active editor")
-	}
-	e.ClearSelection()
-	e.MoveCursorTo(line, 0)
-	e.EnsureCursorVisible()
-	return nil
+	return s.SwitchTo(path)
 }
 
 // GoBack pops the navigation stack and returns to the previous location.
-// Returns the location jumped to, or nil if the stack is empty.
+// Returns the location jumped to, or nil if the stack is empty. The
+// frontend is responsible for placing its cursor at the returned
+// location — Session does not hold a UI cursor.
 func (s *Session) GoBack() *lang.Location {
 	if len(s.navStack) == 0 {
 		return nil
@@ -136,10 +127,6 @@ func (s *Session) GoBack() *lang.Location {
 			return nil
 		}
 	}
-	s.mu.RLock()
-	e := s.activeEditor
-	s.mu.RUnlock()
-	e.MoveCursorTo(loc.Line, loc.Col)
 	s.navStack = s.navStack[:len(s.navStack)-1]
 	return &loc
 }
@@ -241,37 +228,38 @@ func (s *Session) NotifySaved() {
 	s.langSyncer.DidSave(s.CanonPath(path))
 }
 
-// wireBufferSync sets up Buffer.OnChange for an editor to auto-sync
-// incremental changes with the language service. Also sends DidOpen.
-// Safe to call multiple times — no-op if the editor is already wired.
-// Composes with any existing OnChange handler (does not overwrite).
-// Uses canonical paths consistently to match the session's editor map.
-func (s *Session) wireBufferSync(e *editor.Editor) {
-	if s.langSyncer == nil || e == nil || e.Buf.Path == "" {
+// wireBufferSync sets up Buffer.OnChange on an open file's buffer to
+// auto-sync incremental changes with the language service. Also sends
+// DidOpen. Safe to call multiple times — no-op if the file is already
+// wired. Composes with any existing OnChange handler (does not
+// overwrite). Uses canonical paths consistently to match the session's
+// open-files map.
+func (s *Session) wireBufferSync(of *openfile.OpenFile) {
+	if s.langSyncer == nil || of == nil || of.Buf.Path == "" {
 		return
 	}
-	canon := s.CanonPath(e.Buf.Path)
+	canon := s.CanonPath(of.Buf.Path)
 	languageID := lang.DetectLanguage(canon)
 	if languageID == "" {
 		return
 	}
 
-	// Check/update wiredEditors under lock — may be called from
-	// TUI goroutine (SwitchTo) or agent goroutine (editorForEdit, WriteFile).
+	// Check/update wiredFiles under lock — may be called from
+	// TUI goroutine (SwitchTo) or agent goroutine (openFileForEdit, WriteFile).
 	s.mu.Lock()
-	if s.wiredEditors == nil {
-		s.wiredEditors = make(map[string]func())
+	if s.wiredFiles == nil {
+		s.wiredFiles = make(map[string]func())
 	}
-	if _, alreadyWired := s.wiredEditors[canon]; alreadyWired {
+	if _, alreadyWired := s.wiredFiles[canon]; alreadyWired {
 		s.mu.Unlock()
 		return
 	}
 	// Store the previous OnChange handler so unwireBufferSync can restore it.
-	s.wiredEditors[canon] = e.Buf.OnChange
+	s.wiredFiles[canon] = of.Buf.OnChange
 	s.mu.Unlock()
 
 	// Open document in language service.
-	s.langSyncer.DidOpen(canon, languageID, e.Buf.Content())
+	s.langSyncer.DidOpen(canon, languageID, of.Buf.Content())
 
 	// Check if the backend needs full document content instead of incremental
 	// changes (e.g., UTF-32 encoding not negotiated, so rune-based positions
@@ -286,13 +274,13 @@ func (s *Session) wireBufferSync(e *editor.Editor) {
 	// Note: DrainChanges returns and clears — if a future observer also
 	// needs changes, Buffer should switch to a multi-subscriber model.
 	//
-	// Concurrency: this read-modify-write on e.Buf.OnChange is safe because
-	// wireBufferSync is only called on editors that were just created (no
+	// Concurrency: this read-modify-write on of.Buf.OnChange is safe because
+	// wireBufferSync is only called on files that were just opened (no
 	// other goroutine has a reference yet) or during startup before the TUI
-	// and agent goroutines exist. The wiredEditors guard ensures at-most-once.
-	buf := e.Buf // capture for closure
-	prev := e.Buf.OnChange
-	e.Buf.OnChange = func() {
+	// and agent goroutines exist. The wiredFiles guard ensures at-most-once.
+	buf := of.Buf // capture for closure
+	prev := of.Buf.OnChange
+	of.Buf.OnChange = func() {
 		if prev != nil {
 			prev()
 		}
@@ -325,25 +313,26 @@ func (s *Session) wireBufferSync(e *editor.Editor) {
 	}
 }
 
-// unwireBufferSync sends DidClose and removes the wired state for an editor.
-// Used when an editor is removed from the session (e.g., file close).
-func (s *Session) unwireBufferSync(e *editor.Editor) {
-	if s.langSyncer == nil || e == nil || e.Buf.Path == "" {
+// unwireBufferSync sends DidClose and removes the wired state for an
+// open file. Used when a file is removed from the session (e.g., file
+// close / delete).
+func (s *Session) unwireBufferSync(of *openfile.OpenFile) {
+	if s.langSyncer == nil || of == nil || of.Buf.Path == "" {
 		return
 	}
-	canon := s.CanonPath(e.Buf.Path)
+	canon := s.CanonPath(of.Buf.Path)
 
 	s.mu.Lock()
-	prev, wired := s.wiredEditors[canon]
+	prev, wired := s.wiredFiles[canon]
 	if wired {
-		delete(s.wiredEditors, canon)
+		delete(s.wiredFiles, canon)
 	}
 	s.mu.Unlock()
 
 	if wired {
 		// Restore the previous OnChange handler, removing the LSP closure.
-		// Prevents stale DidChange calls if the old editor is mutated after close.
-		e.Buf.OnChange = prev
+		// Prevents stale DidChange calls if the old buffer is mutated after close.
+		of.Buf.OnChange = prev
 		s.langSyncer.DidClose(canon)
 	}
 }

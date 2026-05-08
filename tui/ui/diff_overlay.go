@@ -5,6 +5,7 @@ import (
 
 	"github.com/latebit-io/nib/engine/buffer"
 	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
 // DiffOverlay manages the inline diff preview and editable replacement lines.
@@ -26,7 +27,7 @@ type DiffOverlay struct {
 
 // NewDiffOverlay creates a DiffOverlay from a computed DiffResult.
 // The replacement lines are loaded into a real buffer/editor.
-func NewDiffOverlay(diff *editor.DiffResult) *DiffOverlay {
+func NewDiffOverlay(diff *openfile.DiffResult) *DiffOverlay {
 	content := strings.Join(diff.NewLines, "\n")
 	buf := buffer.New()
 	if content != "" {

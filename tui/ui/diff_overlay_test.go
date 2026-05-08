@@ -3,11 +3,11 @@ package ui
 import (
 	"testing"
 
-	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
 func TestNewDiffOverlay(t *testing.T) {
-	diff := &editor.DiffResult{
+	diff := &openfile.DiffResult{
 		StartLine: 2,
 		EndLine:   4,
 		NewLines:  []string{"line A", "line B"},
@@ -166,7 +166,7 @@ func TestOverlayPaste(t *testing.T) {
 // --- Helpers ---
 
 func newTestOverlay(text string) *DiffOverlay {
-	return NewDiffOverlay(&editor.DiffResult{
+	return NewDiffOverlay(&openfile.DiffResult{
 		StartLine: 0,
 		EndLine:   0,
 		NewLines:  []string{text},
@@ -174,7 +174,7 @@ func newTestOverlay(text string) *DiffOverlay {
 }
 
 func newTestOverlayMulti(lines []string) *DiffOverlay {
-	return NewDiffOverlay(&editor.DiffResult{
+	return NewDiffOverlay(&openfile.DiffResult{
 		StartLine: 0,
 		EndLine:   len(lines) - 1,
 		NewLines:  lines,

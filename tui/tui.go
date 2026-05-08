@@ -10,6 +10,7 @@ import (
 	"github.com/latebit-io/nib/coding/agent"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/session"
+	"github.com/latebit-io/nib/engine/syntax"
 	"github.com/latebit-io/nib/tui/ui"
 )
 
@@ -50,6 +51,12 @@ type Config struct {
 	// OAuth holds OAuth connection callbacks.
 	// Optional — nil disables OAuth UI flows.
 	OAuth *OAuthCallbacks
+
+	// HighlighterFactory builds a syntax highlighter for a given file
+	// path. The TUI installs the returned highlighter on each editor it
+	// constructs in its per-file pool. Pass nil to disable highlighting
+	// (e.g. tests).
+	HighlighterFactory syntax.HighlighterFactory
 }
 
 // AgentCallbacks groups callbacks that require a live agent.
@@ -121,6 +128,10 @@ type App struct {
 func New(cfg Config) *App {
 	app := ui.NewApp(cfg.Session)
 	appPtr := &app
+
+	if cfg.HighlighterFactory != nil {
+		appPtr.SetHighlighterFactory(cfg.HighlighterFactory)
+	}
 
 	// Wire LLM callbacks.
 	if cfg.LLM != nil {

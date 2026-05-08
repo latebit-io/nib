@@ -133,7 +133,7 @@ func (s *Session) startNewConversation(goal string, mode event.Mode) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	s.agent.RunWithMode(ctx, s.activeFile, s.activeEditor.Buf.Content(), goal, s.ContextFiles(), mode)
+	s.agent.RunWithMode(ctx, s.activeFile, s.activeOpenFile.Content(), goal, s.ContextFiles(), mode)
 }
 
 // ArchiveIntent marks the current intent as done.

@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
 // mockDefinitionProvider implements lang.DocumentSyncer + lang.DefinitionProvider.
@@ -54,31 +54,7 @@ func newNavTestSession(t *testing.T, content string) *Session {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := editor.New(buf)
-	return New(e, dir)
-}
-
-// lookupAndNavigate mirrors the live TUI path: LookupDefinition + PushNav + MoveCursorTo.
-func lookupAndNavigate(t *testing.T, sess *Session, line, col int) *lang.Location {
-	t.Helper()
-	originPath := sess.ActiveFile()
-	originLine, originCol := sess.activeEditor.CursorLine, sess.activeEditor.CursorCol
-
-	loc, err := sess.LookupDefinition(line, col)
-	if err != nil {
-		t.Fatalf("LookupDefinition failed: %v", err)
-	}
-
-	sess.PushNav(originPath, originLine, originCol)
-
-	if loc.Path != sess.ActiveFile() {
-		if err := sess.SwitchTo(loc.Path); err != nil {
-			sess.PopNav()
-			t.Fatalf("SwitchTo failed: %v", err)
-		}
-	}
-	sess.activeEditor.MoveCursorTo(loc.Line, loc.Col)
-	return loc
+	return New(openfile.New(buf), dir)
 }
 
 func TestLookupDefinition(t *testing.T) {
@@ -118,19 +94,13 @@ func TestLookupDefinition(t *testing.T) {
 	})
 }
 
+// TestNavigateAndGoBack exercises Session's nav-stack contract: GoBack
+// returns the popped location; the frontend is responsible for cursor
+// placement on its own editor instance after the file switch lands.
 func TestNavigateAndGoBack(t *testing.T) {
-	t.Run("same file jump and go-back", func(t *testing.T) {
+	t.Run("same-file go-back returns pushed location", func(t *testing.T) {
 		sess := newNavTestSession(t, "line0\nline1\nline2\n")
-		sess.activeEditor.MoveCursorTo(1, 2)
-		mock := &mockDefinitionProvider{
-			loc: lang.Location{Path: sess.ActiveFile(), Line: 2, Col: 0},
-		}
-		sess.SetLanguageService(mock)
-
-		lookupAndNavigate(t, sess, 1, 2)
-		if sess.activeEditor.CursorLine != 2 {
-			t.Fatalf("cursor should be at line 2, got %d", sess.activeEditor.CursorLine)
-		}
+		sess.PushNav(sess.ActiveFile(), 1, 2)
 
 		loc := sess.GoBack()
 		if loc == nil {
@@ -138,9 +108,6 @@ func TestNavigateAndGoBack(t *testing.T) {
 		}
 		if loc.Line != 1 || loc.Col != 2 {
 			t.Errorf("GoBack returned %d:%d, want 1:2", loc.Line, loc.Col)
-		}
-		if sess.activeEditor.CursorLine != 1 || sess.activeEditor.CursorCol != 2 {
-			t.Errorf("cursor at %d:%d, want 1:2", sess.activeEditor.CursorLine, sess.activeEditor.CursorCol)
 		}
 	})
 
@@ -153,31 +120,20 @@ func TestNavigateAndGoBack(t *testing.T) {
 
 	t.Run("LIFO order", func(t *testing.T) {
 		sess := newNavTestSession(t, "line0\nline1\nline2\nline3\n")
-		mock := &mockDefinitionProvider{}
-		sess.SetLanguageService(mock)
+		path := sess.ActiveFile()
+		sess.PushNav(path, 0, 0)
+		sess.PushNav(path, 1, 0)
 
-		// Jump 0:0 → 1:0
-		sess.activeEditor.MoveCursorTo(0, 0)
-		mock.loc = lang.Location{Path: sess.ActiveFile(), Line: 1, Col: 0}
-		lookupAndNavigate(t, sess, 0, 0)
-
-		// Jump 1:0 → 3:0
-		mock.loc = lang.Location{Path: sess.ActiveFile(), Line: 3, Col: 0}
-		lookupAndNavigate(t, sess, 1, 0)
-
-		// First go-back → 1:0
 		loc := sess.GoBack()
 		if loc == nil || loc.Line != 1 {
 			t.Errorf("first go-back: want line 1, got %+v", loc)
 		}
 
-		// Second go-back → 0:0
 		loc = sess.GoBack()
 		if loc == nil || loc.Line != 0 {
 			t.Errorf("second go-back: want line 0, got %+v", loc)
 		}
 
-		// Stack empty
 		if sess.GoBack() != nil {
 			t.Error("stack should be empty")
 		}
@@ -189,6 +145,37 @@ func TestNavigateAndGoBack(t *testing.T) {
 		sess.PopNav()
 		if sess.GoBack() != nil {
 			t.Error("stack should be empty after PopNav")
+		}
+	})
+}
+
+// TestNavigateAgent verifies Session.NavigateAgent switches to the target
+// file when needed and is a no-op when the target is already active.
+// Cursor placement is the frontend's responsibility — verified in TUI tests.
+func TestNavigateAgent(t *testing.T) {
+	t.Run("no-op when path matches active file", func(t *testing.T) {
+		sess := newNavTestSession(t, "hello\n")
+		active := sess.ActiveFile()
+		if err := sess.NavigateAgent(active); err != nil {
+			t.Fatalf("NavigateAgent: %v", err)
+		}
+		if sess.ActiveFile() != active {
+			t.Errorf("active file changed unexpectedly")
+		}
+	})
+
+	t.Run("switches when path differs", func(t *testing.T) {
+		sess := newNavTestSession(t, "hello\n")
+		dir := filepath.Dir(sess.ActiveFile())
+		other := filepath.Join(dir, "other.go")
+		if err := os.WriteFile(other, []byte("package x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := sess.NavigateAgent(other); err != nil {
+			t.Fatalf("NavigateAgent: %v", err)
+		}
+		if sess.ActiveFile() != sess.CanonPath(other) {
+			t.Errorf("active file = %q, want %q", sess.ActiveFile(), sess.CanonPath(other))
 		}
 	})
 }

@@ -12,7 +12,7 @@ import (
 	"github.com/latebit-io/nib/coding/agent"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
 // stubProvider satisfies llm.Provider for constructing an agent in tests.
@@ -47,7 +47,7 @@ func newTestSessionWithRoot(content, projectRoot string) *Session {
 	if content != "" {
 		buf.Insert(0, 0, content)
 	}
-	e := editor.New(buf)
+	e := openfile.New(buf)
 	sess := New(e, projectRoot)
 	events := make(chan event.Event, 64)
 	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
@@ -202,7 +202,7 @@ func TestPrepareApprovalDoesNotMutateBuffer(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	got := s.activeEditor.Buf.Content()
+	got := s.activeOpenFile.Buf.Content()
 	if got != "hello world" {
 		t.Errorf("buffer mutated: got %q, want %q", got, "hello world")
 	}
@@ -248,7 +248,7 @@ func TestSwitchTo(t *testing.T) {
 	}
 
 	// New editor is active.
-	got := s.activeEditor.Buf.Content()
+	got := s.activeOpenFile.Buf.Content()
 	if got != "new content" && got != "new content\n" {
 		t.Errorf("new editor content = %q, want %q", got, "new content")
 	}
@@ -282,23 +282,23 @@ func TestSwitchToExistingBuffer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eA := editor.New(bufA)
+	eA := openfile.New(bufA)
 	s := New(eA, dir)
 
 	// Switch to B — opens from disk.
 	if err := s.SwitchTo(pathB); err != nil {
 		t.Fatal(err)
 	}
-	if s.activeEditor.Buf.Content() != "file B content" {
-		t.Errorf("after switch to B: got %q", s.activeEditor.Buf.Content())
+	if s.activeOpenFile.Buf.Content() != "file B content" {
+		t.Errorf("after switch to B: got %q", s.activeOpenFile.Buf.Content())
 	}
 
 	// Switch back to A — should reuse the existing buffer, not re-read disk.
-	eA.InsertChar('!') // modify buffer A while viewing B
+	eA.Buf.Insert(0, 0, "!") // modify buffer A while viewing B
 	if err := s.SwitchTo(pathA); err != nil {
 		t.Fatal(err)
 	}
-	got := s.activeEditor.Buf.Content()
+	got := s.activeOpenFile.Buf.Content()
 	if got == "file A content" {
 		t.Error("expected modified buffer A, got original disk content — buffer was not reused")
 	}
@@ -319,7 +319,7 @@ func TestMultiBufferModifiedTracking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(editor.New(bufA), dir)
+	s := New(openfile.New(bufA), dir)
 
 	// Open second file.
 	if err := s.SwitchTo(pathB); err != nil {
@@ -332,14 +332,14 @@ func TestMultiBufferModifiedTracking(t *testing.T) {
 	}
 
 	// Modify file B.
-	s.activeEditor.InsertChar('X')
+	s.activeOpenFile.Buf.Insert(0, 0, "X")
 	modified := s.ModifiedFiles()
 	if len(modified) != 1 {
 		t.Fatalf("expected 1 modified file, got %v", modified)
 	}
 }
 
-func TestEditorForPath(t *testing.T) {
+func TestOpenFileForPath(t *testing.T) {
 	dir := t.TempDir()
 	s := newTestSessionWithRoot("content", dir)
 
@@ -352,14 +352,13 @@ func TestEditorForPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := s.EditorForPath(path)
-	if e == nil {
-		t.Fatal("EditorForPath returned nil for open file")
+	of := s.OpenFileForPath(path)
+	if of == nil {
+		t.Fatal("OpenFileForPath returned nil for open file")
 	}
 
-	e2 := s.EditorForPath("/nonexistent")
-	if e2 != nil {
-		t.Error("EditorForPath should return nil for unopened file")
+	if s.OpenFileForPath("/nonexistent") != nil {
+		t.Error("OpenFileForPath should return nil for unopened file")
 	}
 }
 
@@ -378,7 +377,7 @@ func TestSwitchToBlockedByPendingEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(editor.New(bufA), dir)
+	s := New(openfile.New(bufA), dir)
 	events := make(chan event.Event, 64)
 	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
 	s.SetAgent(ag, events)
@@ -472,7 +471,7 @@ func TestContextSetAutoAddOnNew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(editor.New(buf), dir)
+	s := New(openfile.New(buf), dir)
 	if !s.InContext(path) {
 		t.Error("initial file should be auto-added to context")
 	}
@@ -493,7 +492,7 @@ func TestContextSetAutoAddOnSwitchTo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(editor.New(bufA), dir)
+	s := New(openfile.New(bufA), dir)
 
 	if err := s.SwitchTo(pathB); err != nil {
 		t.Fatal(err)
@@ -541,7 +540,7 @@ func TestContextSetPersistence(t *testing.T) {
 
 func TestContextSetAutoAddOnWriteFile(t *testing.T) {
 	dir := t.TempDir()
-	s := New(editor.New(buffer.New()), dir)
+	s := New(openfile.New(buffer.New()), dir)
 
 	newPath := dir + "/created.go"
 	if err := s.WriteFile("created.go", "package created"); err != nil {
@@ -573,7 +572,7 @@ func TestApproveEditMarksAgentOrigin(t *testing.T) {
 	}
 
 	// Line should be marked as agent-written
-	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+	if got := s.activeOpenFile.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Errorf("line 0 origin = %d, want OriginAgent", got)
 	}
 }
@@ -589,7 +588,7 @@ func TestApproveEditTracksModifiedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := editor.New(buf)
+	e := openfile.New(buf)
 	s := New(e, root)
 	events := make(chan event.Event, 64)
 	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
@@ -623,7 +622,7 @@ func TestFileStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := editor.New(buf)
+	e := openfile.New(buf)
 	s := New(e, root)
 	events := make(chan event.Event, 64)
 	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
@@ -656,18 +655,20 @@ func TestDeveloperEditResetsAgentOrigin(t *testing.T) {
 	s := newTestSession("agent line")
 
 	// Simulate agent writing a line
-	s.activeEditor.Buf.SetLineOrigin(0, buffer.OriginAgent)
-	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+	s.activeOpenFile.Buf.SetLineOrigin(0, buffer.OriginAgent)
+	if got := s.activeOpenFile.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Fatalf("setup: origin = %d, want OriginAgent", got)
 	}
 
-	// Developer types on the agent line
-	s.activeEditor.CursorLine = 0
-	s.activeEditor.CursorCol = 5
-	s.activeEditor.InsertChar('X')
+	// Developer types on the agent line. Mirrors editor.InsertChar:
+	// reset the affected line's origin to Developer, then insert at
+	// the cursor position. Cursor lives on the TUI's editor controller
+	// post-Phase C, so we operate on the buffer directly.
+	s.activeOpenFile.Buf.ResetOriginToDeveloper(0)
+	s.activeOpenFile.Buf.Insert(0, 5, "X")
 
 	// Origin should flip to Developer
-	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+	if got := s.activeOpenFile.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
 		t.Errorf("after developer edit: origin = %d, want OriginDeveloper", got)
 	}
 }
@@ -676,27 +677,27 @@ func TestAgentOriginSurvivesUndoRedo(t *testing.T) {
 	s := newTestSession("original")
 
 	// Simulate a grouped agent edit with origin
-	s.activeEditor.Buf.BeginGroup()
-	s.activeEditor.Buf.Delete(0, 0, 8)
-	s.activeEditor.Buf.InsertWithOrigin(0, 0, "replaced", buffer.OriginAgent)
-	s.activeEditor.Buf.EndGroup()
+	s.activeOpenFile.Buf.BeginGroup()
+	s.activeOpenFile.Buf.Delete(0, 0, 8)
+	s.activeOpenFile.Buf.InsertWithOrigin(0, 0, "replaced", buffer.OriginAgent)
+	s.activeOpenFile.Buf.EndGroup()
 
-	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+	if got := s.activeOpenFile.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Fatalf("after edit: origin = %d, want OriginAgent", got)
 	}
 
 	// Undo should restore Developer origin
-	s.activeEditor.Undo()
-	if s.activeEditor.Buf.LineText(0) != "original" {
-		t.Fatalf("after undo: text = %q", s.activeEditor.Buf.LineText(0))
+	s.activeOpenFile.Buf.Undo()
+	if s.activeOpenFile.Buf.LineText(0) != "original" {
+		t.Fatalf("after undo: text = %q", s.activeOpenFile.Buf.LineText(0))
 	}
-	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
+	if got := s.activeOpenFile.Buf.LineOrigin(0); got != buffer.OriginDeveloper {
 		t.Errorf("after undo: origin = %d, want OriginDeveloper", got)
 	}
 
 	// Redo should restore Agent origin
-	s.activeEditor.Redo()
-	if got := s.activeEditor.Buf.LineOrigin(0); got != buffer.OriginAgent {
+	s.activeOpenFile.Buf.Redo()
+	if got := s.activeOpenFile.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Errorf("after redo: origin = %d, want OriginAgent", got)
 	}
 }
@@ -787,7 +788,7 @@ func TestPrepareApprovalPerLineOrigins(t *testing.T) {
 
 func TestDeleteFile(t *testing.T) {
 	dir := t.TempDir()
-	s := New(editor.New(buffer.New()), dir)
+	s := New(openfile.New(buffer.New()), dir)
 
 	// Create file first
 	if err := s.WriteFile("victim.go", "package victim"); err != nil {
@@ -821,7 +822,7 @@ func TestDeleteFile(t *testing.T) {
 
 	// Should be removed from editors
 	s.mu.RLock()
-	_, hasEditor := s.editors[canon]
+	_, hasEditor := s.openFiles[canon]
 	s.mu.RUnlock()
 	if hasEditor {
 		t.Error("editor should be removed after DeleteFile")
@@ -830,7 +831,7 @@ func TestDeleteFile(t *testing.T) {
 
 func TestDeleteFile_ActiveFile(t *testing.T) {
 	dir := t.TempDir()
-	s := New(editor.New(buffer.New()), dir)
+	s := New(openfile.New(buffer.New()), dir)
 
 	// Create and switch to a file
 	if err := s.WriteFile("active.go", "package active"); err != nil {
@@ -850,15 +851,17 @@ func TestDeleteFile_ActiveFile(t *testing.T) {
 	if s.ActiveFile() != "" {
 		t.Errorf("ActiveFile should be empty after deleting active file, got %q", s.ActiveFile())
 	}
-	// Editor must never be nil — a fresh empty editor is installed as fallback
-	if s.ActiveEditor() == nil {
-		t.Fatal("Editor should not be nil after deleting active file")
+	// Active open-file must never be nil — a fresh empty handle is
+	// installed as fallback so callers (intent.go reads
+	// activeOpenFile.Content() unconditionally) cannot panic.
+	if s.ActiveOpenFile() == nil {
+		t.Fatal("ActiveOpenFile should not be nil after deleting active file")
 	}
 }
 
 func TestDeleteFile_Directory(t *testing.T) {
 	dir := t.TempDir()
-	s := New(editor.New(buffer.New()), dir)
+	s := New(openfile.New(buffer.New()), dir)
 
 	// Create files inside a subdirectory
 	if err := s.WriteFile("pkg/a.go", "package pkg"); err != nil {
@@ -893,8 +896,8 @@ func TestDeleteFile_Directory(t *testing.T) {
 		t.Error("b.go should not be in context after dir delete")
 	}
 	s.mu.RLock()
-	_, hasA := s.editors[canonA]
-	_, hasB := s.editors[canonB]
+	_, hasA := s.openFiles[canonA]
+	_, hasB := s.openFiles[canonB]
 	s.mu.RUnlock()
 	if hasA || hasB {
 		t.Error("editors should be removed after dir delete")
@@ -903,7 +906,7 @@ func TestDeleteFile_Directory(t *testing.T) {
 
 func TestDeleteFile_NonExistent(t *testing.T) {
 	dir := t.TempDir()
-	s := New(editor.New(buffer.New()), dir)
+	s := New(openfile.New(buffer.New()), dir)
 
 	err := s.DeleteFile(dir + "/nope.go")
 	if err == nil {
@@ -913,7 +916,7 @@ func TestDeleteFile_NonExistent(t *testing.T) {
 
 func TestDeleteFile_ProjectRoot(t *testing.T) {
 	dir := t.TempDir()
-	s := New(editor.New(buffer.New()), dir)
+	s := New(openfile.New(buffer.New()), dir)
 
 	err := s.DeleteFile(".")
 	if err == nil {
@@ -931,7 +934,7 @@ func TestDeleteFile_ProjectRoot(t *testing.T) {
 
 func TestDeleteFile_EscapesRoot(t *testing.T) {
 	dir := t.TempDir()
-	s := New(editor.New(buffer.New()), dir)
+	s := New(openfile.New(buffer.New()), dir)
 
 	err := s.DeleteFile("../../etc/passwd")
 	if err == nil {
@@ -941,7 +944,7 @@ func TestDeleteFile_EscapesRoot(t *testing.T) {
 
 func TestDeleteFile_ProjectMeta(t *testing.T) {
 	dir := t.TempDir()
-	s := New(editor.New(buffer.New()), dir)
+	s := New(openfile.New(buffer.New()), dir)
 
 	// Create .project/context.md
 	metaDir := filepath.Join(dir, ".project")

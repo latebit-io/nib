@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
 // Edit-approval flow for Session.
@@ -34,29 +34,29 @@ import (
 // If the pending edit targets a non-active file, the session auto-switches
 // to that file so the frontend renders the correct buffer.
 // Returns nil if there is no pending edit or the search text has no unique match.
-// Returns true for switched if the active editor changed.
-func (s *Session) ReviewEdit() (diff *editor.DiffResult, switched bool) {
+// Returns true for switched if the active open file changed.
+func (s *Session) ReviewEdit() (diff *openfile.DiffResult, switched bool) {
 	if s.pendingEdit == nil {
 		return nil, false
 	}
-	// editorForEdit may auto-open a file that isn't in the map yet.
-	e := s.editorForEdit()
-	if e == nil {
+	// openFileForEdit may auto-open a file that isn't in the map yet.
+	of := s.openFileForEdit()
+	if of == nil {
 		return nil, false
 	}
 	// Auto-switch to the target file so the frontend shows the right buffer.
-	// Done after editorForEdit so auto-opened files are also switched to.
+	// Done after openFileForEdit so auto-opened files are also switched to.
 	if s.pendingEdit.Path != "" {
 		canon := s.CanonPath(s.pendingEdit.Path)
 		s.mu.Lock()
 		if canon != s.activeFile {
-			s.activeEditor = e
+			s.activeOpenFile = of
 			s.activeFile = canon
 			switched = true
 		}
 		s.mu.Unlock()
 	}
-	diff = e.ComputeDiff(s.pendingEdit.Search, s.pendingEdit.Replace)
+	diff = of.ComputeDiff(s.pendingEdit.Search, s.pendingEdit.Replace)
 	if diff != nil {
 		s.editReviewed = true
 	}
@@ -77,8 +77,8 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 	if !s.editReviewed {
 		return false, "edit not reviewed — call ReviewEdit first"
 	}
-	e := s.editorForEdit()
-	if e == nil {
+	of := s.openFileForEdit()
+	if of == nil {
 		s.RejectEdit("file-not-open")
 		return false, "file not open"
 	}
@@ -87,7 +87,8 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 		editPath = s.CanonPath(s.pendingEdit.Path)
 	}
 	lineOrigins := computeLineOrigins(search, s.pendingEdit.Replace, replace)
-	ok, reason := e.ApplyEdit(search, replace, lineOrigins)
+	outcome := of.ApplyEdit(search, replace, lineOrigins)
+	ok, reason := outcome.Applied, outcome.FailureReason
 	proposedReplace := s.pendingProposedReplace
 	editID := s.pendingEdit.ID
 	if ok {
@@ -98,7 +99,7 @@ func (s *Session) ApproveEdit(search, replace string) (bool, string) {
 		// Pass post-apply buffer content (not pendingEdit.Replace
 		// alone — replace may have been modified in the overlay) so
 		// the orchestrator seeds its file cache from the truth.
-		s.agent.Approve(e.Buf.Content())
+		s.agent.Approve(of.Content())
 		modified := replace != proposedReplace
 		accepted := map[string]any{
 			"id":               editID,
@@ -148,7 +149,7 @@ type ApprovalPlan struct {
 	// Index 0 corresponds to the buffer line at Line, index 1 to Line+1, etc.
 	// A nil entry means "don't change this line's origin" (the line was
 	// unchanged from the search text — the agent just re-included it as context).
-	LineOrigins []*editor.LineOrigin
+	LineOrigins []*openfile.LineOrigin
 }
 
 // PrepareApproval validates the reviewed edit and returns an ApprovalPlan.
@@ -164,13 +165,13 @@ func (s *Session) PrepareApproval(search, replace string) (*ApprovalPlan, error)
 	if !s.editReviewed {
 		return nil, errors.New("edit not reviewed — call ReviewEdit first")
 	}
-	e := s.editorForEdit()
-	if e == nil {
+	of := s.openFileForEdit()
+	if of == nil {
 		s.RejectEdit("file-not-open")
 		return nil, errors.New("file not open")
 	}
-	loc, reason := e.LocateEdit(search)
-	if loc == nil {
+	loc, reason := of.LocateEdit(search)
+	if reason != "" {
 		s.RejectEdit("search-mismatch")
 		return nil, errors.New(reason)
 	}
@@ -243,7 +244,7 @@ func (s *Session) CompleteApproval() {
 	s.lastEditedFile = editPath
 	s.mu.Lock()
 	s.modifiedFiles[editPath] = true
-	e := s.editors[editPath]
+	of := s.openFiles[editPath]
 	s.mu.Unlock()
 
 	modified := staged.replace != s.pendingProposedReplace
@@ -263,13 +264,13 @@ func (s *Session) CompleteApproval() {
 	s.pendingApproval = nil
 	s.pendingProposedReplace = ""
 	// Pass the post-apply buffer content so the orchestrator seeds
-	// its file cache from the truth. If the editor is somehow gone
-	// (closed/reloaded between PrepareApproval and now) fall back to
-	// empty content rather than panicking — Approve still has to fire
-	// to unblock the agent.
+	// its file cache from the truth. If the file handle is somehow
+	// gone (closed/reloaded between PrepareApproval and now) fall
+	// back to empty content rather than panicking — Approve still has
+	// to fire to unblock the agent.
 	var content string
-	if e != nil {
-		content = e.Buf.Content()
+	if of != nil {
+		content = of.Content()
 	}
 	s.agent.Approve(content)
 }

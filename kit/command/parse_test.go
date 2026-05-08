@@ -72,8 +72,8 @@ func TestValidName(t *testing.T) {
 		{"foo/bar", false},
 	}
 	for _, tc := range cases {
-		if got := validName(tc.in); got != tc.want {
-			t.Errorf("validName(%q) = %v, want %v", tc.in, got, tc.want)
+		if got := ValidName(tc.in); got != tc.want {
+			t.Errorf("ValidName(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 }

@@ -37,7 +37,16 @@ cmd/nibster/nibster
 
 .mcp.json
 log.txt
-.project
+# Top-level .project/ holds runtime state (memory binaries, tokens,
+# runtime configs). The .project/commands/ subdir is carved out: it
+# holds team-shared markdown slash-command templates and IS tracked.
+# New top-level subdirs default to ignored; add another `!` line if
+# you want them tracked.
+/.project/*
+!/.project/commands/
+# nibster carries its own runtime .project/ for kit-boundary smoke
+# testing — wholly ignored, no commands surface there.
+cmd/nibster/.project/
 .claude
 
 # Editor/IDE

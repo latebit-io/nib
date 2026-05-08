@@ -154,11 +154,11 @@ func (r *Registry) Register(c Command) error {
 	}
 	def := c.Definition()
 	canon := strings.ToLower(def.Name)
-	if !validName(canon) {
+	if !ValidName(canon) {
 		return fmt.Errorf("command: invalid name %q", def.Name)
 	}
 	for _, a := range def.Aliases {
-		if !validName(strings.ToLower(a)) {
+		if !ValidName(strings.ToLower(a)) {
 			return fmt.Errorf("command %q: invalid alias %q", canon, a)
 		}
 	}

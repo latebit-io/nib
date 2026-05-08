@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/tui/editor"
 )
 
 // newTestEditorModel creates a minimal EditorModel for testing.

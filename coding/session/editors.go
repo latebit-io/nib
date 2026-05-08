@@ -343,10 +343,12 @@ func (s *Session) editorForEdit() *editor.Editor {
 	// Auto-open: the agent proposed an edit to a file that isn't open yet.
 	absPath, err := s.resolvePath(path)
 	if err != nil {
+		slog.Warn("editorForEdit: resolve path failed", "path", path, "err", err)
 		return nil
 	}
 	buf, err := buffer.NewFromFile(absPath)
 	if err != nil {
+		slog.Warn("editorForEdit: open buffer failed", "path", path, "err", err)
 		return nil
 	}
 	e = s.newEditor(buf)

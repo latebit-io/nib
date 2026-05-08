@@ -75,7 +75,14 @@ var _ kitcmd.PromptCommand = (*MarkdownCommand)(nil)
 //     will reject malformed names anyway, but Parse surfaces the
 //     reason at file granularity).
 func Parse(path string, kind kitcmd.SourceKind) (*MarkdownCommand, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is from filepath.WalkDir on a configured root
+	// gosec G304: Parse is the loader's public entry point and
+	// accepts a caller-provided path. The standard wiring through
+	// LoadDir constrains paths to filepath.Join(root, entry.Name())
+	// where root is configured at startup and entry comes from
+	// os.ReadDir of that root, so attacker-controlled traversal is
+	// not reachable in nib-code's call chain. External callers that
+	// pass untrusted paths take on the responsibility themselves.
+	data, err := os.ReadFile(path) //nolint:gosec // see comment above
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -91,8 +98,12 @@ func Parse(path string, kind kitcmd.SourceKind) (*MarkdownCommand, error) {
 	}
 	name = strings.ToLower(name)
 
-	if !validCommandName(name) {
-		return nil, fmt.Errorf("parse %s: invalid command name %q (must match [a-z0-9_-]+)", path, name)
+	// Use the framework's authoritative name validator. The loader
+	// already lowercased name above, but ValidName accepts both
+	// cases — the lowercase invariant is a loader concern, not a
+	// validator concern.
+	if !kitcmd.ValidName(name) {
+		return nil, fmt.Errorf("parse %s: invalid command name %q (must match [a-zA-Z0-9_-]+)", path, name)
 	}
 
 	return &MarkdownCommand{
@@ -219,26 +230,4 @@ func splitFrontmatter(data []byte) (frontmatter, string, error) {
 		}
 		rest = rest[eol+1:]
 	}
-}
-
-// validCommandName mirrors the registry's name validator so Parse
-// can fail at file granularity rather than deferring the error to
-// Register (which would only know "command X failed", not "file Y
-// produced a bad name"). Kept in sync with kit/command/parse.go's
-// rule by convention; the registry's own validator is the
-// authoritative gate.
-func validCommandName(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= '0' && r <= '9':
-		case r == '_' || r == '-':
-		default:
-			return false
-		}
-	}
-	return true
 }

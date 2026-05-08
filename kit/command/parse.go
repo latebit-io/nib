@@ -39,15 +39,25 @@ func parseSlash(input string) (name, args string, ok bool) {
 		args = strings.TrimLeft(rest[sp:], " ")
 	}
 
-	if !validName(name) {
+	if !ValidName(name) {
 		return "", "", false
 	}
 	return strings.ToLower(name), args, true
 }
 
-// validName enforces the [a-zA-Z0-9_-]+ character class on a
-// command name. Empty names are invalid.
-func validName(s string) bool {
+// ValidName reports whether s satisfies the canonical command-name
+// rule: [a-zA-Z0-9_-]+, non-empty. The rule is case-insensitive at
+// the validator; callers that need a canonical form should lowercase
+// before storing.
+//
+// Single-sourced for the framework: the parser uses it on user-typed
+// input, [Registry.Register] uses it on registered Definition names
+// and aliases, and the markdown loader uses it on filename- or
+// frontmatter-derived names. Changing the character class here
+// changes it everywhere — the only correct behavior, since a name
+// the parser accepts must be a name the registry accepts and vice
+// versa.
+func ValidName(s string) bool {
 	if s == "" {
 		return false
 	}

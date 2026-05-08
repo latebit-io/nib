@@ -622,16 +622,6 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	builtins = append(builtins, tools.NewPackageInfoTool(projectRoot))
 	builtins = a.appendSmokeTool(builtins, projectRoot)
 
-	// request_input was deliberately removed: the LLM was using it as a
-	// workaround for tool-surface friction ("which strategy should I
-	// pick?") rather than for genuine ambiguity in the developer's
-	// goal. With replace_file now covering the wholesale-rewrite case
-	// the friction is gone — and the absence of request_input forces
-	// the LLM to either make a tool call that succeeds or fail loud,
-	// which is a better default than escalating decisions back through
-	// a chat prompt for the developer to dis/approve. Re-register
-	// behind a feature flag if a legitimate use case appears.
-
 	// LSP-powered tools — conditionally registered via type assertion.
 	if diagProvider != nil {
 		if dp, ok := diagProvider.(lang.DefinitionProvider); ok {

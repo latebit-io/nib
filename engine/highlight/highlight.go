@@ -14,7 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/engine/syntax"
 	tree_sitter_lua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
 	tree_sitter_yaml "github.com/tree-sitter-grammars/tree-sitter-yaml/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
@@ -30,31 +30,28 @@ var luaHighlightsSCM string
 //go:embed queries/yaml/highlights.scm
 var yamlHighlightsSCM string
 
-// Re-export the editor types so existing references to e.g. highlight.Token
-// continue to resolve. Everything below is a thin alias — the canonical
-// definitions live in the editor package so binaries that never render
-// (the headless agent) can skip the tree-sitter grammar imports entirely.
+// Re-export the syntax types so existing references to e.g. highlight.Token
+// continue to resolve. Canonical definitions live in [engine/syntax]; this
+// package supplies a tree-sitter-backed implementation of [syntax.Highlighter].
 type (
-	// TokenKind aliases [editor.TokenKind].
-	TokenKind = editor.TokenKind
-	// Token aliases [editor.Token].
-	Token = editor.Token
+	// TokenKind aliases [syntax.TokenKind].
+	TokenKind = syntax.TokenKind
+	// Token aliases [syntax.Token].
+	Token = syntax.Token
 )
 
-// Token-kind constants re-exported from the editor package. Use these
-// aliases for readability inside highlighter internals; external callers
-// can reference either `editor.KindKeyword` or `highlight.KindKeyword`.
+// Token-kind constants re-exported from [engine/syntax].
 const (
-	KindKeyword  = editor.KindKeyword
-	KindString   = editor.KindString
-	KindComment  = editor.KindComment
-	KindNumber   = editor.KindNumber
-	KindType     = editor.KindType
-	KindProperty = editor.KindProperty
-	KindOperator = editor.KindOperator
-	KindFunction = editor.KindFunction
-	KindConstant = editor.KindConstant
-	KindNone     = editor.KindNone
+	KindKeyword  = syntax.KindKeyword
+	KindString   = syntax.KindString
+	KindComment  = syntax.KindComment
+	KindNumber   = syntax.KindNumber
+	KindType     = syntax.KindType
+	KindProperty = syntax.KindProperty
+	KindOperator = syntax.KindOperator
+	KindFunction = syntax.KindFunction
+	KindConstant = syntax.KindConstant
+	KindNone     = syntax.KindNone
 )
 
 // langSpec describes one supported language: its tree-sitter grammar and
@@ -125,12 +122,12 @@ type Highlighter struct {
 	cache        [][]Token // per-line tokens, computed on Parse()
 }
 
-// NewHighlighter is the [editor.HighlighterFactory]-shaped constructor.
+// NewHighlighter is the [syntax.HighlighterFactory]-shaped constructor.
 // It delegates to [New] and converts a nil concrete result into a true
 // nil interface value — callers that compare `h != nil` on the returned
-// [editor.Highlighter] get the answer they expect, avoiding the typed-nil
+// [syntax.Highlighter] get the answer they expect, avoiding the typed-nil
 // gotcha that bites naive conversions.
-func NewHighlighter(filename string) editor.Highlighter {
+func NewHighlighter(filename string) syntax.Highlighter {
 	h := New(filename)
 	if h == nil {
 		return nil

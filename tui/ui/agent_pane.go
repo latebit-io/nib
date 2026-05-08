@@ -289,6 +289,14 @@ type AgentPaneModel struct {
 	// [SetCommandDispatch].
 	commandBusy func() bool
 
+	// commandCtx is the context Dispatch threads through to handlers.
+	// Typically the application's appCtx so a Ctrl+C / app shutdown
+	// propagates to long-running command handlers (compaction,
+	// history reset). nil falls back to context.Background — handlers
+	// that wait on ctx.Done lose shutdown propagation but the
+	// dispatch itself still runs. Set via [SetCommandDispatch].
+	commandCtx context.Context //nolint:containedctx // long-lived dispatch ctx is the design
+
 	// renderBuf is the per-frame output slice. Hoisted onto the model so
 	// each Render call resizes/clears in place rather than allocating a
 	// fresh []string. Capacity grows to the largest m.height seen.
@@ -695,15 +703,21 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 // SetCommandDispatch wires (or unwires) slash-command dispatch into
 // the input handler. After this call, SubmitMsg input that parses as
 // a slash command runs through reg.Dispatch before falling back to
-// goal submission. Pass (nil, nil) to disable.
+// goal submission. Pass reg=nil to disable.
 //
 // busy is consulted via [kitcmd.WithBusyCheck]. nil means the busy
 // check is omitted — commands dispatch unconditionally. The binary
-// typically wires busy to coding.Agent.IsRunning so /quit-class
+// typically wires busy to coding.Agent's parked-aware probe so
 // commands cannot interleave with an in-flight LLM turn.
-func (m *AgentPaneModel) SetCommandDispatch(reg *kitcmd.Registry, busy func() bool) {
+//
+// ctx is threaded into [kitcmd.Registry.Dispatch] so handlers see
+// program-shutdown cancellation. Pass nil to fall back to
+// context.Background — acceptable for tests and fallback paths;
+// production binaries should pass the application context.
+func (m *AgentPaneModel) SetCommandDispatch(reg *kitcmd.Registry, busy func() bool, ctx context.Context) {
 	m.commandRegistry = reg
 	m.commandBusy = busy
+	m.commandCtx = ctx
 }
 
 // dispatchOrSubmit is the post-validation tail of the SubmitMsg
@@ -734,10 +748,21 @@ func (m *AgentPaneModel) dispatchOrSubmit(text string, planning bool) tea.Cmd {
 		if m.commandBusy != nil {
 			opts = append(opts, kitcmd.WithBusyCheck(m.commandBusy))
 		}
-		matched, err := m.commandRegistry.Dispatch(context.Background(), sess, text, opts...)
+		ctx := m.commandCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		matched, err := m.commandRegistry.Dispatch(ctx, sess, text, opts...)
 		if matched {
 			if err != nil {
+				// Per the doc above: goal submission is suppressed for
+				// any matched command, INCLUDING errored ones. A
+				// HandlerCommand that called SubmitPrompt and then
+				// returned an error must not silently leak its
+				// pending prompt to the LLM — surface the error and
+				// drop the prompt.
 				m.AppendMeta(fmt.Sprintf("[%s]\n", err.Error()))
+				return nil
 			}
 			if prompt, ok := sess.PendingPrompt(); ok {
 				return func() tea.Msg { return GoalSubmittedMsg{Goal: prompt} }

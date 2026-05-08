@@ -41,6 +41,22 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if a.kit == nil {
 		return ErrNoConversation
 	}
+	// Cheap pre-check on the live transcript so a no-conversation case
+	// returns immediately instead of paying for cancelAndDrain. The
+	// authoritative snapshot is taken below, post-drain.
+	if len(a.kit.State().Messages) == 0 {
+		return ErrNoConversation
+	}
+	// Drain BEFORE snapshotting. A snapshot taken before cancelAndDrain
+	// can lose any messages an in-flight run appends between the
+	// snapshot and the drain — ReplaceMessages would then install a
+	// stale slice and silently discard those appends. The TUI's busy
+	// check makes this race impossible in the standard wiring (Compact
+	// is gated on !IsRunning() || IsWaiting()), but Compact is exported
+	// and any direct caller deserves the safe ordering.
+	if err := a.cancelAndDrain(ctx); err != nil {
+		return err
+	}
 	saved := a.kit.State().Messages
 	if len(saved) == 0 {
 		return ErrNoConversation
@@ -52,9 +68,6 @@ func (a *Agent) Compact(ctx context.Context) error {
 	compacted, changed := llm.CompactMessages(saved, compactKeepTurns, compactMinBytes)
 	if !changed {
 		return ErrNothingToCompact
-	}
-	if err := a.cancelAndDrain(ctx); err != nil {
-		return err
 	}
 	if err := a.kit.ReplaceMessages(compacted); err != nil {
 		return fmt.Errorf("replace messages: %w", err)

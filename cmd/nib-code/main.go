@@ -363,7 +363,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if ag != nil {
 		cmdBusy = func() bool { return ag.IsRunning() && !ag.IsWaiting() }
 	}
-	app.AgentPane.SetCommandDispatch(cmdRegistry, cmdBusy)
+	app.AgentPane.SetCommandDispatch(cmdRegistry, cmdBusy, appCtx)
 
 	// OAuth callbacks — wired post-construction because ConnectOAuth
 	// needs tuiApp.Program() which only exists after New().

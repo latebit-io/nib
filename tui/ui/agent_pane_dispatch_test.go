@@ -79,7 +79,7 @@ func TestDispatchOrSubmit_NonSlashFallsThrough(t *testing.T) {
 	if err := r.Register(&fakeDispatchHandler{def: builtinDef("foo")}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	m.SetCommandDispatch(r, nil)
+	m.SetCommandDispatch(r, nil, nil)
 
 	cmd := m.dispatchOrSubmit("regular goal", false)
 	msg := cmd()
@@ -95,7 +95,7 @@ func TestDispatchOrSubmit_SlashHandlerSwallowed(t *testing.T) {
 	if err := r.Register(h); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	m.SetCommandDispatch(r, nil)
+	m.SetCommandDispatch(r, nil, nil)
 
 	cmd := m.dispatchOrSubmit("/foo bar", false)
 	if cmd != nil {
@@ -113,7 +113,7 @@ func TestDispatchOrSubmit_HandlerErrorRendersAndSwallows(t *testing.T) {
 	if err := r.Register(h); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	m.SetCommandDispatch(r, nil)
+	m.SetCommandDispatch(r, nil, nil)
 
 	cmd := m.dispatchOrSubmit("/foo", false)
 	if cmd != nil {
@@ -127,10 +127,38 @@ func TestDispatchOrSubmit_HandlerErrorRendersAndSwallows(t *testing.T) {
 	}
 }
 
+func TestDispatchOrSubmit_HandlerErrorWithPendingPromptDoesNotSubmit(t *testing.T) {
+	// A HandlerCommand that calls SubmitPrompt and then returns an
+	// error has its prompt dropped — surfacing the error and ALSO
+	// silently sending the prompt to the LLM would be a worst-of-both
+	// outcome. Locks the doc contract: "Goal submission is suppressed
+	// — the user typed a slash command, even if it errored."
+	m := dispatchTestPane()
+	h := &fakeDispatchHandler{
+		def:    builtinDef("foo"),
+		submit: "should not reach LLM",
+		err:    errStub("template render failed"),
+	}
+	r := kitcmd.NewRegistry()
+	if err := r.Register(h); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	m.SetCommandDispatch(r, nil, nil)
+
+	cmd := m.dispatchOrSubmit("/foo", false)
+	if cmd != nil {
+		t.Errorf("errored dispatch must drop pending prompt; got cmd=%T", cmd)
+	}
+	joined := strings.Join(m.RawLines, "\n")
+	if !strings.Contains(joined, "template render failed") {
+		t.Errorf("RawLines should contain error; got %q", joined)
+	}
+}
+
 func TestDispatchOrSubmit_UnknownCommandReportsError(t *testing.T) {
 	m := dispatchTestPane()
 	r := kitcmd.NewRegistry()
-	m.SetCommandDispatch(r, nil)
+	m.SetCommandDispatch(r, nil, nil)
 
 	cmd := m.dispatchOrSubmit("/nope", false)
 	if cmd != nil {
@@ -148,7 +176,7 @@ func TestDispatchOrSubmit_BusyCheckReportsTurnInFlight(t *testing.T) {
 	if err := r.Register(&fakeDispatchHandler{def: builtinDef("foo")}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	m.SetCommandDispatch(r, func() bool { return true })
+	m.SetCommandDispatch(r, func() bool { return true }, nil)
 
 	cmd := m.dispatchOrSubmit("/foo", false)
 	if cmd != nil {
@@ -171,7 +199,7 @@ func TestDispatchOrSubmit_PromptSubmissionEmitsGoal(t *testing.T) {
 	if err := r.Register(h); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	m.SetCommandDispatch(r, nil)
+	m.SetCommandDispatch(r, nil, nil)
 
 	cmd := m.dispatchOrSubmit("/foo", false)
 	if cmd == nil {
@@ -197,7 +225,7 @@ func TestDispatchOrSubmit_PlanningSuppressedOnSlash(t *testing.T) {
 	if err := r.Register(h); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	m.SetCommandDispatch(r, nil)
+	m.SetCommandDispatch(r, nil, nil)
 
 	cmd := m.dispatchOrSubmit("/foo", true)
 	if cmd != nil {

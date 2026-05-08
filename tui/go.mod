@@ -10,6 +10,7 @@ require (
 	github.com/latebit-io/nib/ai v0.0.0
 	github.com/latebit-io/nib/coding v0.0.0
 	github.com/latebit-io/nib/engine v0.0.0
+	github.com/latebit-io/nib/kit v0.0.0
 	github.com/mattn/go-runewidth v0.0.19
 )
 
@@ -30,7 +31,6 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/latebit-io/nib/agent v0.0.0 // indirect
-	github.com/latebit-io/nib/kit v0.0.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect

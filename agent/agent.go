@@ -251,6 +251,32 @@ func (a *Agent) Abort() {
 	}
 }
 
+// ReplaceMessages overwrites the saved transcript with msgs. Returns
+// [ErrRunInProgress] if a run is active — callers must [Agent.Abort]
+// and [Agent.WaitForIdle] before replacing. msgs is cloned; the caller
+// retains ownership of the input slice.
+//
+// Use cases: out-of-band compaction (replace with a smaller slice
+// before the next run resumes) and history reset (pass nil to start
+// the next run from a clean slate). The next [Agent.PromptWithMessages]
+// call will overwrite again — this method only matters when the
+// consumer drives a resume-from-saved-state path.
+func (a *Agent) ReplaceMessages(msgs []llm.Message) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.running {
+		return ErrRunInProgress
+	}
+	if len(msgs) == 0 {
+		a.messages = nil
+		return nil
+	}
+	cloned := make([]llm.Message, len(msgs))
+	copy(cloned, msgs)
+	a.messages = cloned
+	return nil
+}
+
 // State returns a read-only snapshot of the agent's current state.
 // Slices and maps in the result are safe to read without further
 // synchronization; modifying them does NOT affect the agent.

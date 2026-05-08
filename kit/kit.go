@@ -398,6 +398,22 @@ func (a *Agent) State() State {
 	return a.foundation.State()
 }
 
+// ReplaceMessages overwrites the saved transcript with msgs. Returns
+// the foundation's [agent.ErrRunInProgress] if a run is active —
+// callers must [Agent.Cancel] and [Agent.WaitForIdle] before
+// replacing. The slice is cloned; the caller retains ownership of
+// the input.
+//
+// Surfaced for out-of-band compaction and history reset by
+// kit consumers. Most consumers should not call this directly —
+// prefer driving compaction through the run loop's TransformContext
+// hook. The exception is user-triggered between-turn rewrites
+// (e.g., a /clear or /compact command) where the consumer wants the
+// next resume to start from a different transcript.
+func (a *Agent) ReplaceMessages(msgs []llm.Message) error {
+	return a.foundation.ReplaceMessages(msgs)
+}
+
 // WaitForIdle blocks until the current run (if any) has finished and
 // the foundation goroutine has unwound. Returns immediately when no
 // run is active.

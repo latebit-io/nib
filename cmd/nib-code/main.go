@@ -16,6 +16,7 @@ import (
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/ai/oauth"
+	"github.com/latebit-io/nib/cmd/nib-code/defaults"
 	"github.com/latebit-io/nib/coding/agent"
 	codingcmd "github.com/latebit-io/nib/coding/command"
 	"github.com/latebit-io/nib/coding/event"
@@ -344,6 +345,19 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if err := cmdRegistry.Register(tuicmd.NewClear(resetter, app.AgentPane)); err != nil {
 		return fmt.Errorf("register /clear: %w", err)
 	}
+	// Cold-start seed: when a project has no .project/commands/
+	// directory yet, materialize the binary's bundled starter
+	// templates so first-launch users see the surface immediately.
+	// Idempotent at the dir level — once the directory exists
+	// (even empty), seeding never runs again. Failures here are
+	// logged but never abort startup; the rest of nib-code is
+	// useful even if the seed write failed (full-disk, permissions,
+	// etc.).
+	projectCommandsDir := filepath.Join(projectRoot, ".project", "commands")
+	if err := defaults.Seed(projectCommandsDir); err != nil {
+		slog.Warn("commands: seed defaults failed", "dir", projectCommandsDir, "err", err)
+	}
+
 	// Markdown-defined PromptCommands. Project-local commands live
 	// under <projectRoot>/.project/commands/ and shadow global
 	// commands at <UserConfigDir>/nib/commands/ via the registry's
@@ -364,11 +378,18 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			}
 		}
 	}
-	loadCommandDir(filepath.Join(projectRoot, ".project", "commands"), kitcmd.SourceProject)
+	loadCommandDir(projectCommandsDir, kitcmd.SourceProject)
 	if userCfgDir, err := os.UserConfigDir(); err == nil {
 		loadCommandDir(filepath.Join(userCfgDir, brand.ConfigDirName, "commands"), kitcmd.SourceGlobal)
 	} else {
 		slog.Debug("commands: skipping global dir, UserConfigDir unavailable", "err", err)
+	}
+
+	// /new-command — scaffold a new markdown command. Registered
+	// after the markdown loader runs so its CommandLookup probe
+	// sees every already-loaded command and refuses shadowing.
+	if err := cmdRegistry.Register(codingcmd.NewNewCommand(projectCommandsDir, cmdRegistry)); err != nil {
+		return fmt.Errorf("register /new-command: %w", err)
 	}
 
 	if err := cmdRegistry.Register(tuicmd.NewQuit(func() {

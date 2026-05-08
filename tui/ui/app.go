@@ -234,24 +234,32 @@ type AppModel struct {
 
 // editorForOpenFile returns the pooled editor for the given open file,
 // creating and decorating one on first use. Returns nil if of is nil.
-// Cursor/scroll state is preserved across calls because each canonical
-// path maps to a single editor instance for the lifetime of the AppModel.
+// Cursor/scroll state is preserved across calls because each path
+// resolves to a single editor instance for the lifetime of the AppModel.
+//
+// Empty-path scratch handles (the fallback installed when Session has
+// no real active file) use "" as the pool key, mirroring
+// [Session.openFiles] so future iteration/lookup paths stay consistent.
+// Every other path is canonicalized.
 func (m *AppModel) editorForOpenFile(of *openfile.OpenFile) *editor.Editor {
 	if of == nil {
 		return nil
 	}
-	canon := m.Session.CanonPath(of.Buf.Path)
+	key := of.Buf.Path
+	if key != "" {
+		key = m.Session.CanonPath(of.Buf.Path)
+	}
 	if m.editorPool == nil {
 		m.editorPool = make(map[string]*editor.Editor)
 	}
-	if e, ok := m.editorPool[canon]; ok {
+	if e, ok := m.editorPool[key]; ok {
 		return e
 	}
 	e := editor.New(of.Buf)
 	if m.highlighterFactory != nil && of.Buf.Path != "" {
 		e.SetHighlighter(m.highlighterFactory(of.Buf.Path))
 	}
-	m.editorPool[canon] = e
+	m.editorPool[key] = e
 	return e
 }
 
@@ -259,6 +267,43 @@ func (m *AppModel) editorForOpenFile(of *openfile.OpenFile) *editor.Editor {
 // open file. May return nil when the session has no active file.
 func (m *AppModel) activeEditor() *editor.Editor {
 	return m.editorForOpenFile(m.Session.ActiveOpenFile())
+}
+
+// clampPooledEditor clamps the cursor and viewport for the pooled
+// editor at path so a buffer-shrinking reload (external tool, agent
+// edit, ReloadFromDisk) doesn't leave the cursor out-of-bounds.
+// No-op if no editor is pooled for the path. The pool key resolution
+// matches [editorForOpenFile]: empty-path scratch handles use "" as
+// the key, every other path is canonicalized.
+func (m *AppModel) clampPooledEditor(path string) {
+	key := path
+	if key != "" {
+		key = m.Session.CanonPath(path)
+	}
+	ed, ok := m.editorPool[key]
+	if !ok {
+		return
+	}
+	// Self-call MoveCursorTo with current position so the editor's
+	// internal clamp logic (line bounds, column bounds) runs against
+	// the new buffer length.
+	ed.MoveCursorTo(ed.CursorLine, ed.CursorCol)
+	ed.ClampScroll()
+}
+
+// dropPooledEditors removes pool entries for a path and any children
+// (when path was a directory), closing each editor's highlighter so
+// tree-sitter grammar instances are released. Mirrors the matching
+// logic in [session.cleanupDeletedPath].
+func (m *AppModel) dropPooledEditors(path string) {
+	canon := m.Session.CanonPath(path)
+	dirPrefix := canon + string(filepath.Separator)
+	for k, ed := range m.editorPool {
+		if k == canon || strings.HasPrefix(k, dirPrefix) {
+			ed.Close()
+			delete(m.editorPool, k)
+		}
+	}
 }
 
 // SetHighlighterFactory installs the syntax-highlighter factory used by
@@ -836,6 +881,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.AgentPane.AppendMeta("[delete failed: " + err.Error() + "]\n")
 			return m, nil
 		}
+		// Drop pooled editors for the deleted path (or any children
+		// when a directory was removed). Closes each editor's
+		// highlighter so tree-sitter grammar instances don't leak.
+		m.dropPooledEditors(absPath)
 		// Preserve parent directory in tree if it's now empty on disk.
 		parentRel := filepath.ToSlash(filepath.Dir(msg.Path))
 		if parentRel != "." && parentRel != "" {
@@ -1479,6 +1528,9 @@ func (m *AppModel) handleFileChanged(path string) {
 		slog.Warn("auto-reload failed", "path", path, "err", err)
 		return
 	}
+	// Buffer length may have shrunk — clamp the pooled editor so a
+	// stale cursor doesn't reference an out-of-bounds line/column.
+	m.clampPooledEditor(path)
 	// If the changed file is the active one, rebuild the editor model.
 	if path == m.Session.ActiveFile() {
 		m.rebuildEditorModel()
@@ -1497,6 +1549,8 @@ func (m *AppModel) reloadActiveFile() (tea.Model, tea.Cmd) {
 		m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
 		return m, nil
 	}
+	// Buffer length may have shrunk — clamp the pooled editor cursor.
+	m.clampPooledEditor(path)
 	m.rebuildEditorModel()
 	slog.Debug("file reloaded", "path", path)
 	return m, nil

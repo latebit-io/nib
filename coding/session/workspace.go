@@ -8,14 +8,14 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/filelist"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
 // Workspace methods — the agent.Workspace interface implementation that
 // gives tools access to the project filesystem and open buffers. Grouped
-// here so the contract is visible at one glance. State (editors, contextSet,
-// projectRoot, mu, langSyncer) lives on Session.
+// here so the contract is visible at one glance. State (openFiles,
+// contextSet, projectRoot, mu, langSyncer) lives on Session.
 
 // SaveDirtyBuffers writes all modified (unsaved) buffers to disk and
 // notifies the language service of each save. Returns the canonical
@@ -23,16 +23,16 @@ import (
 // before tool execution so it always sees the developer's latest edits.
 func (s *Session) SaveDirtyBuffers() ([]string, error) {
 	s.mu.RLock()
-	// Snapshot dirty editors under read lock — Save() does I/O so we
+	// Snapshot dirty open files under read lock — Save() does I/O so we
 	// don't want to hold the lock through os.WriteFile.
 	type dirty struct {
 		canon string
-		ed    *editor.Editor
+		of    *openfile.OpenFile
 	}
 	var toSave []dirty
-	for path, e := range s.editors {
-		if e.Buf.Modified {
-			toSave = append(toSave, dirty{canon: path, ed: e})
+	for path, of := range s.openFiles {
+		if of.Modified() {
+			toSave = append(toSave, dirty{canon: path, of: of})
 		}
 	}
 	s.mu.RUnlock()
@@ -40,7 +40,7 @@ func (s *Session) SaveDirtyBuffers() ([]string, error) {
 	var saved []string
 	var firstErr error
 	for _, d := range toSave {
-		if err := d.ed.Save(); err != nil {
+		if err := d.of.Save(); err != nil {
 			slog.Warn("autosave failed", "path", d.canon, "err", err)
 			if firstErr == nil {
 				firstErr = err
@@ -128,18 +128,18 @@ func (s *Session) WriteFile(path, content string) error {
 	if err != nil {
 		return fmt.Errorf("open after write %s: %w", path, err)
 	}
-	e := s.newEditor(buf)
+	of := s.newOpenFile(buf)
 	canon := s.CanonPath(absPath)
 	addToContext := !s.isProjectMeta(canon)
 	s.mu.Lock()
-	s.editors[canon] = e
+	s.openFiles[canon] = of
 	if addToContext {
 		s.contextSet[canon] = true
 	}
 	s.mu.Unlock()
 
-	// Wire LSP sync for the new editor.
-	s.wireBufferSync(e)
+	// Wire LSP sync for the newly opened file.
+	s.wireBufferSync(of)
 
 	if addToContext {
 		s.saveContext()

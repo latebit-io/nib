@@ -26,8 +26,8 @@ import (
 	"github.com/latebit-io/nib/coding/wire"
 	"github.com/latebit-io/nib/engine/buffer"
 	"github.com/latebit-io/nib/engine/capture/demarkus"
-	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/highlight"
+	"github.com/latebit-io/nib/engine/openfile"
 	"github.com/latebit-io/nib/engine/runconfig"
 	"github.com/latebit-io/nib/engine/styleconfig"
 	"github.com/latebit-io/nib/engine/validate"
@@ -121,14 +121,10 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 	}
 
-	e := editor.New(buf)
-	if buf.Path != "" {
-		e.SetHighlighter(highlight.NewHighlighter(buf.Path))
-	}
+	of := openfile.New(buf)
 
-	sess := session.New(e, projectRoot)
+	sess := session.New(of, projectRoot)
 	sess.SetContext(appCtx)
-	sess.SetHighlighterFactory(highlight.NewHighlighter)
 
 	// Discover MCP tools from .mcp.json or the brand-prefixed MCP env var.
 	mcpResult := wire.DiscoverMCPTools(projectRoot)
@@ -317,10 +313,11 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 
 	// Construct the TUI via the facade.
 	tuiApp := nibTui.New(nibTui.Config{
-		Session: sess,
-		Events:  events,
-		Agent:   ag,
-		LLM:     llmCallbacks,
+		Session:            sess,
+		Events:             events,
+		Agent:              ag,
+		LLM:                llmCallbacks,
+		HighlighterFactory: highlight.NewHighlighter,
 	})
 	app := tuiApp.Model()
 

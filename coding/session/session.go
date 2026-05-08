@@ -17,8 +17,8 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/engine/buffer"
 	"github.com/latebit-io/nib/engine/capture"
-	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/engine/openfile"
 )
 
 // agentLifecycle is the subset of agent operations that start, extend, or
@@ -57,11 +57,13 @@ type agentPort interface {
 // (ReadFile, WriteFile, ListFiles, CanonPath). The mu field guards the
 // editors map and activeFile so both goroutines can safely access them.
 type Session struct {
-	// activeEditor points to the currently-focused editor. Updated on file
-	// switch. Callers outside this package read via ActiveEditor(); direct
-	// field access is reserved for session internals so the workflow-enforcing
-	// methods remain the only mutation path.
-	activeEditor *editor.Editor
+	// activeOpenFile points to the currently-focused open file. Updated
+	// on file switch. Callers outside this package read via
+	// ActiveOpenFile(); direct field access is reserved for session
+	// internals so the workflow-enforcing methods remain the only
+	// mutation path. UI state (cursor, selection, scroll, highlighter)
+	// lives on the frontend's editor controller — Session never owns it.
+	activeOpenFile *openfile.OpenFile
 
 	// ctx is the application-level context. Agent runs derive a child
 	// context so they are cancelled when the application shuts down.
@@ -70,14 +72,14 @@ type Session struct {
 	agent  agentPort
 	events <-chan event.Event // frontend reads engine events from here
 
-	// mu guards editors and activeFile for concurrent access from the
+	// mu guards openFiles and activeFile for concurrent access from the
 	// TUI goroutine and agent goroutine (via Workspace interface).
 	mu sync.RWMutex
 
 	// Multi-buffer state
-	editors     map[string]*editor.Editor // path → editor
-	activeFile  string                    // path of the active editor
-	projectRoot string                    // root for file listing and path resolution
+	openFiles   map[string]*openfile.OpenFile // path → open file handle
+	activeFile  string                        // path of the active open file
+	projectRoot string                        // root for file listing and path resolution
 
 	// Context set — files the agent is allowed to edit.
 	// Canonical absolute paths as keys. Guarded by mu.
@@ -148,11 +150,11 @@ type Session struct {
 	// immutable after initialization. Read without lock is safe.
 	langSyncer lang.DocumentSyncer
 
-	// wiredEditors tracks which editors have had LSP sync wired (by canonical path).
+	// wiredFiles tracks which open files have had LSP sync wired (by canonical path).
 	// Maps to the previous OnChange handler that was installed before wiring,
 	// so unwireBufferSync can restore it. nil func() means no previous handler.
 	// Guarded by mu.
-	wiredEditors map[string]func()
+	wiredFiles map[string]func()
 
 	// navStack tracks cursor positions for go-back navigation after go-to-definition.
 	// Each entry records where the cursor was before the jump.
@@ -182,19 +184,6 @@ type Session struct {
 	// agent. Set via SetModelSwitcher at startup. Returns the display model
 	// name and any error. Nil means model switching is not available.
 	switchModel func(profile, modelID string) (displayModel string, err error)
-
-	// highlighterFactory produces a [editor.Highlighter] for a given file
-	// path. Frontends that render source (TUI) install the real factory via
-	// [SetHighlighterFactory]; headless binaries (the headless binary) leaves it nil
-	// so tree-sitter grammar blobs are never linked in. Guarded by mu.
-	highlighterFactory editor.HighlighterFactory
-
-	// highlighterFactoryGen increments on every [SetHighlighterFactory]
-	// call. decorateEditor reads (factory, gen) under RLock, installs the
-	// highlighter outside the lock, then re-checks gen — if it changed, a
-	// concurrent factory swap happened and decoration retries with the new
-	// factory. This makes concurrent decoration linearizable with swaps.
-	highlighterFactoryGen uint64
 }
 
 // ResolveProjectRoot walks up from startDir looking for a .git directory.
@@ -218,18 +207,18 @@ func ResolveProjectRoot(startDir string) string {
 	return absDir
 }
 
-// New creates a session in editor-only mode. Call SetAgent to enable the
-// agent after construction (this breaks the circular dependency between
-// session-as-workspace and agent-needing-workspace).
-// The projectRoot is used for file listing and resolving relative paths.
+// New creates a session bound to an initial open file. Call SetAgent to
+// enable the agent after construction (this breaks the circular dependency
+// between session-as-workspace and agent-needing-workspace). The
+// projectRoot is used for file listing and resolving relative paths.
 //
-// If e is nil, a fresh empty editor is installed so activeEditor is never
-// nil — the same invariant cleanupDeletedPath enforces on file deletion.
-// Callers that pass nil (e.g. tests for non-editor subsystems) get a sound
-// session instead of one that panics on the first agent turn.
-func New(e *editor.Editor, projectRoot string) *Session {
-	if e == nil {
-		e = editor.New(buffer.New())
+// If of is nil, a fresh empty open file is installed so activeOpenFile is
+// never nil — the same invariant cleanupDeletedPath enforces on file
+// deletion. Callers that pass nil (e.g. tests for non-editor subsystems)
+// get a sound session instead of one that panics on the first agent turn.
+func New(of *openfile.OpenFile, projectRoot string) *Session {
+	if of == nil {
+		of = openfile.New(buffer.New())
 	}
 	// Normalize to absolute so CanonPath/resolvePath work regardless of
 	// whether the caller passes ".", a relative path, or an absolute path.
@@ -238,24 +227,24 @@ func New(e *editor.Editor, projectRoot string) *Session {
 	} else {
 		projectRoot = filepath.Clean(projectRoot)
 	}
-	editors := make(map[string]*editor.Editor)
+	openFiles := make(map[string]*openfile.OpenFile)
 	contextSet := make(map[string]bool)
 	s := &Session{
-		activeEditor:  e,
-		editors:       editors,
-		contextSet:    contextSet,
-		modifiedFiles: make(map[string]bool),
-		projectRoot:   projectRoot,
-		sink:          capture.NoopSink{},
-		sessionID:     newSessionID(),
+		activeOpenFile: of,
+		openFiles:      openFiles,
+		contextSet:     contextSet,
+		modifiedFiles:  make(map[string]bool),
+		projectRoot:    projectRoot,
+		sink:           capture.NoopSink{},
+		sessionID:      newSessionID(),
 	}
-	if e.Buf.Path != "" {
-		if _, err := s.resolvePath(e.Buf.Path); err != nil {
-			slog.Warn("New: initial editor path rejected", "path", e.Buf.Path, "err", err)
+	if of.Buf.Path != "" {
+		if _, err := s.resolvePath(of.Buf.Path); err != nil {
+			slog.Warn("New: initial open file path rejected", "path", of.Buf.Path, "err", err)
 		} else {
-			canon := s.CanonPath(e.Buf.Path)
+			canon := s.CanonPath(of.Buf.Path)
 			s.activeFile = canon
-			s.editors[canon] = e
+			s.openFiles[canon] = of
 			if !s.isProjectMeta(canon) {
 				s.contextSet[canon] = true
 			}
@@ -365,13 +354,13 @@ func (s *Session) ProjectRoot() string {
 	return s.projectRoot
 }
 
-// ModifiedFiles returns paths of editors with unsaved changes.
+// ModifiedFiles returns paths of open files with unsaved changes.
 func (s *Session) ModifiedFiles() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var modified []string
-	for path, e := range s.editors {
-		if e.Buf.Modified {
+	for path, of := range s.openFiles {
+		if of.Modified() {
 			modified = append(modified, path)
 		}
 	}
@@ -419,25 +408,22 @@ func (s *Session) AgentModifiedFiles() []string {
 // Workspace methods (ReadFile, WriteFile, ListFiles, ListFilesAndDirs,
 // CanonPath, resolvePath, SaveDirtyBuffers, CreateDir) live in workspace.go.
 
-// Close frees resources for all open editors.
+// Close releases resources held by Session — chiefly the language service.
+// Open file handles wrap a [*buffer.Buffer] which has no resources to close
+// (the highlighter, which previously needed a Close, lives on the
+// frontend's editor controller now).
 func (s *Session) Close() {
-	// Notify language service of all document closes, then shut it down.
-	if s.langSyncer != nil {
-		s.mu.Lock()
-		for path := range s.wiredEditors {
-			s.langSyncer.DidClose(path)
-		}
-		s.wiredEditors = nil
-		s.mu.Unlock()
-		if err := s.langSyncer.Close(); err != nil {
-			slog.Warn("close language service", "err", err)
-		}
+	if s.langSyncer == nil {
+		return
 	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, e := range s.editors {
-		e.Close()
+	s.mu.Lock()
+	for path := range s.wiredFiles {
+		s.langSyncer.DidClose(path)
+	}
+	s.wiredFiles = nil
+	s.mu.Unlock()
+	if err := s.langSyncer.Close(); err != nil {
+		slog.Warn("close language service", "err", err)
 	}
 }
 

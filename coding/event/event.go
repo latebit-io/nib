@@ -141,13 +141,18 @@ type AgentFileCreated struct {
 	Path string
 }
 
-// AgentNavigate signals the agent wants to navigate the editor to a location.
-// The frontend handles the actual cursor movement on its own goroutine.
+// AgentNavigate signals the agent wants to navigate the editor to a
+// location. The frontend handles the actual cursor movement on its own
+// goroutine — Session never holds a UI cursor.
 type AgentNavigate struct {
 	// Path is the file to navigate to.
 	Path string
 	// Line is the 1-indexed line number to navigate to.
 	Line int
+	// Col is the 0-indexed rune column to land on. Zero is a valid
+	// "start of line" target; consumers that previously emitted only
+	// (path, line) interpret Col=0 as the original behavior.
+	Col int
 }
 
 // ReloadBuffers requests the frontend to re-read all open buffers from disk.

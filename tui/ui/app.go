@@ -14,9 +14,13 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/session"
+	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/filelist"
 	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/engine/openfile"
 	"github.com/latebit-io/nib/engine/search"
+	"github.com/latebit-io/nib/engine/syntax"
 )
 
 // engineEventMsg wraps an engine event.Event for delivery through Bubble Tea.
@@ -213,6 +217,66 @@ type AppModel struct {
 	// edit is wrong, don't decide for me on the next one"). Empty
 	// when no Block is currently surfaced.
 	pendingBlockedPath string
+
+	// editorPool maps canonical paths to the per-file editor
+	// controllers the TUI maintains over each session OpenFile.
+	// Cursor, selection, scroll, and highlighter state live on these
+	// editors — Session never holds a UI controller. Editors are
+	// lazily created on first need and reused across file switches so
+	// each file's cursor/scroll position is preserved.
+	editorPool map[string]*editor.Editor
+
+	// highlighterFactory builds a highlighter for a given file path.
+	// Set by composition root (cmd/nib-code/main.go) at startup. Nil
+	// disables highlighting (e.g. tests).
+	highlighterFactory syntax.HighlighterFactory
+}
+
+// editorForOpenFile returns the pooled editor for the given open file,
+// creating and decorating one on first use. Returns nil if of is nil.
+// Cursor/scroll state is preserved across calls because each canonical
+// path maps to a single editor instance for the lifetime of the AppModel.
+func (m *AppModel) editorForOpenFile(of *openfile.OpenFile) *editor.Editor {
+	if of == nil {
+		return nil
+	}
+	canon := m.Session.CanonPath(of.Buf.Path)
+	if m.editorPool == nil {
+		m.editorPool = make(map[string]*editor.Editor)
+	}
+	if e, ok := m.editorPool[canon]; ok {
+		return e
+	}
+	e := editor.New(of.Buf)
+	if m.highlighterFactory != nil && of.Buf.Path != "" {
+		e.SetHighlighter(m.highlighterFactory(of.Buf.Path))
+	}
+	m.editorPool[canon] = e
+	return e
+}
+
+// activeEditor returns the editor for the session's currently active
+// open file. May return nil when the session has no active file.
+func (m *AppModel) activeEditor() *editor.Editor {
+	return m.editorForOpenFile(m.Session.ActiveOpenFile())
+}
+
+// SetHighlighterFactory installs the syntax-highlighter factory used by
+// the editor pool. Existing pooled editors are re-decorated to match.
+// Pass nil to disable highlighting. Called at startup by the composition
+// root.
+func (m *AppModel) SetHighlighterFactory(fn syntax.HighlighterFactory) {
+	m.highlighterFactory = fn
+	for _, e := range m.editorPool {
+		if e == nil || e.Buf == nil || e.Buf.Path == "" {
+			continue
+		}
+		if fn == nil {
+			e.SetHighlighter(nil)
+			continue
+		}
+		e.SetHighlighter(fn(e.Buf.Path))
+	}
 }
 
 // CloseWatcher shuts down the file watcher. Safe to call if the watcher is nil.
@@ -296,7 +360,26 @@ func NewApp(sess *session.Session) AppModel {
 	km := DefaultKeymap()
 	svc := NewServices()
 
-	editorPane := NewEditorModel(sess.ActiveEditor(), km, svc)
+	m := AppModel{
+		Session:      sess,
+		Services:     svc,
+		Keymap:       km,
+		dial:         session.LevelTrusted,
+		blockedPaths: map[string]bool{},
+		editorPool:   make(map[string]*editor.Editor),
+	}
+	// Seed the editor pool from the session's initial active open file.
+	// editorForOpenFile lazily creates+decorates one if needed; we resolve
+	// it eagerly here so the EditorModel below holds the same instance
+	// future activeEditor() calls return.
+	initialEditor := m.editorForOpenFile(sess.ActiveOpenFile())
+	if initialEditor == nil {
+		// Defensive: Session guarantees activeOpenFile != nil, but if a
+		// caller installed something unusual, fall back to a lone empty
+		// editor that we don't track in the pool (no path).
+		initialEditor = editor.New(buffer.New())
+	}
+	editorPane := NewEditorModel(initialEditor, km, svc)
 	editorPane.OnSave = func() { sess.NotifySaved() }
 	agentPane := NewAgentPaneModel(svc, sess.HasAgent())
 	projectPane := NewProjectPaneModel(sess)
@@ -313,23 +396,17 @@ func NewApp(sess *session.Session) AppModel {
 		fw.Watch(sess.ActiveFile())
 	}
 
-	return AppModel{
-		Session:      sess,
-		Editor:       editorPane,
-		AgentPane:    agentPane,
-		ProjectPane:  projectPane,
-		Regions:      rm,
-		Services:     svc,
-		Keymap:       km,
-		dial:         session.LevelTrusted,
-		fileWatcher:  fw,
-		blockedPaths: map[string]bool{},
-		SearchOverlay: SearchOverlayModel{
-			SearchFunc: func(pattern string) ([]search.Result, error) {
-				return sess.Search(pattern, search.Options{})
-			},
+	m.Editor = editorPane
+	m.AgentPane = agentPane
+	m.ProjectPane = projectPane
+	m.Regions = rm
+	m.fileWatcher = fw
+	m.SearchOverlay = SearchOverlayModel{
+		SearchFunc: func(pattern string) ([]search.Result, error) {
+			return sess.Search(pattern, search.Options{})
 		},
 	}
+	return m
 }
 
 func (m *AppModel) Init() tea.Cmd {
@@ -941,14 +1018,22 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshProjectPane()
 		}
 	case event.AgentNavigate:
-		prevActive := m.Session.ActiveEditor()
-		if err := m.Session.NavigateAgent(e.Path, e.Line-1); err != nil {
+		prevActive := m.activeEditor()
+		if err := m.Session.NavigateAgent(e.Path); err != nil {
 			slog.Warn("agent navigate failed", "path", e.Path, "err", err)
 			m.AgentPane.AppendMeta("[navigate failed: " + err.Error() + "]\n")
 			break
 		}
+		// Place the cursor on the TUI's editor for the (possibly newly
+		// active) file. Session no longer holds a UI cursor, so this is
+		// the frontend's responsibility now.
+		if ed := m.activeEditor(); ed != nil {
+			ed.ClearSelection()
+			ed.MoveCursorTo(e.Line-1, e.Col)
+			ed.EnsureCursorVisible()
+		}
 		// If the session switched files, update TUI-owned state to match.
-		if m.Session.ActiveEditor() != prevActive {
+		if m.activeEditor() != prevActive {
 			if m.fileWatcher != nil {
 				m.fileWatcher.Watch(m.Session.ActiveFile())
 			}
@@ -1296,9 +1381,16 @@ func (m *AppModel) View() tea.View {
 	return v
 }
 
-// rebuildEditorModel creates a new EditorModel from the session's active editor.
+// rebuildEditorModel creates a new EditorModel wrapping the pooled
+// editor for the session's currently active open file. Cursor/scroll
+// state is preserved because [editorForOpenFile] returns the same
+// editor instance across calls for a given path.
 func (m *AppModel) rebuildEditorModel() {
-	m.Editor = NewEditorModel(m.Session.ActiveEditor(), m.Keymap, m.Services)
+	ed := m.activeEditor()
+	if ed == nil {
+		ed = editor.New(buffer.New())
+	}
+	m.Editor = NewEditorModel(ed, m.Keymap, m.Services)
 	m.Editor.OnSave = func() { m.Session.NotifySaved() }
 	m.Regions.ReplacePane("editor", m.Editor)
 }
@@ -1378,8 +1470,8 @@ func (m *AppModel) reloadAllBuffers() {
 // Skips reload if the buffer has unsaved in-editor changes.
 func (m *AppModel) handleFileChanged(path string) {
 	// Don't reload buffers the user has modified in-editor.
-	ed := m.Session.EditorForPath(path)
-	if ed != nil && ed.IsModified() {
+	of := m.Session.OpenFileForPath(path)
+	if of != nil && of.Modified() {
 		slog.Debug("skip external reload (buffer modified)", "path", path)
 		return
 	}
@@ -1504,12 +1596,14 @@ func (m *AppModel) applyGoToDefinition(msg goToDefResultMsg) (tea.Model, tea.Cmd
 	}
 
 	// Rebuild EditorModel if session switched files.
-	if m.Session.ActiveEditor() != m.Editor.Engine() {
+	if m.activeEditor() != m.Editor.Engine() {
 		m.rebuildEditorModel()
 		m.refreshDiagnostics(m.Session.ActiveFile())
 	}
 
-	m.Session.ActiveEditor().MoveCursorTo(msg.line, msg.col)
+	if ed := m.activeEditor(); ed != nil {
+		ed.MoveCursorTo(msg.line, msg.col)
+	}
 	slog.Debug("go-to-definition", "path", msg.path, "line", msg.line, "col", msg.col)
 	return m, nil
 }
@@ -1521,10 +1615,16 @@ func (m *AppModel) handleGoBack() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Session may have switched files — rebuild EditorModel if needed.
-	if m.Session.ActiveEditor() != m.Editor.Engine() {
+	// Session may have switched files — rebuild EditorModel if needed,
+	// then place the cursor on the TUI's editor (Session no longer
+	// holds a UI cursor).
+	if m.activeEditor() != m.Editor.Engine() {
 		m.rebuildEditorModel()
 		m.refreshDiagnostics(m.Session.ActiveFile())
+	}
+	if ed := m.activeEditor(); ed != nil {
+		ed.MoveCursorTo(loc.Line, loc.Col)
+		ed.EnsureCursorVisible()
 	}
 
 	slog.Debug("go-back", "path", loc.Path, "line", loc.Line, "col", loc.Col)

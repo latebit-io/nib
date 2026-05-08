@@ -2,42 +2,14 @@ package session
 
 import (
 	"fmt"
-
-	"github.com/latebit-io/nib/engine/editor"
 )
 
-// LLM, model selection, and highlighter wiring. Read-only state with
-// one-time wiring at startup, plus the SwitchModel hot-swap path. State
-// (llmModel, llmProfile, switchModel, highlighterFactory,
-// highlighterFactoryGen) lives on Session.
-
-// SetHighlighterFactory installs a factory used to construct highlighters
-// for every editor this session creates. Pass nil to disable highlighting.
-// Typical usage: the TUI wires in [highlight.NewHighlighter] at startup;
-// headless binaries never call this so no grammar blobs are linked in.
+// LLM and model selection wiring. Read-only state with one-time wiring at
+// startup, plus the SwitchModel hot-swap path. State (llmModel,
+// llmProfile, switchModel) lives on Session.
 //
-// All currently-open editors are re-decorated to match the new factory
-// (their old highlighters are closed). Concurrent factory swaps and
-// editor decoration are linearized via the highlighterFactoryGen counter:
-// decorateEditor re-checks the generation after installing a highlighter
-// and retries if a swap happened mid-install.
-func (s *Session) SetHighlighterFactory(fn editor.HighlighterFactory) {
-	s.mu.Lock()
-	s.highlighterFactory = fn
-	s.highlighterFactoryGen++
-	// Snapshot under the lock; call SetHighlighter after releasing so the
-	// editor's Close() path on the old highlighter doesn't run while we
-	// hold the session lock.
-	open := make([]*editor.Editor, 0, len(s.editors))
-	for _, e := range s.editors {
-		open = append(open, e)
-	}
-	s.mu.Unlock()
-
-	for _, e := range open {
-		s.decorateEditor(e)
-	}
-}
+// Highlighter factory wiring no longer lives on Session: the frontend
+// owns its own editor controllers and decorates them on construction.
 
 // SetLLMInfo stores the active LLM model ID and profile name.
 // Called during startup and after model switches. Guarded by mu

@@ -344,7 +344,16 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return fmt.Errorf("register /clear: %w", err)
 	}
 	if err := cmdRegistry.Register(tuicmd.NewQuit(func() {
-		tuiApp.Program().Send(tea.Quit())
+		// Send must run off the Update goroutine. Program.msgs is an
+		// unbuffered channel; Send blocks until the loop reads, but
+		// the loop is parked inside this very Handle call. Synchronous
+		// Send self-deadlocks. Spawning a goroutine deposits the
+		// QuitMsg on a side stack, lets Handle return, and the loop
+		// drains the next tick. Bubble Tea's idiomatic alternative —
+		// returning tea.Quit as a Cmd from Update — would require
+		// threading tea.Cmd through kit.Session, which is rejected
+		// per the v3 plan: kit Session stays {Display, SubmitPrompt}.
+		go tuiApp.Program().Quit()
 	})); err != nil {
 		return fmt.Errorf("register /quit: %w", err)
 	}

@@ -1,6 +1,14 @@
-// Package editor provides a frontend-agnostic code editor controller.
-// It manages cursor, selection, scroll, and text operations on top of a buffer.
-// Frontends map their input events to Editor methods and read Editor state to render.
+// Package editor is the TUI's editor controller. It manages cursor,
+// selection, scroll, viewport, and text operations on top of a
+// [buffer.Buffer], plus an injected [syntax.Highlighter] for rendering.
+// The TUI's [AppModel] holds one Editor per open file (the editor pool)
+// and wraps the same buffer that the session-side
+// [openfile.OpenFile] holds.
+//
+// This package lives under tui/ deliberately: cursor/scroll/selection
+// are rendering state. Headless agent code talks to
+// [engine/openfile.OpenFile] (buffer + edit-domain ops) and never links
+// this package — the editor-vs-buffer split closed that leak.
 package editor
 
 import (

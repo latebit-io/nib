@@ -70,6 +70,33 @@ func (m *AppModel) handleProjectCreateDir(msg ProjectCreateDirMsg) (tea.Model, t
 	return m, nil
 }
 
+// handleToggleProject implements the Ctrl+B toggle:
+// hidden → show + focus, visible but not focused → focus, focused → hide.
+func (m *AppModel) handleToggleProject() (tea.Model, tea.Cmd) {
+	r := m.Regions.regionByName("project")
+	if r == nil {
+		return m, nil
+	}
+	focused := m.Regions.FocusedRegion()
+	if !r.Visible {
+		// Hidden → show + focus (rebuild if stale)
+		if m.ProjectPane.dirty {
+			m.ProjectPane.rebuild()
+			m.ProjectPane.dirty = false
+		}
+		m.Regions.Show("project")
+		m.Regions.FocusByName("project")
+	} else if focused == nil || focused.Name != "project" {
+		// Visible but not focused → focus
+		m.Regions.FocusByName("project")
+	} else {
+		// Focused → hide, move focus to editor
+		m.Regions.Hide("project")
+		m.Regions.FocusByName("editor")
+	}
+	return m, nil
+}
+
 // handleProjectDeleteFile removes a file (or directory) from disk + the
 // session's bookkeeping. Cleanup discipline:
 //

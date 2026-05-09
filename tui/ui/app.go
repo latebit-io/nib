@@ -282,13 +282,6 @@ func (m *AppModel) SetHighlighterFactory(fn syntax.HighlighterFactory) {
 	}
 }
 
-// CloseWatcher shuts down the file watcher. Safe to call if the watcher is nil.
-func (m *AppModel) CloseWatcher() {
-	if m.fileWatcher != nil {
-		m.fileWatcher.Close()
-	}
-}
-
 // SetProgram sets the tea.Program reference.
 func (m *AppModel) SetProgram(p *tea.Program) {
 	m.program = p
@@ -373,19 +366,6 @@ func (m *AppModel) Init() tea.Cmd {
 		cmds = append(cmds, func() tea.Msg { return initDoneMsg{} })
 	}
 	return tea.Batch(cmds...)
-}
-
-// listenForFileChanges returns a tea.Cmd that blocks on the file watcher
-// channel and delivers the next change as a tea.Msg.
-func (m *AppModel) listenForFileChanges() tea.Cmd {
-	ch := m.fileWatcher.Changes()
-	return func() tea.Msg {
-		msg, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return msg
-	}
 }
 
 // listenForEvents returns a tea.Cmd that blocks on the engine event channel
@@ -1264,56 +1244,6 @@ func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
 	slog.Debug("file opened", "path", path)
 	m.refreshDiagnostics(m.Session.ActiveFile())
 	m.refreshProjectPane()
-	return m, nil
-}
-
-// reloadAllBuffers reloads all open buffers from disk. Called after bash
-// tool calls that may have modified files outside the edit approval flow.
-// Skips buffers the user has modified in-editor to avoid clobbering unsaved work.
-func (m *AppModel) reloadAllBuffers() {
-	for _, path := range m.Session.OpenFiles() {
-		m.handleFileChanged(path)
-	}
-}
-
-// handleFileChanged reloads a file that was modified externally.
-// Skips reload if the buffer has unsaved in-editor changes.
-func (m *AppModel) handleFileChanged(path string) {
-	// Don't reload buffers the user has modified in-editor.
-	of := m.Session.OpenFileForPath(path)
-	if of != nil && of.Modified() {
-		slog.Debug("skip external reload (buffer modified)", "path", path)
-		return
-	}
-	if err := m.Session.ReloadFile(path); err != nil {
-		slog.Warn("auto-reload failed", "path", path, "err", err)
-		return
-	}
-	// Buffer length may have shrunk — clamp the pooled editor so a
-	// stale cursor doesn't reference an out-of-bounds line/column.
-	m.clampPooledEditor(path)
-	// If the changed file is the active one, rebuild the editor model.
-	if path == m.Session.ActiveFile() {
-		m.rebuildEditorModel()
-	}
-	slog.Debug("auto-reloaded file", "path", path)
-}
-
-// reloadActiveFile re-reads the active file from disk into its buffer.
-func (m *AppModel) reloadActiveFile() (tea.Model, tea.Cmd) {
-	path := m.Session.ActiveFile()
-	if path == "" {
-		return m, nil
-	}
-	if err := m.Session.ReloadFile(path); err != nil {
-		slog.Error("reload file failed", "path", path, "err", err)
-		m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
-		return m, nil
-	}
-	// Buffer length may have shrunk — clamp the pooled editor cursor.
-	m.clampPooledEditor(path)
-	m.rebuildEditorModel()
-	slog.Debug("file reloaded", "path", path)
 	return m, nil
 }
 

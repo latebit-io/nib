@@ -39,8 +39,8 @@ linters:
           files:
             - "**/buffer/*.go"
           deny:
-            - pkg: "github.com/latebit-io/nib/engine/editor"
-              desc: "buffer must not import editor (dependency inversion)"
+            - pkg: "github.com/latebit-io/nib/tui/editor"
+              desc: "buffer must not import editor (dependency inversion; editor controller lives in tui after the editor-vs-buffer split)"
             - pkg: "github.com/latebit-io/nib/ai/llm"
               desc: "buffer must not import llm (dependency inversion)"
             - pkg: "github.com/latebit-io/nib/engine/highlight"
@@ -52,29 +52,35 @@ linters:
             - pkg: "github.com/latebit-io/nib/tui"
               desc: "engine must never import tui"
 
-        # editor depends on buffer only. Highlighting is provided via the
-        # editor.Highlighter interface so binaries that never render (e.g.
-        # the headless agent) doesn't pull in tree-sitter grammar blobs transitively.
-        editor-isolation:
+        # openfile is a frontend-agnostic file handle (buffer + edit-domain
+        # ops). It must not pull in the editor controller or other
+        # rendering surface — that's what keeps headless binaries free of
+        # cursor/highlighter machinery.
+        openfile-isolation:
           files:
-            - "**/editor/*.go"
+            - "**/openfile/*.go"
           deny:
-            - pkg: "github.com/latebit-io/nib/ai/llm"
-              desc: "editor must not import llm"
-            - pkg: "github.com/latebit-io/nib/engine/highlight"
-              desc: "editor must not import highlight — highlighting is injected via the Highlighter interface so the headless agent stays grammar-free"
-            - pkg: "github.com/latebit-io/nib/engine/filelist"
-              desc: "editor must not import filelist"
-            - pkg: "github.com/latebit-io/nib/engine/fuzzy"
-              desc: "editor must not import fuzzy"
             - pkg: "github.com/latebit-io/nib/tui"
-              desc: "engine must never import tui"
+              desc: "openfile must not import tui — openfile is the buffer-only handle headless code consumes"
+            - pkg: "github.com/latebit-io/nib/tui/editor"
+              desc: "openfile must not import the tui editor controller (explicit sibling-path entry; depguard pkg matching does not prefix-cover sibling sub-packages reliably)"
+            - pkg: "github.com/latebit-io/nib/engine/highlight"
+              desc: "openfile must not import highlight — highlighting is a frontend concern"
+            - pkg: "github.com/latebit-io/nib/ai/llm"
+              desc: "openfile must not import llm"
 
-        # No engine package may import tui — dependencies point inward only.
+        # No engine package may import tui — dependencies point inward
+        # only. Both the umbrella path and the `tui/editor` sub-path are
+        # listed explicitly: depguard's matching does not prefix-cover
+        # sibling sub-packages reliably (the same pattern is used in
+        # buffer-isolation above), and tui/editor is the most dangerous
+        # one to leak in since it pulls UI controller machinery.
         engine-no-tui:
           deny:
             - pkg: "github.com/latebit-io/nib/tui"
               desc: "engine must never import tui — dependencies point inward only"
+            - pkg: "github.com/latebit-io/nib/tui/editor"
+              desc: "engine must never import the tui editor controller — engine consumes openfile/buffer; cursor/scroll lives in tui"
 
         # No engine package may import any coding package. Phase 5 split
         # the application event vocabulary out of engine/event into

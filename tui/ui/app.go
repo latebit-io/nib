@@ -15,12 +15,12 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/filelist"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/openfile"
 	"github.com/latebit-io/nib/engine/search"
 	"github.com/latebit-io/nib/engine/syntax"
+	"github.com/latebit-io/nib/tui/editor"
 )
 
 // engineEventMsg wraps an engine event.Event for delivery through Bubble Tea.

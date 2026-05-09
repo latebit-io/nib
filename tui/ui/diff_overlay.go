@@ -4,8 +4,8 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/editor"
 	"github.com/latebit-io/nib/engine/openfile"
+	"github.com/latebit-io/nib/tui/editor"
 )
 
 // DiffOverlay manages the inline diff preview and editable replacement lines.

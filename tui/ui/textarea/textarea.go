@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/latebit-io/nib/engine/editor"
+	"github.com/latebit-io/nib/tui/editor"
 	"github.com/mattn/go-runewidth"
 )
 

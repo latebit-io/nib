@@ -3,7 +3,6 @@ package ui
 import (
 	"errors"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/filelist"
 	"github.com/latebit-io/nib/engine/openfile"
 	"github.com/latebit-io/nib/engine/search"
 	"github.com/latebit-io/nib/engine/syntax"
@@ -382,286 +380,99 @@ func (m *AppModel) listenForEvents() tea.Cmd {
 }
 
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Help overlay is modal for user input only — non-input messages
-	// (engine events, window resize, ticks) must still be processed.
-	if m.Help.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			m.Help.Update(typed, m.Height-2)
-			return m, nil
-		case tea.MouseMsg:
-			return m, nil
-		}
-	}
-
-	// Model selector is modal — captures most input when active.
-	// Ctrl+Q always quits regardless of modal state.
-	if m.AgentPane.IsModelSelectorActive() {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			if m.Keymap.Match(typed) == ActionQuit {
-				m.Quit = true
-				return m, tea.Quit
-			}
-			cmd := m.AgentPane.UpdateModelSelector(typed)
-			return m, cmd
-		case tea.MouseMsg:
-			return m, nil
-		}
-	}
-
-	// Palette is modal — captures all input when active
-	if m.Palette.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			cmd := m.Palette.Update(typed)
-			return m, cmd
-		case tea.MouseMsg:
-			return m, nil
-		}
-	}
-
-	// Search overlay is modal — captures all input when active
-	if m.SearchOverlay.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			cmd := m.SearchOverlay.Update(typed)
-			return m, cmd
-		case searchResultMsg:
-			cmd := m.SearchOverlay.Update(typed)
-			return m, cmd
-		case SearchOpenFileMsg:
-			m.SearchOverlay.Close()
-			model, cmd := m.openFile(filepath.Join(m.Session.ProjectRoot(), typed.Path))
-			if cmd == nil {
-				// Navigate to the specific line.
-				m.Editor.MoveCursorTo(typed.Line-1, 0)
-				m.Editor.EnsureCursorVisible()
-			}
-			return model, cmd
-		case tea.MouseMsg:
-			return m, nil
-		}
-	}
-
-	// Dialog is modal — captures all input when active
-	if m.Dialog.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			cmd := m.Dialog.Update(typed)
-			return m, cmd
-		case tea.MouseMsg:
-			return m, nil // swallow mouse while dialog is visible
-		}
+	// Modal overlays consume input messages first; non-input messages
+	// fall through so engine events / ticks / window resize keep flowing.
+	if cmd, handled := m.handleModalInput(msg); handled {
+		return m, cmd
 	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
-		// Intent bar always takes 1 row; RegionManager gets the rest
+		// Intent bar always takes 1 row; RegionManager gets the rest.
 		m.Regions.SetSize(msg.Width, m.regionHeight())
 		return m, nil
 
-	// Engine events — adapted from channel to tea.Msg
 	case engineEventMsg:
 		cmd := m.handleEngineEvent(msg.event)
-		// Keep listening for the next event
 		return m, tea.Batch(m.listenForEvents(), cmd)
 
-	// File watcher — external change detected
 	case fileChangedMsg:
 		m.handleFileChanged(msg.Path)
 		return m, m.listenForFileChanges()
 
-	// Goal submitted from agent pane — delegate to session.
-	// Only clear the pane when starting a new conversation, not on follow-ups.
 	case GoalSubmittedMsg:
-		continued := m.Session.SubmitGoal(msg.Goal)
-		if continued {
-			m.AgentPane.AppendUserMessage(msg.Goal)
-		} else {
-			m.AgentPane.Clear()
-		}
-		return m, nil
-
+		return m.handleGoalSubmitted(msg)
 	case PlanningGoalSubmittedMsg:
-		m.Session.SubmitPlanningGoal(msg.Goal)
-		m.AgentPane.Clear()
-		return m, nil
+		return m.handlePlanningGoalSubmitted(msg)
 
-	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
 
 	case reloadWorkTreeResultMsg:
 		return m.handleReloadWorkTreeResult(msg)
 
-	// File listing error — surface in agent pane
 	case paletteErrorMsg:
-		slog.Error("failed to list files", "err", msg.err)
-		m.AgentPane.AppendMeta("\n[file listing failed: " + msg.err + "]\n")
-		return m, nil
-
-	// File listing completed — open the palette with results
+		return m.handlePaletteError(msg)
 	case paletteFilesMsg:
-		m.Palette.Open(msg.items)
-		return m, nil
+		return m.handlePaletteFiles(msg)
+	case PaletteResultMsg:
+		return m.handlePaletteResult(msg)
+
+	case SearchOpenFileMsg:
+		return m.handleSearchOpenFile(msg)
+	case searchResultMsg:
+		return m.handleSearchResult(msg)
 
 	case modelSelSwitchProfileMsg:
 		return m.handleModelSelSwitchProfile(msg)
-
 	case oauthInstructionMsg:
 		return m.handleOAuthInstruction(msg)
-
 	case apiKeyEnteredMsg:
 		return m.handleAPIKeyEntered(msg)
-
 	case oauthConnectResultMsg:
 		return m.handleOAuthConnectResult(msg)
-
 	case modelListMsg:
 		return m.handleModelList(msg)
-
 	case ModelSelectorResultMsg:
 		return m.handleModelSelectorResult(msg)
 
-	// Palette result — user selected a file or cancelled
-	case PaletteResultMsg:
-		if !msg.Cancelled && msg.Category == "file" {
-			return m.openFile(msg.Item.Value)
-		}
-		return m, nil
-
-	// Search result — user selected a file:line from project search.
-	// Reachable if the overlay closes before the message is delivered.
-	case SearchOpenFileMsg:
-		model, cmd := m.openFile(filepath.Join(m.Session.ProjectRoot(), msg.Path))
-		if cmd == nil {
-			m.Editor.MoveCursorTo(msg.Line-1, 0)
-			m.Editor.EnsureCursorVisible()
-		}
-		return model, cmd
-
-	// Async search results — forward to overlay if still active.
-	case searchResultMsg:
-		if m.SearchOverlay.Active {
-			cmd := m.SearchOverlay.Update(msg)
-			return m, cmd
-		}
-		return m, nil
-
-	// Completion trigger — editor typed a trigger character, schedule debounced request.
 	case completionTriggerMsg:
 		return m, m.scheduleCompletion()
-
-	// Completion debounce tick — fire the actual request.
 	case completionTickMsg:
 		return m.handleCompletionTick(msg)
-
-	// Agent spinner advance — forward to the pane so it can advance the
-	// frame and reschedule (or drop the loop if status went idle).
-	case spinnerTickMsg:
-		return m, m.AgentPane.Update(msg)
-
 	case completionResultMsg:
 		return m.handleCompletionResult(msg)
-
 	case goToDefResultMsg:
 		return m.applyGoToDefinition(msg)
-
 	case hoverResultMsg:
 		return m.handleHoverResult(msg)
 
-	// Project pane — user selected a file to open
+	case spinnerTickMsg:
+		return m, m.AgentPane.Update(msg)
+
 	case ProjectOpenFileMsg:
-		return m.openFile(msg.Path)
-
-	// Project pane — context set mutations (all session writes go through AppModel)
+		return m.handleProjectOpenFile(msg)
 	case ProjectAddContextMsg:
-		m.Session.AddContext(msg.Path)
-		m.refreshProjectPane()
-		return m, nil
-
+		return m.handleProjectAddContext(msg)
 	case ProjectRemoveContextMsg:
-		m.Session.RemoveContext(msg.Path)
-		m.refreshProjectPane()
-		return m, nil
-
+		return m.handleProjectRemoveContext(msg)
 	case ProjectSetActiveGoalMsg:
 		return m.handleProjectSetActiveGoal(msg)
-
 	case ProjectMarkGoalDoneMsg:
 		return m.handleProjectMarkGoalDone(msg)
-
 	case ProjectCreateFileMsg:
-		if err := m.Session.WriteFile(msg.Path, ""); err != nil {
-			slog.Warn("create file", "err", err)
-			m.AgentPane.AppendMeta("[create failed: " + err.Error() + "]\n")
-			return m, nil
-		}
-		m.refreshProjectPane()
-		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
-		return m.openFile(absPath)
-
+		return m.handleProjectCreateFile(msg)
 	case ProjectCreateDirMsg:
-		if err := m.Session.CreateDir(msg.Path); err != nil {
-			slog.Warn("create dir", "err", err)
-			m.AgentPane.AppendMeta("[create dir failed: " + err.Error() + "]\n")
-			return m, nil
-		}
-		m.ProjectPane.AddEmptyDir(msg.Path)
-		m.refreshProjectPane()
-		return m, nil
-
+		return m.handleProjectCreateDir(msg)
 	case ProjectDeleteFileMsg:
-		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
-		prevActive := m.Session.ActiveFile()
-		if err := m.Session.DeleteFile(absPath); err != nil {
-			slog.Warn("delete file", "err", err)
-			m.AgentPane.AppendMeta("[delete failed: " + err.Error() + "]\n")
-			return m, nil
-		}
-		// Drop pooled editors for the deleted path (or any children
-		// when a directory was removed). Closes each editor's
-		// highlighter so tree-sitter grammar instances don't leak.
-		m.dropPooledEditors(absPath)
-		// Preserve parent directory in tree if it's now empty on disk.
-		parentRel := filepath.ToSlash(filepath.Dir(msg.Path))
-		if parentRel != "." && parentRel != "" {
-			parentAbs := filepath.Join(m.Session.ProjectRoot(), parentRel)
-			if entries, err := os.ReadDir(parentAbs); err == nil && len(entries) == 0 {
-				m.ProjectPane.AddEmptyDir(parentRel)
-			}
-		}
-		m.refreshProjectPane()
-		// If the active editor changed (deleted file or dir containing it),
-		// rebuild the editor pane to reflect the session's fallback.
-		if m.Session.ActiveFile() != prevActive {
-			m.rebuildEditorModel()
-		}
-		return m, nil
+		return m.handleProjectDeleteFile(msg)
 
 	case tea.MouseWheelMsg:
-		m.recentMouse = true
-		// Translate Y for intent bar row
-		translated := tea.Mouse(msg)
-		translated.Y -= 1
-		cmd := m.Regions.HandleMouse(tea.MouseWheelMsg(translated))
-		return m, cmd
-
+		return m.handleMouseWheel(msg)
 	case tea.MouseMsg:
-		// Any click unfocuses the agent input; the agent pane's own
-		// click handler re-focuses if the click landed in the input area.
-		if _, ok := msg.(tea.MouseClickMsg); ok {
-			m.AgentPane.SetInputActive(false)
-		}
-		// Translate Y for intent bar row
-		mouse := msg.Mouse()
-		mouse.Y -= 1
-		localMsg := translateMouseMsg(msg, mouse)
-		cmd := m.Regions.HandleMouse(localMsg)
-		return m, cmd
+		return m.handleMouse(msg)
 
 	case tea.KeyPressMsg:
 		slog.Debug("key event", "code", msg.Code, "mod", msg.Mod)
@@ -910,207 +721,43 @@ func (m *AppModel) regionHeight() int {
 }
 
 func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Drop leaked mouse escape sequence fragments.
-	// During rapid scrolling, Bubble Tea's parser can fail to consume full SGR
-	// sequences. The fragments leak as printable text — a full SGR body like
-	// '<65;14;32M' or '[<65;14;32M'. Gate behind recentMouse so we never
-	// silently drop legitimate typed/pasted text.
+	// Drop leaked mouse escape sequence fragments. During rapid scrolling,
+	// Bubble Tea's parser can fail to consume full SGR sequences; the
+	// fragments leak as printable text. Gate behind recentMouse so we
+	// never silently drop legitimate typed/pasted text. Keep
+	// recentMouse=true while consecutive leaked sequences flow.
 	if m.recentMouse && msg.Text != "" {
 		if isLeakedMouseSequence([]rune(msg.Text)) {
-			// Keep recentMouse=true so consecutive leaked sequences from
-			// rapid scrolling are all caught, not just the first one.
 			return m, nil
 		}
 	}
 	m.recentMouse = false
 
-	// Agent pane input mode — most keys go to agent pane, but global
-	// actions (model selector, dial cycle) are handled here first.
+	// Agent input mode short-circuits to a small allow-list of global
+	// shortcuts; everything else flows into the pane as text input.
 	if m.AgentPane.IsInputActive() {
-		switch m.Keymap.Match(msg) {
-		case ActionModelSelector:
-			return m, m.openModelSelector()
-		case ActionDialCycle:
-			m.cycleDial()
-			return m, nil
-		case ActionStyleCycle:
-			m.cycleStyle()
-			return m, nil
-		case ActionEvaluatorToggle:
-			m.toggleEvaluator()
-			return m, nil
-		case ActionTerseToggle:
-			m.toggleTerse()
-			return m, nil
-		}
-		cmd := m.AgentPane.Update(msg)
-		return m, cmd
+		return m, m.handleAgentInputKey(msg)
 	}
 
-	// Project pane inline input — all keys go to project pane
+	// Project pane inline input — all keys go to the pane.
 	if m.ProjectPane != nil && m.ProjectPane.IsInputActive() {
-		cmd := m.ProjectPane.Update(msg)
-		return m, cmd
+		return m, m.ProjectPane.Update(msg)
 	}
 
-	// Toggle focus between visible panes
+	// Cross-pane focus toggle.
 	if msg.Code == '\\' && msg.Mod == tea.ModCtrl {
 		m.Regions.FocusNext()
 		return m, nil
 	}
 
-	action := m.Keymap.Match(msg)
-
-	// Global / cross-pane actions
-	switch action {
-	case ActionQuit:
-		m.Quit = true
-		return m, tea.Quit
-
-	case ActionAgentApprove:
-		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "agent", m.Session.HasAgent())
-		if m.Session.PendingEdit() != nil && m.Editor.Overlay != nil {
-			// Block snooze (pendingBlockedPath → blockedPaths) is
-			// handled inside applyApproval after ApplyEdit lands —
-			// snoozing here would silently disable future Block
-			// review on this path even when the approval failed.
-			cmd := m.applyApproval()
-			return m, cmd
-		}
-		return m, nil
-
-	case ActionAgentReject:
-		// Completion popup gets priority — dismiss it first.
-		if m.Editor.Completion.Active {
-			m.Editor.Completion.Dismiss()
-			return m, nil
-		}
-		if m.Session.PendingEdit() != nil {
-			slog.Debug("overlay cleared", "reason", "reject")
-			// Reject means "this specific edit is wrong" not "stop
-			// prompting me on this file" — clear the pending Block
-			// path WITHOUT promoting it to snoozed.
-			m.pendingBlockedPath = ""
-			m.clearEditorOverlay(false)
-			m.Session.RejectEdit("user")
-			return m, nil
-		}
-		// No pending edit — cancel agent if active
-		if m.Session.CurrentIntent() != "" && m.Session.HasAgent() {
-			m.Session.CancelAgent()
-			return m, m.AgentPane.SetStatus(event.StatusIdle)
-		}
-		// No intent either — fall through to focused pane
-
-	case ActionDialCycle:
-		m.cycleDial()
-		return m, nil
-
-	case ActionStyleCycle:
-		m.cycleStyle()
-		return m, nil
-
-	case ActionEvaluatorToggle:
-		m.toggleEvaluator()
-		return m, nil
-
-	case ActionTerseToggle:
-		m.toggleTerse()
-		return m, nil
-
-	case ActionModelSelector:
-		return m, m.openModelSelector()
-
-	case ActionAgentStart:
-		if m.Session.HasAgent() {
-			m.AgentPane.SetInputActive(true)
-			m.AgentPane.SetPlanningMode(false)
-		}
-		return m, nil
-
-	case ActionAgentPlan:
-		if m.Session.HasAgent() {
-			m.AgentPane.SetInputActive(true)
-			m.AgentPane.SetPlanningMode(true)
-		}
-		return m, nil
-
-	case ActionToggleProject:
-		return m.handleToggleProject()
-
-	case ActionReloadFile:
-		return m.reloadActiveFile()
-
-	case ActionNextBuffer:
-		return m.switchBuffer(1)
-	case ActionPrevBuffer:
-		return m.switchBuffer(-1)
-
-	case ActionOpenPalette:
-		if root := m.Session.ProjectRoot(); root != "" {
-			return m, func() tea.Msg {
-				files, err := filelist.Walk(root)
-				if err != nil && !errors.Is(err, filelist.ErrCapped) {
-					return paletteErrorMsg{err: err.Error()}
-				}
-				items := make([]PaletteItem, len(files))
-				for i, f := range files {
-					items[i] = PaletteItem{
-						Label:    f,
-						Category: "file",
-						Value:    filepath.Join(root, f),
-					}
-				}
-				return paletteFilesMsg{items: items}
-			}
-		}
-		return m, nil
-
-	case ActionGoToDefinition:
-		return m.handleGoToDefinition()
-
-	case ActionGoBack:
-		return m.handleGoBack()
-
-	case ActionHover:
-		return m.handleHover()
-
-	case ActionFindInProject:
-		m.SearchOverlay.Open()
-		return m, nil
-
-	case ActionFind:
-		m.Regions.FocusByName("editor")
-		m.Editor.Find.Open(m.Editor.Engine(), false)
-		return m, nil
-
-	case ActionFindReplace:
-		m.Regions.FocusByName("editor")
-		m.Editor.Find.Open(m.Editor.Engine(), true)
-		return m, nil
-
-	case ActionHelp:
-		m.Help.Open()
-		return m, nil
-
-	case ActionFocusProject:
-		m.Regions.FocusByName("project")
-		return m, nil
-
-	case ActionFocusEditor:
-		m.Regions.FocusByName("editor")
-		return m, nil
-
-	case ActionFocusAgent:
-		m.Regions.FocusByName("agent")
-		return m, nil
+	if cmd, handled := m.handleGlobalAction(m.Keymap.Match(msg)); handled {
+		return m, cmd
 	}
 
-	// Delegate to focused pane
-	pane := m.Regions.FocusedPane()
-	if pane != nil {
-		cmd := pane.Update(msg)
-		return m, cmd
+	// Action unmatched (or AgentReject's no-overlay-no-intent branch) —
+	// delegate to the focused pane.
+	if pane := m.Regions.FocusedPane(); pane != nil {
+		return m, pane.Update(msg)
 	}
 	return m, nil
 }
@@ -1202,6 +849,32 @@ func (m *AppModel) switchBuffer(delta int) (tea.Model, tea.Cmd) {
 	}
 	next := (idx + delta + len(files)) % len(files)
 	return m.openFile(files[next])
+}
+
+// handleMouseWheel translates the wheel event for the intent-bar row
+// offset and forwards to the region manager. Sets recentMouse so the
+// keypress dispatcher can drop leaked SGR fragments from rapid scrolls.
+func (m *AppModel) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	m.recentMouse = true
+	translated := tea.Mouse(msg)
+	translated.Y -= 1 // translate Y for intent bar row
+	cmd := m.Regions.HandleMouse(tea.MouseWheelMsg(translated))
+	return m, cmd
+}
+
+// handleMouse translates a mouse event for the intent-bar row offset and
+// forwards to the region manager. Any click also unfocuses the agent
+// input; the agent pane's own click handler re-focuses if the click
+// landed in the input area.
+func (m *AppModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(tea.MouseClickMsg); ok {
+		m.AgentPane.SetInputActive(false)
+	}
+	mouse := msg.Mouse()
+	mouse.Y -= 1 // translate Y for intent bar row
+	localMsg := translateMouseMsg(msg, mouse)
+	cmd := m.Regions.HandleMouse(localMsg)
+	return m, cmd
 }
 
 // translateMouseMsg creates a new mouse message with translated coordinates.

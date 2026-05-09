@@ -1,23 +1,12 @@
 package ui
 
 import (
-	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"slices"
-	"strings"
-	"time"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/filelist"
-	"github.com/latebit-io/nib/engine/lang"
-	"github.com/latebit-io/nib/engine/openfile"
 	"github.com/latebit-io/nib/engine/search"
 	"github.com/latebit-io/nib/engine/syntax"
 	"github.com/latebit-io/nib/tui/editor"
@@ -32,17 +21,6 @@ type paletteFilesMsg struct{ items []PaletteItem }
 
 // paletteErrorMsg delivers a file listing error to the UI.
 type paletteErrorMsg struct{ err string }
-
-// goToDefResultMsg delivers go-to-definition results from an async LSP request.
-type goToDefResultMsg struct {
-	// Result from LSP — target location.
-	path      string
-	line, col int
-	err       error
-	// Origin cursor for nav stack push.
-	originPath            string
-	originLine, originCol int
-}
 
 // oauthInstructionMsg delivers an intermediate instruction from an OAuth flow
 // (e.g., "Visit URL and enter code: XXXX") before the flow completes.
@@ -62,46 +40,6 @@ type apiKeyEnteredMsg struct {
 	profile string
 	key     string
 }
-
-// completionResultMsg delivers completion results from an async LSP request.
-type completionResultMsg struct {
-	items        []lang.CompletionItem
-	isIncomplete bool
-	path         string
-	line, col    int
-}
-
-// completionTriggerMsg is emitted by the editor after typing a trigger character.
-type completionTriggerMsg struct{}
-
-// completionTickMsg fires after a debounce delay to trigger a completion request.
-type completionTickMsg struct {
-	path      string
-	line, col int
-}
-
-// hoverResultMsg delivers hover information from an async LSP request.
-// Carries the origin path+cursor so stale results are dropped on mismatch.
-type hoverResultMsg struct {
-	text      string
-	path      string
-	line, col int
-}
-
-type reloadWorkTreeResultMsg struct {
-	snap session.WorkTreeSnapshot
-}
-
-// Package-level styles for the intent bar — allocated once, not per frame.
-var (
-	intentIdleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240")).
-			Background(lipgloss.Color("236"))
-	intentActiveStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("230")).
-				Background(lipgloss.Color("235"))
-)
 
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
@@ -241,96 +179,6 @@ type AppModel struct {
 // no real active file) use "" as the pool key, mirroring
 // [Session.openFiles] so future iteration/lookup paths stay consistent.
 // Every other path is canonicalized.
-func (m *AppModel) editorForOpenFile(of *openfile.OpenFile) *editor.Editor {
-	if of == nil {
-		return nil
-	}
-	key := of.Buf.Path
-	if key != "" {
-		key = m.Session.CanonPath(of.Buf.Path)
-	}
-	if m.editorPool == nil {
-		m.editorPool = make(map[string]*editor.Editor)
-	}
-	if e, ok := m.editorPool[key]; ok {
-		return e
-	}
-	e := editor.New(of.Buf)
-	if m.highlighterFactory != nil && of.Buf.Path != "" {
-		e.SetHighlighter(m.highlighterFactory(of.Buf.Path))
-	}
-	m.editorPool[key] = e
-	return e
-}
-
-// activeEditor returns the editor for the session's currently active
-// open file. May return nil when the session has no active file.
-func (m *AppModel) activeEditor() *editor.Editor {
-	return m.editorForOpenFile(m.Session.ActiveOpenFile())
-}
-
-// clampPooledEditor clamps the cursor and viewport for the pooled
-// editor at path so a buffer-shrinking reload (external tool, agent
-// edit, ReloadFromDisk) doesn't leave the cursor out-of-bounds.
-// No-op if no editor is pooled for the path. The pool key resolution
-// matches [editorForOpenFile]: empty-path scratch handles use "" as
-// the key, every other path is canonicalized.
-func (m *AppModel) clampPooledEditor(path string) {
-	key := path
-	if key != "" {
-		key = m.Session.CanonPath(path)
-	}
-	ed, ok := m.editorPool[key]
-	if !ok {
-		return
-	}
-	// Self-call MoveCursorTo with current position so the editor's
-	// internal clamp logic (line bounds, column bounds) runs against
-	// the new buffer length.
-	ed.MoveCursorTo(ed.CursorLine, ed.CursorCol)
-	ed.ClampScroll()
-}
-
-// dropPooledEditors removes pool entries for a path and any children
-// (when path was a directory), closing each editor's highlighter so
-// tree-sitter grammar instances are released. Mirrors the matching
-// logic in [session.cleanupDeletedPath].
-func (m *AppModel) dropPooledEditors(path string) {
-	canon := m.Session.CanonPath(path)
-	dirPrefix := canon + string(filepath.Separator)
-	for k, ed := range m.editorPool {
-		if k == canon || strings.HasPrefix(k, dirPrefix) {
-			ed.Close()
-			delete(m.editorPool, k)
-		}
-	}
-}
-
-// SetHighlighterFactory installs the syntax-highlighter factory used by
-// the editor pool. Existing pooled editors are re-decorated to match.
-// Pass nil to disable highlighting. Called at startup by the composition
-// root.
-func (m *AppModel) SetHighlighterFactory(fn syntax.HighlighterFactory) {
-	m.highlighterFactory = fn
-	for _, e := range m.editorPool {
-		if e == nil || e.Buf == nil || e.Buf.Path == "" {
-			continue
-		}
-		if fn == nil {
-			e.SetHighlighter(nil)
-			continue
-		}
-		e.SetHighlighter(fn(e.Buf.Path))
-	}
-}
-
-// CloseWatcher shuts down the file watcher. Safe to call if the watcher is nil.
-func (m *AppModel) CloseWatcher() {
-	if m.fileWatcher != nil {
-		m.fileWatcher.Close()
-	}
-}
-
 // SetProgram sets the tea.Program reference.
 func (m *AppModel) SetProgram(p *tea.Program) {
 	m.program = p
@@ -347,57 +195,6 @@ func OAuthInstruction(profile, instruction string) tea.Msg {
 // OAuthConnectResult creates an oauthConnectResultMsg for delivery via tea.Cmd.
 func OAuthConnectResult(profile string, err error) tea.Msg {
 	return oauthConnectResultMsg{profile: profile, err: err}
-}
-
-// SetStyleName sets the current coding style display name for the status bar.
-// Pass empty string to clear the indicator.
-func (m *AppModel) SetStyleName(name string) {
-	m.styleName = name
-}
-
-// SetEvaluatorEnabled sets the evaluator status bar indicator.
-func (m *AppModel) SetEvaluatorEnabled(enabled bool) {
-	m.evaluatorEnabled = enabled
-}
-
-// cycleStyle advances to the next coding style via the CycleStyle callback.
-// Does nothing if no styles are configured.
-func (m *AppModel) cycleStyle() {
-	if m.CycleStyle == nil {
-		return
-	}
-	m.styleName = m.CycleStyle()
-}
-
-// toggleEvaluator flips the style evaluator on/off via the ToggleEvaluator callback.
-// Does nothing if no callback is wired (no agent or no provider).
-func (m *AppModel) toggleEvaluator() {
-	if m.ToggleEvaluator == nil {
-		return
-	}
-	m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
-}
-
-// SetTerse sets the terse mode indicator. Use this at startup to sync
-// the UI with the agent's initial state.
-func (m *AppModel) SetTerse(on bool) {
-	m.terse = on
-}
-
-// toggleTerse flips terse output mode on/off via the ToggleTerse callback.
-// Does nothing if no callback is wired.
-func (m *AppModel) toggleTerse() {
-	if m.ToggleTerse == nil {
-		return
-	}
-	m.terse = m.ToggleTerse(!m.terse)
-}
-
-func (m *AppModel) cycleDial() {
-	m.dial = m.dial.Cycle()
-	if m.OnDialChange != nil {
-		m.OnDialChange(m.dial)
-	}
 }
 
 // NewApp creates the application model.
@@ -468,19 +265,6 @@ func (m *AppModel) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// listenForFileChanges returns a tea.Cmd that blocks on the file watcher
-// channel and delivers the next change as a tea.Msg.
-func (m *AppModel) listenForFileChanges() tea.Cmd {
-	ch := m.fileWatcher.Changes()
-	return func() tea.Msg {
-		msg, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return msg
-	}
-}
-
 // listenForEvents returns a tea.Cmd that blocks on the engine event channel
 // and delivers the next event as a tea.Msg.
 func (m *AppModel) listenForEvents() tea.Cmd {
@@ -495,432 +279,99 @@ func (m *AppModel) listenForEvents() tea.Cmd {
 }
 
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Help overlay is modal for user input only — non-input messages
-	// (engine events, window resize, ticks) must still be processed.
-	if m.Help.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			m.Help.Update(typed, m.Height-2)
-			return m, nil
-		case tea.MouseMsg:
-			return m, nil
-		}
-	}
-
-	// Model selector is modal — captures most input when active.
-	// Ctrl+Q always quits regardless of modal state.
-	if m.AgentPane.IsModelSelectorActive() {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			if m.Keymap.Match(typed) == ActionQuit {
-				m.Quit = true
-				return m, tea.Quit
-			}
-			cmd := m.AgentPane.UpdateModelSelector(typed)
-			return m, cmd
-		case tea.MouseMsg:
-			return m, nil
-		}
-	}
-
-	// Palette is modal — captures all input when active
-	if m.Palette.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			cmd := m.Palette.Update(typed)
-			return m, cmd
-		case tea.MouseMsg:
-			return m, nil
-		}
-	}
-
-	// Search overlay is modal — captures all input when active
-	if m.SearchOverlay.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			cmd := m.SearchOverlay.Update(typed)
-			return m, cmd
-		case searchResultMsg:
-			cmd := m.SearchOverlay.Update(typed)
-			return m, cmd
-		case SearchOpenFileMsg:
-			m.SearchOverlay.Close()
-			model, cmd := m.openFile(filepath.Join(m.Session.ProjectRoot(), typed.Path))
-			if cmd == nil {
-				// Navigate to the specific line.
-				m.Editor.MoveCursorTo(typed.Line-1, 0)
-				m.Editor.EnsureCursorVisible()
-			}
-			return model, cmd
-		case tea.MouseMsg:
-			return m, nil
-		}
-	}
-
-	// Dialog is modal — captures all input when active
-	if m.Dialog.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			cmd := m.Dialog.Update(typed)
-			return m, cmd
-		case tea.MouseMsg:
-			return m, nil // swallow mouse while dialog is visible
-		}
+	// Modal overlays consume input messages first; non-input messages
+	// fall through so engine events / ticks / window resize keep flowing.
+	if cmd, handled := m.handleModalInput(msg); handled {
+		return m, cmd
 	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
-		// Intent bar always takes 1 row; RegionManager gets the rest
+		// Intent bar always takes 1 row; RegionManager gets the rest.
 		m.Regions.SetSize(msg.Width, m.regionHeight())
 		return m, nil
 
-	// Engine events — adapted from channel to tea.Msg
 	case engineEventMsg:
 		cmd := m.handleEngineEvent(msg.event)
-		// Keep listening for the next event
 		return m, tea.Batch(m.listenForEvents(), cmd)
 
-	// File watcher — external change detected
 	case fileChangedMsg:
 		m.handleFileChanged(msg.Path)
 		return m, m.listenForFileChanges()
 
-	// Goal submitted from agent pane — delegate to session.
-	// Only clear the pane when starting a new conversation, not on follow-ups.
 	case GoalSubmittedMsg:
-		continued := m.Session.SubmitGoal(msg.Goal)
-		if continued {
-			m.AgentPane.AppendUserMessage(msg.Goal)
-		} else {
-			m.AgentPane.Clear()
-		}
-		return m, nil
-
+		return m.handleGoalSubmitted(msg)
 	case PlanningGoalSubmittedMsg:
-		m.Session.SubmitPlanningGoal(msg.Goal)
-		m.AgentPane.Clear()
-		return m, nil
+		return m.handlePlanningGoalSubmitted(msg)
 
-	// Dialog result — handle the user's choice
 	case DialogResultMsg:
 		return m.handleDialogResult(msg)
 
 	case reloadWorkTreeResultMsg:
-		if msg.snap.Err != nil {
-			slog.Warn("reload work tree", "err", msg.snap.Err)
-			m.AgentPane.AppendMeta("[reload project failed: " + msg.snap.Err.Error() + "]\n")
-		} else {
-			m.Session.ApplyWorkTreeSnapshot(msg.snap)
-		}
-		m.refreshProjectPane()
-		return m, nil
+		return m.handleReloadWorkTreeResult(msg)
 
-	// File listing error — surface in agent pane
 	case paletteErrorMsg:
-		slog.Error("failed to list files", "err", msg.err)
-		m.AgentPane.AppendMeta("\n[file listing failed: " + msg.err + "]\n")
-		return m, nil
-
-	// File listing completed — open the palette with results
+		return m.handlePaletteError(msg)
 	case paletteFilesMsg:
-		m.Palette.Open(msg.items)
-		return m, nil
-
-	// Tab pressed in model selector — switch to a different provider's models
-	case modelSelSwitchProfileMsg:
-		if m.ListModels != nil {
-			profile := msg.profile
-			m.pendingModelProfile = profile
-			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
-			listFn := m.ListModels
-			return m, func() tea.Msg {
-				items, err := listFn(profile)
-				return modelListMsg{profile: profile, items: items, err: err}
-			}
-		}
-		return m, nil
-
-	// OAuth intermediate instruction (e.g., device code to display)
-	case oauthInstructionMsg:
-		m.AgentPane.AppendMeta("[" + msg.instruction + "]\n")
-		m.AgentPane.AppendMeta("[waiting for authorization...]\n")
-		return m, nil
-
-	// API key entered — store and switch to the profile
-	case apiKeyEnteredMsg:
-		if msg.key == "" {
-			return m, nil // cancelled
-		}
-		if m.StoreAPIKey != nil {
-			if err := m.StoreAPIKey(msg.profile, msg.key); err != nil {
-				m.AgentPane.AppendMeta("\n[failed to save key: " + err.Error() + "]\n")
-				return m, nil
-			}
-			m.AgentPane.AppendMeta("\n[API key saved for " + msg.profile + "]\n")
-			// Switch to this profile's default model.
-			dm, switchErr := m.Session.SwitchModel(msg.profile, "")
-			m.applySwitchResult(msg.profile, dm, switchErr)
-		}
-		return m, nil
-
-	// OAuth connection completed — switch to the connected profile.
-	// The switcher builds the agent on first successful connect, so the
-	// connection is live without restart.
-	case oauthConnectResultMsg:
-		if msg.err != nil {
-			m.AgentPane.AppendMeta("\n[connection failed: " + msg.err.Error() + "]\n")
-			return m, nil
-		}
-		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
-		dm, switchErr := m.Session.SwitchModel(msg.profile, "")
-		m.applySwitchResult(msg.profile, dm, switchErr)
-		return m, nil
-
-	// Model list fetched — open the inline selector in the agent pane
-	case modelListMsg:
-		// Drop stale responses from superseded requests.
-		if msg.profile != m.pendingModelProfile {
-			return m, nil
-		}
-		if msg.err != nil {
-			var profiles []string
-			if m.LLMProfileNames != nil {
-				profiles = m.LLMProfileNames()
-			}
-			// OAuth profile without token → offer to connect.
-			if m.IsOAuthProfile != nil && m.HasOAuthToken != nil {
-				if providerID := m.IsOAuthProfile(msg.profile); providerID != "" && !m.HasOAuthToken(msg.profile) {
-					m.AgentPane.OpenModelSelector([]ModelSelectorItem{{
-						ID: "_connect", Name: "Connect to " + msg.profile, Profile: msg.profile,
-					}}, msg.profile, "", profiles)
-					return m, nil
-				}
-			}
-			// API key profile without key → offer to enter one.
-			if m.StoreAPIKey != nil && m.HasAPIKey != nil && !m.HasAPIKey(msg.profile) {
-				m.AgentPane.OpenModelSelector([]ModelSelectorItem{{
-					ID: "_enter_key", Name: "Enter API key for " + msg.profile, Profile: msg.profile,
-				}}, msg.profile, "", profiles)
-				return m, nil
-			}
-			m.AgentPane.AppendMeta("\n[failed to list models: " + msg.err.Error() + "]\n")
-			return m, nil
-		}
-		if len(msg.items) == 0 {
-			m.AgentPane.AppendMeta("\n[no models available from provider]\n")
-			return m, nil
-		}
-		var profiles []string
-		if m.LLMProfileNames != nil {
-			profiles = m.LLMProfileNames()
-		}
-		m.AgentPane.OpenModelSelector(msg.items, msg.profile, m.Session.LLMModel(), profiles)
-		return m, nil
-
-	// Model selector result — user selected a model/profile or cancelled
-	case ModelSelectorResultMsg:
-		if msg.Cancelled {
-			return m, nil
-		}
-		// Profile selection (multi-profile mode) — fetch models for that profile.
-		if msg.ModelID == "" && msg.Profile != "" && m.ListModels != nil {
-			profile := msg.Profile
-			m.pendingModelProfile = profile
-			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
-			listFn := m.ListModels
-			return m, func() tea.Msg {
-				items, err := listFn(profile)
-				return modelListMsg{profile: profile, items: items, err: err}
-			}
-		}
-		// OAuth connect action — user selected "Connect to [provider]".
-		if msg.ModelID == "_connect" && m.ConnectOAuth != nil {
-			return m.startOAuthConnect(msg.Profile)
-		}
-		// API key entry action — switch to key input mode.
-		if msg.ModelID == "_enter_key" {
-			m.AgentPane.StartAPIKeyInput(msg.Profile)
-			return m, nil
-		}
-		// Model selection — switch to the chosen model.
-		if msg.ModelID != "" {
-			dm, switchErr := m.Session.SwitchModel(msg.Profile, msg.ModelID)
-			m.applySwitchResult(msg.Profile, dm, switchErr)
-		}
-		return m, nil
-
-	// Palette result — user selected a file or cancelled
+		return m.handlePaletteFiles(msg)
 	case PaletteResultMsg:
-		if !msg.Cancelled && msg.Category == "file" {
-			return m.openFile(msg.Item.Value)
-		}
-		return m, nil
+		return m.handlePaletteResult(msg)
 
-	// Search result — user selected a file:line from project search.
-	// Reachable if the overlay closes before the message is delivered.
 	case SearchOpenFileMsg:
-		model, cmd := m.openFile(filepath.Join(m.Session.ProjectRoot(), msg.Path))
-		if cmd == nil {
-			m.Editor.MoveCursorTo(msg.Line-1, 0)
-			m.Editor.EnsureCursorVisible()
-		}
-		return model, cmd
-
-	// Async search results — forward to overlay if still active.
+		return m.handleSearchOpenFile(msg)
 	case searchResultMsg:
-		if m.SearchOverlay.Active {
-			cmd := m.SearchOverlay.Update(msg)
-			return m, cmd
-		}
-		return m, nil
+		return m.handleSearchResult(msg)
 
-	// Completion trigger — editor typed a trigger character, schedule debounced request.
+	case modelSelSwitchProfileMsg:
+		return m.handleModelSelSwitchProfile(msg)
+	case oauthInstructionMsg:
+		return m.handleOAuthInstruction(msg)
+	case apiKeyEnteredMsg:
+		return m.handleAPIKeyEntered(msg)
+	case oauthConnectResultMsg:
+		return m.handleOAuthConnectResult(msg)
+	case modelListMsg:
+		return m.handleModelList(msg)
+	case ModelSelectorResultMsg:
+		return m.handleModelSelectorResult(msg)
+
 	case completionTriggerMsg:
 		return m, m.scheduleCompletion()
-
-	// Completion debounce tick — fire the actual request.
 	case completionTickMsg:
 		return m.handleCompletionTick(msg)
+	case completionResultMsg:
+		return m.handleCompletionResult(msg)
+	case goToDefResultMsg:
+		return m.applyGoToDefinition(msg)
+	case hoverResultMsg:
+		return m.handleHoverResult(msg)
 
-	// Agent spinner advance — forward to the pane so it can advance the
-	// frame and reschedule (or drop the loop if status went idle).
 	case spinnerTickMsg:
 		return m, m.AgentPane.Update(msg)
 
-	// Completion result — show popup if still relevant.
-	case completionResultMsg:
-		var curLine, curCol int
-		if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
-			oe := m.Editor.Overlay.Editor
-			curLine = m.Editor.Overlay.StartLine + oe.CursorLine
-			curCol = oe.CursorCol
-		} else {
-			curLine, curCol = m.Editor.CursorPosition()
-		}
-		if msg.path == m.Session.ActiveFile() &&
-			msg.line == curLine &&
-			msg.col == curCol &&
-			len(msg.items) > 0 {
-			m.Editor.Completion.Show(msg.items, msg.line, msg.col)
-		}
-		return m, nil
-
-	// Go-to-definition result — apply navigation on the TUI goroutine.
-	case goToDefResultMsg:
-		return m.applyGoToDefinition(msg)
-
-	// Hover result — display if still relevant, drop stale responses.
-	case hoverResultMsg:
-		curLine, curCol := m.Editor.CursorPosition()
-		if msg.text != "" &&
-			msg.path == m.Session.ActiveFile() &&
-			msg.line == curLine &&
-			msg.col == curCol {
-			m.Editor.ShowHover(msg.text)
-		}
-		return m, nil
-
-	// Project pane — user selected a file to open
 	case ProjectOpenFileMsg:
-		return m.openFile(msg.Path)
-
-	// Project pane — context set mutations (all session writes go through AppModel)
+		return m.handleProjectOpenFile(msg)
 	case ProjectAddContextMsg:
-		m.Session.AddContext(msg.Path)
-		m.refreshProjectPane()
-		return m, nil
-
+		return m.handleProjectAddContext(msg)
 	case ProjectRemoveContextMsg:
-		m.Session.RemoveContext(msg.Path)
-		m.refreshProjectPane()
-		return m, nil
-
+		return m.handleProjectRemoveContext(msg)
 	case ProjectSetActiveGoalMsg:
-		if err := m.Session.SetActiveGoal(msg.Title); err != nil {
-			slog.Warn("set active goal", "err", err)
-			m.AgentPane.AppendMeta("[set active goal failed: " + err.Error() + "]\n")
-		}
-		m.refreshProjectPane()
-		return m, nil
-
+		return m.handleProjectSetActiveGoal(msg)
 	case ProjectMarkGoalDoneMsg:
-		if err := m.Session.MarkGoalDone(msg.Title); err != nil {
-			slog.Warn("mark goal done", "err", err)
-			m.AgentPane.AppendMeta("[mark done failed: " + err.Error() + "]\n")
-		}
-		m.refreshProjectPane()
-		return m, nil
-
+		return m.handleProjectMarkGoalDone(msg)
 	case ProjectCreateFileMsg:
-		if err := m.Session.WriteFile(msg.Path, ""); err != nil {
-			slog.Warn("create file", "err", err)
-			m.AgentPane.AppendMeta("[create failed: " + err.Error() + "]\n")
-			return m, nil
-		}
-		m.refreshProjectPane()
-		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
-		return m.openFile(absPath)
-
+		return m.handleProjectCreateFile(msg)
 	case ProjectCreateDirMsg:
-		if err := m.Session.CreateDir(msg.Path); err != nil {
-			slog.Warn("create dir", "err", err)
-			m.AgentPane.AppendMeta("[create dir failed: " + err.Error() + "]\n")
-			return m, nil
-		}
-		m.ProjectPane.AddEmptyDir(msg.Path)
-		m.refreshProjectPane()
-		return m, nil
-
+		return m.handleProjectCreateDir(msg)
 	case ProjectDeleteFileMsg:
-		absPath := filepath.Join(m.Session.ProjectRoot(), msg.Path)
-		prevActive := m.Session.ActiveFile()
-		if err := m.Session.DeleteFile(absPath); err != nil {
-			slog.Warn("delete file", "err", err)
-			m.AgentPane.AppendMeta("[delete failed: " + err.Error() + "]\n")
-			return m, nil
-		}
-		// Drop pooled editors for the deleted path (or any children
-		// when a directory was removed). Closes each editor's
-		// highlighter so tree-sitter grammar instances don't leak.
-		m.dropPooledEditors(absPath)
-		// Preserve parent directory in tree if it's now empty on disk.
-		parentRel := filepath.ToSlash(filepath.Dir(msg.Path))
-		if parentRel != "." && parentRel != "" {
-			parentAbs := filepath.Join(m.Session.ProjectRoot(), parentRel)
-			if entries, err := os.ReadDir(parentAbs); err == nil && len(entries) == 0 {
-				m.ProjectPane.AddEmptyDir(parentRel)
-			}
-		}
-		m.refreshProjectPane()
-		// If the active editor changed (deleted file or dir containing it),
-		// rebuild the editor pane to reflect the session's fallback.
-		if m.Session.ActiveFile() != prevActive {
-			m.rebuildEditorModel()
-		}
-		return m, nil
+		return m.handleProjectDeleteFile(msg)
 
 	case tea.MouseWheelMsg:
-		m.recentMouse = true
-		// Translate Y for intent bar row
-		translated := tea.Mouse(msg)
-		translated.Y -= 1
-		cmd := m.Regions.HandleMouse(tea.MouseWheelMsg(translated))
-		return m, cmd
-
+		return m.handleMouseWheel(msg)
 	case tea.MouseMsg:
-		// Any click unfocuses the agent input; the agent pane's own
-		// click handler re-focuses if the click landed in the input area.
-		if _, ok := msg.(tea.MouseClickMsg); ok {
-			m.AgentPane.SetInputActive(false)
-		}
-		// Translate Y for intent bar row
-		mouse := msg.Mouse()
-		mouse.Y -= 1
-		localMsg := translateMouseMsg(msg, mouse)
-		cmd := m.Regions.HandleMouse(localMsg)
-		return m, cmd
+		return m.handleMouse(msg)
 
 	case tea.KeyPressMsg:
 		slog.Debug("key event", "code", msg.Code, "mod", msg.Mod)
@@ -929,220 +380,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleEngineEvent updates session state and renders the event.
-func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
-	// Let session update domain state (intent, pending edit)
-	m.Session.HandleEvent(ev)
-
-	var cmd tea.Cmd
-
-	// Render in agent pane (presentation)
-	switch e := ev.(type) {
-	case event.AgentToken:
-		m.AgentPane.AppendToken(e.Text)
-	case event.AgentToolCall:
-		// Indented bullet reads as a sub-action rather than a sibling of
-		// the agent's prose. Renders dim via the metaRawLines path.
-		m.AgentPane.AppendMeta("\n  ● " + e.Name + "\n")
-	case event.AgentStatus:
-		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(e.Status))
-	case event.AgentEditProposed:
-		m.clearEditorOverlay(false)
-
-		// ReviewEdit computes the diff AND marks the edit as reviewed.
-		// If the edit targets a different file, the session auto-switches
-		// and we rebuild the EditorModel to render the correct buffer.
-		diff, switched := m.Session.ReviewEdit()
-		if switched {
-			m.rebuildEditorModel()
-			m.refreshDiagnostics(m.Session.ActiveFile())
-		}
-		if diff != nil {
-			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
-			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
-
-			// Build the overlay — applyApproval reads it for
-			// search/replace content even when we skip the visual review.
-			m.Editor.Overlay = NewDiffOverlay(diff)
-
-			// Validator guard: refuse auto-approval whenever any
-			// non-"pass" verdict reaches us. The agent already
-			// exhausted the per-CanonPath retry budget feeding
-			// feedback back to the LLM (so the model had its 3
-			// attempts to self-correct), and the proposal is now
-			// surfacing precisely BECAUSE the LLM couldn't fix it.
-			// Auto-applying it under LevelTrusted would invert the
-			// validator's purpose. Fail-closed on unknown verdicts
-			// too — a future verdict must explicitly opt into
-			// auto-apply rather than slipping through this gate.
-			//
-			// LevelYolo is the explicit opt-out: the developer has
-			// accepted that validator Block findings may slip
-			// through. m.dial.AutoApproveBlock() returns true only
-			// at LevelYolo, so the gate retains the LevelTrusted
-			// safety valve by default.
-			// summaryRequiresReview is the must-surface gate (true for
-			// any non-pass verdict, including retry). summaryHasBlock
-			// is the narrower snooze-eligibility gate — only Block
-			// findings can be silenced for the rest of the session,
-			// because only Block carries the "developer has eyes-on
-			// for this file's recurring architectural concern"
-			// semantics. Retry is per-edit (LLM exhausted its budget
-			// on this specific change) and must be reviewed each time
-			// — auto-applying future retries on a once-approved file
-			// would re-open a fail-open path for validator-exhausted
-			// proposals.
-			needsReview := summaryRequiresReview(e.ValidatorSummaries)
-			blockSnoozeEligible := summaryHasBlock(e.ValidatorSummaries)
-			snoozed := blockSnoozeEligible && m.blockedPaths[e.Edit.Path]
-			autoApprove := m.dial.AutoApproveEdits() &&
-				(!needsReview || m.dial.AutoApproveBlock() || snoozed)
-
-			if autoApprove {
-				switch {
-				case snoozed:
-					// Per-file snooze: the developer already saw and
-					// approved a Block on this file earlier in the
-					// session. Repeat Blocks add no new information,
-					// so auto-apply with a marker banner instead of
-					// re-prompting.
-					m.AgentPane.AppendMeta(snoozeBannerForSummaries(e.Edit.Path, e.ValidatorSummaries))
-				case needsReview:
-					// LevelYolo override path.
-					m.AgentPane.AppendMeta(yoloOverrideBannerForSummaries(e.ValidatorSummaries))
-				}
-				// At LevelTrusted+, skip the visual review step and apply
-				// immediately.
-				cmd = m.applyApproval()
-			} else {
-				status := event.StatusReviewing
-				if needsReview {
-					// Only arm the snooze cache for Block findings —
-					// see the comment above on blockSnoozeEligible.
-					// Retry-only proposals still surface (needsReview
-					// is true) but a manual approval must NOT promote
-					// the path into blockedPaths, otherwise a future
-					// retry would auto-apply.
-					if blockSnoozeEligible {
-						m.pendingBlockedPath = e.Edit.Path
-					} else {
-						m.pendingBlockedPath = ""
-					}
-					m.AgentPane.AppendMeta(reviewBannerForSummaries(e.ValidatorSummaries))
-					// Distinct status so the indicator stands out
-					// from routine reviewing — block-review means
-					// "validator flagged this, eyes-on required."
-					status = event.StatusBlockReview
-				}
-				cmd = tea.Batch(cmd, m.AgentPane.SetStatus(status))
-				m.Editor.Overlay.Active = true
-				// Auto-scroll so the diff is visible with some context above.
-				target := diff.StartLine - 3
-				if target < 0 {
-					target = 0
-				}
-				m.Editor.SetScrollOffset(target)
-				m.Editor.syncExtraVisualLines()
-				m.Editor.ClampScroll()
-			}
-		} else {
-			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
-			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
-			m.Session.RejectEdit("search-mismatch")
-		}
-	case event.AgentFileCreated:
-		m.AgentPane.AppendMeta("\n[Created: " + e.Path + "]\n")
-		// Set pendingReveal before openFile — openFile calls
-		// refreshProjectPane internally, which triggers rebuild.
-		// ExpandToPath runs during that rebuild to uncollapse
-		// ancestor dirs so the new file is visible in the tree.
-		if m.ProjectPane != nil {
-			m.ProjectPane.pendingReveal = e.Path
-		}
-		m.openFile(e.Path)
-		// If openFile failed (e.g. edit pending), the file was still
-		// created on disk. Refresh the project pane so it appears in
-		// the tree and pendingReveal is consumed.
-		if m.ProjectPane != nil && m.ProjectPane.pendingReveal != "" {
-			m.refreshProjectPane()
-		}
-	case event.AgentNavigate:
-		prevActive := m.activeEditor()
-		if err := m.Session.NavigateAgent(e.Path); err != nil {
-			slog.Warn("agent navigate failed", "path", e.Path, "err", err)
-			m.AgentPane.AppendMeta("[navigate failed: " + err.Error() + "]\n")
-			break
-		}
-		// Place the cursor on the TUI's editor for the (possibly newly
-		// active) file. Session no longer holds a UI cursor, so this is
-		// the frontend's responsibility now.
-		if ed := m.activeEditor(); ed != nil {
-			ed.ClearSelection()
-			ed.MoveCursorTo(e.Line-1, e.Col)
-			ed.EnsureCursorVisible()
-		}
-		// If the session switched files, update TUI-owned state to match.
-		if m.activeEditor() != prevActive {
-			if m.fileWatcher != nil {
-				m.fileWatcher.Watch(m.Session.ActiveFile())
-			}
-			m.rebuildEditorModel()
-			m.refreshDiagnostics(m.Session.ActiveFile())
-			m.refreshProjectPane()
-		}
-	case event.AgentError:
-		// Terminal branch — drop pane status to idle so the spinner loop
-		// stops rescheduling and any in-flight streaming tint settles.
-		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
-		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
-		m.clearEditorOverlay(false)
-	case event.AgentWaiting:
-		switch {
-		case m.Session.Phase() == session.PhasePlanning:
-			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusPlanningWaiting))
-		case e.Finished:
-			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusFinished))
-		default:
-			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusWaiting))
-		}
-		m.AgentPane.SetInputActive(true)
-		m.AgentPane.ResetInput()
-		// Agent may have published /project.md — reload async to stay in sync.
-		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
-	case event.AgentDone:
-		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
-		summary := formatSessionSummary(m.AgentPane.usage)
-		if summary != "" {
-			m.AgentPane.AppendMeta("\n--- Done ---\n" + summary + "\n")
-		} else {
-			m.AgentPane.AppendMeta("\n--- Done ---\n")
-		}
-		m.AgentPane.SetInputActive(false)
-		// Agent may have published /project.md — reload async to stay in sync.
-		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
-		m.clearEditorOverlay(false)
-	case event.FlushBuffers:
-		saved, err := m.Session.SaveDirtyBuffers()
-		e.Result <- event.FlushResult{Saved: saved, Err: err}
-	case event.DiagnosticsUpdated:
-		m.refreshDiagnostics(e.Path)
-	case event.ReloadBuffers:
-		m.reloadAllBuffers()
-	case event.AgentInputEstimate:
-		m.AgentPane.SetStreamingInput(e)
-	case event.AgentTurnUsage:
-		m.AgentPane.AppendTurnUsage(e)
-		m.AgentPane.UpdateUsage(e)
-	case event.AgentCompacted:
-		m.AgentPane.AppendMeta(formatCompacted(e))
-	}
-	return cmd
-}
-
-// Validator-gate predicates and banner formatters
-// (summaryRequiresReview, summaryHasBlock, snoozeBannerForSummaries,
-// yoloOverrideBannerForSummaries, reviewBannerForSummaries,
-// joinNonPassVerdicts) live in validator_gate.go.
 // clearEditorOverlay delegates scroll correction to the engine and clears
 // the TUI overlay state.
 //
@@ -1169,207 +406,43 @@ func (m *AppModel) regionHeight() int {
 }
 
 func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Drop leaked mouse escape sequence fragments.
-	// During rapid scrolling, Bubble Tea's parser can fail to consume full SGR
-	// sequences. The fragments leak as printable text — a full SGR body like
-	// '<65;14;32M' or '[<65;14;32M'. Gate behind recentMouse so we never
-	// silently drop legitimate typed/pasted text.
+	// Drop leaked mouse escape sequence fragments. During rapid scrolling,
+	// Bubble Tea's parser can fail to consume full SGR sequences; the
+	// fragments leak as printable text. Gate behind recentMouse so we
+	// never silently drop legitimate typed/pasted text. Keep
+	// recentMouse=true while consecutive leaked sequences flow.
 	if m.recentMouse && msg.Text != "" {
 		if isLeakedMouseSequence([]rune(msg.Text)) {
-			// Keep recentMouse=true so consecutive leaked sequences from
-			// rapid scrolling are all caught, not just the first one.
 			return m, nil
 		}
 	}
 	m.recentMouse = false
 
-	// Agent pane input mode — most keys go to agent pane, but global
-	// actions (model selector, dial cycle) are handled here first.
+	// Agent input mode short-circuits to a small allow-list of global
+	// shortcuts; everything else flows into the pane as text input.
 	if m.AgentPane.IsInputActive() {
-		switch m.Keymap.Match(msg) {
-		case ActionModelSelector:
-			return m, m.openModelSelector()
-		case ActionDialCycle:
-			m.cycleDial()
-			return m, nil
-		case ActionStyleCycle:
-			m.cycleStyle()
-			return m, nil
-		case ActionEvaluatorToggle:
-			m.toggleEvaluator()
-			return m, nil
-		case ActionTerseToggle:
-			m.toggleTerse()
-			return m, nil
-		}
-		cmd := m.AgentPane.Update(msg)
-		return m, cmd
+		return m, m.handleAgentInputKey(msg)
 	}
 
-	// Project pane inline input — all keys go to project pane
+	// Project pane inline input — all keys go to the pane.
 	if m.ProjectPane != nil && m.ProjectPane.IsInputActive() {
-		cmd := m.ProjectPane.Update(msg)
-		return m, cmd
+		return m, m.ProjectPane.Update(msg)
 	}
 
-	// Toggle focus between visible panes
+	// Cross-pane focus toggle.
 	if msg.Code == '\\' && msg.Mod == tea.ModCtrl {
 		m.Regions.FocusNext()
 		return m, nil
 	}
 
-	action := m.Keymap.Match(msg)
-
-	// Global / cross-pane actions
-	switch action {
-	case ActionQuit:
-		m.Quit = true
-		return m, tea.Quit
-
-	case ActionAgentApprove:
-		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "agent", m.Session.HasAgent())
-		if m.Session.PendingEdit() != nil && m.Editor.Overlay != nil {
-			// Block snooze (pendingBlockedPath → blockedPaths) is
-			// handled inside applyApproval after ApplyEdit lands —
-			// snoozing here would silently disable future Block
-			// review on this path even when the approval failed.
-			cmd := m.applyApproval()
-			return m, cmd
-		}
-		return m, nil
-
-	case ActionAgentReject:
-		// Completion popup gets priority — dismiss it first.
-		if m.Editor.Completion.Active {
-			m.Editor.Completion.Dismiss()
-			return m, nil
-		}
-		if m.Session.PendingEdit() != nil {
-			slog.Debug("overlay cleared", "reason", "reject")
-			// Reject means "this specific edit is wrong" not "stop
-			// prompting me on this file" — clear the pending Block
-			// path WITHOUT promoting it to snoozed.
-			m.pendingBlockedPath = ""
-			m.clearEditorOverlay(false)
-			m.Session.RejectEdit("user")
-			return m, nil
-		}
-		// No pending edit — cancel agent if active
-		if m.Session.CurrentIntent() != "" && m.Session.HasAgent() {
-			m.Session.CancelAgent()
-			return m, m.AgentPane.SetStatus(event.StatusIdle)
-		}
-		// No intent either — fall through to focused pane
-
-	case ActionDialCycle:
-		m.cycleDial()
-		return m, nil
-
-	case ActionStyleCycle:
-		m.cycleStyle()
-		return m, nil
-
-	case ActionEvaluatorToggle:
-		m.toggleEvaluator()
-		return m, nil
-
-	case ActionTerseToggle:
-		m.toggleTerse()
-		return m, nil
-
-	case ActionModelSelector:
-		return m, m.openModelSelector()
-
-	case ActionAgentStart:
-		if m.Session.HasAgent() {
-			m.AgentPane.SetInputActive(true)
-			m.AgentPane.SetPlanningMode(false)
-		}
-		return m, nil
-
-	case ActionAgentPlan:
-		if m.Session.HasAgent() {
-			m.AgentPane.SetInputActive(true)
-			m.AgentPane.SetPlanningMode(true)
-		}
-		return m, nil
-
-	case ActionToggleProject:
-		return m.handleToggleProject()
-
-	case ActionReloadFile:
-		return m.reloadActiveFile()
-
-	case ActionNextBuffer:
-		return m.switchBuffer(1)
-	case ActionPrevBuffer:
-		return m.switchBuffer(-1)
-
-	case ActionOpenPalette:
-		if root := m.Session.ProjectRoot(); root != "" {
-			return m, func() tea.Msg {
-				files, err := filelist.Walk(root)
-				if err != nil && !errors.Is(err, filelist.ErrCapped) {
-					return paletteErrorMsg{err: err.Error()}
-				}
-				items := make([]PaletteItem, len(files))
-				for i, f := range files {
-					items[i] = PaletteItem{
-						Label:    f,
-						Category: "file",
-						Value:    filepath.Join(root, f),
-					}
-				}
-				return paletteFilesMsg{items: items}
-			}
-		}
-		return m, nil
-
-	case ActionGoToDefinition:
-		return m.handleGoToDefinition()
-
-	case ActionGoBack:
-		return m.handleGoBack()
-
-	case ActionHover:
-		return m.handleHover()
-
-	case ActionFindInProject:
-		m.SearchOverlay.Open()
-		return m, nil
-
-	case ActionFind:
-		m.Regions.FocusByName("editor")
-		m.Editor.Find.Open(m.Editor.Engine(), false)
-		return m, nil
-
-	case ActionFindReplace:
-		m.Regions.FocusByName("editor")
-		m.Editor.Find.Open(m.Editor.Engine(), true)
-		return m, nil
-
-	case ActionHelp:
-		m.Help.Open()
-		return m, nil
-
-	case ActionFocusProject:
-		m.Regions.FocusByName("project")
-		return m, nil
-
-	case ActionFocusEditor:
-		m.Regions.FocusByName("editor")
-		return m, nil
-
-	case ActionFocusAgent:
-		m.Regions.FocusByName("agent")
-		return m, nil
+	if cmd, handled := m.handleGlobalAction(m.Keymap.Match(msg)); handled {
+		return m, cmd
 	}
 
-	// Delegate to focused pane
-	pane := m.Regions.FocusedPane()
-	if pane != nil {
-		cmd := pane.Update(msg)
-		return m, cmd
+	// Action unmatched (or AgentReject's no-overlay-no-intent branch) —
+	// delegate to the focused pane.
+	if pane := m.Regions.FocusedPane(); pane != nil {
+		return m, pane.Update(msg)
 	}
 	return m, nil
 }
@@ -1379,88 +452,30 @@ func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *AppModel) View() tea.View {
-	var content string
-	if m.Width == 0 || m.Height == 0 {
-		content = "Initializing..."
-	} else {
-		mem := m.Session.DistributedMemory()
-		extra := 5 // dial + style + evaluator + terse + usage always shown
-		indicators := make([]string, len(mem)+extra)
-		copy(indicators, mem)
-		idx := len(mem)
-		indicators[idx] = m.dial.String()
-		idx++
-		if m.styleName != "" {
-			indicators[idx] = "style:" + m.styleName
-		} else {
-			indicators[idx] = "style:none"
-		}
-		idx++
-		if m.evaluatorEnabled {
-			indicators[idx] = "eval:on"
-		} else {
-			indicators[idx] = "eval:off"
-		}
-		idx++
-		if m.terse {
-			indicators[idx] = "terse:on"
-		} else {
-			indicators[idx] = "terse:off"
-		}
-		idx++
-		indicators[idx] = m.AgentPane.UsageIndicator()
-		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + renderStatusBar(m.Editor.statusInfo(), m.Width, indicators...)
-		if m.Dialog.Active {
-			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
-		} else if m.Help.Active {
-			content = m.Help.RenderOverlay(base, m.Width, m.Height)
-		} else if m.Palette.Active {
-			content = m.Palette.RenderOverlay(base, m.Width, m.Height)
-		} else if m.SearchOverlay.Active {
-			content = m.SearchOverlay.RenderOverlay(base, m.Width, m.Height)
-		} else {
-			content = base
-		}
-	}
-
-	v := tea.NewView(content)
-	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
-	return v
+// handleMouseWheel translates the wheel event for the intent-bar row
+// offset and forwards to the region manager. Sets recentMouse so the
+// keypress dispatcher can drop leaked SGR fragments from rapid scrolls.
+func (m *AppModel) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	m.recentMouse = true
+	translated := tea.Mouse(msg)
+	translated.Y -= 1 // translate Y for intent bar row
+	cmd := m.Regions.HandleMouse(tea.MouseWheelMsg(translated))
+	return m, cmd
 }
 
-// rebuildEditorModel creates a new EditorModel wrapping the pooled
-// editor for the session's currently active open file. Cursor/scroll
-// state is preserved because [editorForOpenFile] returns the same
-// editor instance across calls for a given path.
-func (m *AppModel) rebuildEditorModel() {
-	ed := m.activeEditor()
-	if ed == nil {
-		ed = editor.New(buffer.New())
+// handleMouse translates a mouse event for the intent-bar row offset and
+// forwards to the region manager. Any click also unfocuses the agent
+// input; the agent pane's own click handler re-focuses if the click
+// landed in the input area.
+func (m *AppModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(tea.MouseClickMsg); ok {
+		m.AgentPane.SetInputActive(false)
 	}
-	m.Editor = NewEditorModel(ed, m.Keymap, m.Services)
-	m.Editor.OnSave = func() { m.Session.NotifySaved() }
-	m.Regions.ReplacePane("editor", m.Editor)
-}
-
-// switchBuffer cycles through open buffers by delta (+1 next, -1 prev).
-func (m *AppModel) switchBuffer(delta int) (tea.Model, tea.Cmd) {
-	files := m.Session.OpenFiles()
-	if len(files) <= 1 {
-		return m, nil
-	}
-	slices.Sort(files)
-	active := m.Session.ActiveFile()
-	idx := 0
-	for i, f := range files {
-		if f == active {
-			idx = i
-			break
-		}
-	}
-	next := (idx + delta + len(files)) % len(files)
-	return m.openFile(files[next])
+	mouse := msg.Mouse()
+	mouse.Y -= 1 // translate Y for intent bar row
+	localMsg := translateMouseMsg(msg, mouse)
+	cmd := m.Regions.HandleMouse(localMsg)
+	return m, cmd
 }
 
 // translateMouseMsg creates a new mouse message with translated coordinates.
@@ -1478,331 +493,6 @@ func translateMouseMsg(msg tea.MouseMsg, m tea.Mouse) tea.MouseMsg {
 	return msg
 }
 
-// openFile switches the editor to a different file. Uses session.SwitchTo
-// which keeps editors alive in the multi-buffer map. This method rebuilds
-// the EditorModel and updates the region manager.
-func (m *AppModel) openFile(path string) (tea.Model, tea.Cmd) {
-	if err := m.Session.SwitchTo(path); err != nil {
-		if errors.Is(err, session.ErrEditPending) {
-			m.AgentPane.AppendMeta("[" + err.Error() + "]\n")
-		} else {
-			slog.Error("failed to open file", "path", path, "err", err)
-			m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
-		}
-		return m, nil
-	}
-
-	// Watch the newly opened file for external changes.
-	if m.fileWatcher != nil {
-		m.fileWatcher.Watch(m.Session.ActiveFile())
-	}
-
-	// Rebuild EditorModel with the new active editor from session.
-	m.rebuildEditorModel()
-
-	slog.Debug("file opened", "path", path)
-	m.refreshDiagnostics(m.Session.ActiveFile())
-	m.refreshProjectPane()
-	return m, nil
-}
-
-// reloadAllBuffers reloads all open buffers from disk. Called after bash
-// tool calls that may have modified files outside the edit approval flow.
-// Skips buffers the user has modified in-editor to avoid clobbering unsaved work.
-func (m *AppModel) reloadAllBuffers() {
-	for _, path := range m.Session.OpenFiles() {
-		m.handleFileChanged(path)
-	}
-}
-
-// handleFileChanged reloads a file that was modified externally.
-// Skips reload if the buffer has unsaved in-editor changes.
-func (m *AppModel) handleFileChanged(path string) {
-	// Don't reload buffers the user has modified in-editor.
-	of := m.Session.OpenFileForPath(path)
-	if of != nil && of.Modified() {
-		slog.Debug("skip external reload (buffer modified)", "path", path)
-		return
-	}
-	if err := m.Session.ReloadFile(path); err != nil {
-		slog.Warn("auto-reload failed", "path", path, "err", err)
-		return
-	}
-	// Buffer length may have shrunk — clamp the pooled editor so a
-	// stale cursor doesn't reference an out-of-bounds line/column.
-	m.clampPooledEditor(path)
-	// If the changed file is the active one, rebuild the editor model.
-	if path == m.Session.ActiveFile() {
-		m.rebuildEditorModel()
-	}
-	slog.Debug("auto-reloaded file", "path", path)
-}
-
-// reloadActiveFile re-reads the active file from disk into its buffer.
-func (m *AppModel) reloadActiveFile() (tea.Model, tea.Cmd) {
-	path := m.Session.ActiveFile()
-	if path == "" {
-		return m, nil
-	}
-	if err := m.Session.ReloadFile(path); err != nil {
-		slog.Error("reload file failed", "path", path, "err", err)
-		m.AgentPane.AppendMeta("[error: " + err.Error() + "]\n")
-		return m, nil
-	}
-	// Buffer length may have shrunk — clamp the pooled editor cursor.
-	m.clampPooledEditor(path)
-	m.rebuildEditorModel()
-	slog.Debug("file reloaded", "path", path)
-	return m, nil
-}
-
-func (m *AppModel) renderIntentBar() string {
-	var text string
-	var style lipgloss.Style
-
-	_, goalPath := m.Session.ActiveGoal()
-
-	switch {
-	case !m.Session.HasAgent():
-		text = " Editor"
-		style = intentIdleStyle
-	case goalPath != "":
-		text = " " + goalPath
-		style = intentActiveStyle
-	default:
-		text = " Ready"
-		style = intentIdleStyle
-	}
-
-	// Truncate to fit width (one line, never wraps)
-	runes := []rune(text)
-	if len(runes) > m.Width {
-		runes = runes[:m.Width-1]
-		text = string(runes) + "…"
-	}
-
-	// Pad to full width
-	padding := m.Width - utf8.RuneCountInString(text)
-	if padding > 0 {
-		text += strings.Repeat(" ", padding)
-	}
-
-	return style.Render(text)
-}
-
-// refreshDiagnostics queries the session for diagnostics on the given path
-// and updates the editor model. Only updates if path matches the active file.
-func (m *AppModel) refreshDiagnostics(path string) {
-	if !m.Session.HasLanguageService() {
-		return
-	}
-	canon := m.Session.CanonPath(path)
-	if m.Session.ActiveFile() != canon {
-		return
-	}
-	m.Editor.SetDiagnostics(m.Session.Diagnostics(canon))
-}
-
-// --- Go-to-Definition / Hover / Go-Back ---
-
-// handleGoToDefinition dispatches an async definition lookup to avoid blocking the TUI.
-func (m *AppModel) handleGoToDefinition() (tea.Model, tea.Cmd) {
-	if !m.Session.HasLanguageService() {
-		return m, nil
-	}
-	originPath := m.Session.ActiveFile()
-	originLine, originCol := m.Editor.CursorPosition()
-	return m, func() tea.Msg {
-		loc, err := m.Session.LookupDefinition(originLine, originCol)
-		if err != nil {
-			return goToDefResultMsg{err: err}
-		}
-		return goToDefResultMsg{
-			path:       loc.Path,
-			line:       loc.Line,
-			col:        loc.Col,
-			originPath: originPath,
-			originLine: originLine,
-			originCol:  originCol,
-		}
-	}
-}
-
-// applyGoToDefinition handles the async definition result on the TUI goroutine.
-// Pushes the nav stack, switches files if needed, and moves the cursor.
-func (m *AppModel) applyGoToDefinition(msg goToDefResultMsg) (tea.Model, tea.Cmd) {
-	if msg.err != nil {
-		slog.Debug("go-to-definition failed", "err", msg.err)
-		m.Editor.StatusMsg = msg.err.Error()
-		return m, nil
-	}
-
-	// Push origin onto nav stack (primitives — no lang.Location in TUI).
-	m.Session.PushNav(msg.originPath, msg.originLine, msg.originCol)
-
-	// Switch file if the definition is in a different file.
-	if msg.path != m.Session.ActiveFile() {
-		if err := m.Session.SwitchTo(msg.path); err != nil {
-			m.Session.PopNav() // undo the push
-			m.Editor.StatusMsg = err.Error()
-			return m, nil
-		}
-	}
-
-	// Rebuild EditorModel if session switched files.
-	if m.activeEditor() != m.Editor.Engine() {
-		m.rebuildEditorModel()
-		m.refreshDiagnostics(m.Session.ActiveFile())
-	}
-
-	if ed := m.activeEditor(); ed != nil {
-		ed.MoveCursorTo(msg.line, msg.col)
-	}
-	slog.Debug("go-to-definition", "path", msg.path, "line", msg.line, "col", msg.col)
-	return m, nil
-}
-
-// handleGoBack returns to the previous location in the navigation stack.
-func (m *AppModel) handleGoBack() (tea.Model, tea.Cmd) {
-	loc := m.Session.GoBack()
-	if loc == nil {
-		return m, nil
-	}
-
-	// Session may have switched files — rebuild EditorModel if needed,
-	// then place the cursor on the TUI's editor (Session no longer
-	// holds a UI cursor).
-	if m.activeEditor() != m.Editor.Engine() {
-		m.rebuildEditorModel()
-		m.refreshDiagnostics(m.Session.ActiveFile())
-	}
-	if ed := m.activeEditor(); ed != nil {
-		ed.MoveCursorTo(loc.Line, loc.Col)
-		ed.EnsureCursorVisible()
-	}
-
-	slog.Debug("go-back", "path", loc.Path, "line", loc.Line, "col", loc.Col)
-	return m, nil
-}
-
-// handleHover requests hover info for the symbol under the cursor.
-// The LSP request runs asynchronously via a tea.Cmd.
-func (m *AppModel) handleHover() (tea.Model, tea.Cmd) {
-	if !m.Session.HasLanguageService() {
-		return m, nil
-	}
-	// Dismiss any existing hover.
-	m.Editor.DismissHover()
-
-	path := m.Session.ActiveFile()
-	line, col := m.Editor.CursorPosition()
-	return m, func() tea.Msg {
-		text, err := m.Session.HoverInfo(line, col)
-		if err != nil {
-			slog.Debug("hover failed", "err", err)
-			return hoverResultMsg{}
-		}
-		return hoverResultMsg{text: text, path: path, line: line, col: col}
-	}
-}
-
-// --- Autocomplete ---
-
-// completionDebounce is the delay before firing a completion request.
-const completionDebounce = 100 * time.Millisecond
-
-// scheduleCompletion starts a debounced completion request. Called after
-// typing a character. The tick carries a snapshot of path+cursor so stale
-// ticks are dropped.
-func (m *AppModel) scheduleCompletion() tea.Cmd {
-	if !m.Session.HasLanguageService() {
-		return nil
-	}
-	path := m.Session.ActiveFile()
-	var line, col int
-	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
-		// Map overlay cursor to buffer position for the LSP request.
-		// The overlay replaces buffer lines StartLine..EndLine, so the
-		// overlay cursor line maps to StartLine + overlayCursorLine.
-		oe := m.Editor.Overlay.Editor
-		line = m.Editor.Overlay.StartLine + oe.CursorLine
-		col = oe.CursorCol
-	} else {
-		line, col = m.Editor.CursorPosition()
-	}
-	return tea.Tick(completionDebounce, func(_ time.Time) tea.Msg {
-		return completionTickMsg{path: path, line: line, col: col}
-	})
-}
-
-// handleCompletionTick fires when the debounce timer expires.
-// Drops stale ticks (cursor moved since scheduling). Dispatches async request.
-func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.Cmd) {
-	// Drop if cursor moved since the tick was scheduled.
-	// Compare against the right cursor (overlay or buffer).
-	var curLine, curCol int
-	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
-		oe := m.Editor.Overlay.Editor
-		curLine = m.Editor.Overlay.StartLine + oe.CursorLine
-		curCol = oe.CursorCol
-	} else {
-		curLine, curCol = m.Editor.CursorPosition()
-	}
-	if msg.path != m.Session.ActiveFile() ||
-		msg.line != curLine ||
-		msg.col != curCol {
-		return m, nil
-	}
-	line, col := msg.line, msg.col
-	path := msg.path
-
-	// Capture content snapshots on the TUI goroutine (no race).
-	// For overlay editing, session needs both merged and original content
-	// to temporarily sync the proposed code to LSP and revert afterward.
-	var tempContent, originalContent string
-	if m.Editor.Overlay != nil && m.Editor.Overlay.Active {
-		originalContent = m.Editor.Content()
-		tempContent = m.Editor.Overlay.MergedContent(m.Editor.Engine())
-	}
-
-	return m, func() tea.Msg {
-		var result *lang.CompletionResult
-		var err error
-
-		if tempContent != "" {
-			// Overlay: sync/query/revert atomically inside session.
-			result, err = m.Session.RequestCompletionInContext(path, tempContent, originalContent, line, col)
-		} else {
-			result, err = m.Session.RequestCompletion(path, line, col)
-		}
-
-		if err != nil {
-			slog.Debug("completion request failed", "path", path, "line", line, "col", col, "err", err)
-			return completionResultMsg{}
-		}
-		if result == nil {
-			return completionResultMsg{}
-		}
-		return completionResultMsg{
-			items:        result.Items,
-			isIncomplete: result.IsIncomplete,
-			path:         path,
-			line:         line,
-			col:          col,
-		}
-	}
-}
-
-// reloadWorkTreeCmd returns a tea.Cmd that fetches the work tree from
-// demarkus in a background goroutine. The snapshot is applied to session
-// state on the TUI goroutine when reloadWorkTreeResultMsg is handled,
-// avoiding data races on workTree/workTreeVer fields.
-func (m *AppModel) reloadWorkTreeCmd() tea.Cmd {
-	return func() tea.Msg {
-		return reloadWorkTreeResultMsg{snap: m.Session.FetchWorkTreeSnapshot()}
-	}
-}
-
 // refreshProjectPane rebuilds the project pane if visible, or marks it
 // dirty for deferred rebuild when the pane is next shown.
 func (m *AppModel) refreshProjectPane() {
@@ -1817,168 +507,6 @@ func (m *AppModel) refreshProjectPane() {
 	}
 }
 
-// handleToggleProject implements the Ctrl+B toggle:
-// hidden → show + focus, visible but not focused → focus, focused → hide.
-func (m *AppModel) handleToggleProject() (tea.Model, tea.Cmd) {
-	r := m.Regions.regionByName("project")
-	if r == nil {
-		return m, nil
-	}
-	focused := m.Regions.FocusedRegion()
-	if !r.Visible {
-		// Hidden → show + focus (rebuild if stale)
-		if m.ProjectPane.dirty {
-			m.ProjectPane.rebuild()
-			m.ProjectPane.dirty = false
-		}
-		m.Regions.Show("project")
-		m.Regions.FocusByName("project")
-	} else if focused == nil || focused.Name != "project" {
-		// Visible but not focused → focus
-		m.Regions.FocusByName("project")
-	} else {
-		// Focused → hide, move focus to editor
-		m.Regions.Hide("project")
-		m.Regions.FocusByName("editor")
-	}
-	return m, nil
-}
-
 // --- Edit Approval ---
-
-// approvalOutcome enumerates how applyApproval finished. The caller
-// uses it to decide pending-block snoozing — promotion to
-// blockedPaths happens only on outcomeSucceeded; both terminal
-// failure paths drop the pending snapshot; the retryable preparation
-// failure leaves it in place so a follow-up press can still snooze.
 //
-// Modelling the three branches as data (not three call sites that
-// each remember to call the snooze helper) is what fixes the original
-// regression: a future edit to applyApproval can't accidentally
-// reach the success suffix without also producing outcomeSucceeded,
-// and the snooze helper has exactly one caller.
-type approvalOutcome int
-
-const (
-	// outcomeSucceeded: PrepareApproval+ApplyEdit both landed. Snooze.
-	outcomeSucceeded approvalOutcome = iota
-	// outcomePreparationFailedTerminal: PrepareApproval failed AND the
-	// session has no PendingEdit anymore (agent gave up on this edit).
-	// No retry possible; drop the pending snapshot.
-	outcomePreparationFailedTerminal
-	// outcomePreparationFailedRetryable: PrepareApproval failed but
-	// PendingEdit is still set. Developer can retry; keep the pending
-	// snapshot so a successful retry can still snooze.
-	outcomePreparationFailedRetryable
-	// outcomeApplyFailed: ApplyEdit rejected the patch; AbortApproval
-	// cleared PendingEdit. Drop the pending snapshot.
-	outcomeApplyFailed
-)
-
-// applyApproval validates the reviewed edit and applies it
-// atomically; CompleteApproval signals the agent which proceeds
-// without an additional developer step.
-//
-// The flow splits cleanly: tryApplyApproval runs the prepare → apply
-// pipeline and returns an [approvalOutcome];
-// reconcilePendingBlockOnOutcome decides snoozing based on that
-// outcome. Centralising the snooze decision in one
-// data-driven helper is what protects the
-// "snooze only on confirmed approval" invariant — see the type
-// comment on [approvalOutcome] for why.
-func (m *AppModel) applyApproval() tea.Cmd {
-	blockedPath := m.pendingBlockedPath
-	outcome, cmd := m.tryApplyApproval()
-	m.reconcilePendingBlockOnOutcome(blockedPath, outcome)
-	return cmd
-}
-
-// tryApplyApproval runs the prepare → apply pipeline and signals the
-// agent via CompleteApproval. Returns the outcome plus any tea.Cmd
-// the success branch produced. It does NOT touch pendingBlockedPath /
-// blockedPaths — that reconciliation is the caller's responsibility,
-// see [reconcilePendingBlockOnOutcome].
-func (m *AppModel) tryApplyApproval() (approvalOutcome, tea.Cmd) {
-	o := m.Editor.Overlay
-	oldLines := make([]string, 0, o.EndLine-o.StartLine+1)
-	for i := o.StartLine; i <= o.EndLine; i++ {
-		oldLines = append(oldLines, m.Editor.LineText(i))
-	}
-	search := strings.Join(oldLines, "\n")
-	replace := o.Content()
-
-	plan, err := m.Session.PrepareApproval(search, replace)
-	if err != nil {
-		slog.Warn("agent approve: preparation failed", "err", err)
-		m.AgentPane.AppendText("\n[" + err.Error() + "]\n")
-		// Only clear the overlay if the session gave up on the edit
-		// (PendingEdit cleared, agent rejected). If PendingEdit is still
-		// set (e.g. "not reviewed"), keep the overlay so the user can retry.
-		if m.Session.PendingEdit() == nil {
-			m.clearEditorOverlay(false)
-			return outcomePreparationFailedTerminal, nil
-		}
-		return outcomePreparationFailedRetryable, nil
-	}
-
-	// ApplyEdit short-circuits on LocateEdit failure without mutating
-	// the buffer. On failure we MUST clear the overlay: PrepareApproval
-	// already cleared session.pendingEdit, so a developer pressing Esc
-	// at this point hits the "No pending edit" branch of
-	// ActionAgentReject and cancels the entire agent instead of
-	// dismissing the dead diff. Leaving the overlay visible (the
-	// previous design intent) made sense only when a retry path
-	// existed; AbortApproval below now closes that off, so the overlay
-	// has no purpose post-failure.
-	ok, reason := m.Editor.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
-	if !ok {
-		slog.Warn("apply failed", "reason", reason)
-		m.AgentPane.AppendText("\n[apply failed: " + reason + "]\n")
-		m.Session.AbortApproval()
-		m.clearEditorOverlay(false)
-		return outcomeApplyFailed, nil
-	}
-
-	// bufferMutated=true: ApplyEdit already replaced the lines, so CollapseOverlay
-	// must use the post-mutation coordinate translation (subtract removedCount,
-	// not addedCount) to keep the viewport pointing at the right buffer line.
-	m.clearEditorOverlay(true)
-	m.AgentPane.AppendMeta("[applied]\n")
-
-	// Refresh after CompleteApproval — that's when modifiedFiles is populated,
-	// which the project pane reads to render the modified badge.
-	m.Session.CompleteApproval()
-	statusCmd := m.AgentPane.SetStatus(event.StatusThinking)
-	m.refreshProjectPane()
-	return outcomeSucceeded, statusCmd
-}
-
-// reconcilePendingBlockOnOutcome promotes (or drops) the pending
-// blocked-path snapshot based on what tryApplyApproval reported.
-//
-// Snooze rule: only outcomeSucceeded promotes blockedPath into
-// blockedPaths. The two terminal failure outcomes drop the snapshot
-// so a fresh proposal must re-trigger the surface; the retryable
-// outcome leaves the snapshot alone so the developer's retry can
-// still snooze on success.
-//
-// Pure with respect to AppModel — only mutates blockedPaths and
-// pendingBlockedPath — so the snooze invariant is unit-testable
-// without standing up the full Session/Editor stack. This is
-// deliberate: the original bug was a state-ordering one (snooze
-// promoted at keypress before the pipeline ran), and the test for
-// it should not depend on running the pipeline at all.
-func (m *AppModel) reconcilePendingBlockOnOutcome(blockedPath string, outcome approvalOutcome) {
-	switch outcome {
-	case outcomeSucceeded:
-		if blockedPath != "" {
-			m.blockedPaths[blockedPath] = true
-			m.pendingBlockedPath = ""
-		}
-	case outcomePreparationFailedTerminal, outcomeApplyFailed:
-		m.pendingBlockedPath = ""
-	case outcomePreparationFailedRetryable:
-		// Leave pendingBlockedPath in place — a successful retry
-		// of the same proposal should still be able to snooze.
-	}
-}
+// Implementation lives in app_approval.go.

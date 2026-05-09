@@ -88,10 +88,6 @@ type hoverResultMsg struct {
 	line, col int
 }
 
-type reloadWorkTreeResultMsg struct {
-	snap session.WorkTreeSnapshot
-}
-
 // Package-level styles for the intent bar — allocated once, not per frame.
 var (
 	intentIdleStyle = lipgloss.NewStyle().
@@ -557,14 +553,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleDialogResult(msg)
 
 	case reloadWorkTreeResultMsg:
-		if msg.snap.Err != nil {
-			slog.Warn("reload work tree", "err", msg.snap.Err)
-			m.AgentPane.AppendMeta("[reload project failed: " + msg.snap.Err.Error() + "]\n")
-		} else {
-			m.Session.ApplyWorkTreeSnapshot(msg.snap)
-		}
-		m.refreshProjectPane()
-		return m, nil
+		return m.handleReloadWorkTreeResult(msg)
 
 	// File listing error — surface in agent pane
 	case paletteErrorMsg:
@@ -682,20 +671,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ProjectSetActiveGoalMsg:
-		if err := m.Session.SetActiveGoal(msg.Title); err != nil {
-			slog.Warn("set active goal", "err", err)
-			m.AgentPane.AppendMeta("[set active goal failed: " + err.Error() + "]\n")
-		}
-		m.refreshProjectPane()
-		return m, nil
+		return m.handleProjectSetActiveGoal(msg)
 
 	case ProjectMarkGoalDoneMsg:
-		if err := m.Session.MarkGoalDone(msg.Title); err != nil {
-			slog.Warn("mark goal done", "err", err)
-			m.AgentPane.AppendMeta("[mark done failed: " + err.Error() + "]\n")
-		}
-		m.refreshProjectPane()
-		return m, nil
+		return m.handleProjectMarkGoalDone(msg)
 
 	case ProjectCreateFileMsg:
 		if err := m.Session.WriteFile(msg.Path, ""); err != nil {
@@ -1634,16 +1613,6 @@ func (m *AppModel) handleCompletionTick(msg completionTickMsg) (tea.Model, tea.C
 			line:         line,
 			col:          col,
 		}
-	}
-}
-
-// reloadWorkTreeCmd returns a tea.Cmd that fetches the work tree from
-// demarkus in a background goroutine. The snapshot is applied to session
-// state on the TUI goroutine when reloadWorkTreeResultMsg is handled,
-// avoiding data races on workTree/workTreeVer fields.
-func (m *AppModel) reloadWorkTreeCmd() tea.Cmd {
-	return func() tea.Msg {
-		return reloadWorkTreeResultMsg{snap: m.Session.FetchWorkTreeSnapshot()}
 	}
 }
 

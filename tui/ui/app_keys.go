@@ -95,6 +95,7 @@ func (m *AppModel) handleGlobalAction(action Action) (tea.Cmd, bool) {
 			return nil, true
 		}
 		if m.Session.CurrentIntent() != "" && m.Session.HasAgent() {
+			m.Session.CancelAgent()
 			return m.AgentPane.SetStatus(event.StatusIdle), true
 		}
 		// No overlay, no intent — fall through to focused pane.

@@ -577,128 +577,23 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Palette.Open(msg.items)
 		return m, nil
 
-	// Tab pressed in model selector — switch to a different provider's models
 	case modelSelSwitchProfileMsg:
-		if m.ListModels != nil {
-			profile := msg.profile
-			m.pendingModelProfile = profile
-			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
-			listFn := m.ListModels
-			return m, func() tea.Msg {
-				items, err := listFn(profile)
-				return modelListMsg{profile: profile, items: items, err: err}
-			}
-		}
-		return m, nil
+		return m.handleModelSelSwitchProfile(msg)
 
-	// OAuth intermediate instruction (e.g., device code to display)
 	case oauthInstructionMsg:
-		m.AgentPane.AppendMeta("[" + msg.instruction + "]\n")
-		m.AgentPane.AppendMeta("[waiting for authorization...]\n")
-		return m, nil
+		return m.handleOAuthInstruction(msg)
 
-	// API key entered — store and switch to the profile
 	case apiKeyEnteredMsg:
-		if msg.key == "" {
-			return m, nil // cancelled
-		}
-		if m.StoreAPIKey != nil {
-			if err := m.StoreAPIKey(msg.profile, msg.key); err != nil {
-				m.AgentPane.AppendMeta("\n[failed to save key: " + err.Error() + "]\n")
-				return m, nil
-			}
-			m.AgentPane.AppendMeta("\n[API key saved for " + msg.profile + "]\n")
-			// Switch to this profile's default model.
-			dm, switchErr := m.Session.SwitchModel(msg.profile, "")
-			m.applySwitchResult(msg.profile, dm, switchErr)
-		}
-		return m, nil
+		return m.handleAPIKeyEntered(msg)
 
-	// OAuth connection completed — switch to the connected profile.
-	// The switcher builds the agent on first successful connect, so the
-	// connection is live without restart.
 	case oauthConnectResultMsg:
-		if msg.err != nil {
-			m.AgentPane.AppendMeta("\n[connection failed: " + msg.err.Error() + "]\n")
-			return m, nil
-		}
-		m.AgentPane.AppendMeta("\n[connected to " + msg.profile + "!]\n")
-		dm, switchErr := m.Session.SwitchModel(msg.profile, "")
-		m.applySwitchResult(msg.profile, dm, switchErr)
-		return m, nil
+		return m.handleOAuthConnectResult(msg)
 
-	// Model list fetched — open the inline selector in the agent pane
 	case modelListMsg:
-		// Drop stale responses from superseded requests.
-		if msg.profile != m.pendingModelProfile {
-			return m, nil
-		}
-		if msg.err != nil {
-			var profiles []string
-			if m.LLMProfileNames != nil {
-				profiles = m.LLMProfileNames()
-			}
-			// OAuth profile without token → offer to connect.
-			if m.IsOAuthProfile != nil && m.HasOAuthToken != nil {
-				if providerID := m.IsOAuthProfile(msg.profile); providerID != "" && !m.HasOAuthToken(msg.profile) {
-					m.AgentPane.OpenModelSelector([]ModelSelectorItem{{
-						ID: "_connect", Name: "Connect to " + msg.profile, Profile: msg.profile,
-					}}, msg.profile, "", profiles)
-					return m, nil
-				}
-			}
-			// API key profile without key → offer to enter one.
-			if m.StoreAPIKey != nil && m.HasAPIKey != nil && !m.HasAPIKey(msg.profile) {
-				m.AgentPane.OpenModelSelector([]ModelSelectorItem{{
-					ID: "_enter_key", Name: "Enter API key for " + msg.profile, Profile: msg.profile,
-				}}, msg.profile, "", profiles)
-				return m, nil
-			}
-			m.AgentPane.AppendMeta("\n[failed to list models: " + msg.err.Error() + "]\n")
-			return m, nil
-		}
-		if len(msg.items) == 0 {
-			m.AgentPane.AppendMeta("\n[no models available from provider]\n")
-			return m, nil
-		}
-		var profiles []string
-		if m.LLMProfileNames != nil {
-			profiles = m.LLMProfileNames()
-		}
-		m.AgentPane.OpenModelSelector(msg.items, msg.profile, m.Session.LLMModel(), profiles)
-		return m, nil
+		return m.handleModelList(msg)
 
-	// Model selector result — user selected a model/profile or cancelled
 	case ModelSelectorResultMsg:
-		if msg.Cancelled {
-			return m, nil
-		}
-		// Profile selection (multi-profile mode) — fetch models for that profile.
-		if msg.ModelID == "" && msg.Profile != "" && m.ListModels != nil {
-			profile := msg.Profile
-			m.pendingModelProfile = profile
-			m.AgentPane.AppendMeta("\n[fetching models for " + profile + "...]\n")
-			listFn := m.ListModels
-			return m, func() tea.Msg {
-				items, err := listFn(profile)
-				return modelListMsg{profile: profile, items: items, err: err}
-			}
-		}
-		// OAuth connect action — user selected "Connect to [provider]".
-		if msg.ModelID == "_connect" && m.ConnectOAuth != nil {
-			return m.startOAuthConnect(msg.Profile)
-		}
-		// API key entry action — switch to key input mode.
-		if msg.ModelID == "_enter_key" {
-			m.AgentPane.StartAPIKeyInput(msg.Profile)
-			return m, nil
-		}
-		// Model selection — switch to the chosen model.
-		if msg.ModelID != "" {
-			dm, switchErr := m.Session.SwitchModel(msg.Profile, msg.ModelID)
-			m.applySwitchResult(msg.Profile, dm, switchErr)
-		}
-		return m, nil
+		return m.handleModelSelectorResult(msg)
 
 	// Palette result — user selected a file or cancelled
 	case PaletteResultMsg:

@@ -214,35 +214,38 @@ func (a *App) Model() *ui.AppModel { return a.model }
 func (a *App) Program() *tea.Program { return a.program }
 
 // SetAgentCallbacks installs generic agent callbacks. Late-binding:
-// callable after [App.Run] has started, to support binaries that
-// construct the agent lazily (e.g., on first OAuth connect via the
-// model switcher). Idempotent — last call wins.
+// callable any time — pre-Run (during startup wiring) or post-Run
+// (the lazy-OAuth model-switcher path). Idempotent — last call wins.
 //
 // The callbacks are routed through [tea.Program.Send] into the
 // AppModel's Update goroutine so the field assignments happen on
-// Bubble Tea's single-threaded event loop. Calling [App.SetAgentCallbacks]
-// from outside the loop must NOT touch model fields directly; the
-// race detector flags any such write. The Send path is buffered, so
-// pre-Run calls are safe too — the message is processed when the
-// loop begins.
+// Bubble Tea's single-threaded event loop (race-free regardless of
+// caller goroutine). Bubble Tea's Send is *blocking* on its
+// unbuffered channel pre-Run, so the dispatch runs in a spawned
+// goroutine — the caller never blocks; the goroutine completes
+// when Run begins pumping and the message lands. Field assignment
+// is therefore asynchronous: the caller cannot rely on the field
+// being set when SetAgentCallbacks returns. In practice this is
+// fine because the assigned fields drive keystroke handlers, and
+// no keystroke can fire until Run has started and processed the
+// queued messages.
 func (a *App) SetAgentCallbacks(cb AgentCallbacks) {
-	a.program.Send(ui.SetAgentCallbacksMsg(cb.ToggleTerse, cb.InitialTerse))
+	msg := ui.SetAgentCallbacksMsg(cb.ToggleTerse, cb.InitialTerse)
+	go a.program.Send(msg)
 }
 
 // SetCodingCallbacks installs coding-flavored agent callbacks.
-// Late-binding for the same reason as [App.SetAgentCallbacks] — the
-// flagship binary's lazy-OAuth path constructs the coding agent
-// after [App.Run] has begun, so the closures referencing it must
-// install on a running app. Routed through [tea.Program.Send] for
-// the same race-avoidance reason. Last call wins.
+// Same any-time semantics, race-avoidance rationale, and async
+// caveat as [App.SetAgentCallbacks].
 func (a *App) SetCodingCallbacks(cb CodingCallbacks) {
-	a.program.Send(ui.SetCodingCallbacksMsg(
+	msg := ui.SetCodingCallbacksMsg(
 		cb.OnDialChange,
 		cb.CycleStyle,
 		cb.ToggleEvaluator,
 		cb.InitialStyleName,
 		cb.InitialEvaluatorEnabled,
-	))
+	)
+	go a.program.Send(msg)
 }
 
 // Run starts the Bubble Tea event loop and blocks until the user

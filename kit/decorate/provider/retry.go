@@ -112,9 +112,13 @@ func (r *retryProvider) Stream(ctx context.Context, messages []llm.Message, tool
 			break
 		}
 		if delay > 0 {
+			// NewTimer + Stop on the cancel path so a ctx-driven exit
+			// does not leak the timer for the remainder of delay.
+			timer := time.NewTimer(delay)
 			select {
-			case <-time.After(delay):
+			case <-timer.C:
 			case <-ctx.Done():
+				timer.Stop()
 				return nil, ctx.Err()
 			}
 		}

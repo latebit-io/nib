@@ -122,6 +122,46 @@ func TestWithCaching_TTLExpiry(t *testing.T) {
 	}
 }
 
+func TestWithCaching_TTLStartsFromFetchCompletion(t *testing.T) {
+	// Simulate a slow inner Fetch by advancing the clock inside the
+	// mock. If cachedAt were stamped at the start of the wrapper's
+	// Fetch (the pre-fix behavior), the entry's TTL would be measured
+	// from before the slow call — a 10s TTL behind a 3s inner call
+	// would survive only ~7s. After the fix, TTL is measured from
+	// completion, so the entry survives the full 10s after the inner
+	// call returns.
+	now := time.Now()
+	clock := &now
+	innerFetchDelay := 3 * time.Second
+	inner := newMockStore()
+	inner.docs["/slow.md"] = memory.Document{Path: "/slow.md", Body: "v1", Version: 1}
+	// Wrap Fetch so it advances the clock to model latency.
+	delayingInner := &delayingFetchStore{
+		inner: inner,
+		onFetch: func() {
+			*clock = clock.Add(innerFetchDelay)
+		},
+	}
+	s := kit.DecorateStore(delayingInner, WithCaching(CachePolicy{
+		TTL: 10 * time.Second,
+		Now: func() time.Time { return *clock },
+	}))
+
+	if _, err := s.Fetch(context.Background(), "/slow.md"); err != nil {
+		t.Fatalf("first Fetch: %v", err)
+	}
+	// Advance to 9s after fetch completion — still inside the 10s TTL
+	// when measured from completion; would already be past it if TTL
+	// were measured from the start of the wrapper call (3 + 9 = 12s).
+	*clock = clock.Add(9 * time.Second)
+	if _, err := s.Fetch(context.Background(), "/slow.md"); err != nil {
+		t.Fatalf("second Fetch: %v", err)
+	}
+	if got := inner.fetchCalls.Load(); got != 1 {
+		t.Fatalf("expected TTL measured from fetch completion (1 inner call), got %d", got)
+	}
+}
+
 func TestWithCaching_PublishInvalidates(t *testing.T) {
 	inner := newMockStore()
 	inner.docs["/foo.md"] = memory.Document{Path: "/foo.md", Body: "v1", Version: 1}
@@ -237,4 +277,32 @@ func TestWithCaching_ListNotCached(t *testing.T) {
 
 func pathN(i int) string {
 	return "/foo" + string(rune('0'+i)) + ".md"
+}
+
+// delayingFetchStore wraps a mockStore and runs onFetch before each
+// inner Fetch returns. Used to simulate slow upstream stores in TTL
+// tests that need to distinguish "elapsed during fetch" from
+// "elapsed after fetch."
+type delayingFetchStore struct {
+	inner   *mockStore
+	onFetch func()
+}
+
+func (d *delayingFetchStore) Fetch(ctx context.Context, path string) (memory.Document, error) {
+	if d.onFetch != nil {
+		d.onFetch()
+	}
+	return d.inner.Fetch(ctx, path)
+}
+
+func (d *delayingFetchStore) Publish(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
+	return d.inner.Publish(ctx, path, body, expectedVersion)
+}
+
+func (d *delayingFetchStore) Append(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
+	return d.inner.Append(ctx, path, body, expectedVersion)
+}
+
+func (d *delayingFetchStore) List(ctx context.Context, path string) ([]string, error) {
+	return d.inner.List(ctx, path)
 }

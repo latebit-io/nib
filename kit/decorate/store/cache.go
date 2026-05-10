@@ -88,9 +88,8 @@ var _ memory.Store = (*cachedStore)(nil)
 // Fetch returns the cached document when present and unexpired;
 // otherwise delegates and caches the result.
 func (c *cachedStore) Fetch(ctx context.Context, path string) (memory.Document, error) {
-	now := c.policy.Now()
 	c.mu.Lock()
-	if ent, ok := c.entries[path]; ok && !c.expired(ent, now) {
+	if ent, ok := c.entries[path]; ok && !c.expired(ent, c.policy.Now()) {
 		c.mu.Unlock()
 		return ent.doc, nil
 	}
@@ -100,7 +99,9 @@ func (c *cachedStore) Fetch(ctx context.Context, path string) (memory.Document, 
 	if err != nil {
 		return memory.Document{}, err
 	}
-	c.store(path, doc, now)
+	// Stamp cachedAt with a fresh Now() AFTER the inner Fetch completes,
+	// so a slow inner call doesn't burn TTL it never spent serving.
+	c.store(path, doc, c.policy.Now())
 	return doc, nil
 }
 

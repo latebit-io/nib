@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/latebit-io/nib/kit/contracttest"
 	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/memory/demarkus/mcpadapter"
@@ -256,6 +257,16 @@ func TestIntegrationList(t *testing.T) {
 	if !found["beta.md"] && !found["/beta.md"] {
 		t.Errorf("expected beta.md in list, got: %v", paths)
 	}
+}
+
+// TestIntegrationStoreContract runs the [contracttest.Store] suite
+// against the demarkus mcpadapter. The contract fixture uses unique
+// per-subtest paths under /contracttest/ so a shared backing server
+// can host the entire suite without inter-test collisions. Skipped in
+// -short mode like the rest of the integration suite.
+func TestIntegrationStoreContract(t *testing.T) {
+	env := setupIntegration(t)
+	contracttest.Store(t, func() memory.Store { return env.store })
 }
 
 // TestIntegrationUnauthenticated verifies unauthenticated writes are rejected.

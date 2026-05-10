@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/latebit-io/nib/engine/contracttest"
+	"github.com/latebit-io/nib/engine/syntax"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
@@ -183,4 +185,19 @@ func TestKindForCaptureName(t *testing.T) {
 			t.Errorf("kindForCaptureName(%q) = %q, want %q", tc.name, got, tc.want)
 		}
 	}
+}
+
+// TestHighlighter_SatisfiesContract verifies the tree-sitter Go
+// highlighter conforms to the [syntax.Highlighter] contract: arbitrary
+// source parsing, out-of-range line lookup, repeated Parse, Close
+// safety. The fixture uses a `.go` filename so the registry returns a
+// concrete (non-nil) highlighter.
+func TestHighlighter_SatisfiesContract(t *testing.T) {
+	contracttest.Highlighter(t, func() syntax.Highlighter {
+		h := NewHighlighter("contract.go")
+		if h == nil {
+			t.Fatal("NewHighlighter(\"contract.go\") returned nil — Go grammar registry broken")
+		}
+		return h
+	})
 }

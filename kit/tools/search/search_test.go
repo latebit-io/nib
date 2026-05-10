@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/contracttest"
 )
 
 func call(args string) llm.ToolCall {
@@ -165,4 +167,14 @@ func TestNew_NilSearchFuncPanics(t *testing.T) {
 		}
 	}()
 	New("/tmp", nil)
+}
+
+// TestTool_SatisfiesContract verifies the search tool conforms to the
+// [kit.Tool] contract when constructed with a benign no-op backend.
+func TestTool_SatisfiesContract(t *testing.T) {
+	contracttest.Tool(t, func() kit.Tool {
+		return New("/tmp", func(context.Context, string, string, Options) ([]Result, error) {
+			return nil, nil
+		})
+	})
 }

@@ -109,8 +109,14 @@ func parseDocument(p string, r mcp.ToolResult) (memory.Document, error) {
 		}, nil
 	case "not-found":
 		return memory.Document{}, fmt.Errorf("%w: %s", memory.ErrNotFound, p)
-	case "conflict":
-		return memory.Document{}, fmt.Errorf("%w: %s (server-version=%s)", memory.ErrConflict, p, meta["server-version"])
+	case "conflict", "merge-candidate":
+		// "merge-candidate" was added in demarkus-server 0.17.x for the
+		// stale-publish path under nested directories: the server
+		// indicates the document could be 3-way merged from the caller's
+		// version, but the version mismatch is still a write conflict
+		// from the [memory.Store] contract's perspective. Both statuses
+		// surface as [memory.ErrConflict] so consumers see one sentinel.
+		return memory.Document{}, fmt.Errorf("%w: %s (server-status=%s server-version=%s)", memory.ErrConflict, p, meta["status"], meta["server-version"])
 	case "unauthorized":
 		return memory.Document{}, fmt.Errorf("%w: %s", memory.ErrAuth, p)
 	case "archived":

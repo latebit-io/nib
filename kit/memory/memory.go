@@ -41,6 +41,11 @@ type Document struct {
 // All methods accept a context for cancellation propagation —
 // implementations must respect ctx.Done() so agent cancellation can
 // abort in-flight operations.
+//
+// Implementations should pass [github.com/latebit-io/nib/kit/contracttest.Store]
+// — the fixture verifies the not-found sentinel, version monotonicity,
+// stale-version conflict semantics, list visibility, and ctx
+// cancellation across every conforming implementation.
 type Store interface {
 	// Fetch retrieves a document by path.
 	Fetch(ctx context.Context, path string) (Document, error)

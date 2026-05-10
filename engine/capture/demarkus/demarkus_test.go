@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/latebit-io/nib/engine/capture"
+	"github.com/latebit-io/nib/engine/contracttest"
 	"github.com/latebit-io/nib/kit/memory"
 )
 
@@ -575,4 +576,14 @@ func TestCloseIdempotent(t *testing.T) {
 	if err := sink.Close(context.Background()); err != nil {
 		t.Errorf("second Close returned error: %v", err)
 	}
+}
+
+// TestSink_SatisfiesContract verifies the demarkus capture sink
+// conforms to the [capture.SessionEventSink] contract. The fixture
+// uses a fresh fakeStore + fresh Sink per subtest so the dispatch
+// goroutine and Close lifecycle run cleanly per-case.
+func TestSink_SatisfiesContract(t *testing.T) {
+	contracttest.SessionEventSink(t, func() capture.SessionEventSink {
+		return New(newFakeStore(), "contracttest", Config{})
+	})
 }

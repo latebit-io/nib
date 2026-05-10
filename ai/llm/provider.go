@@ -91,6 +91,11 @@ func trySend(ctx context.Context, ch chan<- StreamEvent, evt StreamEvent) bool {
 }
 
 // Provider abstracts an LLM backend for streaming chat completions.
+//
+// Implementations should pass [github.com/latebit-io/nib/kit/contracttest.Provider]
+// — the fixture verifies channel closure on completion and cancel,
+// no-events-after-Done, Truncated-implies-Done, and concurrent-Stream
+// safety against any conforming implementation.
 type Provider interface {
 	// Stream sends messages with the given tool definitions and returns
 	// a channel of streaming events. The channel is closed when the

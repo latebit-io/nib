@@ -3,11 +3,13 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/contracttest"
 	"github.com/latebit-io/nib/kit/memory"
 )
 
@@ -29,8 +31,11 @@ func newMockStore() *mockStore {
 	return &mockStore{docs: make(map[string]memory.Document)}
 }
 
-func (m *mockStore) Fetch(_ context.Context, path string) (memory.Document, error) {
+func (m *mockStore) Fetch(ctx context.Context, path string) (memory.Document, error) {
 	m.fetchCalls.Add(1)
+	if err := ctx.Err(); err != nil {
+		return memory.Document{}, err
+	}
 	if m.fetchErr != nil {
 		return memory.Document{}, m.fetchErr
 	}
@@ -41,23 +46,47 @@ func (m *mockStore) Fetch(_ context.Context, path string) (memory.Document, erro
 	return doc, nil
 }
 
-func (m *mockStore) Publish(_ context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
+func (m *mockStore) Publish(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
 	m.publishCalls.Add(1)
+	if err := ctx.Err(); err != nil {
+		return memory.Document{}, err
+	}
 	if m.publishErr != nil {
 		return memory.Document{}, m.publishErr
 	}
-	v := expectedVersion + 1
-	doc := memory.Document{Path: path, Body: body, Version: v, Modified: "now"}
+	cur, exists := m.docs[path]
+	if expectedVersion == 0 {
+		if exists {
+			return memory.Document{}, memory.ErrConflict
+		}
+	} else {
+		if !exists {
+			return memory.Document{}, memory.ErrNotFound
+		}
+		if expectedVersion != cur.Version {
+			return memory.Document{}, memory.ErrConflict
+		}
+	}
+	doc := memory.Document{Path: path, Body: body, Version: cur.Version + 1, Modified: "now"}
 	m.docs[path] = doc
 	return doc, nil
 }
 
-func (m *mockStore) Append(_ context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
+func (m *mockStore) Append(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
 	m.appendCalls.Add(1)
+	if err := ctx.Err(); err != nil {
+		return memory.Document{}, err
+	}
 	if m.appendErr != nil {
 		return memory.Document{}, m.appendErr
 	}
-	cur := m.docs[path]
+	cur, exists := m.docs[path]
+	if !exists {
+		return memory.Document{}, memory.ErrNotFound
+	}
+	if expectedVersion != cur.Version {
+		return memory.Document{}, memory.ErrConflict
+	}
 	cur.Body += body
 	cur.Version = expectedVersion + 1
 	cur.Path = path
@@ -65,9 +94,18 @@ func (m *mockStore) Append(_ context.Context, path string, body string, expected
 	return cur, nil
 }
 
-func (m *mockStore) List(_ context.Context, _ string) ([]string, error) {
+func (m *mockStore) List(ctx context.Context, dir string) ([]string, error) {
 	m.listCalls.Add(1)
-	return nil, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0)
+	for p := range m.docs {
+		if strings.HasPrefix(p, dir) {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 func TestWithCaching_HitsCacheOnRepeatFetch(t *testing.T) {
@@ -260,6 +298,18 @@ func TestWithCaching_MaxEntriesEviction(t *testing.T) {
 	if got := inner.fetchCalls.Load(); got != before+1 {
 		t.Fatalf("expected eviction-driven refetch; inner fetches did not advance")
 	}
+}
+
+// TestCachedStore_SatisfiesContract verifies the caching decorator
+// preserves the [memory.Store] contract when wrapping a conforming
+// inner. The mockStore inner is fully version-aware so the contract
+// suite exercises read-through caching plus the invariants the
+// decorator must preserve (not-found sentinel, conflict semantics,
+// list visibility, ctx cancellation).
+func TestCachedStore_SatisfiesContract(t *testing.T) {
+	contracttest.Store(t, func() memory.Store {
+		return kit.DecorateStore(newMockStore(), WithCaching(CachePolicy{TTL: time.Hour}))
+	})
 }
 
 func TestWithCaching_ListNotCached(t *testing.T) {

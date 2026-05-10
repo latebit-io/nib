@@ -43,8 +43,12 @@ type Config struct {
 	// (research, refactor) can plug in by satisfying the same port.
 	Agent kit.AgentLifecycle
 
-	// CodingCallbacks holds coding-flavored callbacks that require a
-	// live agent. Ignored when Agent is nil.
+	// AgentCallbacks holds generic frontend callbacks that any
+	// kit-level agent can supply. Wired only when Agent is non-nil.
+	AgentCallbacks AgentCallbacks
+
+	// CodingCallbacks holds coding-flavored callbacks that depend on
+	// coding-agent concepts. Wired only when Agent is non-nil.
 	CodingCallbacks CodingCallbacks
 
 	// LLM holds LLM-related callbacks (model listing, profiles).
@@ -62,12 +66,25 @@ type Config struct {
 	HighlighterFactory syntax.HighlighterFactory
 }
 
+// AgentCallbacks groups generic frontend callbacks that any kit-level
+// agent can supply. A non-coding kit consumer (research agent, refactor
+// agent) populates these without touching CodingCallbacks. Today the
+// surface is small (output verbosity); promote a CodingCallbacks field
+// up to AgentCallbacks when its parameter types and semantics no
+// longer reference coding-only state.
+type AgentCallbacks struct {
+	// ToggleTerse enables/disables terse output mode. Returns the
+	// new state.
+	ToggleTerse func(enabled bool) bool
+
+	// InitialTerse is the terse mode state at startup.
+	InitialTerse bool
+}
+
 // CodingCallbacks groups frontend callbacks that depend on coding-agent
 // concepts (autonomy policy for edit approval, coding style cycling,
 // style evaluator). The naming is deliberate: the type signature
 // documents which Config fields a non-coding consumer can leave zero.
-// Promote a callback up to a future generic AgentCallbacks when its
-// parameter types and semantics no longer reference coding-only state.
 type CodingCallbacks struct {
 	// OnDialChange is called when the autonomy dial changes.
 	OnDialChange func(level session.AutonomyLevel)
@@ -78,17 +95,11 @@ type CodingCallbacks struct {
 	// ToggleEvaluator enables/disables the style evaluator. Returns new state.
 	ToggleEvaluator func(enabled bool) bool
 
-	// ToggleTerse enables/disables terse mode. Returns new state.
-	ToggleTerse func(enabled bool) bool
-
 	// InitialStyleName is the coding style name at startup.
 	InitialStyleName string
 
 	// InitialEvaluatorEnabled is the evaluator state at startup.
 	InitialEvaluatorEnabled bool
-
-	// InitialTerse is the terse mode state at startup.
-	InitialTerse bool
 }
 
 // LLMCallbacks groups LLM-related UI callbacks.
@@ -159,21 +170,27 @@ func New(cfg Config) *App {
 		appPtr.HasOAuthToken = cfg.OAuth.HasOAuthToken
 	}
 
-	// Wire agent callbacks.
+	// Wire agent callbacks. Generic and coding-flavored bundles are
+	// populated independently — a non-coding consumer wires
+	// AgentCallbacks alone and leaves CodingCallbacks zero.
 	if cfg.Agent != nil {
 		appPtr.AgentPane.SetHasAgent(true)
+
+		// Generic.
+		appPtr.ToggleTerse = cfg.AgentCallbacks.ToggleTerse
+		if cfg.AgentCallbacks.InitialTerse {
+			appPtr.SetTerse(true)
+		}
+
+		// Coding-flavored.
 		appPtr.OnDialChange = cfg.CodingCallbacks.OnDialChange
 		appPtr.CycleStyle = cfg.CodingCallbacks.CycleStyle
 		appPtr.ToggleEvaluator = cfg.CodingCallbacks.ToggleEvaluator
-		appPtr.ToggleTerse = cfg.CodingCallbacks.ToggleTerse
 		if cfg.CodingCallbacks.InitialStyleName != "" {
 			appPtr.SetStyleName(cfg.CodingCallbacks.InitialStyleName)
 		}
 		if cfg.CodingCallbacks.InitialEvaluatorEnabled {
 			appPtr.SetEvaluatorEnabled(true)
-		}
-		if cfg.CodingCallbacks.InitialTerse {
-			appPtr.SetTerse(true)
 		}
 	}
 

@@ -2,7 +2,7 @@ package kit
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/latebit-io/nib/kit/command"
@@ -257,7 +257,7 @@ func groupPlugins(plugins []Plugin) map[PluginKind][]Plugin {
 	}
 	for kind := range groups {
 		g := groups[kind]
-		sort.Slice(g, func(i, j int) bool { return g[i].Name < g[j].Name })
+		slices.SortFunc(g, func(a, b Plugin) int { return strings.Compare(a.Name, b.Name) })
 		groups[kind] = g
 	}
 	return groups
@@ -269,18 +269,18 @@ func groupPlugins(plugins []Plugin) map[PluginKind][]Plugin {
 // description off the next column. Names longer than the cap render
 // without alignment.
 func groupNameWidth(group []Plugin) int {
-	const cap = 24
-	maxWidth := 0
+	const maxNameWidth = 24
+	width := 0
 	for _, p := range group {
 		w := len(displayName(p))
-		if w > maxWidth {
-			maxWidth = w
+		if w > width {
+			width = w
 		}
 	}
-	if maxWidth > cap {
-		return cap
+	if width > maxNameWidth {
+		return maxNameWidth
 	}
-	return maxWidth
+	return width
 }
 
 // displayName renders the Name@Version form when Version is

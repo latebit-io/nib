@@ -55,6 +55,11 @@ type Token struct {
 // Concrete implementations (e.g. tree-sitter-backed) live outside this
 // package so consumers of the interface have no language-specific
 // dependencies.
+//
+// Implementations should pass [github.com/latebit-io/nib/engine/contracttest.Highlighter]
+// — the fixture verifies Parse over empty and arbitrary input,
+// HighlightLine bounds-handling, repeated Parse safety, and Close
+// safety.
 type Highlighter interface {
 	// Parse parses the given source and caches tokens per line.
 	// Called on initial set and whenever the buffer content changes

@@ -9,6 +9,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/contracttest"
 )
 
 // flakyProvider returns errFail on the first n calls then succeeds.
@@ -217,4 +218,20 @@ type providerFunc func(context.Context, []llm.Message, []llm.ToolDef) (<-chan ll
 
 func (f providerFunc) Stream(ctx context.Context, m []llm.Message, t []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	return f(ctx, m, t)
+}
+
+// TestRetryProvider_SatisfiesContract verifies the retry decorator
+// passes the [llm.Provider] contract suite when wrapping a happy-path
+// inner. Locks in the invariant that adding/extending the retry
+// decorator must not break channel-closure, no-events-after-Done, or
+// concurrent-Stream guarantees.
+func TestRetryProvider_SatisfiesContract(t *testing.T) {
+	contracttest.Provider(t, func() llm.Provider {
+		// Inner succeeds on first call; retry policy never fires.
+		inner := &flakyProvider{failUntil: 0}
+		return kit.DecorateProvider(inner, WithRetry(RetryPolicy{
+			MaxAttempts: 3,
+			IsRetryable: func(error) bool { return true },
+		}))
+	})
 }

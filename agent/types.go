@@ -15,6 +15,10 @@ import (
 // must be safe to invoke concurrently when registered with concurrent
 // execution; per-tool state (caches, retry counters) needs its own
 // synchronization.
+//
+// Implementations should pass [github.com/latebit-io/nib/kit/contracttest.Tool]
+// — the fixture verifies Definition() shape and stability, panic-free
+// handling of malformed/empty arguments, and concurrent Execute safety.
 type Tool interface {
 	// Definition returns the tool's function schema for the LLM.
 	Definition() llm.ToolDef

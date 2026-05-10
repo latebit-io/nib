@@ -8,6 +8,8 @@ import (
 
 	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/contracttest"
 	kitmemory "github.com/latebit-io/nib/kit/memory"
 )
 
@@ -543,4 +545,22 @@ func TestToolDefinitions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTools_SatisfyContract verifies each of the four memory tools
+// conforms to the [kit.Tool] contract.
+func TestTools_SatisfyContract(t *testing.T) {
+	store := &mockStore{}
+	t.Run("FetchTool", func(t *testing.T) {
+		contracttest.Tool(t, func() kit.Tool { return NewFetchTool(store) })
+	})
+	t.Run("PublishTool", func(t *testing.T) {
+		contracttest.Tool(t, func() kit.Tool { return NewPublishTool(store) })
+	})
+	t.Run("AppendTool", func(t *testing.T) {
+		contracttest.Tool(t, func() kit.Tool { return NewAppendTool(store) })
+	})
+	t.Run("ListTool", func(t *testing.T) {
+		contracttest.Tool(t, func() kit.Tool { return NewListTool(store) })
+	})
 }

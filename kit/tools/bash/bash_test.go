@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/contracttest"
 )
 
 func bashCall(command string) llm.ToolCall {
@@ -253,4 +255,10 @@ func TestHeadTailWriter_TotalTracking(t *testing.T) {
 	if !strings.Contains(got, "4 bytes collapsed") {
 		t.Errorf("expected 4 bytes collapsed, got %q", got)
 	}
+}
+
+// TestTool_SatisfiesContract verifies the bash tool conforms to the
+// [kit.Tool] contract.
+func TestTool_SatisfiesContract(t *testing.T) {
+	contracttest.Tool(t, func() kit.Tool { return New(t.TempDir()) })
 }

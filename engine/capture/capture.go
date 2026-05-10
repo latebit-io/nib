@@ -50,6 +50,11 @@ type Event struct {
 // references) before releasing the caller, otherwise a post-return
 // mutation races with the dispatch goroutine. The NoopSink and the
 // demarkus Sink both honour this contract.
+//
+// Implementations should pass [github.com/latebit-io/nib/engine/contracttest.SessionEventSink]
+// — the fixture verifies Append over zero/populated/nil-payload events,
+// concurrent-Append safety, post-return Payload-snapshot (under -race),
+// and Append-after-Close not panicking.
 type SessionEventSink interface {
 	// Append records an event. Returns an error only on unrecoverable sink
 	// failure; transient issues (buffer full, RPC retry) should be logged

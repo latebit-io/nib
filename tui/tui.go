@@ -43,9 +43,9 @@ type Config struct {
 	// (research, refactor) can plug in by satisfying the same port.
 	Agent kit.AgentLifecycle
 
-	// AgentCallbacks holds callbacks that require a live agent.
-	// Ignored when Agent is nil.
-	AgentCallbacks AgentCallbacks
+	// CodingCallbacks holds coding-flavored callbacks that require a
+	// live agent. Ignored when Agent is nil.
+	CodingCallbacks CodingCallbacks
 
 	// LLM holds LLM-related callbacks (model listing, profiles).
 	// Optional — nil disables model switching UI.
@@ -62,8 +62,13 @@ type Config struct {
 	HighlighterFactory syntax.HighlighterFactory
 }
 
-// AgentCallbacks groups callbacks that require a live agent.
-type AgentCallbacks struct {
+// CodingCallbacks groups frontend callbacks that depend on coding-agent
+// concepts (autonomy policy for edit approval, coding style cycling,
+// style evaluator). The naming is deliberate: the type signature
+// documents which Config fields a non-coding consumer can leave zero.
+// Promote a callback up to a future generic AgentCallbacks when its
+// parameter types and semantics no longer reference coding-only state.
+type CodingCallbacks struct {
 	// OnDialChange is called when the autonomy dial changes.
 	OnDialChange func(level session.AutonomyLevel)
 
@@ -157,17 +162,17 @@ func New(cfg Config) *App {
 	// Wire agent callbacks.
 	if cfg.Agent != nil {
 		appPtr.AgentPane.SetHasAgent(true)
-		appPtr.OnDialChange = cfg.AgentCallbacks.OnDialChange
-		appPtr.CycleStyle = cfg.AgentCallbacks.CycleStyle
-		appPtr.ToggleEvaluator = cfg.AgentCallbacks.ToggleEvaluator
-		appPtr.ToggleTerse = cfg.AgentCallbacks.ToggleTerse
-		if cfg.AgentCallbacks.InitialStyleName != "" {
-			appPtr.SetStyleName(cfg.AgentCallbacks.InitialStyleName)
+		appPtr.OnDialChange = cfg.CodingCallbacks.OnDialChange
+		appPtr.CycleStyle = cfg.CodingCallbacks.CycleStyle
+		appPtr.ToggleEvaluator = cfg.CodingCallbacks.ToggleEvaluator
+		appPtr.ToggleTerse = cfg.CodingCallbacks.ToggleTerse
+		if cfg.CodingCallbacks.InitialStyleName != "" {
+			appPtr.SetStyleName(cfg.CodingCallbacks.InitialStyleName)
 		}
-		if cfg.AgentCallbacks.InitialEvaluatorEnabled {
+		if cfg.CodingCallbacks.InitialEvaluatorEnabled {
 			appPtr.SetEvaluatorEnabled(true)
 		}
-		if cfg.AgentCallbacks.InitialTerse {
+		if cfg.CodingCallbacks.InitialTerse {
 			appPtr.SetTerse(true)
 		}
 	}

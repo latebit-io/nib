@@ -41,6 +41,27 @@ type apiKeyEnteredMsg struct {
 	key     string
 }
 
+// setAgentCallbacksMsg installs generic agent callbacks on the
+// AppModel from inside the Update goroutine. Constructed via
+// [SetAgentCallbacksMsg]; sent through Program.Send so the field
+// writes happen on the single-threaded Bubble Tea event loop —
+// otherwise post-Run callers would race the loop's reads.
+type setAgentCallbacksMsg struct {
+	toggleTerse  func(enabled bool) bool
+	initialTerse bool
+}
+
+// setCodingCallbacksMsg installs coding-flavored agent callbacks on
+// the AppModel from inside the Update goroutine. Same race-avoidance
+// rationale as [setAgentCallbacksMsg].
+type setCodingCallbacksMsg struct {
+	onDialChange            func(level session.AutonomyLevel)
+	cycleStyle              func() string
+	toggleEvaluator         func(enabled bool) bool
+	initialStyleName        string
+	initialEvaluatorEnabled bool
+}
+
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
 // reads Session state to render, and adapts agent events to tea.Msg.
@@ -197,6 +218,34 @@ func OAuthConnectResult(profile string, err error) tea.Msg {
 	return oauthConnectResultMsg{profile: profile, err: err}
 }
 
+// SetAgentCallbacksMsg constructs a tea.Msg that installs generic
+// agent callbacks on the AppModel. Routed through Program.Send so
+// the field assignment happens inside the single-threaded Update
+// goroutine — calling code from outside the event loop must use this
+// path (or Config-time wiring) to stay race-free.
+func SetAgentCallbacksMsg(toggleTerse func(enabled bool) bool, initialTerse bool) tea.Msg {
+	return setAgentCallbacksMsg{toggleTerse: toggleTerse, initialTerse: initialTerse}
+}
+
+// SetCodingCallbacksMsg constructs a tea.Msg that installs
+// coding-flavored agent callbacks on the AppModel. Same race-avoidance
+// rationale as [SetAgentCallbacksMsg].
+func SetCodingCallbacksMsg(
+	onDialChange func(level session.AutonomyLevel),
+	cycleStyle func() string,
+	toggleEvaluator func(enabled bool) bool,
+	initialStyleName string,
+	initialEvaluatorEnabled bool,
+) tea.Msg {
+	return setCodingCallbacksMsg{
+		onDialChange:            onDialChange,
+		cycleStyle:              cycleStyle,
+		toggleEvaluator:         toggleEvaluator,
+		initialStyleName:        initialStyleName,
+		initialEvaluatorEnabled: initialEvaluatorEnabled,
+	}
+}
+
 // NewApp creates the application model.
 func NewApp(sess *session.Session) AppModel {
 	km := DefaultKeymap()
@@ -332,6 +381,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleAPIKeyEntered(msg)
 	case oauthConnectResultMsg:
 		return m.handleOAuthConnectResult(msg)
+	case setAgentCallbacksMsg:
+		return m.handleSetAgentCallbacks(msg)
+	case setCodingCallbacksMsg:
+		return m.handleSetCodingCallbacks(msg)
 	case modelListMsg:
 		return m.handleModelList(msg)
 	case ModelSelectorResultMsg:

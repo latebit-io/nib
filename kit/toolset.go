@@ -7,11 +7,16 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit/command"
 )
 
-// Toolset is a composable bundle of tools and hooks. Construct with a
-// struct literal; combine with [Merge]. The zero value is a valid empty
-// toolset that contributes nothing when merged.
+// Toolset is a composable bundle of tools, hooks, and slash commands.
+// Construct with a struct literal; combine with [Merge]. The zero value
+// is a valid empty toolset that contributes nothing when merged.
+//
+// Toolset is the canonical plug-in registration unit. A plug-in package
+// (bundled or third-party) exposes a single Plugins() Toolset function;
+// the composition root composes them via Merge.
 type Toolset struct {
 	// Tools are the tool implementations in this bundle. Order is
 	// preserved through Merge for stable LLM tool-list ordering.
@@ -21,24 +26,39 @@ type Toolset struct {
 	// merged, each non-nil hook field chains with hooks from other
 	// toolsets in Merge order.
 	Hooks Hooks
+
+	// Commands are the slash commands this bundle contributes. Order
+	// is preserved through Merge. Merge does NOT deduplicate; the
+	// composition root registers them into a [command.Registry], which
+	// owns precedence-based shadowing (project > global > MCP > builtin)
+	// and same-kind collision detection. Plug-ins ship commands at the
+	// SourceBuiltin kind; markdown loaders supply higher-precedence
+	// kinds separately.
+	Commands []command.Command
 }
 
-// Merge combines toolsets into a single Toolset. Tools are concatenated
-// in order. Hook functions chain sequentially — see each hook field's
-// chaining contract below. Merge does NOT deduplicate tools; that
-// happens at [New] time where builtin-vs-extra precedence applies.
+// Merge combines toolsets into a single Toolset. Tools and Commands are
+// concatenated in order. Hook functions chain sequentially — see each
+// hook field's chaining contract below. Merge does NOT deduplicate
+// tools or commands; tool dedup happens at [New] time, and command
+// dedup is the [command.Registry]'s responsibility (precedence model).
 //
 // Merge is associative: Merge(a, Merge(b, c)) equals Merge(a, b, c).
 // The zero-value Toolset contributes nothing.
 func Merge(sets ...Toolset) Toolset {
-	var tools []Tool
+	var (
+		tools    []Tool
+		commands []command.Command
+	)
 	for _, s := range sets {
 		tools = append(tools, s.Tools...)
+		commands = append(commands, s.Commands...)
 	}
 
 	return Toolset{
-		Tools: tools,
-		Hooks: mergeHooks(sets),
+		Tools:    tools,
+		Hooks:    mergeHooks(sets),
+		Commands: commands,
 	}
 }
 

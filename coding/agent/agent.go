@@ -543,8 +543,7 @@ func (a *Agent) buildKitAgent() {
 	kitAgent, err := kit.New(kit.Config{
 		Provider: a.providerProxy,
 		Events:   a.kitEvents,
-		Tools:    kitTools,
-		Hooks:    hooks,
+		Toolset:  kit.Toolset{Tools: kitTools, Hooks: hooks},
 	})
 	if err != nil {
 		panic(fmt.Sprintf("agent.New: kit construction failed: %v", err))

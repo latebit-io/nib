@@ -150,7 +150,7 @@ func TestNew_PropagatesFoundationValidation(t *testing.T) {
 	_, err := kit.New(kit.Config{
 		Provider: errorProvider{err: errors.New("x")},
 		Events:   make(chan<- event.Event, 1),
-		Tools:    []kit.Tool{brokenTool{}},
+		Toolset:  kit.Toolset{Tools: []kit.Tool{brokenTool{}}},
 	})
 	if !errors.Is(err, kit.ErrInvalidOptions) {
 		t.Fatalf("want ErrInvalidOptions, got %v", err)
@@ -250,8 +250,7 @@ func TestPrompt_CleanRunDoneSuccessTrue(t *testing.T) {
 	a, err := kit.New(kit.Config{
 		Provider: provider,
 		Events:   events,
-		Tools:    []kit.Tool{tool},
-		Hooks:    hooks,
+		Toolset:  kit.Toolset{Tools: []kit.Tool{tool}, Hooks: hooks},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -292,7 +291,7 @@ func TestPark_TranslatesAgentParkedToAgentWaitingInStreamOrder(t *testing.T) {
 		},
 	}
 
-	a, err := kit.New(kit.Config{Provider: provider, Events: events, Hooks: hooks})
+	a, err := kit.New(kit.Config{Provider: provider, Events: events, Toolset: kit.Toolset{Hooks: hooks}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -393,8 +392,7 @@ func TestUnsuccessful_ResetBetweenRuns(t *testing.T) {
 	a, err := kit.New(kit.Config{
 		Provider: provider,
 		Events:   events,
-		Tools:    []kit.Tool{nopTool{name: "echo"}},
-		Hooks:    hooks,
+		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -511,8 +509,7 @@ func TestUnsuccessful_NoCrossRunPoisoning(t *testing.T) {
 	a, err := kit.New(kit.Config{
 		Provider: provider,
 		Events:   events,
-		Tools:    []kit.Tool{nopTool{name: "echo"}},
-		Hooks:    hooks,
+		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

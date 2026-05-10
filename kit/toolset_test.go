@@ -8,8 +8,18 @@ import (
 	agentevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/event"
 )
+
+// stubCommand is a test fake for [command.Command]. It implements only
+// the marker interface — neither HandlerCommand nor PromptCommand —
+// because [Merge] does not dispatch commands, only concatenates them.
+type stubCommand struct{ name string }
+
+func (s stubCommand) Definition() command.Definition {
+	return command.Definition{Name: s.name, Source: command.Source{Kind: command.SourceBuiltin}}
+}
 
 // resultTool returns a fixed result and records whether Execute was called.
 type resultTool struct {
@@ -209,6 +219,57 @@ func TestMerge_Associative_ErrorPreservesPartialState(t *testing.T) {
 	}
 	if !res.Terminate {
 		t.Fatal("Terminate should be true from b (OR'd before error)")
+	}
+}
+
+// --- Merge: command concatenation ---
+
+func TestMerge_ConcatenatesCommandsInOrder(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Commands: []command.Command{stubCommand{name: "alpha"}}}
+	b := kit.Toolset{Commands: []command.Command{stubCommand{name: "beta"}, stubCommand{name: "gamma"}}}
+	merged := kit.Merge(a, b)
+
+	want := []string{"alpha", "beta", "gamma"}
+	if len(merged.Commands) != len(want) {
+		t.Fatalf("got %d commands, want %d", len(merged.Commands), len(want))
+	}
+	for i, w := range want {
+		got := merged.Commands[i].Definition().Name
+		if got != w {
+			t.Errorf("command[%d] = %q, want %q", i, got, w)
+		}
+	}
+}
+
+func TestMerge_NoCommands(t *testing.T) {
+	t.Parallel()
+	merged := kit.Merge(kit.Toolset{}, kit.Toolset{})
+	if len(merged.Commands) != 0 {
+		t.Fatalf("got %d commands, want 0", len(merged.Commands))
+	}
+}
+
+func TestMerge_CommandsAssociative(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Commands: []command.Command{stubCommand{name: "a"}}}
+	b := kit.Toolset{Commands: []command.Command{stubCommand{name: "b"}}}
+	c := kit.Toolset{Commands: []command.Command{stubCommand{name: "c"}}}
+
+	left := kit.Merge(a, kit.Merge(b, c))
+	right := kit.Merge(kit.Merge(a, b), c)
+	flat := kit.Merge(a, b, c)
+
+	if len(flat.Commands) != 3 || len(left.Commands) != 3 || len(right.Commands) != 3 {
+		t.Fatalf("lengths differ: left=%d right=%d flat=%d", len(left.Commands), len(right.Commands), len(flat.Commands))
+	}
+	for i := range flat.Commands {
+		fn := flat.Commands[i].Definition().Name
+		ln := left.Commands[i].Definition().Name
+		rn := right.Commands[i].Definition().Name
+		if ln != fn || rn != fn {
+			t.Errorf("command[%d]: left=%q right=%q flat=%q", i, ln, rn, fn)
+		}
 	}
 }
 
@@ -694,11 +755,10 @@ func TestNew_DeduplicatesToolsFirstWins(t *testing.T) {
 	a, err := kit.New(kit.Config{
 		Provider: provider,
 		Events:   events,
-		Tools:    []kit.Tool{directTool},
-		Hooks:    hooks,
-		Toolsets: []kit.Toolset{
-			{Tools: []kit.Tool{toolsetTool, nopTool{name: "search"}}},
-		},
+		Toolset: kit.Merge(
+			kit.Toolset{Tools: []kit.Tool{directTool}, Hooks: hooks},
+			kit.Toolset{Tools: []kit.Tool{toolsetTool, nopTool{name: "search"}}},
+		),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -748,9 +808,10 @@ func TestNew_ToolsetsHooksChainWithDirectHooks(t *testing.T) {
 	a, err := kit.New(kit.Config{
 		Provider: provider,
 		Events:   events,
-		Tools:    []kit.Tool{nopTool{name: "echo"}},
-		Hooks:    hooks,
-		Toolsets: []kit.Toolset{ts},
+		Toolset: kit.Merge(
+			kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
+			ts,
+		),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -768,14 +829,74 @@ func TestNew_ToolsetsHooksChainWithDirectHooks(t *testing.T) {
 	}
 }
 
+// fakePluginPackage simulates the canonical external-plug-in shape:
+// a package exposes a Plugins() function returning a [kit.Toolset]
+// bundling its tools, hooks, and commands. The composition root
+// merges Plugins() outputs into a single Toolset for kit.New. This
+// test demonstrates the convention works end-to-end without kit
+// having to know anything about the plug-in's internals.
+type fakePluginPackage struct {
+	beforeCalls int
+}
+
+func (p *fakePluginPackage) Plugins() kit.Toolset {
+	return kit.Toolset{
+		Tools: []kit.Tool{nopTool{name: "fake-tool"}},
+		Hooks: kit.Hooks{
+			BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+				p.beforeCalls++
+				return kit.BeforeToolCallResult{}, nil
+			},
+		},
+		Commands: []command.Command{stubCommand{name: "fake-cmd"}},
+	}
+}
+
+func TestPluginsConvention_MergesIntoToolsetAndDispatches(t *testing.T) {
+	t.Parallel()
+
+	pkg := &fakePluginPackage{}
+	provider := newScriptedProvider(streamWithToolCall("call-1", "fake-tool", `{}`))
+	events := make(chan event.Event, 32)
+
+	terminator := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: true}, nil
+		},
+	}}
+
+	merged := kit.Merge(pkg.Plugins(), terminator)
+
+	if len(merged.Tools) != 1 || merged.Tools[0].Definition().Function.Name != "fake-tool" {
+		t.Fatalf("merged Tools wrong: %+v", merged.Tools)
+	}
+	if len(merged.Commands) != 1 || merged.Commands[0].Definition().Name != "fake-cmd" {
+		t.Fatalf("merged Commands wrong: %+v", merged.Commands)
+	}
+
+	a, err := kit.New(kit.Config{Provider: provider, Events: events, Toolset: merged})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	a.WaitForIdle()
+	drainUntil(events, untilDone)
+
+	if pkg.beforeCalls != 1 {
+		t.Errorf("BeforeToolCall fired %d times, want 1", pkg.beforeCalls)
+	}
+}
+
 func TestNew_NilToolPassesToFoundationValidation(t *testing.T) {
 	t.Parallel()
 	_, err := kit.New(kit.Config{
 		Provider: newScriptedProvider(),
 		Events:   make(chan event.Event, 1),
-		Toolsets: []kit.Toolset{
-			{Tools: []kit.Tool{nil}},
-		},
+		Toolset:  kit.Toolset{Tools: []kit.Tool{nil}},
 	})
 	if !errors.Is(err, kit.ErrInvalidOptions) {
 		t.Fatalf("want ErrInvalidOptions for nil tool, got %v", err)

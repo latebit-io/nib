@@ -213,6 +213,39 @@ func (a *App) Model() *ui.AppModel { return a.model }
 // Program returns the tea.Program for sending async messages.
 func (a *App) Program() *tea.Program { return a.program }
 
+// SetAgentCallbacks installs generic agent callbacks. Late-binding:
+// callable after [App.Run] has started, to support binaries that
+// construct the agent lazily (e.g., on first OAuth connect via the
+// model switcher). Calling with a zero-valued [AgentCallbacks] clears
+// any previously-installed callbacks. Idempotent — last call wins;
+// per-handler nil-checks at every dispatch site already gate dispatch
+// when a field is nil. Mirrors the generic block of [Config]-time
+// wiring in [New] so Config consumers and post-construction consumers
+// see the same surface.
+func (a *App) SetAgentCallbacks(cb AgentCallbacks) {
+	a.model.ToggleTerse = cb.ToggleTerse
+	if cb.InitialTerse {
+		a.model.SetTerse(true)
+	}
+}
+
+// SetCodingCallbacks installs coding-flavored agent callbacks.
+// Late-binding for the same reason as [App.SetAgentCallbacks] — the
+// flagship binary's lazy-OAuth path constructs the coding agent
+// after [App.Run] has begun, so the closures referencing it must
+// install on a running app. Last call wins.
+func (a *App) SetCodingCallbacks(cb CodingCallbacks) {
+	a.model.OnDialChange = cb.OnDialChange
+	a.model.CycleStyle = cb.CycleStyle
+	a.model.ToggleEvaluator = cb.ToggleEvaluator
+	if cb.InitialStyleName != "" {
+		a.model.SetStyleName(cb.InitialStyleName)
+	}
+	if cb.InitialEvaluatorEnabled {
+		a.model.SetEvaluatorEnabled(true)
+	}
+}
+
 // Run starts the Bubble Tea event loop and blocks until the user
 // quits. On return, all resources (watcher, agent) are cleaned up.
 // The caller is responsible for closing the session and any deferred

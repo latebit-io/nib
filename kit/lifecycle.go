@@ -18,7 +18,7 @@ type AgentLifecycle interface {
 	// Close releases the resources the agent holds. After Close
 	// returns, no further events will be emitted on the agent's
 	// event channel and no further runs may be started. Idempotent;
-	// safe to call exactly once.
+	// safe to call more than once.
 	Close()
 }
 

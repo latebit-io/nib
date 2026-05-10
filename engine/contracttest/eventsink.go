@@ -3,7 +3,6 @@ package contracttest
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,13 +94,11 @@ func sinkConcurrentAppend(t *testing.T, ctor func() capture.SessionEventSink) {
 	const n = 16
 	var wg sync.WaitGroup
 	wg.Add(n)
-	var failures atomic.Int32
 	for i := range n {
 		go func(i int) {
 			defer wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
-					failures.Add(1)
 					t.Errorf("contract: concurrent Append panicked (goroutine %d): %v", i, r)
 				}
 			}()
@@ -112,7 +109,6 @@ func sinkConcurrentAppend(t *testing.T, ctor func() capture.SessionEventSink) {
 				Payload:   map[string]any{"i": i},
 			}
 			if err := s.Append(context.Background(), ev); err != nil {
-				failures.Add(1)
 				t.Errorf("contract: concurrent Append (goroutine %d) returned error: %v", i, err)
 			}
 		}(i)

@@ -131,16 +131,24 @@ func Provider(t *testing.T, ctor func() llm.Provider) {
 		}
 	})
 
-	t.Run("TruncatedEventNeverCarriesExecutableToolCalls", func(t *testing.T) {
+	t.Run("TruncatedImpliesDone", func(t *testing.T) {
 		t.Parallel()
-		// Per [llm.StreamEvent.Truncated]'s contract, ToolCalls on a
-		// Truncated=true event may have incomplete arguments and "must
-		// not be executed." The fixture cannot force a truncation on
+		// Per [llm.StreamEvent.Truncated]'s contract, Truncated=true
+		// is a terminal condition: the provider stopped mid-generation
+		// because the output token limit was reached, so no further
+		// events can follow. The fixture cannot force a truncation on
 		// an arbitrary provider, so this subtest only verifies that
 		// IF a Truncated=true event appears on the happy-path stream,
-		// the surrounding invariant holds: Truncated implies Done
-		// (truncation is a terminal condition). Providers that never
-		// emit Truncated=true (the common case) pass trivially.
+		// the surrounding invariant holds: Truncated implies Done.
+		// Providers that never emit Truncated=true (the common case)
+		// pass trivially.
+		//
+		// The companion claim — "ToolCalls on a Truncated event may
+		// have incomplete arguments and must not be executed" — is a
+		// caller-side discipline (the agent loop must not dispatch
+		// truncated tool calls), not a provider-side invariant the
+		// fixture can verify. The provider is allowed to surface the
+		// partial calls; refusing to execute them is the agent's job.
 		p := ctor()
 		ch, err := p.Stream(context.Background(), nil, nil)
 		if err != nil {

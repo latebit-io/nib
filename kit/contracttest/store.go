@@ -207,11 +207,18 @@ func uniquePath(t *testing.T, kind string) string {
 	return fmt.Sprintf("/contracttest/%s-%d-%d.md", kind, time.Now().UnixNano(), uniqueCounter.next())
 }
 
-// containsPath reports whether want appears in entries by full match,
-// or as a suffix (some backends return directory-relative paths).
+// containsPath reports whether want appears in entries. Accepts two
+// shapes a backend may return: the full want path, or the basename
+// (some backends return directory-relative entries instead of
+// fully-qualified paths). Stricter than blanket suffix matching —
+// rejects entries that are arbitrary suffixes of want (e.g. an entry
+// "/doc.md" must not silently match a wanted path
+// "/contracttest/list-123/doc.md") since that would let a backend
+// returning wrong-but-overlapping paths pass the assertion.
 func containsPath(entries []string, want string) bool {
+	base := want[strings.LastIndex(want, "/")+1:]
 	for _, e := range entries {
-		if e == want || strings.HasSuffix(want, e) || strings.HasSuffix(e, want) {
+		if e == want || e == base {
 			return true
 		}
 	}

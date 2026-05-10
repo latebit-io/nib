@@ -13,8 +13,6 @@ import (
 	"github.com/latebit-io/nib/kit/event"
 	"github.com/latebit-io/nib/kit/headless"
 	"github.com/latebit-io/nib/kit/memory"
-	"github.com/latebit-io/nib/kit/tools/bash"
-	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 )
 
 // eventBufferSize is the kit events channel capacity. Generous enough
@@ -65,15 +63,7 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 		Provider:     provider,
 		Events:       events,
 		SystemPrompt: buildSystemPrompt(sessionID),
-		Toolset: kit.Toolset{
-			Tools: []kit.Tool{
-				bash.New(root),
-				memorytools.NewFetchTool(store),
-				memorytools.NewPublishTool(store),
-				memorytools.NewAppendTool(store),
-				memorytools.NewListTool(store),
-			},
-		},
+		Toolset:      nibsterToolset(root, store),
 	})
 	if err != nil {
 		return setupErr("agent: %v", err)

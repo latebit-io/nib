@@ -55,14 +55,18 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// of running until their next HTTP round-trip times out.
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
-	// Parse args: [--debug] [file]
+	// Parse args: [--debug] [--plugins] [file]
 	args := os.Args[1:]
 	debug := false
+	pluginsOnly := false
 	var filePath string
 	for _, a := range args {
-		if a == "--debug" {
+		switch a {
+		case "--debug":
 			debug = true
-		} else {
+		case "--plugins":
+			pluginsOnly = true
+		default:
 			filePath = a
 		}
 	}
@@ -644,6 +648,11 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Wire agent handlers if credentials were available at startup.
 	if ag != nil {
 		wireAgentHandlers()
+	}
+
+	if pluginsOnly {
+		fmt.Print(buildPluginsManifest(ag, cmdRegistry, mem.Store, llmResolved))
+		return nil
 	}
 
 	slog.Debug("startup: running TUI")

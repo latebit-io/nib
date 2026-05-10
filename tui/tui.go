@@ -43,8 +43,12 @@ type Config struct {
 	// (research, refactor) can plug in by satisfying the same port.
 	Agent kit.AgentLifecycle
 
-	// CodingCallbacks holds coding-flavored callbacks that require a
-	// live agent. Ignored when Agent is nil.
+	// AgentCallbacks holds generic frontend callbacks that any
+	// kit-level agent can supply. Wired only when Agent is non-nil.
+	AgentCallbacks AgentCallbacks
+
+	// CodingCallbacks holds coding-flavored callbacks that depend on
+	// coding-agent concepts. Wired only when Agent is non-nil.
 	CodingCallbacks CodingCallbacks
 
 	// LLM holds LLM-related callbacks (model listing, profiles).
@@ -62,12 +66,25 @@ type Config struct {
 	HighlighterFactory syntax.HighlighterFactory
 }
 
+// AgentCallbacks groups generic frontend callbacks that any kit-level
+// agent can supply. A non-coding kit consumer (research agent, refactor
+// agent) populates these without touching CodingCallbacks. Today the
+// surface is small (output verbosity); promote a CodingCallbacks field
+// up to AgentCallbacks when its parameter types and semantics no
+// longer reference coding-only state.
+type AgentCallbacks struct {
+	// ToggleTerse enables/disables terse output mode. Returns the
+	// new state.
+	ToggleTerse func(enabled bool) bool
+
+	// InitialTerse is the terse mode state at startup.
+	InitialTerse bool
+}
+
 // CodingCallbacks groups frontend callbacks that depend on coding-agent
 // concepts (autonomy policy for edit approval, coding style cycling,
 // style evaluator). The naming is deliberate: the type signature
 // documents which Config fields a non-coding consumer can leave zero.
-// Promote a callback up to a future generic AgentCallbacks when its
-// parameter types and semantics no longer reference coding-only state.
 type CodingCallbacks struct {
 	// OnDialChange is called when the autonomy dial changes.
 	OnDialChange func(level session.AutonomyLevel)
@@ -78,17 +95,11 @@ type CodingCallbacks struct {
 	// ToggleEvaluator enables/disables the style evaluator. Returns new state.
 	ToggleEvaluator func(enabled bool) bool
 
-	// ToggleTerse enables/disables terse mode. Returns new state.
-	ToggleTerse func(enabled bool) bool
-
 	// InitialStyleName is the coding style name at startup.
 	InitialStyleName string
 
 	// InitialEvaluatorEnabled is the evaluator state at startup.
 	InitialEvaluatorEnabled bool
-
-	// InitialTerse is the terse mode state at startup.
-	InitialTerse bool
 }
 
 // LLMCallbacks groups LLM-related UI callbacks.
@@ -159,21 +170,27 @@ func New(cfg Config) *App {
 		appPtr.HasOAuthToken = cfg.OAuth.HasOAuthToken
 	}
 
-	// Wire agent callbacks.
+	// Wire agent callbacks. Generic and coding-flavored bundles are
+	// populated independently — a non-coding consumer wires
+	// AgentCallbacks alone and leaves CodingCallbacks zero.
 	if cfg.Agent != nil {
 		appPtr.AgentPane.SetHasAgent(true)
+
+		// Generic.
+		appPtr.ToggleTerse = cfg.AgentCallbacks.ToggleTerse
+		if cfg.AgentCallbacks.InitialTerse {
+			appPtr.SetTerse(true)
+		}
+
+		// Coding-flavored.
 		appPtr.OnDialChange = cfg.CodingCallbacks.OnDialChange
 		appPtr.CycleStyle = cfg.CodingCallbacks.CycleStyle
 		appPtr.ToggleEvaluator = cfg.CodingCallbacks.ToggleEvaluator
-		appPtr.ToggleTerse = cfg.CodingCallbacks.ToggleTerse
 		if cfg.CodingCallbacks.InitialStyleName != "" {
 			appPtr.SetStyleName(cfg.CodingCallbacks.InitialStyleName)
 		}
 		if cfg.CodingCallbacks.InitialEvaluatorEnabled {
 			appPtr.SetEvaluatorEnabled(true)
-		}
-		if cfg.CodingCallbacks.InitialTerse {
-			appPtr.SetTerse(true)
 		}
 	}
 
@@ -195,6 +212,41 @@ func (a *App) Model() *ui.AppModel { return a.model }
 
 // Program returns the tea.Program for sending async messages.
 func (a *App) Program() *tea.Program { return a.program }
+
+// SetAgentCallbacks installs generic agent callbacks. Late-binding:
+// callable any time — pre-Run (during startup wiring) or post-Run
+// (the lazy-OAuth model-switcher path). Idempotent — last call wins.
+//
+// The callbacks are routed through [tea.Program.Send] into the
+// AppModel's Update goroutine so the field assignments happen on
+// Bubble Tea's single-threaded event loop (race-free regardless of
+// caller goroutine). Bubble Tea's Send is *blocking* on its
+// unbuffered channel pre-Run, so the dispatch runs in a spawned
+// goroutine — the caller never blocks; the goroutine completes
+// when Run begins pumping and the message lands. Field assignment
+// is therefore asynchronous: the caller cannot rely on the field
+// being set when SetAgentCallbacks returns. In practice this is
+// fine because the assigned fields drive keystroke handlers, and
+// no keystroke can fire until Run has started and processed the
+// queued messages.
+func (a *App) SetAgentCallbacks(cb AgentCallbacks) {
+	msg := ui.SetAgentCallbacksMsg(cb.ToggleTerse, cb.InitialTerse)
+	go a.program.Send(msg)
+}
+
+// SetCodingCallbacks installs coding-flavored agent callbacks.
+// Same any-time semantics, race-avoidance rationale, and async
+// caveat as [App.SetAgentCallbacks].
+func (a *App) SetCodingCallbacks(cb CodingCallbacks) {
+	msg := ui.SetCodingCallbacksMsg(
+		cb.OnDialChange,
+		cb.CycleStyle,
+		cb.ToggleEvaluator,
+		cb.InitialStyleName,
+		cb.InitialEvaluatorEnabled,
+	)
+	go a.program.Send(msg)
+}
 
 // Run starts the Bubble Tea event loop and blocks until the user
 // quits. On return, all resources (watcher, agent) are cleaned up.

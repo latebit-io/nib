@@ -1,5 +1,7 @@
 package ui
 
+import tea "charm.land/bubbletea/v2"
+
 // Styling, evaluator, terse, and autonomy-dial callbacks and toggles.
 // Extracted from app.go (Phase 1 of AppModel decomposition).
 
@@ -54,4 +56,33 @@ func (m *AppModel) cycleDial() {
 	if m.OnDialChange != nil {
 		m.OnDialChange(m.dial)
 	}
+}
+
+// handleSetAgentCallbacks installs generic agent callbacks from
+// inside the Update goroutine — the only race-free path for callers
+// that send the message after the Bubble Tea event loop has started.
+// Last call wins; per-handler nil-checks at every dispatch site
+// already gate dispatch when a field is nil.
+func (m *AppModel) handleSetAgentCallbacks(msg setAgentCallbacksMsg) (tea.Model, tea.Cmd) {
+	m.ToggleTerse = msg.toggleTerse
+	if msg.initialTerse {
+		m.SetTerse(true)
+	}
+	return m, nil
+}
+
+// handleSetCodingCallbacks installs coding-flavored agent callbacks
+// from inside the Update goroutine. Same race-avoidance rationale as
+// [AppModel.handleSetAgentCallbacks].
+func (m *AppModel) handleSetCodingCallbacks(msg setCodingCallbacksMsg) (tea.Model, tea.Cmd) {
+	m.OnDialChange = msg.onDialChange
+	m.CycleStyle = msg.cycleStyle
+	m.ToggleEvaluator = msg.toggleEvaluator
+	if msg.initialStyleName != "" {
+		m.SetStyleName(msg.initialStyleName)
+	}
+	if msg.initialEvaluatorEnabled {
+		m.SetEvaluatorEnabled(true)
+	}
+	return m, nil
 }

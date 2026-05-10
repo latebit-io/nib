@@ -458,37 +458,45 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	currentResolved := styleResult.Resolved
 	evaluatorActive := false
 
-	// wireAgentHandlers installs the UI callbacks that require a live agent.
-	// Called once — on startup (when credentials exist) or on the first
-	// successful connect via the model switcher.
+	// wireAgentHandlers installs the UI callbacks that require a live
+	// agent through the typed nibTui.AgentCallbacks / CodingCallbacks
+	// surface. Called once — on startup (when credentials exist) or
+	// on the first successful connect via the model switcher.
+	//
+	// The two Set*Callbacks calls dispatch through tea.Program.Send,
+	// which serializes the field writes into the Bubble Tea Update
+	// goroutine and so stays race-free regardless of which caller
+	// goroutine invokes wireAgentHandlers (startup goroutine pre-Run;
+	// Update goroutine via model switcher post-Run).
 	wireAgentHandlers := func() {
 		ag.SetAutonomous(true)
 
-		app.OnDialChange = func(level session.AutonomyLevel) {
-			ag.SetAutonomous(level.AutoApproveEdits())
-		}
+		tuiApp.SetAgentCallbacks(nibTui.AgentCallbacks{
+			ToggleTerse: func(enabled bool) bool {
+				ag.SetTerse(enabled)
+				if enabled {
+					slog.Info("terse mode: enabled")
+				} else {
+					slog.Info("terse mode: disabled")
+				}
+				return enabled
+			},
+			InitialTerse: true,
+		})
 
-		app.SetTerse(true)
-		app.ToggleTerse = func(enabled bool) bool {
-			ag.SetTerse(enabled)
-			if enabled {
-				slog.Info("terse mode: enabled")
-			} else {
-				slog.Info("terse mode: disabled")
-			}
-			return enabled
-		}
-
+		var initialStyleName string
 		if styleResult.Resolved != nil {
-			app.SetStyleName(styleResult.Resolved.Name)
+			initialStyleName = styleResult.Resolved.Name
 		}
+
+		var cycleStyleFn func() string
 		styleNames := styleResult.Config.StyleNames()
 		if len(styleNames) > 0 {
 			currentStyleKey := ""
 			if styleResult.Config.Active != "" {
 				currentStyleKey = styleResult.Config.Active
 			}
-			app.CycleStyle = func() string {
+			cycleStyleFn = func() string {
 				idx := -1
 				for i, name := range styleNames {
 					if name == currentStyleKey {
@@ -543,33 +551,46 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			}
 		}
 
+		// Build evaluator at startup BEFORE constructing CodingCallbacks
+		// so InitialEvaluatorEnabled reflects whether wiring actually
+		// succeeded (eval may be nil if the provider doesn't support it).
+		initialEvaluator := false
 		if currentResolved != nil && currentResolved.Evaluator {
 			eval := wire.NewStyleEvaluator(currentResolved, provider, llmCfg)
 			if eval != nil {
 				ag.SetEvaluator(eval)
 				evaluatorActive = true
-				app.SetEvaluatorEnabled(true)
+				initialEvaluator = true
 			}
 		}
-		app.ToggleEvaluator = func(enabled bool) bool {
-			if currentResolved == nil {
-				return false
-			}
-			if enabled {
-				eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
-				if eval == nil {
+
+		tuiApp.SetCodingCallbacks(nibTui.CodingCallbacks{
+			OnDialChange: func(level session.AutonomyLevel) {
+				ag.SetAutonomous(level.AutoApproveEdits())
+			},
+			CycleStyle: cycleStyleFn,
+			ToggleEvaluator: func(enabled bool) bool {
+				if currentResolved == nil {
 					return false
 				}
-				ag.SetEvaluator(eval)
-				evaluatorActive = true
-				slog.Info("evaluator: enabled")
-				return true
-			}
-			ag.SetEvaluator(nil)
-			evaluatorActive = false
-			slog.Info("evaluator: disabled")
-			return false
-		}
+				if enabled {
+					eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
+					if eval == nil {
+						return false
+					}
+					ag.SetEvaluator(eval)
+					evaluatorActive = true
+					slog.Info("evaluator: enabled")
+					return true
+				}
+				ag.SetEvaluator(nil)
+				evaluatorActive = false
+				slog.Info("evaluator: disabled")
+				return false
+			},
+			InitialStyleName:        initialStyleName,
+			InitialEvaluatorEnabled: initialEvaluator,
+		})
 	}
 
 	// Model switcher — first call with valid credentials constructs the agent

@@ -7,10 +7,10 @@ package tui
 
 import (
 	tea "charm.land/bubbletea/v2"
-	"github.com/latebit-io/nib/coding/agent"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/engine/syntax"
+	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/tui/ui"
 )
 
@@ -37,8 +37,11 @@ type Config struct {
 	// Events is the shared event channel the TUI reads from.
 	Events chan event.Event
 
-	// Agent is the coding agent (optional — nil for editor-only mode).
-	Agent *agent.Agent
+	// Agent is the kit-level agent the TUI shuts down on exit.
+	// Optional — nil for editor-only mode. *coding.Agent satisfies
+	// this via its embedded kit-agent handle; future agent shapes
+	// (research, refactor) can plug in by satisfying the same port.
+	Agent kit.AgentLifecycle
 
 	// AgentCallbacks holds callbacks that require a live agent.
 	// Ignored when Agent is nil.
@@ -117,7 +120,7 @@ type OAuthCallbacks struct {
 type App struct {
 	model   *ui.AppModel
 	program *tea.Program
-	agent   *agent.Agent
+	agent   kit.AgentLifecycle
 	events  chan event.Event
 	session *session.Session
 }

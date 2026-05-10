@@ -34,19 +34,28 @@ linters:
             - pkg: "github.com/latebit-io/nib/tui/ui"
               desc: "editor must not import tui/ui — the controller is consumed by ui, not the reverse"
 
-        # tui/ui (the inner UI packages) must not reach into application
-        # composition. The umbrella facade tui/tui.go is intentionally
-        # exempted: it takes *agent.Agent in its Config so external
-        # callers can wire a concrete agent into the app — that's the
-        # composition seam, not a layering violation.
+        # tui-wide rule: no part of the reference TUI imports
+        # coding/agent. The lifecycle handle flows through
+        # kit.AgentLifecycle on tui/tui.go's Config; per-concern
+        # adapters (HistoryResetter for /clear, kit.Compactor for the
+        # compactor pane, etc.) live next to their consumers. Adding
+        # a coding/agent import anywhere in tui/ would couple a
+        # frontend to one specific agent shape — exactly the seam the
+        # microkernel + ports-and-adapters value forbids. See
+        # /nib/engineering-values.md.
+        tui-no-coding-agent:
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding/agent"
+              desc: "tui must not import coding/agent — frontends consume an agent through kit.AgentLifecycle (in tui/tui.go) and consumer-defined interfaces (HistoryResetter in tui/command, kit.Compactor wired at the composition root). See /nib/engineering-values.md."
+
+        # tui/ui (the inner UI packages) must not reach into other
+        # composition surfaces beyond the agent ban above.
         tui-ui-no-composition:
           files:
             - "**/ui/*.go"
             - "**/ui/textarea/*.go"
             - "**/editor/*.go"
           deny:
-            - pkg: "github.com/latebit-io/nib/coding/agent"
-              desc: "tui/ui must not import coding/agent directly — agent is consumed via session/event abstractions; concrete agent flows in via the facade"
             - pkg: "github.com/latebit-io/nib/coding/wire"
               desc: "tui/ui must not import coding/wire — wire is a composition root, not a dependency"
             - pkg: "github.com/latebit-io/nib/coding/headless"

@@ -5,15 +5,14 @@
 // loop-lifecycle events into the consumer-facing
 // [github.com/latebit-io/nib/kit/event] vocabulary.
 //
-// The intended consumer pattern:
+// The intended consumer pattern: each plug-in package exposes a
+// Plugins() [Toolset] function; the composition root merges them.
 //
 //	events := make(chan event.Event, 64)
 //	a, err := kit.New(kit.Config{
 //	    Provider: provider,
 //	    Events:   events,
-//	    Tools:    coreTools,
-//	    Hooks:    coreHooks,
-//	    Toolsets:  []kit.Toolset{memoryBundle, mcpBundle},
+//	    Toolset:  kit.Merge(builtin.Plugins(), coding.Plugins(opts)),
 //	})
 //	if err != nil { ... }
 //	go drain(events)
@@ -132,28 +131,16 @@ type Config struct {
 	// and drive runs through [Agent.PromptWithMessages] instead.
 	SystemPrompt string
 
-	// Tools are the tool implementations registered directly. These
-	// appear BEFORE tools from [Toolsets] in the flattened list, giving
-	// them builtin precedence when names collide (first wins).
-	// Each tool's Definition() schema is advertised to the LLM; tool
-	// calls route to Execute(). Tools share the agent's lifetime and
-	// must be safe to invoke concurrently.
-	Tools []Tool
-
-	// Hooks are hooks registered directly. These fire BEFORE any hooks
-	// contributed by [Toolsets]. Nil disables a given hook; the agent
-	// skips it without ceremony. Hooks run synchronously on the loop
-	// goroutine — long-running work should be dispatched off the
-	// hook's call stack.
-	Hooks Hooks
-
-	// Toolsets are composable tool+hook bundles merged in order after
-	// the direct [Tools] and [Hooks] fields. Use for library-provided
-	// bundles that ship their own hooks alongside their tools.
-	// Duplicate tool names across toolsets and direct tools are
-	// resolved at [New] time: first registration wins; later
-	// duplicates are logged and dropped.
-	Toolsets []Toolset
+	// Toolset is the merged plug-in bundle: tools, hooks, and slash
+	// commands. Compose with [Merge]: each plug-in package exposes a
+	// Plugins() [Toolset] function; the composition root merges them
+	// in priority order. Tools registered earlier in the merged
+	// [Toolset.Tools] slice win on name collision (first-wins; later
+	// duplicates are logged and dropped at [New] time). Hooks chain
+	// across the merge per each field's documented semantics.
+	// Commands are concatenated; precedence-based dedup happens at
+	// [command.Registry] registration time, not here.
+	Toolset Toolset
 }
 
 // runOutcome carries the failure bit for a single run from
@@ -254,10 +241,7 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("%w: Events is required", ErrInvalidOptions)
 	}
 
-	merged := Merge(
-		append([]Toolset{{Tools: cfg.Tools, Hooks: cfg.Hooks}}, cfg.Toolsets...)...,
-	)
-	tools := deduplicateTools(merged.Tools)
+	tools := deduplicateTools(cfg.Toolset.Tools)
 
 	foundationEvents := make(chan agentevent.Event, 64)
 
@@ -266,7 +250,7 @@ func New(cfg Config) (*Agent, error) {
 		Events:       foundationEvents,
 		SystemPrompt: cfg.SystemPrompt,
 		Tools:        tools,
-		Hooks:        merged.Hooks,
+		Hooks:        cfg.Toolset.Hooks,
 	})
 	if err != nil {
 		return nil, err

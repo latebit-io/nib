@@ -88,12 +88,14 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 		Provider:     provider,
 		Events:       events,
 		SystemPrompt: buildSystemPrompt(sessionID),
-		Tools: []kit.Tool{
-			bash.New(root),
-			memorytools.NewFetchTool(store),
-			memorytools.NewPublishTool(store),
-			memorytools.NewAppendTool(store),
-			memorytools.NewListTool(store),
+		Toolset: kit.Toolset{
+			Tools: []kit.Tool{
+				bash.New(root),
+				memorytools.NewFetchTool(store),
+				memorytools.NewPublishTool(store),
+				memorytools.NewAppendTool(store),
+				memorytools.NewListTool(store),
+			},
 		},
 	})
 	if err != nil {

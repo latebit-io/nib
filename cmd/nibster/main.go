@@ -62,6 +62,7 @@ type config struct {
 	root    string
 	list    bool
 	show    string
+	plugins bool
 	debug   bool
 }
 
@@ -71,6 +72,7 @@ func parseArgs() config {
 	flag.StringVar(&c.root, "root", "", "Working directory for bash and demarkus root (default: cwd)")
 	flag.BoolVar(&c.list, "list", false, "Print the session index and exit")
 	flag.StringVar(&c.show, "show", "", "Print a specific session's memory page and exit")
+	flag.BoolVar(&c.plugins, "plugins", false, "Print the wired plug-in manifest (provider, store, tools, commands) and exit")
 	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/nibster-debug.log")
 	flag.Parse()
 	return c
@@ -100,6 +102,8 @@ func run() error {
 	}()
 
 	switch {
+	case cfg.plugins:
+		return printPlugins(root, mem.Store)
 	case cfg.list:
 		return listSessions(ctx, mem.Store)
 	case cfg.show != "":
@@ -108,7 +112,7 @@ func run() error {
 		return runAgent(ctx, root, mem.Store, cfg.message)
 	default:
 		flag.Usage()
-		return setupErr("provide -m <message>, --list, or --show <id>")
+		return setupErr("provide -m <message>, --list, --show <id>, or --plugins")
 	}
 }
 

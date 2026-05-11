@@ -88,41 +88,39 @@ var ErrRunInProgress = agent.ErrRunInProgress
 // which is already idle by then.
 var ErrClosed = errors.New("kit: agent is closed")
 
-// Config bundles the construction-time inputs for [New]. Provider and
-// Events are required; everything else is optional.
+// Config bundles the construction-time inputs for [New]. Provider is
+// required; everything else is optional.
 type Config struct {
 	// Provider is the LLM provider used for every turn. Required.
 	Provider llm.Provider
 
-	// Events is the channel the agent writes consumer-facing events to.
-	// Required. The caller MUST drain this channel.
+	// Events is the legacy single-consumer event channel.
 	//
-	// Send semantics:
+	// New code should prefer [Agent.Subscribe], which returns a
+	// [Subscription] whose [Subscription.Events] channel receives
+	// events through the same internal bus. Events here remains as a
+	// compatibility shim through the bus-migration arc: if non-nil,
+	// [New] subscribes a default-policy [Subscription] internally
+	// and forwards every event to this channel. The shim is removed
+	// once every in-tree consumer migrates to Subscribe.
+	//
+	// Send semantics (preserved exactly by the shim):
 	//
 	//   - High-volume streaming events ([event.AgentToken],
 	//     [event.AgentTurnUsage], [event.AgentInputEstimate]) drop
-	//     when the channel is full. They are individually
-	//     replaceable — a missing token is visually closed by the
-	//     next one; a missing usage tick is recovered from the next.
+	//     when the inbox is full. Individually replaceable.
 	//
-	//   - Control events ([event.AgentDone], [event.AgentError],
-	//     [event.AgentToolCall], [event.AgentWaiting],
-	//     [event.AgentStatus], [event.AgentCompacted]) block until
-	//     the consumer drains. Guaranteed delivery — these carry
-	//     lifecycle and failure signals an event-driven consumer
-	//     cannot reconstruct from later events.
+	//   - Control events block until the consumer drains. Guaranteed
+	//     delivery — these carry lifecycle and failure signals an
+	//     event-driven consumer cannot reconstruct from later events.
 	//
-	// A consumer that stops draining will wedge the kit translator
-	// goroutine on its next blocking send. Because [Agent.Close]
-	// waits synchronously for the translator to drain remaining
-	// foundation events and exit (the translatorDone barrier),
-	// Close itself will hang indefinitely against a wedged consumer
-	// — Close cannot rescue a stuck translator without violating
-	// the "no further writes to Events after Close returns"
-	// guarantee callers rely on for safe channel cleanup. Size the
-	// channel generously (64+ recommended) and keep the consumer
-	// draining for the lifetime of the agent; close the channel
-	// only AFTER Close returns.
+	// A consumer that stops draining will wedge the shim goroutine
+	// (which fills the bus inbox; further control events block the
+	// translator). Because [Agent.Close] waits synchronously for
+	// the translator and the shim to drain, Close itself will hang
+	// indefinitely against a wedged consumer. Size the channel
+	// generously (64+ recommended) and keep the consumer draining;
+	// close the channel only AFTER Close returns.
 	Events chan<- event.Event
 
 	// SystemPrompt is the system message prepended to every run's
@@ -166,7 +164,21 @@ type runOutcome struct {
 type Agent struct {
 	foundation       *agent.Agent
 	foundationEvents chan agentevent.Event
-	consumerEvents   chan<- event.Event
+
+	// bus fans every translated [event.Event] out to its registered
+	// [Subscription]s. Created by [New], populated by the translator
+	// goroutine via [bus.publish], drained by each subscriber's
+	// reader. The bus is the single writer to each subscription's
+	// inbox channel; the [Agent] never writes to a consumer-facing
+	// channel directly.
+	bus *bus
+
+	// shimDone is closed by the legacy [Config.Events] forwarder
+	// goroutine on exit. Nil when [Config.Events] is nil (no shim
+	// goroutine is spawned). [Agent.Close] waits on it after the bus
+	// closes so callers receive a synchronous "no further writes to
+	// [Config.Events]" guarantee.
+	shimDone chan struct{}
 
 	// outcomeMu guards [Agent.pendingOutcome] and [Agent.currentOutcome].
 	// The two pointers carry per-run failure state across goroutines:
@@ -221,24 +233,27 @@ type Agent struct {
 //
 // Validation rules:
 //   - cfg.Provider must be non-nil.
-//   - cfg.Events must be non-nil.
-//   - Each entry in cfg.Tools must satisfy the foundation's tool rules
-//     (non-nil, non-empty Definition().Function.Name, names unique).
+//   - Each entry in cfg.Toolset.Tools must satisfy the foundation's
+//     tool rules (non-nil, non-empty Definition().Function.Name,
+//     names unique).
+//
+// cfg.Events is optional. When non-nil, [New] subscribes a default
+// [Subscription] internally and forwards every event to cfg.Events
+// so legacy callers keep working unchanged. New callers should leave
+// cfg.Events nil and call [Agent.Subscribe] to obtain a subscription
+// directly.
 //
 // Side effect: New spawns a translator goroutine that drains the
-// foundation's lifecycle events and re-emits each as the closest
-// [event] equivalent through cfg.Events. The goroutine lives until
-// [Agent.Close] is called — the foundation never closes its own
-// events channel, so without Close the translator and the foundation
-// hold each other live until process exit. Callers that create
-// short-lived agents (tests, daemons that spin up per-request agents)
-// must Close to avoid leaking.
+// foundation's lifecycle events and publishes each as the closest
+// [event] equivalent on the agent's internal bus. The goroutine lives
+// until [Agent.Close] — the foundation never closes its own events
+// channel, so without Close the translator and the foundation hold
+// each other live until process exit. Callers that create short-lived
+// agents (tests, daemons that spin up per-request agents) must Close
+// to avoid leaking.
 func New(cfg Config) (*Agent, error) {
 	if cfg.Provider == nil {
 		return nil, fmt.Errorf("%w: Provider is required", ErrInvalidOptions)
-	}
-	if cfg.Events == nil {
-		return nil, fmt.Errorf("%w: Events is required", ErrInvalidOptions)
 	}
 
 	tools := deduplicateTools(cfg.Toolset.Tools)
@@ -259,13 +274,61 @@ func New(cfg Config) (*Agent, error) {
 	a := &Agent{
 		foundation:       f,
 		foundationEvents: foundationEvents,
-		consumerEvents:   cfg.Events,
+		bus:              newBus(),
 		done:             make(chan struct{}),
 		translatorDone:   make(chan struct{}),
 	}
 
+	if cfg.Events != nil {
+		a.shimDone = make(chan struct{})
+		// Subscribe with default options to preserve legacy
+		// drop-streaming-block-control semantics. subscribe cannot
+		// fail here — the bus was just constructed and is not closed.
+		sub, _ := a.bus.subscribe(SubscribeOptions{})
+		go a.forwardShim(sub, cfg.Events)
+	}
+
 	go a.translateEvents()
 	return a, nil
+}
+
+// Subscribe registers a new subscriber for this agent's event stream
+// and returns a [Subscription] whose inbox receives events from the
+// next [bus.publish] onward.
+//
+// Default [SubscribeOptions] (zero value) preserve the legacy
+// single-consumer channel semantics: streaming events drop on a full
+// inbox; control events block the publisher until the inbox accepts.
+// Override the options for subscribers with different needs (a probe
+// that can tolerate event loss on every class; a recorder that needs
+// strict streaming-event delivery).
+//
+// Subscribe returns [ErrClosed] if the agent has been closed. Late
+// subscribers (registered after some events were already published)
+// receive only events published after their subscribe call; the bus
+// does not journal.
+func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
+	if atomic.LoadUint32(&a.closed) == 1 {
+		return nil, ErrClosed
+	}
+	return a.bus.subscribe(opts)
+}
+
+// forwardShim copies every event from the legacy [Config.Events]
+// subscription into the user-provided channel. Closes [Agent.shimDone]
+// on return so [Agent.Close] can synchronize on the "no further
+// writes to Config.Events" guarantee.
+//
+// The forwarding send is the legacy "consumer must drain" contract:
+// if the user channel stops accepting, this goroutine wedges on the
+// send, the bus inbox fills, and subsequent control events block the
+// translator. Same wedge profile as the pre-bus implementation; the
+// shim does not rescue a stuck consumer.
+func (a *Agent) forwardShim(sub *Subscription, dst chan<- event.Event) {
+	defer close(a.shimDone)
+	for ev := range sub.Events() {
+		dst <- ev
+	}
 }
 
 // Prompt starts a new run with the given user message. Returns
@@ -423,19 +486,21 @@ func (a *Agent) WaitForIdle() {
 //
 // After Close: [Agent.Reply] returns false (no active run),
 // [Agent.Cancel] is a no-op, [Agent.WaitForIdle] returns immediately,
-// [Agent.State] returns the foundation's final snapshot. The
-// consumer's events channel is NOT closed by Close — that channel
-// belongs to the caller and may be reused for other producers.
+// [Agent.State] returns the foundation's final snapshot. The legacy
+// [Config.Events] channel is NOT closed by Close — that channel
+// belongs to the caller and may be reused for other producers. Every
+// [Subscription] obtained via [Agent.Subscribe] has its inbox closed
+// by the bus, so reader loops exit naturally.
 //
-// Close blocks until the foundation has fully unwound AND the
-// translator goroutine has exited (no further writes to
-// [Config.Events]). Callers that need force-quit semantics should
-// not rely on Close — they should abandon the agent and accept the
-// leak.
+// Close blocks until the foundation has fully unwound, the translator
+// goroutine has exited, the bus has closed every subscription inbox,
+// and any legacy [Config.Events] forwarder has drained. Callers that
+// need force-quit semantics should not rely on Close — they should
+// abandon the agent and accept the leak.
 //
-// Synchronous translator exit is the contract callers rely on when
-// they own the consumer channel: closing it right after Close
-// returns must not race a still-draining translator.
+// Synchronous shutdown is the contract callers rely on when they own
+// the consumer channel: closing it right after Close returns must
+// not race a still-draining writer.
 func (a *Agent) Close() {
 	a.closeOnce.Do(func() {
 		atomic.StoreUint32(&a.closed, 1)
@@ -446,11 +511,21 @@ func (a *Agent) Close() {
 		a.Cancel()
 		a.foundation.WaitForIdle()
 		close(a.done)
-		// Block until translateEvents has fully drained any buffered
-		// foundation events and exited. If the consumer is no longer
-		// draining [Config.Events], the translator wedges and Close
-		// will hang — same hard contract as steady-state operation
-		// (consumer must drain). Documented on Config.Events.
+		// Wait for translateEvents to drain remaining foundation
+		// events and exit. Bus is still open during this drain so
+		// the final [event.AgentDone] reaches every subscriber.
 		<-a.translatorDone
+		// Close the bus. Signals every subscription's done channel,
+		// waits for in-flight deliveries to drain, then closes every
+		// inbox so reader loops exit.
+		a.bus.close()
+		// Wait for the legacy forwarder (if any) to finish copying
+		// the closed subscription's tail into [Config.Events]. The
+		// shim exits when the inbox closes; if the consumer is no
+		// longer draining [Config.Events], the shim wedges and Close
+		// hangs — same wedge contract as the pre-bus pipeline.
+		if a.shimDone != nil {
+			<-a.shimDone
+		}
 	})
 }

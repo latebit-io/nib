@@ -1,17 +1,16 @@
 package kit
 
 import (
-	"fmt"
-	"log/slog"
 	"sync/atomic"
 
 	agentevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/kit/event"
 )
 
-// translateEvents drains the foundation's event channel and re-emits
-// each event as the closest [event] equivalent on
-// [Agent.consumerEvents]. The translator is the SOLE driver of:
+// translateEvents drains the foundation's event channel and publishes
+// each event as the closest [event] equivalent on [Agent.bus], which
+// fans it out to every registered [Subscription]. The translator is
+// the SOLE driver of:
 //
 //   - [event.AgentToken] streaming text
 //   - [event.AgentDone] success/failure dispatch (success := !runUnsuccessful)
@@ -44,13 +43,13 @@ import (
 // translator drains any events the foundation enqueued before Close
 // returned — Close has already waited for the foundation to unwind
 // via [agent.Agent.WaitForIdle], so the drain is bounded and the
-// final [agentevent.AgentEnd] still reaches the consumer as
+// final [agentevent.AgentEnd] still reaches every subscriber as
 // [event.AgentDone]. Without the drain, a consumer that called Close
 // while a run was unwinding would miss the final lifecycle event.
 func (a *Agent) translateEvents() {
 	// Signal Close that the translator has fully exited and will not
-	// touch consumerEvents again, so a caller that closes its consumer
-	// channel after Close returns cannot race a still-running drain.
+	// publish to the bus again, so Close can safely call bus.close
+	// without racing a still-running drain.
 	defer close(a.translatorDone)
 	for {
 		select {
@@ -93,9 +92,9 @@ func (a *Agent) translate(ev agentevent.Event) {
 	case agentevent.AgentStart:
 		a.bindOutcome()
 	case agentevent.MessageUpdate:
-		a.send(event.AgentToken{Text: e.Delta})
+		a.bus.publish(event.AgentToken{Text: e.Delta})
 	case agentevent.TurnUsage:
-		a.send(event.AgentTurnUsage{
+		a.bus.publish(event.AgentTurnUsage{
 			Turn:             e.Turn,
 			PromptTokens:     e.PromptTokens,
 			CompletionTokens: e.CompletionTokens,
@@ -108,70 +107,24 @@ func (a *Agent) translate(ev agentevent.Event) {
 			CompletionEst:    e.CompletionEst,
 		})
 	case agentevent.InputEstimate:
-		a.send(event.AgentInputEstimate{
+		a.bus.publish(event.AgentInputEstimate{
 			System:  e.System,
 			Tools:   e.Tools,
 			History: e.History,
 			New:     e.New,
 		})
 	case agentevent.Compacted:
-		a.send(event.AgentCompacted{
+		a.bus.publish(event.AgentCompacted{
 			BeforeTokens: e.BeforeTokens,
 			AfterTokens:  e.AfterTokens,
 		})
 	case agentevent.Error:
 		a.markCurrentUnsuccess()
-		a.send(event.AgentError{Err: e.Err})
+		a.bus.publish(event.AgentError{Err: e.Err})
 	case agentevent.AgentParked:
-		a.send(event.AgentWaiting{Finished: e.Finished})
+		a.bus.publish(event.AgentWaiting{Finished: e.Finished})
 	case agentevent.AgentEnd:
-		a.send(event.AgentDone{Success: !a.consumeCurrentUnsuccess()})
-	}
-}
-
-// send writes ev to the consumer events channel. Two policies:
-//
-//   - **Streaming events** ([event.AgentToken], [event.AgentTurnUsage],
-//     [event.AgentInputEstimate]) drop on full. They are high-volume
-//     and individually replaceable — a missing token mid-stream is
-//     visible (next AgentToken closes the gap visually); a missing
-//     usage tick is recovered from the next one. Dropping them
-//     prevents the foundation goroutine from blocking when a slow
-//     consumer falls behind.
-//
-//   - **Control events** ([event.AgentDone], [event.AgentError],
-//     [event.AgentToolCall], [event.AgentWaiting], [event.AgentStatus],
-//     [event.AgentCompacted]) block until the consumer drains.
-//     Guaranteed delivery — these carry lifecycle and failure signals
-//     that an event-driven consumer cannot reconstruct from later
-//     events. AgentDone in particular is the only "this run is over"
-//     signal; dropping it would leave consumers stranded.
-//
-// The blocking send for control events makes "consumer must drain the
-// channel" a hard contract. A consumer that stops draining will wedge
-// the translator goroutine indefinitely; if the consumer also calls
-// [Agent.Close], Close still returns (it does not wait for the
-// translator), but the translator goroutine leaks. Document this
-// contract to consumers and use a sufficiently buffered channel
-// (recommended: 64+) to absorb bursts without blocking.
-//
-// A previous version used a 5-second timeout on control events to
-// avoid the leak; that traded silent data loss for liveness, which is
-// the wrong direction for terminal/control events. Loss of an
-// AgentDone leaves consumers waiting forever for a signal that will
-// never arrive — much worse than a leaked goroutine the consumer can
-// avoid by draining.
-func (a *Agent) send(ev event.Event) {
-	switch ev.(type) {
-	case event.AgentToken, event.AgentTurnUsage, event.AgentInputEstimate:
-		select {
-		case a.consumerEvents <- ev:
-		default:
-			slog.Warn("kit: dropping streaming event, channel full",
-				"type", fmt.Sprintf("%T", ev))
-		}
-	default:
-		a.consumerEvents <- ev
+		a.bus.publish(event.AgentDone{Success: !a.consumeCurrentUnsuccess()})
 	}
 }
 

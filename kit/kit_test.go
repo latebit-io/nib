@@ -137,12 +137,21 @@ func TestNew_RejectsNilProvider(t *testing.T) {
 	}
 }
 
-func TestNew_RejectsNilEvents(t *testing.T) {
+// TestNew_AllowsNilEvents verifies that cfg.Events is optional. New
+// callers use [kit.Agent.Subscribe] instead of the legacy single
+// channel; nil cfg.Events should NOT error.
+func TestNew_AllowsNilEvents(t *testing.T) {
 	t.Parallel()
-	_, err := kit.New(kit.Config{Provider: errorProvider{err: errors.New("x")}})
-	if !errors.Is(err, kit.ErrInvalidOptions) {
-		t.Fatalf("want ErrInvalidOptions, got %v", err)
+	a, err := kit.New(kit.Config{Provider: newScriptedProvider()})
+	if err != nil {
+		t.Fatalf("New with nil Events: %v", err)
 	}
+	defer a.Close()
+	sub, err := a.Subscribe(kit.SubscribeOptions{})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
 }
 
 func TestNew_PropagatesFoundationValidation(t *testing.T) {

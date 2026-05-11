@@ -32,20 +32,18 @@ import (
 //     undefined when policies differ (a fast DropStreaming subscriber
 //     may "race ahead" of a slow BlockControl one, but each sees its
 //     own stream in publish order).
-//   - [bus.deliverWG] counts in-flight deliver calls. Both
-//     [bus.close] and [Subscription.Close] wait on it before closing
-//     inbox channels, so subscribers cannot send-on-closed.
+//   - Each [Subscription] holds its own [Subscription.deliverWG]
+//     counting in-flight deliver calls to that subscription.
+//     [Subscription.Close] waits on the per-subscription wait-group;
+//     [bus.close] waits on each subscription's wait-group in turn.
+//     Per-subscription rather than per-bus so closing one
+//     subscription is never coupled to deliveries in flight on
+//     another (a [Block]-policy subscriber stuck on a slow consumer
+//     must not block an unrelated subscription's shutdown).
 type bus struct {
 	mu          sync.Mutex
 	subscribers []*Subscription
 	closed      bool
-
-	// deliverWG tracks in-flight [Subscription.deliver] calls across
-	// every subscriber. [bus.publish] adds before the lock release;
-	// [Subscription.deliver]'s defer decrements. Both [bus.close]
-	// and [Subscription.Close] wait on it before closing inbox
-	// channels so a deliver-in-flight cannot race a channel close.
-	deliverWG sync.WaitGroup
 }
 
 // newBus constructs an empty bus.
@@ -103,7 +101,15 @@ func (b *bus) publish(ev event.Event) {
 		return
 	}
 	subs := slices.Clone(b.subscribers)
-	b.deliverWG.Add(len(subs))
+	// Add to each subscription's wait-group under the registry lock,
+	// before any iteration. This guarantees that a concurrent
+	// [Subscription.Close] that has already taken the snapshot's
+	// subscription out via [bus.unsubscribe] cannot return from
+	// [Subscription.Close.deliverWG.Wait] before this publish's
+	// deliver call has had a chance to run and Done.
+	for _, sub := range subs {
+		sub.deliverWG.Add(1)
+	}
 	b.mu.Unlock()
 
 	for _, sub := range subs {
@@ -138,9 +144,13 @@ func (b *bus) unsubscribe(sub *Subscription) {
 //  1. Mark closed under the lock. Subsequent publish/subscribe
 //     calls observe this and short-circuit.
 //  2. Snapshot and drop the subscribers slice.
-//  3. Signal each subscription's done channel so in-flight
+//  3. Signal every subscription's done channel so in-flight
 //     [Subscription.deliver] calls blocked on the inbox bail.
-//  4. Wait on [bus.deliverWG] for every in-flight deliver to drain.
+//  4. Wait on each subscription's [Subscription.deliverWG] for its
+//     in-flight delivers to drain. Per-subscription rather than
+//     bus-wide so the iteration order does not couple unrelated
+//     subscriptions; each wait finishes as soon as that subscription's
+//     own in-flight delivers complete.
 //  5. Close each subscription's inbox channel.
 //
 // Idempotent.
@@ -158,7 +168,9 @@ func (b *bus) close() {
 	for _, sub := range subs {
 		sub.signalDone()
 	}
-	b.deliverWG.Wait()
+	for _, sub := range subs {
+		sub.deliverWG.Wait()
+	}
 	for _, sub := range subs {
 		sub.finishClose()
 	}

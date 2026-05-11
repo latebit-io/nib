@@ -309,7 +309,7 @@ func TestSubscribeDefaultOptionsMatchLegacyPolicy(t *testing.T) {
 	<-done
 }
 
-// TestDeliverWGTracksInflightDelivers checks the internal
+// TestDeliverWGTracksInflightDelivers checks the per-subscription
 // deliverWG invariant: every deliver call decrements the counter.
 // Guard against a future refactor that forgets the defer.
 func TestDeliverWGTracksInflightDelivers(t *testing.T) {
@@ -320,8 +320,9 @@ func TestDeliverWGTracksInflightDelivers(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		b.publish(event.AgentToken{Text: "x"})
 	}
-	// All publishes returned, so deliverWG should be at zero.
-	// We can't read it directly; instead, bus.close should not deadlock.
+	// All publishes returned, so the subscription's deliverWG should
+	// be at zero. We can't read it directly; instead, bus.close
+	// should not deadlock.
 	closed := make(chan struct{})
 	go func() {
 		// Drain the inbox so close can finish.
@@ -337,6 +338,69 @@ func TestDeliverWGTracksInflightDelivers(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("bus.close did not return — deliverWG likely leaked")
 	}
+}
+
+// TestSubscriptionCloseDoesNotBlockOnUnrelatedSlowSubscriber is the
+// regression test for the P1 bug Greptile flagged on PR #151: a
+// per-subscription deliverWG (rather than a per-bus shared one) is
+// required so closing subscription A does not wait on in-flight
+// deliveries to an unrelated, slow subscription B.
+//
+// Failure mode this guards: publish snapshots [A, B], B's deliver
+// blocks on a [Block]-policy full inbox, A.Close hangs on the global
+// wait-group until B's consumer drains — coupling unrelated
+// subscriptions through the shutdown path.
+func TestSubscriptionCloseDoesNotBlockOnUnrelatedSlowSubscriber(t *testing.T) {
+	b := newBus()
+	// Drain B so we can exit cleanly at the end of the test, no matter
+	// how long it takes. Without this, killing the test goroutine leaks.
+	t.Cleanup(b.close)
+
+	fast, _ := b.subscribe(SubscribeOptions{BufferSize: 4})
+	slow, _ := b.subscribe(SubscribeOptions{BufferSize: 1})
+
+	// Fill slow's inbox so its NEXT control-event delivery blocks
+	// under the default Block policy.
+	b.publish(event.AgentDone{Success: true}) // both receive; slow's inbox now 1/1 (full)
+	<-fast.Events()                           // drain fast so its inbox has room
+
+	// Spawn a second publish that will block on slow.deliver (inbox
+	// full + Block). fast.deliver completes immediately.
+	publishing := make(chan struct{})
+	go func() {
+		close(publishing)
+		b.publish(event.AgentError{Err: "boom"})
+	}()
+	<-publishing
+	// Wait for fast's deliver to complete and slow's to be in-flight.
+	// Read fast's second event so its deliver definitely returned.
+	select {
+	case <-fast.Events():
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("fast subscriber did not receive second event")
+	}
+
+	// Now close fast. With the per-subscription deliverWG, this should
+	// return promptly. With a shared bus-wide deliverWG, this would
+	// block on slow's in-flight deliver until slow's consumer drains.
+	closed := make(chan struct{})
+	go func() {
+		fast.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("fast.Close blocked on unrelated slow subscriber — " +
+			"global deliverWG regression")
+	}
+
+	// Drain slow so the t.Cleanup bus.close can finish (unblocks the
+	// stuck publish goroutine).
+	go func() {
+		for range slow.Events() {
+		}
+	}()
 }
 
 // drainOne reads one event from sub.Events with a small timeout.

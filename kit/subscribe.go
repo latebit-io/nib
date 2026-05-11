@@ -106,8 +106,16 @@ type Subscription struct {
 	// never double-close the inbox channel.
 	closeOnce sync.Once
 
-	// drops counts events dropped under [DropStreaming] policy.
-	// Atomic so [Subscription.Drops] can read it without locks.
+	// deliverWG tracks in-flight [Subscription.deliver] calls TO THIS
+	// SUBSCRIPTION. Per-subscription rather than per-bus so
+	// [Subscription.Close] only waits for its own in-flight delivers
+	// — a Close on subscription A must not block on a deliver-in-flight
+	// to subscription B (which would happen with a shared bus-level
+	// wait-group whenever B is on a [Block] policy with a slow consumer).
+	deliverWG sync.WaitGroup
+
+	// drops counts events dropped under [Drop] policy. Atomic so
+	// [Subscription.Drops] can read it without locks.
 	drops int64
 }
 
@@ -133,14 +141,16 @@ func (s *Subscription) Drops() int64 {
 // observe the closure and bail without sending; the inbox channel is
 // closed so reader loops exit.
 //
-// Close blocks until in-flight deliver calls to this subscription
-// drain — bounded by the configured policy (DropStreaming returns
-// immediately; BlockControl returns once the deliver bails on
-// [Subscription.done]). Idempotent.
+// Close blocks until in-flight deliver calls TO THIS subscription
+// drain — bounded by the configured policy ([Drop] returns
+// immediately; [Block] returns once the deliver bails on
+// [Subscription.done]). Crucially, Close does NOT wait on deliveries
+// to other subscriptions; a slow [Block]-policy subscriber on the
+// same bus cannot delay this Close. Idempotent.
 func (s *Subscription) Close() {
 	s.bus.unsubscribe(s)
 	s.signalDone()
-	s.bus.deliverWG.Wait()
+	s.deliverWG.Wait()
 	s.finishClose()
 }
 
@@ -158,9 +168,11 @@ func (s *Subscription) finishClose() {
 
 // deliver dispatches one event to this subscriber per its configured
 // policy. The bus calls this from its publisher goroutine, holding
-// [bus.deliverWG] for the duration; deliver's defer decrements the
-// wait-group on return so bus close and subscription close can wait
-// for in-flight deliveries to drain.
+// this subscription's [Subscription.deliverWG] for the duration;
+// deliver's defer decrements the wait-group on return so
+// [Subscription.Close] and bus close can wait for in-flight
+// deliveries to drain — per-subscription so one subscription's
+// shutdown is not coupled to another's.
 //
 // Policy resolution:
 //
@@ -175,7 +187,7 @@ func (s *Subscription) finishClose() {
 // shutdown). On [Drop] the send is non-blocking; a full inbox
 // increments [Subscription.drops] and returns.
 func (s *Subscription) deliver(ev event.Event) {
-	defer s.bus.deliverWG.Done()
+	defer s.deliverWG.Done()
 
 	streaming := isStreamingEvent(ev)
 	policy := s.opts.OnControlFull

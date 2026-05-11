@@ -42,8 +42,8 @@ func TestKitBuilt_KitAndProxyInstalled(t *testing.T) {
 	if ag.providerProxy == nil {
 		t.Fatalf("Agent.providerProxy is nil; want non-nil after New")
 	}
-	if ag.kitEvents == nil {
-		t.Errorf("Agent.kitEvents is nil; want a non-nil channel for the forwarder")
+	if ag.kitSub == nil {
+		t.Errorf("Agent.kitSub is nil; want a non-nil subscription for the forwarder")
 	}
 
 	// The proxy must be seeded with the constructor's provider so the

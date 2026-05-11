@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/kit"
@@ -43,7 +44,10 @@ func printPlugins(root string, store memory.Store) error {
 
 	_, resolved := llmconfig.Resolve(root)
 	if resolved.OAuthProvider != "" {
-		if oauthStore, err := openOAuthStore(); err == nil {
+		oauthStore, err := openOAuthStore()
+		if err != nil {
+			slog.Debug("plugins: oauth store unavailable", "err", err)
+		} else {
 			llmconfig.WireOAuth(resolved, oauthStore)
 		}
 	}

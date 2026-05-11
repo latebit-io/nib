@@ -30,20 +30,20 @@ import (
 // resets it.
 //
 // Lifecycle: spawned once in [Agent.buildKitAgent]; exits when
-// [Agent.Close] closes [Agent.kitEvents] after kit.Close has waited
-// for the foundation to unwind.
+// [kit.Agent.Close] closes [Agent.kitSub]'s inbox after the kit
+// translator has fully exited.
 
-// forwardKitEvents drains [Agent.kitEvents] and forwards each event
-// (after coding-specific augmentation or filtering) to the frontend
-// events channel via [Agent.send].
+// forwardKitEvents drains [Agent.kitSub]'s inbox and forwards each
+// event (after coding-specific augmentation or filtering) to the
+// frontend events channel via [Agent.send].
 //
 // Closes [Agent.forwardDone] on return so [Agent.Close] can block on
-// it after closing kitEvents — providing callers a synchronous "no
-// further writes to the frontend channel" guarantee symmetric to
-// kit.Agent.Close's translatorDone wait.
+// it after kit.Close closes the subscription inbox — providing
+// callers a synchronous "no further writes to the frontend channel"
+// guarantee symmetric to kit.Agent.Close's translatorDone wait.
 func (a *Agent) forwardKitEvents() {
 	defer close(a.forwardDone)
-	for ev := range a.kitEvents {
+	for ev := range a.kitSub.Events() {
 		switch e := ev.(type) {
 		case event.AgentTurnUsage:
 			// Drop. providerProxy emits the authoritative AgentTurnUsage

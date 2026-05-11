@@ -9,7 +9,6 @@ import (
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
-	"github.com/latebit-io/nib/kit/event"
 )
 
 // stubCommand is a test fake for [command.Command]. It implements only
@@ -750,11 +749,8 @@ func TestNew_DeduplicatesToolsFirstWins(t *testing.T) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
-	events := make(chan event.Event, 32)
-
 	a, err := kit.New(kit.Config{
 		Provider: provider,
-		Events:   events,
 		Toolset: kit.Merge(
 			kit.Toolset{Tools: []kit.Tool{directTool}, Hooks: hooks},
 			kit.Toolset{Tools: []kit.Tool{toolsetTool, nopTool{name: "search"}}},
@@ -764,6 +760,7 @@ func TestNew_DeduplicatesToolsFirstWins(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -803,11 +800,8 @@ func TestNew_ToolsetsHooksChainWithDirectHooks(t *testing.T) {
 			},
 		},
 	}
-	events := make(chan event.Event, 32)
-
 	a, err := kit.New(kit.Config{
 		Provider: provider,
-		Events:   events,
 		Toolset: kit.Merge(
 			kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
 			ts,
@@ -817,6 +811,7 @@ func TestNew_ToolsetsHooksChainWithDirectHooks(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -857,7 +852,6 @@ func TestPluginsConvention_MergesIntoToolsetAndDispatches(t *testing.T) {
 
 	pkg := &fakePluginPackage{}
 	provider := newScriptedProvider(streamWithToolCall("call-1", "fake-tool", `{}`))
-	events := make(chan event.Event, 32)
 
 	terminator := kit.Toolset{Hooks: kit.Hooks{
 		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
@@ -874,11 +868,12 @@ func TestPluginsConvention_MergesIntoToolsetAndDispatches(t *testing.T) {
 		t.Fatalf("merged Commands wrong: %+v", merged.Commands)
 	}
 
-	a, err := kit.New(kit.Config{Provider: provider, Events: events, Toolset: merged})
+	a, err := kit.New(kit.Config{Provider: provider, Toolset: merged})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -895,7 +890,6 @@ func TestNew_NilToolPassesToFoundationValidation(t *testing.T) {
 	t.Parallel()
 	_, err := kit.New(kit.Config{
 		Provider: newScriptedProvider(),
-		Events:   make(chan event.Event, 1),
 		Toolset:  kit.Toolset{Tools: []kit.Tool{nil}},
 	})
 	if !errors.Is(err, kit.ErrInvalidOptions) {

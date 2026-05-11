@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -108,6 +109,30 @@ func untilDone(ev event.Event) bool {
 	return ok
 }
 
+// subscribeEvents subscribes a default-policy [kit.Subscription] to a
+// and returns its inbox channel; the subscription is auto-Closed via
+// [t.Cleanup]. Replaces the legacy pattern of allocating a channel and
+// passing it through `Config.Events`.
+//
+// Default options preserve the pre-bus drop-streaming-block-control
+// behavior: a buffered inbox (64 slots) absorbs streaming bursts;
+// control events block the publisher if the test stops draining.
+// Override via the variadic SubscribeOptions for tests that need a
+// smaller buffer or different policy.
+func subscribeEvents(t *testing.T, a *kit.Agent, opts ...kit.SubscribeOptions) <-chan event.Event {
+	t.Helper()
+	o := kit.SubscribeOptions{}
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	sub, err := a.Subscribe(o)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	t.Cleanup(sub.Close)
+	return sub.Events()
+}
+
 // nopTool implements [kit.Tool] with a no-op execute. Used only to
 // drive the facade — semantic tool tests live in the foundation.
 type nopTool struct {
@@ -131,34 +156,16 @@ func (brokenTool) Execute(context.Context, llm.ToolCall) kit.ToolResult { return
 
 func TestNew_RejectsNilProvider(t *testing.T) {
 	t.Parallel()
-	_, err := kit.New(kit.Config{Events: make(chan<- event.Event, 1)})
+	_, err := kit.New(kit.Config{})
 	if !errors.Is(err, kit.ErrInvalidOptions) {
 		t.Fatalf("want ErrInvalidOptions, got %v", err)
 	}
-}
-
-// TestNew_AllowsNilEvents verifies that cfg.Events is optional. New
-// callers use [kit.Agent.Subscribe] instead of the legacy single
-// channel; nil cfg.Events should NOT error.
-func TestNew_AllowsNilEvents(t *testing.T) {
-	t.Parallel()
-	a, err := kit.New(kit.Config{Provider: newScriptedProvider()})
-	if err != nil {
-		t.Fatalf("New with nil Events: %v", err)
-	}
-	defer a.Close()
-	sub, err := a.Subscribe(kit.SubscribeOptions{})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer sub.Close()
 }
 
 func TestNew_PropagatesFoundationValidation(t *testing.T) {
 	t.Parallel()
 	_, err := kit.New(kit.Config{
 		Provider: errorProvider{err: errors.New("x")},
-		Events:   make(chan<- event.Event, 1),
 		Toolset:  kit.Toolset{Tools: []kit.Tool{brokenTool{}}},
 	})
 	if !errors.Is(err, kit.ErrInvalidOptions) {
@@ -173,13 +180,12 @@ func TestPrompt_StreamsTokensAndEndsSuccess(t *testing.T) {
 		PromptTokens:     10,
 		CompletionTokens: 2,
 	}))
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "hi"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -254,17 +260,15 @@ func TestPrompt_CleanRunDoneSuccessTrue(t *testing.T) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
-	events := make(chan event.Event, 32)
-
 	a, err := kit.New(kit.Config{
 		Provider: provider,
-		Events:   events,
 		Toolset:  kit.Toolset{Tools: []kit.Tool{tool}, Hooks: hooks},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -292,7 +296,6 @@ func TestPark_TranslatesAgentParkedToAgentWaitingInStreamOrder(t *testing.T) {
 	t.Parallel()
 
 	provider := newScriptedProvider(streamText([]string{"a", "b", "c"}, nil))
-	events := make(chan event.Event, 64)
 
 	hooks := kit.Hooks{
 		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
@@ -300,11 +303,12 @@ func TestPark_TranslatesAgentParkedToAgentWaitingInStreamOrder(t *testing.T) {
 		},
 	}
 
-	a, err := kit.New(kit.Config{Provider: provider, Events: events, Toolset: kit.Toolset{Hooks: hooks}})
+	a, err := kit.New(kit.Config{Provider: provider, Toolset: kit.Toolset{Hooks: hooks}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a, kit.SubscribeOptions{BufferSize: 64})
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -345,13 +349,12 @@ func TestStreamError_EmitsAgentErrorAndUnsuccessfulDone(t *testing.T) {
 	t.Parallel()
 
 	provider := errorProvider{err: errors.New("boom")}
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "hi"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -396,17 +399,15 @@ func TestUnsuccessful_ResetBetweenRuns(t *testing.T) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
-	events := make(chan event.Event, 32)
-
 	a, err := kit.New(kit.Config{
 		Provider: provider,
-		Events:   events,
 		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "first"); err != nil {
 		t.Fatalf("Prompt(first): %v", err)
@@ -448,14 +449,19 @@ func TestSend_ControlEventsBlockNotDrop(t *testing.T) {
 	t.Parallel()
 
 	provider := errorProvider{err: errors.New("boom")}
-	// Unbuffered channel — every send must wait for a receive.
-	events := make(chan event.Event)
 
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	// Tiny buffer so the second control event must back-pressure the
+	// publisher under the default Block policy. With BufferSize=1
+	// AgentError fits in the slot; AgentDone publish blocks until
+	// the consumer drains. If the bus dropped control events on full
+	// (the regression this test guards against) AgentDone would
+	// silently disappear.
+	events := subscribeEvents(t, a, kit.SubscribeOptions{BufferSize: 1})
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -513,17 +519,15 @@ func TestUnsuccessful_NoCrossRunPoisoning(t *testing.T) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
-	events := make(chan event.Event, 64)
-
 	a, err := kit.New(kit.Config{
 		Provider: provider,
-		Events:   events,
 		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a, kit.SubscribeOptions{BufferSize: 64})
 
 	if err := a.Prompt(context.Background(), "first"); err != nil {
 		t.Fatalf("Prompt(first): %v", err)
@@ -584,13 +588,12 @@ func TestErrRunInProgress(t *testing.T) {
 	t.Parallel()
 
 	provider := blockingProvider{}
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "first"); err != nil {
 		t.Fatalf("Prompt(first): %v", err)
@@ -610,17 +613,15 @@ func TestState_DelegatesToFoundation(t *testing.T) {
 	t.Parallel()
 
 	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
-	events := make(chan event.Event, 32)
-
 	a, err := kit.New(kit.Config{
 		Provider:     provider,
-		Events:       events,
 		SystemPrompt: "you are a test",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "hi"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -662,13 +663,12 @@ func TestEventTranslation_TurnUsageFieldByField(t *testing.T) {
 		CachedTokens:     20,
 	}
 	provider := newScriptedProvider(streamText([]string{"hi"}, usage))
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -699,13 +699,12 @@ func TestFoundationObservability_NotInConsumerStream(t *testing.T) {
 	t.Parallel()
 
 	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -734,13 +733,12 @@ func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 	t.Parallel()
 
 	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -759,18 +757,21 @@ func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 	<-drained
 
 	// Observable contract: after Close returns, the translator has
-	// fully exited and will not write to `events` again. The only
-	// race-free way to assert that from the consumer side is to
-	// CLOSE the channel ourselves — a still-running translator
-	// would hit the closed channel on its next send and crash the
-	// goroutine (visible as a test panic via the goroutine's
-	// panic propagating up through the runtime). Compared to a
-	// runtime.NumGoroutine sample (polluted by other parallel
-	// tests' goroutines and by the still-alive consumer drainer),
-	// this catches the "Close returned early" failure mode
-	// directly.
-	close(events)
-	for range events {
+	// fully exited, the bus has closed every subscription's inbox,
+	// and reader loops exit naturally. The range below sees a closed
+	// channel and returns immediately; if Close had returned early
+	// (before bus.close finished) the channel would still be open
+	// and the range would block until a 200ms watchdog fired.
+	closedSeen := make(chan struct{})
+	go func() {
+		defer close(closedSeen)
+		for range events {
+		}
+	}()
+	select {
+	case <-closedSeen:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("subscription inbox not closed after Close — bus.close did not run or Close returned early")
 	}
 }
 
@@ -778,13 +779,12 @@ func TestClose_Idempotent(t *testing.T) {
 	t.Parallel()
 
 	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -802,13 +802,12 @@ func TestClose_DeliversFinalAgentDone(t *testing.T) {
 	t.Parallel()
 
 	provider := blockingProvider{}
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -835,13 +834,12 @@ func TestPrompt_AfterCloseReturnsErrClosed(t *testing.T) {
 	t.Parallel()
 
 	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
-	events := make(chan event.Event, 32)
-
-	a, err := kit.New(kit.Config{Provider: provider, Events: events})
+	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
+	events := subscribeEvents(t, a)
 
 	a.Close()
 	drainUntil(events, untilDone)
@@ -867,6 +865,103 @@ func lastDone(evs []event.Event) (event.AgentDone, bool) {
 		}
 	}
 	return d, ok
+}
+
+// TestSubscribeProbeObservesAlongsideConsumer (P9) verifies the
+// concrete use case the bus migration enables: a kit-level test
+// attaches a probe subscriber to observe the agent's event stream
+// without owning the consumer position. Both subscribers see every
+// event in publish order; neither blocks the other.
+//
+// Pre-bus this was impossible — there was one Events channel; whoever
+// held it was the consumer. After the bus, every subscriber gets an
+// independent inbox, and the bus is the sole writer to each.
+//
+// Uses a terminating AfterToolCall hook so the run converges on a
+// clean AgentDone (Success=true) — see [TestPrompt_CleanRunDoneSuccessTrue]
+// for the same pattern. Avoids the slower Cancel-after-park dance
+// (~2s drainUntil timeout) that would otherwise double up across
+// two subscribers.
+func TestSubscribeProbeObservesAlongsideConsumer(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(
+		streamWithToolCall("call-1", "echo", `{"text":"hi"}`),
+	)
+	hooks := kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: true}, nil
+		},
+	}
+
+	a, err := kit.New(kit.Config{
+		Provider: provider,
+		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+
+	// Real consumer: the headless-style drain path.
+	consumer := subscribeEvents(t, a)
+	// Probe: observes the same stream without claiming the consumer
+	// position. A future audit logger / metrics emitter / test probe
+	// is the same shape.
+	probe := subscribeEvents(t, a)
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	consumerSeq := drainUntil(consumer, untilDone)
+	probeSeq := drainUntil(probe, untilDone)
+
+	// Both subscribers must see a terminal AgentDone — proof both
+	// received the full stream. Tool-call runs do not emit AgentToken
+	// (the foundation's MessageUpdate stream carries the tool-call
+	// id/args, not free text), so token concatenation is not part of
+	// the assertion; AgentToolCall + AgentDone are the visible signals.
+	_, consumerDone := pickTokenAndDone(consumerSeq)
+	_, probeDone := pickTokenAndDone(probeSeq)
+	if !consumerDone || !probeDone {
+		t.Fatalf("missing AgentDone — consumer=%v probe=%v", consumerDone, probeDone)
+	}
+	// Both subscribers see the same event-type sequence in the same
+	// order. Comparing the event-type slices is the structural P2
+	// (per-subscriber order) check at the kit level.
+	if got, want := eventTypeSeq(consumerSeq), eventTypeSeq(probeSeq); !slices.Equal(got, want) {
+		t.Errorf("subscriber sequences diverged\n  consumer: %v\n     probe: %v", got, want)
+	}
+}
+
+// eventTypeSeq returns the string type name of each event in evs, in
+// order. Used by [TestSubscribeProbeObservesAlongsideConsumer] to
+// compare what two subscribers saw.
+func eventTypeSeq(evs []event.Event) []string {
+	out := make([]string, len(evs))
+	for i, ev := range evs {
+		out[i] = fmt.Sprintf("%T", ev)
+	}
+	return out
+}
+
+// pickTokenAndDone returns the concatenated AgentToken text and a flag
+// indicating whether an AgentDone was observed. Helper for the P9 test.
+func pickTokenAndDone(evs []event.Event) (string, bool) {
+	var (
+		text string
+		done bool
+	)
+	for _, ev := range evs {
+		switch e := ev.(type) {
+		case event.AgentToken:
+			text += e.Text
+		case event.AgentDone:
+			done = true
+		}
+	}
+	return text, done
 }
 
 // swappableProvider lets a test swap the underlying provider mid-test.

@@ -83,10 +83,8 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, eventBufferSize)
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,
-		Events:       events,
 		SystemPrompt: buildSystemPrompt(sessionID),
 		Toolset: kit.Toolset{
 			Tools: []kit.Tool{
@@ -101,6 +99,11 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kit.New: %v", err)
 	}
+	sub, err := ag.Subscribe(kit.SubscribeOptions{BufferSize: eventBufferSize})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	events := sub.Events()
 	defer closeAgent(ag, events)
 
 	// Bound the run so a wedged translator/provider cannot hang CI.
@@ -150,15 +153,18 @@ func TestKitWiring_AgentTokenBeforeAgentWaiting(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, eventBufferSize)
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,
-		Events:       events,
 		SystemPrompt: "test",
 	})
 	if err != nil {
 		t.Fatalf("kit.New: %v", err)
 	}
+	sub, err := ag.Subscribe(kit.SubscribeOptions{BufferSize: eventBufferSize})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	events := sub.Events()
 	defer closeAgent(ag, events)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)

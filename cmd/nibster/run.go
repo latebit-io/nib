@@ -58,16 +58,20 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 	sessionID := newSessionID(time.Now(), message)
 	slog.Debug("session", "id", sessionID)
 
-	events := make(chan event.Event, eventBufferSize)
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,
-		Events:       events,
 		SystemPrompt: buildSystemPrompt(sessionID),
 		Toolset:      nibsterToolset(root, store),
 	})
 	if err != nil {
 		return setupErr("agent: %v", err)
 	}
+
+	sub, err := ag.Subscribe(kit.SubscribeOptions{BufferSize: eventBufferSize})
+	if err != nil {
+		return setupErr("subscribe: %v", err)
+	}
+	events := sub.Events()
 
 	// Single-shot Runner: AgentWaiting (emitted by the foundation just
 	// before parking on awaitReply, translated by kit) triggers Cancel +
@@ -78,7 +82,7 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 	// Close drains the translator and any trailing AgentEnd → AgentDone
 	// the foundation emits in response to the Runner's Cancel; without a
 	// concurrent drain, the translator would block on the still-buffered
-	// consumer channel.
+	// subscription inbox.
 	closeAgent(ag, events)
 
 	status := classifyStatus(ctx, result)

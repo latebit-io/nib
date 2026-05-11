@@ -274,20 +274,24 @@ type Agent struct {
 	// hooks composed by [Agent.FoundationHooks].
 	kit *kit.Agent
 
-	// kitEvents is the channel [kit] emits its [event.Event] stream on.
-	// Drained by [Agent.forwardKitEvents] — the application boundary
-	// where the generic agent events get augmented with coding-specific
-	// per-turn budget accounting and forwarded to the frontend channel.
-	kitEvents chan event.Event
+	// kitSub is the kit subscription [Agent.forwardKitEvents] drains.
+	// Created in [Agent.buildKitAgent] via [kit.Agent.Subscribe] with
+	// default policy (drop-streaming, block-control). The forwarder
+	// is the application boundary where the generic agent events get
+	// augmented with coding-specific per-turn budget accounting and
+	// forwarded to the frontend channel. [Agent.Close] closes the
+	// kit agent, which closes every subscription's inbox; the
+	// forwarder's range exits naturally on the closed inbox.
+	kitSub *kit.Subscription
 
 	// forwardDone is closed by [Agent.forwardKitEvents] (via defer)
 	// when the forwarder goroutine returns. [Agent.Close] blocks on
-	// it after closing [Agent.kitEvents] so the wrapper provides the
-	// same "no further writes to the consumer channel" guarantee
-	// kit.Agent.Close provides for [Config.Events] — without this
-	// wait, a consumer that closes the frontend events channel right
-	// after Close returns can race a forwarder still draining the
-	// last buffered AgentDone.
+	// it after [kit.Agent.Close] closes the subscription's inbox so
+	// the wrapper provides a synchronous "no further writes to the
+	// consumer channel" guarantee — without this wait, a consumer
+	// that closes the frontend events channel right after Close
+	// returns can race a forwarder still draining the last buffered
+	// AgentDone from the subscription inbox.
 	forwardDone chan struct{}
 
 	// closeOnce guards [Agent.Close] so concurrent or repeated Close
@@ -529,7 +533,6 @@ func (a *Agent) buildKitAgent() {
 		kitTools = append(kitTools, t)
 	}
 
-	a.kitEvents = make(chan event.Event, 64)
 	a.forwardDone = make(chan struct{})
 
 	hooks := a.FoundationHooks(func() []llm.Message {
@@ -542,7 +545,6 @@ func (a *Agent) buildKitAgent() {
 
 	kitAgent, err := kit.New(kit.Config{
 		Provider: a.providerProxy,
-		Events:   a.kitEvents,
 		Toolset:  kit.Toolset{Tools: kitTools, Hooks: hooks},
 	})
 	if err != nil {
@@ -550,22 +552,31 @@ func (a *Agent) buildKitAgent() {
 	}
 	a.kit = kitAgent
 
+	// Subscribe with default policy: streaming drops, control blocks.
+	// Matches the legacy pre-bus pipeline behavior. The forwarder
+	// is the sole reader; the bus is the sole writer; inbox close
+	// is the forwarder's exit signal.
+	sub, err := kitAgent.Subscribe(kit.SubscribeOptions{BufferSize: 64})
+	if err != nil {
+		panic(fmt.Sprintf("agent.New: kit.Subscribe failed: %v", err))
+	}
+	a.kitSub = sub
+
 	go a.forwardKitEvents()
 }
 
 // Close gracefully shuts down the agent. Cancels any in-flight run,
 // waits for the kit/foundation AND the kit translator to unwind,
-// closes the intercept events channel so [Agent.forwardKitEvents]
-// drains and exits, then waits for the forwarder. Idempotent.
+// then waits for the forwarder. Idempotent.
 //
 // Ordering matters and is the contract callers rely on:
 //
-//  1. kit.Close blocks until the kit translator has fully exited
-//     (no more writes to [Agent.kitEvents]) — otherwise step 3 would
-//     race a still-running translator and panic on send-on-closed.
-//  2. close(kitEvents) signals the forwarder to drain its remaining
-//     events and return.
-//  3. <-forwardDone blocks until forwarder exits, providing the
+//  1. [kit.Agent.Close] blocks until the kit translator has fully
+//     exited (no more publishes to the bus) and then closes every
+//     subscription's inbox via bus.close. After kit.Close returns,
+//     [Agent.kitSub]'s inbox is closed and the forwarder's range
+//     drains the buffered tail and exits.
+//  2. <-forwardDone blocks until the forwarder exits, providing the
 //     symmetric "no further writes to the frontend events channel"
 //     guarantee. A consumer that closes the frontend channel
 //     immediately after Close returns is safe.
@@ -581,9 +592,6 @@ func (a *Agent) Close() {
 	a.closeOnce.Do(func() {
 		if a.kit != nil {
 			a.kit.Close()
-		}
-		if a.kitEvents != nil {
-			close(a.kitEvents)
 		}
 		if a.forwardDone != nil {
 			<-a.forwardDone

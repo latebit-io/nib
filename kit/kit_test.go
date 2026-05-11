@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -875,15 +876,28 @@ func lastDone(evs []event.Event) (event.AgentDone, bool) {
 // Pre-bus this was impossible — there was one Events channel; whoever
 // held it was the consumer. After the bus, every subscriber gets an
 // independent inbox, and the bus is the sole writer to each.
+//
+// Uses a terminating AfterToolCall hook so the run converges on a
+// clean AgentDone (Success=true) — see [TestPrompt_CleanRunDoneSuccessTrue]
+// for the same pattern. Avoids the slower Cancel-after-park dance
+// (~2s drainUntil timeout) that would otherwise double up across
+// two subscribers.
 func TestSubscribeProbeObservesAlongsideConsumer(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"Hi", " there"}, &llm.Usage{
-		PromptTokens:     5,
-		CompletionTokens: 2,
-	}))
+	provider := newScriptedProvider(
+		streamWithToolCall("call-1", "echo", `{"text":"hi"}`),
+	)
+	hooks := kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: true}, nil
+		},
+	}
 
-	a, err := kit.New(kit.Config{Provider: provider})
+	a, err := kit.New(kit.Config{
+		Provider: provider,
+		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -896,32 +910,40 @@ func TestSubscribeProbeObservesAlongsideConsumer(t *testing.T) {
 	// is the same shape.
 	probe := subscribeEvents(t, a)
 
-	if err := a.Prompt(context.Background(), "hi"); err != nil {
+	if err := a.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 
 	consumerSeq := drainUntil(consumer, untilDone)
-	a.Cancel()
-	a.WaitForIdle()
-	consumerSeq = append(consumerSeq, drainUntil(consumer, untilDone)...)
 	probeSeq := drainUntil(probe, untilDone)
-	probeSeq = append(probeSeq, drainUntil(probe, untilDone)...)
 
-	// Both subscribers must see at least one AgentToken with text and a
-	// terminal AgentDone — proof that both received the full stream.
-	consumerTok, consumerDone := pickTokenAndDone(consumerSeq)
-	probeTok, probeDone := pickTokenAndDone(probeSeq)
-
-	if consumerTok == "" || probeTok == "" {
-		t.Fatalf("missing tokens — consumer=%q probe=%q", consumerTok, probeTok)
-	}
+	// Both subscribers must see a terminal AgentDone — proof both
+	// received the full stream. Tool-call runs do not emit AgentToken
+	// (the foundation's MessageUpdate stream carries the tool-call
+	// id/args, not free text), so token concatenation is not part of
+	// the assertion; AgentToolCall + AgentDone are the visible signals.
+	_, consumerDone := pickTokenAndDone(consumerSeq)
+	_, probeDone := pickTokenAndDone(probeSeq)
 	if !consumerDone || !probeDone {
 		t.Fatalf("missing AgentDone — consumer=%v probe=%v", consumerDone, probeDone)
 	}
-	// Both subscribers see the same streamed text in the same order.
-	if consumerTok != probeTok {
-		t.Errorf("token streams diverged — consumer=%q probe=%q", consumerTok, probeTok)
+	// Both subscribers see the same event-type sequence in the same
+	// order. Comparing the event-type slices is the structural P2
+	// (per-subscriber order) check at the kit level.
+	if got, want := eventTypeSeq(consumerSeq), eventTypeSeq(probeSeq); !slices.Equal(got, want) {
+		t.Errorf("subscriber sequences diverged\n  consumer: %v\n     probe: %v", got, want)
 	}
+}
+
+// eventTypeSeq returns the string type name of each event in evs, in
+// order. Used by [TestSubscribeProbeObservesAlongsideConsumer] to
+// compare what two subscribers saw.
+func eventTypeSeq(evs []event.Event) []string {
+	out := make([]string, len(evs))
+	for i, ev := range evs {
+		out[i] = fmt.Sprintf("%T", ev)
+	}
+	return out
 }
 
 // pickTokenAndDone returns the concatenated AgentToken text and a flag

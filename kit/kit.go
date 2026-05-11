@@ -426,21 +426,20 @@ func (a *Agent) WaitForIdle() {
 //
 // After Close: [Agent.Reply] returns false (no active run),
 // [Agent.Cancel] is a no-op, [Agent.WaitForIdle] returns immediately,
-// [Agent.State] returns the foundation's final snapshot. The legacy
-// [Config.Events] channel is NOT closed by Close — that channel
-// belongs to the caller and may be reused for other producers. Every
+// [Agent.State] returns the foundation's final snapshot. Every
 // [Subscription] obtained via [Agent.Subscribe] has its inbox closed
-// by the bus, so reader loops exit naturally.
+// by the bus, so `for ev := range sub.Events()` loops exit naturally
+// after draining any buffered tail.
 //
 // Close blocks until the foundation has fully unwound, the translator
-// goroutine has exited, the bus has closed every subscription inbox,
-// and any legacy [Config.Events] forwarder has drained. Callers that
-// need force-quit semantics should not rely on Close — they should
-// abandon the agent and accept the leak.
+// goroutine has exited, and the bus has closed every subscription
+// inbox. Callers that need force-quit semantics should not rely on
+// Close — they should abandon the agent and accept the leak.
 //
-// Synchronous shutdown is the contract callers rely on when they own
-// the consumer channel: closing it right after Close returns must
-// not race a still-draining writer.
+// Synchronous shutdown is the contract subscribers rely on: a reader
+// goroutine that ranges over a [Subscription.Events] channel
+// terminates cleanly when Close returns, with no risk of a late
+// publish racing the channel close.
 func (a *Agent) Close() {
 	a.closeOnce.Do(func() {
 		atomic.StoreUint32(&a.closed, 1)

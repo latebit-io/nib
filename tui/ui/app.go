@@ -346,6 +346,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.handleEngineEvent(msg.event)
 		return m, tea.Batch(m.listenForEvents(), cmd)
 
+	case FlushDirtyBuffersMsg:
+		return m, m.handleFlushDirtyBuffers(msg)
+
 	case fileChangedMsg:
 		m.handleFileChanged(msg.Path)
 		return m, m.listenForFileChanges()

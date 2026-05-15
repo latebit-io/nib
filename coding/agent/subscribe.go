@@ -152,14 +152,15 @@ func (s *Subscription) finishClose() {
 	s.closeOnce.Do(func() { close(s.inbox) })
 }
 
-// deliver dispatches one event to this subscriber per its configured
-// policy. The bus calls this from its publisher path, holding this
-// subscription's [Subscription.deliverWG] for the duration; deliver's
-// defer decrements the wait-group on return so [Subscription.Close]
-// and bus close can wait for in-flight deliveries to drain.
-func (s *Subscription) deliver(ev event.Event) {
-	defer s.deliverWG.Done()
-
+// effectivePolicy returns the concrete [Block] or [Drop] policy that
+// applies to ev under this subscription's [SubscribeOptions]. A
+// [DefaultPolicy] field on the options is resolved here per the
+// class-sensitive rule documented on [DropPolicy]: streaming → Drop,
+// control → Block.
+//
+// Shared by [Subscription.deliver] and [Subscription.deliverContext]
+// so a future change to the resolution rule is a single-site edit.
+func (s *Subscription) effectivePolicy(ev event.Event) DropPolicy {
 	streaming := isStreamingEvent(ev)
 	policy := s.opts.OnControlFull
 	if streaming {
@@ -167,13 +168,21 @@ func (s *Subscription) deliver(ev event.Event) {
 	}
 	if policy == DefaultPolicy {
 		if streaming {
-			policy = Drop
-		} else {
-			policy = Block
+			return Drop
 		}
+		return Block
 	}
+	return policy
+}
 
-	switch policy {
+// deliver dispatches one event to this subscriber per its configured
+// policy. The bus calls this from its publisher path, holding this
+// subscription's [Subscription.deliverWG] for the duration; deliver's
+// defer decrements the wait-group on return so [Subscription.Close]
+// and bus close can wait for in-flight deliveries to drain.
+func (s *Subscription) deliver(ev event.Event) {
+	defer s.deliverWG.Done()
+	switch s.effectivePolicy(ev) {
 	case Block:
 		select {
 		case s.inbox <- ev:
@@ -206,21 +215,7 @@ func (s *Subscription) deliver(ev event.Event) {
 // bus.close can wait on in-flight attempts.
 func (s *Subscription) deliverContext(ctx context.Context, ev event.Event) error {
 	defer s.deliverWG.Done()
-
-	streaming := isStreamingEvent(ev)
-	policy := s.opts.OnControlFull
-	if streaming {
-		policy = s.opts.OnStreamingFull
-	}
-	if policy == DefaultPolicy {
-		if streaming {
-			policy = Drop
-		} else {
-			policy = Block
-		}
-	}
-
-	switch policy {
+	switch s.effectivePolicy(ev) {
 	case Block:
 		select {
 		case s.inbox <- ev:

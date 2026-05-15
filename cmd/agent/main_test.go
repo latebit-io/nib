@@ -56,14 +56,24 @@ func TestEndToEnd_SimpleGoal_JSONOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
+	// Bound the forwarder's lifetime to the test so a failure that
+	// leaves the runner mid-drain doesn't strand a goroutine blocked
+	// on `events <- ev`. Mirrors the production forwarder in cmd/agent/
+	// main.go which uses appCtx for the same guarantee.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	go func() {
 		for ev := range sub.Events() {
-			events <- ev
+			select {
+			case events <- ev:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
 	runner := headless.NewRunner(ag, ws, events, &bytes.Buffer{}, false)
-	result := runner.Run(context.Background(), "review the code", nil)
+	result := runner.Run(ctx, "review the code", nil)
 
 	if !result.Success {
 		t.Fatalf("expected success, got errors: %v", result.Errors)
@@ -143,14 +153,24 @@ func TestEndToEnd_EditFile_JSONOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
+	// Bound the forwarder's lifetime to the test so a failure that
+	// leaves the runner mid-drain doesn't strand a goroutine blocked
+	// on `events <- ev`. Mirrors the production forwarder in cmd/agent/
+	// main.go which uses appCtx for the same guarantee.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	go func() {
 		for ev := range sub.Events() {
-			events <- ev
+			select {
+			case events <- ev:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 
 	runner := headless.NewRunner(ag, ws, events, &bytes.Buffer{}, false)
-	result := runner.Run(context.Background(), "add a print to hello", []string{"hello.go"})
+	result := runner.Run(ctx, "add a print to hello", []string{"hello.go"})
 
 	if !result.Success {
 		t.Fatalf("expected success, got errors: %v", result.Errors)

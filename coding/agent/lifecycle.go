@@ -584,6 +584,22 @@ func (a *Agent) send(ev event.Event) {
 			slog.Error("failed to deliver agent event: channel full", "type", fmt.Sprintf("%T", ev))
 		}
 	}
+	// Dual-write: every event also fans out to bus subscribers
+	// registered via [Agent.Subscribe]. Bus delivery is independent
+	// of the legacy channel — a slow subscriber's drop accounting
+	// does not affect the channel reader's view, and a slow channel
+	// reader does not delay bus delivery (the bus enforces its own
+	// per-subscriber policy). Order is preserved per writer: the
+	// channel send and the bus publish happen in this fixed sequence
+	// on the same goroutine.
+	//
+	// The nil guard is for unit tests that construct an [Agent] via
+	// literal rather than [New] — they exercise hook composition or
+	// gate logic without wiring a full agent. Production paths always
+	// go through [New], which allocates the bus.
+	if a.bus != nil {
+		a.bus.publish(ev)
+	}
 }
 
 // sendCritical delivers an event that must reach the frontend for the
@@ -591,9 +607,22 @@ func (a *Agent) send(ev event.Event) {
 // enqueued within the timeout. Use this for events that gate a
 // blocking wait (e.g. edit proposals) — dropping these silently would
 // deadlock the agent.
+//
+// The bus publish is best-effort and unconditional: bus subscribers
+// see the event regardless of whether the legacy channel accepts it.
+// The error return reflects ONLY the legacy channel's delivery
+// outcome, since that's the path the orchestrator's blocking wait
+// depends on today. When commit 4 removes the channel, this method
+// will gain a real critical-publish semantic on the bus.
 func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
+	// nil guard mirrors [Agent.send]: literal-built agents in unit
+	// tests have no bus, and the legacy channel write is the only
+	// path the orchestrator's blocking wait depends on today.
+	if a.bus != nil {
+		defer a.bus.publish(ev)
+	}
 	select {
 	case a.events <- ev:
 		return nil

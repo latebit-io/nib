@@ -24,7 +24,7 @@ func TestPlanningBlocklistGate_BlocksInPlanningMode(t *testing.T) {
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
 
-	res := a.planningBlocklistGate(upagent.BeforeToolCallContext{Name: "edit_file"})
+	res := a.planningBlocklistGate(upagent.BeforeToolCallInput{Name: "edit_file"})
 	if !res.Block {
 		t.Fatalf("expected Block=true for blocklisted tool in planning mode")
 	}
@@ -38,7 +38,7 @@ func TestPlanningBlocklistGate_CaseInsensitive(t *testing.T) {
 		mode:              event.ModePlanning,
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
-	res := a.planningBlocklistGate(upagent.BeforeToolCallContext{Name: "Edit_File"})
+	res := a.planningBlocklistGate(upagent.BeforeToolCallInput{Name: "Edit_File"})
 	if !res.Block {
 		t.Fatalf("expected Block for case-different name")
 	}
@@ -49,7 +49,7 @@ func TestPlanningBlocklistGate_AllowsNonBlocklisted(t *testing.T) {
 		mode:              event.ModePlanning,
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
-	res := a.planningBlocklistGate(upagent.BeforeToolCallContext{Name: "read_file"})
+	res := a.planningBlocklistGate(upagent.BeforeToolCallInput{Name: "read_file"})
 	if res.Block {
 		t.Errorf("expected non-block for tool off the blocklist; reason=%q", res.Reason)
 	}
@@ -60,7 +60,7 @@ func TestPlanningBlocklistGate_OffInExecution(t *testing.T) {
 		mode:              event.ModeExecution,
 		planningBlocklist: map[string]bool{"edit_file": true},
 	}
-	res := a.planningBlocklistGate(upagent.BeforeToolCallContext{Name: "edit_file"})
+	res := a.planningBlocklistGate(upagent.BeforeToolCallInput{Name: "edit_file"})
 	if res.Block {
 		t.Errorf("planning-mode blocklist must not fire in execution mode")
 	}
@@ -76,7 +76,7 @@ func TestActiveTaskGate_BlocksWhenNoActiveTask(t *testing.T) {
 	}
 	a := &Agent{mode: event.ModeExecution, workspace: ws}
 
-	res := a.activeTaskGate(context.Background(), upagent.BeforeToolCallContext{Name: "edit_file"})
+	res := a.activeTaskGate(context.Background(), upagent.BeforeToolCallInput{Name: "edit_file"})
 	if !res.Block {
 		t.Fatalf("expected Block when no active task")
 	}
@@ -93,7 +93,7 @@ func TestActiveTaskGate_AllowsWhenActiveTaskSet(t *testing.T) {
 	}
 	a := &Agent{mode: event.ModeExecution, workspace: ws}
 
-	res := a.activeTaskGate(context.Background(), upagent.BeforeToolCallContext{Name: "edit_file"})
+	res := a.activeTaskGate(context.Background(), upagent.BeforeToolCallInput{Name: "edit_file"})
 	if res.Block {
 		t.Errorf("expected non-block with active task; reason=%q", res.Reason)
 	}
@@ -105,7 +105,7 @@ func TestSingleEditGate_FirstEditPasses(t *testing.T) {
 	a := &Agent{interactionMode: Interactive, autonomous: false}
 	fired := false
 
-	res := a.singleEditGate(upagent.BeforeToolCallContext{Name: "edit_file"}, &fired)
+	res := a.singleEditGate(upagent.BeforeToolCallInput{Name: "edit_file"}, &fired)
 	if res.Block {
 		t.Fatalf("first edit must not be blocked; reason=%q", res.Reason)
 	}
@@ -118,7 +118,7 @@ func TestSingleEditGate_SecondEditBlocked(t *testing.T) {
 	a := &Agent{interactionMode: Interactive, autonomous: false}
 	fired := true // already-fired state
 
-	res := a.singleEditGate(upagent.BeforeToolCallContext{Name: "edit_file"}, &fired)
+	res := a.singleEditGate(upagent.BeforeToolCallInput{Name: "edit_file"}, &fired)
 	if !res.Block {
 		t.Fatalf("second edit must be blocked")
 	}
@@ -131,7 +131,7 @@ func TestSingleEditGate_HeadlessDoesNotEnforce(t *testing.T) {
 	a := &Agent{interactionMode: Headless, autonomous: false}
 	fired := true
 
-	res := a.singleEditGate(upagent.BeforeToolCallContext{Name: "edit_file"}, &fired)
+	res := a.singleEditGate(upagent.BeforeToolCallInput{Name: "edit_file"}, &fired)
 	if res.Block {
 		t.Errorf("headless mode must not enforce single-edit; reason=%q", res.Reason)
 	}
@@ -141,7 +141,7 @@ func TestSingleEditGate_AutonomousDoesNotEnforce(t *testing.T) {
 	a := &Agent{interactionMode: Interactive, autonomous: true}
 	fired := true
 
-	res := a.singleEditGate(upagent.BeforeToolCallContext{Name: "edit_file"}, &fired)
+	res := a.singleEditGate(upagent.BeforeToolCallInput{Name: "edit_file"}, &fired)
 	if res.Block {
 		t.Errorf("autonomous mode must not enforce single-edit; reason=%q", res.Reason)
 	}
@@ -154,7 +154,7 @@ func TestSingleEditGate_NonEditToolPasses(t *testing.T) {
 	fired := true
 
 	for _, tool := range []string{"bash", "smoke_run", "read_file"} {
-		res := a.singleEditGate(upagent.BeforeToolCallContext{Name: tool}, &fired)
+		res := a.singleEditGate(upagent.BeforeToolCallInput{Name: tool}, &fired)
 		if res.Block {
 			t.Errorf("%s should not be gated by single-edit", tool)
 		}
@@ -176,11 +176,11 @@ func TestFoundationHooks_BeforeToolCallChain_Order(t *testing.T) {
 	}
 	hooks := a.FoundationHooks(nil)
 	// Fire one edit to flip closure state.
-	if _, err := hooks.BeforeToolCall(context.Background(), upagent.BeforeToolCallContext{Name: "edit_file"}); err != nil {
+	if _, err := hooks.BeforeToolCall(context.Background(), upagent.BeforeToolCallInput{Name: "edit_file"}); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 	// Second call should hit single-edit, not planning-blocklist.
-	res, err := hooks.BeforeToolCall(context.Background(), upagent.BeforeToolCallContext{Name: "edit_file"})
+	res, err := hooks.BeforeToolCall(context.Background(), upagent.BeforeToolCallInput{Name: "edit_file"})
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
@@ -206,14 +206,14 @@ func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
 	ctx := context.Background()
 
 	// Turn 1: first edit passes, second blocked.
-	res1, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	res1, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
 	if err != nil {
 		t.Fatalf("turn 1 first BeforeToolCall: %v", err)
 	}
 	if res1.Block {
 		t.Fatalf("turn 1 first edit should pass; reason=%q", res1.Reason)
 	}
-	res2, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	res2, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
 	if err != nil {
 		t.Fatalf("turn 1 second BeforeToolCall: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
 	}
 
 	// Turn 2: first edit passes again.
-	res3, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	res3, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
 	if err != nil {
 		t.Fatalf("turn 2 BeforeToolCall: %v", err)
 	}
@@ -250,14 +250,14 @@ func TestFoundationHooks_MigratedHooksPresent(t *testing.T) {
 	if hooks.TransformContext == nil {
 		t.Errorf("TransformContext must be wired (concerns #2, #3, #6 + system prompt rebuild + EstimateAndBroadcast)")
 	}
-	if hooks.GetSteeringMessages == nil {
-		t.Errorf("GetSteeringMessages must be wired (concern #4)")
+	if hooks.SteeringMessages == nil {
+		t.Errorf("SteeringMessages must be wired (concern #4)")
 	}
 	if hooks.AfterToolCall == nil {
 		t.Errorf("AfterToolCall must be wired (concern #5)")
 	}
-	if hooks.GetFollowUpMessages == nil {
-		t.Errorf("GetFollowUpMessages must be wired — drives AgentWaiting emission at the loop-park boundary")
+	if hooks.FollowUpMessages == nil {
+		t.Errorf("FollowUpMessages must be wired — drives AgentWaiting emission at the loop-park boundary")
 	}
 	if hooks.OnTruncated == nil {
 		t.Errorf("OnTruncated must be wired — drives the truncation-recovery contract")
@@ -495,7 +495,7 @@ func TestIsFreshUserInput_TrailingUserResetsBudget(t *testing.T) {
 	}
 }
 
-// --- FoundationHooks GetSteeringMessages composition ---
+// --- FoundationHooks SteeringMessages composition ---
 
 func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 	// Lifecycle: assistant produces outstanding-work prose → narrative
@@ -527,7 +527,7 @@ func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 		{Role: "user", Content: "finish it up"},
 		{Role: "assistant", Content: "All set. Outstanding work still needed: tests."},
 	}
-	out, err := hooks.GetSteeringMessages(ctx)
+	out, err := hooks.SteeringMessages(ctx)
 	if err != nil {
 		t.Fatalf("first steering: %v", err)
 	}
@@ -539,7 +539,7 @@ func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 	transcript = append(transcript, out...)
 
 	// Second steering call within the same input window: one-shot.
-	out, err = hooks.GetSteeringMessages(ctx)
+	out, err = hooks.SteeringMessages(ctx)
 	if err != nil {
 		t.Fatalf("second steering: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 	transcript = append(transcript, llm.Message{Role: "assistant", Content: "Still done. Items still needed: tests."})
 
 	// Steering must fire again (budget reset).
-	out, err = hooks.GetSteeringMessages(ctx)
+	out, err = hooks.SteeringMessages(ctx)
 	if err != nil {
 		t.Fatalf("third steering: %v", err)
 	}
@@ -596,7 +596,7 @@ func TestFoundationAfterToolCall_AppendsIntentReminderOnSuccess(t *testing.T) {
 		intent: "rewrite the auth middleware",
 	}
 	_ = subscribeForTest(t, a)
-	c := upagent.AfterToolCallContext{
+	c := upagent.AfterToolCallInput{
 		Name:   "edit_file",
 		Result: upagent.ToolResult{Content: "edit applied"},
 	}
@@ -623,7 +623,7 @@ func TestFoundationAfterToolCall_NoIntentNoOverride(t *testing.T) {
 		// intent left empty
 	}
 	_ = subscribeForTest(t, a)
-	c := upagent.AfterToolCallContext{
+	c := upagent.AfterToolCallInput{
 		Name:   "read_file",
 		Result: upagent.ToolResult{Content: "file contents"},
 	}
@@ -640,7 +640,7 @@ func TestFoundationAfterToolCall_BlockedSkipsReminder(t *testing.T) {
 		intent: "do the thing",
 	}
 	_ = subscribeForTest(t, a)
-	c := upagent.AfterToolCallContext{
+	c := upagent.AfterToolCallInput{
 		Name:   "edit_file",
 		Result: upagent.ToolResult{Content: "Skipped — only ONE file-edit per turn", IsError: true},
 	}
@@ -657,7 +657,7 @@ func TestFoundationAfterToolCall_BashFiresReloadBuffers(t *testing.T) {
 		cache: NewFileCache(),
 	}
 	events := subscribeForTest(t, a)
-	c := upagent.AfterToolCallContext{
+	c := upagent.AfterToolCallInput{
 		Name:   "bash",
 		Result: upagent.ToolResult{Content: "ls output"},
 	}
@@ -683,7 +683,7 @@ func TestFoundationAfterToolCall_BashFiresEvenWhenBlocked(t *testing.T) {
 		cache: NewFileCache(),
 	}
 	events := subscribeForTest(t, a)
-	c := upagent.AfterToolCallContext{
+	c := upagent.AfterToolCallInput{
 		Name:   "bash",
 		Result: upagent.ToolResult{Content: "Error: tool \"bash\" is not available", IsError: true},
 	}
@@ -705,7 +705,7 @@ func TestFoundationAfterToolCall_NonBashSkipsCacheReset(t *testing.T) {
 		cache: NewFileCache(),
 	}
 	events := subscribeForTest(t, a)
-	c := upagent.AfterToolCallContext{
+	c := upagent.AfterToolCallInput{
 		Name:   "read_file",
 		Result: upagent.ToolResult{Content: "x"},
 	}
@@ -745,14 +745,14 @@ func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. edit_file blocks (no active task) → AfterToolCall must be a no-op.
-	br, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	br, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
 	if err != nil {
 		t.Fatalf("blocked-path BeforeToolCall: %v", err)
 	}
 	if !br.Block {
 		t.Fatalf("expected first call to be blocked")
 	}
-	ar, err := hooks.AfterToolCall(ctx, upagent.AfterToolCallContext{
+	ar, err := hooks.AfterToolCall(ctx, upagent.AfterToolCallInput{
 		Name:   "edit_file",
 		Result: upagent.ToolResult{Content: br.Reason, IsError: true},
 	})
@@ -766,14 +766,14 @@ func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
 	// 2. Activate a task and try a non-edit tool: BeforeToolCall passes,
 	// AfterToolCall appends reminder.
 	tracker.activePath = "Phase 1 > task"
-	br, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "read_file"})
+	br, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "read_file"})
 	if err != nil {
 		t.Fatalf("non-blocked BeforeToolCall: %v", err)
 	}
 	if br.Block {
 		t.Fatalf("expected read_file to pass; reason=%q", br.Reason)
 	}
-	ar, err = hooks.AfterToolCall(ctx, upagent.AfterToolCallContext{
+	ar, err = hooks.AfterToolCall(ctx, upagent.AfterToolCallInput{
 		Name:   "read_file",
 		Result: upagent.ToolResult{Content: "file body"},
 	})
@@ -900,14 +900,14 @@ func TestFoundationHooks_TransformContext_ResetAndCompactAndLint(t *testing.T) {
 	}
 
 	// Turn 1 dispatch: pendingLint drained, first edit passes, second blocked.
-	r, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	r, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
 	if err != nil {
 		t.Fatalf("turn 1 first BeforeToolCall: %v", err)
 	}
 	if r.Block {
 		t.Fatalf("first edit should pass after lint drained, got Block=%q", r.Reason)
 	}
-	r, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	r, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
 	if err != nil {
 		t.Fatalf("turn 1 second BeforeToolCall: %v", err)
 	}
@@ -921,7 +921,7 @@ func TestFoundationHooks_TransformContext_ResetAndCompactAndLint(t *testing.T) {
 	}
 
 	// Turn 2 dispatch: first edit must pass again (single-edit reset).
-	r, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallContext{Name: "edit_file"})
+	r, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
 	if err != nil {
 		t.Fatalf("turn 2 BeforeToolCall: %v", err)
 	}

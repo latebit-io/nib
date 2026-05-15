@@ -82,11 +82,11 @@ func TestMerge_Associative(t *testing.T) {
 	a := kit.Toolset{
 		Tools: []kit.Tool{nopTool{name: "a"}},
 		Hooks: kit.Hooks{
-			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 				s := "from-a"
 				return kit.AfterToolCallResult{Content: &s}, nil
 			},
-			OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+			OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 				return kit.TruncationResult{Messages: []llm.Message{{Content: "a"}}}, nil
 			},
 		},
@@ -94,11 +94,11 @@ func TestMerge_Associative(t *testing.T) {
 	b := kit.Toolset{
 		Tools: []kit.Tool{nopTool{name: "b"}},
 		Hooks: kit.Hooks{
-			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 				s := "from-b"
 				return kit.AfterToolCallResult{Content: &s, Terminate: true}, nil
 			},
-			OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+			OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 				return kit.TruncationResult{Retry: true, Messages: []llm.Message{{Content: "b"}}}, nil
 			},
 		},
@@ -106,11 +106,11 @@ func TestMerge_Associative(t *testing.T) {
 	c := kit.Toolset{
 		Tools: []kit.Tool{nopTool{name: "c"}},
 		Hooks: kit.Hooks{
-			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 				s := "from-c"
 				return kit.AfterToolCallResult{Content: &s}, nil
 			},
-			OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+			OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 				return kit.TruncationResult{Retry: false, Messages: []llm.Message{{Content: "c"}}}, nil
 			},
 		},
@@ -135,7 +135,7 @@ func TestMerge_Associative(t *testing.T) {
 
 	// AfterToolCall: all three forms must produce the same merged result.
 	ctx := context.Background()
-	ac := kit.AfterToolCallContext{}
+	ac := kit.AfterToolCallInput{}
 	flatRes, err := flat.Hooks.AfterToolCall(ctx, ac)
 	if err != nil {
 		t.Fatalf("flat AfterToolCall error: %v", err)
@@ -159,7 +159,7 @@ func TestMerge_Associative(t *testing.T) {
 	}
 
 	// OnTruncated: all three forms must produce the same result.
-	tc := kit.TruncationContext{}
+	tc := kit.TruncationInput{}
 	flatTR, err := flat.Hooks.OnTruncated(ctx, tc)
 	if err != nil {
 		t.Fatalf("flat OnTruncated error: %v", err)
@@ -193,13 +193,13 @@ func TestMerge_Associative_ErrorPreservesPartialState(t *testing.T) {
 	boom := errors.New("boom")
 
 	b := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			s := "from-b"
 			return kit.AfterToolCallResult{Content: &s, Terminate: true}, nil
 		},
 	}}
 	c := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			s := "from-c"
 			return kit.AfterToolCallResult{Content: &s}, boom
 		},
@@ -209,7 +209,7 @@ func TestMerge_Associative_ErrorPreservesPartialState(t *testing.T) {
 	// produces the same. Both must return b+c's partial content with
 	// c's error — b's Terminate and c's Content must be folded in.
 	nested := kit.Merge(b, c)
-	res, err := nested.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallContext{})
+	res, err := nested.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallInput{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("want boom, got %v", err)
 	}
@@ -278,19 +278,19 @@ func TestMerge_BeforeToolCall_ChainsInOrder(t *testing.T) {
 	t.Parallel()
 	var order []string
 	a := kit.Toolset{Hooks: kit.Hooks{
-		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 			order = append(order, "a")
 			return kit.BeforeToolCallResult{}, nil
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 			order = append(order, "b")
 			return kit.BeforeToolCallResult{}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	_, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallContext{})
+	_, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,18 +303,18 @@ func TestMerge_BeforeToolCall_BlockShortCircuits(t *testing.T) {
 	t.Parallel()
 	var bCalled bool
 	a := kit.Toolset{Hooks: kit.Hooks{
-		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 			return kit.BeforeToolCallResult{Block: true, Reason: "nope"}, nil
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 			bCalled = true
 			return kit.BeforeToolCallResult{}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	res, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallContext{})
+	res, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,18 +331,18 @@ func TestMerge_BeforeToolCall_ErrorShortCircuits(t *testing.T) {
 	boom := errors.New("boom")
 	var bCalled bool
 	a := kit.Toolset{Hooks: kit.Hooks{
-		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 			return kit.BeforeToolCallResult{}, boom
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 			bCalled = true
 			return kit.BeforeToolCallResult{}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	_, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallContext{})
+	_, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("want boom, got %v", err)
 	}
@@ -363,13 +363,13 @@ func TestMerge_BeforeToolCall_SinglePassthrough(t *testing.T) {
 	t.Parallel()
 	called := false
 	a := kit.Toolset{Hooks: kit.Hooks{
-		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 			called = true
 			return kit.BeforeToolCallResult{Block: true, Reason: "only"}, nil
 		},
 	}}
 	merged := kit.Merge(a)
-	res, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallContext{})
+	res, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{})
 	if err != nil {
 		t.Fatalf("BeforeToolCall error: %v", err)
 	}
@@ -386,17 +386,17 @@ func TestMerge_AfterToolCall_LaterOverrides(t *testing.T) {
 	contentB := "from-b"
 	isErrTrue := true
 	a := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Content: &contentA}, nil
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Content: &contentB, IsError: &isErrTrue}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	res, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallContext{})
+	res, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,17 +411,17 @@ func TestMerge_AfterToolCall_LaterOverrides(t *testing.T) {
 func TestMerge_AfterToolCall_TerminateORd(t *testing.T) {
 	t.Parallel()
 	a := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: false}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	res, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallContext{})
+	res, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallInput{})
 	if err != nil {
 		t.Fatalf("AfterToolCall error: %v", err)
 	}
@@ -434,18 +434,18 @@ func TestMerge_AfterToolCall_ErrorShortCircuits(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	a := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{}, boom
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			t.Fatal("should not be called")
 			return kit.AfterToolCallResult{}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	_, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallContext{})
+	_, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallInput{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("want boom, got %v", err)
 	}
@@ -523,22 +523,22 @@ func TestMerge_TransformContext_ErrorShortCircuits(t *testing.T) {
 	}
 }
 
-// --- Hook chaining: GetSteeringMessages / GetFollowUpMessages ---
+// --- Hook chaining: SteeringMessages / FollowUpMessages ---
 
-func TestMerge_GetSteeringMessages_Concatenates(t *testing.T) {
+func TestMerge_SteeringMessages_Concatenates(t *testing.T) {
 	t.Parallel()
 	a := kit.Toolset{Hooks: kit.Hooks{
-		GetSteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
 			return []llm.Message{{Role: "user", Content: "steer-a"}}, nil
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		GetSteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
 			return []llm.Message{{Role: "user", Content: "steer-b"}}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	msgs, err := merged.Hooks.GetSteeringMessages(context.Background())
+	msgs, err := merged.Hooks.SteeringMessages(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,20 +547,20 @@ func TestMerge_GetSteeringMessages_Concatenates(t *testing.T) {
 	}
 }
 
-func TestMerge_GetFollowUpMessages_Concatenates(t *testing.T) {
+func TestMerge_FollowUpMessages_Concatenates(t *testing.T) {
 	t.Parallel()
 	a := kit.Toolset{Hooks: kit.Hooks{
-		GetFollowUpMessages: func(_ context.Context) ([]llm.Message, error) {
+		FollowUpMessages: func(_ context.Context) ([]llm.Message, error) {
 			return []llm.Message{{Role: "user", Content: "follow-a"}}, nil
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		GetFollowUpMessages: func(_ context.Context) ([]llm.Message, error) {
+		FollowUpMessages: func(_ context.Context) ([]llm.Message, error) {
 			return []llm.Message{{Role: "user", Content: "follow-b"}}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	msgs, err := merged.Hooks.GetFollowUpMessages(context.Background())
+	msgs, err := merged.Hooks.FollowUpMessages(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,18 +573,18 @@ func TestMerge_GetMessages_ErrorShortCircuits(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	a := kit.Toolset{Hooks: kit.Hooks{
-		GetSteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
 			return nil, boom
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		GetSteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
 			t.Fatal("should not be called")
 			return nil, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	_, err := merged.Hooks.GetSteeringMessages(context.Background())
+	_, err := merged.Hooks.SteeringMessages(context.Background())
 	if !errors.Is(err, boom) {
 		t.Fatalf("want boom, got %v", err)
 	}
@@ -595,17 +595,17 @@ func TestMerge_GetMessages_ErrorShortCircuits(t *testing.T) {
 func TestMerge_OnTruncated_LastNonZeroWins(t *testing.T) {
 	t.Parallel()
 	a := kit.Toolset{Hooks: kit.Hooks{
-		OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 			return kit.TruncationResult{Retry: true, Messages: []llm.Message{{Content: "a"}}}, nil
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 			return kit.TruncationResult{Retry: false, Messages: []llm.Message{{Content: "b"}}}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	res, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationContext{})
+	res, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,17 +620,17 @@ func TestMerge_OnTruncated_LastNonZeroWins(t *testing.T) {
 func TestMerge_OnTruncated_ZeroSkipped(t *testing.T) {
 	t.Parallel()
 	a := kit.Toolset{Hooks: kit.Hooks{
-		OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 			return kit.TruncationResult{Retry: true, Messages: []llm.Message{{Content: "keep"}}}, nil
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 			return kit.TruncationResult{}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	res, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationContext{})
+	res, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationInput{})
 	if err != nil {
 		t.Fatalf("OnTruncated error: %v", err)
 	}
@@ -643,18 +643,18 @@ func TestMerge_OnTruncated_ErrorShortCircuits(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	a := kit.Toolset{Hooks: kit.Hooks{
-		OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 			return kit.TruncationResult{}, boom
 		},
 	}}
 	b := kit.Toolset{Hooks: kit.Hooks{
-		OnTruncated: func(_ context.Context, _ kit.TruncationContext) (kit.TruncationResult, error) {
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
 			t.Fatal("should not be called")
 			return kit.TruncationResult{}, nil
 		},
 	}}
 	merged := kit.Merge(a, b)
-	_, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationContext{})
+	_, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationInput{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("want boom, got %v", err)
 	}
@@ -745,7 +745,7 @@ func TestNew_DeduplicatesToolsFirstWins(t *testing.T) {
 		streamWithToolCall("call-1", "echo", `{}`),
 	)
 	hooks := kit.Hooks{
-		AfterToolCall: func(_ context.Context, c kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, c kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
@@ -784,17 +784,17 @@ func TestNew_ToolsetsHooksChainWithDirectHooks(t *testing.T) {
 		streamWithToolCall("call-1", "echo", `{}`),
 	)
 	hooks := kit.Hooks{
-		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 			order = append(order, "direct")
 			return kit.BeforeToolCallResult{}, nil
 		},
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
 	ts := kit.Toolset{
 		Hooks: kit.Hooks{
-			BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+			BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 				order = append(order, "toolset")
 				return kit.BeforeToolCallResult{}, nil
 			},
@@ -838,7 +838,7 @@ func (p *fakePluginPackage) Plugins() kit.Toolset {
 	return kit.Toolset{
 		Tools: []kit.Tool{nopTool{name: "fake-tool"}},
 		Hooks: kit.Hooks{
-			BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallContext) (kit.BeforeToolCallResult, error) {
+			BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
 				p.beforeCalls++
 				return kit.BeforeToolCallResult{}, nil
 			},
@@ -854,7 +854,7 @@ func TestPluginsConvention_MergesIntoToolsetAndDispatches(t *testing.T) {
 	provider := newScriptedProvider(streamWithToolCall("call-1", "fake-tool", `{}`))
 
 	terminator := kit.Toolset{Hooks: kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}}

@@ -256,7 +256,7 @@ func TestPrompt_CleanRunDoneSuccessTrue(t *testing.T) {
 	)
 	tool := nopTool{name: "echo"}
 	hooks := kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
@@ -395,7 +395,7 @@ func TestUnsuccessful_ResetBetweenRuns(t *testing.T) {
 
 	provider := &swappableProvider{p: errorProvider{err: errors.New("first")}}
 	hooks := kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
@@ -515,7 +515,7 @@ func TestUnsuccessful_NoCrossRunPoisoning(t *testing.T) {
 
 	provider := &swappableProvider{p: errorProvider{err: errors.New("first")}}
 	hooks := kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}
@@ -889,7 +889,7 @@ func TestSubscribeProbeObservesAlongsideConsumer(t *testing.T) {
 		streamWithToolCall("call-1", "echo", `{"text":"hi"}`),
 	)
 	hooks := kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallContext) (kit.AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 			return kit.AfterToolCallResult{Terminate: true}, nil
 		},
 	}

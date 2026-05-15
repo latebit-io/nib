@@ -65,13 +65,13 @@ func Merge(sets ...Toolset) Toolset {
 // mergeHooks chains every non-nil hook across all toolsets.
 func mergeHooks(sets []Toolset) Hooks {
 	var (
-		befores     []func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error)
-		afters      []func(context.Context, AfterToolCallContext) (AfterToolCallResult, error)
+		befores     []func(context.Context, BeforeToolCallInput) (BeforeToolCallResult, error)
+		afters      []func(context.Context, AfterToolCallInput) (AfterToolCallResult, error)
 		transforms  []func(context.Context, []llm.Message) ([]llm.Message, error)
 		steerings   []func(context.Context) ([]llm.Message, error)
 		followUps   []func(context.Context) ([]llm.Message, error)
 		beforeParks []func(context.Context) (event.AgentParked, error)
-		truncs      []func(context.Context, TruncationContext) (TruncationResult, error)
+		truncs      []func(context.Context, TruncationInput) (TruncationResult, error)
 	)
 	for _, s := range sets {
 		if s.Hooks.BeforeToolCall != nil {
@@ -83,11 +83,11 @@ func mergeHooks(sets []Toolset) Hooks {
 		if s.Hooks.TransformContext != nil {
 			transforms = append(transforms, s.Hooks.TransformContext)
 		}
-		if s.Hooks.GetSteeringMessages != nil {
-			steerings = append(steerings, s.Hooks.GetSteeringMessages)
+		if s.Hooks.SteeringMessages != nil {
+			steerings = append(steerings, s.Hooks.SteeringMessages)
 		}
-		if s.Hooks.GetFollowUpMessages != nil {
-			followUps = append(followUps, s.Hooks.GetFollowUpMessages)
+		if s.Hooks.FollowUpMessages != nil {
+			followUps = append(followUps, s.Hooks.FollowUpMessages)
 		}
 		if s.Hooks.BeforePark != nil {
 			beforeParks = append(beforeParks, s.Hooks.BeforePark)
@@ -98,13 +98,13 @@ func mergeHooks(sets []Toolset) Hooks {
 	}
 
 	return Hooks{
-		BeforeToolCall:      chainBeforeToolCall(befores),
-		AfterToolCall:       chainAfterToolCall(afters),
-		TransformContext:    chainTransformContext(transforms),
-		GetSteeringMessages: chainGetMessages(steerings),
-		GetFollowUpMessages: chainGetMessages(followUps),
-		BeforePark:          chainBeforePark(beforeParks),
-		OnTruncated:         chainOnTruncated(truncs),
+		BeforeToolCall:   chainBeforeToolCall(befores),
+		AfterToolCall:    chainAfterToolCall(afters),
+		TransformContext: chainTransformContext(transforms),
+		SteeringMessages: chainGetMessages(steerings),
+		FollowUpMessages: chainGetMessages(followUps),
+		BeforePark:       chainBeforePark(beforeParks),
+		OnTruncated:      chainOnTruncated(truncs),
 	}
 }
 
@@ -136,14 +136,14 @@ func chainBeforePark(fns []func(context.Context) (event.AgentParked, error)) fun
 
 // chainBeforeToolCall chains before-tool-call hooks. First Block=true
 // short-circuits; errors short-circuit. Returns nil when fns is empty.
-func chainBeforeToolCall(fns []func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error)) func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error) {
+func chainBeforeToolCall(fns []func(context.Context, BeforeToolCallInput) (BeforeToolCallResult, error)) func(context.Context, BeforeToolCallInput) (BeforeToolCallResult, error) {
 	switch len(fns) {
 	case 0:
 		return nil
 	case 1:
 		return fns[0]
 	}
-	return func(ctx context.Context, c BeforeToolCallContext) (BeforeToolCallResult, error) {
+	return func(ctx context.Context, c BeforeToolCallInput) (BeforeToolCallResult, error) {
 		for _, fn := range fns {
 			res, err := fn(ctx, c)
 			if err != nil {
@@ -160,14 +160,14 @@ func chainBeforeToolCall(fns []func(context.Context, BeforeToolCallContext) (Bef
 // chainAfterToolCall chains after-tool-call hooks. Later non-nil
 // pointer fields (Content, IsError) override earlier. Terminate is
 // OR'd. Errors short-circuit. Returns nil when fns is empty.
-func chainAfterToolCall(fns []func(context.Context, AfterToolCallContext) (AfterToolCallResult, error)) func(context.Context, AfterToolCallContext) (AfterToolCallResult, error) {
+func chainAfterToolCall(fns []func(context.Context, AfterToolCallInput) (AfterToolCallResult, error)) func(context.Context, AfterToolCallInput) (AfterToolCallResult, error) {
 	switch len(fns) {
 	case 0:
 		return nil
 	case 1:
 		return fns[0]
 	}
-	return func(ctx context.Context, c AfterToolCallContext) (AfterToolCallResult, error) {
+	return func(ctx context.Context, c AfterToolCallInput) (AfterToolCallResult, error) {
 		var merged AfterToolCallResult
 		for _, fn := range fns {
 			res, err := fn(ctx, c)
@@ -214,7 +214,7 @@ func chainTransformContext(fns []func(context.Context, []llm.Message) ([]llm.Mes
 
 // chainGetMessages concatenates message slices from all hooks. Errors
 // short-circuit. Returns nil when fns is empty. Used for both
-// GetSteeringMessages and GetFollowUpMessages.
+// SteeringMessages and FollowUpMessages.
 func chainGetMessages(fns []func(context.Context) ([]llm.Message, error)) func(context.Context) ([]llm.Message, error) {
 	switch len(fns) {
 	case 0:
@@ -238,14 +238,14 @@ func chainGetMessages(fns []func(context.Context) ([]llm.Message, error)) func(c
 // chainOnTruncated chains truncation hooks. Each fires in order; the
 // last non-zero result wins. Errors short-circuit. Returns nil when
 // fns is empty.
-func chainOnTruncated(fns []func(context.Context, TruncationContext) (TruncationResult, error)) func(context.Context, TruncationContext) (TruncationResult, error) {
+func chainOnTruncated(fns []func(context.Context, TruncationInput) (TruncationResult, error)) func(context.Context, TruncationInput) (TruncationResult, error) {
 	switch len(fns) {
 	case 0:
 		return nil
 	case 1:
 		return fns[0]
 	}
-	return func(ctx context.Context, c TruncationContext) (TruncationResult, error) {
+	return func(ctx context.Context, c TruncationInput) (TruncationResult, error) {
 		var last TruncationResult
 		for _, fn := range fns {
 			res, err := fn(ctx, c)

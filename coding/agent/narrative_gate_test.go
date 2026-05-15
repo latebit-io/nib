@@ -309,7 +309,7 @@ func TestAgent_NarrativeGate_ActiveTaskInProgress_NoFire(t *testing.T) {
 // ending in error ends the run cleanly with AgentDone.Success=false,
 // not via a Finished AgentWaiting. The original guard (no DONE on
 // errored turn) is now structurally enforced: AgentWaiting only fires
-// from the foundation's GetFollowUpMessages hook on a clean turn-park,
+// from the foundation's FollowUpMessages hook on a clean turn-park,
 // which an error path never reaches. The test pins the new contract
 // so a regression that re-routes errors through AgentWaiting{Finished}
 // surfaces immediately.

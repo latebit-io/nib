@@ -401,7 +401,7 @@ func TestBeforeToolCall_BlocksExecution(t *testing.T) {
 
 	hookCalls := 0
 	hooks := Hooks{
-		BeforeToolCall: func(_ context.Context, c BeforeToolCallContext) (BeforeToolCallResult, error) {
+		BeforeToolCall: func(_ context.Context, c BeforeToolCallInput) (BeforeToolCallResult, error) {
 			hookCalls++
 			if c.Name != "edit_file" {
 				return BeforeToolCallResult{}, nil
@@ -476,7 +476,7 @@ func TestAfterToolCall_OverridesAndTerminates(t *testing.T) {
 	overridden := "overridden"
 	isErr := true
 	hooks := Hooks{
-		AfterToolCall: func(_ context.Context, _ AfterToolCallContext) (AfterToolCallResult, error) {
+		AfterToolCall: func(_ context.Context, _ AfterToolCallInput) (AfterToolCallResult, error) {
 			return AfterToolCallResult{
 				Content:   &overridden,
 				IsError:   &isErr,
@@ -571,10 +571,10 @@ Done:
 	}
 }
 
-// TestGetSteeringMessages_ReentersLoop verifies that a non-empty
+// TestSteeringMessages_ReentersLoop verifies that a non-empty
 // steering response on a no-tool-calls turn causes the loop to invoke
 // the provider a second time without parking on Reply.
-func TestGetSteeringMessages_ReentersLoop(t *testing.T) {
+func TestSteeringMessages_ReentersLoop(t *testing.T) {
 	t.Parallel()
 
 	provider := newScriptedProvider(streamDone(), streamDone())
@@ -582,7 +582,7 @@ func TestGetSteeringMessages_ReentersLoop(t *testing.T) {
 
 	calls := 0
 	hooks := Hooks{
-		GetSteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
 			calls++
 			if calls == 1 {
 				return []llm.Message{{Role: "user", Content: "steer"}}, nil
@@ -620,7 +620,7 @@ func TestGetSteeringMessages_ReentersLoop(t *testing.T) {
 		t.Errorf("provider.calls = %d; want 2 (steering should re-enter loop)", provider.calls)
 	}
 	if calls != 2 {
-		t.Errorf("GetSteeringMessages calls = %d; want 2 (one to inject, one to drain)", calls)
+		t.Errorf("SteeringMessages calls = %d; want 2 (one to inject, one to drain)", calls)
 	}
 }
 
@@ -962,7 +962,7 @@ func TestOnTruncated_RetrySplicesAndContinues(t *testing.T) {
 	events := make(chan event.Event, 64)
 
 	var hookCalls int
-	hook := func(_ context.Context, c TruncationContext) (TruncationResult, error) {
+	hook := func(_ context.Context, c TruncationInput) (TruncationResult, error) {
 		hookCalls++
 		if len(c.ToolCalls) != 1 || c.ToolCalls[0].ID != "trunc-1" {
 			t.Errorf("hook ToolCalls = %+v; want trunc-1 only", c.ToolCalls)
@@ -1040,7 +1040,7 @@ func TestOnTruncated_NoRetryEndsRunSilently(t *testing.T) {
 	})
 	events := make(chan event.Event, 32)
 
-	hook := func(_ context.Context, _ TruncationContext) (TruncationResult, error) {
+	hook := func(_ context.Context, _ TruncationInput) (TruncationResult, error) {
 		return TruncationResult{
 			Retry: false,
 			Messages: []llm.Message{
@@ -1098,7 +1098,7 @@ func TestOnTruncated_HookErrorIsTerminal(t *testing.T) {
 	events := make(chan event.Event, 32)
 
 	hookErr := errors.New("recovery rejected the proposal")
-	hook := func(_ context.Context, _ TruncationContext) (TruncationResult, error) {
+	hook := func(_ context.Context, _ TruncationInput) (TruncationResult, error) {
 		return TruncationResult{}, hookErr
 	}
 

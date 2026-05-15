@@ -105,7 +105,18 @@ var fileEditTools = map[string]bool{
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
 	provider llm.Provider
-	events   chan<- event.Event // frontend reads from this
+	events   chan<- event.Event // legacy frontend channel; dual-written alongside [Agent.bus] until commit 4
+	// bus fans every published [event.Event] out to subscribers
+	// registered via [Agent.Subscribe]. Today, [Agent.send] and
+	// [Agent.sendCritical] dual-write: every event goes BOTH to
+	// [Agent.events] (legacy channel that TUI / session consume)
+	// AND through [bus.publish] (which fans out to any Subscribe-d
+	// observers). The legacy channel write happens FIRST so the
+	// frontend's drop-streaming-block-control timeout-bounded
+	// semantics (the contract callers rely on) is preserved as-is.
+	// Commit 4 will remove the legacy channel and make the bus the
+	// sole delivery path.
+	bus      *bus
 	tools    map[string]Tool
 	toolDefs []llm.ToolDef
 	cache    *FileCache
@@ -458,6 +469,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	a := &Agent{
 		provider:          provider,
 		events:            events,
+		bus:               newBus(),
 		cache:             cache,
 		prompts:           prompts.NewPromptLoader(projectRoot),
 		coord:             coord,
@@ -596,7 +608,38 @@ func (a *Agent) Close() {
 		if a.forwardDone != nil {
 			<-a.forwardDone
 		}
+		// After the forwarder exits, no goroutine publishes to the
+		// bus anymore — safe to close. bus.close drains in-flight
+		// deliveries per-subscription and closes every subscriber
+		// inbox so `for ev := range sub.Events()` loops exit
+		// naturally. Idempotent.
+		if a.bus != nil {
+			a.bus.close()
+		}
 	})
+}
+
+// Subscribe registers a new subscriber on the coding agent's event
+// stream and returns a [Subscription] whose inbox receives events from
+// the next [Agent.send] / [Agent.sendCritical] onward.
+//
+// Default [SubscribeOptions] (zero value) preserve the legacy channel
+// semantics: streaming events ([event.AgentToken], [event.AgentStatus],
+// [event.AgentTurnUsage], [event.AgentInputEstimate],
+// [event.AgentCompacted]) drop on a full inbox; control events block
+// the publisher until the inbox accepts.
+//
+// Subscribe returns [ErrAgentClosed] if the agent has been closed.
+// Late subscribers receive only events published after their subscribe
+// call; the bus does not journal.
+//
+// The legacy events channel passed to [New] remains the canonical
+// frontend path through commit 3 — a subscriber attached here observes
+// the same stream the channel reader sees, with independent buffer and
+// drop accounting. Commit 4 removes the channel and Subscribe becomes
+// the only consumption path.
+func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
+	return a.bus.subscribe(opts)
 }
 
 // registerTools builds the tool registry. Built-in tools are registered first

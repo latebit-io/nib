@@ -23,7 +23,9 @@ import (
 const (
 	githubRepo = "latebit-io/demarkus"
 	// requiredBins lists the binaries that must be present for memory to work.
-	// Server release: demarkus-server, demarkus-token.
+	// Server release: demarkus-server.
+	// Tools release: demarkus-token (publish/broker also exist on the same
+	// tag but are not required by nib).
 	// Client release: demarkus, demarkus-mcp.
 	requiredBins = "demarkus-server,demarkus-token,demarkus,demarkus-mcp"
 
@@ -56,12 +58,33 @@ func install(ctx context.Context, binDir, versionFile string) error {
 		return fmt.Errorf("create bin dir: %w", err)
 	}
 
-	// Server release: demarkus-server + demarkus-token in one archive.
+	// Server release: demarkus-server only. Up through 0.17.x the server
+	// archive bundled demarkus-token as a second binary; from the
+	// distribution change captured in the tools/v* release line,
+	// demarkus-token moved into a separate tools release alongside
+	// demarkus-broker and demarkus-publish. The server tarball now ships
+	// exactly one binary.
 	slog.Info("memory install: downloading server", "version", version, "platform", platform, "arch", arch)
 	serverTag := "server/v" + version
 	serverArchive := fmt.Sprintf("demarkus-server_%s_%s_%s.tar.gz", version, platform, arch)
-	if err := downloadRelease(ctx, serverTag, serverArchive, "demarkus-server_checksums.txt", binDir, []string{"demarkus-server", "demarkus-token"}); err != nil {
+	if err := downloadRelease(ctx, serverTag, serverArchive, "demarkus-server_checksums.txt", binDir, []string{"demarkus-server"}); err != nil {
 		return fmt.Errorf("server release: %w", err)
+	}
+
+	// Tools release: demarkus-token is the only tool nib requires from
+	// this release line. demarkus-broker and demarkus-publish are
+	// shipped under the same tag in their own archives but are not
+	// needed at runtime — extract only what we use.
+	toolsVersion, err := fetchLatestVersion(ctx, "tools")
+	if err != nil {
+		return fmt.Errorf("fetch tools version: %w", err)
+	}
+	slog.Info("memory install: downloading tools", "version", toolsVersion, "platform", platform, "arch", arch)
+	toolsTag := "tools/v" + toolsVersion
+	toolsChecksums := "demarkus-tools_checksums.txt"
+	tokenArchive := fmt.Sprintf("demarkus-token_%s_%s_%s.tar.gz", toolsVersion, platform, arch)
+	if err := downloadRelease(ctx, toolsTag, tokenArchive, toolsChecksums, binDir, []string{"demarkus-token"}); err != nil {
+		return fmt.Errorf("token release: %w", err)
 	}
 
 	// Client release: demarkus CLI and demarkus-mcp live in separate archives

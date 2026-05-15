@@ -188,6 +188,24 @@ func (s *Subscription) deliver(ev event.Event) {
 	}
 }
 
+// tryDeliver attempts a non-blocking send to the subscription's inbox
+// regardless of its configured policy. Drops on full and increments
+// [Subscription.drops]. Used by [bus.tryPublish] during the dual-write
+// transitional phase — see that method's doc for the rationale.
+//
+// Like [Subscription.deliver], decrements the per-subscription
+// deliverWG on return so Close/bus.close can wait on in-flight
+// attempts.
+func (s *Subscription) tryDeliver(ev event.Event) {
+	defer s.deliverWG.Done()
+	select {
+	case s.inbox <- ev:
+	case <-s.done:
+	default:
+		atomic.AddInt64(&s.drops, 1)
+	}
+}
+
 // isStreamingEvent returns true for the high-volume, individually
 // replaceable event types whose loss is recoverable from later events.
 // Every other event is control: lifecycle, failure, or signal events

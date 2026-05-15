@@ -97,6 +97,45 @@ func (b *bus) publish(ev event.Event) {
 	}
 }
 
+// tryPublish dispatches ev to every currently-registered subscriber on
+// a best-effort, never-blocking basis: each subscriber's inbox is
+// attempted with a non-blocking send. If the inbox is full, the event
+// is dropped on that subscriber regardless of its configured policy,
+// and [Subscription.drops] is incremented. Returns immediately when
+// the bus is closed.
+//
+// tryPublish exists for the dual-write transitional phase
+// ([Agent.send], [Agent.sendCritical]) where the legacy events
+// channel is the canonical delivery path with its own bounded timeout
+// and the bus is a shadow path for [Subscription]-attached observers.
+// In that phase the legacy channel owns "guaranteed delivery" for
+// Block-policy semantics and a blocking bus publish would void the
+// legacy channel's deadline contract — exactly the failure mode
+// Greptile flagged on PR #153.
+//
+// Once the legacy channel is removed (commit 4 of the kit-event-bus
+// arc), call sites switch to [bus.publish] and each subscriber's
+// configured [DropPolicy] takes effect normally.
+//
+// Same snapshot-under-lock, deliver-outside-lock, per-subscription
+// deliverWG discipline as [bus.publish].
+func (b *bus) tryPublish(ev event.Event) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	subs := slices.Clone(b.subscribers)
+	for _, sub := range subs {
+		sub.deliverWG.Add(1)
+	}
+	b.mu.Unlock()
+
+	for _, sub := range subs {
+		sub.tryDeliver(ev)
+	}
+}
+
 // unsubscribe removes sub from the registry if present. Subsequent
 // [bus.publish] calls will not deliver to sub. Idempotent.
 //

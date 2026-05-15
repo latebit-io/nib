@@ -447,6 +447,75 @@ func sliceEqual(a, b []string) bool {
 	return true
 }
 
+// TestSendCriticalDeadlineHonoredWithBlockedBusSubscriber is the
+// regression test for the P1 Greptile catch on PR #153: a defer-based
+// [bus.publish] inside [Agent.sendCritical] would block the function
+// after its 5-second timer had fired if a Block-policy subscriber's
+// inbox was full, voiding the deadline contract.
+//
+// The fix is to use [bus.tryPublish] (non-blocking per-subscriber)
+// during the dual-write transitional phase. This test exercises that
+// fix directly without standing up a full kit-backed agent: build a
+// minimal [Agent] with a non-nil bus + a tiny-buffered events channel
+// + a Block-policy subscriber whose inbox is pre-filled, then call
+// sendCritical and assert it returns within a deadline shorter than
+// the test's overall timeout.
+//
+// Failure mode this guards: a future refactor switching back to
+// [bus.publish] (blocking) inside sendCritical / send would block on
+// the wedged subscriber forever, this test would hit the deadline
+// guard and fail with a clear message.
+func TestSendCriticalDeadlineHonoredWithBlockedBusSubscriber(t *testing.T) {
+	t.Parallel()
+
+	events := make(chan event.Event, 1)
+	a := &Agent{
+		events: events,
+		bus:    newBus(),
+	}
+
+	// Subscriber uses default options (Block policy on control events).
+	// Pre-fill its inbox to 1/1 so the next control-event delivery would
+	// block under blocking publish.
+	sub, err := a.bus.subscribe(SubscribeOptions{BufferSize: 1})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	t.Cleanup(sub.Close)
+	a.bus.publish(event.AgentDone{Success: true}) // inbox now 1/1
+
+	// Drain the legacy channel concurrently so sendCritical's
+	// channel-side select can succeed quickly — we want to measure the
+	// bus-side behavior, not the legacy timeout.
+	drainerDone := make(chan struct{})
+	go func() {
+		defer close(drainerDone)
+		<-events
+	}()
+
+	deadline := 1 * time.Second
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- a.sendCritical(context.Background(), event.AgentEditProposed{})
+	}()
+
+	select {
+	case err := <-done:
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Errorf("sendCritical returned err=%v after %s", err, elapsed)
+		}
+		if elapsed >= deadline {
+			t.Errorf("sendCritical took %s; deadline was %s — bus publish blocked", elapsed, deadline)
+		}
+	case <-time.After(deadline):
+		t.Fatal("sendCritical did not return within deadline — Block-policy subscriber blocked the bus publish past the legacy channel's 5s timer (P1 regression)")
+	}
+
+	<-drainerDone
+}
+
 // drainOneCoding reads one event from sub.Events with a small timeout.
 // Distinguished from the kit-side helper of the same name by package
 // scoping.

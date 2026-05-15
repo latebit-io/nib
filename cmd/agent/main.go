@@ -258,7 +258,24 @@ func run() error {
 			lintstage.New(styleResult.PerFileLinters.Linters),
 		)
 	}
-	ag := agent.New(provider, workspace, events, opts, mcpResult.Tools...)
+	ag := agent.New(provider, workspace, opts, mcpResult.Tools...)
+	// Forward bus-published agent events into the shared `events` chan
+	// that LSP also writes to and the headless [Runner] reads. The
+	// forwarder exits naturally when [agent.Agent.Close] closes the
+	// bus (which closes the subscription's inbox).
+	sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
+	if err != nil {
+		return setupErr("agent.Subscribe: %v", err)
+	}
+	go func() {
+		for ev := range sub.Events() {
+			select {
+			case events <- ev:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// Stderr writer — streams status in TTY or verbose mode.
 	stderr := io.Writer(io.Discard)

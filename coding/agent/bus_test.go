@@ -295,22 +295,22 @@ func TestCodingSubscriptionCloseDoesNotBlockOnUnrelatedSlowSubscriber(t *testing
 	}()
 }
 
-// TestSubscribeProbeObservesAlongsideLegacyChannel is the P10 verification
-// at the coding layer (mirror of P9 at the kit layer in
-// `kit/kit_test.go::TestSubscribeProbeObservesAlongsideConsumer`).
+// TestSubscribeMultipleSubscribersObserveSameStream is the post-channel
+// P10 verification at the coding layer: two independent Subscriptions
+// against the same [Agent] each observe the same event-type sequence in
+// the same per-subscriber order. Mirrors P9 at the kit layer
+// (`kit/kit_test.go::TestSubscribeProbeObservesAlongsideConsumer`).
 //
 // Concrete use case: a developer attaches a probe Subscription to an
 // already-running coding agent — for observability, metrics, or a
-// secondary frontend — without disturbing the legacy events channel
-// the TUI consumes. The probe must see the same event types in the
-// same order as the channel reader.
+// secondary frontend — alongside the primary consumer Subscription that
+// the flagship binary's bus→events forwarder reads. The probe must see
+// the same event types in the same order as the primary consumer.
 //
-// Today's dual-write shape ([Agent.send] writes to both
-// [Agent.events] and [Agent.bus]) is what enables this. When commit 4
-// removes the legacy channel and the TUI migrates to its own
-// Subscription, this test becomes a multi-Subscription-only check
-// without any change to the assertion shape.
-func TestSubscribeProbeObservesAlongsideLegacyChannel(t *testing.T) {
+// Before commit 4 of the kit-event-bus arc this test compared the
+// legacy [Agent.events] channel with a probe; commit 4 removed the
+// channel and reshaped this into a two-Subscription comparison.
+func TestSubscribeMultipleSubscribersObserveSameStream(t *testing.T) {
 	t.Parallel()
 
 	provider := &multiTurnProvider{
@@ -324,17 +324,21 @@ func TestSubscribeProbeObservesAlongsideLegacyChannel(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 256)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
 	t.Cleanup(ag.Close)
 
-	// Probe attaches BEFORE the run starts so it sees every event the
-	// channel sees. A generous buffer keeps the test from depending on
-	// drop policy under burst — the assertion is "probe sees the
-	// stream," not "probe matches drop behavior."
+	// Both subscribers attach BEFORE the run starts so they see every
+	// event from the first publish onward. A generous buffer keeps the
+	// test from depending on drop policy under burst — the assertion is
+	// "both subscribers see the same stream," not "drop behavior."
+	primary, err := ag.Subscribe(SubscribeOptions{BufferSize: 256})
+	if err != nil {
+		t.Fatalf("Subscribe primary: %v", err)
+	}
+	t.Cleanup(primary.Close)
 	probe, err := ag.Subscribe(SubscribeOptions{BufferSize: 256})
 	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+		t.Fatalf("Subscribe probe: %v", err)
 	}
 	t.Cleanup(probe.Close)
 
@@ -343,63 +347,26 @@ func TestSubscribeProbeObservesAlongsideLegacyChannel(t *testing.T) {
 
 	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
 
-	// Drain both streams in parallel until each has observed an
-	// AgentWaiting (the run parks after one turn). Probe and channel
-	// each respond to FlushBuffers in-band — only the legacy channel
-	// reader can answer the request-channel-coupled event, so the
-	// probe ignores it.
-	channelSeq := drainCodingChannelUntilWaiting(t, events, 3*time.Second)
+	// Drain both subscriptions in parallel until each has observed an
+	// AgentWaiting (the run parks after one turn).
+	primarySeq := drainCodingProbeUntilWaiting(t, primary.Events(), 3*time.Second)
 	probeSeq := drainCodingProbeUntilWaiting(t, probe.Events(), 3*time.Second)
 
 	ag.Cancel()
 
-	// Both observers see the same event-type sequence. The probe is
-	// expected to MISS FlushBuffers because the legacy channel reader
-	// (the test's drain) consumes it before the bus's iteration order
-	// is meaningful — but per the dual-write contract, FlushBuffers
-	// goes ONLY to the legacy channel today (see io.go). So we filter
-	// FlushBuffers out of both sequences before comparing.
-	got := eventTypeSeqCodingFiltered(channelSeq)
-	want := eventTypeSeqCodingFiltered(probeSeq)
+	got := eventTypeSeqCoding(primarySeq)
+	want := eventTypeSeqCoding(probeSeq)
 
 	if !sliceEqual(got, want) {
-		t.Errorf("channel and probe sequences diverged\n  channel: %v\n    probe: %v", got, want)
+		t.Errorf("primary and probe sequences diverged\n  primary: %v\n    probe: %v", got, want)
 	}
 	if len(want) == 0 {
 		t.Fatal("probe observed no events at all — Subscribe not wired into a.send")
 	}
 }
 
-// drainCodingChannelUntilWaiting reads from the legacy events channel
-// until an AgentWaiting arrives or the deadline fires. Responds to
-// FlushBuffers in-band so the agent does not wedge on autosave.
-func drainCodingChannelUntilWaiting(t *testing.T, ch <-chan event.Event, timeout time.Duration) []event.Event {
-	t.Helper()
-	out := make([]event.Event, 0, 32)
-	deadline := time.After(timeout)
-	for {
-		select {
-		case ev := <-ch:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				out = append(out, ev)
-				continue
-			}
-			out = append(out, ev)
-			if _, ok := ev.(event.AgentWaiting); ok {
-				return out
-			}
-		case <-deadline:
-			t.Fatalf("legacy channel drain: deadline before AgentWaiting; got %d events", len(out))
-			return out
-		}
-	}
-}
-
 // drainCodingProbeUntilWaiting reads from a probe Subscription until
-// AgentWaiting arrives or the deadline fires. The probe does NOT
-// answer FlushBuffers — its Result channel is single-reader and
-// belongs to the legacy-channel consumer.
+// AgentWaiting arrives or the deadline fires.
 func drainCodingProbeUntilWaiting(t *testing.T, ch <-chan event.Event, timeout time.Duration) []event.Event {
 	t.Helper()
 	out := make([]event.Event, 0, 32)
@@ -418,16 +385,10 @@ func drainCodingProbeUntilWaiting(t *testing.T, ch <-chan event.Event, timeout t
 	}
 }
 
-// eventTypeSeqCodingFiltered returns the type names of events in evs,
-// dropping FlushBuffers (per the dual-write contract today, it goes
-// only to the legacy channel and the probe should not see it; the
-// channel-side drain consumes it before the assertion).
-func eventTypeSeqCodingFiltered(evs []event.Event) []string {
+// eventTypeSeqCoding returns the type names of events in evs.
+func eventTypeSeqCoding(evs []event.Event) []string {
 	out := make([]string, 0, len(evs))
 	for _, ev := range evs {
-		if _, isFlush := ev.(event.FlushBuffers); isFlush {
-			continue
-		}
 		out = append(out, fmt.Sprintf("%T", ev))
 	}
 	return out
@@ -447,73 +408,66 @@ func sliceEqual(a, b []string) bool {
 	return true
 }
 
-// TestSendCriticalDeadlineHonoredWithBlockedBusSubscriber is the
-// regression test for the P1 Greptile catch on PR #153: a defer-based
-// [bus.publish] inside [Agent.sendCritical] would block the function
-// after its 5-second timer had fired if a Block-policy subscriber's
-// inbox was full, voiding the deadline contract.
+// TestPublishContextHonorsDeadlineWithBlockedSubscriber is the P12
+// property regression: [bus.publishContext] must surface ctx.Err()
+// rather than wedge when a Block-policy subscriber's inbox is full
+// and ctx fires.
 //
-// The fix is to use [bus.tryPublish] (non-blocking per-subscriber)
-// during the dual-write transitional phase. This test exercises that
-// fix directly without standing up a full kit-backed agent: build a
-// minimal [Agent] with a non-nil bus + a tiny-buffered events channel
-// + a Block-policy subscriber whose inbox is pre-filled, then call
-// sendCritical and assert it returns within a deadline shorter than
-// the test's overall timeout.
+// This is the post-channel-removal counterpart to
+// TestSendCriticalDeadlineHonoredWithBlockedBusSubscriber. Commit 3's
+// guard worked only because the legacy events channel still owned the
+// deadline contract; commit 4 makes publishContext the sole deadline-
+// honoring path. Without ctx-bounded inbox sends inside
+// [Subscription.deliverContext], a Block-policy subscriber with a full
+// inbox would deadlock the orchestrator's edit-proposal wait
+// indefinitely (the failure mode Greptile flagged on PR #153 in a
+// different shape).
 //
-// Failure mode this guards: a future refactor switching back to
-// [bus.publish] (blocking) inside sendCritical / send would block on
-// the wedged subscriber forever, this test would hit the deadline
-// guard and fail with a clear message.
-func TestSendCriticalDeadlineHonoredWithBlockedBusSubscriber(t *testing.T) {
+// The matching success case is covered by the bus's other Block-policy
+// tests; this test asserts only the deadline-miss path.
+func TestPublishContextHonorsDeadlineWithBlockedSubscriber(t *testing.T) {
 	t.Parallel()
 
-	events := make(chan event.Event, 1)
-	a := &Agent{
-		events: events,
-		bus:    newBus(),
-	}
+	b := newBus()
+	t.Cleanup(b.close)
 
-	// Subscriber uses default options (Block policy on control events).
-	// Pre-fill its inbox to 1/1 so the next control-event delivery would
-	// block under blocking publish.
-	sub, err := a.bus.subscribe(SubscribeOptions{BufferSize: 1})
+	// Default options → control events Block on full. BufferSize 1 then
+	// pre-fill so the inbox is full when publishContext attempts the
+	// next control-event delivery.
+	sub, err := b.subscribe(SubscribeOptions{BufferSize: 1})
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	t.Cleanup(sub.Close)
-	a.bus.publish(event.AgentDone{Success: true}) // inbox now 1/1
+	b.publish(event.AgentDone{Success: true}) // inbox now 1/1
 
-	// Drain the legacy channel concurrently so sendCritical's
-	// channel-side select can succeed quickly — we want to measure the
-	// bus-side behavior, not the legacy timeout.
-	drainerDone := make(chan struct{})
-	go func() {
-		defer close(drainerDone)
-		<-events
-	}()
+	deadline := 150 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
 
-	deadline := 1 * time.Second
 	done := make(chan error, 1)
 	start := time.Now()
 	go func() {
-		done <- a.sendCritical(context.Background(), event.AgentEditProposed{})
+		done <- b.publishContext(ctx, event.AgentEditProposed{})
 	}()
 
 	select {
 	case err := <-done:
 		elapsed := time.Since(start)
-		if err != nil {
-			t.Errorf("sendCritical returned err=%v after %s", err, elapsed)
+		if err == nil {
+			t.Errorf("publishContext returned nil after %s; want ctx.Err()", elapsed)
 		}
-		if elapsed >= deadline {
-			t.Errorf("sendCritical took %s; deadline was %s — bus publish blocked", elapsed, deadline)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("publishContext returned %v; want context.DeadlineExceeded", err)
 		}
-	case <-time.After(deadline):
-		t.Fatal("sendCritical did not return within deadline — Block-policy subscriber blocked the bus publish past the legacy channel's 5s timer (P1 regression)")
+		// Allow generous slack — runtime scheduling jitter under -race
+		// can stretch elapsed well past the nominal deadline.
+		if elapsed > deadline+500*time.Millisecond {
+			t.Errorf("publishContext took %s; deadline was %s — ctx-bounded delivery did not fire", elapsed, deadline)
+		}
+	case <-time.After(deadline + 2*time.Second):
+		t.Fatal("publishContext did not return — Block-policy subscriber wedged the bus past the deadline (P12 regression)")
 	}
-
-	<-drainerDone
 }
 
 // drainOneCoding reads one event from sub.Events with a small timeout.

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"slices"
 	"sync"
 
@@ -97,33 +98,34 @@ func (b *bus) publish(ev event.Event) {
 	}
 }
 
-// tryPublish dispatches ev to every currently-registered subscriber on
-// a best-effort, never-blocking basis: each subscriber's inbox is
-// attempted with a non-blocking send. If the inbox is full, the event
-// is dropped on that subscriber regardless of its configured policy,
-// and [Subscription.drops] is incremented. Returns immediately when
-// the bus is closed.
+// publishContext dispatches ev to every currently-registered subscriber
+// with ctx-bounded delivery semantics. Drop-policy subscribers delegate
+// to the non-blocking inbox send (they are lossy by choice; ctx does
+// not apply). Block-policy subscribers attempt a select-bounded inbox
+// send that aborts on ctx cancellation.
 //
-// tryPublish exists for the dual-write transitional phase
-// ([Agent.send], [Agent.sendCritical]) where the legacy events
-// channel is the canonical delivery path with its own bounded timeout
-// and the bus is a shadow path for [Subscription]-attached observers.
-// In that phase the legacy channel owns "guaranteed delivery" for
-// Block-policy semantics and a blocking bus publish would void the
-// legacy channel's deadline contract — exactly the failure mode
-// Greptile flagged on PR #153.
+// Returns the first ctx.Err() observed across subscribers; subscribers
+// after the first deadline miss are still attempted on a best-effort
+// basis so a single slow Block-policy subscriber does not silently
+// drop the event for every subscriber behind it in iteration order.
+// Returns [ErrAgentClosed] when the bus is closed.
 //
-// Once the legacy channel is removed (commit 4 of the kit-event-bus
-// arc), call sites switch to [bus.publish] and each subscriber's
-// configured [DropPolicy] takes effect normally.
+// publishContext is the post-channel-removal home for the deadline
+// contract that the legacy events channel's 5-second timer carried in
+// [Agent.sendCritical]. [bus.publish] (the unbounded-block variant) is
+// wrong for sendCritical (Greptile P1, PR #153); [bus.tryPublish] (the
+// always-drop variant) is wrong because it does not honor a Block-
+// policy consumer's "guaranteed delivery up to the deadline" contract.
+// publishContext is the middle: deliver guaranteed for Block-policy
+// subscribers, but ONLY up to the supplied deadline.
 //
 // Same snapshot-under-lock, deliver-outside-lock, per-subscription
-// deliverWG discipline as [bus.publish].
-func (b *bus) tryPublish(ev event.Event) {
+// deliverWG discipline as [bus.publish] and [bus.tryPublish].
+func (b *bus) publishContext(ctx context.Context, ev event.Event) error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		return
+		return ErrAgentClosed
 	}
 	subs := slices.Clone(b.subscribers)
 	for _, sub := range subs {
@@ -131,9 +133,13 @@ func (b *bus) tryPublish(ev event.Event) {
 	}
 	b.mu.Unlock()
 
+	var firstErr error
 	for _, sub := range subs {
-		sub.tryDeliver(ev)
+		if err := sub.deliverContext(ctx, ev); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
+	return firstErr
 }
 
 // unsubscribe removes sub from the registry if present. Subsequent

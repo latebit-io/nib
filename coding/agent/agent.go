@@ -105,17 +105,13 @@ var fileEditTools = map[string]bool{
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
 	provider llm.Provider
-	events   chan<- event.Event // legacy frontend channel; dual-written alongside [Agent.bus] until commit 4
-	// bus fans every published [event.Event] out to subscribers
-	// registered via [Agent.Subscribe]. Today, [Agent.send] and
-	// [Agent.sendCritical] dual-write: every event goes BOTH to
-	// [Agent.events] (legacy channel that TUI / session consume)
-	// AND through [bus.publish] (which fans out to any Subscribe-d
-	// observers). The legacy channel write happens FIRST so the
-	// frontend's drop-streaming-block-control timeout-bounded
-	// semantics (the contract callers rely on) is preserved as-is.
-	// Commit 4 will remove the legacy channel and make the bus the
-	// sole delivery path.
+	// bus is the sole delivery path for events emitted by the agent.
+	// [Agent.send] publishes through [bus.publish]; [Agent.sendCritical]
+	// publishes through [bus.publishContext] for ctx-bounded delivery.
+	// Consumers register via [Agent.Subscribe]; the bus fans every
+	// publication out to each subscriber's inbox per its configured
+	// [DropPolicy]. The pre-bus single-frontend-channel design was
+	// retired in commit 4 of the kit-event-bus arc.
 	bus      *bus
 	tools    map[string]Tool
 	toolDefs []llm.ToolDef
@@ -227,6 +223,12 @@ type Agent struct {
 	// style evaluator fire when the agent marks a task complete, not on
 	// every turn.
 	taskEdits []taskEdit
+
+	// flushDirtyBuffersFn is the frontend-supplied autosave callback the
+	// agent invokes before each tool dispatch. Nil when no frontend has
+	// registered a callback (headless mode), in which case
+	// [Agent.flushDirtyBuffers] short-circuits to a no-op.
+	flushDirtyBuffersFn FlushDirtyBuffersFunc
 
 	// Per-run session usage lives on [providerProxy.session] —
 	// accumulated synchronously inside the Stream channel wrapper so
@@ -349,6 +351,24 @@ type taskEdit struct {
 	Replace string
 }
 
+// FlushDirtyBuffersFunc is the frontend-supplied callback the agent
+// invokes before each tool dispatch to save any in-memory buffer edits
+// to disk. Returns the canonical paths of files that were successfully
+// saved (the agent invalidates those entries in its [FileCache]) and
+// the first error encountered. ctx carries the agent's per-flush
+// deadline; implementations should honor ctx.Done() between save
+// operations.
+//
+// A nil callback means the agent has no buffer-flushing responsibility
+// (the headless case — no in-memory buffers exist) and the flush step
+// becomes a no-op.
+//
+// Before commit 4 of the kit-event-bus arc this contract was carried by
+// the [event.FlushBuffers] request-response event; the callback shape
+// removes the per-event Result-channel coupling that did not fit a
+// fan-out delivery model.
+type FlushDirtyBuffersFunc func(ctx context.Context) ([]string, error)
+
 // NewOptions holds optional dependencies for agent construction.
 type NewOptions struct {
 	// DiagProvider enables diagnostics tool and auto-injection after edits.
@@ -413,16 +433,24 @@ type NewOptions struct {
 	//	 < 0 — unlimited (disable the check; not recommended).
 	//	 > 0 — explicit cap in tokens.
 	TaskTokenBudget int
+
+	// FlushDirtyBuffers is the frontend-supplied autosave callback. See
+	// [FlushDirtyBuffersFunc]. Nil disables the pre-tool-dispatch flush
+	// step — appropriate for headless callers with no in-memory buffers.
+	FlushDirtyBuffers FlushDirtyBuffersFunc
 }
 
 // New creates an agent with the given provider, workspace, and tools.
 // The project root is derived from workspace.ProjectRoot().
 // The opts parameter is optional — pass nil for defaults.
-// The frontend must continuously drain the events channel. Streaming events
-// (AgentToken, AgentStatus) are dropped when the channel is full; control-flow
-// events (EditProposed, Done, Error) block for up to 5 seconds before being
-// discarded with a log. Use a buffered channel (e.g. 64) to absorb bursts.
-func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, opts *NewOptions, extraTools ...Tool) *Agent {
+//
+// Frontends consume agent-emitted events via [Agent.Subscribe], which
+// returns a [Subscription]. Streaming events (AgentToken, AgentStatus,
+// AgentTurnUsage, AgentInputEstimate, AgentCompacted) drop on a full
+// subscriber inbox; control events block until the inbox accepts
+// (subject to each subscriber's [SubscribeOptions]). Use the default
+// [DropPolicy] for parity with the pre-bus single-channel behavior.
+func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTools ...Tool) *Agent {
 	coord := approval.New()
 	cache := NewFileCache()
 	projectRoot := workspace.ProjectRoot()
@@ -440,6 +468,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	var smokeCfg runconfig.Resolved
 	var pipeline validate.Pipeline = validate.NoopPipeline{}
 	var taskTokenBudgetInput int
+	var flushDirtyBuffersFn FlushDirtyBuffersFunc
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -456,6 +485,7 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 			pipeline = opts.ValidationPipeline
 		}
 		taskTokenBudgetInput = opts.TaskTokenBudget
+		flushDirtyBuffersFn = opts.FlushDirtyBuffers
 	}
 	taskTokenBudget := budget.Resolve(taskTokenBudgetInput)
 
@@ -467,28 +497,28 @@ func New(provider llm.Provider, workspace Workspace, events chan<- event.Event, 
 	}
 
 	a := &Agent{
-		provider:          provider,
-		events:            events,
-		bus:               newBus(),
-		cache:             cache,
-		prompts:           prompts.NewPromptLoader(projectRoot),
-		coord:             coord,
-		diagProvider:      diagProvider,
-		planningBlocklist: merged,
-		interactionMode:   interaction,
-		memoryStore:       memStore,
-		memorySummary:     memorySummary,
-		distributedMemory: distributedMemory,
-		codingStyle:       codingStyle,
-		linters:           linters,
-		pipeline:          pipeline,
-		validatorRetries:  make(map[string]int),
-		terse:             terse,
-		evaluator:         evaluator,
-		diagDelay:         500 * time.Millisecond,
-		workspace:         workspace,
-		smokeConfig:       smokeCfg,
-		taskTokenBudget:   taskTokenBudget,
+		provider:            provider,
+		bus:                 newBus(),
+		cache:               cache,
+		prompts:             prompts.NewPromptLoader(projectRoot),
+		coord:               coord,
+		diagProvider:        diagProvider,
+		planningBlocklist:   merged,
+		interactionMode:     interaction,
+		memoryStore:         memStore,
+		memorySummary:       memorySummary,
+		distributedMemory:   distributedMemory,
+		codingStyle:         codingStyle,
+		linters:             linters,
+		pipeline:            pipeline,
+		validatorRetries:    make(map[string]int),
+		terse:               terse,
+		evaluator:           evaluator,
+		diagDelay:           500 * time.Millisecond,
+		workspace:           workspace,
+		smokeConfig:         smokeCfg,
+		taskTokenBudget:     taskTokenBudget,
+		flushDirtyBuffersFn: flushDirtyBuffersFn,
 	}
 
 	a.approvalFlow = editflow.NewOrchestrator(editflow.Deps{

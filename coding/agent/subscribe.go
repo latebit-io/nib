@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -151,14 +152,15 @@ func (s *Subscription) finishClose() {
 	s.closeOnce.Do(func() { close(s.inbox) })
 }
 
-// deliver dispatches one event to this subscriber per its configured
-// policy. The bus calls this from its publisher path, holding this
-// subscription's [Subscription.deliverWG] for the duration; deliver's
-// defer decrements the wait-group on return so [Subscription.Close]
-// and bus close can wait for in-flight deliveries to drain.
-func (s *Subscription) deliver(ev event.Event) {
-	defer s.deliverWG.Done()
-
+// effectivePolicy returns the concrete [Block] or [Drop] policy that
+// applies to ev under this subscription's [SubscribeOptions]. A
+// [DefaultPolicy] field on the options is resolved here per the
+// class-sensitive rule documented on [DropPolicy]: streaming → Drop,
+// control → Block.
+//
+// Shared by [Subscription.deliver] and [Subscription.deliverContext]
+// so a future change to the resolution rule is a single-site edit.
+func (s *Subscription) effectivePolicy(ev event.Event) DropPolicy {
 	streaming := isStreamingEvent(ev)
 	policy := s.opts.OnControlFull
 	if streaming {
@@ -166,13 +168,21 @@ func (s *Subscription) deliver(ev event.Event) {
 	}
 	if policy == DefaultPolicy {
 		if streaming {
-			policy = Drop
-		} else {
-			policy = Block
+			return Drop
 		}
+		return Block
 	}
+	return policy
+}
 
-	switch policy {
+// deliver dispatches one event to this subscriber per its configured
+// policy. The bus calls this from its publisher path, holding this
+// subscription's [Subscription.deliverWG] for the duration; deliver's
+// defer decrements the wait-group on return so [Subscription.Close]
+// and bus close can wait for in-flight deliveries to drain.
+func (s *Subscription) deliver(ev event.Event) {
+	defer s.deliverWG.Done()
+	switch s.effectivePolicy(ev) {
 	case Block:
 		select {
 		case s.inbox <- ev:
@@ -188,22 +198,43 @@ func (s *Subscription) deliver(ev event.Event) {
 	}
 }
 
-// tryDeliver attempts a non-blocking send to the subscription's inbox
-// regardless of its configured policy. Drops on full and increments
-// [Subscription.drops]. Used by [bus.tryPublish] during the dual-write
-// transitional phase — see that method's doc for the rationale.
+// deliverContext attempts to deliver one event to this subscriber with
+// ctx-bounded semantics. Drop-policy subscribers behave exactly as
+// [Subscription.tryDeliver] — they are lossy by choice and ctx does
+// not apply. Block-policy subscribers attempt a bounded inbox send,
+// returning [context.Context.Err] if ctx fires before the inbox
+// accepts.
 //
-// Like [Subscription.deliver], decrements the per-subscription
-// deliverWG on return so Close/bus.close can wait on in-flight
-// attempts.
-func (s *Subscription) tryDeliver(ev event.Event) {
+// Used by [bus.publishContext] to back the post-channel-removal
+// [Agent.sendCritical] path: the call site supplies a deadline ctx, and
+// the bus guarantees that no individual Block-policy subscriber can
+// extend delivery past that deadline. Mirrors the deadline contract
+// the legacy events channel carried via its 5-second timer.
+//
+// Decrements the per-subscription deliverWG on return so Close/
+// bus.close can wait on in-flight attempts.
+func (s *Subscription) deliverContext(ctx context.Context, ev event.Event) error {
 	defer s.deliverWG.Done()
-	select {
-	case s.inbox <- ev:
-	case <-s.done:
-	default:
-		atomic.AddInt64(&s.drops, 1)
+	switch s.effectivePolicy(ev) {
+	case Block:
+		select {
+		case s.inbox <- ev:
+			return nil
+		case <-s.done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	case Drop:
+		select {
+		case s.inbox <- ev:
+		case <-s.done:
+		default:
+			atomic.AddInt64(&s.drops, 1)
+		}
+		return nil
 	}
+	return nil
 }
 
 // isStreamingEvent returns true for the high-volume, individually

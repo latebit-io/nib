@@ -182,23 +182,6 @@ type PendingEdit struct {
 	Reason string
 }
 
-// FlushResult carries the outcome of a FlushBuffers request.
-type FlushResult struct {
-	// Saved lists the canonical paths of files that were saved.
-	Saved []string
-	// Err is the first error encountered (nil on full success).
-	Err error
-}
-
-// FlushBuffers requests the frontend to save all dirty buffers to disk.
-// The agent blocks on Result until the frontend completes the save.
-// This routes the I/O through the buffer-owning goroutine (the frontend's
-// main loop) so that no cross-goroutine buffer access occurs.
-type FlushBuffers struct {
-	// Result receives the flush outcome from the frontend.
-	Result chan<- FlushResult
-}
-
 // --- Editor-domain events mirrored from engine/event ---
 
 // DiagnosticsUpdated signals that diagnostics changed for a file.
@@ -218,5 +201,4 @@ func (AgentEditProposed) Event()  {}
 func (AgentFileCreated) Event()   {}
 func (AgentNavigate) Event()      {}
 func (ReloadBuffers) Event()      {}
-func (FlushBuffers) Event()       {}
 func (DiagnosticsUpdated) Event() {}

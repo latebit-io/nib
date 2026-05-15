@@ -47,8 +47,8 @@ func TestAgent_MultiTurnEstimatesBindToOriginatingTurn(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 256)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	events := subscribeForTest(t, ag)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -127,8 +127,8 @@ func TestAgent_TurnUsageSurvivesKitChannelPressure(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 512)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	events := subscribeForTest(t, ag)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -169,17 +169,13 @@ func TestAgent_TurnUsageSurvivesKitChannelPressure(t *testing.T) {
 // collectTurnUsages drains events until n AgentTurnUsage events are
 // observed (or the timeout fires). Cancels the agent on success and
 // on deadline so the wrapper run unwinds cleanly.
-func collectTurnUsages(t *testing.T, ag *Agent, events chan event.Event, n int, timeout time.Duration) []event.AgentTurnUsage {
+func collectTurnUsages(t *testing.T, ag *Agent, events <-chan event.Event, n int, timeout time.Duration) []event.AgentTurnUsage {
 	t.Helper()
 	var out []event.AgentTurnUsage
 	deadline := time.After(timeout)
 	for len(out) < n {
 		select {
 		case ev := <-events:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
 			if u, ok := ev.(event.AgentTurnUsage); ok {
 				out = append(out, u)
 				continue

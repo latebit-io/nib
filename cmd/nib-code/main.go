@@ -190,7 +190,28 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	sess.SetEvents(events)
 
 	var ag *agent.Agent
+	var tuiApp *nibTui.App
 	var switchMu sync.Mutex
+
+	// flushDirtyBuffersFn routes the agent's pre-tool-dispatch autosave
+	// step back through the TUI's Update goroutine via
+	// [nibTui.App.FlushDirtyBuffers]. Calling [session.Session.
+	// SaveDirtyBuffers] directly from the agent's tool-dispatch
+	// goroutine would race the Update goroutine's keystroke-driven
+	// buffer mutations — [engine/buffer.Buffer] has no internal lock.
+	//
+	// The closure captures [tuiApp] by name; the variable is non-nil
+	// by the time any agent run starts (TUI is constructed below before
+	// [tuiApp.Run] is called). The nil check is defensive for the
+	// startup-race window in which the agent is constructed but the
+	// TUI is not yet wired — no agent run can fire in that window, so
+	// returning (nil, nil) is a safe no-op there.
+	flushDirtyBuffersFn := func(ctx context.Context) ([]string, error) {
+		if tuiApp == nil {
+			return nil, nil
+		}
+		return tuiApp.FlushDirtyBuffers(ctx)
+	}
 
 	buildAgent := func(p llm.Provider) *agent.Agent {
 		opts := &agent.NewOptions{
@@ -200,6 +221,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			CodingStyle:       styleResult.AgentStyle,
 			Terse:             true,
 			SmokeConfig:       smokeCfg,
+			FlushDirtyBuffers: flushDirtyBuffersFn,
 		}
 		if styleResult.Resolved != nil {
 			opts.Linters = styleResult.Linters
@@ -216,7 +238,26 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				lintstage.New(styleResult.PerFileLinters.Linters),
 			)
 		}
-		return agent.New(p, sess, events, opts, mcpResult.Tools...)
+		ag := agent.New(p, sess, opts, mcpResult.Tools...)
+		// Forward bus-published agent events into the shared `events`
+		// chan that LSP also writes to. The TUI reads this single
+		// merged stream via [session.Session.Events]. The forwarder
+		// goroutine exits naturally when [agent.Agent.Close] closes
+		// the bus (which closes the subscription's inbox).
+		sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
+		if err != nil {
+			panic(fmt.Sprintf("nib-code: agent.Subscribe: %v", err))
+		}
+		go func() {
+			for ev := range sub.Events() {
+				select {
+				case events <- ev:
+				case <-appCtx.Done():
+					return
+				}
+			}
+		}()
+		return ag
 	}
 
 	// Build the agent now if credentials were already available at startup.
@@ -315,8 +356,10 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		},
 	}
 
-	// Construct the TUI via the facade.
-	tuiApp := nibTui.New(nibTui.Config{
+	// Construct the TUI via the facade. tuiApp is forward-declared
+	// above so the agent's FlushDirtyBuffers callback (set inside
+	// buildAgent) can route through it via closure capture.
+	tuiApp = nibTui.New(nibTui.Config{
 		Session:            sess,
 		Events:             events,
 		Agent:              ag,

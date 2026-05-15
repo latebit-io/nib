@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/coding/event"
 )
 
 // noopProvider is a minimal [llm.Provider] used by construction tests
@@ -32,9 +31,8 @@ func TestKitBuilt_KitAndProxyInstalled(t *testing.T) {
 	// semantics — comparing two value-type noopProvider{} structs
 	// always returns true and would mask a wiring bug.
 	provider := &noopProvider{}
-	events := make(chan event.Event, 8)
-
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 
 	if ag.kit == nil {
 		t.Errorf("Agent.kit is nil; want non-nil after New")
@@ -69,9 +67,8 @@ func TestKitBuilt_SetProviderSwapsProxy(t *testing.T) {
 	// would mask a SetProvider that silently no-ops.
 	original := &noopProvider{}
 	replacement := &noopProvider{}
-	events := make(chan event.Event, 8)
-
-	ag := New(original, stubWorkspace{}, events, nil)
+	ag := New(original, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 
 	// Sanity: original is what the proxy holds before SetProvider.
 	ag.providerProxy.mu.RLock()
@@ -115,8 +112,7 @@ func TestKitBuilt_NilProviderPanicsAtConstruction(t *testing.T) {
 		}
 	}()
 
-	events := make(chan event.Event, 1)
-	_ = New(nil, stubWorkspace{}, events, nil)
+	_ = New(nil, stubWorkspace{}, nil)
 }
 
 // TestKitBuilt_ToolsMirrorAdvertisedSet verifies the kit/foundation
@@ -133,8 +129,8 @@ func TestKitBuilt_NilProviderPanicsAtConstruction(t *testing.T) {
 func TestKitBuilt_ToolsMirrorAdvertisedSet(t *testing.T) {
 	t.Parallel()
 
-	events := make(chan event.Event, 8)
-	ag := New(noopProvider{}, stubWorkspace{}, events, nil)
+	ag := New(noopProvider{}, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 
 	// Sanity-check the wrapper has its own non-empty advertised set.
 	if len(ag.toolDefs) == 0 {

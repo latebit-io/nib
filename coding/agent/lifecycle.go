@@ -568,91 +568,31 @@ func (a *Agent) send(ev event.Event) {
 		a.runUnsuccessful = true
 		a.mu.Unlock()
 	}
-	// Streaming classification is shared with [isStreamingEvent]
-	// (subscribe.go); calling it here keeps the two surfaces in sync
-	// without a parallel switch — Greptile flagged the duplication on
-	// PR #153.
-	if isStreamingEvent(ev) {
-		select {
-		case a.events <- ev:
-		default:
-			slog.Warn("dropping agent event: channel full", "type", fmt.Sprintf("%T", ev))
-		}
-	} else {
-		timer := time.NewTimer(5 * time.Second)
-		defer timer.Stop()
-		select {
-		case a.events <- ev:
-		case <-timer.C:
-			slog.Error("failed to deliver agent event: channel full", "type", fmt.Sprintf("%T", ev))
-		}
-	}
-	// Dual-write shadow: every event also fans out to bus
-	// subscribers registered via [Agent.Subscribe], on a non-blocking
-	// best-effort basis. The legacy channel above owns guaranteed
-	// delivery semantics with its 5-second timeout; the bus is the
-	// shadow path. Using [bus.tryPublish] (rather than [bus.publish])
-	// means a Block-policy subscriber with a full inbox cannot extend
-	// send's effective runtime past the legacy channel's bound —
-	// preserving the contract callers rely on. Order is preserved
-	// within this publisher goroutine; cross-publisher order matches
-	// the pre-bus channel semantics.
-	//
-	// When commit 4 of the kit-event-bus arc removes the legacy
-	// channel and the bus becomes canonical, this switches to
-	// [bus.publish] and each subscriber's configured [DropPolicy]
-	// takes effect normally.
-	//
-	// The nil guard is for unit tests that construct an [Agent] via
-	// literal rather than [New] — they exercise hook composition or
-	// gate logic without wiring a full agent.
-	if a.bus != nil {
-		a.bus.tryPublish(ev)
-	}
+	a.bus.publish(ev)
 }
 
 // sendCritical delivers an event that must reach the frontend for the
-// agent to make progress. Returns an error if the event cannot be
-// enqueued within the timeout. Use this for events that gate a
-// blocking wait (e.g. edit proposals) — dropping these silently would
-// deadlock the agent.
+// agent to make progress within a bounded deadline. Returns an error
+// if the event cannot be delivered within 5 seconds OR if the supplied
+// ctx fires first. Use this for events that gate a blocking wait
+// (e.g. edit proposals via the orchestrator) — dropping these silently
+// would deadlock the agent.
 //
-// The bus publish is best-effort and unconditional: bus subscribers
-// see the event regardless of whether the legacy channel accepts it.
-// The error return reflects ONLY the legacy channel's delivery
-// outcome, since that's the path the orchestrator's blocking wait
-// depends on today. When commit 4 removes the channel, this method
-// will gain a real critical-publish semantic on the bus.
+// Delivery routes through [bus.publishContext]: each Block-policy
+// subscriber's inbox attempt is bounded by ctx, so a wedged Block-
+// policy subscriber cannot extend sendCritical past its deadline
+// (the failure shape Greptile caught on PR #153). Drop-policy
+// subscribers fall back to non-blocking send and ctx does not apply
+// — they are lossy by choice.
+//
+// The 5-second cap is the contract callers rely on; it is composed
+// with the caller's ctx via [context.WithTimeout]. A subscriber that
+// opts into [Block] for control events must drain its inbox within
+// that bound or progress stalls. Probes attached for observation
+// should set [SubscribeOptions.OnControlFull] to [Drop] to opt out
+// of the deadline contract.
 func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
-	// Dual-write shadow uses [bus.tryPublish] (non-blocking) rather
-	// than the blocking [bus.publish]. The original implementation
-	// used `defer a.bus.publish(ev)`, which Greptile flagged on
-	// PR #153 as a deadlock vector: a Block-policy subscriber with a
-	// full inbox would block the deferred publish call, and because
-	// defers run BEFORE the function returns, sendCritical's
-	// 5-second deadline would be silently voided — call sites that
-	// gate progress on sendCritical's return (edit proposals via the
-	// orchestrator's blocking wait) could deadlock indefinitely.
-	//
-	// tryPublish drops on full-inbox per-subscriber regardless of
-	// policy, so the legacy channel's deadline contract is preserved
-	// end-to-end. When commit 4 removes the legacy channel, the bus
-	// needs a real critical-publish semantic (probably a ctx-bounded
-	// variant) so subscribers can opt into "this event must arrive."
-	//
-	// nil guard mirrors [Agent.send]: literal-built agents in unit
-	// tests have no bus.
-	if a.bus != nil {
-		defer a.bus.tryPublish(ev)
-	}
-	select {
-	case a.events <- ev:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return fmt.Errorf("failed to deliver %T: frontend not draining events", ev)
-	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return a.bus.publishContext(ctx, ev)
 }

@@ -45,8 +45,8 @@ func TestAgent_NarrativeGate_FiresWhenTreeEmptyAndOutstandingLanguage(t *testing
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, taskTreeWorkspace{next: ""}, events, nil)
+	ag := New(provider, taskTreeWorkspace{next: ""}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -85,8 +85,8 @@ func TestAgent_NarrativeGate_DoesNotFireWhenTreeHasPendingWork(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, taskTreeWorkspace{next: "Implement collisions"}, events, nil)
+	ag := New(provider, taskTreeWorkspace{next: "Implement collisions"}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -129,8 +129,8 @@ func TestAgent_NarrativeGate_FiresOncePerDeveloperTurn(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, taskTreeWorkspace{next: ""}, events, nil)
+	ag := New(provider, taskTreeWorkspace{next: ""}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -166,8 +166,8 @@ func TestAgent_AgentWaiting_FinishedWhenTreeEmpty(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, taskTreeWorkspace{next: ""}, events, nil)
+	ag := New(provider, taskTreeWorkspace{next: ""}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -200,8 +200,8 @@ func TestAgent_AgentWaiting_NotFinishedWhenTreeHasPendingWork(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, taskTreeWorkspace{next: "Implement HUD"}, events, nil)
+	ag := New(provider, taskTreeWorkspace{next: "Implement HUD"}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -236,8 +236,8 @@ func TestAgent_NarrativeGate_UnloadedTree_NoFire(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, taskTreeWorkspace{unloaded: true}, events, nil)
+	ag := New(provider, taskTreeWorkspace{unloaded: true}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -278,8 +278,8 @@ func TestAgent_NarrativeGate_ActiveTaskInProgress_NoFire(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, taskTreeWorkspace{active: "Implement collisions"}, events, nil)
+	ag := New(provider, taskTreeWorkspace{active: "Implement collisions"}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -326,8 +326,8 @@ func TestAgent_StreamError_EndsRunUnsuccessfully(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, taskTreeWorkspace{next: ""}, events, nil)
+	ag := New(provider, taskTreeWorkspace{next: ""}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -344,10 +344,6 @@ func TestAgent_StreamError_EndsRunUnsuccessfully(t *testing.T) {
 	for !doneSeen {
 		select {
 		case ev := <-events:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
 			switch e := ev.(type) {
 			case event.AgentError:
 				errSeen = true
@@ -387,9 +383,9 @@ func TestAgent_NarrativeGate_NoTaskReader_NoFire(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
 	// stubWorkspace is NOT a TaskReader.
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

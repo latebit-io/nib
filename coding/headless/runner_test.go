@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/latebit-io/nib/coding/event"
 )
@@ -278,40 +277,6 @@ func TestRunner_AgentError_CollectedInResult(t *testing.T) {
 	}
 	if len(result.Errors) != 1 || result.Errors[0] != "LLM timeout" {
 		t.Errorf("Errors = %v, want [LLM timeout]", result.Errors)
-	}
-}
-
-func TestRunner_FlushBuffers_RespondsImmediately(t *testing.T) {
-	events := make(chan event.Event, 64)
-	flushDone := make(chan bool, 1)
-	mock := &mockAgent{events: events}
-	mock.runFunc = func() {
-		resultCh := make(chan event.FlushResult, 1)
-		events <- event.FlushBuffers{Result: resultCh}
-		res := <-resultCh
-		if res.Err != nil {
-			flushDone <- false
-		} else {
-			flushDone <- true
-		}
-		events <- event.AgentDone{Success: true}
-	}
-
-	ws := NewDiskWorkspace(t.TempDir())
-	runner := NewRunner(mock, ws, events, &bytes.Buffer{}, false)
-
-	result := runner.Run(context.Background(), "flush test", nil)
-
-	if !result.Success {
-		t.Error("expected success")
-	}
-	select {
-	case ok := <-flushDone:
-		if !ok {
-			t.Error("flush returned error")
-		}
-	case <-time.After(time.Second):
-		t.Error("flush did not complete within timeout")
 	}
 }
 

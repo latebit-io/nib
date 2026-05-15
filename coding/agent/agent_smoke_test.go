@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/ai/brand"
-	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/engine/runconfig"
 )
 
@@ -19,8 +18,7 @@ import (
 func TestAgent_SmokeRunUnregisteredWhenDisabled(t *testing.T) {
 	t.Setenv(brand.EnvKeySmokeDisabled, "1")
 
-	events := make(chan event.Event, 8)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
+	ag := New(&multiTurnProvider{}, stubWorkspace{},
 		&NewOptions{SmokeConfig: runconfig.Resolved{
 			Command: "make smoke",
 			Source:  "test",
@@ -45,8 +43,7 @@ func TestAgent_SmokeRunRegisteredWhenEnabled(t *testing.T) {
 	// Explicitly clear in case the test runner inherited it.
 	t.Setenv(brand.EnvKeySmokeDisabled, "")
 
-	events := make(chan event.Event, 8)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
+	ag := New(&multiTurnProvider{}, stubWorkspace{},
 		&NewOptions{SmokeConfig: runconfig.Resolved{
 			Command: "make smoke",
 			Source:  "test",

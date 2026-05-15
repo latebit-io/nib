@@ -46,8 +46,8 @@ func TestCheckTaskBudget_Disabled(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			events := make(chan event.Event, 4)
-			ag := New(&multiTurnProvider{}, stubWorkspace{}, events, tc.opts)
+			ag := New(&multiTurnProvider{}, stubWorkspace{}, tc.opts)
+			_ = subscribeForTest(t, ag)
 			tc.mutate(ag)
 			if msg := ag.checkTaskBudget(); msg != "" {
 				t.Errorf("checkTaskBudget returned %q, want empty", msg)
@@ -62,9 +62,9 @@ func TestCheckTaskBudget_Disabled(t *testing.T) {
 // after abort from emitting a duplicate AgentError.
 func TestCheckTaskBudget_FiresAndLatches(t *testing.T) {
 	t.Parallel()
-	events := make(chan event.Event, 4)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
+	ag := New(&multiTurnProvider{}, stubWorkspace{},
 		&NewOptions{TaskTokenBudget: 1000})
+	_ = subscribeForTest(t, ag)
 
 	ag.providerProxy.recordUsage(&llm.Usage{PromptTokens: 800, CompletionTokens: 300}) // 1100 > 1000
 
@@ -124,10 +124,10 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, &NewOptions{
+	ag := New(provider, stubWorkspace{}, &NewOptions{
 		TaskTokenBudget: 500,
 	})
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -155,9 +155,8 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 // the timeout fires). Returns the AgentError's message and the
 // AgentDone's Success flag. Order-tolerant: the two events may arrive
 // in any sequence, and intervening events (tokens, status, edit
-// proposals) are silently discarded. [event.FlushBuffers] is auto-
-// resolved with an empty result so the agent does not block on a flush
-// that the test harness has no real buffer to satisfy.
+// proposals) are silently discarded. Tests construct the agent with
+// no [FlushDirtyBuffersFunc] callback so the flush step is a no-op.
 func collectAbortEvents(t *testing.T, events <-chan event.Event, timeout time.Duration) (errMsg string, doneSuccess bool) {
 	t.Helper()
 	var (
@@ -168,10 +167,6 @@ func collectAbortEvents(t *testing.T, events <-chan event.Event, timeout time.Du
 	for !errSeen || !doneSeen {
 		select {
 		case ev := <-events:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
 			switch e := ev.(type) {
 			case event.AgentError:
 				if !errSeen {
@@ -238,10 +233,10 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, &NewOptions{
+	ag := New(provider, stubWorkspace{}, &NewOptions{
 		TaskTokenBudget: 500,
 	})
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -271,8 +266,7 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 // absent — the regression guard would not fire.
 func TestAgent_TokenBudget_DefaultApplied(t *testing.T) {
 	t.Parallel()
-	events := make(chan event.Event, 1)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, nil)
+	ag := New(&multiTurnProvider{}, stubWorkspace{}, nil)
 	if ag.taskTokenBudget != budget.DefaultTaskTokens {
 		t.Errorf("taskTokenBudget = %d, want default %d",
 			ag.taskTokenBudget, budget.DefaultTaskTokens)
@@ -285,8 +279,7 @@ func TestAgent_TokenBudget_DefaultApplied(t *testing.T) {
 // safety net off.
 func TestAgent_TokenBudget_NegativeMeansUnlimited(t *testing.T) {
 	t.Parallel()
-	events := make(chan event.Event, 1)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
+	ag := New(&multiTurnProvider{}, stubWorkspace{},
 		&NewOptions{TaskTokenBudget: -1})
 	if ag.taskTokenBudget != 0 {
 		t.Errorf("taskTokenBudget = %d, want 0 (unlimited)", ag.taskTokenBudget)

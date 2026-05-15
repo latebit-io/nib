@@ -6,6 +6,8 @@
 package tui
 
 import (
+	"context"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/session"
@@ -209,6 +211,35 @@ func New(cfg Config) *App {
 // Model returns the underlying AppModel for advanced wiring (e.g.,
 // model switcher callbacks set after construction).
 func (a *App) Model() *ui.AppModel { return a.model }
+
+// FlushDirtyBuffers asks the TUI to save all dirty buffers to disk,
+// blocking until the save completes or ctx fires. Returns the canonical
+// paths of files saved and the first error (nil on full success).
+//
+// Routes through [tea.Program.Send] so the actual I/O runs on the
+// Bubble Tea Update goroutine — the same goroutine that mutates
+// [engine/buffer.Buffer] state via keystroke handlers.
+// [engine/buffer.Buffer] holds no internal lock; the goroutine-affinity
+// rule is how concurrent keystroke + agent-edit access stays race-free.
+// Calling [session.Session.SaveDirtyBuffers] directly from a different
+// goroutine (e.g. the agent's tool-dispatch goroutine) would race the
+// Update goroutine's buffer mutations.
+//
+// Intended as the implementation of
+// [coding/agent.NewOptions.FlushDirtyBuffers] in the flagship binary.
+func (a *App) FlushDirtyBuffers(ctx context.Context) ([]string, error) {
+	// Buffered so the Update-goroutine handler can write the result
+	// without blocking even if ctx fires here first and we stop
+	// listening.
+	result := make(chan ui.FlushResult, 1)
+	a.program.Send(ui.FlushDirtyBuffersMsg{Result: result})
+	select {
+	case res := <-result:
+		return res.Saved, res.Err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
 // Program returns the tea.Program for sending async messages.
 func (a *App) Program() *tea.Program { return a.program }

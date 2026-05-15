@@ -27,7 +27,7 @@ type agentPort interface {
 // Runner drives the coding agent to completion without a TUI. Wraps
 // [kithl.Runner] for the generic event-drain + REPL loop, and handles
 // coding-specific events (edit application, file-creation tracking,
-// FlushBuffers reply, lint status) via an [kithl.EventHandler].
+// lint status) via an [kithl.EventHandler].
 type Runner struct {
 	inner     *kithl.Runner
 	agent     agentPort
@@ -108,16 +108,6 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event) error {
 
 	case event.AgentNavigate:
 		slog.Debug("navigate ignored in headless mode", "path", e.Path, "line", e.Line)
-		return nil
-
-	case event.FlushBuffers:
-		// Headless has no in-memory buffers; respond immediately.
-		// Guarded by ctx so a cancelled run doesn't block on the
-		// receiver if it has already exited.
-		select {
-		case e.Result <- event.FlushResult{Saved: nil, Err: nil}:
-		case <-ctx.Done():
-		}
 		return nil
 
 	case event.DiagnosticsUpdated:

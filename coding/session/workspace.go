@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,7 +22,14 @@ import (
 // notifies the language service of each save. Returns the canonical
 // paths of files that were successfully saved. Called by the agent
 // before tool execution so it always sees the developer's latest edits.
-func (s *Session) SaveDirtyBuffers() ([]string, error) {
+//
+// ctx is honored between save operations: if ctx fires after the Nth
+// file is saved, the function returns ctx.Err() with the first N paths
+// in saved so the caller can invalidate caches for completed writes
+// even on cancellation. Per-file [openfile.OpenFile.Save] does
+// synchronous I/O without ctx — the deadline applies at the loop
+// boundary, not inside an individual write.
+func (s *Session) SaveDirtyBuffers(ctx context.Context) ([]string, error) {
 	s.mu.RLock()
 	// Snapshot dirty open files under read lock — Save() does I/O so we
 	// don't want to hold the lock through os.WriteFile.
@@ -40,6 +48,12 @@ func (s *Session) SaveDirtyBuffers() ([]string, error) {
 	var saved []string
 	var firstErr error
 	for _, d := range toSave {
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
 		if err := d.of.Save(); err != nil {
 			slog.Warn("autosave failed", "path", d.canon, "err", err)
 			if firstErr == nil {

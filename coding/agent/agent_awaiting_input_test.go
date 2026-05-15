@@ -47,18 +47,12 @@ func (m *multiTurnProvider) Stream(_ context.Context, messages []llm.Message, _ 
 // drainUntil reads from ch until it receives the first event matching the
 // predicate or the timeout fires. Returns the matching event or nil on timeout.
 // All other events are discarded so the agent does not block on a full channel.
-// FlushBuffers events are auto-resolved with an empty result — in production
-// the frontend handles these; in tests we unblock the agent immediately.
 func drainUntil(t *testing.T, ch <-chan event.Event, timeout time.Duration, match func(event.Event) bool) event.Event {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
 		select {
 		case ev := <-ch:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
 			if match(ev) {
 				return ev
 			}
@@ -88,8 +82,7 @@ func TestAgent_RequestInputUnregisteredAcrossModes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			events := make(chan event.Event, 8)
-			ag := New(&multiTurnProvider{}, stubWorkspace{}, events,
+			ag := New(&multiTurnProvider{}, stubWorkspace{},
 				&NewOptions{Interaction: tc.mode})
 
 			if _, ok := ag.tools["request_input"]; ok {
@@ -139,8 +132,8 @@ func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
 	}
 	provider := &escalatingProvider{multiTurnProvider: inner}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -183,8 +176,8 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 	}
 	provider := &multiTurnProvider{turns: turns}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -251,8 +244,8 @@ func TestAgent_StreamClosedBeforeDone_SurfacesError(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -306,8 +299,8 @@ func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -371,8 +364,8 @@ func TestAgent_TruncationRetries_ResetAcrossRuns(t *testing.T) {
 	}
 	provider := &escalatingProvider{multiTurnProvider: inner}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -426,8 +419,8 @@ func TestAgent_TruncationRetries_ResetAcrossRuns(t *testing.T) {
 func TestReply_NoActiveRunDoesNotMutateWaiting(t *testing.T) {
 	t.Parallel()
 
-	events := make(chan event.Event, 8)
-	ag := New(&multiTurnProvider{}, stubWorkspace{}, events, nil)
+	ag := New(&multiTurnProvider{}, stubWorkspace{}, nil)
+	_ = subscribeForTest(t, ag)
 
 	// Pre-condition: simulate a prior session where the agent was
 	// waiting for input but no kit run is active and no transcript

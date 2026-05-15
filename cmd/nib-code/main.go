@@ -200,6 +200,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			CodingStyle:       styleResult.AgentStyle,
 			Terse:             true,
 			SmokeConfig:       smokeCfg,
+			FlushDirtyBuffers: sess.SaveDirtyBuffers,
 		}
 		if styleResult.Resolved != nil {
 			opts.Linters = styleResult.Linters
@@ -216,7 +217,26 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				lintstage.New(styleResult.PerFileLinters.Linters),
 			)
 		}
-		return agent.New(p, sess, events, opts, mcpResult.Tools...)
+		ag := agent.New(p, sess, opts, mcpResult.Tools...)
+		// Forward bus-published agent events into the shared `events`
+		// chan that LSP also writes to. The TUI reads this single
+		// merged stream via [session.Session.Events]. The forwarder
+		// goroutine exits naturally when [agent.Agent.Close] closes
+		// the bus (which closes the subscription's inbox).
+		sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
+		if err != nil {
+			panic(fmt.Sprintf("nib-code: agent.Subscribe: %v", err))
+		}
+		go func() {
+			for ev := range sub.Events() {
+				select {
+				case events <- ev:
+				case <-appCtx.Done():
+					return
+				}
+			}
+		}()
+		return ag
 	}
 
 	// Build the agent now if credentials were already available at startup.

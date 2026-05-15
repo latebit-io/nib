@@ -47,8 +47,8 @@ func drainTokens(ch <-chan event.Event) string {
 }
 
 func TestRunTaskReview_NoConfigurationSurfacesBanner(t *testing.T) {
-	events := make(chan event.Event, 16)
-	a := &Agent{events: events, workspace: promptTestWorkspace{}}
+	a := &Agent{bus: newBus(), workspace: promptTestWorkspace{}}
+	events := subscribeForTest(t, a)
 	a.taskEdits = []taskEdit{{Path: "main.lua", Search: "a", Replace: "b"}}
 
 	msg := a.runTaskReview(context.Background(), "Task completed: X")
@@ -89,9 +89,8 @@ type nextTaskWorkspace struct {
 // boundary even under autonomous modes — turning a "trust" run into
 // the 6-out-of-11 "yes continue" loop the Pac-Man eval surfaced.
 func TestRunTaskReview_AppendsNextTaskHint(t *testing.T) {
-	events := make(chan event.Event, 16)
 	a := &Agent{
-		events: events,
+		bus: newBus(),
 		workspace: nextTaskWorkspace{
 			nextTaskTracker: &nextTaskTracker{
 				stubTracker: &stubTracker{},
@@ -99,6 +98,7 @@ func TestRunTaskReview_AppendsNextTaskHint(t *testing.T) {
 			},
 		},
 	}
+	_ = subscribeForTest(t, a)
 	a.taskEdits = []taskEdit{{Path: "main.lua", Search: "a", Replace: "b"}}
 
 	msg := a.runTaskReview(context.Background(), "Task complete: setup")
@@ -118,9 +118,8 @@ func TestRunTaskReview_AppendsNextTaskHint(t *testing.T) {
 // finish in this case rather than being prompted to continue with
 // nothing.
 func TestRunTaskReview_NoHintWhenNoPending(t *testing.T) {
-	events := make(chan event.Event, 16)
 	a := &Agent{
-		events: events,
+		bus: newBus(),
 		workspace: nextTaskWorkspace{
 			nextTaskTracker: &nextTaskTracker{
 				stubTracker: &stubTracker{},
@@ -128,6 +127,7 @@ func TestRunTaskReview_NoHintWhenNoPending(t *testing.T) {
 			},
 		},
 	}
+	_ = subscribeForTest(t, a)
 	a.taskEdits = []taskEdit{{Path: "main.lua", Search: "a", Replace: "b"}}
 
 	msg := a.runTaskReview(context.Background(), "Task complete")
@@ -137,8 +137,8 @@ func TestRunTaskReview_NoHintWhenNoPending(t *testing.T) {
 }
 
 func TestRunTaskReview_NoEditsNoBanner(t *testing.T) {
-	events := make(chan event.Event, 16)
-	a := &Agent{events: events, workspace: promptTestWorkspace{}}
+	a := &Agent{bus: newBus(), workspace: promptTestWorkspace{}}
+	events := subscribeForTest(t, a)
 	// taskEdits is nil / empty.
 
 	_ = a.runTaskReview(context.Background(), "Done")
@@ -152,13 +152,13 @@ func TestRunTaskReview_NoEditsNoBanner(t *testing.T) {
 }
 
 func TestRunTaskReview_CleanLint(t *testing.T) {
-	events := make(chan event.Event, 16)
 	linter := &fakeLinter{name: "fake", res: lint.Result{}} // no findings, no error
 	a := &Agent{
-		events:    events,
+		bus:       newBus(),
 		workspace: promptTestWorkspace{},
 		linters:   []lint.Linter{linter},
 	}
+	events := subscribeForTest(t, a)
 	a.taskEdits = []taskEdit{{Path: "pkg/foo.go"}}
 
 	_ = a.runTaskReview(context.Background(), "Done")
@@ -175,17 +175,17 @@ func TestRunTaskReview_CleanLint(t *testing.T) {
 }
 
 func TestRunTaskReview_FindingsOnEditedFileBlocks(t *testing.T) {
-	events := make(chan event.Event, 16)
 	linter := &fakeLinter{name: "fake", res: lint.Result{
 		Findings: []lint.Finding{
 			{Path: "pkg/foo.go", Line: 10, Col: 5, Linter: "fake", Message: "bad thing"},
 		},
 	}}
 	a := &Agent{
-		events:    events,
+		bus:       newBus(),
 		workspace: promptTestWorkspace{},
 		linters:   []lint.Linter{linter},
 	}
+	events := subscribeForTest(t, a)
 	a.taskEdits = []taskEdit{{Path: "pkg/foo.go"}}
 
 	_ = a.runTaskReview(context.Background(), "Done")
@@ -202,7 +202,6 @@ func TestRunTaskReview_FindingsOnEditedFileBlocks(t *testing.T) {
 }
 
 func TestRunTaskReview_SiblingFindingsAreNonBlocking(t *testing.T) {
-	events := make(chan event.Event, 16)
 	linter := &fakeLinter{name: "fake", res: lint.Result{
 		Findings: []lint.Finding{
 			// Sibling file in same package — not edited by agent.
@@ -210,10 +209,11 @@ func TestRunTaskReview_SiblingFindingsAreNonBlocking(t *testing.T) {
 		},
 	}}
 	a := &Agent{
-		events:    events,
+		bus:       newBus(),
 		workspace: promptTestWorkspace{},
 		linters:   []lint.Linter{linter},
 	}
+	events := subscribeForTest(t, a)
 	a.taskEdits = []taskEdit{{Path: "pkg/foo.go"}}
 
 	_ = a.runTaskReview(context.Background(), "Done")
@@ -230,15 +230,15 @@ func TestRunTaskReview_SiblingFindingsAreNonBlocking(t *testing.T) {
 }
 
 func TestRunTaskReview_InfraErrorDoesNotFakeFindings(t *testing.T) {
-	events := make(chan event.Event, 16)
 	linter := &fakeLinter{name: "fake", res: lint.Result{
 		Error: errString("binary not found"),
 	}}
 	a := &Agent{
-		events:    events,
+		bus:       newBus(),
 		workspace: promptTestWorkspace{},
 		linters:   []lint.Linter{linter},
 	}
+	events := subscribeForTest(t, a)
 	a.taskEdits = []taskEdit{{Path: "pkg/foo.go"}}
 
 	_ = a.runTaskReview(context.Background(), "Done")
@@ -255,13 +255,13 @@ func TestRunTaskReview_InfraErrorDoesNotFakeFindings(t *testing.T) {
 }
 
 func TestRunTaskReview_DirDedup(t *testing.T) {
-	events := make(chan event.Event, 16)
 	linter := &fakeLinter{name: "fake", res: lint.Result{}}
 	a := &Agent{
-		events:    events,
+		bus:       newBus(),
 		workspace: promptTestWorkspace{},
 		linters:   []lint.Linter{linter},
 	}
+	_ = subscribeForTest(t, a)
 	// Three edits in one package directory → linter should be called once.
 	a.taskEdits = []taskEdit{
 		{Path: "pkg/a.go"},
@@ -282,13 +282,13 @@ func TestRunTaskReview_DirDedup(t *testing.T) {
 }
 
 func TestRunTaskReview_MultipleDirs(t *testing.T) {
-	events := make(chan event.Event, 16)
 	linter := &fakeLinter{name: "fake", res: lint.Result{}}
 	a := &Agent{
-		events:    events,
+		bus:       newBus(),
 		workspace: promptTestWorkspace{},
 		linters:   []lint.Linter{linter},
 	}
+	_ = subscribeForTest(t, a)
 	a.taskEdits = []taskEdit{
 		{Path: "pkg/a/foo.go"},
 		{Path: "pkg/b/bar.go"},

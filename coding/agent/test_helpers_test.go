@@ -7,40 +7,25 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 )
 
-// mustDrainEvents returns a buffered events channel with a background
-// drainer that auto-resolves [event.FlushBuffers] requests. Tests
-// that exercise [Agent.FoundationHooks].BeforeToolCall directly use
-// this so the flush-dirty-buffers step inside the hook does not stall
-// for its 5-second response timeout.
+// subscribeForTest registers a generous-buffer [Subscription] on ag's
+// bus and returns its inbox channel. The Subscription is closed via
+// t.Cleanup so it never outlives the test.
 //
-// The drainer also keeps the channel from filling up — control-flow
-// events ([event.AgentEditProposed], [event.AgentDone]) would
-// otherwise block past their 5-second deliver timeout and cascade
-// failures into apparently-unrelated tests.
-func mustDrainEvents(t *testing.T) chan event.Event {
+// Tests that used to read from the legacy `events` channel passed to
+// [agent.New] migrate to this helper after the channel field was
+// removed in commit 4 of the kit-event-bus arc. BufferSize is wide
+// (256) so tests do not need to think about drop-vs-block policy under
+// burst — the assertion under test is event content / ordering, not
+// drop semantics. Tests that exercise drop semantics specifically
+// construct their own Subscription with the relevant options.
+func subscribeForTest(t *testing.T, ag *Agent) <-chan event.Event {
 	t.Helper()
-	ch := make(chan event.Event, 128)
-	done := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case ev, ok := <-ch:
-				if !ok {
-					return
-				}
-				if fb, ok := ev.(event.FlushBuffers); ok {
-					select {
-					case fb.Result <- event.FlushResult{}:
-					default:
-					}
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
-	t.Cleanup(func() { close(done) })
-	return ch
+	sub, err := ag.Subscribe(SubscribeOptions{BufferSize: 256})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	t.Cleanup(sub.Close)
+	return sub.Events()
 }
 
 // stubWorkspace is a no-op workspace used by tests that drive the

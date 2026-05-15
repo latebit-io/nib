@@ -163,8 +163,13 @@ func TestRunWithMode_ConcurrentStartsSerialize(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 256)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	sub, err := ag.Subscribe(SubscribeOptions{BufferSize: 256})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	t.Cleanup(sub.Close)
+	events := sub.Events()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -176,12 +181,9 @@ func TestRunWithMode_ConcurrentStartsSerialize(t *testing.T) {
 		defer close(drainDone)
 		for {
 			select {
-			case ev, ok := <-events:
+			case _, ok := <-events:
 				if !ok {
 					return
-				}
-				if fb, ok := ev.(event.FlushBuffers); ok {
-					fb.Result <- event.FlushResult{}
 				}
 			case <-ctx.Done():
 				return
@@ -231,17 +233,13 @@ func TestRunWithMode_ConcurrentStartsSerialize(t *testing.T) {
 // AgentWaiting (turn complete, foundation parked at awaitReply), then
 // Cancel and drain until AgentDone. Returns when both have been
 // observed. Test helper for the back-to-back-runs fence tests.
-func runUntilWaitingThenCancel(t *testing.T, ag *Agent, events chan event.Event, timeout time.Duration) {
+func runUntilWaitingThenCancel(t *testing.T, ag *Agent, events <-chan event.Event, timeout time.Duration) {
 	t.Helper()
 	deadline := time.After(timeout)
 	waitSeen := false
 	for !waitSeen {
 		select {
 		case ev := <-events:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
 			if _, ok := ev.(event.AgentWaiting); ok {
 				waitSeen = true
 			}
@@ -253,10 +251,6 @@ func runUntilWaitingThenCancel(t *testing.T, ag *Agent, events chan event.Event,
 	for {
 		select {
 		case ev := <-events:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
 			if _, ok := ev.(event.AgentDone); ok {
 				return
 			}
@@ -289,8 +283,13 @@ func TestRunWithMode_FenceIsolatesSessionUsageFromPrevRun(t *testing.T) {
 		},
 	}
 
-	events := make(chan event.Event, 64)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	ag := New(provider, stubWorkspace{}, nil)
+	sub, err := ag.Subscribe(SubscribeOptions{BufferSize: 64})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	t.Cleanup(sub.Close)
+	events := sub.Events()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -346,10 +345,15 @@ func TestRunWithMode_FenceWaitsForBackedUpForwarder(t *testing.T) {
 		},
 	}
 
-	// Buffered channel — but small enough that backpressure builds when
-	// the consumer pauses.
-	events := make(chan event.Event, 4)
-	ag := New(provider, stubWorkspace{}, events, nil)
+	// Small subscriber inbox — backpressure builds when the consumer
+	// pauses, exercising the fence on the consumer-slow path.
+	ag := New(provider, stubWorkspace{}, nil)
+	sub, err := ag.Subscribe(SubscribeOptions{BufferSize: 4})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	t.Cleanup(sub.Close)
+	events := sub.Events()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -363,10 +367,6 @@ func TestRunWithMode_FenceWaitsForBackedUpForwarder(t *testing.T) {
 	for !waited {
 		select {
 		case ev := <-events:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
 			if _, ok := ev.(event.AgentWaiting); ok {
 				waited = true
 			}
@@ -400,10 +400,6 @@ drain:
 	for {
 		select {
 		case ev := <-events:
-			if fb, ok := ev.(event.FlushBuffers); ok {
-				fb.Result <- event.FlushResult{}
-				continue
-			}
 			if e, ok := ev.(event.AgentError); ok && captureErr == "" {
 				captureErr = e.Err
 			}

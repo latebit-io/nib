@@ -168,6 +168,7 @@ func TestFoundationHooks_BeforeToolCallChain_Order(t *testing.T) {
 	// preserves that ordering. With singleEditFired pre-flipped to true
 	// AND a planning-mode blocklist match, the single-edit message wins.
 	a := &Agent{
+		bus:               newBus(),
 		mode:              event.ModePlanning,
 		planningBlocklist: map[string]bool{"edit_file": true},
 		interactionMode:   Interactive,
@@ -195,7 +196,7 @@ func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
 	// One file-edit per turn. After TransformContext fires, the next
 	// turn's first edit should pass.
 	a := &Agent{
-		events:          mustDrainEvents(t),
+		bus:             newBus(),
 		cache:           NewFileCache(),
 		mode:            event.ModeExecution,
 		interactionMode: Interactive,
@@ -376,8 +377,9 @@ func TestFoundationSteering_NarrativeFiresWhenOutstandingAndAllComplete(t *testi
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
 	}
-	events := make(chan event.Event, 8)
-	a := &Agent{events: events, workspace: ws}
+	a := &Agent{bus: newBus(), workspace: ws}
+	events := subscribeForTest(t, a)
+	_ = events
 
 	msgs := []llm.Message{
 		{Role: "user", Content: "wrap up"},
@@ -408,8 +410,9 @@ func TestFoundationSteering_NarrativeOneShot(t *testing.T) {
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
 	}
-	events := make(chan event.Event, 8)
-	a := &Agent{events: events, workspace: ws}
+	a := &Agent{bus: newBus(), workspace: ws}
+	events := subscribeForTest(t, a)
+	_ = events
 
 	msgs := []llm.Message{
 		{Role: "assistant", Content: "All set. Items still needed: x."},
@@ -422,8 +425,7 @@ func TestFoundationSteering_NarrativeOneShot(t *testing.T) {
 }
 
 func TestFoundationSteering_PermissionOnlyAutonomous(t *testing.T) {
-	events := make(chan event.Event, 8)
-	a := &Agent{events: events, autonomous: false}
+	a := &Agent{bus: newBus(), autonomous: false}
 
 	msgs := []llm.Message{
 		{Role: "assistant", Content: "Should I proceed with the refactor?"},
@@ -436,8 +438,7 @@ func TestFoundationSteering_PermissionOnlyAutonomous(t *testing.T) {
 }
 
 func TestFoundationSteering_PermissionFiresInAutonomous(t *testing.T) {
-	events := make(chan event.Event, 8)
-	a := &Agent{events: events, autonomous: true}
+	a := &Agent{bus: newBus(), autonomous: true}
 
 	msgs := []llm.Message{
 		{Role: "assistant", Content: "Should I proceed with the refactor?"},
@@ -459,8 +460,7 @@ func TestFoundationSteering_NoFireWhenNothingMatches(t *testing.T) {
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
 	}
-	events := make(chan event.Event, 4)
-	a := &Agent{events: events, workspace: ws, autonomous: false}
+	a := &Agent{bus: newBus(), workspace: ws, autonomous: false}
 
 	msgs := []llm.Message{
 		{Role: "assistant", Content: "Refactored the helper. Tests green."},
@@ -507,14 +507,14 @@ func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
 	}
-	events := make(chan event.Event, 16)
 	a := &Agent{
-		events:          events,
+		bus:             newBus(),
 		workspace:       ws,
 		mode:            event.ModeExecution,
 		interactionMode: Interactive,
 		autonomous:      false,
 	}
+	_ = subscribeForTest(t, a)
 
 	// Live-message snapshot the steering hook reads. Mutated by the
 	// test as the conversation evolves.
@@ -590,12 +590,12 @@ func TestLintPendingGate_PassesWhenEmpty(t *testing.T) {
 // --- foundationAfterToolCall ---
 
 func TestFoundationAfterToolCall_AppendsIntentReminderOnSuccess(t *testing.T) {
-	events := make(chan event.Event, 4)
 	a := &Agent{
-		events: events,
+		bus:    newBus(),
 		cache:  NewFileCache(),
 		intent: "rewrite the auth middleware",
 	}
+	_ = subscribeForTest(t, a)
 	c := upagent.AfterToolCallContext{
 		Name:   "edit_file",
 		Result: upagent.ToolResult{Content: "edit applied"},
@@ -617,12 +617,12 @@ func TestFoundationAfterToolCall_AppendsIntentReminderOnSuccess(t *testing.T) {
 }
 
 func TestFoundationAfterToolCall_NoIntentNoOverride(t *testing.T) {
-	events := make(chan event.Event, 4)
 	a := &Agent{
-		events: events,
-		cache:  NewFileCache(),
+		bus:   newBus(),
+		cache: NewFileCache(),
 		// intent left empty
 	}
+	_ = subscribeForTest(t, a)
 	c := upagent.AfterToolCallContext{
 		Name:   "read_file",
 		Result: upagent.ToolResult{Content: "file contents"},
@@ -634,12 +634,12 @@ func TestFoundationAfterToolCall_NoIntentNoOverride(t *testing.T) {
 }
 
 func TestFoundationAfterToolCall_BlockedSkipsReminder(t *testing.T) {
-	events := make(chan event.Event, 4)
 	a := &Agent{
-		events: events,
+		bus:    newBus(),
 		cache:  NewFileCache(),
 		intent: "do the thing",
 	}
+	_ = subscribeForTest(t, a)
 	c := upagent.AfterToolCallContext{
 		Name:   "edit_file",
 		Result: upagent.ToolResult{Content: "Skipped — only ONE file-edit per turn", IsError: true},
@@ -652,11 +652,11 @@ func TestFoundationAfterToolCall_BlockedSkipsReminder(t *testing.T) {
 }
 
 func TestFoundationAfterToolCall_BashFiresReloadBuffers(t *testing.T) {
-	events := make(chan event.Event, 4)
 	a := &Agent{
-		events: events,
-		cache:  NewFileCache(),
+		bus:   newBus(),
+		cache: NewFileCache(),
 	}
+	events := subscribeForTest(t, a)
 	c := upagent.AfterToolCallContext{
 		Name:   "bash",
 		Result: upagent.ToolResult{Content: "ls output"},
@@ -678,11 +678,11 @@ func TestFoundationAfterToolCall_BashFiresEvenWhenBlocked(t *testing.T) {
 	// for every "bash" tool call regardless of whether BeforeToolCall
 	// blocked the dispatch — the developer's filesystem may have
 	// changed even if the call was rejected.
-	events := make(chan event.Event, 4)
 	a := &Agent{
-		events: events,
-		cache:  NewFileCache(),
+		bus:   newBus(),
+		cache: NewFileCache(),
 	}
+	events := subscribeForTest(t, a)
 	c := upagent.AfterToolCallContext{
 		Name:   "bash",
 		Result: upagent.ToolResult{Content: "Error: tool \"bash\" is not available", IsError: true},
@@ -700,11 +700,11 @@ func TestFoundationAfterToolCall_BashFiresEvenWhenBlocked(t *testing.T) {
 }
 
 func TestFoundationAfterToolCall_NonBashSkipsCacheReset(t *testing.T) {
-	events := make(chan event.Event, 4)
 	a := &Agent{
-		events: events,
-		cache:  NewFileCache(),
+		bus:   newBus(),
+		cache: NewFileCache(),
 	}
+	events := subscribeForTest(t, a)
 	c := upagent.AfterToolCallContext{
 		Name:   "read_file",
 		Result: upagent.ToolResult{Content: "x"},
@@ -733,12 +733,13 @@ func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
 		gateTracker:   tracker,
 	}
 	a := &Agent{
-		events:    mustDrainEvents(t),
+		bus:       newBus(),
 		cache:     NewFileCache(),
 		workspace: ws,
 		mode:      event.ModeExecution,
 		intent:    "do the thing",
 	}
+	_ = subscribeForTest(t, a)
 
 	hooks := a.FoundationHooks(nil)
 	ctx := context.Background()
@@ -857,9 +858,9 @@ func TestFoundationBudgetCheck_LatchedDoesNotReEmit(t *testing.T) {
 // --- FoundationHooks TransformContext budget integration ---
 
 func TestFoundationHooks_TransformContext_BudgetAbort(t *testing.T) {
-	events := make(chan event.Event, 4)
 	a := agentWithUsage(100, false, 80, 80)
-	a.events = events
+	a.bus = newBus()
+	_ = subscribeForTest(t, a)
 	hooks := a.FoundationHooks(nil)
 
 	out, err := hooks.TransformContext(context.Background(), nil)
@@ -879,7 +880,7 @@ func TestFoundationHooks_TransformContext_ResetAndCompactAndLint(t *testing.T) {
 	// fires per tool. lintPendingGate would short-circuit any
 	// BeforeToolCall that ran with pendingLint still set.
 	a := &Agent{
-		events:          mustDrainEvents(t),
+		bus:             newBus(),
 		cache:           NewFileCache(),
 		mode:            event.ModeExecution,
 		interactionMode: Interactive,

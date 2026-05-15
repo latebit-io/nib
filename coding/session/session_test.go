@@ -50,7 +50,7 @@ func newTestSessionWithRoot(content, projectRoot string) *Session {
 	e := openfile.New(buf)
 	sess := New(e, projectRoot)
 	events := make(chan event.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, nil)
 	sess.SetAgent(ag, events)
 	return sess
 }
@@ -379,7 +379,7 @@ func TestSwitchToBlockedByPendingEdit(t *testing.T) {
 	}
 	s := New(openfile.New(bufA), dir)
 	events := make(chan event.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, nil)
 	s.SetAgent(ag, events)
 
 	// With a pending edit, SwitchTo should return ErrEditPending.
@@ -591,7 +591,7 @@ func TestApproveEditTracksModifiedFile(t *testing.T) {
 	e := openfile.New(buf)
 	s := New(e, root)
 	events := make(chan event.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, nil)
 	s.SetAgent(ag, events)
 
 	s.pendingEdit = &event.PendingEdit{Search: "old", Replace: "new"}
@@ -625,7 +625,7 @@ func TestFileStatus(t *testing.T) {
 	e := openfile.New(buf)
 	s := New(e, root)
 	events := make(chan event.Event, 64)
-	ag := agent.New(stubProvider{}, stubWorkspace{}, events, nil)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, nil)
 	s.SetAgent(ag, events)
 
 	// Initially: in context (auto-added), not modified

@@ -49,9 +49,18 @@ func TestEndToEnd_SimpleGoal_JSONOutput(t *testing.T) {
 		},
 	}
 
-	ag := agent.New(provider, ws, events, &agent.NewOptions{
+	ag := agent.New(provider, ws, &agent.NewOptions{
 		Interaction: agent.Headless,
 	})
+	sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	go func() {
+		for ev := range sub.Events() {
+			events <- ev
+		}
+	}()
 
 	runner := headless.NewRunner(ag, ws, events, &bytes.Buffer{}, false)
 	result := runner.Run(context.Background(), "review the code", nil)
@@ -127,9 +136,18 @@ func TestEndToEnd_EditFile_JSONOutput(t *testing.T) {
 		},
 	}
 
-	ag := agent.New(provider, ws, events, &agent.NewOptions{
+	ag := agent.New(provider, ws, &agent.NewOptions{
 		Interaction: agent.Headless,
 	})
+	sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	go func() {
+		for ev := range sub.Events() {
+			events <- ev
+		}
+	}()
 
 	runner := headless.NewRunner(ag, ws, events, &bytes.Buffer{}, false)
 	result := runner.Run(context.Background(), "add a print to hello", []string{"hello.go"})

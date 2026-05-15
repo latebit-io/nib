@@ -219,9 +219,6 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
 		m.clearEditorOverlay(false)
-	case event.FlushBuffers:
-		saved, err := m.Session.SaveDirtyBuffers()
-		e.Result <- event.FlushResult{Saved: saved, Err: err}
 	case event.DiagnosticsUpdated:
 		m.refreshDiagnostics(e.Path)
 	case event.ReloadBuffers:

@@ -68,7 +68,7 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	// tool dispatch.
 	var lastWasBlocked bool
 
-	before := func(ctx context.Context, c upagent.BeforeToolCallContext) (upagent.BeforeToolCallResult, error) {
+	before := func(ctx context.Context, c upagent.BeforeToolCallInput) (upagent.BeforeToolCallResult, error) {
 		// Dispatch order:
 		//   1. lint-pending skip
 		//   2. single-edit
@@ -113,7 +113,7 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		return upagent.BeforeToolCallResult{}, nil
 	}
 
-	after := func(_ context.Context, c upagent.AfterToolCallContext) (upagent.AfterToolCallResult, error) {
+	after := func(_ context.Context, c upagent.AfterToolCallInput) (upagent.AfterToolCallResult, error) {
 		blocked := lastWasBlocked
 		lastWasBlocked = false
 		return a.foundationAfterToolCall(c, blocked), nil
@@ -171,7 +171,7 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	}
 
 	beforePark := func(_ context.Context) (upevent.AgentParked, error) {
-		// BeforePark fires after GetFollowUpMessages returned nothing
+		// BeforePark fires after FollowUpMessages returned nothing
 		// and immediately before the foundation parks on awaitReply.
 		// We flip [waiting] here (frontends query IsWaiting) and hand
 		// the foundation the Finished bit so kit's translator can
@@ -183,7 +183,7 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		return upevent.AgentParked{Finished: finished}, nil
 	}
 
-	onTruncated := func(_ context.Context, c upagent.TruncationContext) (upagent.TruncationResult, error) {
+	onTruncated := func(_ context.Context, c upagent.TruncationInput) (upagent.TruncationResult, error) {
 		// Delegate to recoverFromTruncation with an empty initial slice so
 		// the returned messages are exactly the rejection (and optional
 		// user nudge) splice we hand back to the foundation. Recover
@@ -210,13 +210,13 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	}
 
 	return upagent.Hooks{
-		BeforeToolCall:      before,
-		AfterToolCall:       after,
-		TransformContext:    transform,
-		GetSteeringMessages: steering,
-		GetFollowUpMessages: followUp,
-		BeforePark:          beforePark,
-		OnTruncated:         onTruncated,
+		BeforeToolCall:   before,
+		AfterToolCall:    after,
+		TransformContext: transform,
+		SteeringMessages: steering,
+		FollowUpMessages: followUp,
+		BeforePark:       beforePark,
+		OnTruncated:      onTruncated,
 	}
 }
 
@@ -238,7 +238,7 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 // The reminder is appended via [upagent.AfterToolCallResult.Content]
 // override; bash side effects run as method calls on a so they fire
 // regardless of whether the result body is rewritten.
-func (a *Agent) foundationAfterToolCall(c upagent.AfterToolCallContext, blocked bool) upagent.AfterToolCallResult {
+func (a *Agent) foundationAfterToolCall(c upagent.AfterToolCallInput, blocked bool) upagent.AfterToolCallResult {
 	if strings.ToLower(c.Name) == "bash" {
 		a.cache.Reset("", "")
 		a.send(event.ReloadBuffers{})
@@ -276,7 +276,7 @@ func isFreshUserInput(msgs []llm.Message) bool {
 }
 
 // foundationSteering returns the steering message slice (or nil) for
-// the GetSteeringMessages hook. Each gate is one-shot per developer
+// the SteeringMessages hook. Each gate is one-shot per developer
 // input; firedFlags is shared with TransformContext via the closure so
 // resets cross hook boundaries.
 //
@@ -303,7 +303,7 @@ func (a *Agent) foundationSteering(msgs []llm.Message, narrativeFired, permissio
 // schema filter ([Agent.planningToolDefs]) already removes blocked
 // tools from the advertised list, but a model can still dispatch one
 // that name-collides; this gate is the dispatch-time backstop.
-func (a *Agent) planningBlocklistGate(c upagent.BeforeToolCallContext) upagent.BeforeToolCallResult {
+func (a *Agent) planningBlocklistGate(c upagent.BeforeToolCallInput) upagent.BeforeToolCallResult {
 	name := strings.ToLower(c.Name)
 	if a.currentMode() != event.ModePlanning {
 		return upagent.BeforeToolCallResult{}
@@ -322,7 +322,7 @@ func (a *Agent) planningBlocklistGate(c upagent.BeforeToolCallContext) upagent.B
 // the planning-mode carve-out, the non-mutating-tool carve-out, the
 // missing-TaskReader carve-out, and the work-tree-not-loaded
 // carve-out — see [Agent.enforceActiveTaskGate] for the full table.
-func (a *Agent) activeTaskGate(ctx context.Context, c upagent.BeforeToolCallContext) upagent.BeforeToolCallResult {
+func (a *Agent) activeTaskGate(ctx context.Context, c upagent.BeforeToolCallInput) upagent.BeforeToolCallResult {
 	msg := a.enforceActiveTaskGate(ctx, strings.ToLower(c.Name))
 	if msg == "" {
 		return upagent.BeforeToolCallResult{}
@@ -339,7 +339,7 @@ func (a *Agent) activeTaskGate(ctx context.Context, c upagent.BeforeToolCallCont
 //
 // firedThisTurn is a pointer so the closure in [Agent.FoundationHooks]
 // owns the state; the gate function itself is stateless.
-func (a *Agent) singleEditGate(c upagent.BeforeToolCallContext, firedThisTurn *bool) upagent.BeforeToolCallResult {
+func (a *Agent) singleEditGate(c upagent.BeforeToolCallInput, firedThisTurn *bool) upagent.BeforeToolCallResult {
 	if !a.shouldEnforceSingleEdit() {
 		return upagent.BeforeToolCallResult{}
 	}

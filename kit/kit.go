@@ -49,25 +49,25 @@ type ToolResult = agent.ToolResult
 // Hooks is the foundation [agent.Hooks] re-exported under kit.
 type Hooks = agent.Hooks
 
-// BeforeToolCallContext is the foundation [agent.BeforeToolCallContext]
+// BeforeToolCallInput is the foundation [agent.BeforeToolCallInput]
 // re-exported under kit.
-type BeforeToolCallContext = agent.BeforeToolCallContext
+type BeforeToolCallInput = agent.BeforeToolCallInput
 
 // BeforeToolCallResult is the foundation [agent.BeforeToolCallResult]
 // re-exported under kit.
 type BeforeToolCallResult = agent.BeforeToolCallResult
 
-// AfterToolCallContext is the foundation [agent.AfterToolCallContext]
+// AfterToolCallInput is the foundation [agent.AfterToolCallInput]
 // re-exported under kit.
-type AfterToolCallContext = agent.AfterToolCallContext
+type AfterToolCallInput = agent.AfterToolCallInput
 
 // AfterToolCallResult is the foundation [agent.AfterToolCallResult]
 // re-exported under kit.
 type AfterToolCallResult = agent.AfterToolCallResult
 
-// TruncationContext is the foundation [agent.TruncationContext]
+// TruncationInput is the foundation [agent.TruncationInput]
 // re-exported under kit.
-type TruncationContext = agent.TruncationContext
+type TruncationInput = agent.TruncationInput
 
 // TruncationResult is the foundation [agent.TruncationResult]
 // re-exported under kit.

@@ -30,7 +30,7 @@ var errProviderTruncated = errors.New("agent: provider truncated response")
 // runLoop is the per-run goroutine driver. Owns the multi-turn cycle:
 // invoke TransformContext → Stream → drain → emit lifecycle events →
 // dispatch tools → repeat. Between turns with no tool calls it consults
-// GetSteeringMessages and GetFollowUpMessages before parking on the
+// SteeringMessages and FollowUpMessages before parking on the
 // reply channel; ctx cancellation unwinds the loop.
 //
 // The deferred cleanup is the only path that resets the run-state
@@ -104,7 +104,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 		// follow-up, then park on the reply channel.
 		steering, err := a.callGetSteering(ctx)
 		if err != nil {
-			a.emitError(fmt.Errorf("GetSteeringMessages: %w", err))
+			a.emitError(fmt.Errorf("SteeringMessages: %w", err))
 			return
 		}
 		if len(steering) > 0 {
@@ -114,7 +114,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 
 		followup, err := a.callGetFollowUp(ctx)
 		if err != nil {
-			a.emitError(fmt.Errorf("GetFollowUpMessages: %w", err))
+			a.emitError(fmt.Errorf("FollowUpMessages: %w", err))
 			return
 		}
 		if len(followup) > 0 {
@@ -236,7 +236,7 @@ func (a *Agent) handleTruncation(ctx context.Context, assistant llm.Message) (re
 		a.emitError(errProviderTruncated)
 		return false, nil
 	}
-	res, hookErr := a.hooks.OnTruncated(ctx, TruncationContext{
+	res, hookErr := a.hooks.OnTruncated(ctx, TruncationInput{
 		Assistant: assistant,
 		ToolCalls: assistant.ToolCalls,
 	})
@@ -312,7 +312,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 // a hook returning an error usually means the application is in an
 // inconsistent state.
 func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) (ToolResult, bool, error) {
-	beforeCtx := BeforeToolCallContext{
+	beforeCtx := BeforeToolCallInput{
 		CallID: call.ID,
 		Name:   call.Function.Name,
 		Args:   call.Function.Arguments,
@@ -356,7 +356,7 @@ func (a *Agent) applyAfterToolCall(ctx context.Context, call llm.ToolCall, resul
 	if a.hooks.AfterToolCall == nil {
 		return result, false, nil
 	}
-	res, err := a.hooks.AfterToolCall(ctx, AfterToolCallContext{
+	res, err := a.hooks.AfterToolCall(ctx, AfterToolCallInput{
 		CallID: call.ID,
 		Name:   call.Function.Name,
 		Args:   call.Function.Arguments,
@@ -398,27 +398,27 @@ func (a *Agent) transformContext(ctx context.Context) ([]llm.Message, error) {
 	return out, nil
 }
 
-// callGetSteering invokes the GetSteeringMessages hook (when
+// callGetSteering invokes the SteeringMessages hook (when
 // configured) and returns its messages. Steering messages are
 // injected after the current turn finishes with NO tool calls and
 // re-enter the loop without parking on the reply channel.
 func (a *Agent) callGetSteering(ctx context.Context) ([]llm.Message, error) {
-	if a.hooks.GetSteeringMessages == nil {
+	if a.hooks.SteeringMessages == nil {
 		return nil, nil
 	}
-	return a.hooks.GetSteeringMessages(ctx)
+	return a.hooks.SteeringMessages(ctx)
 }
 
-// callGetFollowUp invokes the GetFollowUpMessages hook (when
+// callGetFollowUp invokes the FollowUpMessages hook (when
 // configured) and returns its messages. Follow-up messages are
 // consulted only after steering returns nothing — the layered hook
 // surface lets the application distinguish "more work for this turn"
 // (steering) from "more work for the run as a whole" (follow-up).
 func (a *Agent) callGetFollowUp(ctx context.Context) ([]llm.Message, error) {
-	if a.hooks.GetFollowUpMessages == nil {
+	if a.hooks.FollowUpMessages == nil {
 		return nil, nil
 	}
-	return a.hooks.GetFollowUpMessages(ctx)
+	return a.hooks.FollowUpMessages(ctx)
 }
 
 // callBeforePark invokes the BeforePark hook (when configured) and

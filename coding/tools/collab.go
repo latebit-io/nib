@@ -53,3 +53,23 @@ type TaskReviewer interface {
 	// append to the tool result.
 	OnComplete(ctx context.Context, baseMessage string) string
 }
+
+// EditProposal carries the data an edit_file or replace_file tool
+// hands to the [Approver] for the full validation+approval+continue
+// dance. The application layer's Approver implementation owns the
+// channels and event delivery; the tool just builds and submits.
+type EditProposal struct {
+	// Edit is the proposed change sent to the frontend for approval.
+	Edit event.PendingEdit
+
+	// Path is the project-relative file path.
+	Path string
+
+	// CanonPath is the canonical absolute path (cache key).
+	CanonPath string
+
+	// ExpectedContent is what the file should contain after applying
+	// the edit. The orchestrator seeds the cache with this value
+	// post-approval so subsequent tool reads see the post-edit state.
+	ExpectedContent string
+}

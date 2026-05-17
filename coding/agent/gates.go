@@ -15,9 +15,8 @@ import (
 // approved (append to taskEdits for end-of-task review, clear the
 // per-path retry counter). enforceActiveTaskGate is the dispatch-
 // time check that mutating tools require an active `[>]` task in
-// /project.md. intentReminder appends the developer's current
-// intent to every tool result. fetchMemorySummary re-reads the
-// project memory snapshot at run start.
+// /project.md. fetchMemorySummary re-reads the project memory
+// snapshot at run start.
 //
 // These all read or mutate Agent state under [Agent.mu]. They live
 // here together because each represents an "agent-side policy"
@@ -101,16 +100,4 @@ func (a *Agent) enforceActiveTaskGate(_ context.Context, toolName string) string
 			"(to create one) first, then retry.",
 		toolName,
 	)
-}
-
-// intentReminder returns a string reminding the LLM of the current intent.
-// Appended to tool results so the LLM sees it every turn.
-func (a *Agent) intentReminder() string {
-	a.mu.Lock()
-	intent := a.intent
-	a.mu.Unlock()
-	if intent == "" {
-		return ""
-	}
-	return "\n\nReminder — developer's intent: " + intent
 }

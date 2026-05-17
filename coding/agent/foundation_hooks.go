@@ -59,15 +59,6 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		narrativeFired  bool
 		permissionFired bool
 	)
-	// lastWasBlocked records whether the most recent BeforeToolCall
-	// returned Block=true. AfterToolCall reads + clears it so the
-	// intent-reminder append is skipped on the Block path (planning-mode
-	// and active-task rejections never see the reminder; tool-execute
-	// and unknown-tool paths do). Safe with a single bool because
-	// BeforeToolCall and AfterToolCall always pair within one foundation
-	// tool dispatch.
-	var lastWasBlocked bool
-
 	before := func(ctx context.Context, c upagent.BeforeToolCallInput) (upagent.BeforeToolCallResult, error) {
 		// Dispatch order:
 		//   1. lint-pending skip
@@ -75,20 +66,14 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		//   3. flush dirty buffers + emit AgentToolCall
 		//   4. planning blocklist
 		//   5. active-task gate
-		//
-		// lastWasBlocked is set on every Block path so AfterToolCall
-		// can decide whether to apply the intent-reminder override.
 		if res := a.lintPendingGate(); res.Block {
-			lastWasBlocked = true
 			return res, nil
 		}
 		if res := a.singleEditGate(c, &singleEditFired); res.Block {
-			lastWasBlocked = true
 			return res, nil
 		}
 		if err := a.flushDirtyBuffers(ctx); err != nil {
 			a.send(event.AgentError{Err: fmt.Sprintf("autosave failed: %v", err)})
-			lastWasBlocked = true
 			return upagent.BeforeToolCallResult{
 				Block:  true,
 				Reason: fmt.Sprintf("Skipped — autosave failed: %v", err),
@@ -102,21 +87,16 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		// rejections still emit AgentToolCall.
 		a.send(event.AgentToolCall{Name: c.Name, Args: c.Args})
 		if res := a.planningBlocklistGate(c); res.Block {
-			lastWasBlocked = true
 			return res, nil
 		}
 		if res := a.activeTaskGate(ctx, c); res.Block {
-			lastWasBlocked = true
 			return res, nil
 		}
-		lastWasBlocked = false
 		return upagent.BeforeToolCallResult{}, nil
 	}
 
 	after := func(_ context.Context, c upagent.AfterToolCallInput) (upagent.AfterToolCallResult, error) {
-		blocked := lastWasBlocked
-		lastWasBlocked = false
-		return a.foundationAfterToolCall(c, blocked), nil
+		return a.foundationAfterToolCall(c), nil
 	}
 
 	transform := func(ctx context.Context, msgs []llm.Message) ([]llm.Message, error) {
@@ -220,38 +200,18 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	}
 }
 
-// foundationAfterToolCall handles two post-dispatch concerns:
-//
-//   - bash-tool side effects: invalidate the file cache and ask the
-//     frontend to reload open buffers because bash can mutate disk
-//     outside the edit-approval flow. Fires for every "bash" tool call
-//     regardless of dispatch outcome (including planning-blocked and
-//     active-task-blocked) so the frontend stays synchronized.
-//
-//   - intent-reminder appending: append the developer's current intent
-//     ([Agent.intentReminder]) to the tool result so the LLM sees it on
-//     every successful or unknown-tool turn. NOT appended on the
-//     BeforeToolCall.Block path — planning + active-task rejections
-//     never get the reminder. The blocked argument carries that signal:
-//     true means suppress.
-//
-// The reminder is appended via [upagent.AfterToolCallResult.Content]
-// override; bash side effects run as method calls on a so they fire
-// regardless of whether the result body is rewritten.
-func (a *Agent) foundationAfterToolCall(c upagent.AfterToolCallInput, blocked bool) upagent.AfterToolCallResult {
+// foundationAfterToolCall handles bash-tool side effects: invalidate
+// the file cache and ask the frontend to reload open buffers because
+// bash can mutate disk outside the edit-approval flow. Fires for
+// every "bash" tool call regardless of dispatch outcome (including
+// planning-blocked and active-task-blocked) so the frontend stays
+// synchronized.
+func (a *Agent) foundationAfterToolCall(c upagent.AfterToolCallInput) upagent.AfterToolCallResult {
 	if strings.ToLower(c.Name) == "bash" {
 		a.cache.Reset("", "")
 		a.send(event.ReloadBuffers{})
 	}
-	if blocked {
-		return upagent.AfterToolCallResult{}
-	}
-	reminder := a.intentReminder()
-	if reminder == "" {
-		return upagent.AfterToolCallResult{}
-	}
-	merged := c.Result.Content + reminder
-	return upagent.AfterToolCallResult{Content: &merged}
+	return upagent.AfterToolCallResult{}
 }
 
 // isFreshUserInput reports whether the trailing message of msgs is a

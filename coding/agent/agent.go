@@ -866,5 +866,4 @@ func (a *Agent) appendSmokeTool(builtins []Tool, projectRoot string) []Tool {
 // proposals through it via [Agent.Propose] in collab_impl.go.
 
 // Agent-internal gates + bookkeeping (recordEdit, maxValidatorRetries,
-// fetchMemorySummary, enforceActiveTaskGate, intentReminder) lives
-// in gates.go.
+// fetchMemorySummary, enforceActiveTaskGate) lives in gates.go.

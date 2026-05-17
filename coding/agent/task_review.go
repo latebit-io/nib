@@ -111,7 +111,7 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 		review.WriteString(hint)
 	}
 
-	return review.String() + a.intentReminder()
+	return review.String()
 }
 
 // nextTaskHint returns a one-line nudge identifying the next pending

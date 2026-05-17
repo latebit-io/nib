@@ -589,11 +589,10 @@ func TestLintPendingGate_PassesWhenEmpty(t *testing.T) {
 
 // --- foundationAfterToolCall ---
 
-func TestFoundationAfterToolCall_AppendsIntentReminderOnSuccess(t *testing.T) {
+func TestFoundationAfterToolCall_NoContentOverride(t *testing.T) {
 	a := &Agent{
-		bus:    newBus(),
-		cache:  NewFileCache(),
-		intent: "rewrite the auth middleware",
+		bus:   newBus(),
+		cache: NewFileCache(),
 	}
 	_ = subscribeForTest(t, a)
 	c := upagent.AfterToolCallInput{
@@ -601,53 +600,9 @@ func TestFoundationAfterToolCall_AppendsIntentReminderOnSuccess(t *testing.T) {
 		Result: upagent.ToolResult{Content: "edit applied"},
 	}
 
-	got := a.foundationAfterToolCall(c, false)
-	if got.Content == nil {
-		t.Fatalf("expected Content override; got nil")
-	}
-	if !strings.Contains(*got.Content, "edit applied") {
-		t.Errorf("expected original body to be preserved, got: %q", *got.Content)
-	}
-	if !strings.Contains(*got.Content, "rewrite the auth middleware") {
-		t.Errorf("expected intent reminder appended, got: %q", *got.Content)
-	}
-	if !strings.Contains(*got.Content, "Reminder — developer's intent") {
-		t.Errorf("expected reminder preamble, got: %q", *got.Content)
-	}
-}
-
-func TestFoundationAfterToolCall_NoIntentNoOverride(t *testing.T) {
-	a := &Agent{
-		bus:   newBus(),
-		cache: NewFileCache(),
-		// intent left empty
-	}
-	_ = subscribeForTest(t, a)
-	c := upagent.AfterToolCallInput{
-		Name:   "read_file",
-		Result: upagent.ToolResult{Content: "file contents"},
-	}
-	got := a.foundationAfterToolCall(c, false)
+	got := a.foundationAfterToolCall(c)
 	if got.Content != nil {
-		t.Errorf("expected no Content override when intent is empty, got %q", *got.Content)
-	}
-}
-
-func TestFoundationAfterToolCall_BlockedSkipsReminder(t *testing.T) {
-	a := &Agent{
-		bus:    newBus(),
-		cache:  NewFileCache(),
-		intent: "do the thing",
-	}
-	_ = subscribeForTest(t, a)
-	c := upagent.AfterToolCallInput{
-		Name:   "edit_file",
-		Result: upagent.ToolResult{Content: "Skipped — only ONE file-edit per turn", IsError: true},
-	}
-
-	got := a.foundationAfterToolCall(c, true) // blocked=true mirrors BeforeToolCall.Block path
-	if got.Content != nil {
-		t.Errorf("expected no Content override on blocked path, got: %q", *got.Content)
+		t.Errorf("expected no Content override, got: %q", *got.Content)
 	}
 }
 
@@ -661,7 +616,7 @@ func TestFoundationAfterToolCall_BashFiresReloadBuffers(t *testing.T) {
 		Name:   "bash",
 		Result: upagent.ToolResult{Content: "ls output"},
 	}
-	a.foundationAfterToolCall(c, false)
+	a.foundationAfterToolCall(c)
 
 	select {
 	case ev := <-events:
@@ -687,7 +642,7 @@ func TestFoundationAfterToolCall_BashFiresEvenWhenBlocked(t *testing.T) {
 		Name:   "bash",
 		Result: upagent.ToolResult{Content: "Error: tool \"bash\" is not available", IsError: true},
 	}
-	a.foundationAfterToolCall(c, true)
+	a.foundationAfterToolCall(c)
 
 	select {
 	case ev := <-events:
@@ -709,7 +664,7 @@ func TestFoundationAfterToolCall_NonBashSkipsCacheReset(t *testing.T) {
 		Name:   "read_file",
 		Result: upagent.ToolResult{Content: "x"},
 	}
-	a.foundationAfterToolCall(c, false)
+	a.foundationAfterToolCall(c)
 
 	select {
 	case ev := <-events:
@@ -722,68 +677,6 @@ func TestFoundationAfterToolCall_NonBashSkipsCacheReset(t *testing.T) {
 }
 
 // --- FoundationHooks Before/AfterToolCall integration ---
-
-func TestFoundationHooks_AfterToolCall_TracksBlockedFlag(t *testing.T) {
-	// Block path: BeforeToolCall returns Block → AfterToolCall must
-	// see blocked=true and skip the reminder. Non-block path: pair
-	// rotates to blocked=false and reminder applies.
-	tracker := &gateTracker{loaded: true, activePath: ""}
-	ws := &gateTestWorkspace{
-		testWorkspace: &testWorkspace{},
-		gateTracker:   tracker,
-	}
-	a := &Agent{
-		bus:       newBus(),
-		cache:     NewFileCache(),
-		workspace: ws,
-		mode:      event.ModeExecution,
-		intent:    "do the thing",
-	}
-	_ = subscribeForTest(t, a)
-
-	hooks := a.FoundationHooks(nil)
-	ctx := context.Background()
-
-	// 1. edit_file blocks (no active task) → AfterToolCall must be a no-op.
-	br, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
-	if err != nil {
-		t.Fatalf("blocked-path BeforeToolCall: %v", err)
-	}
-	if !br.Block {
-		t.Fatalf("expected first call to be blocked")
-	}
-	ar, err := hooks.AfterToolCall(ctx, upagent.AfterToolCallInput{
-		Name:   "edit_file",
-		Result: upagent.ToolResult{Content: br.Reason, IsError: true},
-	})
-	if err != nil {
-		t.Fatalf("blocked-path AfterToolCall: %v", err)
-	}
-	if ar.Content != nil {
-		t.Errorf("expected blocked path to skip reminder; got %q", *ar.Content)
-	}
-
-	// 2. Activate a task and try a non-edit tool: BeforeToolCall passes,
-	// AfterToolCall appends reminder.
-	tracker.activePath = "Phase 1 > task"
-	br, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "read_file"})
-	if err != nil {
-		t.Fatalf("non-blocked BeforeToolCall: %v", err)
-	}
-	if br.Block {
-		t.Fatalf("expected read_file to pass; reason=%q", br.Reason)
-	}
-	ar, err = hooks.AfterToolCall(ctx, upagent.AfterToolCallInput{
-		Name:   "read_file",
-		Result: upagent.ToolResult{Content: "file body"},
-	})
-	if err != nil {
-		t.Fatalf("non-blocked AfterToolCall: %v", err)
-	}
-	if ar.Content == nil || !strings.Contains(*ar.Content, "do the thing") {
-		t.Errorf("expected reminder appended on non-blocked path, got %v", ar.Content)
-	}
-}
 
 // --- foundationBudgetCheck ---
 

@@ -321,17 +321,19 @@ func changedLineRanges(orig, final string) []LineRange {
 	if orig == final {
 		return nil
 	}
+	// Empty final returns nil; the formatter short-circuits on
+	// empty content with a "file now empty" placeholder, so ranges
+	// would never be used. Keeping this path nil matches the caller
+	// contract — strings.Split("", "\n") would otherwise produce
+	// a single-element [""] slice that walks to a spurious {1,1}.
+	if final == "" {
+		return nil
+	}
 	finalLines := strings.Split(final, "\n")
 	if orig == "" {
-		if len(finalLines) == 0 {
-			return nil
-		}
 		return []LineRange{{Start: 1, End: len(finalLines)}}
 	}
 	origLines := strings.Split(orig, "\n")
-	if len(finalLines) == 0 {
-		return nil
-	}
 
 	var ranges []LineRange
 	oi, fi := 0, 0
@@ -352,9 +354,16 @@ func changedLineRanges(orig, final string) []LineRange {
 			ranges = append(ranges, LineRange{Start: startF + 1, End: fi})
 		} else if startF == fi && oi > 0 {
 			// Pure deletion at this position — anchor the touched
-			// range on the surrounding final-buffer line so the
-			// slice renderer has something to show context around.
-			anchor := startF
+			// range on the line immediately after the deletion seam
+			// in the final buffer (1-indexed). startF is the
+			// 0-indexed position where divergence began, so the line
+			// AFTER the seam in 1-indexed terms is startF + 1. This
+			// matches the insert/replace branch's convention
+			// (Start: startF + 1) and gives the slice renderer the
+			// correct anchor to expand context around. The clamp to
+			// len(finalLines) handles tail deletions where startF
+			// already equals the file's final line.
+			anchor := startF + 1
 			if anchor < 1 {
 				anchor = 1
 			}
@@ -404,9 +413,15 @@ const postEditSliceContext = 20
 // re-orient without a separate read_file call.
 //
 // touchedRanges may be nil (whole-file write) — in that case the
-// touched region is the entire file. An empty content blob returns a
-// short placeholder rather than nothing so the LLM sees a definite
-// "file now empty" signal.
+// formatter treats the entire file as touched: small files (rendered
+// within [postEditContentBudget]) are returned in full; files that
+// exceed the budget fall back to a head slice with a read_file hint
+// because [mergeAndPadRanges] returns nil for nil input and there's no
+// natural slice center to expand around. The LLM sees only the file's
+// head in that case — large `write_file` scaffolds therefore won't
+// echo their entire content back through the tool result. An empty
+// content blob returns a short placeholder rather than nothing so the
+// LLM sees a definite "file now empty" signal.
 func FormatPostEditContent(path, content string, touchedRanges []LineRange) string {
 	if content == "" {
 		return fmt.Sprintf("Resulting file (%s) is now empty.", path)

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -730,6 +731,293 @@ func TestEditFileTool_RejectsDuplicationEdit(t *testing.T) {
 	if !strings.Contains(result.Content, "duplicates content") {
 		t.Errorf("expected duplication error, got %q", result.Content)
 	}
+}
+
+// TestChangedLineRanges covers the line-diff helper directly. Cases
+// include the unchanged path (nil result), pure inserts, pure
+// replacements, the pure-deletion anchor (the off-by-one regression
+// surfaced in PR #158 Greptile review), and the new-file + empty-file
+// boundary conditions. Lock against regression because callers
+// (FormatPostEditContent's slice mode) rely on these ranges to be
+// 1-indexed and to anchor on the line AFTER the deletion seam.
+func TestChangedLineRanges(t *testing.T) {
+	tests := []struct {
+		name  string
+		orig  string
+		final string
+		want  []LineRange
+	}{
+		{
+			name:  "unchanged content returns nil",
+			orig:  "a\nb\nc\n",
+			final: "a\nb\nc\n",
+			want:  nil,
+		},
+		{
+			name:  "empty orig — whole final is a range",
+			orig:  "",
+			final: "x\ny\nz",
+			want:  []LineRange{{Start: 1, End: 3}},
+		},
+		{
+			name:  "empty final returns nil",
+			orig:  "a\nb",
+			final: "",
+			want:  nil,
+		},
+		{
+			name:  "single-line replacement mid-file is 1-indexed",
+			orig:  "a\nb\nc\nd\n",
+			final: "a\nB\nc\nd\n",
+			want:  []LineRange{{Start: 2, End: 2}},
+		},
+		{
+			name:  "multi-line insertion mid-file",
+			orig:  "a\nb\nc\n",
+			final: "a\nX\nY\nb\nc\n",
+			want:  []LineRange{{Start: 2, End: 3}},
+		},
+		{
+			// Regression for PR #158 Greptile P2: a deletion between
+			// 1-indexed final lines 5 and 6 (startF=5 0-indexed) must
+			// anchor on line 6 (the line AFTER the seam), not line 5.
+			name:  "pure deletion mid-file anchors on line after seam",
+			orig:  "a\nb\nc\nd\ne\nGONE\nf\ng\n",
+			final: "a\nb\nc\nd\ne\nf\ng\n",
+			want:  []LineRange{{Start: 6, End: 6}},
+		},
+		{
+			name:  "pure deletion at file head clamps to line 1",
+			orig:  "GONE\na\nb\nc\n",
+			final: "a\nb\nc\n",
+			want:  []LineRange{{Start: 1, End: 1}},
+		},
+		{
+			name:  "pure deletion at file tail clamps to final line",
+			orig:  "a\nb\nc\nGONE\n",
+			final: "a\nb\nc\n",
+			// strings.Split on a trailing \n produces a final empty
+			// entry, so len(finalLines)=4 ("a","b","c","").
+			// The deletion seam is at fi=3, anchor=4 (within bounds).
+			want: []LineRange{{Start: 4, End: 4}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := changedLineRanges(tt.orig, tt.final)
+			if !equalRanges(got, tt.want) {
+				t.Errorf("changedLineRanges(...) = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMergeAndPadRanges covers the pad-and-merge helper directly.
+// The slice mode of FormatPostEditContent depends on this expanding
+// each touched range by ±postEditSliceContext lines, clamping to
+// file bounds, and merging overlapping or touching ranges.
+func TestMergeAndPadRanges(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []LineRange
+		total int
+		pad   int
+		want  []LineRange
+	}{
+		{
+			name:  "nil input returns nil",
+			input: nil,
+			total: 100,
+			pad:   20,
+			want:  nil,
+		},
+		{
+			name:  "empty input returns nil",
+			input: []LineRange{},
+			total: 100,
+			pad:   20,
+			want:  nil,
+		},
+		{
+			name:  "zero total returns nil",
+			input: []LineRange{{Start: 5, End: 5}},
+			total: 0,
+			pad:   20,
+			want:  nil,
+		},
+		{
+			name:  "single range pads symmetrically",
+			input: []LineRange{{Start: 50, End: 50}},
+			total: 100,
+			pad:   10,
+			want:  []LineRange{{Start: 40, End: 60}},
+		},
+		{
+			name:  "pad clamps to file head",
+			input: []LineRange{{Start: 5, End: 5}},
+			total: 100,
+			pad:   20,
+			want:  []LineRange{{Start: 1, End: 25}},
+		},
+		{
+			name:  "pad clamps to file tail",
+			input: []LineRange{{Start: 95, End: 95}},
+			total: 100,
+			pad:   20,
+			want:  []LineRange{{Start: 75, End: 100}},
+		},
+		{
+			name:  "overlapping ranges merge",
+			input: []LineRange{{Start: 10, End: 10}, {Start: 25, End: 25}},
+			total: 100,
+			pad:   10,
+			// padded: [1,20] and [15,35] — overlap → [1,35]
+			want: []LineRange{{Start: 1, End: 35}},
+		},
+		{
+			name:  "touching ranges merge (gap of one line)",
+			input: []LineRange{{Start: 10, End: 10}, {Start: 31, End: 31}},
+			total: 100,
+			pad:   10,
+			// padded: [1,20] and [21,41] — touching → [1,41]
+			want: []LineRange{{Start: 1, End: 41}},
+		},
+		{
+			name:  "non-touching ranges stay separate",
+			input: []LineRange{{Start: 10, End: 10}, {Start: 60, End: 60}},
+			total: 100,
+			pad:   10,
+			want:  []LineRange{{Start: 1, End: 20}, {Start: 50, End: 70}},
+		},
+		{
+			name:  "ranges arrive out-of-order; output sorted",
+			input: []LineRange{{Start: 60, End: 60}, {Start: 10, End: 10}},
+			total: 100,
+			pad:   10,
+			want:  []LineRange{{Start: 1, End: 20}, {Start: 50, End: 70}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeAndPadRanges(tt.input, tt.total, tt.pad)
+			if !equalRanges(got, tt.want) {
+				t.Errorf("mergeAndPadRanges(%v, %d, %d) = %v, want %v",
+					tt.input, tt.total, tt.pad, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatPostEditContent covers the three regimes:
+// empty content (placeholder), small file (full content with line
+// numbers), large file (slice mode). Lock the slice-mode marker
+// format and the head-slice fallback for nil-touchedRanges + large.
+func TestFormatPostEditContent(t *testing.T) {
+	t.Run("empty content returns placeholder", func(t *testing.T) {
+		got := FormatPostEditContent("main.go", "", nil)
+		if !strings.Contains(got, "now empty") {
+			t.Errorf("expected empty-placeholder, got %q", got)
+		}
+	})
+
+	t.Run("small file returns full content with line numbers", func(t *testing.T) {
+		content := "package main\n\nfunc main() {}\n"
+		got := FormatPostEditContent("main.go", content, nil)
+		if !strings.Contains(got, "Lines 1–3 of 3 in main.go") {
+			t.Errorf("expected line-numbered header, got %q", got)
+		}
+		if !strings.Contains(got, "   1\tpackage main") {
+			t.Errorf("expected cat -n style line 1, got %q", got)
+		}
+		if !strings.Contains(got, "   3\tfunc main() {}") {
+			t.Errorf("expected cat -n style line 3, got %q", got)
+		}
+	})
+
+	t.Run("large file with touched range renders slice", func(t *testing.T) {
+		// Build a 600-line file (~6 KiB raw, ~10 KiB rendered with
+		// line numbers — over the 8 KiB budget, so slice mode fires).
+		var b strings.Builder
+		for i := 1; i <= 600; i++ {
+			fmt.Fprintf(&b, "line %d\n", i)
+		}
+		content := b.String()
+		got := FormatPostEditContent("big.go", content, []LineRange{{Start: 300, End: 300}})
+		if !strings.Contains(got, "slices around modified regions") {
+			t.Errorf("expected slice-mode header, got first 200 bytes: %q", got[:min(len(got), 200)])
+		}
+		// Slice should be ±20 around line 300 → 280–320.
+		if !strings.Contains(got, "Lines 280–320 of 600 in big.go") {
+			t.Errorf("expected slice ±20 around line 300, got %q", got[:min(len(got), 300)])
+		}
+	})
+
+	t.Run("large file with nil touched ranges falls back to head slice", func(t *testing.T) {
+		var b strings.Builder
+		for i := 1; i <= 600; i++ {
+			fmt.Fprintf(&b, "line %d\n", i)
+		}
+		got := FormatPostEditContent("big.go", b.String(), nil)
+		if !strings.Contains(got, "exceeds the per-result content budget") {
+			t.Errorf("expected head-slice fallback marker, got %q", got[:min(len(got), 300)])
+		}
+		// Head slice should start at line 1.
+		if !strings.Contains(got, "Lines 1–") {
+			t.Errorf("expected head slice starting at line 1, got %q", got[:min(len(got), 200)])
+		}
+	})
+}
+
+// TestRenderLineRange covers the cat -n style renderer's edge cases:
+// out-of-range start/end clamps, empty range handling, and trailing
+// newline display arithmetic.
+func TestRenderLineRange(t *testing.T) {
+	lines := []string{"alpha", "beta", "gamma", "delta", ""}
+
+	t.Run("renders inclusive range with line numbers", func(t *testing.T) {
+		got := renderLineRange("f.go", lines, 2, 3, 4)
+		if !strings.Contains(got, "Lines 2–3 of 4 in f.go") {
+			t.Errorf("header wrong: %q", got)
+		}
+		if !strings.Contains(got, "   2\tbeta") || !strings.Contains(got, "   3\tgamma") {
+			t.Errorf("body wrong: %q", got)
+		}
+	})
+
+	t.Run("clamps start below 1", func(t *testing.T) {
+		got := renderLineRange("f.go", lines, 0, 2, 4)
+		if !strings.Contains(got, "Lines 1–2 of 4 in f.go") {
+			t.Errorf("expected start clamped to 1, got %q", got)
+		}
+	})
+
+	t.Run("clamps end above total", func(t *testing.T) {
+		got := renderLineRange("f.go", lines, 3, 99, 4)
+		if !strings.Contains(got, "Lines 3–4 of 4 in f.go") {
+			t.Errorf("expected end clamped to total, got %q", got)
+		}
+	})
+
+	t.Run("empty range placeholder", func(t *testing.T) {
+		got := renderLineRange("f.go", lines, 5, 3, 4)
+		if !strings.Contains(got, "(empty range)") {
+			t.Errorf("expected empty-range marker, got %q", got)
+		}
+	})
+}
+
+// equalRanges is a test helper: nil and empty slices compare equal
+// (both represent "no changes"), and entries compare by value.
+func equalRanges(a, b []LineRange) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestEditFileTool_BatchAppliesAllInOneProposal locks in the happy

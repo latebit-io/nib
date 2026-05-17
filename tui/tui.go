@@ -84,18 +84,12 @@ type AgentCallbacks struct {
 }
 
 // CodingCallbacks groups frontend callbacks that depend on coding-agent
-// concepts (autonomy policy for edit approval, coding style cycling).
-// The naming is deliberate: the type signature documents which Config
-// fields a non-coding consumer can leave zero.
+// concepts (autonomy policy for edit approval). The naming is deliberate:
+// the type signature documents which Config fields a non-coding consumer
+// can leave zero.
 type CodingCallbacks struct {
 	// OnDialChange is called when the autonomy dial changes.
 	OnDialChange func(level session.AutonomyLevel)
-
-	// CycleStyle advances to the next coding style. Returns display name or "".
-	CycleStyle func() string
-
-	// InitialStyleName is the coding style name at startup.
-	InitialStyleName string
 }
 
 // LLMCallbacks groups LLM-related UI callbacks.
@@ -180,10 +174,6 @@ func New(cfg Config) *App {
 
 		// Coding-flavored.
 		appPtr.OnDialChange = cfg.CodingCallbacks.OnDialChange
-		appPtr.CycleStyle = cfg.CodingCallbacks.CycleStyle
-		if cfg.CodingCallbacks.InitialStyleName != "" {
-			appPtr.SetStyleName(cfg.CodingCallbacks.InitialStyleName)
-		}
 	}
 
 	p := tea.NewProgram(appPtr, tea.WithoutSignalHandler())
@@ -259,11 +249,7 @@ func (a *App) SetAgentCallbacks(cb AgentCallbacks) {
 // Same any-time semantics, race-avoidance rationale, and async
 // caveat as [App.SetAgentCallbacks].
 func (a *App) SetCodingCallbacks(cb CodingCallbacks) {
-	msg := ui.SetCodingCallbacksMsg(
-		cb.OnDialChange,
-		cb.CycleStyle,
-		cb.InitialStyleName,
-	)
+	msg := ui.SetCodingCallbacksMsg(cb.OnDialChange)
 	go a.program.Send(msg)
 }
 

@@ -2,23 +2,8 @@ package ui
 
 import tea "charm.land/bubbletea/v2"
 
-// Styling, terse, and autonomy-dial callbacks and toggles.
+// Terse and autonomy-dial callbacks and toggles.
 // Extracted from app.go (Phase 1 of AppModel decomposition).
-
-// SetStyleName sets the current coding style display name for the status bar.
-// Pass empty string to clear the indicator.
-func (m *AppModel) SetStyleName(name string) {
-	m.styleName = name
-}
-
-// cycleStyle advances to the next coding style via the CycleStyle callback.
-// Does nothing if no styles are configured.
-func (m *AppModel) cycleStyle() {
-	if m.CycleStyle == nil {
-		return
-	}
-	m.styleName = m.CycleStyle()
-}
 
 // SetTerse sets the terse mode indicator. Use this at startup to sync
 // the UI with the agent's initial state.
@@ -62,9 +47,5 @@ func (m *AppModel) handleSetAgentCallbacks(msg setAgentCallbacksMsg) (tea.Model,
 // [AppModel.handleSetAgentCallbacks].
 func (m *AppModel) handleSetCodingCallbacks(msg setCodingCallbacksMsg) (tea.Model, tea.Cmd) {
 	m.OnDialChange = msg.onDialChange
-	m.CycleStyle = msg.cycleStyle
-	if msg.initialStyleName != "" {
-		m.SetStyleName(msg.initialStyleName)
-	}
 	return m, nil
 }

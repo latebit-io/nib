@@ -68,8 +68,6 @@ const (
 	ActionDialCycle
 	// ActionModelSelector opens the LLM model/profile selector overlay.
 	ActionModelSelector
-	// ActionStyleCycle cycles through available coding styles.
-	ActionStyleCycle
 	// ActionTerseToggle toggles terse output mode on/off.
 	ActionTerseToggle
 
@@ -183,7 +181,6 @@ func DefaultBindings() []Binding {
 		{ActionAgentReject, "Reject / Cancel", []string{"Escape"}, CatAgent},
 		{ActionDialCycle, "Cycle autonomy dial", []string{"Alt+A"}, CatAgent},
 		{ActionModelSelector, "Select model", []string{"Alt+M"}, CatAgent},
-		{ActionStyleCycle, "Cycle coding style", []string{"Alt+S"}, CatAgent},
 		{ActionTerseToggle, "Toggle terse mode", []string{"Alt+T"}, CatAgent},
 
 		// View

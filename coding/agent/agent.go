@@ -167,10 +167,6 @@ type Agent struct {
 	// Injected into the system prompt so the agent distinguishes local from shared.
 	distributedMemory []string
 
-	// codingStyle holds the active coding style rules for prompt injection.
-	// Nil when no style is configured.
-	codingStyle *prompts.CodingStyleData
-
 	// linters is the set of lint adapters to run at task completion.
 	// Nil when no linter is configured. Each adapter returns a structured
 	// lint.Result distinguishing infrastructure failures from findings.
@@ -385,9 +381,6 @@ type NewOptions struct {
 	// memory (detected by naming convention). When non-empty, the system
 	// prompt includes a section explaining how to use local vs shared memory.
 	DistributedMemory []string
-	// CodingStyle holds the resolved coding style. When non-nil, style rules
-	// are injected into the system prompt as architectural constraints.
-	CodingStyle *prompts.CodingStyleData
 	// Linters is the set of lint adapters to run at task completion. Each
 	// adapter returns a structured lint.Result (findings or error). Nil
 	// disables post-task lint. Use lint.Detect or lint.FromShellCommands to
@@ -448,7 +441,6 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var extraBlocklist []string
 	var interaction InteractionMode
 	var distributedMemory []string
-	var codingStyle *prompts.CodingStyleData
 	var linters []lint.Linter
 	var terse bool
 	var smokeCfg runconfig.Resolved
@@ -462,7 +454,6 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		extraBlocklist = opts.PlanningBlocklist
 		interaction = opts.Interaction
 		distributedMemory = opts.DistributedMemory
-		codingStyle = opts.CodingStyle
 		linters = slices.Clone(opts.Linters)
 		terse = opts.Terse
 		smokeCfg = opts.SmokeConfig
@@ -493,7 +484,6 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		memoryStore:         memStore,
 		memorySummary:       memorySummary,
 		distributedMemory:   distributedMemory,
-		codingStyle:         codingStyle,
 		linters:             linters,
 		pipeline:            pipeline,
 		validatorRetries:    make(map[string]int),
@@ -782,7 +772,7 @@ func adaptEngineSearch(_ context.Context, root, pattern string, opts searchtools
 // Public lifecycle and signal API (Run, RunWithMode, Reply, Cancel,
 // IsWaiting, IsRunning, SetProvider / Style / Terse / Autonomous,
 // Approve, Reject, activeCoord, drainPendingLint, hasLintPending,
-// currentTerse / Autonomous / CodingStyle / Provider / Mode, Usage,
+// currentTerse / Autonomous / Provider / Mode, Usage,
 // emitOpening, send, sendCritical) lives in lifecycle.go.
 
 // Per-run budget integration (checkTaskBudget) lives in budget.go.

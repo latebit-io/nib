@@ -10,8 +10,6 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
-	"github.com/latebit-io/nib/coding/prompts"
-	"github.com/latebit-io/nib/engine/lint"
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/budget"
 )
@@ -23,7 +21,7 @@ import (
 // state queries, the Set* family for runtime configuration, and
 // Approve / Reject for the edit-flow signals. Plus the internal state
 // getters (currentProvider / currentTerse / currentAutonomous /
-// currentCodingStyle / hasLintPending / drainPendingLint) and event
+// hasLintPending / drainPendingLint) and event
 // emitters (send / sendCritical / activeCoord) that hooks and the
 // forwarder goroutine call into.
 //
@@ -411,19 +409,6 @@ func (a *Agent) SetProvider(p llm.Provider) {
 	}
 }
 
-// SetStyle atomically replaces the active coding style and post-task linters.
-// Pass nil style and nil linters to disable style enforcement.
-// Safe to call between turns.
-func (a *Agent) SetStyle(cs *prompts.CodingStyleData, linters []lint.Linter) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.codingStyle = cs
-	a.linters = slices.Clone(linters)
-	if len(linters) == 0 {
-		a.pendingLint = ""
-	}
-}
-
 // SetTerse enables or disables terse output mode.
 // When enabled, the system prompt instructs the LLM to minimize
 // explanatory text, reducing output tokens by ~65%. Safe to call
@@ -495,13 +480,6 @@ func (a *Agent) currentAutonomous() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.autonomous
-}
-
-// currentCodingStyle returns the active coding style under lock.
-func (a *Agent) currentCodingStyle() *prompts.CodingStyleData {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.codingStyle
 }
 
 // currentProvider returns the active provider under lock.

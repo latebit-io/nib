@@ -21,17 +21,11 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		extra := 4 // dial + style + terse + usage always shown
+		extra := 3 // dial + terse + usage always shown
 		indicators := make([]string, len(mem)+extra)
 		copy(indicators, mem)
 		idx := len(mem)
 		indicators[idx] = m.dial.String()
-		idx++
-		if m.styleName != "" {
-			indicators[idx] = "style:" + m.styleName
-		} else {
-			indicators[idx] = "style:none"
-		}
 		idx++
 		if m.terse {
 			indicators[idx] = "terse:on"

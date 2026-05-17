@@ -10,52 +10,51 @@ type Action = keymap.Action
 
 // Re-export action constants so TUI code doesn't need to import keymap directly.
 const (
-	ActionNone            = keymap.ActionNone
-	ActionQuit            = keymap.ActionQuit
-	ActionSave            = keymap.ActionSave
-	ActionUndo            = keymap.ActionUndo
-	ActionRedo            = keymap.ActionRedo
-	ActionCopy            = keymap.ActionCopy
-	ActionCut             = keymap.ActionCut
-	ActionPaste           = keymap.ActionPaste
-	ActionSelectAll       = keymap.ActionSelectAll
-	ActionSelectLine      = keymap.ActionSelectLine
-	ActionSelectNext      = keymap.ActionSelectNext
-	ActionDeleteLine      = keymap.ActionDeleteLine
-	ActionDuplicateLine   = keymap.ActionDuplicateLine
-	ActionSwapLineUp      = keymap.ActionSwapLineUp
-	ActionSwapLineDown    = keymap.ActionSwapLineDown
-	ActionToggleComment   = keymap.ActionToggleComment
-	ActionIndent          = keymap.ActionIndent
-	ActionOutdent         = keymap.ActionOutdent
-	ActionFileStart       = keymap.ActionFileStart
-	ActionFileEnd         = keymap.ActionFileEnd
-	ActionGoToLineStart   = keymap.ActionGoToLineStart
-	ActionGoToLineEnd     = keymap.ActionGoToLineEnd
-	ActionAgentStart      = keymap.ActionAgentStart
-	ActionAgentPlan       = keymap.ActionAgentPlan
-	ActionAgentApprove    = keymap.ActionAgentApprove
-	ActionAgentReject     = keymap.ActionAgentReject
-	ActionDialCycle       = keymap.ActionDialCycle
-	ActionModelSelector   = keymap.ActionModelSelector
-	ActionStyleCycle      = keymap.ActionStyleCycle
-	ActionEvaluatorToggle = keymap.ActionEvaluatorToggle
-	ActionTerseToggle     = keymap.ActionTerseToggle
-	ActionOpenPalette     = keymap.ActionOpenPalette
-	ActionToggleProject   = keymap.ActionToggleProject
-	ActionHelp            = keymap.ActionHelp
-	ActionFocusProject    = keymap.ActionFocusProject
-	ActionFocusEditor     = keymap.ActionFocusEditor
-	ActionFocusAgent      = keymap.ActionFocusAgent
-	ActionFind            = keymap.ActionFind
-	ActionFindReplace     = keymap.ActionFindReplace
-	ActionGoToDefinition  = keymap.ActionGoToDefinition
-	ActionGoBack          = keymap.ActionGoBack
-	ActionHover           = keymap.ActionHover
-	ActionNextBuffer      = keymap.ActionNextBuffer
-	ActionPrevBuffer      = keymap.ActionPrevBuffer
-	ActionFindInProject   = keymap.ActionFindInProject
-	ActionReloadFile      = keymap.ActionReloadFile
+	ActionNone           = keymap.ActionNone
+	ActionQuit           = keymap.ActionQuit
+	ActionSave           = keymap.ActionSave
+	ActionUndo           = keymap.ActionUndo
+	ActionRedo           = keymap.ActionRedo
+	ActionCopy           = keymap.ActionCopy
+	ActionCut            = keymap.ActionCut
+	ActionPaste          = keymap.ActionPaste
+	ActionSelectAll      = keymap.ActionSelectAll
+	ActionSelectLine     = keymap.ActionSelectLine
+	ActionSelectNext     = keymap.ActionSelectNext
+	ActionDeleteLine     = keymap.ActionDeleteLine
+	ActionDuplicateLine  = keymap.ActionDuplicateLine
+	ActionSwapLineUp     = keymap.ActionSwapLineUp
+	ActionSwapLineDown   = keymap.ActionSwapLineDown
+	ActionToggleComment  = keymap.ActionToggleComment
+	ActionIndent         = keymap.ActionIndent
+	ActionOutdent        = keymap.ActionOutdent
+	ActionFileStart      = keymap.ActionFileStart
+	ActionFileEnd        = keymap.ActionFileEnd
+	ActionGoToLineStart  = keymap.ActionGoToLineStart
+	ActionGoToLineEnd    = keymap.ActionGoToLineEnd
+	ActionAgentStart     = keymap.ActionAgentStart
+	ActionAgentPlan      = keymap.ActionAgentPlan
+	ActionAgentApprove   = keymap.ActionAgentApprove
+	ActionAgentReject    = keymap.ActionAgentReject
+	ActionDialCycle      = keymap.ActionDialCycle
+	ActionModelSelector  = keymap.ActionModelSelector
+	ActionStyleCycle     = keymap.ActionStyleCycle
+	ActionTerseToggle    = keymap.ActionTerseToggle
+	ActionOpenPalette    = keymap.ActionOpenPalette
+	ActionToggleProject  = keymap.ActionToggleProject
+	ActionHelp           = keymap.ActionHelp
+	ActionFocusProject   = keymap.ActionFocusProject
+	ActionFocusEditor    = keymap.ActionFocusEditor
+	ActionFocusAgent     = keymap.ActionFocusAgent
+	ActionFind           = keymap.ActionFind
+	ActionFindReplace    = keymap.ActionFindReplace
+	ActionGoToDefinition = keymap.ActionGoToDefinition
+	ActionGoBack         = keymap.ActionGoBack
+	ActionHover          = keymap.ActionHover
+	ActionNextBuffer     = keymap.ActionNextBuffer
+	ActionPrevBuffer     = keymap.ActionPrevBuffer
+	ActionFindInProject  = keymap.ActionFindInProject
+	ActionReloadFile     = keymap.ActionReloadFile
 )
 
 // keyBinding represents a key combination mapped to an action.
@@ -119,10 +118,6 @@ func DefaultKeymap() *Keymap {
 			{code: 'µ', mod: 0}:           ActionModelSelector, // macOS: Option+M sends µ
 			{code: 's', mod: tea.ModAlt}:  ActionStyleCycle,
 			{code: 'ß', mod: 0}:           ActionStyleCycle, // macOS: Option+S sends ß
-			{code: 'v', mod: tea.ModAlt}:  ActionEvaluatorToggle,
-			{code: '√', mod: 0}:           ActionEvaluatorToggle, // macOS: Option+V sends √
-			{code: 'r', mod: tea.ModAlt}:  ActionEvaluatorToggle,
-			{code: '®', mod: 0}:           ActionEvaluatorToggle, // macOS: Option+R sends ®
 			{code: 't', mod: tea.ModAlt}:  ActionTerseToggle,
 			{code: '†', mod: 0}:           ActionTerseToggle, // macOS: Option+T sends †
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
@@ -156,10 +151,6 @@ func DefaultKeymap() *Keymap {
 			"µ":        ActionModelSelector, // macOS: Option+M sends µ
 			"alt+s":    ActionStyleCycle,
 			"ß":        ActionStyleCycle, // macOS: Option+S sends ß
-			"alt+v":    ActionEvaluatorToggle,
-			"√":        ActionEvaluatorToggle, // macOS: Option+V sends √
-			"alt+r":    ActionEvaluatorToggle,
-			"®":        ActionEvaluatorToggle, // macOS: Option+R sends ®
 			"alt+t":    ActionTerseToggle,
 			"†":        ActionTerseToggle, // macOS: Option+T sends †
 			"shift+f1": ActionHover,

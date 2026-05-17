@@ -8,7 +8,7 @@ func TestDetectLanguage(t *testing.T) {
 		want string
 	}{
 		{"main.go", "Go"},
-		{"engine/agent/style_evaluator.go", "Go"},
+		{"engine/agent/lifecycle.go", "Go"},
 		{"game.lua", "Lua"},
 		{"src/level.lua", "Lua"},
 		{"app.py", "Python"},

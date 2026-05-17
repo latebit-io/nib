@@ -84,9 +84,9 @@ type AgentCallbacks struct {
 }
 
 // CodingCallbacks groups frontend callbacks that depend on coding-agent
-// concepts (autonomy policy for edit approval, coding style cycling,
-// style evaluator). The naming is deliberate: the type signature
-// documents which Config fields a non-coding consumer can leave zero.
+// concepts (autonomy policy for edit approval, coding style cycling).
+// The naming is deliberate: the type signature documents which Config
+// fields a non-coding consumer can leave zero.
 type CodingCallbacks struct {
 	// OnDialChange is called when the autonomy dial changes.
 	OnDialChange func(level session.AutonomyLevel)
@@ -94,14 +94,8 @@ type CodingCallbacks struct {
 	// CycleStyle advances to the next coding style. Returns display name or "".
 	CycleStyle func() string
 
-	// ToggleEvaluator enables/disables the style evaluator. Returns new state.
-	ToggleEvaluator func(enabled bool) bool
-
 	// InitialStyleName is the coding style name at startup.
 	InitialStyleName string
-
-	// InitialEvaluatorEnabled is the evaluator state at startup.
-	InitialEvaluatorEnabled bool
 }
 
 // LLMCallbacks groups LLM-related UI callbacks.
@@ -187,12 +181,8 @@ func New(cfg Config) *App {
 		// Coding-flavored.
 		appPtr.OnDialChange = cfg.CodingCallbacks.OnDialChange
 		appPtr.CycleStyle = cfg.CodingCallbacks.CycleStyle
-		appPtr.ToggleEvaluator = cfg.CodingCallbacks.ToggleEvaluator
 		if cfg.CodingCallbacks.InitialStyleName != "" {
 			appPtr.SetStyleName(cfg.CodingCallbacks.InitialStyleName)
-		}
-		if cfg.CodingCallbacks.InitialEvaluatorEnabled {
-			appPtr.SetEvaluatorEnabled(true)
 		}
 	}
 
@@ -272,9 +262,7 @@ func (a *App) SetCodingCallbacks(cb CodingCallbacks) {
 	msg := ui.SetCodingCallbacksMsg(
 		cb.OnDialChange,
 		cb.CycleStyle,
-		cb.ToggleEvaluator,
 		cb.InitialStyleName,
-		cb.InitialEvaluatorEnabled,
 	)
 	go a.program.Send(msg)
 }

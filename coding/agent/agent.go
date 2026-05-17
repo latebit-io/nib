@@ -19,7 +19,6 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/nudges"
 	"github.com/latebit-io/nib/coding/prompts"
-	"github.com/latebit-io/nib/coding/style"
 	"github.com/latebit-io/nib/coding/tools"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/lint"
@@ -212,16 +211,10 @@ type Agent struct {
 	// works continuously without stopping between edits.
 	autonomous bool
 
-	// evaluator is the optional style evaluator that reviews edits after
-	// each turn completes. Nil when the feature is disabled. Typed as
-	// [style.StyleEvaluatorPort] so tests can substitute a deterministic stub
-	// without spinning up a real LLM provider.
-	evaluator style.StyleEvaluatorPort
 	// taskEdits collects edits made during the current task for end-of-task
 	// review. Accumulates across many LLM turns; cleared on RunWithMode and
-	// on task completion. Named for the task boundary (not turn) — lint and
-	// style evaluator fire when the agent marks a task complete, not on
-	// every turn.
+	// on task completion. Named for the task boundary (not turn) — lint
+	// fires when the agent marks a task complete, not on every turn.
 	taskEdits []taskEdit
 
 	// flushDirtyBuffersFn is the frontend-supplied autosave callback the
@@ -344,7 +337,7 @@ type Agent struct {
 }
 
 // taskEdit records a single edit made during an agent task, for end-of-task
-// batch review (lint, style evaluator).
+// batch review (lint).
 type taskEdit struct {
 	Path    string
 	Search  string
@@ -405,12 +398,6 @@ type NewOptions struct {
 	// edits (syntactic parse, LSP shadow, style invariants). Nil installs
 	// validate.NoopPipeline so call sites dispatch without nil checks.
 	ValidationPipeline validate.Pipeline
-	// StyleEvaluator is the optional style reviewer. When non-nil, proposed
-	// edits are reviewed against style rules before being shown to the
-	// developer. Typed as [style.StyleEvaluatorPort] so callers can inject a
-	// stub or alternative implementation; the LLM-backed
-	// [*style.StyleEvaluator] satisfies the interface.
-	StyleEvaluator style.StyleEvaluatorPort
 	// Terse enables terse output mode at startup. When true, the system
 	// prompt instructs the LLM to minimize explanatory text, reducing
 	// output tokens by ~65%. Switchable at runtime via SetTerse.
@@ -463,7 +450,6 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var distributedMemory []string
 	var codingStyle *prompts.CodingStyleData
 	var linters []lint.Linter
-	var evaluator style.StyleEvaluatorPort
 	var terse bool
 	var smokeCfg runconfig.Resolved
 	var pipeline validate.Pipeline = validate.NoopPipeline{}
@@ -478,7 +464,6 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		distributedMemory = opts.DistributedMemory
 		codingStyle = opts.CodingStyle
 		linters = slices.Clone(opts.Linters)
-		evaluator = opts.StyleEvaluator
 		terse = opts.Terse
 		smokeCfg = opts.SmokeConfig
 		if opts.ValidationPipeline != nil {
@@ -513,7 +498,6 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		pipeline:            pipeline,
 		validatorRetries:    make(map[string]int),
 		terse:               terse,
-		evaluator:           evaluator,
 		diagDelay:           500 * time.Millisecond,
 		workspace:           workspace,
 		smokeConfig:         smokeCfg,
@@ -796,10 +780,10 @@ func adaptEngineSearch(_ context.Context, root, pattern string, opts searchtools
 }
 
 // Public lifecycle and signal API (Run, RunWithMode, Reply, Cancel,
-// IsWaiting, IsRunning, SetProvider / Style / Terse / Autonomous /
-// Evaluator, Approve, Reject, activeCoord, drainPendingLint,
-// hasLintPending, currentTerse / Autonomous / CodingStyle / Provider /
-// Mode, Usage, emitOpening, send, sendCritical) lives in lifecycle.go.
+// IsWaiting, IsRunning, SetProvider / Style / Terse / Autonomous,
+// Approve, Reject, activeCoord, drainPendingLint, hasLintPending,
+// currentTerse / Autonomous / CodingStyle / Provider / Mode, Usage,
+// emitOpening, send, sendCritical) lives in lifecycle.go.
 
 // Per-run budget integration (checkTaskBudget) lives in budget.go.
 // Per-turn accumulation lives in [Agent.augmentAndAccumulate]

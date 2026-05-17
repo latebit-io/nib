@@ -225,7 +225,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		if styleResult.Resolved != nil {
 			opts.Linters = styleResult.Linters
-			opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, p, llmCfg)
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
@@ -501,10 +500,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 	}
 
-	// Shared state for style cycling and evaluator toggle.
-	currentResolved := styleResult.Resolved
-	evaluatorActive := false
-
 	// wireAgentHandlers installs the UI callbacks that require a live
 	// agent through the typed nibTui.AgentCallbacks / CodingCallbacks
 	// surface. Called once — on startup (when credentials exist) or
@@ -554,15 +549,9 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				idx++
 				if idx >= len(styleNames) {
 					currentStyleKey = ""
-					currentResolved = nil
 					ag.SetStyle(nil, nil)
 					styleResult.SetArchitecture(styleconfig.Architecture{})
 					styleResult.PerFileLinters.Set(nil)
-					if evaluatorActive {
-						ag.SetEvaluator(nil)
-						evaluatorActive = false
-						app.SetEvaluatorEnabled(false)
-					}
 					slog.Info("style: disabled")
 					return ""
 				}
@@ -575,39 +564,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				styleResult.PerFileLinters.Set(
 					wire.LintersForStylePerFile(s.LintCmd, styleResult.DefaultPerFileLinters))
 
-				currentResolved = &styleconfig.Resolved{
-					Name:           s.Name,
-					Rules:          s.Rules,
-					LintCmd:        s.LintCmd,
-					Evaluator:      s.Evaluator,
-					EvaluatorModel: s.EvaluatorModel,
-					Architecture:   s.Architecture,
-				}
-
-				if evaluatorActive {
-					eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
-					ag.SetEvaluator(eval)
-					if eval == nil {
-						evaluatorActive = false
-						app.SetEvaluatorEnabled(false)
-					}
-				}
-
 				slog.Info("style: switched", "style", s.Name)
 				return s.Name
-			}
-		}
-
-		// Build evaluator at startup BEFORE constructing CodingCallbacks
-		// so InitialEvaluatorEnabled reflects whether wiring actually
-		// succeeded (eval may be nil if the provider doesn't support it).
-		initialEvaluator := false
-		if currentResolved != nil && currentResolved.Evaluator {
-			eval := wire.NewStyleEvaluator(currentResolved, provider, llmCfg)
-			if eval != nil {
-				ag.SetEvaluator(eval)
-				evaluatorActive = true
-				initialEvaluator = true
 			}
 		}
 
@@ -615,28 +573,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			OnDialChange: func(level session.AutonomyLevel) {
 				ag.SetAutonomous(level.AutoApproveEdits())
 			},
-			CycleStyle: cycleStyleFn,
-			ToggleEvaluator: func(enabled bool) bool {
-				if currentResolved == nil {
-					return false
-				}
-				if enabled {
-					eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
-					if eval == nil {
-						return false
-					}
-					ag.SetEvaluator(eval)
-					evaluatorActive = true
-					slog.Info("evaluator: enabled")
-					return true
-				}
-				ag.SetEvaluator(nil)
-				evaluatorActive = false
-				slog.Info("evaluator: disabled")
-				return false
-			},
-			InitialStyleName:        initialStyleName,
-			InitialEvaluatorEnabled: initialEvaluator,
+			CycleStyle:       cycleStyleFn,
+			InitialStyleName: initialStyleName,
 		})
 	}
 
@@ -669,14 +607,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			slog.Info("llm: agent constructed", "profile", profile, "model", resolved.Model)
 		} else {
 			ag.SetProvider(provider)
-			if evaluatorActive && currentResolved != nil {
-				eval := wire.ForceStyleEvaluator(currentResolved, provider, llmCfg)
-				ag.SetEvaluator(eval)
-				if eval == nil {
-					evaluatorActive = false
-					app.SetEvaluatorEnabled(false)
-				}
-			}
 		}
 		llmResolved = resolved
 		sess.SetLLMInfo(resolved.Model, resolved.Profile)

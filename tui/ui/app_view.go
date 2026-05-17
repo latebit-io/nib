@@ -21,7 +21,7 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		extra := 5 // dial + style + evaluator + terse + usage always shown
+		extra := 4 // dial + style + terse + usage always shown
 		indicators := make([]string, len(mem)+extra)
 		copy(indicators, mem)
 		idx := len(mem)
@@ -31,12 +31,6 @@ func (m *AppModel) View() tea.View {
 			indicators[idx] = "style:" + m.styleName
 		} else {
 			indicators[idx] = "style:none"
-		}
-		idx++
-		if m.evaluatorEnabled {
-			indicators[idx] = "eval:on"
-		} else {
-			indicators[idx] = "eval:off"
 		}
 		idx++
 		if m.terse {

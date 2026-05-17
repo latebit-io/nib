@@ -68,12 +68,10 @@ func resolve(cfg *Config) *Resolved {
 	}
 
 	return &Resolved{
-		Name:           s.Name,
-		Rules:          s.Rules,
-		LintCmd:        s.LintCmd,
-		Evaluator:      s.Evaluator,
-		EvaluatorModel: s.EvaluatorModel,
-		Architecture:   s.Architecture,
+		Name:         s.Name,
+		Rules:        s.Rules,
+		LintCmd:      s.LintCmd,
+		Architecture: s.Architecture,
 	}
 }
 
@@ -82,8 +80,8 @@ func resolve(cfg *Config) *Resolved {
 // brand-prefixed STYLE env var override this.
 //
 // Empty means "no active style" — the prompt skips the style section, the
-// architecture validator and style evaluator are disabled, and per-edit
-// linting depends only on auto-detected per-file linters. This is the
+// architecture validator is disabled, and per-edit linting depends only
+// on auto-detected per-file linters. This is the
 // production default since 2026-04-26: governance is opt-in. Set the
 // brand-prefixed STYLE env var (e.g. NIB_STYLE=clean-code) or write
 // `.project/style.json` with an `active` field to opt into a style.
@@ -126,9 +124,9 @@ func loadBuiltins() *Config {
 	// Activate the default style if one is configured AND it was loaded
 	// successfully. When defaultActiveStyle is empty (the production default
 	// since 2026-04-26), Active stays "" — meaning no style is active and
-	// the architecture validator, style evaluator, and prompt style section
-	// are all disabled. The developer opts in via the brand-prefixed STYLE
-	// env var or `.project/style.json`.
+	// the architecture validator and prompt style section are disabled.
+	// The developer opts in via the brand-prefixed STYLE env var or
+	// `.project/style.json`.
 	//
 	// retained for future reactivation if defaultActiveStyle policy
 	// changes — the body is dormant today (the constant is "") but kept
@@ -249,12 +247,6 @@ func mergeConfigs(dst, src *Config) {
 		}
 		if len(ss.LintCmd) > 0 {
 			ds.LintCmd = ss.LintCmd
-		}
-		if ss.Evaluator {
-			ds.Evaluator = true
-		}
-		if ss.EvaluatorModel != "" {
-			ds.EvaluatorModel = ss.EvaluatorModel
 		}
 		// Architecture merges field-by-field so a project file can tighten
 		// one cap without forcing the developer to repeat the others.

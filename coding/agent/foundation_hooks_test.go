@@ -99,142 +99,7 @@ func TestActiveTaskGate_AllowsWhenActiveTaskSet(t *testing.T) {
 	}
 }
 
-// --- singleEditGate ---
-
-func TestSingleEditGate_FirstEditPasses(t *testing.T) {
-	a := &Agent{interactionMode: Interactive, autonomous: false}
-	fired := false
-
-	res := a.singleEditGate(upagent.BeforeToolCallInput{Name: "edit_file"}, &fired)
-	if res.Block {
-		t.Fatalf("first edit must not be blocked; reason=%q", res.Reason)
-	}
-	if !fired {
-		t.Errorf("expected firedThisTurn=true after first file-edit")
-	}
-}
-
-func TestSingleEditGate_SecondEditBlocked(t *testing.T) {
-	a := &Agent{interactionMode: Interactive, autonomous: false}
-	fired := true // already-fired state
-
-	res := a.singleEditGate(upagent.BeforeToolCallInput{Name: "edit_file"}, &fired)
-	if !res.Block {
-		t.Fatalf("second edit must be blocked")
-	}
-	if !strings.Contains(res.Reason, "ONE file-edit per turn") {
-		t.Errorf("expected one-edit message, got: %q", res.Reason)
-	}
-}
-
-func TestSingleEditGate_HeadlessDoesNotEnforce(t *testing.T) {
-	a := &Agent{interactionMode: Headless, autonomous: false}
-	fired := true
-
-	res := a.singleEditGate(upagent.BeforeToolCallInput{Name: "edit_file"}, &fired)
-	if res.Block {
-		t.Errorf("headless mode must not enforce single-edit; reason=%q", res.Reason)
-	}
-}
-
-func TestSingleEditGate_AutonomousDoesNotEnforce(t *testing.T) {
-	a := &Agent{interactionMode: Interactive, autonomous: true}
-	fired := true
-
-	res := a.singleEditGate(upagent.BeforeToolCallInput{Name: "edit_file"}, &fired)
-	if res.Block {
-		t.Errorf("autonomous mode must not enforce single-edit; reason=%q", res.Reason)
-	}
-}
-
-func TestSingleEditGate_NonEditToolPasses(t *testing.T) {
-	// bash and smoke_run are mutating but NOT file-edit tools — they may
-	// chain after an edit (e.g. "edit then go test").
-	a := &Agent{interactionMode: Interactive, autonomous: false}
-	fired := true
-
-	for _, tool := range []string{"bash", "smoke_run", "read_file"} {
-		res := a.singleEditGate(upagent.BeforeToolCallInput{Name: tool}, &fired)
-		if res.Block {
-			t.Errorf("%s should not be gated by single-edit", tool)
-		}
-	}
-}
-
 // --- FoundationHooks() composed behavior ---
-
-func TestFoundationHooks_BeforeToolCallChain_Order(t *testing.T) {
-	// Single-edit fires first in inline; verify the composed chain
-	// preserves that ordering. With singleEditFired pre-flipped to true
-	// AND a planning-mode blocklist match, the single-edit message wins.
-	a := &Agent{
-		bus:               newBus(),
-		mode:              event.ModePlanning,
-		planningBlocklist: map[string]bool{"edit_file": true},
-		interactionMode:   Interactive,
-		autonomous:        false,
-	}
-	hooks := a.FoundationHooks(nil)
-	// Fire one edit to flip closure state.
-	if _, err := hooks.BeforeToolCall(context.Background(), upagent.BeforeToolCallInput{Name: "edit_file"}); err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	// Second call should hit single-edit, not planning-blocklist.
-	res, err := hooks.BeforeToolCall(context.Background(), upagent.BeforeToolCallInput{Name: "edit_file"})
-	if err != nil {
-		t.Fatalf("second call: %v", err)
-	}
-	if !res.Block {
-		t.Fatal("expected Block on second edit")
-	}
-	if !strings.Contains(res.Reason, "ONE file-edit per turn") {
-		t.Errorf("expected single-edit message to win; got: %q", res.Reason)
-	}
-}
-
-func TestFoundationHooks_TransformContextResetsTurnState(t *testing.T) {
-	// One file-edit per turn. After TransformContext fires, the next
-	// turn's first edit should pass.
-	a := &Agent{
-		bus:             newBus(),
-		cache:           NewFileCache(),
-		mode:            event.ModeExecution,
-		interactionMode: Interactive,
-		autonomous:      false,
-	}
-	hooks := a.FoundationHooks(nil)
-	ctx := context.Background()
-
-	// Turn 1: first edit passes, second blocked.
-	res1, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
-	if err != nil {
-		t.Fatalf("turn 1 first BeforeToolCall: %v", err)
-	}
-	if res1.Block {
-		t.Fatalf("turn 1 first edit should pass; reason=%q", res1.Reason)
-	}
-	res2, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
-	if err != nil {
-		t.Fatalf("turn 1 second BeforeToolCall: %v", err)
-	}
-	if !res2.Block {
-		t.Fatalf("turn 1 second edit should be blocked")
-	}
-
-	// TransformContext fires at the top of turn 2 — must reset.
-	if _, err := hooks.TransformContext(ctx, nil); err != nil {
-		t.Fatalf("TransformContext: %v", err)
-	}
-
-	// Turn 2: first edit passes again.
-	res3, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
-	if err != nil {
-		t.Fatalf("turn 2 BeforeToolCall: %v", err)
-	}
-	if res3.Block {
-		t.Errorf("turn 2 first edit should pass after reset; reason=%q", res3.Reason)
-	}
-}
 
 func TestFoundationHooks_MigratedHooksPresent(t *testing.T) {
 	// Pin the wiring contract so future commits notice when the
@@ -424,21 +289,8 @@ func TestFoundationSteering_NarrativeOneShot(t *testing.T) {
 	}
 }
 
-func TestFoundationSteering_PermissionOnlyAutonomous(t *testing.T) {
-	a := &Agent{bus: newBus(), autonomous: false}
-
-	msgs := []llm.Message{
-		{Role: "assistant", Content: "Should I proceed with the refactor?"},
-	}
-	narrativeFired, permissionFired := true, false // narrative latched so permission gets checked
-	out := a.foundationSteering(msgs, &narrativeFired, &permissionFired)
-	if out != nil {
-		t.Errorf("permission gate must not fire outside autonomous mode")
-	}
-}
-
-func TestFoundationSteering_PermissionFiresInAutonomous(t *testing.T) {
-	a := &Agent{bus: newBus(), autonomous: true}
+func TestFoundationSteering_PermissionFires(t *testing.T) {
+	a := &Agent{bus: newBus()}
 
 	msgs := []llm.Message{
 		{Role: "assistant", Content: "Should I proceed with the refactor?"},
@@ -460,7 +312,7 @@ func TestFoundationSteering_NoFireWhenNothingMatches(t *testing.T) {
 		testWorkspace: &testWorkspace{},
 		gateTracker:   tracker,
 	}
-	a := &Agent{bus: newBus(), workspace: ws, autonomous: false}
+	a := &Agent{bus: newBus(), workspace: ws}
 
 	msgs := []llm.Message{
 		{Role: "assistant", Content: "Refactored the helper. Tests green."},
@@ -512,7 +364,6 @@ func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
 		workspace:       ws,
 		mode:            event.ModeExecution,
 		interactionMode: Interactive,
-		autonomous:      false,
 	}
 	_ = subscribeForTest(t, a)
 
@@ -765,60 +616,26 @@ func TestFoundationHooks_TransformContext_BudgetAbort(t *testing.T) {
 	}
 }
 
-// --- TransformContext composed with concern #2 reset ---
+// --- TransformContext drains pendingLint ---
 
-func TestFoundationHooks_TransformContext_ResetAndCompactAndLint(t *testing.T) {
-	// Mirrors real foundation runtime order: TransformContext fires at
-	// turn start (drains pendingLint into messages), THEN BeforeToolCall
-	// fires per tool. lintPendingGate would short-circuit any
-	// BeforeToolCall that ran with pendingLint still set.
+func TestFoundationHooks_TransformContext_DrainsLint(t *testing.T) {
+	// TransformContext fires at turn start and drains pendingLint into
+	// the message slice so the LLM sees lint findings on its next turn.
 	a := &Agent{
 		bus:             newBus(),
 		cache:           NewFileCache(),
 		mode:            event.ModeExecution,
 		interactionMode: Interactive,
-		autonomous:      false,
 		pendingLint:     "violation",
 	}
 	hooks := a.FoundationHooks(nil)
 	ctx := context.Background()
 
-	// Turn 1 start: TransformContext drains pendingLint.
 	out, err := hooks.TransformContext(ctx, []llm.Message{{Role: "user", Content: "."}})
 	if err != nil {
 		t.Fatalf("TransformContext: %v", err)
 	}
 	if len(out) != 2 || !strings.Contains(out[1].Content, "STOP") {
 		t.Errorf("expected lint message appended; got %+v", out)
-	}
-
-	// Turn 1 dispatch: pendingLint drained, first edit passes, second blocked.
-	r, err := hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
-	if err != nil {
-		t.Fatalf("turn 1 first BeforeToolCall: %v", err)
-	}
-	if r.Block {
-		t.Fatalf("first edit should pass after lint drained, got Block=%q", r.Reason)
-	}
-	r, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
-	if err != nil {
-		t.Fatalf("turn 1 second BeforeToolCall: %v", err)
-	}
-	if !r.Block {
-		t.Fatalf("second edit should be blocked")
-	}
-
-	// Turn 2 start: TransformContext resets editFired (no lint this time).
-	if _, err := hooks.TransformContext(ctx, []llm.Message{{Role: "user", Content: "next"}}); err != nil {
-		t.Fatalf("TransformContext turn 2: %v", err)
-	}
-
-	// Turn 2 dispatch: first edit must pass again (single-edit reset).
-	r, err = hooks.BeforeToolCall(ctx, upagent.BeforeToolCallInput{Name: "edit_file"})
-	if err != nil {
-		t.Fatalf("turn 2 BeforeToolCall: %v", err)
-	}
-	if r.Block {
-		t.Errorf("post-reset first edit should pass; reason=%q", r.Reason)
 	}
 }

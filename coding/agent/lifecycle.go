@@ -20,8 +20,8 @@ import (
 // Reply / Cancel for conversation control, IsWaiting / IsRunning for
 // state queries, the Set* family for runtime configuration, and
 // Approve / Reject for the edit-flow signals. Plus the internal state
-// getters (currentProvider / currentTerse / currentAutonomous /
-// hasLintPending / drainPendingLint) and event
+// getters (currentProvider / currentTerse / hasLintPending /
+// drainPendingLint) and event
 // emitters (send / sendCritical / activeCoord) that hooks and the
 // forwarder goroutine call into.
 //
@@ -319,9 +319,9 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	}
 	a.mu.Unlock()
 
-	// Refresh the system prompt so a runtime style/terse/autonomous
-	// toggle since the original run took effect on the resume's first
-	// turn. The transcript's first message is always the system one
+	// Refresh the system prompt so a runtime terse toggle since the
+	// original run took effect on the resume's first turn. The
+	// transcript's first message is always the system one
 	// (buildMessages constructs it that way); resumed transcripts
 	// preserve that invariant.
 	if len(messages) > 0 && messages[0].Role == "system" {
@@ -419,14 +419,6 @@ func (a *Agent) SetTerse(on bool) {
 	a.terse = on
 }
 
-// SetAutonomous enables or disables autonomous mode. When true, the
-// system prompt allows multiple edits per turn without stopping.
-func (a *Agent) SetAutonomous(on bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.autonomous = on
-}
-
 // Usage returns the accumulated token consumption for the current session.
 // Source of truth is [providerProxy.Snapshot] — accumulated synchronously
 // inside the Stream wrapper goroutine on each Done event.
@@ -473,13 +465,6 @@ func (a *Agent) currentMode() event.Mode {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.mode
-}
-
-// currentAutonomous reports whether autonomous mode is enabled.
-func (a *Agent) currentAutonomous() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.autonomous
 }
 
 // currentProvider returns the active provider under lock.

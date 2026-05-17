@@ -84,13 +84,9 @@ type AgentCallbacks struct {
 }
 
 // CodingCallbacks groups frontend callbacks that depend on coding-agent
-// concepts (autonomy policy for edit approval). The naming is deliberate:
-// the type signature documents which Config fields a non-coding consumer
-// can leave zero.
-type CodingCallbacks struct {
-	// OnDialChange is called when the autonomy dial changes.
-	OnDialChange func(level session.AutonomyLevel)
-}
+// concepts. Currently empty — kept as a wiring seam for future coding-
+// flavored callbacks (the per-PR diff stays small when one returns).
+type CodingCallbacks struct{}
 
 // LLMCallbacks groups LLM-related UI callbacks.
 type LLMCallbacks struct {
@@ -171,9 +167,6 @@ func New(cfg Config) *App {
 		if cfg.AgentCallbacks.InitialTerse {
 			appPtr.SetTerse(true)
 		}
-
-		// Coding-flavored.
-		appPtr.OnDialChange = cfg.CodingCallbacks.OnDialChange
 	}
 
 	p := tea.NewProgram(appPtr, tea.WithoutSignalHandler())
@@ -247,10 +240,12 @@ func (a *App) SetAgentCallbacks(cb AgentCallbacks) {
 
 // SetCodingCallbacks installs coding-flavored agent callbacks.
 // Same any-time semantics, race-avoidance rationale, and async
-// caveat as [App.SetAgentCallbacks].
-func (a *App) SetCodingCallbacks(cb CodingCallbacks) {
-	msg := ui.SetCodingCallbacksMsg(cb.OnDialChange)
-	go a.program.Send(msg)
+// caveat as [App.SetAgentCallbacks]. Currently a no-op — the
+// callback set is empty after the autonomy-dial removal but the
+// wiring seam is kept so future coding-flavored callbacks land
+// with a tiny diff.
+func (a *App) SetCodingCallbacks(_ CodingCallbacks) {
+	go a.program.Send(ui.SetCodingCallbacksMsg())
 }
 
 // Run starts the Bubble Tea event loop and blocks until the user

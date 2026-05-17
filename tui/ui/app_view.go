@@ -21,12 +21,10 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		extra := 3 // dial + terse + usage always shown
+		extra := 2 // terse + usage always shown
 		indicators := make([]string, len(mem)+extra)
 		copy(indicators, mem)
 		idx := len(mem)
-		indicators[idx] = m.dial.String()
-		idx++
 		if m.terse {
 			indicators[idx] = "terse:on"
 		} else {

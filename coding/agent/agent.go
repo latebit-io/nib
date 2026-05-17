@@ -88,19 +88,6 @@ var mutatingTools = map[string]bool{
 	"smoke_run":    true,
 }
 
-// fileEditTools is the subset of mutating tools whose calls must be
-// rate-limited to ONE per LLM turn in non-autonomous, non-headless mode.
-// Distinct from [mutatingTools] (which gates on the project task tree)
-// because bash and smoke_run can legitimately chain after an edit (e.g.
-// "edit then verify with go test"), but a second file edit in the same
-// turn means the model is bypassing the developer's review-and-continue
-// flow. Enforced by [Agent.singleEditGate] in BeforeToolCall.
-var fileEditTools = map[string]bool{
-	"edit_file":    true,
-	"write_file":   true,
-	"replace_file": true,
-}
-
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
 	provider llm.Provider
@@ -202,10 +189,6 @@ type Agent struct {
 	// terse enables terse output mode — instructs the LLM to minimize
 	// explanatory text, reducing output tokens by ~65%.
 	terse bool
-
-	// autonomous relaxes one-edit-at-a-time constraints so the agent
-	// works continuously without stopping between edits.
-	autonomous bool
 
 	// taskEdits collects edits made during the current task for end-of-task
 	// review. Accumulates across many LLM turns; cleared on RunWithMode and
@@ -770,10 +753,10 @@ func adaptEngineSearch(_ context.Context, root, pattern string, opts searchtools
 }
 
 // Public lifecycle and signal API (Run, RunWithMode, Reply, Cancel,
-// IsWaiting, IsRunning, SetProvider / Style / Terse / Autonomous,
-// Approve, Reject, activeCoord, drainPendingLint, hasLintPending,
-// currentTerse / Autonomous / Provider / Mode, Usage,
-// emitOpening, send, sendCritical) lives in lifecycle.go.
+// IsWaiting, IsRunning, SetProvider / Terse, Approve, Reject,
+// activeCoord, drainPendingLint, hasLintPending, currentTerse /
+// Provider / Mode, Usage, emitOpening, send, sendCritical) lives in
+// lifecycle.go.
 
 // Per-run budget integration (checkTaskBudget) lives in budget.go.
 // Per-turn accumulation lives in [Agent.augmentAndAccumulate]

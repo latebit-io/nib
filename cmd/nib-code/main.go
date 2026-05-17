@@ -502,8 +502,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// goroutine invokes wireAgentHandlers (startup goroutine pre-Run;
 	// Update goroutine via model switcher post-Run).
 	wireAgentHandlers := func() {
-		ag.SetAutonomous(true)
-
 		tuiApp.SetAgentCallbacks(nibTui.AgentCallbacks{
 			ToggleTerse: func(enabled bool) bool {
 				ag.SetTerse(enabled)
@@ -517,11 +515,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			InitialTerse: true,
 		})
 
-		tuiApp.SetCodingCallbacks(nibTui.CodingCallbacks{
-			OnDialChange: func(level session.AutonomyLevel) {
-				ag.SetAutonomous(level.AutoApproveEdits())
-			},
-		})
+		tuiApp.SetCodingCallbacks(nibTui.CodingCallbacks{})
 	}
 
 	// Model switcher — first call with valid credentials constructs the agent

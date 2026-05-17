@@ -201,38 +201,24 @@ func TestPromptLoaderFallsBackToEmbedded(t *testing.T) {
 	}
 }
 
-// TestSystemPromptAutonomousModeRules verifies the autonomous-mode
-// section ships the "stop asking permission" instructions. The
-// Pac-Man rerun showed the LLM ending turns with "Say keep going
-// and I'll continue Phase 3/4" — even at LevelTrusted/LevelYolo —
-// because the prompt didn't explicitly forbid the offer-pattern.
-// These keywords lock the fix in.
-func TestSystemPromptAutonomousModeRules(t *testing.T) {
+// TestSystemPromptAutonomyRules verifies the Autonomy section ships
+// the "stop asking permission" instructions. The Pac-Man rerun
+// showed the LLM ending turns with "Say keep going and I'll continue
+// Phase 3/4" because the prompt didn't explicitly forbid the offer-
+// pattern. These keywords lock the fix in.
+func TestSystemPromptAutonomyRules(t *testing.T) {
 	t.Parallel()
 
 	loader := prompts.NewPromptLoader("")
-
-	autonomous := loader.SystemPrompt(prompts.SystemPromptData{Autonomous: true})
+	system := loader.SystemPrompt(prompts.SystemPromptData{})
 	for _, want := range []string{
-		"Autonomous Mode",
+		"## Autonomy",
 		"WILL NOT be answered",
 		"immediately activate the next pending task",
 	} {
-		if !strings.Contains(autonomous, want) {
-			t.Errorf("autonomous prompt missing %q", want)
+		if !strings.Contains(system, want) {
+			t.Errorf("system prompt missing %q", want)
 		}
-	}
-
-	// Ensure the ask-permission language is gated OUT in autonomous mode.
-	if strings.Contains(autonomous, "ask the developer:") {
-		t.Errorf("autonomous prompt still contains ask-permission instruction")
-	}
-
-	guided := loader.SystemPrompt(prompts.SystemPromptData{
-		Autonomous: false,
-	})
-	if strings.Contains(guided, "Autonomous Mode") {
-		t.Errorf("non-autonomous prompt should not include the Autonomous Mode section")
 	}
 }
 
@@ -254,13 +240,6 @@ func TestSystemPromptInteractiveMode(t *testing.T) {
 	if !strings.Contains(system, "Context Set") {
 		t.Error("interactive system prompt should include Context Set section")
 	}
-	// 2026-04-27 prompt rev: rule was broadened from "ONE edit_file call
-	// per step" to cover all file-edit tools (edit_file, write_file,
-	// replace_file). The canonical phrase the test guards is now the
-	// "One file-edit tool call per interactive turn" wording.
-	if !strings.Contains(system, "One file-edit tool call per interactive turn") {
-		t.Error("interactive system prompt should include the one-file-edit-per-turn rule")
-	}
 	if strings.Contains(system, "headless mode") {
 		t.Error("interactive system prompt should not mention headless mode")
 	}
@@ -281,12 +260,6 @@ func TestSystemPromptHeadlessMode(t *testing.T) {
 	}
 	if strings.Contains(system, "Context Set") {
 		t.Error("headless system prompt should not include Context Set section")
-	}
-	// Headless mode is autonomous; the one-file-edit-per-turn rule
-	// (broadened 2026-04-27) is gated on `(not .Headless) (not .Autonomous)`,
-	// so headless prompts must NOT include it.
-	if strings.Contains(system, "One file-edit tool call per interactive turn") {
-		t.Error("headless system prompt should not include single-edit-per-turn rule")
 	}
 	if strings.Contains(system, "After a rejection") {
 		t.Error("headless system prompt should not include rejection rules")

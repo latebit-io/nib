@@ -201,48 +201,6 @@ func TestSnoozeBannerForSummaries(t *testing.T) {
 	}
 }
 
-// TestYoloOverrideBannerForSummaries verifies the LevelYolo path's
-// banner names the verdicts that were overridden so a session log
-// reviewer can see exactly which validator findings were ignored.
-// Without it, a Block override would land silently — the on-disk
-// result would be the only signal.
-func TestYoloOverrideBannerForSummaries(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name        string
-		in          []event.ValidatorSummary
-		wantSubstrs []string
-	}{
-		{
-			name: "block override",
-			in: []event.ValidatorSummary{
-				{Stage: "architecture", Verdict: "block"},
-			},
-			wantSubstrs: []string{"validator: block", "yolo", "auto-applied"},
-		},
-		{
-			name: "multi-verdict",
-			in: []event.ValidatorSummary{
-				{Stage: "architecture", Verdict: "block"},
-				{Stage: "lint", Verdict: "retry"},
-			},
-			wantSubstrs: []string{"block", "retry", "yolo"},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := yoloOverrideBannerForSummaries(tc.in)
-			for _, want := range tc.wantSubstrs {
-				if !strings.Contains(got, want) {
-					t.Errorf("banner missing %q; got %q", want, got)
-				}
-			}
-		})
-	}
-}
-
 // TestReviewBannerForSummaries verifies the banner enumerates the
 // unique non-pass verdicts so the developer immediately sees what
 // kind of failure they're being asked to look at. Forward-compat:

@@ -69,16 +69,11 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			// feedback back to the LLM (so the model had its 3
 			// attempts to self-correct), and the proposal is now
 			// surfacing precisely BECAUSE the LLM couldn't fix it.
-			// Auto-applying it under LevelTrusted would invert the
-			// validator's purpose. Fail-closed on unknown verdicts
-			// too — a future verdict must explicitly opt into
-			// auto-apply rather than slipping through this gate.
+			// Auto-applying would invert the validator's purpose.
+			// Fail-closed on unknown verdicts too — a future verdict
+			// must explicitly opt into auto-apply rather than slipping
+			// through this gate.
 			//
-			// LevelYolo is the explicit opt-out: the developer has
-			// accepted that validator Block findings may slip
-			// through. m.dial.AutoApproveBlock() returns true only
-			// at LevelYolo, so the gate retains the LevelTrusted
-			// safety valve by default.
 			// summaryRequiresReview is the must-surface gate (true for
 			// any non-pass verdict, including retry). summaryHasBlock
 			// is the narrower snooze-eligibility gate — only Block
@@ -93,24 +88,18 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			needsReview := summaryRequiresReview(e.ValidatorSummaries)
 			blockSnoozeEligible := summaryHasBlock(e.ValidatorSummaries)
 			snoozed := blockSnoozeEligible && m.blockedPaths[e.Edit.Path]
-			autoApprove := m.dial.AutoApproveEdits() &&
-				(!needsReview || m.dial.AutoApproveBlock() || snoozed)
+			autoApprove := !needsReview || snoozed
 
 			if autoApprove {
-				switch {
-				case snoozed:
+				if snoozed {
 					// Per-file snooze: the developer already saw and
 					// approved a Block on this file earlier in the
 					// session. Repeat Blocks add no new information,
 					// so auto-apply with a marker banner instead of
 					// re-prompting.
 					m.AgentPane.AppendMeta(snoozeBannerForSummaries(e.Edit.Path, e.ValidatorSummaries))
-				case needsReview:
-					// LevelYolo override path.
-					m.AgentPane.AppendMeta(yoloOverrideBannerForSummaries(e.ValidatorSummaries))
 				}
-				// At LevelTrusted+, skip the visual review step and apply
-				// immediately.
+				// Skip the visual review step and apply immediately.
 				cmd = m.applyApproval()
 			} else {
 				status := event.StatusReviewing

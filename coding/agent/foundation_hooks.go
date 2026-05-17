@@ -32,9 +32,9 @@ var errBudgetExceeded = errors.New("coding/agent: per-task token budget exceeded
 // closure variables so the Agent struct stays free of hook-only fields.
 
 // FoundationHooks returns the [upagent.Hooks] value bound to this
-// agent. Closure-captured state (singleEditFired, narrativeFired,
-// permissionFired, truncationRetries) lives for the lifetime of the
-// returned Hooks; a fresh FoundationHooks call yields a fresh closure.
+// agent. Closure-captured state (narrativeFired, permissionFired,
+// truncationRetries) lives for the lifetime of the returned Hooks;
+// a fresh FoundationHooks call yields a fresh closure.
 //
 // liveMessages is the snapshotter the steering hook uses to read the
 // transcript including the assistant turn that just ended (TransformContext
@@ -46,11 +46,6 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	if liveMessages == nil {
 		liveMessages = func() []llm.Message { return nil }
 	}
-	// singleEditFired is reset at the top of each turn (TransformContext
-	// fires once per outer iteration of the foundation loop, immediately
-	// before Stream) and set when [singleEditGate] permits a file-edit
-	// dispatch.
-	var singleEditFired bool
 	// narrativeFired and permissionFired are the per-developer-input
 	// guards. Reset by TransformContext when a fresh user message
 	// lands at the tail of the transcript (one not authored by a
@@ -62,14 +57,10 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	before := func(ctx context.Context, c upagent.BeforeToolCallInput) (upagent.BeforeToolCallResult, error) {
 		// Dispatch order:
 		//   1. lint-pending skip
-		//   2. single-edit
-		//   3. flush dirty buffers + emit AgentToolCall
-		//   4. planning blocklist
-		//   5. active-task gate
+		//   2. flush dirty buffers + emit AgentToolCall
+		//   3. planning blocklist
+		//   4. active-task gate
 		if res := a.lintPendingGate(); res.Block {
-			return res, nil
-		}
-		if res := a.singleEditGate(c, &singleEditFired); res.Block {
 			return res, nil
 		}
 		if err := a.flushDirtyBuffers(ctx); err != nil {
@@ -80,11 +71,11 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 			}, nil
 		}
 		// Mirrors turn.go:222-224: emit AgentToolCall AFTER the
-		// gates that suppress dispatch entirely (lint, single-edit)
-		// but BEFORE planning + active-task gates so the frontend
-		// sees the call attempt even when it's about to be
-		// rejected. Inline behavior: planning + active-task
-		// rejections still emit AgentToolCall.
+		// lint-pending gate that suppresses dispatch entirely but
+		// BEFORE planning + active-task gates so the frontend sees
+		// the call attempt even when it's about to be rejected.
+		// Inline behavior: planning + active-task rejections still
+		// emit AgentToolCall.
 		a.send(event.AgentToolCall{Name: c.Name, Args: c.Args})
 		if res := a.planningBlocklistGate(c); res.Block {
 			return res, nil
@@ -100,7 +91,6 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 	}
 
 	transform := func(ctx context.Context, msgs []llm.Message) ([]llm.Message, error) {
-		singleEditFired = false
 		fresh := isFreshUserInput(msgs)
 		if fresh {
 			narrativeFired = false
@@ -116,9 +106,9 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		if err != nil {
 			return nil, err
 		}
-		// Refresh the system prompt on fresh developer input so
-		// style/terse/autonomous toggles between turns take effect on
-		// the next provider call. Skipped on intra-turn re-entries
+		// Refresh the system prompt on fresh developer input so a
+		// terse toggle between turns takes effect on the next provider
+		// call. Skipped on intra-turn re-entries
 		// (steering, follow-up, tool-result-driven loops) where the
 		// trailing message is NOT a fresh user input — re-rendering
 		// every iteration is wasteful and can race with mid-batch
@@ -240,8 +230,7 @@ func isFreshUserInput(msgs []llm.Message) bool {
 // input; firedFlags is shared with TransformContext via the closure so
 // resets cross hook boundaries.
 //
-// Order: narrative first, then permission. Permission is
-// autonomous-only.
+// Order: narrative first, then permission.
 func (a *Agent) foundationSteering(msgs []llm.Message, narrativeFired, permissionFired *bool) []llm.Message {
 	if !*narrativeFired && a.shouldNudgeOutstanding(msgs) {
 		*narrativeFired = true
@@ -249,9 +238,9 @@ func (a *Agent) foundationSteering(msgs []llm.Message, narrativeFired, permissio
 		a.send(event.AgentStatus{Status: event.StatusThinking})
 		return []llm.Message{{Role: "user", Content: nudges.OutstandingNudgeMessage}}
 	}
-	if !*permissionFired && a.currentAutonomous() && nudges.ShouldNudgePermissionQuestion(msgs) {
+	if !*permissionFired && nudges.ShouldNudgePermissionQuestion(msgs) {
 		*permissionFired = true
-		a.send(event.AgentToken{Text: "\n[Nudge: permission-seeking question detected in autonomous mode — act, don't ask]\n"})
+		a.send(event.AgentToken{Text: "\n[Nudge: permission-seeking question detected — act, don't ask]\n"})
 		a.send(event.AgentStatus{Status: event.StatusThinking})
 		return []llm.Message{{Role: "user", Content: nudges.PermissionNudgeMessage}}
 	}
@@ -290,37 +279,6 @@ func (a *Agent) activeTaskGate(ctx context.Context, c upagent.BeforeToolCallInpu
 	return upagent.BeforeToolCallResult{Block: true, Reason: msg}
 }
 
-// singleEditGate enforces one-file-edit-per-turn. In non-autonomous,
-// non-headless (interactive) mode the agent must wait for the
-// developer to review the previous edit before proposing the next one;
-// the gate flips firedThisTurn the first time a file-edit tool
-// dispatches in a turn and rejects every subsequent file-edit until
-// TransformContext clears the flag.
-//
-// firedThisTurn is a pointer so the closure in [Agent.FoundationHooks]
-// owns the state; the gate function itself is stateless.
-func (a *Agent) singleEditGate(c upagent.BeforeToolCallInput, firedThisTurn *bool) upagent.BeforeToolCallResult {
-	if !a.shouldEnforceSingleEdit() {
-		return upagent.BeforeToolCallResult{}
-	}
-	name := strings.ToLower(c.Name)
-	if !fileEditTools[name] {
-		return upagent.BeforeToolCallResult{}
-	}
-	if *firedThisTurn {
-		slog.Info("agent: rejecting extra file-edit in same turn",
-			"tool", name, "id", c.CallID)
-		return upagent.BeforeToolCallResult{
-			Block: true,
-			Reason: "Skipped — only ONE file-edit per turn in interactive mode. " +
-				"Wait for the developer to review the previous edit, then make this change " +
-				"in a follow-up turn. The next tool result will include the updated file content.",
-		}
-	}
-	*firedThisTurn = true
-	return upagent.BeforeToolCallResult{}
-}
-
 // lintPendingGate skips dispatch when a previous edit's lint run set
 // [Agent.pendingLint]. Every tool call in the batch is rejected with
 // the "fix lint first" placeholder so the LLM cannot work around the
@@ -340,12 +298,6 @@ func (a *Agent) lintPendingGate() upagent.BeforeToolCallResult {
 		Block:  true,
 		Reason: "Skipped — fix style lint violations first.",
 	}
-}
-
-// shouldEnforceSingleEdit returns true when one-edit-per-turn applies:
-// non-autonomous, non-headless mode.
-func (a *Agent) shouldEnforceSingleEdit() bool {
-	return !a.currentAutonomous() && a.interactionMode != Headless
 }
 
 // foundationCompactAndLint runs the per-Stream context shaping:

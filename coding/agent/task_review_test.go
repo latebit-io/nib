@@ -86,8 +86,8 @@ type nextTaskWorkspace struct {
 // includes a "Next pending task: ..." hint with an explicit
 // update_task call template the LLM can copy. Without this, the
 // model tends to stop and wait for the developer at every task
-// boundary even under autonomous modes — turning a "trust" run into
-// the 6-out-of-11 "yes continue" loop the Pac-Man eval surfaced.
+// boundary — turning an autonomous run into the 6-out-of-11
+// "yes continue" loop the Pac-Man eval surfaced.
 func TestRunTaskReview_AppendsNextTaskHint(t *testing.T) {
 	a := &Agent{
 		bus: newBus(),

@@ -3,7 +3,6 @@ module github.com/latebit-io/nib/engine
 go 1.26
 
 require (
-	github.com/latebit-io/nib/ai v0.0.0
 	github.com/latebit-io/nib/kit v0.0.0
 	github.com/tree-sitter-grammars/tree-sitter-lua v0.5.0
 	github.com/tree-sitter-grammars/tree-sitter-yaml v0.7.2

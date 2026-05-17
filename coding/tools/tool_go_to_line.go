@@ -36,10 +36,8 @@ func (t *GoToLineTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "go_to_line",
-			Description: "Navigate the editor to a specific line in a file. " +
-				"Use this to direct the developer's attention to code you're discussing. " +
-				"Does not modify the file.",
+			Name:        "go_to_line",
+			Description: "Navigate the editor to a line in a file. Read-only — does not modify the file.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

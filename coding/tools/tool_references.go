@@ -28,7 +28,7 @@ func (t *FindReferencesTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "find_references",
-			Description: "Find all references to the symbol at a specific position in a file. Returns file paths and line numbers of every usage. Use this to understand the impact of a change before editing.",
+			Description: "Find all references to the symbol at the given position. Returns file paths + lines.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

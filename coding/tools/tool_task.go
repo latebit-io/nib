@@ -34,11 +34,8 @@ func (t *TaskTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "update_task",
-			Description: "Update a task's status in the project plan. " +
-				"Use 'activate' to mark a task as in-progress before starting work on it. " +
-				"Use 'complete' to mark it done after finishing. " +
-				"The title must exactly match a task item from the project plan.",
+			Name:        "update_task",
+			Description: "Set a project-plan task's status: 'activate' (start) or 'complete' (done). Title must match an existing task verbatim.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

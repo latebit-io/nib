@@ -46,12 +46,7 @@ func NewSmokeRunTool(projectRoot string, cfg runconfig.Resolved) *SmokeRunTool {
 // failure diagnosis), and that path is governed by the documented
 // .project/run.json trust boundary.
 func (t *SmokeRunTool) Definition() llm.ToolDef {
-	desc := "Run the project's smoke command (typically `make smoke` or `make run`) " +
-		"to verify the artifact actually launches and does not crash on startup. " +
-		"Use this before claiming a task is complete on a runnable project. " +
-		"On failure, the stack trace and exit code are returned so you can fix issues " +
-		"the static validators (parser, lint, architecture) cannot catch — runtime " +
-		"errors, missing initialisation, broken wiring."
+	desc := "Run the project's smoke command (typically `make smoke` / `make run`) to verify the artifact launches. Call before claiming a runnable task complete. Failure returns stack trace + exit code."
 
 	if t.cfg.Source != "" {
 		desc += fmt.Sprintf(" (resolved via: %s)", t.cfg.Source)

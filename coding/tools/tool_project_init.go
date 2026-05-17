@@ -51,14 +51,8 @@ func (t *ProjectInitTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "project_init",
-			Description: "Bootstrap the project's task-tracking document at /project.md with the " +
-				"given name and top-level phases. Call this BEFORE project_task_add or update_task " +
-				"on a fresh repo — the work tree gate blocks task activation until /project.md " +
-				"exists and is loaded. Idempotent: if /project.md already exists, the existing " +
-				"plan is preserved and only the in-memory tree is refreshed. " +
-				"Use project_init for the structured project plan; use memory_publish for session " +
-				"notes, design docs, and other arbitrary content.",
+			Name:        "project_init",
+			Description: "Bootstrap /project.md (the project plan) with name + top-level phases. Call FIRST on a fresh repo — the task gate blocks activation until /project.md exists. Idempotent: a second call preserves the existing plan. Use this for the project plan; use memory_publish for notes and design docs.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

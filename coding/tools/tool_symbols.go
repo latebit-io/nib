@@ -28,7 +28,7 @@ func (t *WorkspaceSymbolsTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "workspace_symbols",
-			Description: "Search for symbols (functions, types, variables, constants) by name across the project. Returns symbol locations with their kind. Use this to find where types or functions are defined.",
+			Description: "Search symbols (functions, types, variables, constants) by name across the project. Returns locations with kind.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

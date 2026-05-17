@@ -145,7 +145,15 @@ func (a *Agent) cancelAndDrain(_ context.Context) error {
 // which old tool results are truncated to reduce input cost.
 // Compaction is triggered before each LLM call so the next request
 // fits a smaller window without losing the recent conversation.
-const compactHistoryThreshold = 30_000
+//
+// Set to 15k after a real session at 30k showed history climbing to
+// 44k+ with only 36% cache hit rate on Codex — meaning ~28k tokens
+// of history was being re-billed every turn at full rate. Tightening
+// the threshold trades a more aggressive summarization pass against
+// per-turn input cost; with the Codex pool's bipolar cache behavior
+// (some turns hit 90%+, others 5–20%), reducing the size of the part
+// that can miss is the dominant cost lever.
+const compactHistoryThreshold = 15_000
 
 // compactKeepTurns is the number of recent user turns whose tool
 // results are preserved verbatim during compaction. Older tool
@@ -159,36 +167,168 @@ const compactKeepTurns = 3
 const compactMinBytes = 200
 
 // maybeCompact checks whether the conversation history is large
-// enough to warrant compaction. If so, truncates old tool results
-// (delegating to [llm.CompactMessages]) and emits an AgentCompacted
-// event. Returns the (possibly compacted) message slice.
+// enough to warrant compaction and runs the two-tier compaction
+// pipeline when it is. Tier 1 is the cheap tool-result truncation
+// inherited from earlier work; Tier 2 is the LLM-backed summarization
+// added in commit 3 of the agent-token-efficiency plan. Returns the
+// (possibly compacted) message slice.
 //
-// The decision is based on [llm.EstimateMessageTokens] against
-// [compactHistoryThreshold]; estimation runs on every turn but
-// compaction itself only fires when the threshold is crossed AND
-// [llm.CompactMessages] reports that something actually changed
-// (a tree of small tool results may estimate over the threshold
-// but contain nothing prunable).
-func maybeCompact(messages []llm.Message, toolDefs []llm.ToolDef, send sender) []llm.Message {
+//   - Tier 1 fires when estimated history meets [compactHistoryThreshold].
+//     It delegates to [llm.CompactMessages] which stubs old tool
+//     results larger than [compactMinBytes]. Q&A-heavy sessions and
+//     small-result tool chains often hit the threshold without
+//     anything Tier 1 can prune — that's the misfire warn log surfaces.
+//
+//   - Tier 2 fires when post-Tier-1 history still meets
+//     [summarizationThreshold] AND a viable user-boundary split exists
+//     in the slice. It runs one non-streaming LLM call against the
+//     agent's raw provider to replace the older range with a single
+//     summary message. Failure (provider error, empty response, ctx
+//     cancel) is a soft degrade: the post-Tier-1 slice is returned
+//     unchanged. Tier 2 emits [event.AgentCompactionSummary] on
+//     success; Tier 1 emits [event.AgentCompacted].
+//
+// Called from the foundation's TransformContext hook before each LLM
+// call so the request sees a compacted slice without callers needing
+// to know compaction happened. ctx threads through so the
+// summarization LLM call inherits the run's cancellation.
+func (a *Agent) maybeCompact(ctx context.Context, messages []llm.Message, toolDefs []llm.ToolDef) []llm.Message {
 	est := llm.EstimateMessageTokens(messages, toolDefs)
+	logCompactEvaluation(est.History, messages)
+
 	if est.History < compactHistoryThreshold {
 		return messages
 	}
-	compacted, changed := llm.CompactMessages(messages, compactKeepTurns, compactMinBytes)
-	if !changed {
+
+	// Tier 1 — truncate old tool results.
+	tier1Out, tier1Changed := llm.CompactMessages(messages, compactKeepTurns, compactMinBytes)
+	tier1Est := est
+	if tier1Changed {
+		tier1Est = llm.EstimateMessageTokens(tier1Out, toolDefs)
+		a.send(event.AgentCompacted{
+			BeforeTokens: est.History,
+			AfterTokens:  tier1Est.History,
+		})
+		slog.Info("conversation compacted (tier 1)",
+			"before", est.History,
+			"after", tier1Est.History,
+			"saved", est.History-tier1Est.History,
+		)
+		messages = tier1Out
+	} else {
+		slog.Warn("compact: threshold crossed but tier 1 made no change",
+			"history", est.History,
+			"threshold", compactHistoryThreshold,
+			"messages", len(messages),
+			"keep_turns", compactKeepTurns,
+			"min_bytes", compactMinBytes)
+	}
+
+	// Tier 2 — summarize older messages if Tier 1 alone wasn't enough.
+	if tier1Est.History < summarizationThreshold {
 		return messages
 	}
-	afterEst := llm.EstimateMessageTokens(compacted, toolDefs)
-	send(event.AgentCompacted{
-		BeforeTokens: est.History,
-		AfterTokens:  afterEst.History,
+	if a.provider == nil {
+		// Test fixtures may construct an Agent literal without a
+		// provider; degrade silently rather than dereferencing nil.
+		return messages
+	}
+	tier2Out, summary, summarized, ok := a.runTier2(ctx, messages)
+	if !ok {
+		return messages
+	}
+	tier2Est := llm.EstimateMessageTokens(tier2Out, toolDefs)
+	a.send(event.AgentCompactionSummary{
+		BeforeTokens:       tier1Est.History,
+		AfterTokens:        tier2Est.History,
+		SummarizedMessages: summarized,
+		Summary:            summary,
 	})
-	slog.Info("conversation compacted",
-		"before", est.History,
-		"after", afterEst.History,
-		"saved", est.History-afterEst.History,
+	slog.Info("conversation compacted (tier 2 — summarized)",
+		"before", tier1Est.History,
+		"after", tier2Est.History,
+		"saved", tier1Est.History-tier2Est.History,
+		"summarized_messages", summarized,
 	)
-	return compacted
+	return tier2Out
+}
+
+// runTier2 performs the summarization-tier pass. Returns (out, summary,
+// summarizedCount, true) on success; (nil, "", 0, false) on soft
+// degrade (nothing to summarize, summarization failed, ctx cancelled).
+//
+// Soft-degrade contract: any non-fatal condition logs at warn or info
+// and returns ok=false. The caller continues with the pre-Tier-2
+// slice. Tier 2 must never panic, must never propagate an error to
+// the foundation hook (the developer's run does not fail because
+// compaction failed), and must release the provider snapshot before
+// returning.
+func (a *Agent) runTier2(ctx context.Context, messages []llm.Message) (out []llm.Message, summary string, summarized int, ok bool) {
+	splitIdx, err := splitForSummarization(messages)
+	if err != nil {
+		// Not enough history with a clean user-boundary cut — let the
+		// next turn try again as the slice grows.
+		slog.Info("compact: tier 2 skipped — no viable split",
+			"messages", len(messages),
+			"err", err)
+		return nil, "", 0, false
+	}
+
+	// Snapshot the provider under lock so a concurrent SetProvider
+	// can't swap it mid-call. The summarization call uses the raw
+	// provider (not the proxy) so its tokens don't pollute session
+	// budget accounting.
+	a.mu.Lock()
+	provider := a.provider
+	a.mu.Unlock()
+
+	transcript := renderTranscript(messages[1:splitIdx])
+	summary, err = runSummarization(ctx, provider, transcript)
+	if err != nil {
+		slog.Warn("compact: tier 2 summarization failed; keeping post-tier-1 slice",
+			"err", err,
+			"split_idx", splitIdx,
+			"range_messages", splitIdx-1)
+		return nil, "", 0, false
+	}
+
+	// Build the new slice: system prompt + summary + recent verbatim tail.
+	out = make([]llm.Message, 0, 2+(len(messages)-splitIdx))
+	out = append(out, messages[0])
+	out = append(out, llm.Message{
+		Role:    "assistant",
+		Content: summaryPrefix + "\n\n" + summary,
+	})
+	out = append(out, messages[splitIdx:]...)
+	return out, summary, splitIdx - 1, true
+}
+
+// logCompactEvaluation emits the per-turn diagnostic that surfaces
+// whether Tier 1 has anything to prune (`tool_results_above_min`) or
+// is silently no-oping on a Q&A-heavy session. Kept on the cheap path
+// so /context callers always see a fresh snapshot in the log alongside
+// their inspection.
+func logCompactEvaluation(history int, messages []llm.Message) {
+	roleCounts := make(map[string]int, 5)
+	var bigToolResults, smallToolResults int
+	for _, m := range messages {
+		roleCounts[m.Role]++
+		if m.Role == "tool" {
+			if len(m.Content) > compactMinBytes {
+				bigToolResults++
+			} else {
+				smallToolResults++
+			}
+		}
+	}
+	slog.Debug("compact: evaluate",
+		"history", history,
+		"tier1_threshold", compactHistoryThreshold,
+		"tier2_threshold", summarizationThreshold,
+		"messages", len(messages),
+		"roles", roleCounts,
+		"tool_results_above_min", bigToolResults,
+		"tool_results_below_min", smallToolResults)
 }
 
 // AgentInputEstimate emission lives on [providerProxy.Stream] —

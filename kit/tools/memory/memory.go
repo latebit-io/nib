@@ -95,12 +95,8 @@ func (t *FetchTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "memory_fetch",
-			Description: "Fetch a memory document by path. Use this to retrieve project context, " +
-				"architecture decisions, session history, or any structured knowledge persisted across sessions. " +
-				"Use the optional section parameter to fetch only a specific heading's content " +
-				"(e.g. section=\"Current State\" returns only that section). " +
-				"This reduces context size when you only need part of a large document.",
+			Name:        "memory_fetch",
+			Description: "Fetch a memory document by path. Optional `section` extracts a single heading's content (e.g. \"Current State\") instead of the whole doc.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -260,10 +256,8 @@ func (t *PublishTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "memory_publish",
-			Description: "Create or update a memory document. Use this to persist architecture decisions, " +
-				"design specs, or project state. Requires expected_version for conflict detection " +
-				"(0 = create new, N = update version N).",
+			Name:        "memory_publish",
+			Description: "Create or update a memory document. expected_version=0 to create, current version to update.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -342,9 +336,8 @@ func (t *AppendTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "memory_append",
-			Description: "Append content to an existing memory document. Use this for journal entries, " +
-				"incremental notes, or adding to a running log. Requires expected_version >= 1.",
+			Name:        "memory_append",
+			Description: "Append to a memory document (journal entries, incremental notes). expected_version >= 1.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -421,9 +414,8 @@ func (t *ListTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "memory_list",
-			Description: "List memory documents under a directory path. " +
-				"Use this to discover what knowledge has been persisted.",
+			Name:        "memory_list",
+			Description: "List memory documents under a directory path.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

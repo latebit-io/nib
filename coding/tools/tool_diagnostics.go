@@ -30,7 +30,7 @@ func (t *DiagnosticsTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "diagnostics",
-			Description: "Get compiler errors, warnings, and hints for a file. Use after editing to check for problems.",
+			Description: "Compile-error / warning / hint check for a file. Run after editing.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

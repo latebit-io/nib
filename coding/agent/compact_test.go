@@ -1,12 +1,41 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 )
+
+// drainBus subscribes to a bus-backed agent's stream and returns every
+// event published while running fn. Closes the subscription on return.
+// Tests use it to assert exactly which compaction events fired.
+func drainBus(t *testing.T, a *Agent, fn func()) []event.Event {
+	t.Helper()
+	sub, err := a.Subscribe(SubscribeOptions{})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Close()
+	fn()
+	// Bus delivery is per-subscriber serialized: by the time fn returns,
+	// every Send invocation has completed deliverWG.Done, so events are
+	// observable on the channel without further synchronization.
+	var out []event.Event
+	for {
+		select {
+		case ev, ok := <-sub.Events():
+			if !ok {
+				return out
+			}
+			out = append(out, ev)
+		default:
+			return out
+		}
+	}
+}
 
 // TestMaybeCompact_BelowThresholdNoOp verifies that a small history
 // is returned unchanged and no AgentCompacted event is emitted.
@@ -18,10 +47,11 @@ func TestMaybeCompact_BelowThresholdNoOp(t *testing.T) {
 		{Role: "system", Content: "tiny"},
 		{Role: "user", Content: "hello"},
 	}
-	var sent []event.Event
-	send := func(ev event.Event) { sent = append(sent, ev) }
-
-	out := maybeCompact(in, nil, send)
+	a := &Agent{bus: newBus()}
+	var out []llm.Message
+	sent := drainBus(t, a, func() {
+		out = a.maybeCompact(context.Background(), in, nil)
+	})
 
 	if len(out) != len(in) {
 		t.Errorf("len(out) = %d, want %d (no-op below threshold)", len(out), len(in))
@@ -35,7 +65,9 @@ func TestMaybeCompact_BelowThresholdNoOp(t *testing.T) {
 // large enough to cross [compactHistoryThreshold] (via a heavy tool
 // result that [llm.CompactMessages] will prune) and asserts that the
 // returned slice is shorter in token estimate AND an AgentCompacted
-// event fires with the before/after counts.
+// event fires with the before/after counts. Tier-2 stays out of the
+// way because Tier-1 already brings history below the summarization
+// threshold (heavy results stub down to a short marker).
 func TestMaybeCompact_AboveThresholdCompactsAndEmits(t *testing.T) {
 	t.Parallel()
 	heavy := strings.Repeat("garbage ", 20_000) // ~160 KB of repetitive text
@@ -66,10 +98,11 @@ func TestMaybeCompact_AboveThresholdCompactsAndEmits(t *testing.T) {
 			before.History, compactHistoryThreshold)
 	}
 
-	var sent []event.Event
-	send := func(ev event.Event) { sent = append(sent, ev) }
-
-	out := maybeCompact(msgs, nil, send)
+	a := &Agent{bus: newBus()}
+	var out []llm.Message
+	sent := drainBus(t, a, func() {
+		out = a.maybeCompact(context.Background(), msgs, nil)
+	})
 
 	after := llm.EstimateMessageTokens(out, nil)
 	if after.History >= before.History {
@@ -77,7 +110,7 @@ func TestMaybeCompact_AboveThresholdCompactsAndEmits(t *testing.T) {
 			after.History, before.History)
 	}
 	if len(sent) != 1 {
-		t.Fatalf("sent %d events, want 1 (AgentCompacted)", len(sent))
+		t.Fatalf("sent %d events, want 1 (AgentCompacted only); got %d", len(sent), len(sent))
 	}
 	ev, ok := sent[0].(event.AgentCompacted)
 	if !ok {

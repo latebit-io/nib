@@ -40,9 +40,17 @@ type Config struct {
 	Events chan event.Event
 
 	// Agent is the kit-level agent the TUI shuts down on exit.
-	// Optional — nil for editor-only mode. *coding.Agent satisfies
-	// this via its embedded kit-agent handle; future agent shapes
-	// (research, refactor) can plug in by satisfying the same port.
+	// Optional — leave the field zero (untyped nil) for editor-only
+	// mode. *coding.Agent satisfies this via its embedded kit-agent
+	// handle; future agent shapes (research, refactor) can plug in by
+	// satisfying the same port.
+	//
+	// Callers MUST NOT assign a typed-nil pointer here (e.g.
+	// `Agent: (*coding/agent.Agent)(nil)` or a nil *Agent variable):
+	// the interface value would compare != nil and pass shutdown's
+	// guard, then dereference a nil receiver inside Close(). Guard at
+	// the call site (`if ag != nil { cfg.Agent = ag }`) so the field
+	// stays untyped-nil when no agent exists.
 	Agent kit.AgentLifecycle
 
 	// AgentCallbacks holds generic frontend callbacks that any

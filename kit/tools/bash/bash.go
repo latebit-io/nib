@@ -32,12 +32,17 @@ const defaultBashTimeout = 30 * time.Second
 const maxBashTimeout = 120 * time.Second
 
 // maxBashHead is the byte budget for the beginning of command output.
-// Captures initial context (command echo, early output).
-const maxBashHead = 4 * 1024
+// Captures initial context (command echo, early output). Combined with
+// [maxBashTail] this caps a single bash result at roughly the
+// [truncate.DefaultMaxBytes] contract (50 KiB) the agent-token-efficiency
+// plan locks in for every tool, leaving a small overhead for the
+// collapse marker. Head and tail are equal so neither end of a long
+// log is favored over the other when a build emits balanced output.
+const maxBashHead = 25 * 1024
 
 // maxBashTail is the byte budget for the end of command output.
 // Captures the most recent output (error messages, test failures).
-const maxBashTail = 4 * 1024
+const maxBashTail = 25 * 1024
 
 // Tool lets the LLM execute shell commands in a project directory.
 //
@@ -62,11 +67,8 @@ func (t *Tool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "bash",
-			Description: "Execute a shell command in the project directory. " +
-				"Use this to verify edits compile (go build ./...), run tests (go test ./...), " +
-				"check formatting, or explore the project. " +
-				"Do NOT use for destructive operations (rm -rf, git push) unless the developer explicitly asked.",
+			Name:        "bash",
+			Description: "Run a shell command in the project directory. Use for builds, tests, format checks. NOT for destructive ops (rm -rf, git push) without explicit developer ask.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

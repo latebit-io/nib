@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit/tools/truncate"
 )
 
 // ReadFileTool lets the LLM read any file in the project.
@@ -15,6 +16,7 @@ import (
 type ReadFileTool struct {
 	workspace FileReader
 	cache     *FileCache
+	stash     truncate.Sink
 }
 
 // NewReadFileTool creates a ReadFileTool with the given dependencies.
@@ -22,15 +24,19 @@ func NewReadFileTool(ws FileReader, cache *FileCache) *ReadFileTool {
 	return &ReadFileTool{workspace: ws, cache: cache}
 }
 
+// SetStash attaches an optional [truncate.Sink] for over-cap full-file
+// reads. Nil clears any previously-attached sink. Composition root only.
+func (t *ReadFileTool) SetStash(sink truncate.Sink) {
+	t.stash = sink
+}
+
 // Definition returns the tool schema for the LLM.
 func (t *ReadFileTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "read_file",
-			Description: "Read the contents of a file. Use a path relative to the project root. " +
-				"Use this before editing to see the exact current state. " +
-				"For large files, use offset and limit to read specific sections.",
+			Name:        "read_file",
+			Description: "Read file contents. Path is project-relative. Use offset+limit for large files.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -82,7 +88,26 @@ func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult 
 	if args.Offset > 0 || args.Limit > 0 {
 		return textResult(sliceLines(content, args.Path, args.Offset, args.Limit))
 	}
-	return textResult(content)
+	// Full-file reads cap at the truncate contract so a 100 KiB file
+	// doesn't poison every subsequent turn. The marker steers the LLM
+	// toward offset/limit on re-query and includes a stash path when
+	// one is wired.
+	out, _ := truncate.Bytes("read_"+sanitizeReadLabel(args.Path), content, truncate.DefaultMaxBytes, t.stash)
+	return textResult(out)
+}
+
+// sanitizeReadLabel produces a short filesystem-safe suffix from a
+// project-relative path so concurrent stashes for different files are
+// easy to tell apart on disk. ProjectStash sanitizes further; this
+// pre-pass just keeps the prefix readable.
+func sanitizeReadLabel(path string) string {
+	// Keep only the basename; drop directory separators and dots.
+	base := path
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.TrimPrefix(base, ".")
+	return base
 }
 
 // maxFileSize is the largest file we'll read and cache. Matches the

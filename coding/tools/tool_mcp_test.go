@@ -1,8 +1,13 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit/tools/truncate"
 )
 
 func TestConvertSchema(t *testing.T) {
@@ -75,5 +80,61 @@ func TestNewMCPToolAdapter_Definition(t *testing.T) {
 	}
 	if _, ok := def.Function.Parameters.Properties["url"]; !ok {
 		t.Error("missing 'url' parameter")
+	}
+}
+
+// fakeMCPCaller returns a fixed response so the adapter's truncation
+// path can be exercised without spinning up an MCP server.
+type fakeMCPCaller struct {
+	response string
+}
+
+func (f *fakeMCPCaller) CallTool(_ context.Context, _ string, _ map[string]any) (string, error) {
+	return f.response, nil
+}
+
+func TestMCPToolAdapter_TruncatesOverCap(t *testing.T) {
+	big := strings.Repeat("x", 100*1024)
+	caller := &fakeMCPCaller{response: big}
+	info := MCPToolInfo{Name: "huge_doc"}
+	adapter := NewMCPToolAdapter(caller, info)
+	sink := &recordingStash{}
+	adapter.SetStash(sink)
+
+	result := adapter.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{Name: "huge_doc", Arguments: "{}"},
+	})
+
+	if len(result.Content) > truncate.DefaultMaxBytes+256 {
+		t.Fatalf("MCP result %d bytes exceeds cap+marker budget", len(result.Content))
+	}
+	if !strings.Contains(result.Content, "[Truncated: showing") {
+		t.Fatalf("missing truncation marker")
+	}
+	if !strings.Contains(result.Content, "Full output: .project/tooltmp/") {
+		t.Fatalf("marker missing Full-output path")
+	}
+	if sink.calls != 1 {
+		t.Fatalf("expected sink invoked once, got %d", sink.calls)
+	}
+	if sink.lastBody != big {
+		t.Fatalf("sink received %d bytes, want %d", len(sink.lastBody), len(big))
+	}
+}
+
+func TestMCPToolAdapter_PassesThroughUnderCap(t *testing.T) {
+	small := "doc body that fits easily under the cap"
+	adapter := NewMCPToolAdapter(&fakeMCPCaller{response: small}, MCPToolInfo{Name: "small_doc"})
+	sink := &recordingStash{}
+	adapter.SetStash(sink)
+
+	result := adapter.Execute(context.Background(), llm.ToolCall{
+		Function: llm.FunctionCall{Name: "small_doc", Arguments: "{}"},
+	})
+	if result.Content != small {
+		t.Fatalf("expected passthrough, got %q", result.Content)
+	}
+	if sink.calls != 0 {
+		t.Fatalf("expected sink untouched, got %d calls", sink.calls)
 	}
 }

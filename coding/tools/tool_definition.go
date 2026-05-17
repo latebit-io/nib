@@ -27,7 +27,7 @@ func (t *GoToDefinitionTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "go_to_definition",
-			Description: "Jump to the definition of a symbol at a specific position in a file. Returns the file path and line number where the symbol is defined. Use this to follow function calls, type references, or variable declarations to their source.",
+			Description: "Jump to a symbol's definition at the given position. Returns file path + line.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

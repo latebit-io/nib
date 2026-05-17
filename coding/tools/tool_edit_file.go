@@ -340,7 +340,7 @@ func (t *EditFileTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "edit_file",
-			Description: "Search for exact text in a file and replace it. The search string must match the file content exactly (including whitespace and newlines). The replace string must be correctly formatted code with proper indentation matching the file's style — never collapse multiple lines onto one line. Keep search text as SHORT as possible — only include lines that actually change, plus minimal context to match uniquely. Do NOT rewrite entire functions when only a few lines change. To delete text, set replace to an empty string. To insert, include anchor text in search and repeat it in replace with the new code added.",
+			Description: "Exact search-and-replace in a file. search must match verbatim (whitespace and newlines included). Keep search SHORT — only changing lines plus minimal context. Don't rewrite a whole function for a few-line change. Empty replace deletes; to insert, anchor with surrounding text and repeat the anchor in replace with the new code added.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

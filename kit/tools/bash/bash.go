@@ -62,11 +62,8 @@ func (t *Tool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "bash",
-			Description: "Execute a shell command in the project directory. " +
-				"Use this to verify edits compile (go build ./...), run tests (go test ./...), " +
-				"check formatting, or explore the project. " +
-				"Do NOT use for destructive operations (rm -rf, git push) unless the developer explicitly asked.",
+			Name:        "bash",
+			Description: "Run a shell command in the project directory. Use for builds, tests, format checks. NOT for destructive ops (rm -rf, git push) without explicit developer ask.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

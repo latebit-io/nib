@@ -35,10 +35,8 @@ func (t *PackageInfoTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "package_info",
-			Description: "Look up installed package version and API documentation from the project's package manager. " +
-				"Use this BEFORE writing code that imports external libraries to ensure you use correct, current APIs. " +
-				"Supports Go modules (go.mod). Returns installed version and exported API surface.",
+			Name:        "package_info",
+			Description: "Look up installed package version + API surface (Go modules). Call BEFORE importing an external library — your training data may be outdated.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

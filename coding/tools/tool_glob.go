@@ -39,7 +39,7 @@ func (t *GlobTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "glob",
-			Description: "Find files by glob pattern (respects .gitignore). Supports * (single segment), ** (any depth), and ? (single char). Use this to discover files by name or extension before reading them. Examples: **/*_test.go, engine/**/*.go, *.md",
+			Description: "Find files by glob pattern (respects .gitignore). Supports *, **, ?. Examples: **/*_test.go, engine/**/*.go, *.md",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

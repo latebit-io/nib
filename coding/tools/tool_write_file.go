@@ -29,7 +29,7 @@ func (t *WriteFileTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "write_file",
-			Description: "Create a new file with the given content. Use this only for files that do not exist yet. For existing files, use edit_file.",
+			Description: "Create a new file. Errors if the file already exists — use edit_file for existing files.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

@@ -35,6 +35,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/lintstage"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
+	"github.com/latebit-io/nib/kit/budget"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	cmdloader "github.com/latebit-io/nib/kit/command/loader"
 	nibTui "github.com/latebit-io/nib/tui"
@@ -359,13 +360,24 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Construct the TUI via the facade. tuiApp is forward-declared
 	// above so the agent's FlushDirtyBuffers callback (set inside
 	// buildAgent) can route through it via closure capture.
-	tuiApp = nibTui.New(nibTui.Config{
+	//
+	// Agent is assigned conditionally: a nil *agent.Agent stored in the
+	// kit.AgentLifecycle interface field produces a typed-nil interface
+	// (interface != nil, but every method call dereferences a nil
+	// receiver). The TUI's shutdown path calls a.agent.Close() guarded
+	// only by `!= nil`, which a typed-nil passes — segfault on quit
+	// when the user never connected an LLM. Leaving the field zero
+	// keeps the interface value untyped-nil so the guard works.
+	tuiCfg := nibTui.Config{
 		Session:            sess,
 		Events:             events,
-		Agent:              ag,
 		LLM:                llmCallbacks,
 		HighlighterFactory: highlight.NewHighlighter,
-	})
+	}
+	if ag != nil {
+		tuiCfg.Agent = ag
+	}
+	tuiApp = nibTui.New(tuiCfg)
 	app := tuiApp.Model()
 
 	// Compose the slash-command registry. Domain commands (/compact)
@@ -388,6 +400,10 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	resetter := agentResetter{getAgent: func() *agent.Agent { return ag }}
 	if err := cmdRegistry.Register(tuicmd.NewClear(resetter, app.AgentPane)); err != nil {
 		return fmt.Errorf("register /clear: %w", err)
+	}
+	snapshotter := agentSnapshotter{getAgent: func() *agent.Agent { return ag }}
+	if err := cmdRegistry.Register(codingcmd.NewContext(snapshotter)); err != nil {
+		return fmt.Errorf("register /context: %w", err)
 	}
 	// Cold-start seed: when a project has no .project/commands/
 	// directory yet, materialize the binary's bundled starter
@@ -732,6 +748,43 @@ func (c agentCompactor) Compact(ctx context.Context) error {
 // rationale.
 type agentResetter struct {
 	getAgent func() *agent.Agent
+}
+
+// agentSnapshotter adapts a lazily-resolved *agent.Agent to
+// codingcmd.ContextSnapshotter. See agentCompactor for the lazy-resolve
+// rationale. Returns zero values when the agent is still nil so
+// /context displays an empty breakdown rather than panicking before
+// LLM credentials are wired up.
+type agentSnapshotter struct {
+	getAgent func() *agent.Agent
+}
+
+// EstimateContext copies the agent's [agent.ContextSnapshot] into the
+// command-side mirror. Both structs share the same field shape so the
+// conversion is a direct struct construction — no field mapping logic
+// hides drift.
+func (s agentSnapshotter) EstimateContext() codingcmd.ContextSnapshot {
+	ag := s.getAgent()
+	if ag == nil {
+		return codingcmd.ContextSnapshot{}
+	}
+	snap := ag.EstimateContext()
+	return codingcmd.ContextSnapshot{
+		Estimate:     snap.Estimate,
+		ToolCount:    snap.ToolCount,
+		MessageCount: snap.MessageCount,
+	}
+}
+
+// Usage forwards to the agent's cumulative session-usage snapshot.
+// Returns a zero [budget.Session] when no agent has been built yet so
+// /context's "no turns yet" branch renders.
+func (s agentSnapshotter) Usage() budget.Session {
+	ag := s.getAgent()
+	if ag == nil {
+		return budget.Session{}
+	}
+	return ag.Usage()
 }
 
 // ResetHistory resolves the active agent and forwards. Returns nil

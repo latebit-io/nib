@@ -145,7 +145,15 @@ func (a *Agent) cancelAndDrain(_ context.Context) error {
 // which old tool results are truncated to reduce input cost.
 // Compaction is triggered before each LLM call so the next request
 // fits a smaller window without losing the recent conversation.
-const compactHistoryThreshold = 30_000
+//
+// Set to 15k after a real session at 30k showed history climbing to
+// 44k+ with only 36% cache hit rate on Codex — meaning ~28k tokens
+// of history was being re-billed every turn at full rate. Tightening
+// the threshold trades a more aggressive summarization pass against
+// per-turn input cost; with the Codex pool's bipolar cache behavior
+// (some turns hit 90%+, others 5–20%), reducing the size of the part
+// that can miss is the dominant cost lever.
+const compactHistoryThreshold = 15_000
 
 // compactKeepTurns is the number of recent user turns whose tool
 // results are preserved verbatim during compaction. Older tool

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,15 @@ type CodexAPI struct {
 	model  string
 	client *http.Client
 
+	// cacheKey is a stable per-provider identifier sent as
+	// `prompt_cache_key` on every request. Codex Responses uses this
+	// as a routing hint — requests with the same key are preferentially
+	// routed to the same backend so the prompt-prefix cache stays
+	// warm. Generated once at construction; never rotated for the
+	// lifetime of the process so a long-running session amortizes
+	// across many turns.
+	cacheKey string
+
 	mu        sync.Mutex
 	maxTokens int // 0 means "omit max_output_tokens — use provider default"
 }
@@ -28,12 +38,47 @@ type CodexAPI struct {
 // NewCodexAPI creates a CodexAPI provider for the ChatGPT Codex endpoint.
 func NewCodexAPI(model string, auth Auth) *CodexAPI {
 	return &CodexAPI{
-		auth:  auth,
-		model: model,
+		auth:     auth,
+		model:    model,
+		cacheKey: newCacheKey(),
 		client: &http.Client{
 			Transport: agentTransport(),
 		},
 	}
+}
+
+// newCacheKey returns a UUIDv4-shaped random string for use as
+// `prompt_cache_key`. Codex does not appear to enforce a specific
+// format; a UUID is chosen because it's the shape the backend itself
+// returns in response payloads and it gives enough entropy to make
+// cross-process collisions effectively zero.
+//
+// Generated with crypto/rand — falls back to a deterministic literal
+// only if the entropy source fails, which on darwin/linux is a
+// system-level failure where the caller has bigger problems than a
+// cold cache. The fallback keeps the call total-functional so
+// construction never fails.
+func newCacheKey() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "00000000-0000-4000-8000-000000000000"
+	}
+	// Set version (4) and variant (RFC 4122) bits.
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	const hex = "0123456789abcdef"
+	out := make([]byte, 36)
+	j := 0
+	for i := 0; i < 16; i++ {
+		if i == 4 || i == 6 || i == 8 || i == 10 {
+			out[j] = '-'
+			j++
+		}
+		out[j] = hex[b[i]>>4]
+		out[j+1] = hex[b[i]&0x0f]
+		j += 2
+	}
+	return string(out)
 }
 
 // Codex API endpoints.
@@ -106,6 +151,11 @@ type codexRequest struct {
 	// provider's default applies; set after a truncated turn to give the
 	// retry more headroom.
 	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+	// PromptCacheKey is a routing hint to keep prefix-cached prompts
+	// warm across turns. A stable per-provider value (set once at
+	// construction) makes consecutive requests preferentially land on
+	// the same backend pool so the prompt cache can hit.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 }
 
 // codexMessageItem is a role-based message in the Responses API input.
@@ -166,8 +216,25 @@ type codexIncompleteDetails struct {
 }
 
 type codexUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens         int                       `json:"input_tokens"`
+	OutputTokens        int                       `json:"output_tokens"`
+	InputTokensDetails  *codexInputTokensDetails  `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails *codexOutputTokensDetails `json:"output_tokens_details,omitempty"`
+}
+
+// codexInputTokensDetails carries per-category breakdowns the Codex
+// backend reports alongside `input_tokens`. Currently only
+// `cached_tokens` is populated; declared as a pointer so a missing
+// block is distinguishable from a zero value (cache-warm vs. cold).
+type codexInputTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// codexOutputTokensDetails carries per-category breakdowns the Codex
+// backend reports alongside `output_tokens`. Reserved for future use
+// (e.g. reasoning_tokens on reasoning-capable models).
+type codexOutputTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 type codexOutputItem struct {
@@ -278,6 +345,7 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		instructions = "You are a helpful coding assistant."
 	}
 	slog.Debug("codex request", "model", c.model, "instructions_len", len(instructions), "input_items", len(input), "tools", len(tools))
+	logPrefixProbe(c.model, instructions, input, tools)
 	c.mu.Lock()
 	maxTokens := c.maxTokens
 	c.mu.Unlock()
@@ -289,6 +357,7 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		Tools:           toolsToCodexTools(tools),
 		Stream:          true,
 		MaxOutputTokens: maxTokens,
+		PromptCacheKey:  c.cacheKey,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -437,10 +506,25 @@ func (s *codexStreamState) handleItemDone(evt codexSSEEvent, raw []byte) {
 
 func (s *codexStreamState) handleCompleted(evt codexSSEEvent) (*StreamEvent, bool) {
 	if evt.Response != nil && evt.Response.Usage != nil {
+		u := evt.Response.Usage
 		s.usage = &Usage{
-			PromptTokens:     evt.Response.Usage.InputTokens,
-			CompletionTokens: evt.Response.Usage.OutputTokens,
+			PromptTokens:     u.InputTokens,
+			CompletionTokens: u.OutputTokens,
 		}
+		// Codex reports cached input under input_tokens_details.cached_tokens.
+		// Surface it so /context can render the actual cache-hit rate;
+		// without this the cached column stays at 0 even when the
+		// backend caches the prefix.
+		hasDetails := u.InputTokensDetails != nil
+		if hasDetails {
+			s.usage.CachedTokens = u.InputTokensDetails.CachedTokens
+		}
+		slog.Debug("codex: turn usage",
+			"prompt", s.usage.PromptTokens,
+			"completion", s.usage.CompletionTokens,
+			"cached", s.usage.CachedTokens,
+			"has_input_details", hasDetails,
+		)
 	}
 	truncated := isTruncatedCompletion(evt)
 	if truncated {

@@ -60,7 +60,7 @@ func (t *Tool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "search_project",
-			Description: "Search for a text pattern across all project files. Returns matching lines with file paths and line numbers. Use this to find function definitions, string occurrences, imports, TODOs, or any text pattern across the codebase. Prefers ripgrep when available.",
+			Description: "Text or regex search across project files. Returns matching lines with paths + line numbers. Uses ripgrep when available.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

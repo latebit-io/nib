@@ -27,10 +27,8 @@ func (t *ReadFileTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "read_file",
-			Description: "Read the contents of a file. Use a path relative to the project root. " +
-				"Use this before editing to see the exact current state. " +
-				"For large files, use offset and limit to read specific sections.",
+			Name:        "read_file",
+			Description: "Read file contents. Path is project-relative. Use offset+limit for large files.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

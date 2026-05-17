@@ -24,7 +24,7 @@ func (t *ListFilesTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "list_files",
-			Description: "List all files in the project (respects .gitignore). Returns paths relative to the project root. Use this to discover files before reading or editing them.",
+			Description: "List all project files (respects .gitignore). Paths are project-relative.",
 			Parameters: llm.FunctionParams{
 				Type:       "object",
 				Properties: map[string]llm.FunctionParam{},

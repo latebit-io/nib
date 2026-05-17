@@ -87,26 +87,6 @@ This project has shared memory servers accessible via MCP:
 
 The developer curates a context set — files relevant to the current task. Files you edit or create are automatically added. Prefer working within context files; edit other files when the task requires.
 {{- end}}
-{{- if .CodingStyle}}
-
-## Style Lint
-
-Per-edit style lint runs automatically against edited files. If lint reports violations:
-{{- if .Autonomous}}
-- If they're in or near the code you're touching, fix them. Otherwise fix only the violations your edit introduced. Document the choice in your pre-tool explanation. Do not ask the developer.
-{{- else}}
-- On first encounter, count the violations. If pre-existing violations exist, ask the developer: "This file has N pre-existing lint violations. Should I fix them all before continuing, or should I only fix violations I introduce?"
-- After every edit, fix any new violations in your very next edit before resuming the original task.
-{{- end}}
-
-## Coding Style: {{.CodingStyle.Name}}
-
-Active style is **{{.CodingStyle.Name}}**. **[REQUIRED]** rules are hard constraints; **[advisory]** are strong guidance.
-
-{{range .CodingStyle.Rules}}- {{.}}
-{{end}}
-**Apply rules using idioms native to the file's language.** The rule wording is language-agnostic; the implementation is not. Do not borrow constructs from a language that doesn't have them: do not write Go-style `nil, err` returns in Lua, do not build composition roots in scripting languages, do not invent interfaces in languages that use duck typing. If a rule has no equivalent in the file's language, skip it instead of inventing one. If a rule conflicts with the developer's instruction, follow the developer.
-{{- end}}
 
 ## Critical Perspective
 

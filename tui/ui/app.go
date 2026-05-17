@@ -55,9 +55,7 @@ type setAgentCallbacksMsg struct {
 // the AppModel from inside the Update goroutine. Same race-avoidance
 // rationale as [setAgentCallbacksMsg].
 type setCodingCallbacksMsg struct {
-	onDialChange     func(level session.AutonomyLevel)
-	cycleStyle       func() string
-	initialStyleName string
+	onDialChange func(level session.AutonomyLevel)
 }
 
 // AppModel is the top-level Bubble Tea model.
@@ -87,7 +85,6 @@ type AppModel struct {
 	SearchOverlay       SearchOverlayModel
 	recentMouse         bool                  // tracks leaked CSI prefix from unparsed mouse events
 	dial                session.AutonomyLevel // current autonomy level; defaults to session.LevelTrusted
-	styleName           string                // current coding style display name; empty when disabled
 	terse               bool                  // true when terse output mode is active
 	pendingModelProfile string                // profile of the in-flight ListModels request (stale detection)
 
@@ -119,11 +116,6 @@ type AppModel struct {
 
 	// HasAPIKey reports whether a stored or env-based API key exists for a profile.
 	HasAPIKey func(profile string) bool
-
-	// CycleStyle advances to the next available coding style and returns its
-	// display name (or "" if styles are exhausted and cycling disables enforcement).
-	// Set by the entry point — nil when no styles are configured.
-	CycleStyle func() string
 
 	// ToggleTerse enables or disables terse output mode at runtime.
 	// Returns the new state (true = enabled). Set by the entry point.
@@ -222,16 +214,8 @@ func SetAgentCallbacksMsg(toggleTerse func(enabled bool) bool, initialTerse bool
 // SetCodingCallbacksMsg constructs a tea.Msg that installs
 // coding-flavored agent callbacks on the AppModel. Same race-avoidance
 // rationale as [SetAgentCallbacksMsg].
-func SetCodingCallbacksMsg(
-	onDialChange func(level session.AutonomyLevel),
-	cycleStyle func() string,
-	initialStyleName string,
-) tea.Msg {
-	return setCodingCallbacksMsg{
-		onDialChange:     onDialChange,
-		cycleStyle:       cycleStyle,
-		initialStyleName: initialStyleName,
-	}
+func SetCodingCallbacksMsg(onDialChange func(level session.AutonomyLevel)) tea.Msg {
+	return setCodingCallbacksMsg{onDialChange: onDialChange}
 }
 
 // NewApp creates the application model.

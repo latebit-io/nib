@@ -21,7 +21,6 @@ import (
 	codingcmd "github.com/latebit-io/nib/coding/command"
 	"github.com/latebit-io/nib/coding/event"
 	codingmemory "github.com/latebit-io/nib/coding/memory"
-	"github.com/latebit-io/nib/coding/prompts"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/coding/wire"
 	"github.com/latebit-io/nib/engine/buffer"
@@ -29,11 +28,8 @@ import (
 	"github.com/latebit-io/nib/engine/highlight"
 	"github.com/latebit-io/nib/engine/openfile"
 	"github.com/latebit-io/nib/engine/runconfig"
-	"github.com/latebit-io/nib/engine/styleconfig"
 	"github.com/latebit-io/nib/engine/validate"
-	"github.com/latebit-io/nib/engine/validate/architecture"
 	"github.com/latebit-io/nib/engine/validate/goparse"
-	"github.com/latebit-io/nib/engine/validate/lintstage"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	cmdloader "github.com/latebit-io/nib/kit/command/loader"
@@ -157,7 +153,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		sess.SetLLMInfo(llmResolved.Model, llmResolved.Profile)
 	}
 
-	styleResult := wire.NewStyle(projectRoot)
+	linters := wire.NewLinters(projectRoot)
 
 	smokeCfg := runconfig.Load(projectRoot)
 	if smokeCfg.Skipped {
@@ -218,13 +214,10 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			MemoryStore:       mem.Store,
 			MemorySummary:     mem.Summary,
 			DistributedMemory: distributed,
-			CodingStyle:       styleResult.AgentStyle,
+			Linters:           linters.PostTask,
 			Terse:             true,
 			SmokeConfig:       smokeCfg,
 			FlushDirtyBuffers: flushDirtyBuffersFn,
-		}
-		if styleResult.Resolved != nil {
-			opts.Linters = styleResult.Linters
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
@@ -233,8 +226,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			opts.ValidationPipeline = validate.NewPipeline(
 				goparse.Validator{},
 				treesitter.New(highlight.LanguageFor),
-				architecture.New(styleResult.Architecture, highlight.LanguageFor),
-				lintstage.New(styleResult.PerFileLinters.Linters),
 			)
 		}
 		ag := agent.New(p, sess, opts, mcpResult.Tools...)
@@ -526,55 +517,10 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			InitialTerse: true,
 		})
 
-		var initialStyleName string
-		if styleResult.Resolved != nil {
-			initialStyleName = styleResult.Resolved.Name
-		}
-
-		var cycleStyleFn func() string
-		styleNames := styleResult.Config.StyleNames()
-		if len(styleNames) > 0 {
-			currentStyleKey := ""
-			if styleResult.Config.Active != "" {
-				currentStyleKey = styleResult.Config.Active
-			}
-			cycleStyleFn = func() string {
-				idx := -1
-				for i, name := range styleNames {
-					if name == currentStyleKey {
-						idx = i
-						break
-					}
-				}
-				idx++
-				if idx >= len(styleNames) {
-					currentStyleKey = ""
-					ag.SetStyle(nil, nil)
-					styleResult.SetArchitecture(styleconfig.Architecture{})
-					styleResult.PerFileLinters.Set(nil)
-					slog.Info("style: disabled")
-					return ""
-				}
-				currentStyleKey = styleNames[idx]
-				s := styleResult.Config.Styles[currentStyleKey]
-				data := prompts.NewCodingStyleData(s.Name, wire.ConvertRules(s.Rules))
-				linters := wire.LintersForStyle(s.LintCmd, styleResult.DefaultLinters)
-				ag.SetStyle(data, linters)
-				styleResult.SetArchitecture(s.Architecture)
-				styleResult.PerFileLinters.Set(
-					wire.LintersForStylePerFile(s.LintCmd, styleResult.DefaultPerFileLinters))
-
-				slog.Info("style: switched", "style", s.Name)
-				return s.Name
-			}
-		}
-
 		tuiApp.SetCodingCallbacks(nibTui.CodingCallbacks{
 			OnDialChange: func(level session.AutonomyLevel) {
 				ag.SetAutonomous(level.AutoApproveEdits())
 			},
-			CycleStyle:       cycleStyleFn,
-			InitialStyleName: initialStyleName,
 		})
 	}
 

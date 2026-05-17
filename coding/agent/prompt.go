@@ -91,7 +91,6 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		Headless:          a.interactionMode == Headless,
 		Autonomous:        a.currentAutonomous(),
 		DistributedMemory: a.distributedMemory,
-		CodingStyle:       a.currentCodingStyle(),
 		Terse:             a.currentTerse(),
 	}
 	systemPrompt := a.prompts.SystemPrompt(sysData)
@@ -106,15 +105,14 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 }
 
 // rebuildSystemPrompt regenerates the system prompt text using the current
-// runtime state (e.g. coding style). Called between conversation turns so
-// that changes from SetCodingStyle take effect immediately without requiring
+// runtime state (e.g. terse mode). Called between conversation turns so
+// that runtime toggle changes take effect immediately without requiring
 // a new RunWithMode call.
 func (a *Agent) rebuildSystemPrompt(mode event.Mode) string {
 	sysData := prompts.SystemPromptData{
 		Headless:          a.interactionMode == Headless,
 		Autonomous:        a.currentAutonomous(),
 		DistributedMemory: a.distributedMemory,
-		CodingStyle:       a.currentCodingStyle(),
 		Terse:             a.currentTerse(),
 	}
 	if mode == event.ModePlanning {

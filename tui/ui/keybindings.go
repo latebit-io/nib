@@ -38,7 +38,6 @@ const (
 	ActionAgentReject    = keymap.ActionAgentReject
 	ActionDialCycle      = keymap.ActionDialCycle
 	ActionModelSelector  = keymap.ActionModelSelector
-	ActionStyleCycle     = keymap.ActionStyleCycle
 	ActionTerseToggle    = keymap.ActionTerseToggle
 	ActionOpenPalette    = keymap.ActionOpenPalette
 	ActionToggleProject  = keymap.ActionToggleProject
@@ -116,8 +115,6 @@ func DefaultKeymap() *Keymap {
 			{code: 'å', mod: 0}:           ActionDialCycle, // macOS: Option+A sends å
 			{code: 'm', mod: tea.ModAlt}:  ActionModelSelector,
 			{code: 'µ', mod: 0}:           ActionModelSelector, // macOS: Option+M sends µ
-			{code: 's', mod: tea.ModAlt}:  ActionStyleCycle,
-			{code: 'ß', mod: 0}:           ActionStyleCycle, // macOS: Option+S sends ß
 			{code: 't', mod: tea.ModAlt}:  ActionTerseToggle,
 			{code: '†', mod: 0}:           ActionTerseToggle, // macOS: Option+T sends †
 			{code: 'o', mod: tea.ModCtrl}: ActionAgentApprove,
@@ -149,8 +146,6 @@ func DefaultKeymap() *Keymap {
 			"å":        ActionDialCycle, // macOS: Option+A sends å
 			"alt+m":    ActionModelSelector,
 			"µ":        ActionModelSelector, // macOS: Option+M sends µ
-			"alt+s":    ActionStyleCycle,
-			"ß":        ActionStyleCycle, // macOS: Option+S sends ß
 			"alt+t":    ActionTerseToggle,
 			"†":        ActionTerseToggle, // macOS: Option+T sends †
 			"shift+f1": ActionHover,

@@ -33,9 +33,7 @@ import (
 	"github.com/latebit-io/nib/engine/highlight"
 	"github.com/latebit-io/nib/engine/runconfig"
 	"github.com/latebit-io/nib/engine/validate"
-	"github.com/latebit-io/nib/engine/validate/architecture"
 	"github.com/latebit-io/nib/engine/validate/goparse"
-	"github.com/latebit-io/nib/engine/validate/lintstage"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
 )
 
@@ -214,8 +212,8 @@ func run() error {
 	}
 	defer mem.Cleanup()
 
-	// Resolve coding style — injected into the agent's system prompt.
-	styleResult := wire.NewStyle(projectRoot)
+	// Auto-detect post-task linters (golangci-lint / luacheck / etc).
+	linters := wire.NewLinters(projectRoot)
 
 	// Resolve smoke-run config. In headless / CI mode this is the
 	// primary safety net that catches "compiles clean but won't launch"
@@ -233,28 +231,22 @@ func run() error {
 		MemorySummary:     mem.Summary,
 		Interaction:       agent.Headless,
 		DistributedMemory: codingmemory.DetectDistributedMemory(mcpResult.ServerNames),
-		CodingStyle:       styleResult.AgentStyle,
+		Linters:           linters.PostTask,
 		SmokeConfig:       smokeCfg,
-	}
-	if styleResult.Resolved != nil {
-		opts.Linters = styleResult.Linters
 	}
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr
 	}
 	if os.Getenv(brand.EnvKeyValidatorsDisabled) == "" {
 		// Headless / CI mode wires the same validator stages as the
-		// TUI. Architecture caps and syntax-regression checks matter
-		// MORE here, not less — there's no developer to notice a
-		// runaway file size or a parser-breaking edit before the
-		// agent commits. The tree-sitter grammars are already a
+		// TUI. Syntax-regression checks matter MORE here, not less —
+		// there's no developer to notice a parser-breaking edit before
+		// the agent commits. The tree-sitter grammars are already a
 		// transitive dep of engine, so the binary-size delta of
 		// linking them in is small relative to the correctness win.
 		opts.ValidationPipeline = validate.NewPipeline(
 			goparse.Validator{},
 			treesitter.New(highlight.LanguageFor),
-			architecture.New(styleResult.Architecture, highlight.LanguageFor),
-			lintstage.New(styleResult.PerFileLinters.Linters),
 		)
 	}
 	ag := agent.New(provider, workspace, opts, mcpResult.Tools...)

@@ -228,19 +228,11 @@ func TestSystemPromptAutonomousModeRules(t *testing.T) {
 		t.Errorf("autonomous prompt still contains ask-permission instruction")
 	}
 
-	// Non-autonomous mode keeps the original ask-language. The
-	// lint-violations ask only renders when CodingStyle is set
-	// (it's inside the `## Style Lint` block) — so the test must
-	// supply a non-nil CodingStyle to exercise that gate.
 	guided := loader.SystemPrompt(prompts.SystemPromptData{
-		Autonomous:  false,
-		CodingStyle: &prompts.CodingStyleData{Name: "test", Rules: []string{}},
+		Autonomous: false,
 	})
 	if strings.Contains(guided, "Autonomous Mode") {
 		t.Errorf("non-autonomous prompt should not include the Autonomous Mode section")
-	}
-	if !strings.Contains(guided, "ask the developer:") {
-		t.Errorf("non-autonomous prompt should retain the lint-violations ask-language")
 	}
 }
 
@@ -438,42 +430,6 @@ func TestBuildMessagesNoDistributedMemory(t *testing.T) {
 	}
 }
 
-func TestBuildMessagesCodingStyleInSystemPrompt(t *testing.T) {
-	a := testAgent()
-	a.codingStyle = prompts.NewCodingStyleData("SOLID + Hexagonal", []prompts.StyleRule{
-		{Name: "Single Responsibility", Instruction: "Each type has one reason to change.", Enforcement: "hard"},
-		{Name: "Dependency Inversion", Instruction: "Depend on interfaces, not concretions.", Enforcement: "soft"},
-	})
-	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", event.ModeExecution)
-
-	system := msgs[0].Content
-	if !strings.Contains(system, "Coding Style: SOLID + Hexagonal") {
-		t.Error("system prompt should include Coding Style section when style is configured")
-	}
-	if !strings.Contains(system, "Single Responsibility") {
-		t.Error("system prompt should contain style rule names")
-	}
-	if !strings.Contains(system, "Dependency Inversion") {
-		t.Error("system prompt should contain all style rules")
-	}
-	if !strings.Contains(system, "[REQUIRED]") {
-		t.Error("system prompt should render hard enforcement as [REQUIRED]")
-	}
-	if !strings.Contains(system, "[advisory]") {
-		t.Error("system prompt should render soft enforcement as [advisory]")
-	}
-}
-
-func TestBuildMessagesNoCodingStyle(t *testing.T) {
-	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", event.ModeExecution)
-
-	system := msgs[0].Content
-	if strings.Contains(system, "Coding Style") {
-		t.Error("system prompt should not include Coding Style section when no style configured")
-	}
-}
-
 // TestBuildMessagesUserPromptIncludesLanguage verifies the user message
 // surfaces the file's language so the generating model applies style
 // rules using native idioms. Lua files were silently picking up Go
@@ -499,66 +455,6 @@ func TestBuildMessagesUserPromptOmitsLanguageWhenUnknown(t *testing.T) {
 	user := msgs[1].Content
 	if strings.Contains(user, "language:") {
 		t.Errorf("user message should omit language hint for unknown extension, got:\n%s", user)
-	}
-}
-
-// TestBuildMessagesCodingStyleHasLanguageGuidance verifies the system
-// prompt teaches the model to apply rules using native-language idioms,
-// not idioms borrowed from whichever language the rule wording most
-// resembles. Without this, Clean Code rules read Go-flavored and the
-// model produced Go-style scaffolding in Lua/Python files.
-func TestBuildMessagesCodingStyleHasLanguageGuidance(t *testing.T) {
-	a := testAgent()
-	a.codingStyle = prompts.NewCodingStyleData("Clean Code", []prompts.StyleRule{
-		{Name: "Errors as First-Class Citizens", Instruction: "Handle errors explicitly.", Enforcement: "hard"},
-	})
-	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", event.ModeExecution)
-
-	system := msgs[0].Content
-	if !strings.Contains(system, "Apply rules using idioms native to the file's language") {
-		t.Error("system prompt should include native-language guidance when coding style is set")
-	}
-	if !strings.Contains(system, "do not write Go-style") {
-		t.Error("system prompt should explicitly warn against Go-style returns in non-Go files")
-	}
-}
-
-func TestNewCodingStyleData(t *testing.T) {
-	rules := []prompts.StyleRule{
-		{Name: "SRP", Instruction: "One reason to change", Enforcement: "hard"},
-		{Name: "DIP", Instruction: "Depend on abstractions", Enforcement: "soft"},
-	}
-	data := prompts.NewCodingStyleData("Test Style", rules)
-
-	if data.Name != "Test Style" {
-		t.Errorf("Name = %q, want %q", data.Name, "Test Style")
-	}
-	if len(data.Rules) != 2 {
-		t.Fatalf("len(Rules) = %d, want 2", len(data.Rules))
-	}
-	wantHard := "**SRP** [REQUIRED]: One reason to change"
-	if data.Rules[0] != wantHard {
-		t.Errorf("Rules[0] = %q, want %q", data.Rules[0], wantHard)
-	}
-	wantSoft := "**DIP** [advisory]: Depend on abstractions"
-	if data.Rules[1] != wantSoft {
-		t.Errorf("Rules[1] = %q, want %q", data.Rules[1], wantSoft)
-	}
-}
-
-func TestBuildMessagesCodingStyleInPlanningMode(t *testing.T) {
-	a := testAgent()
-	a.codingStyle = prompts.NewCodingStyleData("DDD", []prompts.StyleRule{
-		{Name: "Aggregates", Instruction: "Enforce invariants through roots.", Enforcement: "hard"},
-	})
-	msgs := a.buildMessages("main.go", "package main", "plan feature", nil, "", event.ModePlanning)
-
-	system := msgs[0].Content
-	if !strings.Contains(system, "Coding Style: DDD") {
-		t.Error("planning prompt should include Coding Style section — style guides design too")
-	}
-	if !strings.Contains(system, "Aggregates") {
-		t.Error("planning prompt should contain style rules")
 	}
 }
 

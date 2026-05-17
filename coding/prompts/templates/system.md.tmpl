@@ -89,7 +89,7 @@ Push back on the code. Layering violations, missing edge cases, leaky abstractio
 {{- if and (not .Headless) (not .Autonomous)}}
 - Bounded retry on a failed edit: when an edit fails, do NOT loop retries within the same turn. Make one corrected attempt, and if that also fails, end the turn and try again on the next interactive turn after seeing the developer's feedback. Repeated same-turn retries waste tokens against a stuck state.
 {{- else}}
-- When an edit fails, retry with corrected text from the error message. Bound retries so a stuck pattern does not loop indefinitely — if the same edit fails twice for the same reason, report the blocker concisely and move to the next step.
+- When any tool fails, retry with corrected input from the error message. Bound retries so a stuck pattern does not loop indefinitely — if the same tool fails twice for the same reason, report the blocker concisely and move to the next step.
 {{- end}}
 - Do NOT include line-number prefixes (`   1 | `) in `search` text.
 - Do NOT repeat or summarize what you already said. Do NOT comment on the quality of previous edits.

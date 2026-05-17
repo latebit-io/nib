@@ -55,11 +55,9 @@ type setAgentCallbacksMsg struct {
 // the AppModel from inside the Update goroutine. Same race-avoidance
 // rationale as [setAgentCallbacksMsg].
 type setCodingCallbacksMsg struct {
-	onDialChange            func(level session.AutonomyLevel)
-	cycleStyle              func() string
-	toggleEvaluator         func(enabled bool) bool
-	initialStyleName        string
-	initialEvaluatorEnabled bool
+	onDialChange     func(level session.AutonomyLevel)
+	cycleStyle       func() string
+	initialStyleName string
 }
 
 // AppModel is the top-level Bubble Tea model.
@@ -90,7 +88,6 @@ type AppModel struct {
 	recentMouse         bool                  // tracks leaked CSI prefix from unparsed mouse events
 	dial                session.AutonomyLevel // current autonomy level; defaults to session.LevelTrusted
 	styleName           string                // current coding style display name; empty when disabled
-	evaluatorEnabled    bool                  // true when the style evaluator is active
 	terse               bool                  // true when terse output mode is active
 	pendingModelProfile string                // profile of the in-flight ListModels request (stale detection)
 
@@ -127,11 +124,6 @@ type AppModel struct {
 	// display name (or "" if styles are exhausted and cycling disables enforcement).
 	// Set by the entry point — nil when no styles are configured.
 	CycleStyle func() string
-
-	// ToggleEvaluator enables or disables the style evaluator at runtime.
-	// Returns the new state (true = enabled). Set by the entry point — nil
-	// when no style or provider is configured.
-	ToggleEvaluator func(enabled bool) bool
 
 	// ToggleTerse enables or disables terse output mode at runtime.
 	// Returns the new state (true = enabled). Set by the entry point.
@@ -233,16 +225,12 @@ func SetAgentCallbacksMsg(toggleTerse func(enabled bool) bool, initialTerse bool
 func SetCodingCallbacksMsg(
 	onDialChange func(level session.AutonomyLevel),
 	cycleStyle func() string,
-	toggleEvaluator func(enabled bool) bool,
 	initialStyleName string,
-	initialEvaluatorEnabled bool,
 ) tea.Msg {
 	return setCodingCallbacksMsg{
-		onDialChange:            onDialChange,
-		cycleStyle:              cycleStyle,
-		toggleEvaluator:         toggleEvaluator,
-		initialStyleName:        initialStyleName,
-		initialEvaluatorEnabled: initialEvaluatorEnabled,
+		onDialChange:     onDialChange,
+		cycleStyle:       cycleStyle,
+		initialStyleName: initialStyleName,
 	}
 }
 

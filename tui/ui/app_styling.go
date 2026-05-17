@@ -2,18 +2,13 @@ package ui
 
 import tea "charm.land/bubbletea/v2"
 
-// Styling, evaluator, terse, and autonomy-dial callbacks and toggles.
+// Styling, terse, and autonomy-dial callbacks and toggles.
 // Extracted from app.go (Phase 1 of AppModel decomposition).
 
 // SetStyleName sets the current coding style display name for the status bar.
 // Pass empty string to clear the indicator.
 func (m *AppModel) SetStyleName(name string) {
 	m.styleName = name
-}
-
-// SetEvaluatorEnabled sets the evaluator status bar indicator.
-func (m *AppModel) SetEvaluatorEnabled(enabled bool) {
-	m.evaluatorEnabled = enabled
 }
 
 // cycleStyle advances to the next coding style via the CycleStyle callback.
@@ -23,15 +18,6 @@ func (m *AppModel) cycleStyle() {
 		return
 	}
 	m.styleName = m.CycleStyle()
-}
-
-// toggleEvaluator flips the style evaluator on/off via the ToggleEvaluator callback.
-// Does nothing if no callback is wired (no agent or no provider).
-func (m *AppModel) toggleEvaluator() {
-	if m.ToggleEvaluator == nil {
-		return
-	}
-	m.evaluatorEnabled = m.ToggleEvaluator(!m.evaluatorEnabled)
 }
 
 // SetTerse sets the terse mode indicator. Use this at startup to sync
@@ -77,12 +63,8 @@ func (m *AppModel) handleSetAgentCallbacks(msg setAgentCallbacksMsg) (tea.Model,
 func (m *AppModel) handleSetCodingCallbacks(msg setCodingCallbacksMsg) (tea.Model, tea.Cmd) {
 	m.OnDialChange = msg.onDialChange
 	m.CycleStyle = msg.cycleStyle
-	m.ToggleEvaluator = msg.toggleEvaluator
 	if msg.initialStyleName != "" {
 		m.SetStyleName(msg.initialStyleName)
-	}
-	if msg.initialEvaluatorEnabled {
-		m.SetEvaluatorEnabled(true)
 	}
 	return m, nil
 }

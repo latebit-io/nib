@@ -70,8 +70,6 @@ const (
 	ActionModelSelector
 	// ActionStyleCycle cycles through available coding styles.
 	ActionStyleCycle
-	// ActionEvaluatorToggle toggles the style evaluator on/off.
-	ActionEvaluatorToggle
 	// ActionTerseToggle toggles terse output mode on/off.
 	ActionTerseToggle
 
@@ -186,7 +184,6 @@ func DefaultBindings() []Binding {
 		{ActionDialCycle, "Cycle autonomy dial", []string{"Alt+A"}, CatAgent},
 		{ActionModelSelector, "Select model", []string{"Alt+M"}, CatAgent},
 		{ActionStyleCycle, "Cycle coding style", []string{"Alt+S"}, CatAgent},
-		{ActionEvaluatorToggle, "Toggle style evaluator", []string{"Alt+V", "Alt+R"}, CatAgent},
 		{ActionTerseToggle, "Toggle terse mode", []string{"Alt+T"}, CatAgent},
 
 		// View

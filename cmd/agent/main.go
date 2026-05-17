@@ -189,7 +189,7 @@ func run() error {
 
 	// Create LLM provider — required for headless mode.
 	pr := wire.NewProvider(projectRoot)
-	provider, llmCfg, llmResolved := pr.Provider, pr.Config, pr.Resolved
+	provider, llmResolved := pr.Provider, pr.Resolved
 	if provider == nil {
 		// Use the resolved global config path so the hint shows the
 		// correct platform-specific location (~/.config/<brand>/llm.json
@@ -238,7 +238,6 @@ func run() error {
 	}
 	if styleResult.Resolved != nil {
 		opts.Linters = styleResult.Linters
-		opts.StyleEvaluator = wire.NewStyleEvaluator(styleResult.Resolved, provider, llmCfg)
 	}
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr

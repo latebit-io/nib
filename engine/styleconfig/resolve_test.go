@@ -22,9 +22,8 @@ var resolveTests = []resolveTestCase{
 	{
 		// Production default since 2026-04-26: no style is active unless the
 		// developer opts in via the brand-prefixed STYLE env var or
-		// .project/style.json. This keeps the architecture validator, style
-		// evaluator, and prompt style section all off by default — governance
-		// is opt-in.
+		// .project/style.json. This keeps the architecture validator and
+		// prompt style section off by default — governance is opt-in.
 		name:    "default is no active style",
 		wantNil: true,
 	},

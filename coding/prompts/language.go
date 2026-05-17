@@ -7,9 +7,9 @@ import (
 
 // languageByExt maps lowercased file extensions (with leading dot) to a
 // human-readable language name. Used by [DetectLanguage] to give the
-// evaluator and the generating model a language anchor so they apply
-// style rules using idioms native to the file's language instead of
-// importing idioms from whichever language the rule wording resembles.
+// generating model a language anchor so it applies style rules using
+// idioms native to the file's language instead of importing idioms
+// from whichever language the rule wording resembles.
 //
 // Add new entries when a project surfaces a language we don't yet detect.
 // Unknown or ambiguous extensions return "" — the caller treats that as

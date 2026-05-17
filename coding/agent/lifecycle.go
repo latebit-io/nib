@@ -11,7 +11,6 @@ import (
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/prompts"
-	"github.com/latebit-io/nib/coding/style"
 	"github.com/latebit-io/nib/engine/lint"
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/budget"
@@ -441,14 +440,6 @@ func (a *Agent) SetAutonomous(on bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.autonomous = on
-}
-
-// SetEvaluator replaces the style evaluator. Pass nil to disable.
-// Safe to call between turns.
-func (a *Agent) SetEvaluator(eval style.StyleEvaluatorPort) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.evaluator = eval
 }
 
 // Usage returns the accumulated token consumption for the current session.

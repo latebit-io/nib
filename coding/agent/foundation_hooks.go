@@ -32,9 +32,9 @@ var errBudgetExceeded = errors.New("coding/agent: per-task token budget exceeded
 // closure variables so the Agent struct stays free of hook-only fields.
 
 // FoundationHooks returns the [upagent.Hooks] value bound to this
-// agent. Closure-captured state (singleEditFired, narrativeFired,
-// permissionFired, truncationRetries) lives for the lifetime of the
-// returned Hooks; a fresh FoundationHooks call yields a fresh closure.
+// agent. Closure-captured state (narrativeFired, permissionFired,
+// truncationRetries) lives for the lifetime of the returned Hooks;
+// a fresh FoundationHooks call yields a fresh closure.
 //
 // liveMessages is the snapshotter the steering hook uses to read the
 // transcript including the assistant turn that just ended (TransformContext
@@ -71,11 +71,11 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 			}, nil
 		}
 		// Mirrors turn.go:222-224: emit AgentToolCall AFTER the
-		// gates that suppress dispatch entirely (lint, single-edit)
-		// but BEFORE planning + active-task gates so the frontend
-		// sees the call attempt even when it's about to be
-		// rejected. Inline behavior: planning + active-task
-		// rejections still emit AgentToolCall.
+		// lint-pending gate that suppresses dispatch entirely but
+		// BEFORE planning + active-task gates so the frontend sees
+		// the call attempt even when it's about to be rejected.
+		// Inline behavior: planning + active-task rejections still
+		// emit AgentToolCall.
 		a.send(event.AgentToolCall{Name: c.Name, Args: c.Args})
 		if res := a.planningBlocklistGate(c); res.Block {
 			return res, nil

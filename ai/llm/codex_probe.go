@@ -34,6 +34,8 @@ func logPrefixProbe(model, instructions string, input []any, tools []ToolDef) {
 	if len(tools) > 0 {
 		if b, err := json.Marshal(tools); err == nil {
 			toolsHash = shortHash(b)
+		} else {
+			slog.Debug("codex prefix probe: marshal tools failed", "err", err)
 		}
 	}
 
@@ -43,6 +45,8 @@ func logPrefixProbe(model, instructions string, input []any, tools []ToolDef) {
 		if b, err := json.Marshal(input[0]); err == nil {
 			firstInputHash = shortHash(b)
 			firstInputHead = head(string(b), 96)
+		} else {
+			slog.Debug("codex prefix probe: marshal first input failed", "err", err)
 		}
 	}
 
@@ -72,13 +76,18 @@ func shortHash(b []byte) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// head returns the first n characters of s with newlines collapsed to
+// head returns the first n runes of s with newlines collapsed to
 // spaces so the value renders as a single key=value pair in slog text
-// output. Truncates with an ellipsis when shorter than the full string.
+// output. Truncates with an ellipsis when the string is longer than n
+// runes. Counts runes rather than bytes because tool JSON, system
+// prompts, and the ellipsis itself can carry multi-byte UTF-8; a
+// byte-slice cut would corrupt code points and mis-state the prefix
+// fingerprint diff that this probe exists to surface.
 func head(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(runes[:n]) + "…"
 }

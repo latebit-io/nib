@@ -204,10 +204,13 @@ type AgentCompactionSummary struct {
 	// summary (the size of the replaced range — excludes the system
 	// prompt and the recent verbatim slice).
 	SummarizedMessages int
-	// Summary is the text produced by the summarization LLM call,
-	// already wrapped with its prefix tag. Frontends may render or
-	// log it; the agent's next provider call sees the same text as an
-	// assistant message.
+	// Summary is the raw text the summarization LLM call produced,
+	// without the [summaryPrefix] tag. The agent's next provider call
+	// sees this text wrapped with the prefix inside an assistant
+	// message; the wrapping happens at message-assembly time and is
+	// intentionally NOT included here so frontends can render or log
+	// the value directly without stripping a prefix they didn't ask
+	// for.
 	Summary string
 }
 

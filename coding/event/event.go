@@ -182,6 +182,35 @@ type PendingEdit struct {
 	Reason string
 }
 
+// AgentCompactionSummary is emitted when the agent runs Tier-2
+// summarization compaction: an LLM call replaces a run of old messages
+// with a single assistant message. Distinguished from [AgentCompacted]
+// (Tier 1, tool-result truncation only) because Tier 2 is qualitatively
+// different — it costs an extra LLM round-trip, can drop nuance, and
+// the frontend may want to surface the summary text directly rather
+// than just a before/after token delta.
+//
+// Emitted at most once per [Agent.maybeCompact] pass. Soft-degrade on
+// summarization failure: when the LLM call errors or returns empty
+// text, no event is emitted and the post-Tier-1 slice is returned
+// unchanged.
+type AgentCompactionSummary struct {
+	// BeforeTokens is the estimated history token count entering Tier 2.
+	BeforeTokens int
+	// AfterTokens is the estimated history token count after the
+	// summarized assistant message has replaced the old range.
+	AfterTokens int
+	// SummarizedMessages is the number of messages collapsed into the
+	// summary (the size of the replaced range — excludes the system
+	// prompt and the recent verbatim slice).
+	SummarizedMessages int
+	// Summary is the text produced by the summarization LLM call,
+	// already wrapped with its prefix tag. Frontends may render or
+	// log it; the agent's next provider call sees the same text as an
+	// assistant message.
+	Summary string
+}
+
 // --- Editor-domain events mirrored from engine/event ---
 
 // DiagnosticsUpdated signals that diagnostics changed for a file.
@@ -197,8 +226,9 @@ type DiagnosticsUpdated struct {
 
 // --- Marker method implementations ---
 
-func (AgentEditProposed) Event()  {}
-func (AgentFileCreated) Event()   {}
-func (AgentNavigate) Event()      {}
-func (ReloadBuffers) Event()      {}
-func (DiagnosticsUpdated) Event() {}
+func (AgentEditProposed) Event()      {}
+func (AgentFileCreated) Event()       {}
+func (AgentNavigate) Event()          {}
+func (ReloadBuffers) Event()          {}
+func (DiagnosticsUpdated) Event()     {}
+func (AgentCompactionSummary) Event() {}

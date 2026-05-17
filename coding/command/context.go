@@ -47,8 +47,8 @@ type ContextSnapshotter interface {
 // optimization decision (slim a prompt, trim a tool, compact) has a
 // concrete target.
 type ContextCommand struct {
-	def       kitcmd.Definition
-	snapshot  ContextSnapshotter
+	def      kitcmd.Definition
+	snapshot ContextSnapshotter
 }
 
 // NewContext returns a ContextCommand. snapshot must be non-nil; a nil

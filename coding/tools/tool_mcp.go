@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit/tools/truncate"
 )
 
-// maxMCPResult caps the response size returned to the LLM from MCP tools.
-// Higher than BashTool's 8KB cap because MCP tools return markdown documents
-// (architecture specs, patterns, roadmaps) that are legitimately larger than
-// typical bash output (build errors, test results).
-const maxMCPResult = 32 * 1024
+// maxMCPResult caps the response size returned to the LLM from MCP
+// tools. Aligned with [truncate.DefaultMaxBytes] (50 KiB) so MCP
+// follows the same per-tool-result contract as bash, search, and
+// read_file. MCP results that exceed this are stashed (when a sink
+// is wired) so the LLM can re-read them on demand.
+const maxMCPResult = truncate.DefaultMaxBytes
 
 // maxMCPArgs caps the argument payload size from the LLM to prevent
 // excessive allocation from malformed tool calls.
@@ -46,6 +47,7 @@ type MCPToolAdapter struct {
 	client   MCPCaller
 	toolName string
 	toolDef  llm.ToolDef
+	stash    truncate.Sink
 }
 
 // NewMCPToolAdapter creates an adapter for one MCP tool.
@@ -64,6 +66,13 @@ func NewMCPToolAdapter(client MCPCaller, info MCPToolInfo) *MCPToolAdapter {
 		toolName: info.Name,
 		toolDef:  toolDef,
 	}
+}
+
+// SetStash attaches an optional [truncate.Sink] for over-cap MCP
+// responses. Nil clears any previously-attached sink. Composition
+// root only.
+func (t *MCPToolAdapter) SetStash(sink truncate.Sink) {
+	t.stash = sink
 }
 
 // Definition returns the OpenAI-compatible tool schema.
@@ -88,11 +97,8 @@ func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) ToolRes
 		slog.Error("mcp tool error", "tool", t.toolName, "err", err)
 		return textResult(fmt.Sprintf("Error: %v", err))
 	}
-	if len(result) > maxMCPResult {
-		// Truncate at valid UTF-8 boundary to avoid garbled output.
-		result = strings.ToValidUTF8(result[:maxMCPResult], "") + "\n[... output truncated]"
-	}
-	return textResult(result)
+	out, _ := truncate.Bytes("mcp_"+t.toolName, result, maxMCPResult, t.stash)
+	return textResult(out)
 }
 
 // convertSchema converts a JSON Schema (raw JSON) into the OpenAI-compatible

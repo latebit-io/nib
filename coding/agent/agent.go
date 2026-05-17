@@ -33,6 +33,7 @@ import (
 	"github.com/latebit-io/nib/kit/tools/bash"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 	searchtools "github.com/latebit-io/nib/kit/tools/search"
+	"github.com/latebit-io/nib/kit/tools/truncate"
 )
 
 // InteractionMode controls prompt framing — how the agent describes its
@@ -117,6 +118,15 @@ type Agent struct {
 	toolDefs []llm.ToolDef
 	cache    *FileCache
 	prompts  *prompts.PromptLoader
+
+	// stash captures pre-truncation tool output to a per-agent
+	// directory under .project/tooltmp/. Sink-aware tools (bash,
+	// search, read_file, MCP) receive it via SetStash so over-cap
+	// results land in a stable path the LLM can re-read. Cleaned up
+	// in [Agent.Close]. May be nil if construction failed (the
+	// truncation contract degrades to "no Full output: path" rather
+	// than failing the agent).
+	stash *truncate.ProjectStash
 
 	mu         sync.Mutex
 	cancel     context.CancelFunc
@@ -496,6 +506,21 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		merged[strings.ToLower(name)] = true
 	}
 
+	// Per-agent stash for over-cap tool output. Construction failure
+	// degrades to a nil stash: the truncate contract still fires
+	// (caps respected, marker emitted) but without a "Full output:"
+	// path. The empty-project-root case typically only hits in tests
+	// using literal-built Agents, which never run tools anyway.
+	var stash *truncate.ProjectStash
+	if projectRoot != "" {
+		s, err := truncate.NewProjectStash(projectRoot)
+		if err != nil {
+			slog.Warn("agent: stash construction failed; truncation will omit Full output paths", "err", err)
+		} else {
+			stash = s
+		}
+	}
+
 	a := &Agent{
 		provider:            provider,
 		bus:                 newBus(),
@@ -519,6 +544,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		smokeConfig:         smokeCfg,
 		taskTokenBudget:     taskTokenBudget,
 		flushDirtyBuffersFn: flushDirtyBuffersFn,
+		stash:               stash,
 	}
 
 	a.approvalFlow = editflow.NewOrchestrator(editflow.Deps{
@@ -646,6 +672,11 @@ func (a *Agent) Close() {
 		if a.bus != nil {
 			a.bus.close()
 		}
+		// Stash cleanup happens last so any tempfile referenced by
+		// the final tool result (still in-flight on the bus when
+		// close started) outlives the bus drain. The stash itself
+		// is nil-safe; Cleanup is idempotent.
+		a.stash.Cleanup()
 	})
 }
 
@@ -683,8 +714,11 @@ func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, memStore memory.Store, extraTools []Tool) {
 	editTool := tools.NewEditFileTool(workspace, cache, a)
 
+	readTool := tools.NewReadFileTool(workspace, cache)
+	readTool.SetStash(a.stash)
+
 	builtins := []Tool{
-		tools.NewReadFileTool(workspace, cache),
+		readTool,
 		editTool,
 		tools.NewWriteFileTool(workspace, cache, a),
 		tools.NewReplaceFileTool(workspace, cache, a),
@@ -698,7 +732,9 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 
 	builtins = append(builtins, tools.NewGoToLineTool(workspace, a))
 	builtins = append(builtins, tools.NewGlobTool(workspace))
-	builtins = append(builtins, searchtools.New(projectRoot, adaptEngineSearch))
+	searchTool := searchtools.New(projectRoot, adaptEngineSearch)
+	searchTool.SetStash(a.stash)
+	builtins = append(builtins, searchTool)
 	builtins = append(builtins, tools.NewPackageInfoTool(projectRoot))
 	builtins = a.appendSmokeTool(builtins, projectRoot)
 
@@ -771,9 +807,24 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 			slog.Warn("extra tool collision, skipping duplicate", "name", def.Function.Name)
 			continue
 		}
+		// Sink-aware tools (the MCP adapter is the live case; future
+		// sink-aware extras automatically opt in) receive the agent's
+		// stash so their over-cap output lands in the same per-agent
+		// directory as built-in tools'.
+		if setter, ok := t.(stashAware); ok {
+			setter.SetStash(a.stash)
+		}
 		a.tools[key] = t
 		a.toolDefs = append(a.toolDefs, def)
 	}
+}
+
+// stashAware is the optional interface tools implement to receive the
+// agent's truncate.Sink at registration. Keeping the contract local
+// avoids exporting a new public-surface interface for what is purely
+// an internal wiring convention.
+type stashAware interface {
+	SetStash(truncate.Sink)
 }
 
 // adaptEngineSearch bridges engine/search.Search to kit's SearchFunc

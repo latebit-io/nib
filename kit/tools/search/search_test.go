@@ -122,8 +122,10 @@ func TestExecute(t *testing.T) {
 }
 
 func TestExecute_Truncation(t *testing.T) {
+	// Build enough matches to overflow the 50 KiB cap. Each match
+	// formats to roughly 120 bytes; 1000 matches = ~120 KiB.
 	var results []Result
-	for i := range 500 {
+	for i := range 1000 {
 		results = append(results, Result{
 			Path: "file.go",
 			Line: i + 1,
@@ -139,11 +141,11 @@ func TestExecute_Truncation(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
 	}
-	if len(result.Content) > maxPreviewBytes+200 {
+	if len(result.Content) > maxPreviewBytes+256 {
 		t.Errorf("content not truncated: len=%d", len(result.Content))
 	}
-	if !strings.Contains(result.Content, "[... truncated") {
-		t.Error("missing truncation marker")
+	if !strings.Contains(result.Content, "[Truncated: showing") {
+		t.Errorf("missing truncation marker, got tail: %q", result.Content[max(0, len(result.Content)-200):])
 	}
 }
 

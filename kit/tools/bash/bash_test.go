@@ -88,10 +88,15 @@ func TestTool_OutputTruncation(t *testing.T) {
 	dir := t.TempDir()
 	tool := New(dir)
 
-	// Generate output larger than head+tail budget (8KB total).
-	result := tool.Execute(context.Background(), bashCall("yes | head -c 16384"))
+	// Generate output larger than head+tail budget (~50 KiB total).
+	// 100 KiB blows past the cap and forces the collapse path.
+	result := tool.Execute(context.Background(), bashCall("yes | head -c 102400"))
 	if !strings.Contains(result.Content, "bytes collapsed") {
 		t.Errorf("expected collapse marker, got length %d:\n%s", len(result.Content), result.Content)
+	}
+	// Body must stay near the head+tail cap regardless of input size.
+	if len(result.Content) > maxBashHead+maxBashTail+1024 {
+		t.Errorf("result %d bytes exceeds head+tail+marker budget %d", len(result.Content), maxBashHead+maxBashTail+1024)
 	}
 }
 
@@ -99,9 +104,9 @@ func TestTool_TailPreservation(t *testing.T) {
 	dir := t.TempDir()
 	tool := New(dir)
 
-	// Emit a large block then a known sentinel at the end.
-	// The sentinel must survive in the tail even though the middle is collapsed.
-	cmd := "yes | head -c 16384; echo SENTINEL_TAIL_MARKER"
+	// Emit a large block then a known sentinel at the end. The sentinel
+	// must survive in the tail even though the middle is collapsed.
+	cmd := "yes | head -c 102400; echo SENTINEL_TAIL_MARKER"
 	result := tool.Execute(context.Background(), bashCall(cmd))
 
 	if !strings.Contains(result.Content, "SENTINEL_TAIL_MARKER") {

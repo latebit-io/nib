@@ -396,8 +396,8 @@ func (a *Agent) shouldEnforceSingleEdit() bool {
 // token-threshold guard inside MaybeCompact short-circuits when
 // nothing has changed, so the per-Stream cost is one
 // [llm.EstimateMessageTokens] call.
-func (a *Agent) foundationCompactAndLint(_ context.Context, msgs []llm.Message) ([]llm.Message, error) {
-	msgs = maybeCompact(msgs, a.activeToolDefs(), a.send)
+func (a *Agent) foundationCompactAndLint(ctx context.Context, msgs []llm.Message) ([]llm.Message, error) {
+	msgs = a.maybeCompact(ctx, msgs, a.activeToolDefs())
 	if lint := a.drainPendingLint(); lint != "" {
 		msgs = append(msgs, llm.Message{Role: "user", Content: lint})
 	}

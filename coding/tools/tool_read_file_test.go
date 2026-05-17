@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit/tools/truncate"
 )
 
 // errWorkspace returns an error for files not in its map, unlike testWorkspace
@@ -227,6 +228,70 @@ func TestReadFileTool_FileTooLargeCacheHit(t *testing.T) {
 	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "big.bin"}))
 	if !strings.Contains(result.Content, "file too large") {
 		t.Errorf("expected size error on cache hit, got %q", result.Content)
+	}
+}
+
+// recordingStash is a [truncate.Sink] that captures stashed payloads
+// in-memory so tests can verify the full pre-truncation content was
+// handed off without touching disk.
+type recordingStash struct {
+	calls    int
+	lastBody string
+}
+
+func (r *recordingStash) Stash(label, content string) (string, error) {
+	r.calls++
+	r.lastBody = content
+	return ".project/tooltmp/test/" + label + ".txt", nil
+}
+
+func TestReadFileTool_FullFileTruncation(t *testing.T) {
+	// 100 KiB file blows past the 50 KiB default cap and must
+	// truncate with a marker. With a sink attached, the marker
+	// includes the stash path and the sink sees the full content.
+	big := strings.Repeat("a", 100*1024)
+	ws := newReadTestWorkspace(map[string]string{"big.log": big})
+	tool := NewReadFileTool(ws, NewFileCache())
+	sink := &recordingStash{}
+	tool.SetStash(sink)
+
+	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "big.log"}))
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if len(result.Content) > truncate.DefaultMaxBytes+256 {
+		t.Fatalf("result %d bytes exceeds cap+marker budget", len(result.Content))
+	}
+	if !strings.Contains(result.Content, "[Truncated: showing") {
+		t.Fatalf("missing marker, tail: %q", result.Content[max(0, len(result.Content)-200):])
+	}
+	if !strings.Contains(result.Content, "Full output: .project/tooltmp/") {
+		t.Fatalf("marker missing Full-output path: tail: %q", result.Content[max(0, len(result.Content)-200):])
+	}
+	if sink.calls != 1 {
+		t.Fatalf("expected sink invoked once, got %d", sink.calls)
+	}
+	if sink.lastBody != big {
+		t.Fatalf("sink received %d bytes, want full %d", len(sink.lastBody), len(big))
+	}
+}
+
+func TestReadFileTool_FullFileUnderCap(t *testing.T) {
+	// A file under the cap must pass through untouched even with a
+	// stash attached (CP2 — under-cap = passthrough).
+	small := strings.Repeat("b", 1024)
+	ws := newReadTestWorkspace(map[string]string{"small.log": small})
+	tool := NewReadFileTool(ws, NewFileCache())
+	sink := &recordingStash{}
+	tool.SetStash(sink)
+
+	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "small.log"}))
+	if result.Content != small {
+		t.Fatalf("expected passthrough, got len=%d", len(result.Content))
+	}
+	if sink.calls != 0 {
+		t.Fatalf("expected sink untouched, got %d calls", sink.calls)
 	}
 }
 

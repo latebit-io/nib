@@ -13,10 +13,14 @@ import (
 
 	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit/tools/truncate"
 )
 
-// maxPreviewBytes caps the result text returned to the LLM.
-const maxPreviewBytes = 8 * 1024
+// maxPreviewBytes caps the result text returned to the LLM. Aligned
+// with [truncate.DefaultMaxBytes] (50 KiB) so the search tool follows
+// the same per-tool-result contract the agent-token-efficiency plan
+// locks in for every tool.
+const maxPreviewBytes = truncate.DefaultMaxBytes
 
 // DefaultMaxResults is the default cap on search results.
 const DefaultMaxResults = 200
@@ -43,15 +47,26 @@ type SearchFunc func(ctx context.Context, root, pattern string, opts Options) ([
 type Tool struct {
 	projectRoot string
 	search      SearchFunc
+	stash       truncate.Sink
 }
 
 // New creates a search tool rooted at projectRoot using the given
-// search backend.
+// search backend. The optional [truncate.Sink] is attached via
+// [Tool.SetStash]; a nil sink (the default) keeps the truncation
+// marker free of a "Full output:" path.
 func New(projectRoot string, fn SearchFunc) *Tool {
 	if fn == nil {
 		panic("search.New: nil SearchFunc")
 	}
 	return &Tool{projectRoot: projectRoot, search: fn}
+}
+
+// SetStash attaches an optional [truncate.Sink] so over-cap results
+// can be written somewhere the LLM can re-read in full. Calling with
+// nil clears any previously-attached sink. Intended for the
+// composition root; not part of the call-time contract.
+func (t *Tool) SetStash(sink truncate.Sink) {
+	t.stash = sink
 }
 
 // Definition returns the tool schema for the LLM.
@@ -117,19 +132,12 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		return agent.ToolResult{Content: "No matches found."}
 	}
 
-	const truncSuffix = "\n\n[... truncated — use read_file for full content]"
-	limit := maxPreviewBytes - len(truncSuffix)
-
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d match(es) found:\n\n", len(results))
 	for _, r := range results {
-		line := fmt.Sprintf("%s:%d: %s\n", r.Path, r.Line, r.Text)
-		if sb.Len()+len(line) > limit {
-			sb.WriteString(truncSuffix)
-			return agent.ToolResult{Content: sb.String()}
-		}
-		sb.WriteString(line)
+		fmt.Fprintf(&sb, "%s:%d: %s\n", r.Path, r.Line, r.Text)
 	}
 
-	return agent.ToolResult{Content: sb.String()}
+	out, _ := truncate.Bytes("search", sb.String(), maxPreviewBytes, t.stash)
+	return agent.ToolResult{Content: out}
 }

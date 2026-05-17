@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -301,6 +302,225 @@ func findMatch(expected, actual []string, ei, ai int) matchResult {
 	return matchResult{}
 }
 
+// changedLineRanges returns the 1-indexed inclusive line ranges in
+// `final` that differ from `orig`. Used by the post-edit content
+// formatter to render slices ±N lines around the modified regions when
+// the file is too large to include in full.
+//
+// The walk mirrors [SimpleDiff]: equal lines advance both indices in
+// lockstep; a divergence is resolved by [findMatch]'s bounded
+// lookahead. The lookahead means very large insert-or-delete blocks
+// past 20 lines without a re-sync collapse into a single "changed
+// through end" range — that's conservative (we show more context than
+// strictly necessary) but never wrong.
+//
+// Empty `orig` (i.e. new file) returns one range covering all of
+// `final`. Empty `final` returns nil (no lines to slice around). An
+// unchanged file returns nil.
+func changedLineRanges(orig, final string) []LineRange {
+	if orig == final {
+		return nil
+	}
+	finalLines := strings.Split(final, "\n")
+	if orig == "" {
+		if len(finalLines) == 0 {
+			return nil
+		}
+		return []LineRange{{Start: 1, End: len(finalLines)}}
+	}
+	origLines := strings.Split(orig, "\n")
+	if len(finalLines) == 0 {
+		return nil
+	}
+
+	var ranges []LineRange
+	oi, fi := 0, 0
+	for oi < len(origLines) || fi < len(finalLines) {
+		if oi < len(origLines) && fi < len(finalLines) && origLines[oi] == finalLines[fi] {
+			oi++
+			fi++
+			continue
+		}
+		startF := fi
+		match := findMatch(origLines, finalLines, oi, fi)
+		if match.found {
+			oi, fi = match.ei, match.ai
+		} else {
+			oi, fi = len(origLines), len(finalLines)
+		}
+		if fi > startF {
+			ranges = append(ranges, LineRange{Start: startF + 1, End: fi})
+		} else if startF == fi && oi > 0 {
+			// Pure deletion at this position — anchor the touched
+			// range on the surrounding final-buffer line so the
+			// slice renderer has something to show context around.
+			anchor := startF
+			if anchor < 1 {
+				anchor = 1
+			}
+			if anchor > len(finalLines) {
+				anchor = len(finalLines)
+			}
+			ranges = append(ranges, LineRange{Start: anchor, End: anchor})
+		}
+	}
+	return ranges
+}
+
+// postEditContentBudget is the byte budget the post-approval body
+// reserves for the file-content blob. Matches the legacy
+// [maxContentPreview] cap (8 KiB) so the per-edit history payload
+// does not grow vs the pre-PR-#157 baseline; the line-number format
+// upgrade still pays off (the LLM reads tool results in the same
+// shape as read_file's sliceLines output), but the size does not.
+//
+// History impact, locked 2026-05-17 after pacman re-run: a 30 KiB
+// budget here caused tier-2 compaction to fire 12x in a 32-turn
+// session (vs 5x in the 31-turn baseline) because each successful
+// edit injected a 5–15 KiB blob into history, blowing past the
+// 30 KiB tier-2 threshold every 2–3 turns. Each tier-2 firing
+// burns ~12K input + resets the prompt cache for the following
+// real turn — the dominant cost spike vs baseline. Sizing the
+// budget at 8 KiB brings the per-edit history payload back to
+// roughly the legacy cap; the line-number format change remains.
+//
+// Large files (rendered > 8 KiB) fall through to the slice mode
+// where each touched range gets ±[postEditSliceContext] lines and
+// the slice budget itself is enforced here.
+const postEditContentBudget = 8 * 1024
+
+// postEditSliceContext is the number of lines included on each side
+// of a touched range when slicing a large file. Matches the plan's
+// "±20 lines around each touched range" contract.
+const postEditSliceContext = 20
+
+// FormatPostEditContent renders the post-edit file content for the
+// LLM-facing tool result. Small files (rendered size within
+// [postEditContentBudget]) are returned in full with cat -n style
+// line numbers matching read_file's slice format. Larger files
+// collapse to one or more slices ±[postEditSliceContext] lines
+// around each touched range, merged when they overlap; the slice
+// headers report the line range and total file size so the LLM can
+// re-orient without a separate read_file call.
+//
+// touchedRanges may be nil (whole-file write) — in that case the
+// touched region is the entire file. An empty content blob returns a
+// short placeholder rather than nothing so the LLM sees a definite
+// "file now empty" signal.
+func FormatPostEditContent(path, content string, touchedRanges []LineRange) string {
+	if content == "" {
+		return fmt.Sprintf("Resulting file (%s) is now empty.", path)
+	}
+	lines := strings.Split(content, "\n")
+	total := len(lines)
+	// strings.Split on a trailing newline produces a final empty
+	// entry; treat it as part of the previous line for display so
+	// "Lines 1–N of N" matches what `wc -l` would say.
+	display := total
+	if total > 0 && lines[total-1] == "" {
+		display = total - 1
+	}
+
+	full := renderLineRange(path, lines, 1, display, display)
+	if len(full) <= postEditContentBudget {
+		return full
+	}
+
+	// Large file — render slices around touched ranges.
+	ranges := mergeAndPadRanges(touchedRanges, display, postEditSliceContext)
+	if len(ranges) == 0 {
+		// No touched ranges supplied (or all collapsed away). Fall
+		// back to a head slice so the LLM at least sees the file
+		// start; a marker advises read_file for the rest.
+		head := renderLineRange(path, lines, 1, min(display, postEditSliceContext*2), display)
+		return head + fmt.Sprintf("\n[file is %d lines and exceeds the per-result content budget; use read_file with offset/limit for the rest]", display)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Resulting file (%s, %d lines) — slices around modified regions:\n", path, display)
+	used := b.Len()
+	for i, r := range ranges {
+		slice := renderLineRange(path, lines, r.Start, r.End, display)
+		if used+len(slice) > postEditContentBudget {
+			remaining := len(ranges) - i
+			fmt.Fprintf(&b, "\n[%d additional slice(s) omitted to fit the per-result content budget; use read_file with offset/limit to view them]", remaining)
+			break
+		}
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(slice)
+		used = b.Len()
+	}
+	return b.String()
+}
+
+// renderLineRange formats a [start, end] (1-indexed, inclusive) slice
+// of `lines` with read_file's cat -n line-number style and a header
+// naming the range and the total. The header matches sliceLines'
+// format so a follow-up read_file with the same range produces a
+// near-identical payload — the LLM doesn't have to learn two layouts.
+func renderLineRange(path string, lines []string, start, end, total int) string {
+	if start < 1 {
+		start = 1
+	}
+	if end > total {
+		end = total
+	}
+	if end < start {
+		return fmt.Sprintf("Lines %d–%d of %d in %s\n(empty range)\n", start, end, total, path)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Lines %d–%d of %d in %s\n", start, end, total, path)
+	for i := start - 1; i < end; i++ {
+		fmt.Fprintf(&b, "%4d\t%s\n", i+1, lines[i])
+	}
+	return b.String()
+}
+
+// mergeAndPadRanges expands each range by `pad` lines on either side,
+// clamps to [1, total], and merges overlapping or touching ranges.
+// Returns ranges sorted by Start. A nil or empty input returns nil.
+func mergeAndPadRanges(ranges []LineRange, total, pad int) []LineRange {
+	if len(ranges) == 0 || total <= 0 {
+		return nil
+	}
+	padded := make([]LineRange, 0, len(ranges))
+	for _, r := range ranges {
+		s := r.Start - pad
+		if s < 1 {
+			s = 1
+		}
+		e := r.End + pad
+		if e > total {
+			e = total
+		}
+		if s > total {
+			continue
+		}
+		if e < 1 {
+			continue
+		}
+		padded = append(padded, LineRange{Start: s, End: e})
+	}
+	if len(padded) == 0 {
+		return nil
+	}
+	sort.Slice(padded, func(i, j int) bool { return padded[i].Start < padded[j].Start })
+	merged := []LineRange{padded[0]}
+	for _, r := range padded[1:] {
+		last := &merged[len(merged)-1]
+		if r.Start <= last.End+1 {
+			if r.End > last.End {
+				last.End = r.End
+			}
+			continue
+		}
+		merged = append(merged, r)
+	}
+	return merged
+}
+
 // EditFileTool lets the LLM propose search-and-replace edits to files.
 // It validates the search text and submits the proposal through
 // [Approver]; the approver runs the validation pipeline, sends
@@ -340,7 +560,7 @@ func (t *EditFileTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "edit_file",
-			Description: "Exact search-and-replace in a file. search must match verbatim (whitespace and newlines included). Keep search SHORT — only changing lines plus minimal context. Don't rewrite a whole function for a few-line change. Empty replace deletes; to insert, anchor with surrounding text and repeat the anchor in replace with the new code added.",
+			Description: "Exact search-and-replace in a file. Prefer the `edits` array for multi-spot patches in one call (each entry has its own `search`/`replace` and is applied in document order against the running buffer; atomic — if any entry fails, none apply). Use the top-level `search`/`replace` only for a single change. search text must match verbatim (whitespace and newlines included). Keep each search SHORT — only changing lines plus minimal context. Don't rewrite a whole function for a few-line change. Empty replace deletes; to insert, anchor with surrounding text and repeat the anchor in replace with the new code added.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -350,34 +570,70 @@ func (t *EditFileTool) Definition() llm.ToolDef {
 					},
 					"search": {
 						Type:        "string",
-						Description: "Exact text to find in the file. Must match verbatim.",
+						Description: "Single-edit form: exact text to find. Ignored when `edits` is non-empty.",
 					},
 					"replace": {
 						Type:        "string",
-						Description: "Text to replace the search text with. Empty string to delete.",
+						Description: "Single-edit form: replacement text. Empty string to delete. Ignored when `edits` is non-empty.",
+					},
+					"edits": {
+						Type:        "array",
+						Description: "Multi-edit form: each entry is {search, replace}, applied in document order against the running buffer. Atomic — if any entry fails its search match or safety check, the whole call fails and no edits apply. Prefer this form whenever you have more than one change in the same file.",
+						Items: &llm.FunctionParam{
+							Type: "object",
+							Properties: map[string]llm.FunctionParam{
+								"search": {
+									Type:        "string",
+									Description: "Exact text to find in the running buffer. Must match verbatim.",
+								},
+								"replace": {
+									Type:        "string",
+									Description: "Replacement text. Empty string to delete the matched search text.",
+								},
+							},
+							Required: []string{"search", "replace"},
+						},
 					},
 					"reason": {
 						Type:        "string",
 						Description: "Brief explanation of the change, shown to the developer.",
 					},
 				},
-				Required: []string{"path", "search", "replace", "reason"},
+				Required: []string{"path", "reason"},
 			},
 		},
 	}
 }
 
-type editArgs struct {
-	Path    string `json:"path"`
+// editSpec is one search/replace pair in the multi-edit `edits` array.
+// Per-spec failures fail the whole edit_file call (atomicity); position
+// in the failure error names the 0-based index so the LLM can correct.
+type editSpec struct {
 	Search  string `json:"search"`
 	Replace string `json:"replace"`
-	Reason  string `json:"reason"`
+}
+
+type editArgs struct {
+	Path    string     `json:"path"`
+	Search  string     `json:"search"`
+	Replace string     `json:"replace"`
+	Edits   []editSpec `json:"edits"`
+	Reason  string     `json:"reason"`
 }
 
 // Execute validates the edit and submits an [EditProposal] through the
 // configured [Approver]. The approver runs the validation
 // pipeline, sends the proposal to the frontend, and blocks on
 // approval+continue; its returned body becomes the tool result.
+//
+// Two argument shapes are supported. The single-edit form uses the
+// top-level `search`/`replace` fields and preserves the legacy silent-
+// retry budget on a search mismatch (handy for the LLM correcting
+// near-miss whitespace on its own turn). The multi-edit form passes an
+// `edits` array; the call is atomic — every entry is checked against a
+// running in-memory buffer in order, and the first failure aborts the
+// whole batch with a structured error naming the failed index. No
+// partial applies, no silent-retry budget consumed.
 func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	if len(call.Function.Arguments) > maxToolArgsBytes {
 		return errorResult(fmt.Sprintf("Error: arguments too large (%d bytes, max %d). Use a narrower edit.", len(call.Function.Arguments), maxToolArgsBytes))
@@ -389,15 +645,26 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResul
 	if args.Path == "" {
 		return errorResult("Error: path is required")
 	}
-	if len(args.Search) > maxDiffInputBytes || len(args.Replace) > maxDiffInputBytes {
-		return errorResult(fmt.Sprintf("Error: search/replace too large (max %d bytes each). Use a narrower edit.", maxDiffInputBytes))
-	}
 
 	content, canon, err := t.resolveContent(args.Path)
 	if err != nil {
 		return errorResult(fmt.Sprintf("Error: cannot read %s: %v", args.Path, err))
 	}
 
+	if len(args.Edits) > 0 {
+		return t.executeBatch(ctx, call, args, content, canon)
+	}
+	return t.executeSingle(ctx, call, args, content, canon)
+}
+
+// executeSingle handles the legacy `{search, replace}` form. Behavior
+// preserved verbatim from pre-batching: silent-retry budget on a
+// missed search, fuzzy-whitespace fallback, per-edit corruption +
+// over-rewrite checks, single [EditProposal] submission.
+func (t *EditFileTool) executeSingle(ctx context.Context, call llm.ToolCall, args editArgs, content, canon string) ToolResult {
+	if len(args.Search) > maxDiffInputBytes || len(args.Replace) > maxDiffInputBytes {
+		return errorResult(fmt.Sprintf("Error: search/replace too large (max %d bytes each). Use a narrower edit.", maxDiffInputBytes))
+	}
 	if args.Search == "" && content != "" {
 		return errorResult("Error: search field cannot be empty (file is not empty — copy existing text to anchor your edit)")
 	}
@@ -445,6 +712,91 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResul
 		Path:            args.Path,
 		CanonPath:       canon,
 		ExpectedContent: expectedContent,
+		TouchedLines:    changedLineRanges(content, expectedContent),
+	})
+	return ToolResult{Content: body, IsError: isErr}
+}
+
+// executeBatch handles the multi-edit `edits` array. Each entry is
+// validated and applied to a running in-memory buffer in order; any
+// per-entry failure (search not found, ambiguous match, corruption
+// guard) aborts the whole call with a structured error naming the
+// failed index. Atomicity is structural: the [Approver] sees a single
+// proposal covering the cumulative diff only when every entry passed.
+//
+// Differences from the single-edit path: no silent-retry budget (a
+// missed search fails the batch immediately so the LLM gets a single
+// clean retry rather than budget-eating partial applies), and no
+// fuzzy-whitespace fallback (the multi-edit form is for the LLM that
+// has the file content already and is patching N spots in one call —
+// per-spot whitespace forgiveness encourages sloppier sub-edits).
+func (t *EditFileTool) executeBatch(ctx context.Context, call llm.ToolCall, args editArgs, content, canon string) ToolResult {
+	running := content
+	for i, e := range args.Edits {
+		if len(e.Search) > maxDiffInputBytes || len(e.Replace) > maxDiffInputBytes {
+			return errorResult(fmt.Sprintf("Error: edits[%d] search/replace too large (max %d bytes each). Use a narrower edit.", i, maxDiffInputBytes))
+		}
+		if e.Search == "" && running != "" {
+			return errorResult(fmt.Sprintf("Error: edits[%d] search field cannot be empty (file is not empty — copy existing text to anchor your edit)", i))
+		}
+
+		search := stripLineNumberPrefixes(e.Search)
+
+		matchCount := strings.Count(running, search)
+		if matchCount != 1 {
+			reason := "search text not found in running buffer (after prior edits in this call were applied)"
+			if matchCount > 1 {
+				reason = fmt.Sprintf("search text matches %d locations in running buffer (expected exactly 1)", matchCount)
+			}
+			slog.Info("edit_file: batch entry failed search match",
+				"path", args.Path, "index", i,
+				"matches", matchCount, "search_len", len(search))
+			return errorResult(fmt.Sprintf(
+				"Error: edits[%d] failed: %s. No edits in this call were applied (atomic). Make the search text more specific, then retry the whole batch.\n\nCurrent file (%s):\n\n%s",
+				i, reason, args.Path, TruncateForPreview(content)))
+		}
+
+		if msg := detectLikelyCorruption(search, e.Replace, running); msg != "" {
+			slog.Warn("edit_file: batch entry rejected as likely-corrupting",
+				"path", args.Path, "index", i, "reason", msg)
+			return errorResult(fmt.Sprintf("Error: edits[%d]: %s No edits in this call were applied (atomic).", i, msg))
+		}
+
+		if ratio, lines := editOverlapRatio(search, e.Replace); lines >= editOverlapMinLines && ratio >= editOverlapWarningThreshold {
+			slog.Warn("edit_file: batch entry over-rewrite detected — search and replace mostly identical",
+				"path", args.Path, "index", i,
+				"search_lines", lines,
+				"unchanged_ratio", ratio,
+				"hint", "split into smaller edits that only change the lines that differ")
+		}
+
+		running = strings.Replace(running, search, e.Replace, 1)
+	}
+
+	// Reset silent-retry state on successful atomic batch — the LLM
+	// just demonstrated it can read the file accurately. The mu lock
+	// matches the single-edit path's reset on a clean match.
+	t.mu.Lock()
+	t.silentRetries = 0
+	t.mu.Unlock()
+
+	// The frontend approval pane displays one diff for the whole
+	// batch (Search = original full content, Replace = post-batch
+	// full content). For multi-spot patches this matches what the
+	// developer would see in a "show changes" overlay anyway, and
+	// avoids the alternative of N consecutive approval prompts.
+	body, isErr := t.approver.Propose(ctx, EditProposal{
+		Edit: event.PendingEdit{
+			ID:      call.ID,
+			Path:    args.Path,
+			Search:  content,
+			Replace: running,
+			Reason:  args.Reason,
+		},
+		Path:            args.Path,
+		CanonPath:       canon,
+		ExpectedContent: running,
+		TouchedLines:    changedLineRanges(content, running),
 	})
 	return ToolResult{Content: body, IsError: isErr}
 }

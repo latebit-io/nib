@@ -732,6 +732,213 @@ func TestEditFileTool_RejectsDuplicationEdit(t *testing.T) {
 	}
 }
 
+// TestEditFileTool_BatchAppliesAllInOneProposal locks in the happy
+// path of the multi-edit `edits` array: every per-spot edit lands
+// against a running buffer, and a single [EditProposal] is submitted
+// covering the cumulative diff. The approver sees one Search/Replace
+// pair (original full content → post-batch full content), not N.
+func TestEditFileTool_BatchAppliesAllInOneProposal(t *testing.T) {
+	const orig = "a := 1\nb := 2\nc := 3\n"
+	ws := &testWorkspace{
+		files:     map[string]string{"main.go": orig},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	app := &fakeApprover{}
+	tool := NewEditFileTool(ws, cache, app)
+
+	args := mustMarshal(t, editArgs{
+		Path: "main.go",
+		Edits: []editSpec{
+			{Search: "a := 1", Replace: "a := 10"},
+			{Search: "b := 2", Replace: "b := 20"},
+			{Search: "c := 3", Replace: "c := 30"},
+		},
+		Reason: "scale by 10",
+	})
+	result := tool.Execute(context.Background(), llm.ToolCall{
+		ID:       "call-batch",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	})
+
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Content)
+	}
+	if app.received == nil {
+		t.Fatalf("expected approver to receive a single proposal")
+	}
+	wantFinal := "a := 10\nb := 20\nc := 30\n"
+	if app.received.ExpectedContent != wantFinal {
+		t.Errorf("ExpectedContent mismatch:\n got  %q\n want %q", app.received.ExpectedContent, wantFinal)
+	}
+	if app.received.Edit.Search != orig {
+		t.Errorf("proposal Search should be original full content, got %q", app.received.Edit.Search)
+	}
+	if app.received.Edit.Replace != wantFinal {
+		t.Errorf("proposal Replace should be post-batch full content, got %q", app.received.Edit.Replace)
+	}
+	if app.received.Edit.ID != "call-batch" {
+		t.Errorf("expected edit ID call-batch, got %q", app.received.Edit.ID)
+	}
+}
+
+// TestEditFileTool_BatchAtomicityOnFailure locks in the atomicity
+// invariant: when any single entry in the `edits` array fails its
+// search match, the whole call returns an error WITHOUT submitting a
+// proposal — no partial applies. The error names the failed index so
+// the LLM can correct precisely.
+func TestEditFileTool_BatchAtomicityOnFailure(t *testing.T) {
+	ws := &testWorkspace{
+		files:     map[string]string{"main.go": "a := 1\nb := 2\nc := 3\n"},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	app := &fakeApprover{}
+	tool := NewEditFileTool(ws, cache, app)
+
+	args := mustMarshal(t, editArgs{
+		Path: "main.go",
+		Edits: []editSpec{
+			{Search: "a := 1", Replace: "a := 10"},
+			{Search: "DOES_NOT_EXIST", Replace: "anything"},
+			{Search: "c := 3", Replace: "c := 30"},
+		},
+		Reason: "should fail atomically",
+	})
+	result := tool.Execute(context.Background(), llm.ToolCall{
+		ID:       "1",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	})
+
+	if !result.IsError {
+		t.Fatalf("expected IsError=true on mid-batch failure")
+	}
+	if app.received != nil {
+		t.Errorf("approver MUST NOT receive a proposal on partial failure (atomicity violated): got %+v", app.received)
+	}
+	if !strings.Contains(result.Content, "edits[1]") {
+		t.Errorf("expected error to name failed index edits[1], got %q", result.Content)
+	}
+	// Cache must still hold the pre-batch content (no partial mutation visible).
+	cached, ok := cache.Get("main.go")
+	if !ok {
+		t.Fatalf("expected cache to hold original content after failed batch")
+	}
+	if cached != "a := 1\nb := 2\nc := 3\n" {
+		t.Errorf("cache mutated despite atomic failure: %q", cached)
+	}
+}
+
+// TestEditFileTool_BatchAppliesInOrder verifies that edits are applied
+// in document-order against the running buffer: a later edit can
+// match text introduced by an earlier edit. This is the contract the
+// LLM relies on when batching dependent patches.
+func TestEditFileTool_BatchAppliesInOrder(t *testing.T) {
+	ws := &testWorkspace{
+		files:     map[string]string{"main.go": "FIRST\n"},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	app := &fakeApprover{}
+	tool := NewEditFileTool(ws, cache, app)
+
+	args := mustMarshal(t, editArgs{
+		Path: "main.go",
+		Edits: []editSpec{
+			{Search: "FIRST", Replace: "SECOND"},
+			{Search: "SECOND", Replace: "THIRD"},
+		},
+		Reason: "chain rename",
+	})
+	result := tool.Execute(context.Background(), llm.ToolCall{
+		ID:       "1",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	})
+
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Content)
+	}
+	if app.received == nil {
+		t.Fatalf("expected approver to receive a proposal")
+	}
+	if got := app.received.ExpectedContent; got != "THIRD\n" {
+		t.Errorf("expected final content 'THIRD\\n', got %q", got)
+	}
+}
+
+// TestEditFileTool_BatchPerEditOverRewriteCheck confirms the
+// over-rewrite warning fires per-edit (not cumulative) — an entry
+// where search and replace are mostly identical logs a warning but
+// does not block the batch. The legacy single-edit warning floor and
+// threshold apply identically.
+func TestEditFileTool_BatchPerEditOverRewriteCheck(t *testing.T) {
+	// A 6-line search/replace where 5 lines are identical → ratio ~0.83,
+	// above the 0.80 threshold. Should warn but not block.
+	search := "line A\nline B\nline C\nline D\nline E\nold tail"
+	replace := "line A\nline B\nline C\nline D\nline E\nnew tail"
+	ws := &testWorkspace{
+		files:     map[string]string{"main.go": search + "\n"},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	app := &fakeApprover{}
+	tool := NewEditFileTool(ws, cache, app)
+
+	args := mustMarshal(t, editArgs{
+		Path: "main.go",
+		Edits: []editSpec{
+			{Search: search, Replace: replace},
+		},
+		Reason: "swap tail",
+	})
+	result := tool.Execute(context.Background(), llm.ToolCall{
+		ID:       "1",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	})
+
+	if result.IsError {
+		t.Fatalf("over-rewrite must warn, not block: %s", result.Content)
+	}
+	if app.received == nil {
+		t.Fatalf("expected approver to receive a proposal")
+	}
+}
+
+// TestEditFileTool_BatchTouchedLinesComputed verifies that the
+// post-batch [EditProposal] carries a TouchedLines slice naming each
+// modified region. The downstream formatter uses this to slice large
+// files around the edits.
+func TestEditFileTool_BatchTouchedLinesComputed(t *testing.T) {
+	orig := "k1\nk2\nk3\nk4\nk5\n"
+	ws := &testWorkspace{
+		files:     map[string]string{"main.go": orig},
+		inContext: map[string]bool{},
+	}
+	cache := NewFileCache()
+	app := &fakeApprover{}
+	tool := NewEditFileTool(ws, cache, app)
+
+	args := mustMarshal(t, editArgs{
+		Path: "main.go",
+		Edits: []editSpec{
+			{Search: "k2", Replace: "K2"},
+			{Search: "k4", Replace: "K4"},
+		},
+		Reason: "uppercase 2 and 4",
+	})
+	tool.Execute(context.Background(), llm.ToolCall{
+		ID:       "1",
+		Function: llm.FunctionCall{Name: "edit_file", Arguments: string(args)},
+	})
+
+	if app.received == nil {
+		t.Fatalf("expected approver to receive a proposal")
+	}
+	if len(app.received.TouchedLines) == 0 {
+		t.Errorf("expected TouchedLines to be populated; got empty")
+	}
+}
+
 func TestEditFileTool_FuzzyWhitespaceCorrection(t *testing.T) {
 	content := "package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n"
 	ws := &testWorkspace{

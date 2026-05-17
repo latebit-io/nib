@@ -150,6 +150,7 @@ func (t *ReplaceFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolRe
 		Path:            args.Path,
 		CanonPath:       canon,
 		ExpectedContent: args.Content,
+		TouchedLines:    changedLineRanges(existing, args.Content),
 	})
 	return ToolResult{Content: body, IsError: isErr}
 }

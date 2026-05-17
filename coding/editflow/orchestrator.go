@@ -254,12 +254,29 @@ func (o *Orchestrator) waitForApproval(ctx context.Context, coord *approval.Coor
 // holds the true post-apply state; ExpectedContent holds the agent's
 // prediction. Diagnostics, when configured, are appended after a
 // brief delay so the language server has time to re-parse.
+//
+// The post-edit content is rendered via [tools.FormatPostEditContent]:
+// cat -n line numbers (matching read_file's slice format) for small
+// files, slices ±20 lines around modified regions for large ones. The
+// LLM sees the new file state inline and does not need to follow up
+// with a separate read_file call — eliminating the read-before-edit
+// pattern flagged by the turn-count investigation.
+//
+// Touched-line ranges follow the developer's actual diff. When the
+// developer modifies the replacement text in the overlay, the
+// agent's prediction (p.TouchedLines, computed from p.ExpectedContent)
+// is stale; recomputing against `applied` keeps the slice headers
+// honest about what the file really looks like post-approval.
 func (o *Orchestrator) afterApproval(p tools.EditProposal, applied string) (string, outcome) {
 	o.deps.Cache.Set(p.CanonPath, applied)
 	o.deps.Send(event.AgentStatus{Status: event.StatusThinking})
 
-	result := fmt.Sprintf("Edit applied successfully.\n\nCurrent file (%s):\n\n%s",
-		p.Path, tools.TruncateForPreview(applied))
+	touched := p.TouchedLines
+	if applied != p.ExpectedContent {
+		touched = nil // developer edited the overlay; predicted ranges no longer reflect reality
+	}
+	result := fmt.Sprintf("Edit applied successfully.\n\n%s",
+		tools.FormatPostEditContent(p.Path, applied, touched))
 
 	if o.deps.DiagProvider != nil {
 		time.Sleep(o.deps.DiagDelay)

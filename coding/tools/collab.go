@@ -72,4 +72,20 @@ type EditProposal struct {
 	// the edit. The orchestrator seeds the cache with this value
 	// post-approval so subsequent tool reads see the post-edit state.
 	ExpectedContent string
+
+	// TouchedLines names the 1-indexed line ranges in ExpectedContent
+	// that the edit changed. Used by the post-approval body to slice
+	// large files around the modified regions instead of dumping the
+	// whole file. Optional: a nil slice tells the formatter "treat
+	// the entire file as touched" (rendered as full-file or head
+	// truncation depending on size).
+	TouchedLines []LineRange
+}
+
+// LineRange is a 1-indexed inclusive line range, [Start, End]. Used by
+// the post-edit content formatter to render slices around modified
+// regions when a file is too large to include in full.
+type LineRange struct {
+	Start int
+	End   int
 }

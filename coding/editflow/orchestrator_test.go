@@ -297,8 +297,17 @@ func TestHandle_Approve_DeveloperModifiedReplace(t *testing.T) {
 	if cached == p.ExpectedContent {
 		t.Errorf("cache equals ExpectedContent — orchestrator regressed to using the prediction; subsequent read_file would return stale data")
 	}
-	if !strings.Contains(body, developerModified) {
-		t.Errorf("body should embed the developer-modified content, got %q", body)
+	// The post-approval body now renders content with cat -n style
+	// line numbers (so the LLM doesn't need a follow-up read_file).
+	// The raw multiline developerModified string is therefore not a
+	// substring of the body — assert against the distinguishing line
+	// content instead, which proves the developer's overlay edit
+	// (and not the agent's prediction) shaped the body.
+	if !strings.Contains(body, "developer edited the overlay before approving") {
+		t.Errorf("body should reflect the developer-modified content, got %q", body)
+	}
+	if strings.Contains(body, "Current file (") {
+		t.Errorf("body should use the new line-numbered post-edit formatter, not the legacy 'Current file (...)' prefix; got %q", body)
 	}
 }
 

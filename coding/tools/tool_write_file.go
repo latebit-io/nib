@@ -29,7 +29,7 @@ func (t *WriteFileTool) Definition() llm.ToolDef {
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "write_file",
-			Description: "Create a new file. Errors if the file already exists — use edit_file for existing files.",
+			Description: "Create a new file. Errors if the file already exists — use edit_file for existing files. Multiple write_file calls in one turn are supported and encouraged for batched file creation (e.g., scaffolding a new module with several files at once). The tool result includes the resulting file content — no separate read_file is needed afterwards.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -92,5 +92,10 @@ func (t *WriteFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResu
 	t.cache.Set(t.workspace.CanonPath(args.Path), args.Content)
 	t.creator.FileCreated(ctx, args.Path)
 
-	return textResult(fmt.Sprintf("File created: %s", args.Path))
+	// Include the resulting file content in the tool result so the
+	// LLM does not need a follow-up read_file to see what landed —
+	// this is the "edit-tool results include post-edit content"
+	// half of the edit-tool-batching plan, applied to file creation.
+	body := fmt.Sprintf("File created: %s\n\n%s", args.Path, FormatPostEditContent(args.Path, args.Content, nil))
+	return textResult(body)
 }

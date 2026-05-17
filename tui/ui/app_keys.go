@@ -28,17 +28,13 @@ import (
 //     and reaches the focused pane.
 
 // handleAgentInputKey routes a keypress while the agent input is focused.
-// A small allow-list of UI shortcuts (model selector, autonomy dial,
-// terse toggle) is intercepted; everything else flows to the agent
-// pane as input. Caller invokes only when AgentPane.IsInputActive()
-// is true.
+// A small allow-list of UI shortcuts (model selector, terse toggle) is
+// intercepted; everything else flows to the agent pane as input.
+// Caller invokes only when AgentPane.IsInputActive() is true.
 func (m *AppModel) handleAgentInputKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch m.Keymap.Match(msg) {
 	case ActionModelSelector:
 		return m.openModelSelector()
-	case ActionDialCycle:
-		m.cycleDial()
-		return nil
 	case ActionTerseToggle:
 		m.toggleTerse()
 		return nil
@@ -94,10 +90,6 @@ func (m *AppModel) handleGlobalAction(action Action) (tea.Cmd, bool) {
 		}
 		// No overlay, no intent — fall through to focused pane.
 		return nil, false
-
-	case ActionDialCycle:
-		m.cycleDial()
-		return nil, true
 
 	case ActionTerseToggle:
 		m.toggleTerse()

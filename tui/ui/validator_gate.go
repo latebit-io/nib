@@ -56,25 +56,11 @@ func summaryHasBlock(summaries []event.ValidatorSummary) bool {
 // when a Block-bearing edit auto-applies because the developer
 // already approved a prior Block on the same file this session. The
 // banner names the file AND the verdicts so a session log reviewer
-// can tell that the snooze (not Yolo, not LevelTrusted alone) was
-// the reason auto-apply fired.
+// can tell that the snooze was the reason auto-apply fired.
 func snoozeBannerForSummaries(path string, summaries []event.ValidatorSummary) string {
 	return fmt.Sprintf(
 		"\n[validator: %s — auto-applied (snoozed: %s already approved this session)]\n",
 		joinNonPassVerdicts(summaries), path)
-}
-
-// yoloOverrideBannerForSummaries renders the agent-pane meta line
-// shown when LevelYolo auto-applies an edit that would otherwise
-// have surfaced under LevelTrusted. The banner names the verdicts
-// that were overridden so the developer reviewing the session log
-// can see exactly which validator findings were ignored — without
-// it, the only signal of an architecture-cap or lint-stage failure
-// would be the on-disk result.
-func yoloOverrideBannerForSummaries(summaries []event.ValidatorSummary) string {
-	return fmt.Sprintf(
-		"\n[validator: %s — auto-applied (yolo); review on-disk result]\n",
-		joinNonPassVerdicts(summaries))
 }
 
 // reviewBannerForSummaries renders the agent-pane meta line shown

@@ -2,7 +2,7 @@ package ui
 
 import tea "charm.land/bubbletea/v2"
 
-// Terse and autonomy-dial callbacks and toggles.
+// Terse callbacks and toggle.
 // Extracted from app.go (Phase 1 of AppModel decomposition).
 
 // SetTerse sets the terse mode indicator. Use this at startup to sync
@@ -20,15 +20,6 @@ func (m *AppModel) toggleTerse() {
 	m.terse = m.ToggleTerse(!m.terse)
 }
 
-// cycleDial advances the autonomy dial to its next level and notifies the
-// OnDialChange callback if wired.
-func (m *AppModel) cycleDial() {
-	m.dial = m.dial.Cycle()
-	if m.OnDialChange != nil {
-		m.OnDialChange(m.dial)
-	}
-}
-
 // handleSetAgentCallbacks installs generic agent callbacks from
 // inside the Update goroutine — the only race-free path for callers
 // that send the message after the Bubble Tea event loop has started.
@@ -43,9 +34,8 @@ func (m *AppModel) handleSetAgentCallbacks(msg setAgentCallbacksMsg) (tea.Model,
 }
 
 // handleSetCodingCallbacks installs coding-flavored agent callbacks
-// from inside the Update goroutine. Same race-avoidance rationale as
-// [AppModel.handleSetAgentCallbacks].
-func (m *AppModel) handleSetCodingCallbacks(msg setCodingCallbacksMsg) (tea.Model, tea.Cmd) {
-	m.OnDialChange = msg.onDialChange
+// from inside the Update goroutine. Currently a no-op — kept for
+// future coding-flavored callbacks.
+func (m *AppModel) handleSetCodingCallbacks(_ setCodingCallbacksMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }

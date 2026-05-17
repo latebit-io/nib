@@ -18,7 +18,6 @@ func TestKeymap_MacOptionRuneFallbacks(t *testing.T) {
 		want   Action
 	}{
 		{"Alt+G / ©", 'g', '©', ActionAgentPlan},
-		{"Alt+A / å", 'a', 'å', ActionDialCycle},
 		{"Alt+M / µ", 'm', 'µ', ActionModelSelector},
 		{"Alt+T / †", 't', '†', ActionTerseToggle},
 	}

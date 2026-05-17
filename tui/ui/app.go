@@ -53,10 +53,9 @@ type setAgentCallbacksMsg struct {
 
 // setCodingCallbacksMsg installs coding-flavored agent callbacks on
 // the AppModel from inside the Update goroutine. Same race-avoidance
-// rationale as [setAgentCallbacksMsg].
-type setCodingCallbacksMsg struct {
-	onDialChange func(level session.AutonomyLevel)
-}
+// rationale as [setAgentCallbacksMsg]. Currently empty — coding-
+// flavored callbacks may be re-added when needed.
+type setCodingCallbacksMsg struct{}
 
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
@@ -83,10 +82,9 @@ type AppModel struct {
 	Help HelpModel
 	// SearchOverlay is the project-wide search overlay state.
 	SearchOverlay       SearchOverlayModel
-	recentMouse         bool                  // tracks leaked CSI prefix from unparsed mouse events
-	dial                session.AutonomyLevel // current autonomy level; defaults to session.LevelTrusted
-	terse               bool                  // true when terse output mode is active
-	pendingModelProfile string                // profile of the in-flight ListModels request (stale detection)
+	recentMouse         bool   // tracks leaked CSI prefix from unparsed mouse events
+	terse               bool   // true when terse output mode is active
+	pendingModelProfile string // profile of the in-flight ListModels request (stale detection)
 
 	// ListModels returns available models for the given profile.
 	// Set by the entry point — nil when no LLM is configured.
@@ -120,10 +118,6 @@ type AppModel struct {
 	// ToggleTerse enables or disables terse output mode at runtime.
 	// Returns the new state (true = enabled). Set by the entry point.
 	ToggleTerse func(enabled bool) bool
-
-	// OnDialChange is called when the autonomy dial changes.
-	// Set by the entry point — nil when no agent is configured.
-	OnDialChange func(level session.AutonomyLevel)
 
 	// Services holds shared runtime services (clipboard, LSP, etc.).
 	Services *Services
@@ -213,9 +207,10 @@ func SetAgentCallbacksMsg(toggleTerse func(enabled bool) bool, initialTerse bool
 
 // SetCodingCallbacksMsg constructs a tea.Msg that installs
 // coding-flavored agent callbacks on the AppModel. Same race-avoidance
-// rationale as [SetAgentCallbacksMsg].
-func SetCodingCallbacksMsg(onDialChange func(level session.AutonomyLevel)) tea.Msg {
-	return setCodingCallbacksMsg{onDialChange: onDialChange}
+// rationale as [SetAgentCallbacksMsg]. Currently a no-op — kept for
+// future coding-flavored callbacks.
+func SetCodingCallbacksMsg() tea.Msg {
+	return setCodingCallbacksMsg{}
 }
 
 // NewApp creates the application model.
@@ -227,7 +222,6 @@ func NewApp(sess *session.Session) AppModel {
 		Session:      sess,
 		Services:     svc,
 		Keymap:       km,
-		dial:         session.LevelTrusted,
 		blockedPaths: map[string]bool{},
 		editorPool:   make(map[string]*editor.Editor),
 	}

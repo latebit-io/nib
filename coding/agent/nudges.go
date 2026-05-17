@@ -13,10 +13,9 @@ import (
 //     enumerating outstanding work AND the tracked task tree is
 //     empty. Catches the failure mode where the model wraps up
 //     prematurely on a missing/unloaded plan.
-//  2. Permission gate (autonomous mode only) — the assistant ended
-//     a turn with a permission-seeking question instead of a tool
-//     call. Under autonomous operation that's a stall the agent
-//     should turn back into action.
+//  2. Permission gate — the assistant ended a turn with a
+//     permission-seeking question instead of a tool call. The agent
+//     turns that stall back into action.
 //
 // Both gates use string-pattern detectors that live in
 // [coding/nudges]; the agent-side glue here owns the per-call

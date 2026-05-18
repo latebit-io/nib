@@ -51,14 +51,8 @@ func (t *ProjectInitTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "project_init",
-			Description: "Bootstrap the project's task-tracking document at /project.md with the " +
-				"given name and top-level phases. Call this BEFORE project_task_add or update_task " +
-				"on a fresh repo — the work tree gate blocks task activation until /project.md " +
-				"exists and is loaded. Idempotent: if /project.md already exists, the existing " +
-				"plan is preserved and only the in-memory tree is refreshed. " +
-				"Use project_init for the structured project plan; use memory_publish for session " +
-				"notes, design docs, and other arbitrary content.",
+			Name:        "project_init",
+			Description: "Bootstrap /project.md with the given name and top-level phases. Call BEFORE project_task_add or update_task on a fresh repo. Idempotent — never overwrites an existing /project.md.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{
@@ -67,13 +61,9 @@ func (t *ProjectInitTool) Definition() llm.ToolDef {
 						Description: "Project display name (e.g. 'Pac-Man Clone'). Goes into the YAML frontmatter.",
 					},
 					"phases": {
-						Type: "array",
-						Description: "Top-level phase headings as plain titles (e.g. " +
-							"['Foundation', 'Movement', 'Ghosts', 'Polish']). Each becomes an H1 in /project.md. " +
-							"Pass them all in this call — project_init is idempotent and a second call will " +
-							"NOT add phases to an existing /project.md. Empty array creates the doc with only " +
-							"the project header; to add phases later, edit /project.md directly via memory tools.",
-						Items: &llm.FunctionParam{Type: "string"},
+						Type:        "array",
+						Description: "Top-level phase headings (e.g. ['Foundation', 'Movement', 'Ghosts', 'Polish']). Each becomes an H1. Pass all phases on the first call — idempotent reruns do not add phases.",
+						Items:       &llm.FunctionParam{Type: "string"},
 					},
 				},
 				Required: []string{"name"},

@@ -170,6 +170,27 @@ func TestSystemPromptAutonomyRules(t *testing.T) {
 	}
 }
 
+// TestSystemPromptDistinguishesProjectInitFromMemoryPublish locks the
+// cross-tool guidance that prevents the Pac-Man-eval failure where the
+// LLM used memory_publish to bootstrap /project.md, then got stuck
+// because the work tree gate did not reload. The disambiguation used
+// to live on project_init's tool description; it relocated to the
+// system prompt's Tool Notes (cross-tool guidance belongs there, not
+// inside a single tool's schema). See
+// coding/tools/tool_project_init_test.go for the in-description test
+// that became scoped to "Idempotent" after the move.
+func TestSystemPromptDistinguishesProjectInitFromMemoryPublish(t *testing.T) {
+	t.Parallel()
+
+	loader := prompts.NewPromptLoader("")
+	system := loader.SystemPrompt(prompts.SystemPromptData{})
+	for _, want := range []string{"project_init", "memory_publish", "/project.md"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system prompt missing %q (tool-disambiguation guidance)", want)
+		}
+	}
+}
+
 func TestSystemPromptIncludesMemorySection(t *testing.T) {
 	loader := prompts.NewPromptLoader("")
 	system := loader.SystemPrompt(prompts.SystemPromptData{})

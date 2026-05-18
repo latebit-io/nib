@@ -40,13 +40,8 @@ func (t *ProjectTaskAddTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name: "project_task_add",
-			Description: "Append a new `[ ]` pending task to /project.md under the given phase and " +
-				"feature. The phase is located by case-insensitive substring match (e.g. 'Phase 3' " +
-				"or part of its title). The feature is matched under that phase; if not present, " +
-				"it is created as a new `## Feature` heading. An optional `link` argument attaches " +
-				"a supplementary memory-doc path, appended to the task title as a markdown link " +
-				"(e.g. '- [ ] Make renderer ([details](/game/renderer.md))').",
+			Name:        "project_task_add",
+			Description: "Append a new `[ ]` task to /project.md under the given phase and feature. Phase matched by case-insensitive substring; feature created as `## Feature` if absent. Optional `link` appends a markdown link to the task title.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

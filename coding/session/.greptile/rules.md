@@ -4,7 +4,7 @@
 
 # Key Invariants
 
-- **Edit approval is two-step.** `ReviewEdit` (marks reviewed) then `ApproveEdit` / `PrepareApproval` + `CompleteApproval` (fail if not reviewed). No blind approvals.
+- **Edit approval is three-step.** `ReviewEdit` (marks reviewed) → `PrepareApproval` (validates + returns plan; fails if not reviewed) → `CompleteApproval` / `AbortApproval`. No blind approvals.
 - **All editor map keys must go through `CanonPath()`** for consistency.
 - **`resolvePath()` must reject paths escaping `projectRoot`.**
 - **`SwitchTo()` must NOT cancel the agent** — multi-file work continues across switches.

@@ -278,8 +278,8 @@ func deleteMatching(m map[string]bool, pred func(string) bool) {
 // buffer) and then proposed an edit_file on it.
 //
 // Callers must hold a non-nil s.pendingEdit — all public entry points
-// (ReviewEdit, ApproveEdit, PrepareApproval) early-return before reaching
-// here, so the nil case is not defended against.
+// (ReviewEdit, PrepareApproval) early-return before reaching here, so
+// the nil case is not defended against.
 func (s *Session) openFileForEdit() *openfile.OpenFile {
 	path := s.pendingEdit.Path
 	if path == "" {

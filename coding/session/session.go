@@ -53,7 +53,7 @@ type agentPort interface {
 // Frontends read its state to render and call its methods to drive the workflow.
 //
 // Concurrency: the TUI goroutine calls most methods (SubmitGoal, SwitchTo,
-// ApproveEdit, etc.) while the agent goroutine calls Workspace methods
+// PrepareApproval, etc.) while the agent goroutine calls Workspace methods
 // (ReadFile, WriteFile, ListFiles, CanonPath). The mu field guards the
 // editors map and activeFile so both goroutines can safely access them.
 type Session struct {
@@ -102,7 +102,7 @@ type Session struct {
 	// lastEditedFile only reflects edits that actually landed.
 	stagedEditFile string
 
-	// editReviewed is set by ReviewEdit. ApproveEdit requires it.
+	// editReviewed is set by ReviewEdit. PrepareApproval requires it.
 	// This enforces the contract: every frontend must compute and present
 	// the diff before approving — no blind approvals.
 	editReviewed bool
@@ -124,15 +124,14 @@ type Session struct {
 
 	// pendingProposedReplace stores the agent's originally-proposed
 	// replacement text for the active proposal. Compared to the applied
-	// replacement in ApproveEdit so the "accepted" capture event can
-	// include the pre-modification text when the developer edited the
-	// proposal in the diff overlay.
+	// replacement in CompleteApproval so the "accepted" capture event
+	// can include the pre-modification text when the developer edited
+	// the proposal in the diff overlay.
 	pendingProposedReplace string
 
 	// pendingApproval carries the edit identity and applied search/replace
-	// from PrepareApproval to CompleteApproval so the staged-flow path can
-	// emit the same "accepted" capture event as ApproveEdit. Cleared by
-	// CompleteApproval and AbortApproval.
+	// from PrepareApproval to CompleteApproval so the latter can emit the
+	// "accepted" capture event. Cleared by CompleteApproval and AbortApproval.
 	pendingApproval *stagedApproval
 
 	// langSyncer is the language service port (optional, nil when no LSP).
@@ -401,8 +400,8 @@ func (s *Session) Close() {
 	}
 }
 
-// Edit-approval methods (ReviewEdit, ApproveEdit, PrepareApproval,
-// ApprovalPlan, CompleteApproval, AbortApproval, RejectEdit,
+// Edit-approval methods (ReviewEdit, PrepareApproval, ApprovalPlan,
+// CompleteApproval, AbortApproval, RejectEdit,
 // computeLineOrigins) live in approval.go.
 
 // --- Agent Event Handling ---

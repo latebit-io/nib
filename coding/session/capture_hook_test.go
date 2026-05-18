@@ -278,20 +278,18 @@ func TestCaptureNoValidatorKindWhenSummariesEmpty(t *testing.T) {
 func TestCaptureAcceptedIncludesProposedReplaceWhenModified(t *testing.T) {
 	t.Parallel()
 
-	sess := newTestSession("hello world")
+	sess := newSessionWithFile(t, "main.go", "hello world")
 	sink := &fakeSink{}
 	sess.SetEventSink(sink)
 
 	sess.HandleEvent(event.AgentEditProposed{Edit: event.PendingEdit{
-		ID: "e7", Path: "", Search: "hello", Replace: "agent-chose",
+		ID: "e7", Path: "main.go", Search: "hello", Replace: "agent-chose",
 	}})
 	if diff, _ := sess.ReviewEdit(); diff == nil {
 		t.Fatalf("ReviewEdit returned nil diff")
 	}
 	// Developer modifies the replacement text in the diff overlay.
-	if ok, reason := sess.ApproveEdit("hello", "dev-chose"); !ok {
-		t.Fatalf("ApproveEdit: %s", reason)
-	}
+	stagedApprove(t, sess, "hello", "dev-chose")
 
 	var accEv capture.Event
 	for _, ev := range sink.snapshot() {

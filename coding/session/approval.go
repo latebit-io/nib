@@ -10,27 +10,24 @@ import (
 
 // Edit-approval flow for Session.
 //
-// The engine enforces a two-step review contract:
+// The engine enforces a three-step review contract:
 //
-//  1. ReviewEdit  — frontend computes and presents the diff to the developer.
-//  2. ApproveEdit — frontend passes the (possibly modified) replacement text.
+//  1. ReviewEdit       — frontend computes and presents the diff to the developer.
+//  2. PrepareApproval  — engine validates the (possibly modified) replacement
+//     and returns an ApprovalPlan the frontend applies to its buffer.
+//  3. CompleteApproval — frontend signals the apply landed; the agent advances.
+//     AbortApproval is the counterpart when the apply fails.
 //
-// ApproveEdit fails if ReviewEdit was not called first. This guarantees
-// that every frontend — TUI, GUI, web — shows the developer what the
-// agent proposes before anything is applied. No blind approvals.
-//
-// The "two-step approval" variants (PrepareApproval / CompleteApproval /
-// AbortApproval) decouple "produce the plan" from "signal the agent" so
-// the frontend can apply the edit and signal the agent as separate,
-// atomic steps. This file covers both variants — the state they touch
-// (pendingEdit, stagedEditFile, editReviewed) is shared.
+// PrepareApproval fails if ReviewEdit was not called first. This guarantees
+// that every frontend — TUI, GUI, web — shows the developer what the agent
+// proposes before anything is applied. No blind approvals.
 //
 // State remains on Session (the fields straddle approval, file I/O, and
-// agent-event handling). The methods are grouped here so the SRP
-// boundary is visible at the file level.
+// agent-event handling). The methods are grouped here so the SRP boundary
+// is visible at the file level.
 
 // ReviewEdit computes the diff for the pending edit and marks it as reviewed.
-// Frontends MUST call this and present the result before calling ApproveEdit.
+// Frontends MUST call this and present the result before calling PrepareApproval.
 // If the pending edit targets a non-active file, the session auto-switches
 // to that file so the frontend renders the correct buffer.
 // Returns nil if there is no pending edit or the search text has no unique match.
@@ -63,72 +60,8 @@ func (s *Session) ReviewEdit() (diff *openfile.DiffResult, switched bool) {
 	return diff, switched
 }
 
-// ApproveEdit applies the reviewed edit to the editor buffer.
-// The frontend must provide the final search and replace text — typically
-// the full affected lines from the diff, with the replacement possibly
-// modified by the developer.
-//
-// Returns (true, "") on success, or (false, reason) on failure.
-// Fails if ReviewEdit was not called first.
-func (s *Session) ApproveEdit(search, replace string) (bool, string) {
-	if s.pendingEdit == nil || !s.HasAgent() {
-		return false, "no pending edit"
-	}
-	if !s.editReviewed {
-		return false, "edit not reviewed — call ReviewEdit first"
-	}
-	of := s.openFileForEdit()
-	if of == nil {
-		s.RejectEdit("file-not-open")
-		return false, "file not open"
-	}
-	editPath := s.activeFile
-	if s.pendingEdit.Path != "" {
-		editPath = s.CanonPath(s.pendingEdit.Path)
-	}
-	lineOrigins := computeLineOrigins(search, s.pendingEdit.Replace, replace)
-	outcome := of.ApplyEdit(search, replace, lineOrigins)
-	ok, reason := outcome.Applied, outcome.FailureReason
-	proposedReplace := s.pendingProposedReplace
-	editID := s.pendingEdit.ID
-	if ok {
-		s.lastEditedFile = editPath
-		s.mu.Lock()
-		s.modifiedFiles[editPath] = true
-		s.mu.Unlock()
-		// Pass post-apply buffer content (not pendingEdit.Replace
-		// alone — replace may have been modified in the overlay) so
-		// the orchestrator seeds its file cache from the truth.
-		s.agent.Approve(of.Content())
-		modified := replace != proposedReplace
-		accepted := map[string]any{
-			"id":               editID,
-			"path":             editPath,
-			"search":           search,
-			"replace":          replace,
-			"modified_by_user": modified,
-		}
-		if modified {
-			accepted["proposed_replace"] = proposedReplace
-		}
-		s.emitCapture("accepted", accepted)
-	} else {
-		s.agent.Reject()
-		s.emitCapture("rejected", map[string]any{
-			"id":     editID,
-			"path":   editPath,
-			"reason": reason,
-			"source": "apply_failed",
-		})
-	}
-	s.pendingEdit = nil
-	s.pendingProposedReplace = ""
-	s.editReviewed = false
-	return ok, reason
-}
-
 // stagedApproval is set by PrepareApproval and consumed by CompleteApproval
-// to emit the same "accepted" capture event ApproveEdit would.
+// to emit the "accepted" capture event after the frontend applies the edit.
 type stagedApproval struct {
 	editID  string
 	search  string
@@ -232,8 +165,7 @@ func computeLineOrigins(search, originalReplace, finalReplace string) []*buffer.
 // approvals that would advance the run with no recorded edit).
 //
 // Promotes the staged edit path to lastEditedFile, marks the file as
-// modified, and emits the "accepted" capture event with the same shape
-// as ApproveEdit.
+// modified, and emits the "accepted" capture event.
 func (s *Session) CompleteApproval() {
 	if !s.HasAgent() || s.stagedEditFile == "" || s.pendingApproval == nil {
 		return
@@ -309,7 +241,7 @@ func (s *Session) AbortApproval() {
 // Callers in the engine and TUI:
 //   - ActionAgentReject (Esc keypress)              → source "user"
 //   - EditProposed search-mismatch path             → source "search-mismatch"
-//   - ApproveEdit / PrepareApproval "file not open" → source "file-not-open"
+//   - PrepareApproval "file not open"               → source "file-not-open"
 //   - PrepareApproval LocateEdit failure            → source "search-mismatch"
 //
 // Empty source defaults to "unknown" so the field is always present

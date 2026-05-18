@@ -487,9 +487,9 @@ func stagedApprove(t *testing.T, s *Session, search, replace string) {
 }
 
 func TestApproveEditMarksAgentOrigin(t *testing.T) {
-	s := newTestSession("old text")
+	s := newSessionWithFile(t, "main.go", "old text")
 
-	s.pendingEdit = &event.PendingEdit{Search: "old text", Replace: "new text"}
+	s.pendingEdit = &event.PendingEdit{Path: "main.go", Search: "old text", Replace: "new text"}
 	s.pendingProposedReplace = "new text"
 	if diff, _ := s.ReviewEdit(); diff == nil {
 		t.Fatal("ReviewEdit returned nil diff")

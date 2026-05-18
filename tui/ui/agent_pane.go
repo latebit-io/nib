@@ -129,14 +129,8 @@ var (
 	chipStylePlanning = chipBase.Background(lipgloss.Color("25")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStylePlanWait = chipBase.Background(lipgloss.Color("60")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleReview   = chipBase.Background(lipgloss.Color("136")).Foreground(lipgloss.Color("232")).Bold(true)
-	// chipStyleBlock is reserved for StatusBlockReview — distinct
-	// red background so the developer can tell at a glance that a
-	// validator stage flagged this proposal as needing eyes-on,
-	// not the routine review-and-approve they'd see at lower
-	// autonomy levels.
-	chipStyleBlock   = chipBase.Background(lipgloss.Color("160")).Foreground(lipgloss.Color("231")).Bold(true)
-	chipStyleWaiting = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
-	chipStyleLinting = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleWaiting  = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleLinting  = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
 	// chipStyleFinished marks "all tracked tasks complete" yields. Green
 	// like editing-success but with a heavier weight so the developer
 	// distinguishes "I'm done with the planned work" from the routine
@@ -1428,8 +1422,6 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 		spec = statusChipSpec{label: "PLAN", hint: ":done execute · :skip", style: chipStylePlanWait}
 	case event.StatusReviewing:
 		spec = statusChipSpec{label: "REVIEW", hint: "Ctrl+O approve · Esc reject", style: chipStyleReview}
-	case event.StatusBlockReview:
-		spec = statusChipSpec{label: "BLOCK", hint: "Ctrl+O approve · Esc reject", style: chipStyleBlock}
 	case event.StatusWaiting:
 		spec = statusChipSpec{label: "REPLY", hint: "Enter send", style: chipStyleWaiting}
 	case event.StatusFinished:

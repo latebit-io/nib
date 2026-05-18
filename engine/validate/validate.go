@@ -1,7 +1,7 @@
 // Package validate defines the port for pre-approval checks against
 // proposed edits. Validators inspect a candidate (the expected post-edit
-// file content) and return a structured verdict: pass, retry with
-// feedback, or block for human review.
+// file content) and return a structured verdict: pass, or retry with
+// feedback that the agent loop hands back to the LLM for self-correction.
 //
 // The engine core depends only on the interfaces in this file. Concrete
 // adapters (go/parser, tree-sitter, LSP shadow-buffer, go vet) live in

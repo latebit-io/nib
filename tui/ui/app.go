@@ -135,26 +135,6 @@ type AppModel struct {
 	// nil when the OS watcher is unavailable.
 	fileWatcher *FileWatcher
 
-	// blockedPaths tracks Path values that have ALREADY been
-	// approved-after-Block in this session. The first Block on a
-	// file surfaces normally (developer must Ctrl+O / Esc);
-	// subsequent Blocks on the same file auto-apply with a
-	// "snoozed" banner. Cuts the per-file repeat-prompt churn the
-	// Pac-Man eval surfaced — once the developer has eyes-on with
-	// a particular over-cap file, further nags don't add
-	// information. Reset at process boundaries (NewApp seeds an
-	// empty map); never persisted across sessions.
-	blockedPaths map[string]bool
-
-	// pendingBlockedPath is the Path of a currently-surfaced Block
-	// awaiting developer decision. Set when EditProposed surfaces
-	// with a Block summary; copied to blockedPaths on Ctrl+O
-	// (manual approve = "yes I've seen this file's situation");
-	// cleared without snoozing on Esc (reject means "this specific
-	// edit is wrong, don't decide for me on the next one"). Empty
-	// when no Block is currently surfaced.
-	pendingBlockedPath string
-
 	// editorPool maps canonical paths to the per-file editor
 	// controllers the TUI maintains over each session OpenFile.
 	// Cursor, selection, scroll, and highlighter state live on these
@@ -219,11 +199,10 @@ func NewApp(sess *session.Session) AppModel {
 	svc := NewServices()
 
 	m := AppModel{
-		Session:      sess,
-		Services:     svc,
-		Keymap:       km,
-		blockedPaths: map[string]bool{},
-		editorPool:   make(map[string]*editor.Editor),
+		Session:    sess,
+		Services:   svc,
+		Keymap:     km,
+		editorPool: make(map[string]*editor.Editor),
 	}
 	// Seed the editor pool from the session's initial active open file.
 	// editorForOpenFile lazily creates+decorates one if needed; we resolve

@@ -64,17 +64,3 @@ func (w *testWorkspace) CanonPath(p string) string {
 }
 
 func (w *testWorkspace) ProjectRoot() string { return w.root }
-
-// stubTracker satisfies TaskTracker with no-op writes and zero-value
-// reads. Tests that need scripted behavior (e.g. NextPendingTask
-// returning a specific title) embed *stubTracker and override the
-// relevant method.
-type stubTracker struct{}
-
-func (*stubTracker) ActivateTask(string) error          { return nil }
-func (*stubTracker) CompleteTask(string) error          { return nil }
-func (*stubTracker) AddTask(_, _, _, _ string) error    { return nil }
-func (*stubTracker) ActiveTaskPath() string             { return "" }
-func (*stubTracker) WorkTreeLoaded() bool               { return true }
-func (*stubTracker) NextPendingTask() string            { return "" }
-func (*stubTracker) InitProject(string, []string) error { return nil }

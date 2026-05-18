@@ -96,42 +96,7 @@ func (a *Agent) runTaskReview(ctx context.Context, toolMsg string) string {
 		}
 	}
 
-	if hint := a.nextTaskHint(); hint != "" {
-		review.WriteString("\n\n")
-		review.WriteString(hint)
-	}
-
 	return review.String()
-}
-
-// nextTaskHint returns a one-line nudge identifying the next pending
-// task in the work tree, or "" when no pending task remains. Appended
-// to runTaskReview's output so the LLM sees a concrete next step
-// after a task completes — without this, even under LevelTrusted the
-// model tends to stop and wait for developer input ("yes continue")
-// at every task boundary, making "trust mode" feel like guided mode.
-//
-// The hint is informational. The LLM still has to call
-// update_task(action:"activate", title:"<title>") to actually start
-// the next task — the gate at enforceActiveTaskGate enforces this so
-// no work happens off the tracked plan. The hint just removes the
-// "what now?" pause.
-//
-// Empty when:
-//   - The workspace doesn't expose [TaskReader] (no project plan).
-//   - No tasks are pending (all done; agent should naturally finish).
-func (a *Agent) nextTaskHint() string {
-	tt, ok := a.workspace.(TaskReader)
-	if !ok {
-		return ""
-	}
-	next := tt.NextPendingTask()
-	if next == "" {
-		return ""
-	}
-	return fmt.Sprintf(
-		"Next pending task: %q. Call update_task(action:\"activate\", title:%q) to start it, or call update_task(action:\"complete\") on the project itself when there is genuinely nothing more to do.",
-		next, next)
 }
 
 // runLinters executes each configured linter once per edited directory and

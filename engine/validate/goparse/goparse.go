@@ -19,7 +19,6 @@ import (
 	"go/token"
 	"strings"
 
-	"github.com/latebit-io/nib/engine/lint"
 	"github.com/latebit-io/nib/engine/validate"
 )
 
@@ -52,55 +51,26 @@ func (Validator) Validate(_ context.Context, c validate.Candidate) validate.Resu
 		return validate.Result{Verdict: validate.Pass, Stage: StageName}
 	}
 
-	findings := errorsToFindings(c.Path, err)
 	return validate.Result{
 		Verdict:  validate.Retry,
 		Stage:    StageName,
-		Findings: findings,
-		Feedback: formatFeedback(c.Path, findings),
+		Feedback: formatFeedback(c.Path, err),
 	}
 }
 
-// errorsToFindings converts a parser error (possibly a scanner.ErrorList)
-// into a stable slice of lint.Finding suitable for agent feedback and
-// capture payloads.
-func errorsToFindings(path string, err error) []lint.Finding {
-	if list, ok := err.(scanner.ErrorList); ok {
-		out := make([]lint.Finding, 0, len(list))
-		for _, e := range list {
-			out = append(out, lint.Finding{
-				Path:    path,
-				Line:    e.Pos.Line,
-				Col:     e.Pos.Column,
-				Linter:  StageName,
-				Message: e.Msg,
-			})
-		}
-		return out
-	}
-	return []lint.Finding{{
-		Path:    path,
-		Linter:  StageName,
-		Message: err.Error(),
-	}}
-}
-
-// formatFeedback renders findings into a single retry prompt the LLM
-// can act on. Includes line numbers so the model can locate the fault
-// without rereading the whole file.
-func formatFeedback(path string, findings []lint.Finding) string {
-	if len(findings) == 0 {
-		return ""
-	}
+// formatFeedback renders a parser error (possibly a scanner.ErrorList)
+// into a single retry prompt the LLM can act on. Includes line numbers
+// so the model can locate the fault without rereading the whole file.
+func formatFeedback(path string, err error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Your proposed edit to %s does not parse as valid Go. ", path)
 	b.WriteString("Fix the syntax error(s) below and propose the edit again.\n\n")
-	for _, f := range findings {
-		if f.Line > 0 {
-			fmt.Fprintf(&b, "  - line %d:%d — %s\n", f.Line, f.Col, f.Message)
-			continue
+	if list, ok := err.(scanner.ErrorList); ok {
+		for _, e := range list {
+			fmt.Fprintf(&b, "  - line %d:%d — %s\n", e.Pos.Line, e.Pos.Column, e.Msg)
 		}
-		fmt.Fprintf(&b, "  - %s\n", f.Message)
+	} else {
+		fmt.Fprintf(&b, "  - %s\n", err.Error())
 	}
 	return b.String()
 }

@@ -128,8 +128,8 @@ func TestValidateRetriesWhenEditRegresses(t *testing.T) {
 	if got.Stage != StageName {
 		t.Errorf("Stage = %q, want %q", got.Stage, StageName)
 	}
-	if len(got.Findings) == 0 {
-		t.Errorf("Retry with no findings")
+	if got.Feedback == "" {
+		t.Errorf("Retry with no feedback")
 	}
 	if !strings.Contains(got.Feedback, "t.lua") {
 		t.Errorf("feedback missing path: %q", got.Feedback)
@@ -173,23 +173,19 @@ func TestCancelledContextPasses(t *testing.T) {
 	}
 }
 
-// TestFindingsFromErrorsCaps verifies the per-finding cap directly, so
-// the behaviour is tested deterministically without depending on what
-// the grammar decides to collapse during error recovery.
-func TestFindingsFromErrorsCaps(t *testing.T) {
+// TestFormatFeedbackCaps verifies the per-error cap in the rendered
+// feedback, so the behaviour is tested deterministically without
+// depending on what the grammar decides to collapse during error
+// recovery.
+func TestFormatFeedbackCaps(t *testing.T) {
 	t.Parallel()
 
 	errs := make([]errorPos, maxReportedErrors+3)
 	for i := range errs {
 		errs[i] = errorPos{Row: uint(i), Col: 0}
 	}
-	got := findingsFromErrors("t.lua", errs, maxReportedErrors)
-	if len(got) != maxReportedErrors {
-		t.Errorf("findings=%d, want %d", len(got), maxReportedErrors)
-	}
-	// Feedback's truncation hint fires when reported < total. Here
-	// reported == maxReportedErrors and total == maxReportedErrors+3.
-	feedback := formatFeedback("t.lua", got, len(errs))
+	// Truncation hint fires when len(errs) > maxReportedErrors.
+	feedback := formatFeedback("t.lua", errs, len(errs))
 	if !strings.Contains(feedback, "more") {
 		t.Errorf("feedback missing truncation hint: %q", feedback)
 	}

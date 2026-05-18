@@ -159,27 +159,25 @@ func TestPipelineDeadlineInFlight(t *testing.T) {
 	_ = errors.Is(v.lastCtx.Err(), context.DeadlineExceeded) // may or may not have fired; both fine
 }
 
-// TestWorstVerdictOrdering verifies the severity ordering (Pass < Retry <
-// Block) the agent's autonomy-retry logic depends on.
-func TestWorstVerdictOrdering(t *testing.T) {
+// TestAnyNonPass verifies the severity helper the agent's retry logic
+// uses to decide between silent retry and pass-through.
+func TestAnyNonPass(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
 		in   []Result
-		want Verdict
+		want bool
 	}{
-		{"empty", nil, Pass},
-		{"all pass", []Result{{Verdict: Pass}, {Verdict: Pass}}, Pass},
-		{"one retry", []Result{{Verdict: Pass}, {Verdict: Retry}}, Retry},
-		{"retry and block", []Result{{Verdict: Retry}, {Verdict: Block}}, Block},
-		{"block wins everywhere", []Result{{Verdict: Block}, {Verdict: Pass}}, Block},
+		{"empty", nil, false},
+		{"all pass", []Result{{Verdict: Pass}, {Verdict: Pass}}, false},
+		{"one retry", []Result{{Verdict: Pass}, {Verdict: Retry}}, true},
+		{"all retry", []Result{{Verdict: Retry}, {Verdict: Retry}}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := WorstVerdict(tc.in)
-			if got != tc.want {
-				t.Errorf("WorstVerdict(%+v) = %v, want %v", tc.in, got, tc.want)
+			if got := AnyNonPass(tc.in); got != tc.want {
+				t.Errorf("AnyNonPass(%+v) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -192,7 +190,6 @@ func TestVerdictString(t *testing.T) {
 	tests := map[Verdict]string{
 		Pass:  "pass",
 		Retry: "retry",
-		Block: "block",
 	}
 	for v, want := range tests {
 		if got := v.String(); got != want {

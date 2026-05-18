@@ -24,7 +24,6 @@ import (
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 
-	"github.com/latebit-io/nib/engine/lint"
 	"github.com/latebit-io/nib/engine/validate"
 )
 
@@ -100,12 +99,10 @@ func (v *Validator) Validate(ctx context.Context, c validate.Candidate) validate
 		return validate.Result{Verdict: validate.Pass, Stage: StageName}
 	}
 
-	findings := findingsFromErrors(c.Path, afterErrors, maxReportedErrors)
 	return validate.Result{
 		Verdict:  validate.Retry,
 		Stage:    StageName,
-		Findings: findings,
-		Feedback: formatFeedback(c.Path, findings, len(afterErrors)-beforeErrors),
+		Feedback: formatFeedback(c.Path, afterErrors, len(afterErrors)-beforeErrors),
 	}
 }
 
@@ -193,39 +190,24 @@ func visitErrors(n *sitter.Node, visit func(*sitter.Node) bool) {
 	}
 }
 
-// findingsFromErrors converts up to limit error positions into
-// lint.Finding values for structured reporting. Callers pass a positive
-// limit; no unlimited/zero-means-all convention is supported.
-func findingsFromErrors(path string, errs []errorPos, limit int) []lint.Finding {
-	limit = min(limit, len(errs))
-	out := make([]lint.Finding, 0, limit)
+// formatFeedback renders up to maxReportedErrors error-node positions
+// plus the regression count into a prompt the LLM can act on. tree-sitter
+// rows are 0-indexed; the rendered output uses 1-indexed line/col so the
+// model can match its line-numbered file view.
+func formatFeedback(path string, errs []errorPos, regressions int) string {
+	limit := min(maxReportedErrors, len(errs))
+	var b strings.Builder
+	fmt.Fprintf(&b, "Your edit to %s introduced %d new syntax error(s) ", path, regressions)
+	b.WriteString("that tree-sitter flagged. Fix the issues below and propose the edit again.\n\n")
 	for _, e := range errs[:limit] {
 		msg := "unexpected syntax"
 		if e.Missing {
 			msg = "missing required syntax token"
 		}
-		out = append(out, lint.Finding{
-			Path:    path,
-			Line:    int(e.Row) + 1, // tree-sitter rows are 0-indexed
-			Col:     int(e.Col) + 1,
-			Linter:  StageName,
-			Message: msg,
-		})
+		fmt.Fprintf(&b, "  - line %d:%d — %s\n", e.Row+1, e.Col+1, msg)
 	}
-	return out
-}
-
-// formatFeedback renders the findings and regression count into a
-// prompt the LLM can act on.
-func formatFeedback(path string, findings []lint.Finding, regressions int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Your edit to %s introduced %d new syntax error(s) ", path, regressions)
-	b.WriteString("that tree-sitter flagged. Fix the issues below and propose the edit again.\n\n")
-	for _, f := range findings {
-		fmt.Fprintf(&b, "  - line %d:%d — %s\n", f.Line, f.Col, f.Message)
-	}
-	if regressions > len(findings) {
-		fmt.Fprintf(&b, "  … and %d more\n", regressions-len(findings))
+	if regressions > limit {
+		fmt.Fprintf(&b, "  … and %d more\n", regressions-limit)
 	}
 	return b.String()
 }

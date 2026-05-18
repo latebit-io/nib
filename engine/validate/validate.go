@@ -14,8 +14,6 @@ import (
 	"context"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
-
-	"github.com/latebit-io/nib/engine/lint"
 )
 
 // LanguageFunc returns the tree-sitter grammar for a given path, or nil
@@ -51,12 +49,6 @@ type Candidate struct {
 }
 
 // Verdict describes a validator's overall judgement on a candidate.
-//
-// Constant order is load-bearing: [WorstVerdict] compares Verdicts
-// numerically on the invariant Pass < Retry < Block. Reordering the
-// iota declarations below silently breaks severity aggregation —
-// TestWorstVerdictOrdering locks the behaviour in, but keep the
-// declaration order stable as the first line of defence.
 type Verdict int
 
 const (
@@ -69,12 +61,6 @@ const (
 	// loop sends the accumulated Feedback back to the model, and the
 	// proposal is regenerated — without bothering the developer.
 	Retry
-
-	// Block means the candidate is unacceptable and the failure is not
-	// one the LLM can trivially auto-correct. The pipeline stops and
-	// the agent surfaces the results to the developer (unless autonomy
-	// is high enough to attempt silent retries).
-	Block
 )
 
 // String returns a stable human-readable label for the verdict — used in
@@ -85,8 +71,6 @@ func (v Verdict) String() string {
 		return "pass"
 	case Retry:
 		return "retry"
-	case Block:
-		return "block"
 	default:
 		return "unknown"
 	}
@@ -103,12 +87,8 @@ type Result struct {
 	// "tree-sitter", "lsp-shadow", "go-vet"). Matches Validator.Name.
 	Stage string
 
-	// Findings are the structured diagnostics the validator produced.
-	// Empty on Pass; populated on Retry/Block.
-	Findings []lint.Finding
-
 	// Feedback is the LLM-facing retry prompt. Non-empty on Retry;
-	// empty on Pass; optional on Block (the developer sees Findings).
+	// empty on Pass.
 	Feedback string
 }
 
@@ -198,16 +178,14 @@ func (p *seqPipeline) Run(ctx context.Context, c Candidate) []Result {
 	return results
 }
 
-// WorstVerdict returns the most severe Verdict across the given
-// results: Block beats Retry beats Pass. Used by agent orchestration
-// to decide between silent retry and surfacing to the developer.
-// An empty slice yields Pass — the null-object result.
-func WorstVerdict(results []Result) Verdict {
-	worst := Pass
+// AnyNonPass reports whether any result carries a non-Pass verdict.
+// Used by agent orchestration to decide between silent retry and
+// pass-through. An empty slice yields false.
+func AnyNonPass(results []Result) bool {
 	for _, r := range results {
-		if r.Verdict > worst {
-			worst = r.Verdict
+		if r.Verdict != Pass {
+			return true
 		}
 	}
-	return worst
+	return false
 }

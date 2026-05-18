@@ -2,6 +2,7 @@ package goparse
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -97,27 +98,22 @@ func TestValidateCases(t *testing.T) {
 				t.Errorf("Stage = %q, want %q", got.Stage, StageName)
 			}
 			if tc.wantVerdict == validate.Pass {
-				if len(got.Findings) != 0 {
-					t.Errorf("Pass case produced findings: %+v", got.Findings)
-				}
 				if got.Feedback != "" {
 					t.Errorf("Pass case produced non-empty feedback: %q", got.Feedback)
 				}
 				return
 			}
-			if len(got.Findings) == 0 {
-				t.Fatalf("Retry case produced no findings")
-			}
-			if tc.wantLine != 0 && got.Findings[0].Line != tc.wantLine {
-				t.Errorf("first finding line = %d, want %d (msg=%q)",
-					got.Findings[0].Line, tc.wantLine, got.Findings[0].Message)
-			}
-			if tc.wantMsgSub != "" && !strings.Contains(got.Findings[0].Message, tc.wantMsgSub) {
-				t.Errorf("first finding message = %q, missing substring %q",
-					got.Findings[0].Message, tc.wantMsgSub)
-			}
 			if got.Feedback == "" {
-				t.Errorf("Retry case produced empty feedback")
+				t.Fatalf("Retry case produced empty feedback")
+			}
+			if tc.wantLine != 0 {
+				want := fmt.Sprintf("line %d:", tc.wantLine)
+				if !strings.Contains(got.Feedback, want) {
+					t.Errorf("feedback missing %q: %q", want, got.Feedback)
+				}
+			}
+			if tc.wantMsgSub != "" && !strings.Contains(got.Feedback, tc.wantMsgSub) {
+				t.Errorf("feedback missing substring %q: %q", tc.wantMsgSub, got.Feedback)
 			}
 			if !strings.Contains(got.Feedback, "test.go") {
 				t.Errorf("feedback missing file path: %q", got.Feedback)

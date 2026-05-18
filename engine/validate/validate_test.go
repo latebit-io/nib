@@ -26,30 +26,6 @@ func (f *fakeValidator) Validate(ctx context.Context, _ Candidate) Result {
 	return f.result
 }
 
-// TestNoopPipelineContract verifies the null object returns no results and
-// never panics — the contract every call site in the engine depends on.
-func TestNoopPipelineContract(t *testing.T) {
-	t.Parallel()
-
-	var p Pipeline = NoopPipeline{}
-	got := p.Run(context.Background(), Candidate{Path: "x.go"})
-	if got != nil {
-		t.Errorf("NoopPipeline.Run returned %d results, want nil", len(got))
-	}
-}
-
-// TestNewPipelineZeroValidatorsReturnsNoop documents the intentional
-// degenerate case: a pipeline with no validators IS the null object,
-// with no special-casing at call sites.
-func TestNewPipelineZeroValidatorsReturnsNoop(t *testing.T) {
-	t.Parallel()
-
-	p := NewPipeline()
-	if _, ok := p.(NoopPipeline); !ok {
-		t.Errorf("NewPipeline() = %T, want NoopPipeline", p)
-	}
-}
-
 // TestPipelineShortCircuitsOnRetry verifies the sequential pipeline stops
 // at the first non-Pass verdict so the agent sees the highest-priority
 // failure deterministically.

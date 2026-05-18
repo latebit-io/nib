@@ -161,9 +161,8 @@ type Agent struct {
 
 	// pipeline runs pre-approval validators (syntactic parse, LSP shadow,
 	// style invariants) against a proposed edit before the comprehension
-	// gate sees it. Initialised to validate.NoopPipeline in New so call
-	// sites dispatch unconditionally; swapped for a live pipeline at the
-	// composition root once adapters are registered.
+	// gate sees it. nil means no validation; runValidationPipeline
+	// early-returns on the nil case.
 	pipeline validate.Pipeline
 
 	// validatorRetries counts per-path silent retries triggered by
@@ -371,8 +370,9 @@ type NewOptions struct {
 	// shell-command adapter is available via lint.FromShellCommands.
 	Linters []lint.Linter
 	// ValidationPipeline runs pre-approval validators against proposed
-	// edits (syntactic parse, LSP shadow, style invariants). Nil installs
-	// validate.NoopPipeline so call sites dispatch without nil checks.
+	// edits (syntactic parse, LSP shadow, style invariants). Nil disables
+	// validation entirely — runValidationPipeline early-returns when the
+	// pipeline is nil.
 	ValidationPipeline validate.Pipeline
 	// Terse enables terse output mode at startup. When true, the system
 	// prompt instructs the LLM to minimize explanatory text, reducing
@@ -427,7 +427,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var linters []lint.Linter
 	var terse bool
 	var smokeCfg runconfig.Resolved
-	var pipeline validate.Pipeline = validate.NoopPipeline{}
+	var pipeline validate.Pipeline
 	var taskTokenBudgetInput int
 	var flushDirtyBuffersFn FlushDirtyBuffersFunc
 	if opts != nil {

@@ -173,16 +173,16 @@ func TestRunValidationPipelineResetsOnApproval(t *testing.T) {
 	}
 }
 
-// TestRunValidationPipelineNoOpReturnsNilFast verifies the null-object
-// path has zero observable effect — no summaries, no feedback, no state
-// mutation — so wiring the pipeline cannot regress existing callers.
-func TestRunValidationPipelineNoOpReturnsNilFast(t *testing.T) {
+// TestRunValidationPipelineNilFast verifies the nil-pipeline path has
+// zero observable effect — no summaries, no feedback, no state mutation
+// — so wiring the pipeline cannot regress existing callers.
+func TestRunValidationPipelineNilFast(t *testing.T) {
 	t.Parallel()
 
-	ag, _ := newPipelineTestAgent(t, validate.NoopPipeline{})
+	ag, _ := newPipelineTestAgent(t, nil)
 	summaries, feedback := ag.runValidationPipeline(context.Background(), sampleProposal())
 	if len(summaries) != 0 || feedback != "" {
-		t.Errorf("NoopPipeline path: summaries=%+v feedback=%q; want both empty", summaries, feedback)
+		t.Errorf("nil pipeline path: summaries=%+v feedback=%q; want both empty", summaries, feedback)
 	}
 }
 

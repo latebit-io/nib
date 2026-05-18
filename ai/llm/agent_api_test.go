@@ -578,6 +578,91 @@ func jsonInt(v int) string {
 	return string(b)
 }
 
+func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
+	// OpenAI's Responses API reports automatic prompt-cache hits via
+	// usage.input_tokens_details.cached_tokens. handleCompleted must
+	// surface that through Usage.CachedTokens so the TUI's cache-hit
+	// indicator lights up for Codex sessions the same way it does for
+	// Anthropic.
+	tests := []struct {
+		name       string
+		details    *codexInputTokensDetails
+		wantCached int
+		wantPrompt int
+		wantOutput int
+	}{
+		{
+			name:       "cached tokens present",
+			details:    &codexInputTokensDetails{CachedTokens: 8192},
+			wantCached: 8192,
+			wantPrompt: 11500,
+			wantOutput: 86,
+		},
+		{
+			name:       "details omitted leaves CachedTokens zero",
+			details:    nil,
+			wantCached: 0,
+			wantPrompt: 11500,
+			wantOutput: 86,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &codexStreamState{calls: map[int]*pendingCall{}}
+			evt := codexSSEEvent{
+				Type: "response.completed",
+				Response: &codexResponse{
+					Usage: &codexUsage{
+						InputTokens:        tc.wantPrompt,
+						OutputTokens:       tc.wantOutput,
+						InputTokensDetails: tc.details,
+					},
+				},
+			}
+			out, done := s.handleCompleted(evt)
+			if !done {
+				t.Fatal("handleCompleted: done=false on response.completed")
+			}
+			if out == nil || out.Usage == nil {
+				t.Fatalf("handleCompleted: nil Usage; out=%+v", out)
+			}
+			if out.Usage.CachedTokens != tc.wantCached {
+				t.Errorf("CachedTokens = %d, want %d", out.Usage.CachedTokens, tc.wantCached)
+			}
+			if out.Usage.PromptTokens != tc.wantPrompt {
+				t.Errorf("PromptTokens = %d, want %d", out.Usage.PromptTokens, tc.wantPrompt)
+			}
+			if out.Usage.CompletionTokens != tc.wantOutput {
+				t.Errorf("CompletionTokens = %d, want %d", out.Usage.CompletionTokens, tc.wantOutput)
+			}
+		})
+	}
+}
+
+// TestCodexUsage_UnmarshalsInputTokensDetails verifies the wire-format
+// decode path: handleCompleted only sees the deserialized struct, so a
+// JSON-tag regression on InputTokensDetails would silently drop the
+// cache hit before handleCompleted ever ran.
+func TestCodexUsage_UnmarshalsInputTokensDetails(t *testing.T) {
+	raw := []byte(`{"input_tokens":11500,"output_tokens":86,"input_tokens_details":{"cached_tokens":8192}}`)
+	var u codexUsage
+	if err := json.Unmarshal(raw, &u); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if u.InputTokens != 11500 {
+		t.Errorf("InputTokens = %d, want 11500", u.InputTokens)
+	}
+	if u.OutputTokens != 86 {
+		t.Errorf("OutputTokens = %d, want 86", u.OutputTokens)
+	}
+	if u.InputTokensDetails == nil {
+		t.Fatal("InputTokensDetails: nil, want populated")
+	}
+	if u.InputTokensDetails.CachedTokens != 8192 {
+		t.Errorf("CachedTokens = %d, want 8192", u.InputTokensDetails.CachedTokens)
+	}
+}
+
 func TestSSEChunk_TruncatedFinishReason(t *testing.T) {
 	tests := []struct {
 		name         string

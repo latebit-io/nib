@@ -166,8 +166,19 @@ type codexIncompleteDetails struct {
 }
 
 type codexUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens        int                      `json:"input_tokens"`
+	OutputTokens       int                      `json:"output_tokens"`
+	InputTokensDetails *codexInputTokensDetails `json:"input_tokens_details,omitempty"`
+}
+
+// codexInputTokensDetails carries the cached-prefix breakdown the
+// Responses API reports under usage.input_tokens_details. cached_tokens
+// is the slice of input_tokens served from OpenAI's automatic prompt
+// cache — billed at a discount and surfaced through Usage.CachedTokens
+// so the TUI's cache-hit indicator can light up for Codex sessions the
+// same way it does for Anthropic.
+type codexInputTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 type codexOutputItem struct {
@@ -440,6 +451,9 @@ func (s *codexStreamState) handleCompleted(evt codexSSEEvent) (*StreamEvent, boo
 		s.usage = &Usage{
 			PromptTokens:     evt.Response.Usage.InputTokens,
 			CompletionTokens: evt.Response.Usage.OutputTokens,
+		}
+		if d := evt.Response.Usage.InputTokensDetails; d != nil {
+			s.usage.CachedTokens = d.CachedTokens
 		}
 	}
 	truncated := isTruncatedCompletion(evt)

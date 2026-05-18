@@ -201,7 +201,7 @@ func TestRunWithMode_ConcurrentStartsSerialize(t *testing.T) {
 			if i == 1 {
 				goal = "second"
 			}
-			ag.RunWithMode(ctx, "main.go", "", goal, nil, event.ModeExecution)
+			ag.RunWithMode(ctx, "main.go", "", goal, event.ModeExecution)
 		}()
 	}
 	wg.Wait()
@@ -294,7 +294,7 @@ func TestRunWithMode_FenceIsolatesSessionUsageFromPrevRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "first", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "first", event.ModeExecution)
 	runUntilWaitingThenCancel(t, ag, events, 2*time.Second)
 
 	usageAfterRun1 := ag.Usage()
@@ -303,7 +303,7 @@ func TestRunWithMode_FenceIsolatesSessionUsageFromPrevRun(t *testing.T) {
 			usageAfterRun1.TotalPromptTokens)
 	}
 
-	ag.RunWithMode(ctx, "main.go", "", "second", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "second", event.ModeExecution)
 	runUntilWaitingThenCancel(t, ag, events, 2*time.Second)
 
 	usage := ag.Usage()
@@ -358,7 +358,7 @@ func TestRunWithMode_FenceWaitsForBackedUpForwarder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "first", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "first", event.ModeExecution)
 
 	// Drain just enough to observe AgentWaiting (turn 1 complete), then
 	// pause draining so subsequent events back up in the forwarder.
@@ -387,7 +387,7 @@ func TestRunWithMode_FenceWaitsForBackedUpForwarder(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		close(run2Started)
-		ag.RunWithMode(ctx, "main.go", "", "second", nil, event.ModeExecution)
+		ag.RunWithMode(ctx, "main.go", "", "second", event.ModeExecution)
 	}()
 	<-run2Started
 

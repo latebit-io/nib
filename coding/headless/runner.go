@@ -18,7 +18,7 @@ import (
 // Matches the methods on *agent.Agent used during a headless run.
 type agentPort interface {
 	kithl.Agent
-	Run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string)
+	Run(ctx context.Context, fileName, fileContent, goal string)
 	Approve(content string)
 	Reject()
 	IsWaiting() bool
@@ -63,8 +63,7 @@ func NewRunner(agent agentPort, workspace *DiskWorkspace, events <-chan event.Ev
 
 // Run starts the agent with the given goal and blocks until it
 // completes. If files are provided, the first is pre-read and passed
-// as the active file; remaining files are listed as context files
-// the agent may edit.
+// as the active file; the agent reads any others on demand via tools.
 func (r *Runner) Run(ctx context.Context, goal string, files []string) *Result {
 	var fileName, fileContent string
 	if len(files) > 0 {
@@ -78,7 +77,7 @@ func (r *Runner) Run(ctx context.Context, goal string, files []string) *Result {
 		}
 	}
 
-	r.agent.Run(ctx, fileName, fileContent, goal, files)
+	r.agent.Run(ctx, fileName, fileContent, goal)
 	base := r.inner.Drive(ctx)
 
 	return &Result{

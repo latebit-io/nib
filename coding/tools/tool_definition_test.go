@@ -13,9 +13,8 @@ import (
 // defWorkspace returns a testWorkspace configured with a project root.
 func defWorkspace(root string) *testWorkspace {
 	return &testWorkspace{
-		root:      root,
-		files:     make(map[string]string),
-		inContext: make(map[string]bool),
+		root:  root,
+		files: make(map[string]string),
 	}
 }
 
@@ -39,8 +38,7 @@ func makeDefCall(t *testing.T, args posArgs) llm.ToolCall {
 
 func TestGoToDefinitionTool_Success(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{},
-		inContext: map[string]bool{},
+		files: map[string]string{},
 	}
 
 	provider := &mockDefinitionProvider{
@@ -65,8 +63,7 @@ func TestGoToDefinitionTool_Success(t *testing.T) {
 
 func TestGoToDefinitionTool_NotFound(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{},
-		inContext: map[string]bool{},
+		files: map[string]string{},
 	}
 
 	provider := &mockDefinitionProvider{
@@ -87,8 +84,7 @@ func TestGoToDefinitionTool_NotFound(t *testing.T) {
 
 func TestGoToDefinitionTool_ProviderError(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{},
-		inContext: map[string]bool{},
+		files: map[string]string{},
 	}
 
 	provider := &mockDefinitionProvider{
@@ -109,8 +105,7 @@ func TestGoToDefinitionTool_ProviderError(t *testing.T) {
 
 func TestGoToDefinitionTool_MissingPath(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{},
-		inContext: map[string]bool{},
+		files: map[string]string{},
 	}
 
 	provider := &mockDefinitionProvider{}
@@ -128,8 +123,7 @@ func TestGoToDefinitionTool_MissingPath(t *testing.T) {
 
 func TestGoToDefinitionTool_InvalidPosition(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{},
-		inContext: map[string]bool{},
+		files: map[string]string{},
 	}
 	provider := &mockDefinitionProvider{}
 	tool := NewGoToDefinitionTool(ws, provider)
@@ -155,8 +149,7 @@ func TestGoToDefinitionTool_InvalidPosition(t *testing.T) {
 
 func TestGoToDefinitionTool_InvalidJSON(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{},
-		inContext: map[string]bool{},
+		files: map[string]string{},
 	}
 
 	provider := &mockDefinitionProvider{}
@@ -208,8 +201,7 @@ func TestGoToDefinitionTool_SiblingDirTraversal(t *testing.T) {
 
 func TestGoToDefinitionTool_Definition(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{},
-		inContext: map[string]bool{},
+		files: map[string]string{},
 	}
 
 	provider := &mockDefinitionProvider{}

@@ -137,27 +137,19 @@ func (s *Session) WriteFile(path, content string) error {
 		return fmt.Errorf("close %s: %w", path, closeErr)
 	}
 
-	// Open it in the session and auto-add to context
+	// Open it in the session.
 	buf, err := buffer.NewFromFile(absPath)
 	if err != nil {
 		return fmt.Errorf("open after write %s: %w", path, err)
 	}
 	of := s.newOpenFile(buf)
 	canon := s.CanonPath(absPath)
-	addToContext := !s.isProjectMeta(canon)
 	s.mu.Lock()
 	s.openFiles[canon] = of
-	if addToContext {
-		s.contextSet[canon] = true
-	}
 	s.mu.Unlock()
 
 	// Wire LSP sync for the newly opened file.
 	s.wireBufferSync(of)
-
-	if addToContext {
-		s.saveContext()
-	}
 
 	return nil
 }

@@ -29,13 +29,8 @@ type FileReader = tools.FileReader
 // FileWriter aliases the workspace write surface tools depend on.
 type FileWriter = tools.FileWriter
 
-// Workspace aliases the full workspace contract (read + write +
-// context set) used at the agent boundary.
+// Workspace aliases the full workspace contract used at the agent boundary.
 type Workspace = tools.Workspace
-
-// ContextSet aliases the developer-context surface used by the
-// approval flow.
-type ContextSet = tools.ContextSet
 
 // TaskReader aliases the read-side task tree surface used by gates and
 // next-task hint logic.

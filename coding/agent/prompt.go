@@ -10,10 +10,6 @@ import (
 	"github.com/latebit-io/nib/coding/prompts"
 )
 
-// maxContextInPrompt caps how many context files are listed in the prompt.
-// Prevents unbounded prompt growth in long-lived sessions.
-const maxContextInPrompt = 50
-
 // maxMemorySummaryBytes caps the memory summary injected into the prompt.
 // The summary is external content from demarkus — must be bounded.
 const maxMemorySummaryBytes = 8000
@@ -23,9 +19,8 @@ const maxActiveTaskPathBytes = 1024
 
 // buildMessages constructs the message list for an LLM request.
 // fileContent is the raw file contents; this function will prepend 1-indexed line numbers.
-// contextFiles lists the files the agent is allowed to edit.
 // memorySummary is the project memory snapshot (passed in to avoid shared state races).
-func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles []string, memorySummary string, mode event.Mode) []llm.Message {
+func (a *Agent) buildMessages(fileName, fileContent, goal string, memorySummary string, mode event.Mode) []llm.Message {
 	// Number the lines for the LLM
 	lines := strings.Split(fileContent, "\n")
 	var numbered strings.Builder
@@ -37,14 +32,6 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 	fence := "```"
 	for strings.Contains(numbered.String(), fence) {
 		fence += "`"
-	}
-
-	// Cap context files for prompt size
-	shown := contextFiles
-	omitted := 0
-	if len(shown) > maxContextInPrompt {
-		omitted = len(shown) - maxContextInPrompt
-		shown = shown[:maxContextInPrompt]
 	}
 
 	if len(memorySummary) > maxMemorySummaryBytes {
@@ -74,8 +61,6 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, contextFiles [
 		Language:       prompts.DetectLanguage(fileName),
 		FileContent:    numbered.String(),
 		Fence:          fence,
-		ContextFiles:   shown,
-		OmittedCount:   omitted,
 		Goal:           goal,
 		MemorySummary:  memorySummary,
 		ActiveTaskPath: activeTaskPath,

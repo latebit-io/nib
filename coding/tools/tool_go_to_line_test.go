@@ -20,8 +20,6 @@ func (m *mockNavWorkspace) ProjectRoot() string          { return "/test" }
 func (m *mockNavWorkspace) ListFiles() ([]string, error) { return nil, nil }
 func (m *mockNavWorkspace) WriteFile(_, _ string) error  { return nil }
 func (m *mockNavWorkspace) CanonPath(p string) string    { return p }
-func (m *mockNavWorkspace) InContext(_ string) bool      { return true }
-func (m *mockNavWorkspace) AddContext(_ string)          {}
 
 func (m *mockNavWorkspace) ReadFile(path string) (string, error) {
 	if m.err != nil {

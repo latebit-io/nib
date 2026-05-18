@@ -25,22 +25,6 @@ func (m *AppModel) handleProjectOpenFile(msg ProjectOpenFileMsg) (tea.Model, tea
 	return m.openFile(msg.Path)
 }
 
-// handleProjectAddContext adds a path to the session's context set and
-// refreshes the project pane to render the new badge.
-func (m *AppModel) handleProjectAddContext(msg ProjectAddContextMsg) (tea.Model, tea.Cmd) {
-	m.Session.AddContext(msg.Path)
-	m.refreshProjectPane()
-	return m, nil
-}
-
-// handleProjectRemoveContext removes a path from the session's context set
-// and refreshes the project pane.
-func (m *AppModel) handleProjectRemoveContext(msg ProjectRemoveContextMsg) (tea.Model, tea.Cmd) {
-	m.Session.RemoveContext(msg.Path)
-	m.refreshProjectPane()
-	return m, nil
-}
-
 // handleProjectCreateFile creates an empty file at the given path and
 // opens it in the editor on success. Errors are surfaced in the agent
 // pane; the pane refresh runs only after a successful create so a failed

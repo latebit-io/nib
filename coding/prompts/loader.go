@@ -47,10 +47,6 @@ type UserPromptData struct {
 	FileContent string
 	// Fence is the code fence marker (``` or longer if the content contains backticks).
 	Fence string
-	// ContextFiles lists relative paths the agent is allowed to edit.
-	ContextFiles []string
-	// OmittedCount is how many context files were truncated from the prompt.
-	OmittedCount int
 	// Goal is the developer's stated intent for this agent run.
 	Goal string
 	// MemorySummary is the project memory summary injected on session start.

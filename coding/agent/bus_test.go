@@ -345,7 +345,7 @@ func TestSubscribeMultipleSubscribersObserveSameStream(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	// Drain both subscriptions in parallel until each has observed an
 	// AgentWaiting (the run parks after one turn).

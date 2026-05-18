@@ -31,8 +31,7 @@ func TestReplaceFileTool_ReturnsEditProposal(t *testing.T) {
 	const oldContent = "local x = 1\nlocal y = 2\n"
 	const newContent = "local x = 99\nlocal y = 88\nlocal z = 77\n"
 	ws := &testWorkspace{
-		files:     map[string]string{"src/main.lua": oldContent},
-		inContext: map[string]bool{},
+		files: map[string]string{"src/main.lua": oldContent},
 	}
 	app := &fakeApprover{}
 	tool := NewReplaceFileTool(ws, NewFileCache(), app)
@@ -74,7 +73,7 @@ func TestReplaceFileTool_MissingFileSteersToWriteFile(t *testing.T) {
 	t.Parallel()
 
 	ws := &missingFileWorkspace{
-		testWorkspace: &testWorkspace{inContext: map[string]bool{}},
+		testWorkspace: &testWorkspace{},
 	}
 	app := &fakeApprover{}
 	tool := NewReplaceFileTool(ws, NewFileCache(), app)
@@ -105,8 +104,7 @@ func TestReplaceFileTool_NoOpRewriteFailsLoud(t *testing.T) {
 
 	const same = "local same = true\n"
 	ws := &testWorkspace{
-		files:     map[string]string{"main.lua": same},
-		inContext: map[string]bool{},
+		files: map[string]string{"main.lua": same},
 	}
 	app := &fakeApprover{}
 	tool := NewReplaceFileTool(ws, NewFileCache(), app)
@@ -153,9 +151,8 @@ func TestReplaceFileTool_ValidatesPath(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ws := &testWorkspace{
-				root:      tc.root,
-				files:     map[string]string{},
-				inContext: map[string]bool{},
+				root:  tc.root,
+				files: map[string]string{},
 			}
 			app := &fakeApprover{}
 			tool := NewReplaceFileTool(ws, NewFileCache(), app)
@@ -180,7 +177,7 @@ func TestReplaceFileTool_ValidatesPath(t *testing.T) {
 func TestReplaceFileTool_DefinitionAdvertisesSchema(t *testing.T) {
 	t.Parallel()
 
-	tool := NewReplaceFileTool(&testWorkspace{inContext: map[string]bool{}}, NewFileCache(), &fakeApprover{})
+	tool := NewReplaceFileTool(&testWorkspace{}, NewFileCache(), &fakeApprover{})
 	def := tool.Definition()
 
 	if def.Function.Name != "replace_file" {
@@ -215,8 +212,7 @@ func TestReplaceFileTool_UsesCachePostApproval(t *testing.T) {
 
 	const content = "old content\n"
 	ws := &testWorkspace{
-		files:     map[string]string{"main.lua": content},
-		inContext: map[string]bool{},
+		files: map[string]string{"main.lua": content},
 	}
 	app := &fakeApprover{}
 	tool := NewReplaceFileTool(ws, NewFileCache(), app)
@@ -239,8 +235,7 @@ func TestReplaceFileTool_PendingEditCarriesReason(t *testing.T) {
 	t.Parallel()
 
 	ws := &testWorkspace{
-		files:     map[string]string{"x.lua": "old"},
-		inContext: map[string]bool{},
+		files: map[string]string{"x.lua": "old"},
 	}
 	app := &fakeApprover{}
 	tool := NewReplaceFileTool(ws, NewFileCache(), app)

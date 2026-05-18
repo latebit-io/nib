@@ -46,11 +46,6 @@ type Deps struct {
 	// calls see the post-edit state without re-reading from disk).
 	Cache *tools.FileCache
 
-	// Workspace exposes the developer's context set. After approval,
-	// the edited file is added to the context set if not already
-	// present so subsequent runs include it.
-	Workspace tools.ContextSet
-
 	// Send is the best-effort event emitter (drops on full channel,
 	// logs the drop). Used for status transitions and progress
 	// banners that should not block approval flow on backpressure.
@@ -104,9 +99,6 @@ type Orchestrator struct {
 func NewOrchestrator(deps Deps) *Orchestrator {
 	if deps.Cache == nil {
 		panic("editflow.NewOrchestrator: Cache is required")
-	}
-	if deps.Workspace == nil {
-		panic("editflow.NewOrchestrator: Workspace is required")
 	}
 	if deps.Send == nil || deps.SendCritical == nil {
 		panic("editflow.NewOrchestrator: Send and SendCritical are required")
@@ -199,11 +191,8 @@ func (o *Orchestrator) handle(ctx context.Context, coord *approval.Coordinator, 
 		return msg, outcomeOK
 	}
 
-	// Approved — record for end-of-turn review and add to context set.
+	// Approved — record for end-of-turn review.
 	o.deps.RecordEdit(p)
-	if !o.deps.Workspace.InContext(p.Path) {
-		o.deps.Workspace.AddContext(p.Path)
-	}
 
 	return o.afterApproval(p, approved.Content)
 }

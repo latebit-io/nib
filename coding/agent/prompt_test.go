@@ -18,8 +18,6 @@ func (promptTestWorkspace) ReadFile(_ string) (string, error) { return "", nil }
 func (promptTestWorkspace) ListFiles() ([]string, error)      { return nil, nil }
 func (promptTestWorkspace) WriteFile(_, _ string) error       { return nil }
 func (promptTestWorkspace) CanonPath(p string) string         { return p }
-func (promptTestWorkspace) InContext(_ string) bool           { return true }
-func (promptTestWorkspace) AddContext(_ string)               {}
 
 // testAgent returns a minimal agent with embedded prompts (no project overrides).
 func testAgent() *Agent {
@@ -30,30 +28,9 @@ func testAgent() *Agent {
 	}
 }
 
-func TestBuildMessagesIncludesContextSet(t *testing.T) {
-	a := testAgent()
-	contextFiles := []string{"src/auth.go", "src/handler.go"}
-	msgs := a.buildMessages("main.go", "package main", "add tests", contextFiles, "", event.ModeExecution)
-
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(msgs))
-	}
-
-	user := msgs[1].Content
-	if !strings.Contains(user, "Context Set") {
-		t.Error("user message should contain context set section")
-	}
-	if !strings.Contains(user, "- src/auth.go") {
-		t.Error("user message should list src/auth.go")
-	}
-	if !strings.Contains(user, "- src/handler.go") {
-		t.Error("user message should list src/handler.go")
-	}
-}
-
 func TestBuildMessagesIncludesMemorySummary(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "Key decision: use hexagonal arch.", event.ModeExecution)
+	msgs := a.buildMessages("main.go", "package main", "add tests", "Key decision: use hexagonal arch.", event.ModeExecution)
 
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
@@ -72,7 +49,7 @@ func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
 	t.Run("ascii", func(t *testing.T) {
 		a := testAgent()
 		big := strings.Repeat("x", maxMemorySummaryBytes+100)
-		msgs := a.buildMessages("main.go", "package main", "add tests", nil, big, event.ModeExecution)
+		msgs := a.buildMessages("main.go", "package main", "add tests", big, event.ModeExecution)
 
 		user := msgs[1].Content
 		if !strings.Contains(user, "[truncated]") {
@@ -88,7 +65,7 @@ func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
 		// U+4E16 (世) is 3 bytes in UTF-8. Fill past the limit so the cut
 		// point is likely mid-rune if not handled correctly.
 		big := strings.Repeat("世", maxMemorySummaryBytes)
-		msgs := a.buildMessages("main.go", "package main", "add tests", nil, big, event.ModeExecution)
+		msgs := a.buildMessages("main.go", "package main", "add tests", big, event.ModeExecution)
 
 		user := msgs[1].Content
 		if !strings.Contains(user, "[truncated]") {
@@ -102,7 +79,7 @@ func TestBuildMessagesMemorySummaryTruncated(t *testing.T) {
 
 func TestBuildMessagesNoMemorySummary(t *testing.T) {
 	a := testAgent() // promptTestWorkspace returns ""
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("main.go", "package main", "add tests", "", event.ModeExecution)
 
 	user := msgs[1].Content
 	if strings.Contains(user, "Memory Summary") {
@@ -110,47 +87,13 @@ func TestBuildMessagesNoMemorySummary(t *testing.T) {
 	}
 }
 
-func TestBuildMessagesNoContextSet(t *testing.T) {
-	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "", event.ModeExecution)
-
-	user := msgs[1].Content
-	if strings.Contains(user, "Context Set") {
-		t.Error("user message should not contain context set section when no context files")
-	}
-}
-
-func TestBuildMessagesSystemPromptIncludesContextSetRules(t *testing.T) {
-	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "", event.ModeExecution)
-
-	system := msgs[0].Content
-	if !strings.Contains(system, "Context Set") {
-		t.Error("system prompt should include context set section")
-	}
-}
-
 func TestBuildMessagesSystemPromptIncludesCriticalPerspective(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add tests", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("main.go", "package main", "add tests", "", event.ModeExecution)
 
 	system := msgs[0].Content
 	if !strings.Contains(system, "Critical Perspective") {
 		t.Error("system prompt should include critical perspective section")
-	}
-}
-
-func TestBuildMessagesContextSetCapped(t *testing.T) {
-	a := testAgent()
-	files := make([]string, 60)
-	for i := range files {
-		files[i] = "file" + string(rune('a'+i%26)) + ".go"
-	}
-	msgs := a.buildMessages("main.go", "package main", "add tests", files, "", event.ModeExecution)
-
-	user := msgs[1].Content
-	if !strings.Contains(user, "10 more files") {
-		t.Error("user message should indicate omitted files when over cap")
 	}
 }
 
@@ -237,9 +180,6 @@ func TestSystemPromptInteractiveMode(t *testing.T) {
 	if !strings.Contains(system, "The developer steers") {
 		t.Error("interactive system prompt should contain 'The developer steers'")
 	}
-	if !strings.Contains(system, "Context Set") {
-		t.Error("interactive system prompt should include Context Set section")
-	}
 	if strings.Contains(system, "headless mode") {
 		t.Error("interactive system prompt should not mention headless mode")
 	}
@@ -257,9 +197,6 @@ func TestSystemPromptHeadlessMode(t *testing.T) {
 	}
 	if strings.Contains(system, "The developer steers") {
 		t.Error("headless system prompt should not contain 'The developer steers'")
-	}
-	if strings.Contains(system, "Context Set") {
-		t.Error("headless system prompt should not include Context Set section")
 	}
 	if strings.Contains(system, "After a rejection") {
 		t.Error("headless system prompt should not include rejection rules")
@@ -316,7 +253,7 @@ func TestPlanningPromptHeadlessMode(t *testing.T) {
 func TestBuildMessagesHeadlessMode(t *testing.T) {
 	a := testAgent()
 	a.interactionMode = Headless
-	msgs := a.buildMessages("main.go", "package main", "fix bug", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("main.go", "package main", "fix bug", "", event.ModeExecution)
 
 	system := msgs[0].Content
 	if !strings.Contains(system, "autonomous coding agent") {
@@ -382,7 +319,7 @@ func TestPlanningPromptDistributedMemoryAbsent(t *testing.T) {
 func TestBuildMessagesDistributedMemoryInSystemPrompt(t *testing.T) {
 	a := testAgent()
 	a.distributedMemory = []string{"team-server"}
-	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("main.go", "package main", "add feature", "", event.ModeExecution)
 
 	system := msgs[0].Content
 	if !strings.Contains(system, "Distributed Memory") {
@@ -395,7 +332,7 @@ func TestBuildMessagesDistributedMemoryInSystemPrompt(t *testing.T) {
 
 func TestBuildMessagesNoDistributedMemory(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "add feature", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("main.go", "package main", "add feature", "", event.ModeExecution)
 
 	system := msgs[0].Content
 	if strings.Contains(system, "Distributed Memory") {
@@ -410,7 +347,7 @@ func TestBuildMessagesNoDistributedMemory(t *testing.T) {
 // were in.
 func TestBuildMessagesUserPromptIncludesLanguage(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("game.lua", "local M = {}", "add tests", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("game.lua", "local M = {}", "add tests", "", event.ModeExecution)
 
 	user := msgs[1].Content
 	if !strings.Contains(user, "language: Lua") {
@@ -423,7 +360,7 @@ func TestBuildMessagesUserPromptIncludesLanguage(t *testing.T) {
 // is worse than no guess.
 func TestBuildMessagesUserPromptOmitsLanguageWhenUnknown(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("Makefile", "all:\n\techo hi", "add tests", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("Makefile", "all:\n\techo hi", "add tests", "", event.ModeExecution)
 
 	user := msgs[1].Content
 	if strings.Contains(user, "language:") {
@@ -434,7 +371,7 @@ func TestBuildMessagesUserPromptOmitsLanguageWhenUnknown(t *testing.T) {
 func TestBuildMessagesTerseInSystemPrompt(t *testing.T) {
 	a := testAgent()
 	a.SetTerse(true)
-	msgs := a.buildMessages("main.go", "package main", "fix bug", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("main.go", "package main", "fix bug", "", event.ModeExecution)
 
 	system := msgs[0].Content
 	if !strings.Contains(system, "Output Style — Terse") {
@@ -447,7 +384,7 @@ func TestBuildMessagesTerseInSystemPrompt(t *testing.T) {
 
 func TestBuildMessagesNoTerse(t *testing.T) {
 	a := testAgent()
-	msgs := a.buildMessages("main.go", "package main", "fix bug", nil, "", event.ModeExecution)
+	msgs := a.buildMessages("main.go", "package main", "fix bug", "", event.ModeExecution)
 
 	system := msgs[0].Content
 	if strings.Contains(system, "Output Style — Terse") {
@@ -458,7 +395,7 @@ func TestBuildMessagesNoTerse(t *testing.T) {
 func TestBuildMessagesTerseInPlanningMode(t *testing.T) {
 	a := testAgent()
 	a.SetTerse(true)
-	msgs := a.buildMessages("main.go", "package main", "plan feature", nil, "", event.ModePlanning)
+	msgs := a.buildMessages("main.go", "package main", "plan feature", "", event.ModePlanning)
 
 	system := msgs[0].Content
 	if !strings.Contains(system, "Output Style — Terse") {

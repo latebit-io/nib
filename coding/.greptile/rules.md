@@ -5,5 +5,5 @@ Agent + session orchestration on top of engine primitives. Depends on `engine/` 
 # Cross-Cutting Rules
 
 - Every error must be explicitly handled.
-- All `Workspace` interface methods (`ProjectRoot`, `ReadFile`, `WriteFile`, `ListFiles`, `CanonPath`, `InContext`, `AddContext` — composed from `FileReader` / `FileWriter` / `ContextSet`) are called from the agent goroutine and must not touch shared TUI state without synchronization. Same rule applies to any future method added to the Workspace surface.
+- All `Workspace` interface methods (`ProjectRoot`, `ReadFile`, `WriteFile`, `ListFiles`, `CanonPath` — composed from `FileReader` / `FileWriter`) are called from the agent goroutine and must not touch shared TUI state without synchronization. Same rule applies to any future method added to the Workspace surface.
 - No package may import `tui/`.

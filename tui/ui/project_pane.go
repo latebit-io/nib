@@ -20,13 +20,6 @@ import (
 // AppModel catches this and opens the file in the editor.
 type ProjectOpenFileMsg struct{ Path string }
 
-// ProjectAddContextMsg is sent when the user adds a file to the context set.
-// AppModel handles this to keep all session mutations in one place.
-type ProjectAddContextMsg struct{ Path string }
-
-// ProjectRemoveContextMsg is sent when the user removes a file from the context set.
-type ProjectRemoveContextMsg struct{ Path string }
-
 // ProjectSetActiveGoalMsg is sent when the user activates a work item.
 // AppModel handles the session mutation to keep writes in one place.
 type ProjectSetActiveGoalMsg struct{ Title string }
@@ -68,9 +61,6 @@ var (
 
 	projInputCursorStyle = lipgloss.NewStyle().Reverse(true)
 
-	projBadgeCtxStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("2"))
-
 	projBadgeModStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("3"))
 
@@ -93,7 +83,6 @@ var (
 // Keeping this minimal prevents the TUI pane from coupling to the full session surface.
 type projectSession interface {
 	WorkTree() *project.Tree
-	ContextFiles() []string
 	AgentModifiedFiles() []string
 	ListFiles() ([]string, error)
 	ListFilesAndDirs() (files []string, dirs []string, err error)
@@ -280,12 +269,10 @@ func (p *ProjectPaneModel) rebuild() {
 	}
 	prevFilesExpanded := ExpandedPaths(p.filesTree)
 
-	contextFiles := p.session.ContextFiles()
 	modifiedFiles := p.session.AgentModifiedFiles()
 
-	// Build sets for badge lookup — normalize to forward slashes
+	// Build set for badge lookup — normalize to forward slashes
 	// to match TreeNode.Path (BuildTree normalizes internally).
-	ctxSet := toSlashSet(contextFiles)
 	modSet := toSlashSet(modifiedFiles)
 
 	// FILES section — full file tree with badges
@@ -319,7 +306,7 @@ func (p *ProjectPaneModel) rebuild() {
 		ExpandToPath(p.filesTree, p.pendingReveal)
 		p.pendingReveal = ""
 	}
-	SetBadges(p.filesTree, ctxSet, modSet)
+	SetBadges(p.filesTree, modSet)
 
 	// Flatten into display items
 	p.flattenItems()
@@ -442,10 +429,6 @@ func (p *ProjectPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			return p.moveCursor(-1)
 		case 'j':
 			return p.moveCursor(1)
-		case 'a':
-			return p.addContext()
-		case 'x':
-			return p.removeContext()
 		case 'n':
 			return p.startFileCreate()
 		case 'f':
@@ -557,34 +540,6 @@ func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
 		// Done tasks are final — no action on Enter
 		return nil
 	}
-}
-
-// addContext emits a message to add the file under cursor to the context set.
-// AppModel handles the actual session mutation.
-func (p *ProjectPaneModel) addContext() tea.Cmd {
-	if p.cursorIdx < 0 || p.cursorIdx >= len(p.items) {
-		return nil
-	}
-	item := p.items[p.cursorIdx]
-	if item.section != "files" || item.isHeader || item.node == nil || item.node.IsDir {
-		return nil
-	}
-	absPath := filepath.Join(p.session.ProjectRoot(), item.node.Path)
-	return func() tea.Msg { return ProjectAddContextMsg{Path: absPath} }
-}
-
-// removeContext emits a message to remove the file under cursor from the context set.
-// AppModel handles the actual session mutation.
-func (p *ProjectPaneModel) removeContext() tea.Cmd {
-	if p.cursorIdx < 0 || p.cursorIdx >= len(p.items) {
-		return nil
-	}
-	item := p.items[p.cursorIdx]
-	if item.section != "files" || item.isHeader || item.node == nil || item.node.IsDir {
-		return nil
-	}
-	absPath := filepath.Join(p.session.ProjectRoot(), item.node.Path)
-	return func() tea.Msg { return ProjectRemoveContextMsg{Path: absPath} }
 }
 
 // startFileCreate activates inline input for creating a new file.
@@ -942,18 +897,10 @@ func (p *ProjectPaneModel) renderBadge(badge string) string {
 	if badge == "" {
 		return ""
 	}
-	var parts []string
-	for _, b := range strings.Fields(badge) {
-		switch b {
-		case "ctx":
-			parts = append(parts, projBadgeCtxStyle.Render("ctx"))
-		case "mod":
-			parts = append(parts, projBadgeModStyle.Render("mod"))
-		default:
-			parts = append(parts, b)
-		}
+	if badge == "mod" {
+		return projBadgeModStyle.Render("mod")
 	}
-	return strings.Join(parts, " ")
+	return badge
 }
 
 // assembleLine combines left content and right badge, padding in between.

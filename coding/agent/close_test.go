@@ -59,7 +59,7 @@ func TestClose_NoSendOnClosedChannelPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	// Don't wait for AgentWaiting — Close mid-run is the harsher test.
 	// kit.Close aborts, foundation emits AgentEnd, kit translator
@@ -106,7 +106,7 @@ func TestClose_BlocksUntilForwarderExits(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 	ag.Close()
 
 	// forwardDone is closed by [Agent.forwardKitEvents] on return;

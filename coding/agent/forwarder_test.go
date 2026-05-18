@@ -52,7 +52,7 @@ func TestAgent_MultiTurnEstimatesBindToOriginatingTurn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	usages := collectTurnUsages(t, ag, events, 2, 3*time.Second)
 
@@ -132,7 +132,7 @@ func TestAgent_TurnUsageSurvivesKitChannelPressure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	usages := collectTurnUsages(t, ag, events, 2, 3*time.Second)
 

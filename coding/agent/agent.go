@@ -480,7 +480,6 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 
 	a.approvalFlow = editflow.NewOrchestrator(editflow.Deps{
 		Cache:        cache,
-		Workspace:    workspace,
 		Send:         a.send,
 		SendCritical: a.sendCritical,
 		Validate:     a.runValidationPipeline,

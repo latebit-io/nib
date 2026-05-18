@@ -92,9 +92,6 @@ func (s *Session) SwitchTo(path string) error {
 	// Already active
 	if canon == s.activeFile {
 		s.mu.Unlock()
-		if !s.isProjectMeta(canon) && !s.InContext(canon) {
-			s.AddContext(canon)
-		}
 		return nil
 	}
 
@@ -103,9 +100,6 @@ func (s *Session) SwitchTo(path string) error {
 		s.activeOpenFile = of
 		s.activeFile = canon
 		s.mu.Unlock()
-		if !s.isProjectMeta(canon) && !s.InContext(canon) {
-			s.AddContext(canon)
-		}
 		return nil
 	}
 
@@ -122,10 +116,6 @@ func (s *Session) SwitchTo(path string) error {
 	}
 	of := openfile.New(buf)
 	s.openFiles[canon] = of
-	addToContext := !s.isProjectMeta(canon)
-	if addToContext {
-		s.contextSet[canon] = true
-	}
 	s.activeOpenFile = of
 	s.activeFile = canon
 	s.mu.Unlock()
@@ -133,9 +123,6 @@ func (s *Session) SwitchTo(path string) error {
 	// Wire LSP sync for the newly opened file.
 	s.wireBufferSync(of)
 
-	if addToContext {
-		s.saveContext()
-	}
 	return nil
 }
 
@@ -201,7 +188,6 @@ func (s *Session) DeleteFile(path string) error {
 		s.unwireBufferSync(of)
 	}
 
-	s.saveContext()
 	return nil
 }
 
@@ -246,7 +232,6 @@ func (s *Session) cleanupDeletedPath(canon string) []*openfile.OpenFile {
 			}
 		}
 	}
-	deleteMatching(s.contextSet, matches)
 	deleteMatching(s.modifiedFiles, matches)
 
 	// Ensure s.activeOpenFile is never nil so callers (intent.go reads
@@ -268,6 +253,13 @@ func (s *Session) cleanupDeletedPath(canon string) []*openfile.OpenFile {
 		}
 	}
 	return removed
+}
+
+// isProjectMeta returns true if the canonical path is inside .project/.
+// Used as a guard against deleting project metadata files via DeleteFile.
+func (s *Session) isProjectMeta(canon string) bool {
+	prefix := filepath.Join(s.projectRoot, ".project") + string(filepath.Separator)
+	return strings.HasPrefix(canon, prefix)
 }
 
 // deleteMatching removes all entries from a map whose keys satisfy pred.

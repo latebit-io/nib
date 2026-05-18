@@ -51,7 +51,7 @@ func TestAgent_NarrativeGate_FiresWhenTreeEmptyAndOutstandingLanguage(t *testing
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	// Wait for AgentWaiting — the gate should fire once, then yield on
 	// the second turn after the nudge is delivered.
@@ -91,7 +91,7 @@ func TestAgent_NarrativeGate_DoesNotFireWhenTreeHasPendingWork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
@@ -135,7 +135,7 @@ func TestAgent_NarrativeGate_FiresOncePerDeveloperTurn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
@@ -172,7 +172,7 @@ func TestAgent_AgentWaiting_FinishedWhenTreeEmpty(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
@@ -206,7 +206,7 @@ func TestAgent_AgentWaiting_NotFinishedWhenTreeHasPendingWork(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
@@ -242,7 +242,7 @@ func TestAgent_NarrativeGate_UnloadedTree_NoFire(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
@@ -284,7 +284,7 @@ func TestAgent_NarrativeGate_ActiveTaskInProgress_NoFire(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
@@ -332,7 +332,7 @@ func TestAgent_StreamError_EndsRunUnsuccessfully(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	var (
 		errSeen     bool
@@ -390,7 +390,7 @@ func TestAgent_NarrativeGate_NoTaskReader_NoFire(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	ev := drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)

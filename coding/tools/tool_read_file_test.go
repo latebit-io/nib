@@ -24,8 +24,7 @@ func (w *errWorkspace) ReadFile(path string) (string, error) {
 
 func newReadTestWorkspace(files map[string]string) *testWorkspace {
 	return &testWorkspace{
-		files:     files,
-		inContext: map[string]bool{},
+		files: files,
 	}
 }
 
@@ -251,7 +250,7 @@ func TestReadFileTool_SliceTruncation(t *testing.T) {
 }
 
 func TestReadFileTool_FileNotFound(t *testing.T) {
-	ws := &errWorkspace{testWorkspace{files: map[string]string{}, inContext: map[string]bool{}}}
+	ws := &errWorkspace{testWorkspace{files: map[string]string{}}}
 	tool := NewReadFileTool(ws, NewFileCache())
 
 	result := tool.Execute(context.Background(), makeReadCall(t, readArgs{Path: "nonexistent.go"}))

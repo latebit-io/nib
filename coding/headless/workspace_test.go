@@ -192,52 +192,6 @@ func TestDiskWorkspace_CanonPath(t *testing.T) {
 	}
 }
 
-func TestDiskWorkspace_InContext_AlwaysTrue(t *testing.T) {
-	ws := NewDiskWorkspace(t.TempDir())
-	if !ws.InContext("anything.go") {
-		t.Error("InContext should always return true in headless mode")
-	}
-}
-
-func TestDiskWorkspace_AddContext_TracksFiles(t *testing.T) {
-	dir := t.TempDir()
-	ws := NewDiskWorkspace(dir)
-
-	ws.AddContext("a.go")
-	ws.AddContext("b.go")
-	ws.AddContext("a.go") // duplicate
-
-	touched := ws.TouchedFiles()
-	sort.Strings(touched)
-
-	if len(touched) != 2 {
-		t.Fatalf("TouchedFiles() returned %d files, want 2", len(touched))
-	}
-	wantA := filepath.Join(dir, "a.go")
-	wantB := filepath.Join(dir, "b.go")
-	if touched[0] != wantA || touched[1] != wantB {
-		t.Errorf("TouchedFiles() = %v, want [%s, %s]", touched, wantA, wantB)
-	}
-}
-
-func TestDiskWorkspace_WriteFile_TracksContext(t *testing.T) {
-	dir := t.TempDir()
-	ws := NewDiskWorkspace(dir)
-
-	if err := ws.WriteFile("created.go", "package created"); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	touched := ws.TouchedFiles()
-	if len(touched) != 1 {
-		t.Fatalf("expected 1 touched file, got %d", len(touched))
-	}
-	want := filepath.Join(dir, "created.go")
-	if touched[0] != want {
-		t.Errorf("TouchedFiles()[0] = %q, want %q", touched[0], want)
-	}
-}
-
 func TestDiskWorkspace_ResolvePath_Traversal(t *testing.T) {
 	// Create two sibling dirs so traversal from one to the other is detectable.
 	parent := t.TempDir()

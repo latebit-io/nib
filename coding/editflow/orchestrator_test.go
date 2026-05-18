@@ -13,33 +13,6 @@ import (
 	"github.com/latebit-io/nib/kit/approval"
 )
 
-// stubContextSet is a minimal ContextSet implementation for tests.
-// Records what was added so tests can assert on AddContext calls.
-type stubContextSet struct {
-	mu      sync.Mutex
-	members map[string]bool
-}
-
-func newStubContextSet(initial ...string) *stubContextSet {
-	cs := &stubContextSet{members: make(map[string]bool)}
-	for _, p := range initial {
-		cs.members[p] = true
-	}
-	return cs
-}
-
-func (c *stubContextSet) InContext(path string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.members[path]
-}
-
-func (c *stubContextSet) AddContext(path string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.members[path] = true
-}
-
 // orchTestRig bundles the moving parts of an Orchestrator test so
 // each case stays compact. The Send and SendCritical wrappers both
 // record into the same events slice — that's the only way assertions
@@ -53,7 +26,6 @@ func (c *stubContextSet) AddContext(path string) {
 // recordedEdits captures RecordEdit invocations.
 type orchTestRig struct {
 	cache                 *tools.FileCache
-	ctxSet                *stubContextSet
 	events                []event.Event
 	eventsMu              sync.Mutex
 	recordedEdits         []tools.EditProposal
@@ -66,7 +38,6 @@ type orchTestRig struct {
 func newRig() *orchTestRig {
 	return &orchTestRig{
 		cache:      tools.NewFileCache(),
-		ctxSet:     newStubContextSet(),
 		validateFn: func(context.Context, tools.EditProposal) ([]event.ValidatorSummary, string) { return nil, "" },
 		sendCriticalFn: func(_ context.Context, _ event.Event) error {
 			return nil
@@ -78,7 +49,6 @@ func newRig() *orchTestRig {
 func (r *orchTestRig) deps() Deps {
 	return Deps{
 		Cache:        r.cache,
-		Workspace:    r.ctxSet,
 		Send:         r.recordEvent,
 		SendCritical: r.sendCriticalDelivery,
 		Validate: func(ctx context.Context, p tools.EditProposal) ([]event.ValidatorSummary, string) {
@@ -170,7 +140,6 @@ func TestNewOrchestrator_PanicsOnMissingDeps(t *testing.T) {
 		mutate func(*Deps)
 	}{
 		{"nil Cache", func(d *Deps) { d.Cache = nil }},
-		{"nil Workspace", func(d *Deps) { d.Workspace = nil }},
 		{"nil Send", func(d *Deps) { d.Send = nil }},
 		{"nil SendCritical", func(d *Deps) { d.SendCritical = nil }},
 		{"nil Validate", func(d *Deps) { d.Validate = nil }},
@@ -246,9 +215,6 @@ func TestHandle_HappyPath_Approve(t *testing.T) {
 	}
 	if !strings.Contains(body, "Edit applied successfully") {
 		t.Errorf("body should report success, got %q", body)
-	}
-	if !r.ctxSet.InContext(p.Path) {
-		t.Errorf("AddContext not invoked for %q", p.Path)
 	}
 	if len(r.recordedEdits) != 1 || r.recordedEdits[0].CanonPath != p.CanonPath {
 		t.Errorf("RecordEdit not invoked exactly once for the proposal: %+v", r.recordedEdits)
@@ -343,9 +309,6 @@ func TestHandle_Reject(t *testing.T) {
 	if !strings.Contains(body, "Error: agent canceled") {
 		t.Errorf("body should include the poisoned cache substring verbatim "+
 			"(proves we are testing what we think we are testing); got %q", body)
-	}
-	if r.ctxSet.InContext(p.Path) {
-		t.Errorf("AddContext should NOT be invoked on reject")
 	}
 	if len(r.recordedEdits) != 0 {
 		t.Errorf("RecordEdit should NOT be invoked on reject: %d", len(r.recordedEdits))

@@ -375,10 +375,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ProjectOpenFileMsg:
 		return m.handleProjectOpenFile(msg)
-	case ProjectAddContextMsg:
-		return m.handleProjectAddContext(msg)
-	case ProjectRemoveContextMsg:
-		return m.handleProjectRemoveContext(msg)
 	case ProjectSetActiveGoalMsg:
 		return m.handleProjectSetActiveGoal(msg)
 	case ProjectMarkGoalDoneMsg:

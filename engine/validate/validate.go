@@ -6,8 +6,8 @@
 // The engine core depends only on the interfaces in this file. Concrete
 // adapters (go/parser, tree-sitter, LSP shadow-buffer, go vet) live in
 // sub-packages and are composed into a [Pipeline] at the composition root.
-// A [NoopPipeline] satisfies the null-object pattern so the agent's
-// proposal-handling path can dispatch unconditionally.
+// A nil Pipeline disables validation entirely — the agent's
+// runValidationPipeline early-returns on nil.
 package validate
 
 import "context"

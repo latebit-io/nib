@@ -170,9 +170,9 @@ func flattenNode(n *TreeNode, result *[]*TreeNode) {
 	}
 }
 
-// SetBadges updates badges on tree nodes based on context and modified sets.
-// contextFiles and modifiedFiles should be relative paths matching TreeNode.Path.
-func SetBadges(root *TreeNode, contextFiles, modifiedFiles map[string]bool) {
+// SetBadges updates badges on tree nodes based on the set of agent-modified files.
+// modifiedFiles should be relative paths matching TreeNode.Path.
+func SetBadges(root *TreeNode, modifiedFiles map[string]bool) {
 	if root == nil {
 		return
 	}
@@ -181,14 +181,9 @@ func SetBadges(root *TreeNode, contextFiles, modifiedFiles map[string]bool) {
 			n.Badge = ""
 			return
 		}
-		switch {
-		case contextFiles[n.Path] && modifiedFiles[n.Path]:
-			n.Badge = "ctx mod"
-		case contextFiles[n.Path]:
-			n.Badge = "ctx"
-		case modifiedFiles[n.Path]:
+		if modifiedFiles[n.Path] {
 			n.Badge = "mod"
-		default:
+		} else {
 			n.Badge = ""
 		}
 	})

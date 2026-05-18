@@ -29,10 +29,8 @@ func (f *fakeApprover) Propose(_ context.Context, p EditProposal) (string, bool)
 }
 
 type testWorkspace struct {
-	root            string // project root; empty means CanonPath is identity
-	files           map[string]string
-	inContext       map[string]bool
-	addContextCalls int
+	root  string // project root; empty means CanonPath is identity
+	files map[string]string
 }
 
 func (w *testWorkspace) ReadFile(path string) (string, error) {
@@ -51,21 +49,6 @@ func (w *testWorkspace) CanonPath(p string) string {
 	return p
 }
 
-func (w *testWorkspace) InContext(path string) bool {
-	if w.inContext == nil {
-		return false
-	}
-	return w.inContext[w.CanonPath(path)]
-}
-
-func (w *testWorkspace) AddContext(path string) {
-	w.addContextCalls++
-	if w.inContext == nil {
-		w.inContext = make(map[string]bool)
-	}
-	w.inContext[w.CanonPath(path)] = true
-}
-
 func (w *testWorkspace) ProjectRoot() string { return w.root }
 
 func mustMarshal(t *testing.T, v any) []byte {
@@ -79,8 +62,7 @@ func mustMarshal(t *testing.T, v any) []byte {
 
 func TestEditFileTool_ReturnsEditProposal(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{"src/main.go": "package main"},
-		inContext: map[string]bool{},
+		files: map[string]string{"src/main.go": "package main"},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -126,8 +108,7 @@ func TestEditFileTool_RootedCanonPath(t *testing.T) {
 		root: "/repo",
 		// File keyed by original relative path — the closure in resolveContent
 		// passes the original path to ReadFile, not the canonical key.
-		files:     map[string]string{"src/main.go": "package main"},
-		inContext: map[string]bool{},
+		files: map[string]string{"src/main.go": "package main"},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -162,8 +143,7 @@ func TestEditFileTool_RootedCanonPath(t *testing.T) {
 
 func TestEditFileTool_ValidationFailsNoMatch(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{"src/main.go": "package main"},
-		inContext: map[string]bool{},
+		files: map[string]string{"src/main.go": "package main"},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -194,8 +174,7 @@ func TestEditFileTool_ValidationFailsNoMatch(t *testing.T) {
 
 func TestEditFileTool_ValidationFailsAmbiguous(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{"src/main.go": "foo\nfoo\nbar"},
-		inContext: map[string]bool{},
+		files: map[string]string{"src/main.go": "foo\nfoo\nbar"},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -226,8 +205,7 @@ func TestEditFileTool_ValidationFailsAmbiguous(t *testing.T) {
 
 func TestEditFileTool_EmptySearchOnNonEmptyFile(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{"src/main.go": "package main"},
-		inContext: map[string]bool{},
+		files: map[string]string{"src/main.go": "package main"},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -255,8 +233,7 @@ func TestEditFileTool_EmptySearchOnNonEmptyFile(t *testing.T) {
 
 func TestEditFileTool_ProposalContainsCallID(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{"src/main.go": "package main"},
-		inContext: map[string]bool{},
+		files: map[string]string{"src/main.go": "package main"},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -284,8 +261,7 @@ func TestEditFileTool_ProposalContainsCallID(t *testing.T) {
 
 func TestEditFileTool_ProposalPendingEditFields(t *testing.T) {
 	ws := &testWorkspace{
-		files:     map[string]string{"main.go": "hello world"},
-		inContext: map[string]bool{},
+		files: map[string]string{"main.go": "hello world"},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -702,8 +678,7 @@ func TestEditFileTool_RejectsDuplicationEdit(t *testing.T) {
 		"\treturn okResult()\nend\n\nreturn player\n"
 	content := "header\n" + tail
 	ws := &testWorkspace{
-		files:     map[string]string{"src/player.lua": content},
-		inContext: map[string]bool{},
+		files: map[string]string{"src/player.lua": content},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -735,8 +710,7 @@ func TestEditFileTool_RejectsDuplicationEdit(t *testing.T) {
 func TestEditFileTool_FuzzyWhitespaceCorrection(t *testing.T) {
 	content := "package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n"
 	ws := &testWorkspace{
-		files:     map[string]string{"main.go": content},
-		inContext: map[string]bool{},
+		files: map[string]string{"main.go": content},
 	}
 	cache := NewFileCache()
 	app := &fakeApprover{}
@@ -800,8 +774,7 @@ func TestEditFileTool_UsesCachePostApproval(t *testing.T) {
 
 	ws := &readCountingWorkspace{
 		testWorkspace: &testWorkspace{
-			files:     map[string]string{"main.go": diskContent},
-			inContext: map[string]bool{},
+			files: map[string]string{"main.go": diskContent},
 		},
 	}
 	cache := NewFileCache()

@@ -35,17 +35,15 @@ type mockAgent struct {
 	signalDone chan struct{}
 
 	// Captured from Run — used to verify pre-read behavior.
-	runFileName     string
-	runFileContent  string
-	runGoal         string
-	runContextFiles []string
+	runFileName    string
+	runFileContent string
+	runGoal        string
 }
 
-func (m *mockAgent) Run(_ context.Context, fileName, fileContent, goal string, contextFiles []string) {
+func (m *mockAgent) Run(_ context.Context, fileName, fileContent, goal string) {
 	m.runFileName = fileName
 	m.runFileContent = fileContent
 	m.runGoal = goal
-	m.runContextFiles = contextFiles
 	if m.runFunc != nil {
 		go m.runFunc()
 	}
@@ -353,9 +351,6 @@ func TestRunner_PreReadsFirstFile(t *testing.T) {
 	}
 	if mock.runGoal != "review" {
 		t.Errorf("agent received goal = %q, want %q", mock.runGoal, "review")
-	}
-	if len(mock.runContextFiles) != 2 || mock.runContextFiles[0] != "target.go" || mock.runContextFiles[1] != "other.go" {
-		t.Errorf("agent received contextFiles = %v, want [target.go other.go]", mock.runContextFiles)
 	}
 }
 

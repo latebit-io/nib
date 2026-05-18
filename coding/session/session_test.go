@@ -31,8 +31,6 @@ func (stubWorkspace) ReadFile(_ string) (string, error) { return "", nil }
 func (stubWorkspace) ListFiles() ([]string, error)      { return nil, nil }
 func (stubWorkspace) WriteFile(_, _ string) error       { return nil }
 func (stubWorkspace) CanonPath(p string) string         { return p }
-func (stubWorkspace) InContext(_ string) bool           { return true }
-func (stubWorkspace) AddContext(_ string)               {}
 func (stubWorkspace) ProjectRoot() string               { return "" }
 
 // newTestSession creates a session with a buffer containing the given text
@@ -437,121 +435,6 @@ func TestResolvePathTraversal(t *testing.T) {
 	}
 }
 
-func TestContextSetAddRemove(t *testing.T) {
-	dir := t.TempDir()
-	s := newTestSessionWithRoot("", dir)
-
-	s.AddContext("src/main.go")
-	if !s.InContext("src/main.go") {
-		t.Error("expected src/main.go in context after AddContext")
-	}
-
-	files := s.ContextFiles()
-	if len(files) != 1 || files[0] != "src/main.go" {
-		t.Errorf("ContextFiles = %v, want [src/main.go]", files)
-	}
-
-	s.RemoveContext("src/main.go")
-	if s.InContext("src/main.go") {
-		t.Error("expected src/main.go removed from context")
-	}
-	if len(s.ContextFiles()) != 0 {
-		t.Errorf("ContextFiles = %v, want empty", s.ContextFiles())
-	}
-}
-
-func TestContextSetAutoAddOnNew(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/test.go"
-	if err := writeTestFile(path, "package main"); err != nil {
-		t.Fatal(err)
-	}
-
-	buf, err := buffer.NewFromFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := New(openfile.New(buf), dir)
-	if !s.InContext(path) {
-		t.Error("initial file should be auto-added to context")
-	}
-}
-
-func TestContextSetAutoAddOnSwitchTo(t *testing.T) {
-	dir := t.TempDir()
-	pathA := dir + "/a.go"
-	pathB := dir + "/b.go"
-	if err := writeTestFile(pathA, "package a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeTestFile(pathB, "package b"); err != nil {
-		t.Fatal(err)
-	}
-
-	bufA, err := buffer.NewFromFile(pathA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := New(openfile.New(bufA), dir)
-
-	if err := s.SwitchTo(pathB); err != nil {
-		t.Fatal(err)
-	}
-	if !s.InContext(pathB) {
-		t.Error("SwitchTo should auto-add file to context")
-	}
-
-	files := s.ContextFiles()
-	if len(files) != 2 {
-		t.Errorf("ContextFiles count = %d, want 2", len(files))
-	}
-}
-
-func TestContextSetPersistence(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create session, add context, verify file written
-	s1 := newTestSessionWithRoot("", dir)
-	s1.AddContext("src/main.go")
-	s1.AddContext("src/util.go")
-
-	contextFile := dir + "/.project/context.md"
-	data, err := os.ReadFile(contextFile)
-	if err != nil {
-		t.Fatalf("context.md not created: %v", err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "- src/main.go") {
-		t.Errorf("context.md missing src/main.go: %s", content)
-	}
-	if !strings.Contains(content, "- src/util.go") {
-		t.Errorf("context.md missing src/util.go: %s", content)
-	}
-
-	// Create new session from same root — should load persisted context
-	s2 := newTestSessionWithRoot("", dir)
-	if !s2.InContext("src/main.go") {
-		t.Error("src/main.go not loaded from persisted context")
-	}
-	if !s2.InContext("src/util.go") {
-		t.Error("src/util.go not loaded from persisted context")
-	}
-}
-
-func TestContextSetAutoAddOnWriteFile(t *testing.T) {
-	dir := t.TempDir()
-	s := New(openfile.New(buffer.New()), dir)
-
-	newPath := dir + "/created.go"
-	if err := s.WriteFile("created.go", "package created"); err != nil {
-		t.Fatalf("WriteFile failed: %v", err)
-	}
-
-	if !s.InContext(newPath) {
-		t.Error("WriteFile should auto-add created file to context")
-	}
-}
-
 func writeTestFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
 }
@@ -628,12 +511,8 @@ func TestFileStatus(t *testing.T) {
 	ag := agent.New(stubProvider{}, stubWorkspace{}, nil)
 	s.SetAgent(ag, events)
 
-	// Initially: in context (auto-added), not modified
-	inCtx, agentMod := s.FileStatus(filePath)
-	if !inCtx {
-		t.Error("expected inContext=true for initial file")
-	}
-	if agentMod {
+	// Initially: not modified
+	if s.AgentModified(filePath) {
 		t.Error("expected agentModified=false before any agent edit")
 	}
 
@@ -642,11 +521,7 @@ func TestFileStatus(t *testing.T) {
 	s.ReviewEdit()
 	s.ApproveEdit("code", "new code")
 
-	inCtx, agentMod = s.FileStatus(filePath)
-	if !inCtx {
-		t.Error("expected inContext=true after edit")
-	}
-	if !agentMod {
+	if !s.AgentModified(filePath) {
 		t.Error("expected agentModified=true after agent edit")
 	}
 }
@@ -797,12 +672,9 @@ func TestDeleteFile(t *testing.T) {
 	absPath := dir + "/victim.go"
 	canon := s.CanonPath(absPath)
 
-	// Verify it exists and is in context
+	// Verify it exists
 	if _, err := os.Stat(absPath); err != nil {
 		t.Fatalf("file should exist: %v", err)
-	}
-	if !s.InContext(canon) {
-		t.Fatal("file should be in context after WriteFile")
 	}
 
 	// Delete it
@@ -813,11 +685,6 @@ func TestDeleteFile(t *testing.T) {
 	// File should be gone from disk
 	if _, err := os.Stat(absPath); !os.IsNotExist(err) {
 		t.Errorf("file should not exist after DeleteFile, got err=%v", err)
-	}
-
-	// Should be removed from context
-	if s.InContext(canon) {
-		t.Error("file should not be in context after DeleteFile")
 	}
 
 	// Should be removed from editors
@@ -871,12 +738,8 @@ func TestDeleteFile_Directory(t *testing.T) {
 		t.Fatalf("WriteFile b.go: %v", err)
 	}
 
-	// Both should be in context
 	canonA := s.CanonPath(filepath.Join(dir, "pkg/a.go"))
 	canonB := s.CanonPath(filepath.Join(dir, "pkg/b.go"))
-	if !s.InContext(canonA) || !s.InContext(canonB) {
-		t.Fatal("files should be in context")
-	}
 
 	// Delete the directory
 	if err := s.DeleteFile(filepath.Join(dir, "pkg")); err != nil {
@@ -888,13 +751,7 @@ func TestDeleteFile_Directory(t *testing.T) {
 		t.Errorf("directory should not exist after delete, got err=%v", err)
 	}
 
-	// Both files should be removed from context and editors
-	if s.InContext(canonA) {
-		t.Error("a.go should not be in context after dir delete")
-	}
-	if s.InContext(canonB) {
-		t.Error("b.go should not be in context after dir delete")
-	}
+	// Both editors should be removed
 	s.mu.RLock()
 	_, hasA := s.openFiles[canonA]
 	_, hasB := s.openFiles[canonB]

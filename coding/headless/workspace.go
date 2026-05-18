@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/latebit-io/nib/engine/filelist"
 )
@@ -17,17 +16,13 @@ import (
 // No buffers, no editor, no undo — files on disk are the source of truth.
 type DiskWorkspace struct {
 	root string
-
-	mu      sync.Mutex
-	context map[string]bool // tracks files the agent has touched
 }
 
 // NewDiskWorkspace creates a workspace rooted at the given directory.
 // The root must be an absolute path.
 func NewDiskWorkspace(root string) *DiskWorkspace {
 	return &DiskWorkspace{
-		root:    filepath.Clean(root),
-		context: make(map[string]bool),
+		root: filepath.Clean(root),
 	}
 }
 
@@ -105,9 +100,6 @@ func (w *DiskWorkspace) WriteFile(path, content string) error {
 		return fmt.Errorf("close %s: %w", path, closeErr)
 	}
 
-	w.mu.Lock()
-	w.context[w.CanonPath(path)] = true
-	w.mu.Unlock()
 	return nil
 }
 
@@ -132,31 +124,6 @@ func (w *DiskWorkspace) CanonPath(path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Clean(filepath.Join(w.root, path))
-}
-
-// InContext always returns true — headless mode has no context restrictions.
-// The agent can edit any file in the project.
-func (w *DiskWorkspace) InContext(_ string) bool {
-	return true
-}
-
-// AddContext records that a file has been touched by the agent.
-func (w *DiskWorkspace) AddContext(path string) {
-	w.mu.Lock()
-	w.context[w.CanonPath(path)] = true
-	w.mu.Unlock()
-}
-
-// TouchedFiles returns the set of files the agent has added to context.
-// Useful for reporting which files were modified during a run.
-func (w *DiskWorkspace) TouchedFiles() []string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	files := make([]string, 0, len(w.context))
-	for path := range w.context {
-		files = append(files, path)
-	}
-	return files
 }
 
 // resolvePath resolves a path relative to the project root and validates

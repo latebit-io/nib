@@ -24,7 +24,7 @@ import (
 // agentLifecycle is the subset of agent operations that start, extend, or
 // terminate a run. Split from signal methods so each interface stays focused.
 type agentLifecycle interface {
-	RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode event.Mode)
+	RunWithMode(ctx context.Context, fileName, fileContent, goal string, mode event.Mode)
 	Reply(ctx context.Context, input string) bool
 	Cancel()
 }
@@ -80,15 +80,6 @@ type Session struct {
 	openFiles   map[string]*openfile.OpenFile // path → open file handle
 	activeFile  string                        // path of the active open file
 	projectRoot string                        // root for file listing and path resolution
-
-	// Context set — files the agent is allowed to edit.
-	// Canonical absolute paths as keys. Guarded by mu.
-	contextSet map[string]bool
-
-	// contextSaveMu serializes writes to .project/context.md.
-	// Separate from mu to avoid deadlock (saveContext calls ContextFiles
-	// which acquires mu.RLock).
-	contextSaveMu sync.Mutex
 
 	// Intent — session-level contract between developer and agent
 	currentIntent string   // the active goal
@@ -227,12 +218,9 @@ func New(of *openfile.OpenFile, projectRoot string) *Session {
 	} else {
 		projectRoot = filepath.Clean(projectRoot)
 	}
-	openFiles := make(map[string]*openfile.OpenFile)
-	contextSet := make(map[string]bool)
 	s := &Session{
 		activeOpenFile: of,
-		openFiles:      openFiles,
-		contextSet:     contextSet,
+		openFiles:      make(map[string]*openfile.OpenFile),
 		modifiedFiles:  make(map[string]bool),
 		projectRoot:    projectRoot,
 		sink:           capture.NoopSink{},
@@ -245,16 +233,7 @@ func New(of *openfile.OpenFile, projectRoot string) *Session {
 			canon := s.CanonPath(of.Buf.Path)
 			s.activeFile = canon
 			s.openFiles[canon] = of
-			if !s.isProjectMeta(canon) {
-				s.contextSet[canon] = true
-			}
 		}
-	}
-	// Load persisted context — adds to whatever was set above.
-	s.loadContext()
-	// Persist so the initial file appears in .project/context.md.
-	if len(s.contextSet) > 0 {
-		s.saveContext()
 	}
 	return s
 }
@@ -369,14 +348,13 @@ func (s *Session) ModifiedFiles() []string {
 
 // --- Provenance ---
 
-// FileStatus returns the provenance status of a file.
-// inContext: the file is in the agent's context set (editable by agent).
-// agentModified: the file was modified by an agent edit this session.
-func (s *Session) FileStatus(path string) (inContext, agentModified bool) {
+// AgentModified reports whether the file was modified by an agent edit
+// during this session.
+func (s *Session) AgentModified(path string) bool {
 	canon := s.CanonPath(path)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.contextSet[canon], s.modifiedFiles[canon]
+	return s.modifiedFiles[canon]
 }
 
 // Search runs a project-wide text search from the project root.
@@ -400,10 +378,6 @@ func (s *Session) AgentModifiedFiles() []string {
 	sort.Strings(files)
 	return files
 }
-
-// Context-set methods (AddContext, RemoveContext, InContext,
-// ContextFiles, loadContext, saveContext, contextPath, isProjectMeta)
-// live in context.go.
 
 // Workspace methods (ReadFile, WriteFile, ListFiles, ListFilesAndDirs,
 // CanonPath, resolvePath, SaveDirtyBuffers, CreateDir) live in workspace.go.

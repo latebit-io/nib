@@ -187,16 +187,15 @@ func TestSetBadges(t *testing.T) {
 		"main.go",
 	})
 
-	ctx := map[string]bool{"auth/handler.go": true, "main.go": true}
 	mod := map[string]bool{"auth/handler.go": true}
-	SetBadges(root, ctx, mod)
+	SetBadges(root, mod)
 
 	handler := findNode(root, "auth/handler.go")
 	if handler == nil {
 		t.Fatal("handler not found")
 	}
-	if handler.Badge != "ctx mod" {
-		t.Errorf("handler badge = %q, want %q", handler.Badge, "ctx mod")
+	if handler.Badge != "mod" {
+		t.Errorf("handler badge = %q, want %q", handler.Badge, "mod")
 	}
 
 	token := findNode(root, "auth/token.go")
@@ -211,8 +210,8 @@ func TestSetBadges(t *testing.T) {
 	if main == nil {
 		t.Fatal("main not found")
 	}
-	if main.Badge != "ctx" {
-		t.Errorf("main badge = %q, want %q", main.Badge, "ctx")
+	if main.Badge != "" {
+		t.Errorf("main badge = %q, want empty", main.Badge)
 	}
 }
 

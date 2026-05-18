@@ -138,7 +138,7 @@ func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
@@ -182,7 +182,7 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	// After retry exhaustion the OnTruncated hook returns Retry=false
 	// and the foundation ends the run via AgentEnd. The translator
@@ -250,7 +250,7 @@ func TestAgent_StreamClosedBeforeDone_SurfacesError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	// The agent must emit an AgentError describing the stream failure —
 	// never reach AgentWaiting treating the partial tokens as a clean turn.
@@ -305,7 +305,7 @@ func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 
 	// Wait for the turn to end.
 	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
@@ -371,7 +371,7 @@ func TestAgent_TruncationRetries_ResetAcrossRuns(t *testing.T) {
 	t.Cleanup(cancel)
 
 	// Run 1 — truncation, recovery, park.
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentWaiting)
 		return ok
@@ -388,7 +388,7 @@ func TestAgent_TruncationRetries_ResetAcrossRuns(t *testing.T) {
 	// AgentDone for the cancelled run before run 2 starts streaming.
 	// Drain past it so the assertion below reflects run 2's outcome,
 	// not the wind-down of run 1.
-	ag.RunWithMode(ctx, "main.go", "", "go", nil, event.ModeExecution)
+	ag.RunWithMode(ctx, "main.go", "", "go", event.ModeExecution)
 	if drainUntil(t, events, 2*time.Second, func(ev event.Event) bool {
 		_, ok := ev.(event.AgentDone)
 		return ok

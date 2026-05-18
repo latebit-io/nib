@@ -96,23 +96,22 @@ func (a *Agent) disarmRunDone(ch chan struct{}) {
 }
 
 // Run starts a new conversation in execution mode. See RunWithMode for details.
-func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string, contextFiles []string) {
-	a.RunWithMode(ctx, fileName, fileContent, goal, contextFiles, event.ModeExecution)
+func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string) {
+	a.RunWithMode(ctx, fileName, fileContent, goal, event.ModeExecution)
 }
 
 // RunWithMode starts a new conversation in the specified mode.
 // Any previous conversation is cancelled. The first user message is
-// built from the full template (file content, context set, memory
-// summary, goal). contextFiles lists the files the agent is allowed to
-// edit. In ModePlanning, write-side tools (edit_file, write_file,
-// bash) are disabled and a planning-focused prompt is used.
+// built from the full template (file content, memory summary, goal).
+// In ModePlanning, write-side tools (edit_file, write_file, bash) are
+// disabled and a planning-focused prompt is used.
 //
 // The kit/foundation owns the actual run goroutine; this method does
 // the per-run prep (state reset, fresh approval coordinator, opening
 // status events) and hands the assembled transcript to
 // [kit.Agent.PromptWithMessages]. The forwarder goroutine spawned in
 // [New] re-emits kit events to the frontend.
-func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, contextFiles []string, mode event.Mode) {
+func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal string, mode event.Mode) {
 	// Serialize the entire startup sequence so concurrent RunWithMode
 	// callers cannot interleave their per-run state resets and runDone
 	// arms. Without startMu, two starters that both passed
@@ -178,7 +177,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	}
 
 	memorySummary := a.fetchMemorySummary(runCtx)
-	messages := a.buildMessages(fileName, fileContent, goal, contextFiles, memorySummary, mode)
+	messages := a.buildMessages(fileName, fileContent, goal, memorySummary, mode)
 
 	a.emitOpening(mode)
 

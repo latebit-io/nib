@@ -33,22 +33,12 @@ type FileWriter interface {
 	WriteFile(path, content string) error
 }
 
-// ContextSet manages the developer's context set — the files the agent
-// is allowed to edit. Used by the approval flow.
-type ContextSet interface {
-	// InContext returns true if the file is in the developer's context set.
-	InContext(path string) bool
-
-	// AddContext adds a file to the developer's context set.
-	AddContext(path string)
-}
-
-// Workspace provides the full set of file and context operations. The
-// session implements this interface. Composed from narrow interfaces so
-// tools can depend only on what they need.
+// Workspace provides the full set of file operations agent tools need.
+// The session implements this interface. Currently aliased to
+// [FileWriter] — kept as a distinct name so callers can express
+// "the full workspace surface" rather than the narrower writer role.
 type Workspace interface {
 	FileWriter
-	ContextSet
 }
 
 // inProject returns true if the canonicalized path is under the project

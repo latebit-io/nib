@@ -43,9 +43,8 @@ func (stubProv) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan ll
 func newPipelineTestAgent(t *testing.T, pipe validate.Pipeline) (*Agent, <-chan event.Event) {
 	t.Helper()
 	ws := &testWorkspace{
-		root:      "",
-		files:     map[string]string{"main.go": "package main\n\nfunc main() {}\n"},
-		inContext: map[string]bool{},
+		root:  "",
+		files: map[string]string{"main.go": "package main\n\nfunc main() {}\n"},
 	}
 	ag := New(stubProv{}, ws, &NewOptions{ValidationPipeline: pipe})
 	events := subscribeForTest(t, ag)

@@ -60,10 +60,6 @@ func (m *AppModel) handleGlobalAction(action Action) (tea.Cmd, bool) {
 	case ActionAgentApprove:
 		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "agent", m.Session.HasAgent())
 		if m.Session.PendingEdit() != nil && m.Editor.Overlay != nil {
-			// Block snooze (pendingBlockedPath → blockedPaths) is
-			// handled inside applyApproval after ApplyEdit lands —
-			// snoozing here would silently disable future Block
-			// review on this path even when the approval failed.
 			return m.applyApproval(), true
 		}
 		return nil, true
@@ -76,10 +72,6 @@ func (m *AppModel) handleGlobalAction(action Action) (tea.Cmd, bool) {
 		}
 		if m.Session.PendingEdit() != nil {
 			slog.Debug("overlay cleared", "reason", "reject")
-			// Reject means "this specific edit is wrong" not "stop
-			// prompting me on this file" — clear the pending Block
-			// path WITHOUT promoting it to snoozed.
-			m.pendingBlockedPath = ""
 			m.clearEditorOverlay(false)
 			m.Session.RejectEdit("user")
 			return nil, true

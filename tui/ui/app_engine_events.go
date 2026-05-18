@@ -73,55 +73,12 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			// Fail-closed on unknown verdicts too — a future verdict
 			// must explicitly opt into auto-apply rather than slipping
 			// through this gate.
-			//
-			// summaryRequiresReview is the must-surface gate (true for
-			// any non-pass verdict, including retry). summaryHasBlock
-			// is the narrower snooze-eligibility gate — only Block
-			// findings can be silenced for the rest of the session,
-			// because only Block carries the "developer has eyes-on
-			// for this file's recurring architectural concern"
-			// semantics. Retry is per-edit (LLM exhausted its budget
-			// on this specific change) and must be reviewed each time
-			// — auto-applying future retries on a once-approved file
-			// would re-open a fail-open path for validator-exhausted
-			// proposals.
-			needsReview := summaryRequiresReview(e.ValidatorSummaries)
-			blockSnoozeEligible := summaryHasBlock(e.ValidatorSummaries)
-			snoozed := blockSnoozeEligible && m.blockedPaths[e.Edit.Path]
-			autoApprove := !needsReview || snoozed
-
-			if autoApprove {
-				if snoozed {
-					// Per-file snooze: the developer already saw and
-					// approved a Block on this file earlier in the
-					// session. Repeat Blocks add no new information,
-					// so auto-apply with a marker banner instead of
-					// re-prompting.
-					m.AgentPane.AppendMeta(snoozeBannerForSummaries(e.Edit.Path, e.ValidatorSummaries))
-				}
+			if !summaryRequiresReview(e.ValidatorSummaries) {
 				// Skip the visual review step and apply immediately.
 				cmd = m.applyApproval()
 			} else {
-				status := event.StatusReviewing
-				if needsReview {
-					// Only arm the snooze cache for Block findings —
-					// see the comment above on blockSnoozeEligible.
-					// Retry-only proposals still surface (needsReview
-					// is true) but a manual approval must NOT promote
-					// the path into blockedPaths, otherwise a future
-					// retry would auto-apply.
-					if blockSnoozeEligible {
-						m.pendingBlockedPath = e.Edit.Path
-					} else {
-						m.pendingBlockedPath = ""
-					}
-					m.AgentPane.AppendMeta(reviewBannerForSummaries(e.ValidatorSummaries))
-					// Distinct status so the indicator stands out
-					// from routine reviewing — block-review means
-					// "validator flagged this, eyes-on required."
-					status = event.StatusBlockReview
-				}
-				cmd = tea.Batch(cmd, m.AgentPane.SetStatus(status))
+				m.AgentPane.AppendMeta(reviewBannerForSummaries(e.ValidatorSummaries))
+				cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusReviewing))
 				m.Editor.Overlay.Active = true
 				// Auto-scroll so the diff is visible with some context above.
 				target := diff.StartLine - 3

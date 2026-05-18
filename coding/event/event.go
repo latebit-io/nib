@@ -91,14 +91,6 @@ const (
 const (
 	// StatusReviewing means an edit proposal is pending user review.
 	StatusReviewing StatusKind = "reviewing"
-	// StatusBlockReview means an edit proposal is pending user review
-	// SPECIFICALLY because a validator stage flagged it (architecture
-	// cap, lint, etc.). The TUI uses this to render a more
-	// attention-grabbing status indicator than plain "reviewing" —
-	// the developer needs to know this surfaced for a reason and is
-	// not the routine review-and-approve flow they'd see at lower
-	// autonomy levels.
-	StatusBlockReview StatusKind = "block-review"
 	// StatusLinting means the agent is running post-edit style lint commands.
 	StatusLinting StatusKind = "linting"
 )

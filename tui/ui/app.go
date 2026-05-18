@@ -401,7 +401,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // clearEditorOverlay delegates scroll correction to the engine and clears
 // the TUI overlay state.
 //
-// bufferMutated should be true when called after a successful ApproveEdit
+// bufferMutated should be true when called after a successful apply
 // (the buffer already has the replacement content). When false (reject,
 // error, done), the buffer is unchanged and the conversion differs.
 func (m *AppModel) clearEditorOverlay(bufferMutated bool) {

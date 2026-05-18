@@ -441,20 +441,62 @@ func writeTestFile(path, content string) error {
 
 // --- Provenance Tests ---
 
+// newSessionWithFile creates a session whose active buffer is backed by
+// a real file in a temp dir. Use when the test needs PrepareApproval to
+// resolve a non-empty stagedEditFile.
+func newSessionWithFile(t *testing.T, relPath, content string) *Session {
+	t.Helper()
+	root := t.TempDir()
+	abs := filepath.Join(root, relPath)
+	if err := writeTestFile(abs, content); err != nil {
+		t.Fatal(err)
+	}
+	buf, err := buffer.NewFromFile(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(openfile.New(buf), root)
+	events := make(chan event.Event, 64)
+	ag := agent.New(stubProvider{}, stubWorkspace{}, nil)
+	s.SetAgent(ag, events)
+	return s
+}
+
+// stagedApprove drives Session through the production approval path:
+// PrepareApproval → buffer.ApplyEdit → CompleteApproval. Mirrors what
+// the TUI does in app_approval.go (modulo the editor controller, which
+// just wraps openfile.ApplyEdit). The target buffer is captured before
+// PrepareApproval because PrepareApproval clears pendingEdit, which
+// openFileForEdit relies on.
+func stagedApprove(t *testing.T, s *Session, search, replace string) {
+	t.Helper()
+	of := s.openFileForEdit()
+	if of == nil {
+		t.Fatal("openFileForEdit returned nil")
+	}
+	plan, err := s.PrepareApproval(search, replace)
+	if err != nil {
+		t.Fatalf("PrepareApproval: %v", err)
+	}
+	outcome := of.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
+	if !outcome.Applied {
+		s.AbortApproval()
+		t.Fatalf("ApplyEdit failed: %s", outcome.FailureReason)
+	}
+	s.CompleteApproval()
+}
+
 func TestApproveEditMarksAgentOrigin(t *testing.T) {
-	s := newTestSession("old text")
+	s := newSessionWithFile(t, "main.go", "old text")
 
-	// Simulate agent proposing an edit
-	s.pendingEdit = &event.PendingEdit{Search: "old text", Replace: "new text"}
-	s.ReviewEdit()
-
-	// Drain the approve signal in a goroutine (agent.Approve sends to channel)
-	ok, reason := s.ApproveEdit("old text", "new text")
-	if !ok {
-		t.Fatalf("ApproveEdit failed: %s", reason)
+	s.pendingEdit = &event.PendingEdit{Path: "main.go", Search: "old text", Replace: "new text"}
+	s.pendingProposedReplace = "new text"
+	if diff, _ := s.ReviewEdit(); diff == nil {
+		t.Fatal("ReviewEdit returned nil diff")
 	}
 
-	// Line should be marked as agent-written
+	stagedApprove(t, s, "old text", "new text")
+
 	if got := s.activeOpenFile.Buf.LineOrigin(0); got != buffer.OriginAgent {
 		t.Errorf("line 0 origin = %d, want OriginAgent", got)
 	}
@@ -478,13 +520,12 @@ func TestApproveEditTracksModifiedFile(t *testing.T) {
 	s.SetAgent(ag, events)
 
 	s.pendingEdit = &event.PendingEdit{Search: "old", Replace: "new"}
-	s.ReviewEdit()
-	ok, _ := s.ApproveEdit("old", "new")
-	if !ok {
-		t.Fatal("ApproveEdit failed")
+	s.pendingProposedReplace = "new"
+	if diff, _ := s.ReviewEdit(); diff == nil {
+		t.Fatal("ReviewEdit returned nil diff")
 	}
+	stagedApprove(t, s, "old", "new")
 
-	// File should be in agent-modified list
 	modified := s.AgentModifiedFiles()
 	if len(modified) != 1 {
 		t.Fatalf("AgentModifiedFiles: got %d files, want 1", len(modified))
@@ -494,7 +535,7 @@ func TestApproveEditTracksModifiedFile(t *testing.T) {
 	}
 }
 
-func TestFileStatus(t *testing.T) {
+func TestAgentModified(t *testing.T) {
 	root := t.TempDir()
 	filePath := root + "/main.go"
 	if err := writeTestFile(filePath, "code\n"); err != nil {
@@ -511,15 +552,16 @@ func TestFileStatus(t *testing.T) {
 	ag := agent.New(stubProvider{}, stubWorkspace{}, nil)
 	s.SetAgent(ag, events)
 
-	// Initially: not modified
 	if s.AgentModified(filePath) {
 		t.Error("expected agentModified=false before any agent edit")
 	}
 
-	// After agent edit: should be modified
 	s.pendingEdit = &event.PendingEdit{Search: "code", Replace: "new code"}
-	s.ReviewEdit()
-	s.ApproveEdit("code", "new code")
+	s.pendingProposedReplace = "new code"
+	if diff, _ := s.ReviewEdit(); diff == nil {
+		t.Fatal("ReviewEdit returned nil diff")
+	}
+	stagedApprove(t, s, "code", "new code")
 
 	if !s.AgentModified(filePath) {
 		t.Error("expected agentModified=true after agent edit")

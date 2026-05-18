@@ -145,7 +145,18 @@ func (a *Agent) cancelAndDrain(_ context.Context) error {
 // which old tool results are truncated to reduce input cost.
 // Compaction is triggered before each LLM call so the next request
 // fits a smaller window without losing the recent conversation.
-const compactHistoryThreshold = 30_000
+//
+// 20_000 is a moderate setting: empirically a Pac-Man-class build
+// peaks history around 60-70k tokens, so the threshold fires 2-3
+// times across the run instead of once near the end at 30_000.
+// [compactKeepTurns] still preserves the last 3 user turns verbatim,
+// so the LLM never loses access to its immediate working set —
+// compaction only prunes large tool results in older turns, which
+// the model can re-read on demand if it genuinely needs them. The
+// re-read cost is a single small bash/read_file turn; keeping the
+// old result in every subsequent prefix costs the full blob every
+// turn until the run ends.
+const compactHistoryThreshold = 20_000
 
 // compactKeepTurns is the number of recent user turns whose tool
 // results are preserved verbatim during compaction. Older tool

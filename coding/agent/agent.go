@@ -135,7 +135,7 @@ type Agent struct {
 	// diagDelay is the wait time for the language server to push diagnostics after an edit.
 	diagDelay time.Duration
 
-	// workspace is used by the approval flow to manage context set.
+	// workspace exposes the project filesystem and open buffers to tools.
 	workspace Workspace
 
 	// planningBlocklist is the per-instance set of tool names blocked in planning mode.

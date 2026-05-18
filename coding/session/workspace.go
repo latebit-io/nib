@@ -16,7 +16,7 @@ import (
 // Workspace methods — the agent.Workspace interface implementation that
 // gives tools access to the project filesystem and open buffers. Grouped
 // here so the contract is visible at one glance. State (openFiles,
-// contextSet, projectRoot, mu, langSyncer) lives on Session.
+// projectRoot, mu, langSyncer) lives on Session.
 
 // SaveDirtyBuffers writes all modified (unsaved) buffers to disk and
 // notifies the language service of each save. Returns the canonical

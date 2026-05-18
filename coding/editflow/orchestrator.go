@@ -18,8 +18,8 @@ import (
 // [Orchestrator] runs the review flow the `edit_file` / `replace_file`
 // tools trigger via the [tools.Approver.Propose] collaborator method.
 // It threads the validation pipeline, EditProposed event delivery,
-// approve/reject wait, edit-record callback, context-set update, and
-// post-approval cache update with diagnostics injection.
+// approve/reject wait, edit-record callback, and post-approval cache
+// update with diagnostics injection.
 //
 // State stays on the agent (taskEdits, validatorRetries, file cache)
 // — the Orchestrator only sees those fields through the [Deps]

@@ -10,22 +10,7 @@
 // proposal-handling path can dispatch unconditionally.
 package validate
 
-import (
-	"context"
-
-	sitter "github.com/tree-sitter/go-tree-sitter"
-)
-
-// LanguageFunc returns the tree-sitter grammar for a given path, or nil
-// when the extension is unsupported. Defined here so every grammar-aware
-// validator (treesitter, architecture, future per-language stages)
-// shares one source of truth — composition roots can resolve a single
-// [highlight.LanguageFor] reference and pass it to N validators without
-// each subpackage re-declaring the contract.
-//
-// The returned [*sitter.Language] is expected to be cached and reused;
-// validators must not call Close() on it.
-type LanguageFunc func(path string) *sitter.Language
+import "context"
 
 // Candidate describes a proposed edit awaiting validation. Before and
 // After hold full file contents so stateless validators (parser,
@@ -66,14 +51,10 @@ const (
 // String returns a stable human-readable label for the verdict — used in
 // capture payloads, debug logs, and test output.
 func (v Verdict) String() string {
-	switch v {
-	case Pass:
+	if v == Pass {
 		return "pass"
-	case Retry:
-		return "retry"
-	default:
-		return "unknown"
 	}
+	return "retry"
 }
 
 // Result is one validator's findings for one candidate. Stage identifies
@@ -127,26 +108,12 @@ type Pipeline interface {
 	Run(ctx context.Context, c Candidate) []Result
 }
 
-// NoopPipeline is the null-object implementation of Pipeline. It is the
-// default installed by [github.com/latebit-io/nib/coding/agent.New]
-// when no validators are registered; swap it out at the composition
-// root to enable pre-approval checks.
-type NoopPipeline struct{}
-
-// Run returns a nil slice — every candidate passes.
-func (NoopPipeline) Run(context.Context, Candidate) []Result { return nil }
-
 // NewPipeline returns a sequential Pipeline that evaluates validators
-// in order and short-circuits on the first non-Pass verdict. Passing
-// zero validators yields a [NoopPipeline] so the common "no stages
-// registered" path is the null object without special-casing.
+// in order and short-circuits on the first non-Pass verdict.
 //
 // The returned pipeline respects ctx.Done() between validators and
 // propagates cancellation into each Validator.Validate call.
 func NewPipeline(validators ...Validator) Pipeline {
-	if len(validators) == 0 {
-		return NoopPipeline{}
-	}
 	return &seqPipeline{validators: validators}
 }
 

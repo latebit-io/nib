@@ -157,7 +157,12 @@ func TestSystemPromptAutonomyRules(t *testing.T) {
 	for _, want := range []string{
 		"## Autonomy",
 		"WILL NOT be answered",
-		"immediately activate the next pending task",
+		// The tool now auto-activates the next task on complete, so the
+		// prompt instruction shifted from "you must activate" to "the
+		// tool already did it." Keep verifying the section tells the LLM
+		// to keep moving at task boundaries — that's the load-bearing
+		// intent for the autonomous-loop fix.
+		"auto-activates the next pending task",
 	} {
 		if !strings.Contains(system, want) {
 			t.Errorf("system prompt missing %q", want)

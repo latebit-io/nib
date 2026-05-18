@@ -3,29 +3,29 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 
 	"github.com/latebit-io/nib/ai/llm"
 )
 
-// TaskTool handles task status updates in the project work tree.
-// Uses the TaskMutator interface to update state through the session,
-// avoiding direct memory writes and keeping the work tree consistent.
-// On a successful "complete" action the tool calls the configured
-// [TaskReviewer] so the LLM sees lint, smoke, and style review
-// feedback inline with the tool result.
+// TaskTool handles task status updates in the project work tree. Uses
+// the TaskTracker interface — read-side (NextPendingTask) is needed so
+// a successful complete can auto-activate the next pending task in the
+// same call, sparing the LLM a round-trip turn on the transition. On a
+// successful complete the tool calls the configured [TaskReviewer] so
+// lint, smoke, and style findings land in the tool result alongside the
+// auto-activation notice.
 type TaskTool struct {
-	tracker  TaskMutator
+	tracker  TaskTracker
 	reviewer TaskReviewer
 }
 
 // NewTaskTool creates a task tracking tool. The tracker is obtained via
-// type assertion on the workspace — nil tracker disables the tool.
-// TaskMutator covers ActivateTask and CompleteTask; the read-side
-// surface is unused here so depending on it would be overreach. The
+// type assertion on the workspace — nil tracker disables the tool. The
 // reviewer is invoked after a successful complete to run the
 // post-completion pipeline; nil reviewer skips it.
-func NewTaskTool(tracker TaskMutator, reviewer TaskReviewer) *TaskTool {
+func NewTaskTool(tracker TaskTracker, reviewer TaskReviewer) *TaskTool {
 	return &TaskTool{tracker: tracker, reviewer: reviewer}
 }
 
@@ -37,7 +37,7 @@ func (t *TaskTool) Definition() llm.ToolDef {
 			Name: "update_task",
 			Description: "Update a task's status in the project plan. " +
 				"Use 'activate' to mark a task as in-progress before starting work on it. " +
-				"Use 'complete' to mark it done after finishing. " +
+				"Use 'complete' to mark it done after finishing — on success the next pending task is auto-activated and named in the result, so you can proceed straight to its work without a separate activate call. " +
 				"The title must exactly match a task item from the project plan.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
@@ -98,8 +98,41 @@ func (t *TaskTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 
 	slog.Debug("update_task succeeded", "action", args.Action, "title", args.Title)
 	msg := "Task " + args.Action + "d: " + args.Title
-	if args.Action == "complete" && t.reviewer != nil {
-		return textResult(t.reviewer.OnComplete(ctx, msg))
+	if args.Action != "complete" {
+		return textResult(msg)
 	}
-	return textResult(msg)
+	if t.reviewer != nil {
+		msg = t.reviewer.OnComplete(ctx, msg)
+	}
+	return textResult(msg + t.autoActivateNext())
+}
+
+// autoActivateNext finds the next pending task and activates it,
+// returning the suffix to append to the complete-result message. Splits
+// the bookkeeping off Execute so the happy path stays linear and each
+// failure mode has its own branch:
+//
+//   - No more pending tasks → an explicit "all complete" message so the
+//     LLM stops instead of looping looking for work.
+//   - Activation fails (e.g. demarkus write rejected) → surface the
+//     reason and instruct the LLM to retry manually. The complete
+//     itself already persisted, so this is recoverable.
+//   - Success → name the activated task so the LLM can proceed to its
+//     work immediately without a separate activate call.
+//
+// The activation is best-effort: a failure here never undoes the
+// complete that succeeded. The system prompt's old "always call
+// activate after complete" instruction is now redundant — the tool
+// handles the round-trip itself.
+func (t *TaskTool) autoActivateNext() string {
+	next := t.tracker.NextPendingTask()
+	if next == "" {
+		return "\n\nAll tasks complete."
+	}
+	if err := t.tracker.ActivateTask(next); err != nil {
+		slog.Warn("auto-activate next task failed", "title", next, "err", err)
+		return fmt.Sprintf("\n\nNext pending task: %q (auto-activate failed: %v — call update_task with action=\"activate\" to retry).", next, err)
+	}
+	slog.Debug("auto-activated next task", "title", next)
+	return fmt.Sprintf("\n\nNext task auto-activated: %s", next)
 }

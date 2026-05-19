@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -23,13 +24,14 @@ func (s *stubTracker) AddTask(p, f, t, l string) error {
 	return s.addErr
 }
 
-func TestProjectTaskAddTool_Success(t *testing.T) {
+func TestProjectTaskAddTool_SingleTask(t *testing.T) {
 	tracker := &stubTracker{}
 	tool := NewProjectTaskAddTool(tracker)
-	args := `{"phase": "Phase 1", "feature": "Render", "task": "draw sprites", "link": "/game/sprites.md"}`
+	args := `{"tasks": [{"phase": "Phase 1", "feature": "Render", "task": "draw sprites", "link": "/game/sprites.md"}]}`
 	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
 
-	assertContains(t, result.Content, "Added: Phase 1 > Render > draw sprites")
+	assertContains(t, result.Content, "Added 1 task(s)")
+	assertContains(t, result.Content, "Phase 1 > Render > draw sprites")
 	if len(tracker.addCalls) != 1 {
 		t.Fatalf("expected 1 AddTask call, got %d", len(tracker.addCalls))
 	}
@@ -40,6 +42,68 @@ func TestProjectTaskAddTool_Success(t *testing.T) {
 	}
 }
 
+// TestProjectTaskAddTool_Batch is the core win of the batch shape: one
+// tool call dispatches AddTask across multiple distinct phase/feature
+// pairs in order. The Pac-Man trace consistently saw the LLM
+// back-to-back the per-task calls in a single turn; with this shape
+// the same intent collapses to one tool call and one tool result.
+func TestProjectTaskAddTool_Batch(t *testing.T) {
+	tracker := &stubTracker{}
+	tool := NewProjectTaskAddTool(tracker)
+	args := `{"tasks": [
+		{"phase": "Foundation", "feature": "Project Setup", "task": "Create LÖVE bootstrap"},
+		{"phase": "Foundation", "feature": "Project Setup", "task": "Implement tile maze"},
+		{"phase": "Ghosts and AI", "feature": "Ghost Behavior", "task": "Implement chase/scatter"},
+		{"phase": "Audio and Polish", "feature": "Presentation", "task": "Synthesized SFX"}
+	]}`
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
+
+	assertContains(t, result.Content, "Added 4 task(s)")
+	if len(tracker.addCalls) != 4 {
+		t.Fatalf("expected 4 AddTask calls, got %d", len(tracker.addCalls))
+	}
+	// Order preservation matters: the LLM may rely on task order for
+	// the activation gate (e.g., NextPendingTask returning the first
+	// pending in document order — which is the order we appended).
+	wantTitles := []string{
+		"Create LÖVE bootstrap",
+		"Implement tile maze",
+		"Implement chase/scatter",
+		"Synthesized SFX",
+	}
+	for i, want := range wantTitles {
+		if tracker.addCalls[i].task != want {
+			t.Errorf("call %d: task = %q, want %q", i, tracker.addCalls[i].task, want)
+		}
+	}
+}
+
+// TestProjectTaskAddTool_PartialSuccess locks the partial-success
+// contract: a malformed entry in the middle of the batch must not
+// stop the surrounding entries from being added. The result names
+// what succeeded AND what failed so the LLM can retry only the
+// failures instead of resending the whole batch.
+func TestProjectTaskAddTool_PartialSuccess(t *testing.T) {
+	tracker := &stubTracker{}
+	tool := NewProjectTaskAddTool(tracker)
+	args := `{"tasks": [
+		{"phase": "Foundation", "feature": "Setup", "task": "good one"},
+		{"phase": "", "feature": "Setup", "task": "bad — missing phase"},
+		{"phase": "Foundation", "feature": "Setup", "task": "another good one"}
+	]}`
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
+
+	assertContains(t, result.Content, "Added 2 task(s)")
+	assertContains(t, result.Content, "good one")
+	assertContains(t, result.Content, "another good one")
+	assertContains(t, result.Content, "Failed 1 task(s)")
+	assertContains(t, result.Content, "tasks[1]")
+	assertContains(t, result.Content, "phase is required")
+	if len(tracker.addCalls) != 2 {
+		t.Fatalf("expected 2 AddTask calls (1 skipped), got %d", len(tracker.addCalls))
+	}
+}
+
 func TestProjectTaskAddTool_Validation(t *testing.T) {
 	tool := NewProjectTaskAddTool(&stubTracker{})
 	cases := []struct {
@@ -47,9 +111,11 @@ func TestProjectTaskAddTool_Validation(t *testing.T) {
 		args string
 		want string
 	}{
-		{"missing phase", `{"feature": "F", "task": "t"}`, "phase is required"},
-		{"missing feature", `{"phase": "P", "task": "t"}`, "feature is required"},
-		{"missing task", `{"phase": "P", "feature": "F"}`, "task is required"},
+		{"missing phase in entry", `{"tasks":[{"feature":"F","task":"t"}]}`, "phase is required"},
+		{"missing feature in entry", `{"tasks":[{"phase":"P","task":"t"}]}`, "feature is required"},
+		{"missing task in entry", `{"tasks":[{"phase":"P","feature":"F"}]}`, "task is required"},
+		{"empty tasks array", `{"tasks":[]}`, "tasks array is required and must not be empty"},
+		{"missing tasks field", `{}`, "tasks array is required and must not be empty"},
 		{"bad json", `{not json`, "invalid arguments"},
 	}
 	for _, tc := range cases {
@@ -62,7 +128,7 @@ func TestProjectTaskAddTool_Validation(t *testing.T) {
 
 func TestProjectTaskAddTool_NilTracker(t *testing.T) {
 	tool := NewProjectTaskAddTool(nil)
-	args := `{"phase": "P", "feature": "F", "task": "t"}`
+	args := `{"tasks":[{"phase":"P","feature":"F","task":"t"}]}`
 	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
 	assertContains(t, result.Content, "task tracking not available")
 }
@@ -70,11 +136,11 @@ func TestProjectTaskAddTool_NilTracker(t *testing.T) {
 func TestProjectTaskAddTool_NormalizesWhitespace(t *testing.T) {
 	tracker := &stubTracker{}
 	tool := NewProjectTaskAddTool(tracker)
-	// Whitespace-padded args must reach the tracker trimmed so lookups
+	// Whitespace-padded fields must reach the tracker trimmed so lookups
 	// against "Phase 1" / "Render" succeed.
-	args := `{"phase": "  Phase 1  ", "feature": "\tRender\n", "task": "  draw  ", "link": "  /x.md  "}`
+	args := `{"tasks":[{"phase":"  Phase 1  ","feature":"\tRender\n","task":"  draw  ","link":"  /x.md  "}]}`
 	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
-	assertContains(t, result.Content, "Added: Phase 1 > Render > draw")
+	assertContains(t, result.Content, "Phase 1 > Render > draw")
 
 	if len(tracker.addCalls) != 1 {
 		t.Fatalf("expected 1 AddTask call, got %d", len(tracker.addCalls))
@@ -94,9 +160,23 @@ func TestProjectTaskAddTool_NormalizesWhitespace(t *testing.T) {
 	}
 }
 
+// TestProjectTaskAddTool_TrackerError verifies that a tracker-side
+// failure (e.g. "no such phase") surfaces in the failure list
+// without aborting the rest of the batch. Pairs the validation-
+// driven partial-success path with the I/O-driven one.
 func TestProjectTaskAddTool_TrackerError(t *testing.T) {
-	tool := NewProjectTaskAddTool(&stubTracker{addErr: errors.New("no such phase")})
-	args := `{"phase": "P", "feature": "F", "task": "t"}`
+	tracker := &stubTracker{addErr: errors.New("no such phase")}
+	tool := NewProjectTaskAddTool(tracker)
+	args := `{"tasks":[
+		{"phase":"P","feature":"F","task":"t1"},
+		{"phase":"P","feature":"F","task":"t2"}
+	]}`
 	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
+
+	// Every entry calls AddTask and every call errors → all fail, none added.
 	assertContains(t, result.Content, "no such phase")
+	assertContains(t, result.Content, "Failed 2 task(s)")
+	if strings.Contains(result.Content, "Added") {
+		t.Errorf("no Added section expected when all entries fail: %q", result.Content)
+	}
 }

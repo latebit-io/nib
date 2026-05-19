@@ -106,7 +106,10 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, call llm.ToolCall) ToolRes
 
 	parsed, err := patch.Parse(args.Patch)
 	if err != nil {
-		return errorResult(formatParseError(err))
+		// patch.ParseError already embeds the line number and (for
+		// UnsupportedV2Error) the LLM-facing steer toward write_file,
+		// so prepending "Error:" is all the tool layer needs to add.
+		return errorResult("Error: " + err.Error())
 	}
 	// Parser guarantees one file on success — defence in depth in case
 	// a future v2 path constructs a multi-file Patch and forgets to
@@ -162,20 +165,6 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, call llm.ToolCall) ToolRes
 		ExpectedContent: updated,
 	})
 	return ToolResult{Content: body, IsError: isErr}
-}
-
-// formatParseError converts a patch.Parse error into LLM-facing text.
-// UnsupportedV2Error carries enough context that the patch package's
-// message is already actionable; the generic ParseError already
-// embeds the line number. We just prepend "Error:" so the tool result
-// reads consistently with the other file tools.
-func formatParseError(err error) string {
-	var v2 *patch.UnsupportedV2Error
-	if errors.As(err, &v2) {
-		// The directive name is already in the message; no need to repeat.
-		return "Error: " + err.Error()
-	}
-	return "Error: " + err.Error()
 }
 
 // applyFilePatch resolves every hunk in fp against content and

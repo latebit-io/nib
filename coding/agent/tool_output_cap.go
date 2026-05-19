@@ -43,14 +43,24 @@ func capToolOutputsIfEnabled(msgs []llm.Message) []llm.Message {
 //  1. IDEMPOTENCY. Running [capStaleToolResults] twice on the same
 //     slice returns a byte-identical result. The `len > maxBytes`
 //     guard skips already-capped messages because the marker text
-//     is bounded below `maxBytes`; [truncationMarker] is a pure
-//     function of (content, maxBytes) — no clock reads, no random
-//     IDs, no per-session state.
-//  2. AT-MOST-ONE NEW MUTATION PER TURN. Because the recent window
-//     advances exactly one user turn per call, at most one
-//     previously-verbatim tool result newly enters the stale
-//     window per turn — bounding cache-invalidation cost to the
-//     suffix between that position and the cache breakpoint.
+//     is bounded below `maxBytes` (enforced by the minToolOutputCap
+//     floor); [truncationMarker] is a pure function of (content,
+//     maxBytes) — no clock reads, no random IDs, no per-session
+//     state.
+//  2. BOUNDED NEW MUTATIONS PER TURN. Each new LLM call appends one
+//     assistant message and zero-or-more tool results (one per
+//     tool call in that turn's batch). The recent window advances
+//     by exactly the batch size, so AT MOST batch-size previously
+//     verbatim tool results newly enter the stale window in a
+//     single turn. Typical agent traffic is one tool per turn —
+//     one new mutation. Parallel-tool turns (e.g. multiple
+//     read_file in one batch) can roll 2-3 results stale in one
+//     pass; the cache invalidates from the oldest of those forward.
+//     This is unavoidable while still respecting Pillar-6
+//     extensibility (the cap can't know batch boundaries without
+//     wiring through). Cost stays positive in expectation because
+//     each newly capped result saves bytes on every subsequent
+//     turn.
 
 // toolOutputCapBytes is the byte cap for tool-result content in
 // older turns. Set generously (4 KiB) on the conservative side of
@@ -80,6 +90,16 @@ const toolCapKeepRecent = 2
 // preview budget.
 const truncationTailReserve = 128
 
+// minToolOutputCap is the smallest maxBytes value the cap accepts.
+// Below this, the marker text cannot fit inside maxBytes and the
+// idempotency invariant (a second pass leaves capped content alone)
+// would break — a re-cap would fire on the marker itself,
+// generating a different (smaller, deterministic but mutated)
+// output every pass, which in turn would invalidate the prompt
+// cache every turn. Treating sub-floor maxBytes as a no-op keeps
+// the invariant structural rather than implicit.
+const minToolOutputCap = 256
+
 // capStaleToolResults replaces oversize tool-result content with a
 // truncation marker for tool messages older than the most recent
 // keepRecent tool-message boundaries. Pure function; returns the
@@ -89,7 +109,7 @@ const truncationTailReserve = 128
 // byte-identical result, so the provider-side prompt cache stays
 // stable across turns.
 func capStaleToolResults(msgs []llm.Message, keepRecent, maxBytes int) []llm.Message {
-	if len(msgs) == 0 || keepRecent < 0 || maxBytes <= 0 {
+	if len(msgs) == 0 || keepRecent < 0 || maxBytes < minToolOutputCap {
 		return msgs
 	}
 	boundary := findKeepBoundary(msgs, keepRecent)
@@ -139,12 +159,16 @@ func capStaleToolResults(msgs []llm.Message, keepRecent, maxBytes int) []llm.Mes
 	return out
 }
 
-// findKeepBoundary returns the index of the first tool message that
-// belongs to the "stale" window — every tool message at index <
-// boundary is eligible for truncation, every message at index >=
-// boundary stays verbatim. The boundary is set so the keepRecent
-// most-recent tool messages (and everything after the oldest of
-// those) are preserved.
+// findKeepBoundary returns the EXCLUSIVE upper bound of the "stale"
+// window: the index of the keepRecent-th most recent tool message
+// — i.e., the FIRST message that stays verbatim. Callers iterate
+// `for i := 0; i < boundary; i++` so every message at index <
+// boundary is eligible for truncation and every message at index
+// >= boundary is preserved.
+//
+// Example with keepRecent=2 and tool messages at indices 3, 5, 7:
+// returns 5. Indices 0..4 are stale (index 3 is the only tool
+// there, so it gets capped); indices 5 and 7 stay verbatim.
 //
 // Walks backward counting tool-role messages (not user messages,
 // which would collapse to 0 on single-goal agentic sessions where

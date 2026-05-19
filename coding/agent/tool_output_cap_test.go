@@ -278,7 +278,13 @@ func TestCapStaleToolResults_OnlyToolMessagesAffected(t *testing.T) {
 	}
 }
 
-// Zero / negative inputs are accepted as no-ops rather than panics.
+// Zero / negative / sub-floor inputs are accepted as no-ops rather
+// than panics. The sub-floor cases (maxBytes < minToolOutputCap)
+// are critical: below the floor the marker text wouldn't fit
+// inside maxBytes and a second pass would re-cap the marker
+// itself, generating a different output every turn and breaking
+// the prompt cache. The floor guard makes that impossible by
+// declining to cap at all.
 func TestCapStaleToolResults_DegenerateInputs(t *testing.T) {
 	t.Parallel()
 	msgs := []llm.Message{{Role: "user", Content: "x"}}
@@ -293,6 +299,9 @@ func TestCapStaleToolResults_DegenerateInputs(t *testing.T) {
 		{"negative keepTurns", msgs, -1, 4096},
 		{"zero maxBytes", msgs, 2, 0},
 		{"negative maxBytes", msgs, 2, -100},
+		{"maxBytes 1 (sub-floor)", msgs, 2, 1},
+		{"maxBytes 127 (just under truncationTailReserve)", msgs, 2, 127},
+		{"maxBytes 255 (one below minToolOutputCap)", msgs, 2, 255},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -301,6 +310,95 @@ func TestCapStaleToolResults_DegenerateInputs(t *testing.T) {
 				t.Errorf("degenerate input should be no-op; got %v, want %v", out, tt.msgs)
 			}
 		})
+	}
+}
+
+// Sub-floor maxBytes on a payload that WOULD trigger capping at a
+// healthy maxBytes is the precise case where a naive implementation
+// breaks idempotency. The floor guard turns this into a no-op
+// instead, preserving cache stability for any caller that hands in
+// an undersized cap (a misconfiguration or a future
+// per-tool-override that picks too aggressive a value).
+func TestCapStaleToolResults_SubFloorMaxBytesIsNoOp(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("z", toolOutputCapBytes*2)
+	msgs := []llm.Message{
+		{Role: "user", Content: "the goal"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "tool", ToolCallID: "t1", Content: big},
+		{Role: "assistant", Content: "a2"},
+		{Role: "tool", ToolCallID: "t2", Content: big},
+		{Role: "assistant", Content: "a3"},
+		{Role: "tool", ToolCallID: "t3", Content: big},
+	}
+	out := capStaleToolResults(msgs, toolCapKeepRecent, minToolOutputCap-1)
+	if !reflect.DeepEqual(out, msgs) {
+		t.Errorf("sub-floor maxBytes should produce a no-op even with cap-eligible payload")
+	}
+}
+
+// Multi-tool batch: when the previous LLM call emitted N>1 tool
+// calls, N tool results land in history in one turn. If keepRecent
+// is smaller than the batch, the oldest results of the batch (plus
+// any pre-existing kept-but-now-stale ones) all newly enter the
+// stale window in a single pass. Greptile P2 #3: the "at most one
+// mutation per turn" framing was overstated; the test pins the
+// real behaviour so future changes can't quietly re-introduce the
+// stronger (false) claim.
+func TestCapStaleToolResults_MultiToolBatchRollsMultipleStale(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("m", toolOutputCapBytes*2)
+	// Turn N pre-batch state: two existing tool results, both kept
+	// (within recent window with keepRecent=2).
+	turnN := []llm.Message{
+		{Role: "user", Content: "the goal"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "tool", ToolCallID: "t1", Content: big}, // idx 2 — kept at turn N
+		{Role: "assistant", Content: "a2"},
+		{Role: "tool", ToolCallID: "t2", Content: big}, // idx 4 — kept at turn N
+	}
+	outN := capStaleToolResults(turnN, toolCapKeepRecent, toolOutputCapBytes)
+	if !reflect.DeepEqual(outN, turnN) {
+		t.Fatalf("turn N: with only 2 tool messages and keepRecent=2, expected no-op")
+	}
+
+	// Turn N+1: assistant emits a batch of 3 tool calls. History
+	// gains assistant + 3 tools.
+	turnNext := append([]llm.Message{}, turnN...)
+	turnNext = append(turnNext,
+		llm.Message{Role: "assistant", Content: "a3 (batch)"},
+		llm.Message{Role: "tool", ToolCallID: "t3", Content: big},
+		llm.Message{Role: "tool", ToolCallID: "t4", Content: big},
+		llm.Message{Role: "tool", ToolCallID: "t5", Content: big}, // newest
+	)
+	outNext := capStaleToolResults(turnNext, toolCapKeepRecent, toolOutputCapBytes)
+
+	// With 5 tool messages and keepRecent=2, indices 0..6 are
+	// stale (boundary lands at the 2nd-newest tool, t4 @ idx 7).
+	// That means t1, t2, AND t3 newly mutate this turn — the
+	// "bounded" not "single" invariant.
+	if outNext[2].Content == big {
+		t.Errorf("t1 not capped (should be — fell out of recent window)")
+	}
+	if outNext[4].Content == big {
+		t.Errorf("t2 not capped (should be — fell out of recent window)")
+	}
+	if outNext[6].Content == big {
+		t.Errorf("t3 not capped (should be — pushed out by t4/t5 in the same batch)")
+	}
+	if outNext[7].Content != big {
+		t.Errorf("t4 was capped; should be kept (2nd most recent)")
+	}
+	if outNext[8].Content != big {
+		t.Errorf("t5 (newest) was capped; should always be kept")
+	}
+	// Critical for cache stability: the second pass must reproduce
+	// turn N+1's output byte-for-byte (idempotency) — three
+	// newly-capped messages don't break idempotency, only the
+	// "one mutation" framing.
+	again := capStaleToolResults(outNext, toolCapKeepRecent, toolOutputCapBytes)
+	if !reflect.DeepEqual(outNext, again) {
+		t.Errorf("multi-tool-batch path not idempotent — cache would thrash")
 	}
 }
 

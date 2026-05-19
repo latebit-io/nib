@@ -1457,12 +1457,22 @@ func (m *AgentPaneModel) renderStatusLine() string {
 		if leftRaw.Len() > 0 {
 			sep = " · "
 		}
-		fmt.Fprintf(&leftRaw, "%s%s%s↓", sep, prefix, formatTokenCount(m.usage.totalIn))
+		// Pi-style: ↑input ↓output R<cache> (matches the per-turn
+		// line in [formatTurnUsage] and the status-bar in
+		// [UsageIndicator] so the same vocabulary reads everywhere).
+		// Trailing chip: N%/<window> for current context occupancy.
+		fresh := m.usage.totalIn - m.usage.totalCached
+		fmt.Fprintf(&leftRaw, "%s↑%s%s ↓%s%s",
+			sep,
+			prefix, formatTokenCount(fresh),
+			prefix, formatTokenCount(m.usage.totalOut))
 		if m.usage.totalCached > 0 && m.usage.totalIn > 0 {
 			pct := m.usage.totalCached * 100 / m.usage.totalIn
-			fmt.Fprintf(&leftRaw, " (%d%%⚡)", pct)
+			fmt.Fprintf(&leftRaw, " R%s (%d%%⚡)", formatTokenCount(m.usage.totalCached), pct)
 		}
-		fmt.Fprintf(&leftRaw, " · %s%s↑", prefix, formatTokenCount(m.usage.totalOut))
+		if chip := formatContextChip(m.usage.lastTurnTotal, m.modelLabel); chip != "" {
+			fmt.Fprintf(&leftRaw, " %s", chip)
+		}
 	}
 	left := statusLeftStyle.Render(leftRaw.String())
 	leftW := lipgloss.Width(left)

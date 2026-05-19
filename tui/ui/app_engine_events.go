@@ -155,7 +155,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
 	case event.AgentDone:
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
-		summary := formatSessionSummary(m.AgentPane.usage)
+		summary := formatSessionSummary(m.AgentPane.usage, m.AgentPane.modelLabel)
 		if summary != "" {
 			m.AgentPane.AppendMeta("\n--- Done ---\n" + summary + "\n")
 		} else {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -131,12 +132,16 @@ func (pp *providerProxy) Stream(ctx context.Context, messages []llm.Message, too
 					if ev.Usage != nil {
 						pp.recordUsage(ev.Usage)
 					}
+					turn := pp.currentTurn()
+					promptTok := usagePromptTokens(ev.Usage)
+					cachedTok := usageCachedTokens(ev.Usage)
+					completionTok := usageCompletionTokens(ev.Usage)
 					if pp.emit != nil {
 						pp.emit(event.AgentTurnUsage{
-							Turn:             pp.currentTurn(),
-							PromptTokens:     usagePromptTokens(ev.Usage),
-							CompletionTokens: usageCompletionTokens(ev.Usage),
-							CachedTokens:     usageCachedTokens(ev.Usage),
+							Turn:             turn,
+							PromptTokens:     promptTok,
+							CompletionTokens: completionTok,
+							CachedTokens:     cachedTok,
 							ToolCalls:        len(ev.ToolCalls),
 							SystemEst:        est.System,
 							ToolsEst:         est.Tools,
@@ -145,6 +150,7 @@ func (pp *providerProxy) Stream(ctx context.Context, messages []llm.Message, too
 							CompletionEst:    llm.EstimateTokens(content.String()),
 						})
 					}
+					pp.logTurnUsage(turn, promptTok, cachedTok, completionTok, len(ev.ToolCalls))
 					if pp.onTurnSettled != nil {
 						pp.onTurnSettled()
 					}
@@ -158,6 +164,45 @@ func (pp *providerProxy) Stream(ctx context.Context, messages []llm.Message, too
 		}
 	}()
 	return out, nil
+}
+
+// logTurnUsage emits one INFO line per turn carrying the
+// provider-reported token counts AND the rolling session totals.
+// Captured at INFO so an unmodified production binary writes a
+// complete per-turn billing trace to debug.log — recoverable later
+// via grep without any extra flags or env vars.
+//
+// The per-turn fields (prompt/cached/completion) are what the
+// provider's billing surface charges for. uncached_input is derived
+// (prompt - cached) so a downstream tally doesn't need to subtract
+// itself. The session_* fields advance monotonically; the LAST log
+// line of a run carries the final session totals — making
+// apples-to-apples billing comparison across nib runs (and against
+// opencode / pi) a single `grep` + `tail -1` away.
+func (pp *providerProxy) logTurnUsage(turn, prompt, cached, completion, toolCalls int) {
+	totals := pp.Snapshot()
+	uncached := prompt - cached
+	if uncached < 0 {
+		// Defensive: providers that mis-report cached > prompt
+		// would produce a negative value that's nonsensical for
+		// downstream summation. Clamp + log so the anomaly is
+		// visible in the trace rather than silently distorting it.
+		slog.Warn("provider usage: cached > prompt — clamping uncached to 0",
+			"turn", turn, "prompt", prompt, "cached", cached)
+		uncached = 0
+	}
+	slog.Info("provider usage: turn settled",
+		"turn", turn,
+		"prompt_tokens", prompt,
+		"cached_tokens", cached,
+		"uncached_tokens", uncached,
+		"completion_tokens", completion,
+		"tool_calls", toolCalls,
+		"session_prompt_tokens", totals.TotalPromptTokens,
+		"session_cached_tokens", totals.TotalCachedTokens,
+		"session_completion_tokens", totals.TotalCompletionTokens,
+		"session_turns", totals.Turns,
+	)
 }
 
 // usagePromptTokens / usageCompletionTokens / usageCachedTokens are

@@ -39,6 +39,13 @@ const (
 	// non-empty.
 	EnvKeyCaptureDisabled = EnvPrefix + "CAPTURE_DISABLED"
 
+	// EnvKeyToolOutputCapDisabled disables the per-tool-output cap when
+	// set non-empty — older oversize tool results are not replaced with
+	// the truncation marker, restoring uncapped baseline behaviour.
+	// Kill switch for the cap; remove once smoke testing confirms the
+	// cap is a net win on cache rate and billable tokens.
+	EnvKeyToolOutputCapDisabled = EnvPrefix + "TOOL_OUTPUT_CAP_DISABLED"
+
 	// ConfigDirName is the subdirectory under [os.UserConfigDir] where
 	// persisted product config lives (style.json, llm.json, OAuth tokens).
 	ConfigDirName = Name

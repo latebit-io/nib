@@ -301,14 +301,32 @@ func (a *Agent) lintPendingGate() upagent.BeforeToolCallResult {
 }
 
 // foundationCompactAndLint runs the per-Stream context shaping:
-// [maybeCompact] for token-budget compaction and
-// [Agent.drainPendingLint] for surfacing pending lint as a user
-// message. Both cluster on TransformContext because they decide what
-// the message slice looks like just before the provider sees it. The
-// token-threshold guard inside MaybeCompact short-circuits when
-// nothing has changed, so the per-Stream cost is one
-// [llm.EstimateMessageTokens] call.
+// the per-tool-output cap, [maybeCompact] for token-budget
+// compaction, and [Agent.drainPendingLint] for surfacing pending
+// lint as a user message. All three cluster on TransformContext
+// because they decide what the message slice looks like just
+// before the provider sees it.
+//
+// Order matters:
+//
+//  1. [capStaleToolResults] runs FIRST so the compaction threshold
+//     check sees post-cap sizes. Capping plus compaction firing
+//     redundantly on the same content would waste the cap (the
+//     compactor would re-mutate already-truncated stubs, breaking
+//     the cache twice).
+//  2. [maybeCompact] runs second; its token-threshold guard
+//     short-circuits when nothing has changed, so the per-Stream
+//     cost is one [llm.EstimateMessageTokens] call when the cap
+//     already bounded growth.
+//  3. drainPendingLint appends the trailing user message last so it
+//     never enters the cap's stale window (it's by definition the
+//     newest content).
+//
+// The cap is idempotent (see [capStaleToolResults]) and disabled
+// when [brand.EnvKeyToolOutputCapDisabled] is set non-empty — the
+// commit-2 kill switch for the smoke-testing soak.
 func (a *Agent) foundationCompactAndLint(_ context.Context, msgs []llm.Message) ([]llm.Message, error) {
+	msgs = capToolOutputsIfEnabled(msgs)
 	msgs = maybeCompact(msgs, a.activeToolDefs(), a.send)
 	if lint := a.drainPendingLint(); lint != "" {
 		msgs = append(msgs, llm.Message{Role: "user", Content: lint})

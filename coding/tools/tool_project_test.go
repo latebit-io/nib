@@ -104,6 +104,51 @@ func TestProjectTaskAddTool_PartialSuccess(t *testing.T) {
 	}
 }
 
+// TestProjectTaskAddTool_DedupesWithinBatch locks the within-batch
+// dedup guard. The LLM occasionally repeats a task triple inside one
+// batch (e.g., a planning prompt that sketches the same item twice).
+// Without the guard, both entries would pass validation, fire
+// AddTask twice, and write two identical `[ ]` bullets to
+// /project.md — the second copy would then orphan as soon as
+// update_task / NextPendingTask matched the first by title.
+//
+// Surfacing the duplicate as a "failed" entry (rather than silently
+// skipping) lets the LLM see that one of its entries was a mistake.
+// The first occurrence still succeeds; only the repeats fail.
+//
+// Whitespace normalization runs BEFORE the dedup check so
+// "Foundation" and "  Foundation\n" hit the same key. Only
+// phase+feature+task participate — `link` is supplementary context
+// and not part of task identity, so entries that differ only in
+// link still count as duplicates.
+func TestProjectTaskAddTool_DedupesWithinBatch(t *testing.T) {
+	tracker := &stubTracker{}
+	tool := NewProjectTaskAddTool(tracker)
+	args := `{"tasks":[
+		{"phase":"Foundation","feature":"Setup","task":"Implement maze"},
+		{"phase":"Foundation","feature":"Setup","task":"Implement ghosts"},
+		{"phase":"  Foundation  ","feature":"Setup","task":"Implement maze"},
+		{"phase":"Foundation","feature":"Setup","task":"Implement maze","link":"/different.md"}
+	]}`
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
+
+	// tasks[0] and tasks[1] are unique — both should be added.
+	// tasks[2] is the same triple as tasks[0] after whitespace
+	// normalization — should fail as duplicate of tasks[0].
+	// tasks[3] differs only in link, which doesn't participate in
+	// the dedup key — should also fail as duplicate of tasks[0].
+	assertContains(t, result.Content, "Added 2 task(s)")
+	assertContains(t, result.Content, "Implement maze")
+	assertContains(t, result.Content, "Implement ghosts")
+	assertContains(t, result.Content, "Failed 2 task(s)")
+	assertContains(t, result.Content, "tasks[2]")
+	assertContains(t, result.Content, "duplicate of tasks[0]")
+	assertContains(t, result.Content, "tasks[3]")
+	if len(tracker.addCalls) != 2 {
+		t.Fatalf("expected 2 AddTask calls (2 dedup'd), got %d", len(tracker.addCalls))
+	}
+}
+
 func TestProjectTaskAddTool_Validation(t *testing.T) {
 	tool := NewProjectTaskAddTool(&stubTracker{})
 	cases := []struct {

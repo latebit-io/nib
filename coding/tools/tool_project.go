@@ -108,6 +108,17 @@ func (t *ProjectTaskAddTool) Execute(_ context.Context, call llm.ToolCall) ToolR
 		return textResult("Error: task tracking not available")
 	}
 
+	// Track first-occurrence index of each (phase, feature, task) triple
+	// so a within-batch repeat surfaces as a "duplicate of tasks[N]"
+	// failure rather than a second AddTask call. The LLM occasionally
+	// emits the same task twice when sketching a plan; without this
+	// guard the tracker would write two identical `[ ]` bullets to
+	// /project.md and the second copy would orphan as soon as the
+	// `update_task` flow matched the first by title.
+	//
+	// `link` is intentionally NOT part of the dedup key — it is
+	// supplementary context, not part of the task identity.
+	seen := make(map[string]int, len(args.Tasks))
 	var added, failed []string
 	for i, entry := range args.Tasks {
 		phase := strings.TrimSpace(entry.Phase)
@@ -119,6 +130,16 @@ func (t *ProjectTaskAddTool) Execute(_ context.Context, call llm.ToolCall) ToolR
 			failed = append(failed, fmt.Sprintf("tasks[%d]: %s", i, reason))
 			continue
 		}
+
+		// ASCII Unit Separator (0x1f) is the delimiter — guaranteed not
+		// to appear in human-authored task titles, so the key is
+		// unambiguous without escaping.
+		key := phase + "\x1f" + feature + "\x1f" + task
+		if firstIdx, dup := seen[key]; dup {
+			failed = append(failed, fmt.Sprintf("tasks[%d] (%s > %s > %s): duplicate of tasks[%d]", i, phase, feature, task, firstIdx))
+			continue
+		}
+		seen[key] = i
 
 		if err := t.tracker.AddTask(phase, feature, task, link); err != nil {
 			failed = append(failed, fmt.Sprintf("tasks[%d] (%s > %s > %s): %v", i, phase, feature, task, err))

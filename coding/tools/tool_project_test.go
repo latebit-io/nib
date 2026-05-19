@@ -123,11 +123,15 @@ func TestProjectTaskAddTool_PartialSuccess(t *testing.T) {
 // skipping) lets the LLM see that one of its entries was a mistake.
 // The first occurrence still succeeds; only the repeats fail.
 //
-// Whitespace normalization runs BEFORE the dedup check so
-// "Foundation" and "  Foundation\n" hit the same key. Only
-// phase+feature+task participate — `link` is supplementary context
-// and not part of task identity, so entries that differ only in
-// link still count as duplicates.
+// Normalization that runs BEFORE the dedup check:
+//   - whitespace: "Foundation" and "  Foundation\n" → same key
+//   - case: "Foundation" and "foundation" → same key (matches the
+//     tracker's case-insensitive phase + feature resolution; task is
+//     folded too so an LLM case slip doesn't write a sibling bullet)
+//
+// Only phase + feature + task participate. `link` is supplementary
+// context and not part of task identity, so entries that differ only
+// in link still count as duplicates.
 func TestProjectTaskAddTool_DedupesWithinBatch(t *testing.T) {
 	tracker := &stubTracker{}
 	tool := NewProjectTaskAddTool(tracker)
@@ -135,7 +139,8 @@ func TestProjectTaskAddTool_DedupesWithinBatch(t *testing.T) {
 		{"phase":"Foundation","feature":"Setup","task":"Implement maze"},
 		{"phase":"Foundation","feature":"Setup","task":"Implement ghosts"},
 		{"phase":"  Foundation  ","feature":"Setup","task":"Implement maze"},
-		{"phase":"Foundation","feature":"Setup","task":"Implement maze","link":"/different.md"}
+		{"phase":"Foundation","feature":"Setup","task":"Implement maze","link":"/different.md"},
+		{"phase":"foundation","feature":"setup","task":"IMPLEMENT MAZE"}
 	]}`
 	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
 
@@ -144,15 +149,21 @@ func TestProjectTaskAddTool_DedupesWithinBatch(t *testing.T) {
 	// normalization — should fail as duplicate of tasks[0].
 	// tasks[3] differs only in link, which doesn't participate in
 	// the dedup key — should also fail as duplicate of tasks[0].
+	// tasks[4] differs only in case across all three fields — should
+	// ALSO fail as duplicate of tasks[0] because the tracker resolves
+	// phase/feature case-insensitively and we fold task too to defend
+	// against LLM case slips that would otherwise write a sibling
+	// bullet under the same feature.
 	assertContains(t, result.Content, "Added 2 task(s)")
 	assertContains(t, result.Content, "Implement maze")
 	assertContains(t, result.Content, "Implement ghosts")
-	assertContains(t, result.Content, "Failed 2 task(s)")
+	assertContains(t, result.Content, "Failed 3 task(s)")
 	assertContains(t, result.Content, "tasks[2]")
 	assertContains(t, result.Content, "duplicate of tasks[0]")
 	assertContains(t, result.Content, "tasks[3]")
+	assertContains(t, result.Content, "tasks[4]")
 	if len(tracker.addCalls) != 2 {
-		t.Fatalf("expected 2 AddTask calls (2 dedup'd), got %d", len(tracker.addCalls))
+		t.Fatalf("expected 2 AddTask calls (3 dedup'd), got %d", len(tracker.addCalls))
 	}
 }
 

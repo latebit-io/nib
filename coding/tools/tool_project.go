@@ -131,10 +131,21 @@ func (t *ProjectTaskAddTool) Execute(_ context.Context, call llm.ToolCall) ToolR
 			continue
 		}
 
-		// ASCII Unit Separator (0x1f) is the delimiter — guaranteed not
-		// to appear in human-authored task titles, so the key is
-		// unambiguous without escaping.
-		key := phase + "\x1f" + feature + "\x1f" + task
+		// Dedup key is case-folded and uses ASCII Unit Separator (0x1f) as
+		// the delimiter. Case-folding matches the underlying tracker's
+		// resolution semantics — `engine/project/project.go` resolves
+		// phases via case-insensitive substring and features via
+		// case-insensitive exact match, so "Foundation" and "foundation"
+		// already land in the same heading. Without case-folding here, two
+		// such entries would produce distinct keys, both fire AddTask, and
+		// write two identical bullets under the same feature. Task titles
+		// are case-sensitive at the tracker level, but in practice a
+		// case-only variation on a task title is virtually always an LLM
+		// slip, not intentional disambiguation; folding them too over-
+		// dedups a rare case and under-dedups never. Unit Separator is
+		// guaranteed not to appear in human-authored titles so no
+		// escaping is needed.
+		key := strings.ToLower(phase) + "\x1f" + strings.ToLower(feature) + "\x1f" + strings.ToLower(task)
 		if firstIdx, dup := seen[key]; dup {
 			failed = append(failed, fmt.Sprintf("tasks[%d] (%s > %s > %s): duplicate of tasks[%d]", i, phase, feature, task, firstIdx))
 			continue

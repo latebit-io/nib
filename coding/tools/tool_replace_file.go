@@ -45,8 +45,12 @@ func (t *ReplaceFileTool) Definition() llm.ToolDef {
 	return llm.ToolDef{
 		Type: "function",
 		Function: llm.FunctionDef{
-			Name:        "replace_file",
-			Description: "Replace the entire contents of an existing file in one operation. Use for wholesale rewrites where many edit_file calls would be fragile. Errors when the file does not exist — use write_file to create.",
+			Name: "replace_file",
+			Description: "Replace the ENTIRE contents of an existing file with new content in one operation. " +
+				"Use this for wholesale rewrites that would require many fragile edit_file calls — extracting a module " +
+				"into a clean shape, swapping a placeholder implementation for the real one, regenerating a generated file. " +
+				"The proposal goes through the same approval and validation flow as edit_file (architecture caps, lint, " +
+				"developer review at lower autonomy levels). Errors when the file does not exist — use write_file to create.",
 			Parameters: llm.FunctionParams{
 				Type: "object",
 				Properties: map[string]llm.FunctionParam{

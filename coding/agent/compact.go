@@ -146,17 +146,22 @@ func (a *Agent) cancelAndDrain(_ context.Context) error {
 // Compaction is triggered before each LLM call so the next request
 // fits a smaller window without losing the recent conversation.
 //
-// 20_000 is a moderate setting: empirically a Pac-Man-class build
-// peaks history around 60-70k tokens, so the threshold fires 2-3
-// times across the run instead of once near the end at 30_000.
-// [compactKeepTurns] still preserves the last 3 user turns verbatim,
-// so the LLM never loses access to its immediate working set —
-// compaction only prunes large tool results in older turns, which
-// the model can re-read on demand if it genuinely needs them. The
-// re-read cost is a single small bash/read_file turn; keeping the
-// old result in every subsequent prefix costs the full blob every
-// turn until the run ends.
-const compactHistoryThreshold = 20_000
+// 30_000 is intentionally conservative. Every compaction event mutates
+// the prefix (old tool results replaced with stubs), which invalidates
+// the provider-side prompt cache from the mutation point onward. A
+// tighter threshold (e.g. 20_000) seemed attractive because it caps
+// peak history sooner, but it fires 2-3× more often across a typical
+// session — and each firing breaks cache, so the next turn pays full
+// rate on the entire post-compaction prefix instead of cache-discounted
+// rate. The net is usually worse, not better.
+//
+// The real fix is window-relative compaction: derive the threshold
+// from the active provider's context-window size (e.g. 25% of max,
+// floor 10k, ceiling 60k) so the choice scales with the model
+// instead of being one wrong number for every backend. Tracked as a
+// follow-up. Until then, 30_000 wins for the wide-context models nib
+// most commonly runs against.
+const compactHistoryThreshold = 30_000
 
 // compactKeepTurns is the number of recent user turns whose tool
 // results are preserved verbatim during compaction. Older tool

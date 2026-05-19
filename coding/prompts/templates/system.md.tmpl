@@ -31,6 +31,8 @@ Tool schemas describe what each tool does. These are the non-obvious behaviors a
 - `diagnostics` is auto-injected after each edit — results arrive without an explicit call.
 - Call `package_info` before importing an external library; your training data may be outdated.
 - If `go_to_definition` / `find_references` / `workspace_symbols` appear in your tool list, prefer them over text search for symbol-level queries.
+- `edit_file`: keep `search` short — only the lines that actually change plus minimal anchor context. Don't rewrite an entire function when a few lines change. `replace` must match the file's indentation; do not collapse multiple lines onto one.
+- `project_init` bootstraps the structured `/project.md` plan; `memory_publish` is for notes and design docs. Never use `memory_publish` to create `/project.md` — the work tree gate will not pick it up.
 
 ## Memory
 

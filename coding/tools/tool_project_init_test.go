@@ -163,13 +163,14 @@ func TestProjectInitTool_SurfacesTrackerError(t *testing.T) {
 	}
 }
 
-// TestProjectInitTool_DefinitionDistinguishesFromMemoryPublish
-// verifies the description explicitly steers the LLM to the right
-// tool — the Pac-Man eval surfaced cases where the agent used
-// memory_publish to bootstrap the project document, then got
-// stuck because the work tree didn't reload. The description
-// must say "use this for the plan; use memory_publish for notes."
-func TestProjectInitTool_DefinitionDistinguishesFromMemoryPublish(t *testing.T) {
+// TestProjectInitTool_DefinitionMentionsIdempotent locks the operative
+// safety hint that survives in the trimmed tool description: the LLM
+// must know calling project_init twice will NOT clobber an existing
+// /project.md. The wider "use project_init not memory_publish"
+// disambiguation moved to the system prompt's Tool Notes — see the
+// matching assertion in coding/agent/prompt_test.go where the prompt
+// is the load-bearing carrier.
+func TestProjectInitTool_DefinitionMentionsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	def := NewProjectInitTool(&initTracker{stubTracker: &stubTracker{}}).Definition()
@@ -177,9 +178,7 @@ func TestProjectInitTool_DefinitionDistinguishesFromMemoryPublish(t *testing.T) 
 	if def.Function.Name != "project_init" {
 		t.Errorf("Name = %q", def.Function.Name)
 	}
-	for _, want := range []string{"memory_publish", "project plan", "Idempotent"} {
-		if !strings.Contains(def.Function.Description, want) {
-			t.Errorf("description missing %q: %q", want, def.Function.Description)
-		}
+	if !strings.Contains(def.Function.Description, "Idempotent") {
+		t.Errorf("description missing %q: %q", "Idempotent", def.Function.Description)
 	}
 }

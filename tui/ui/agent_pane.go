@@ -1451,27 +1451,34 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 // gracefully when the pane is narrow: drops the hint first, then the left
 // section, then truncates the chip label.
 func (m *AgentPaneModel) renderStatusLine() string {
-	// Left: model label + cumulative usage, dim.
-	var leftRaw strings.Builder
+	// Left section assembled in tiers — model label, per-turn stats,
+	// context bar — so narrow panes degrade gracefully: drop the bar
+	// first, then stats, then the whole left, instead of yanking
+	// model+stats together the moment the bar overflows.
+	hasUsage := m.usage.turns > 0 && (m.usage.totalIn > 0 || m.usage.totalOut > 0)
+
+	modelChunk := ""
 	if m.modelLabel != "" {
-		leftRaw.WriteString(" ◇ ")
-		leftRaw.WriteString(sanitizeInlineDisplay(m.modelLabel))
+		modelChunk = " ◇ " + sanitizeInlineDisplay(m.modelLabel)
 	}
-	if m.usage.turns > 0 && (m.usage.totalIn > 0 || m.usage.totalOut > 0) {
+
+	statsChunk := ""
+	if hasUsage {
 		prefix := "~"
 		if m.usage.hasExact {
 			prefix = ""
 		}
 		sep := " "
-		if leftRaw.Len() > 0 {
+		if modelChunk != "" {
 			sep = " · "
 		}
+		var b strings.Builder
 		// Pi-style per-turn snapshot: ↑input ↓output R<cache> for
 		// the LATEST turn. Matches pi's web-ui convention of
 		// rendering each message's usage independently rather than
 		// accumulating. Cumulative billing is surfaced in the
 		// session-end summary, not the live footer.
-		fmt.Fprintf(&leftRaw, "%s↑%s%s ↓%s%s",
+		fmt.Fprintf(&b, "%s↑%s%s ↓%s%s",
 			sep,
 			prefix, formatTokenCount(m.usage.lastTurnFresh),
 			prefix, formatTokenCount(m.usage.lastTurnOut))
@@ -1479,20 +1486,22 @@ func (m *AgentPaneModel) renderStatusLine() string {
 			gross := m.usage.lastTurnFresh + m.usage.lastTurnCached
 			if gross > 0 {
 				pct := m.usage.lastTurnCached * 100 / gross
-				fmt.Fprintf(&leftRaw, " R%s (%d%%⚡)",
+				fmt.Fprintf(&b, " R%s (%d%%⚡)",
 					formatTokenCount(m.usage.lastTurnCached), pct)
 			}
 		}
+		statsChunk = b.String()
+	}
+
+	barChunk := ""
+	if hasUsage {
 		// Bar visualization for context occupancy: ▓░ filled vs
-		// empty cells + N%/<window> label. Lives at the end of the
-		// line because it's the widest chunk; sliding it to the
-		// right keeps the leading ↑↓R aligned across turns.
+		// empty cells + N%/<window> label. Sits at the tail of the
+		// left section so it's the first thing dropped on narrow panes.
 		if bar := formatContextBar(m.usage.lastTurnTotal, m.modelLabel); bar != "" {
-			fmt.Fprintf(&leftRaw, " %s", bar)
+			barChunk = " " + bar
 		}
 	}
-	left := statusLeftStyle.Render(leftRaw.String())
-	leftW := lipgloss.Width(left)
 
 	// Right: chip + optional hint.
 	spec := m.chipFor()
@@ -1505,18 +1514,28 @@ func (m *AgentPaneModel) renderStatusLine() string {
 		hintW = lipgloss.Width(hint)
 	}
 
-	gap := m.width - leftW - chipW - hintW
-	if gap >= 1 {
-		return left + strings.Repeat(" ", gap) + chip + hint
+	// Try left-section variants widest-first; for each, try with hint
+	// and without. First combo whose total width fits wins.
+	leftVariants := []string{
+		modelChunk + statsChunk + barChunk,
+		modelChunk + statsChunk,
+		modelChunk,
 	}
-	// Drop the hint.
-	gap = m.width - leftW - chipW
-	if gap >= 1 {
-		return left + strings.Repeat(" ", gap) + chip
+	for _, raw := range leftVariants {
+		if raw == "" {
+			continue
+		}
+		styled := statusLeftStyle.Render(raw)
+		w := lipgloss.Width(styled)
+		if gap := m.width - w - chipW - hintW; gap >= 1 {
+			return styled + strings.Repeat(" ", gap) + chip + hint
+		}
+		if gap := m.width - w - chipW; gap >= 1 {
+			return styled + strings.Repeat(" ", gap) + chip
+		}
 	}
 	// Drop the left section — keep the chip right-aligned, padded.
-	gap = m.width - chipW
-	if gap >= 0 {
+	if gap := m.width - chipW; gap >= 0 {
 		return strings.Repeat(" ", gap) + chip
 	}
 	// Chip itself doesn't fit — truncate the label (plain text) first so

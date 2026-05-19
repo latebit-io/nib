@@ -248,6 +248,13 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	// the in-flight intent.
 	if a.kit.Reply(ctx, input) {
 		a.markReplyAccepted(input)
+		// Reset the status chip from whatever the prior turn parked at
+		// (StatusFinished/StatusWaiting/StatusPlanningWaiting) back to
+		// StatusThinking. The kit/foundation does not emit AgentStatus
+		// on its own, so without this the frontend chip stays stuck on
+		// "DONE"/"REPLY" through the entire next turn until something
+		// else (tool call, error, next park) updates it.
+		a.send(event.AgentStatus{Status: event.StatusThinking})
 		return true
 	}
 
@@ -265,6 +272,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 	// duplicate resume.
 	if a.kit.Reply(ctx, input) {
 		a.markReplyAccepted(input)
+		a.send(event.AgentStatus{Status: event.StatusThinking})
 		return true
 	}
 

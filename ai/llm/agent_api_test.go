@@ -583,27 +583,45 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 	// usage.input_tokens_details.cached_tokens. handleCompleted must
 	// surface that through Usage.CachedTokens so the TUI's cache-hit
 	// indicator lights up for Codex sessions the same way it does for
-	// Anthropic.
+	// Anthropic — AND must normalize Usage.PromptTokens to mean
+	// "fresh uncached input only" (matching the Anthropic adapter's
+	// semantics) so cross-provider downstream code (TUI total,
+	// kit/budget, billing logs) does not need to branch on provider.
 	tests := []struct {
-		name       string
-		details    *codexInputTokensDetails
-		wantCached int
-		wantPrompt int
-		wantOutput int
+		name        string
+		inputTokens int // gross, as the API reports it (uncached + cached)
+		details     *codexInputTokensDetails
+		outputTok   int
+		wantCached  int
+		wantPrompt  int // fresh-only after normalization
+		wantOutput  int
 	}{
 		{
-			name:       "cached tokens present",
-			details:    &codexInputTokensDetails{CachedTokens: 8192},
-			wantCached: 8192,
-			wantPrompt: 11500,
-			wantOutput: 86,
+			name:        "cached tokens present — prompt normalized to fresh",
+			inputTokens: 11500,
+			details:     &codexInputTokensDetails{CachedTokens: 8192},
+			outputTok:   86,
+			wantCached:  8192,
+			wantPrompt:  11500 - 8192, // 3308 = fresh-only
+			wantOutput:  86,
 		},
 		{
-			name:       "details omitted leaves CachedTokens zero",
-			details:    nil,
-			wantCached: 0,
-			wantPrompt: 11500,
-			wantOutput: 86,
+			name:        "details omitted leaves CachedTokens zero and PromptTokens unchanged",
+			inputTokens: 11500,
+			details:     nil,
+			outputTok:   86,
+			wantCached:  0,
+			wantPrompt:  11500, // no cached subset to subtract
+			wantOutput:  86,
+		},
+		{
+			name:        "cached > input would underflow — clamp keeps prompt non-negative",
+			inputTokens: 100,
+			details:     &codexInputTokensDetails{CachedTokens: 500},
+			outputTok:   10,
+			wantCached:  0,   // dropped on clamp
+			wantPrompt:  100, // gross preserved as fresh fallback
+			wantOutput:  10,
 		},
 	}
 	for _, tc := range tests {
@@ -613,8 +631,8 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 				Type: "response.completed",
 				Response: &codexResponse{
 					Usage: &codexUsage{
-						InputTokens:        tc.wantPrompt,
-						OutputTokens:       tc.wantOutput,
+						InputTokens:        tc.inputTokens,
+						OutputTokens:       tc.outputTok,
 						InputTokensDetails: tc.details,
 					},
 				},
@@ -630,7 +648,7 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 				t.Errorf("CachedTokens = %d, want %d", out.Usage.CachedTokens, tc.wantCached)
 			}
 			if out.Usage.PromptTokens != tc.wantPrompt {
-				t.Errorf("PromptTokens = %d, want %d", out.Usage.PromptTokens, tc.wantPrompt)
+				t.Errorf("PromptTokens (fresh-only) = %d, want %d", out.Usage.PromptTokens, tc.wantPrompt)
 			}
 			if out.Usage.CompletionTokens != tc.wantOutput {
 				t.Errorf("CompletionTokens = %d, want %d", out.Usage.CompletionTokens, tc.wantOutput)

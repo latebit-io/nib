@@ -119,10 +119,22 @@ func TestWouldExceed(t *testing.T) {
 			want:      false,
 		},
 		{
-			name:      "cached tokens are not added separately",
+			// Post-normalization semantic: PromptTokens is fresh-only,
+			// CachedTokens is disjoint, both count toward the limit.
+			// Previously cached was a subset of prompt and would have
+			// double-counted; now they're independent token categories
+			// that both consume context-window capacity.
+			name:      "cached tokens count toward the limit",
 			committed: Session{TotalCachedTokens: 1000},
 			limit:     100,
-			want:      false, // cached alone does not push over
+			want:      true,
+		},
+		{
+			name:      "prompt + cached + completion are summed",
+			committed: Session{TotalPromptTokens: 100, TotalCachedTokens: 300, TotalCompletionTokens: 50},
+			pending:   Turn{PromptTokens: 50, CachedTokens: 0, CompletionTokens: 0},
+			limit:     500,
+			want:      true, // 100+300+50+50 = 500 >= cap
 		},
 	}
 	for _, tc := range cases {

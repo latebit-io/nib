@@ -96,8 +96,13 @@ func Resolve(input int) int {
 // gate (between provider Stream calls within a single turn). Returns
 // false when the cap is disabled (cap <= 0).
 //
-// Sums prompt + completion tokens. Cached tokens are already a subset
-// of prompt and would double-count if added separately.
+// Sums prompt + cached + completion tokens. Per the normalized
+// [llm.Usage] convention, PromptTokens and CachedTokens are disjoint
+// (prompt is fresh-only, cached is the discounted subset), so
+// adding both counts the full input footprint exactly once. Cached
+// tokens are still real tokens that count toward the model's
+// context-window quota and toward the developer's spend; under-
+// counting them would let runaway sessions slip past the budget gate.
 //
 // Comparator is `>=` (not `>`) so the cap value itself is over the
 // line — a turn whose accounting lands exactly at the budget triggers
@@ -106,8 +111,8 @@ func wouldExceed(committed Session, pending Turn, limit int) bool {
 	if limit <= 0 {
 		return false
 	}
-	used := committed.TotalPromptTokens + committed.TotalCompletionTokens
-	add := pending.PromptTokens + pending.CompletionTokens
+	used := committed.TotalPromptTokens + committed.TotalCachedTokens + committed.TotalCompletionTokens
+	add := pending.PromptTokens + pending.CachedTokens + pending.CompletionTokens
 	return used+add >= limit
 }
 
@@ -123,7 +128,7 @@ func Exceeded(committed Session, limit int) (msg string, exceeded bool) {
 	if limit <= 0 {
 		return "", false
 	}
-	used := committed.TotalPromptTokens + committed.TotalCompletionTokens
+	used := committed.TotalPromptTokens + committed.TotalCachedTokens + committed.TotalCompletionTokens
 	if used < limit {
 		return "", false
 	}

@@ -40,8 +40,10 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		m.AgentPane.AppendToken(e.Text)
 	case event.AgentToolCall:
 		// Indented bullet reads as a sub-action rather than a sibling of
-		// the agent's prose. Renders dim via the metaRawLines path.
-		m.AgentPane.AppendMeta("\n  ● " + e.Name + "\n")
+		// the agent's prose. AppendToolCall folds any pending turn-usage
+		// stats into the bullet line (Option B layout); subsequent tool
+		// bullets in the same turn render unadorned.
+		m.AgentPane.AppendToolCall(e.Name)
 	case event.AgentStatus:
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(e.Status))
 	case event.AgentEditProposed:
@@ -155,7 +157,12 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
 	case event.AgentDone:
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
-		summary := formatSessionSummary(m.AgentPane.usage)
+		// Flush any stats stashed by the final turn before the session
+		// summary so the per-turn line for a tool-less final reply
+		// still surfaces (otherwise it would be silently dropped at
+		// session end).
+		m.AgentPane.FlushPendingTurnUsage()
+		summary := formatSessionSummary(m.AgentPane.usage, m.AgentPane.modelLabel)
 		if summary != "" {
 			m.AgentPane.AppendMeta("\n--- Done ---\n" + summary + "\n")
 		} else {
@@ -172,8 +179,10 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 	case event.AgentInputEstimate:
 		m.AgentPane.SetStreamingInput(e)
 	case event.AgentTurnUsage:
+		// AppendTurnUsage stashes for the next bullet AND advances the
+		// running totals internally — single call covers both
+		// formerly-separate concerns.
 		m.AgentPane.AppendTurnUsage(e)
-		m.AgentPane.UpdateUsage(e)
 	case event.AgentCompacted:
 		m.AgentPane.AppendMeta(formatCompacted(e))
 	}

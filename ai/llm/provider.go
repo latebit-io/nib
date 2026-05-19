@@ -34,13 +34,28 @@ type FunctionCall struct {
 
 // Usage holds token consumption data from a single LLM call.
 // Populated from the provider's response when available.
+//
+// Field semantics are NORMALIZED across providers: regardless of
+// whether the upstream API returns a gross input_tokens (OpenAI) or
+// a fresh-only input_tokens (Anthropic), adapters populate
+// PromptTokens with the FRESH (uncached) portion and CachedTokens
+// with the cached subset. The two are disjoint. Total per-turn
+// input = PromptTokens + CachedTokens.
+//
+// This matches opencode's `tokens.input` and pi's `input` so the
+// per-turn footprint formula (input + cached + output [+
+// cache_write + reasoning]) is directly comparable across the
+// three tools.
 type Usage struct {
-	// PromptTokens is the total number of input tokens.
+	// PromptTokens is the number of FRESH (uncached) input tokens
+	// — the portion paid for at the full per-token rate on this
+	// turn. Disjoint from CachedTokens.
 	PromptTokens int
 	// CompletionTokens is the number of output tokens generated.
 	CompletionTokens int
 	// CachedTokens is the number of input tokens served from cache
-	// (a subset of PromptTokens). Zero when caching is not active.
+	// at the discounted rate. Disjoint from PromptTokens. Zero
+	// when caching is not active.
 	CachedTokens int
 }
 

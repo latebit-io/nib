@@ -448,12 +448,32 @@ func (s *codexStreamState) handleItemDone(evt codexSSEEvent, raw []byte) {
 
 func (s *codexStreamState) handleCompleted(evt codexSSEEvent) (*StreamEvent, bool) {
 	if evt.Response != nil && evt.Response.Usage != nil {
-		s.usage = &Usage{
-			PromptTokens:     evt.Response.Usage.InputTokens,
-			CompletionTokens: evt.Response.Usage.OutputTokens,
-		}
+		// Normalize so PromptTokens means "fresh uncached input" — the
+		// Responses API returns input_tokens as the GROSS total
+		// (including cached); subtract the cached subset so the field
+		// has the same semantics as the Anthropic adapter's
+		// PromptTokens. Downstream consumers (TUI display, kit/budget,
+		// billing logs) then compute total_input = Prompt + Cached
+		// without provider branching. Matches opencode's
+		// `adjustedInputTokens` (session.ts::getUsage).
+		gross := evt.Response.Usage.InputTokens
+		cached := 0
 		if d := evt.Response.Usage.InputTokensDetails; d != nil {
-			s.usage.CachedTokens = d.CachedTokens
+			cached = d.CachedTokens
+		}
+		fresh := gross - cached
+		if fresh < 0 {
+			// Provider mis-report (cached > gross). Clamp + drop to a
+			// safe split that preserves the gross total downstream.
+			slog.Warn("codex: cached_tokens > input_tokens — clamping",
+				"input_tokens", gross, "cached_tokens", cached)
+			fresh = gross
+			cached = 0
+		}
+		s.usage = &Usage{
+			PromptTokens:     fresh,
+			CachedTokens:     cached,
+			CompletionTokens: evt.Response.Usage.OutputTokens,
 		}
 	}
 	truncated := isTruncatedCompletion(evt)

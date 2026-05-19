@@ -62,7 +62,7 @@ func statusStreaming(s event.StatusKind) bool {
 }
 
 // Token-usage tracking (usageState, SetStreamingInput, UpdateUsage,
-// UsageIndicator, ResetUsage, formatTokenCount, formatTurnUsage,
+// UsageIndicator, ResetUsage, formatTokenCount, formatTurnStatsInline,
 // formatCompacted, formatSessionSummary) lives in agent_pane_usage.go.
 
 func (m *AgentPaneModel) inputHeight() int {
@@ -214,6 +214,15 @@ type AgentPaneModel struct {
 
 	// usage tracks cumulative token consumption for the status line display.
 	usage usageState
+
+	// pendingTurnUsage stashes the most recent AgentTurnUsage so the
+	// stats can be folded into the next tool-call bullet (Option B
+	// — one row per turn carrying both the tool name and its cost).
+	// Consumed by [AppendToolCall] (folded into the bullet line) or
+	// by [flushPendingTurnUsage] when a turn ends with no tool
+	// (final assistant reply, AgentDone, or another AgentTurnUsage
+	// arriving).
+	pendingTurnUsage *event.AgentTurnUsage
 
 	// ModelSel holds the inline model selector state — when active,
 	// replaces the input area with a model list.
@@ -1457,21 +1466,29 @@ func (m *AgentPaneModel) renderStatusLine() string {
 		if leftRaw.Len() > 0 {
 			sep = " · "
 		}
-		// Pi-style: ↑input ↓output R<cache> (matches the per-turn
-		// line in [formatTurnUsage] and the status-bar in
-		// [UsageIndicator] so the same vocabulary reads everywhere).
-		// Trailing chip: N%/<window> for current context occupancy.
-		fresh := m.usage.totalIn - m.usage.totalCached
+		// Pi-style per-turn snapshot: ↑input ↓output R<cache> for
+		// the LATEST turn. Matches pi's web-ui convention of
+		// rendering each message's usage independently rather than
+		// accumulating. Cumulative billing is surfaced in the
+		// session-end summary, not the live footer.
 		fmt.Fprintf(&leftRaw, "%s↑%s%s ↓%s%s",
 			sep,
-			prefix, formatTokenCount(fresh),
-			prefix, formatTokenCount(m.usage.totalOut))
-		if m.usage.totalCached > 0 && m.usage.totalIn > 0 {
-			pct := m.usage.totalCached * 100 / m.usage.totalIn
-			fmt.Fprintf(&leftRaw, " R%s (%d%%⚡)", formatTokenCount(m.usage.totalCached), pct)
+			prefix, formatTokenCount(m.usage.lastTurnFresh),
+			prefix, formatTokenCount(m.usage.lastTurnOut))
+		if m.usage.lastTurnCached > 0 {
+			gross := m.usage.lastTurnFresh + m.usage.lastTurnCached
+			if gross > 0 {
+				pct := m.usage.lastTurnCached * 100 / gross
+				fmt.Fprintf(&leftRaw, " R%s (%d%%⚡)",
+					formatTokenCount(m.usage.lastTurnCached), pct)
+			}
 		}
-		if chip := formatContextChip(m.usage.lastTurnTotal, m.modelLabel); chip != "" {
-			fmt.Fprintf(&leftRaw, " %s", chip)
+		// Bar visualization for context occupancy: ▓░ filled vs
+		// empty cells + N%/<window> label. Lives at the end of the
+		// line because it's the widest chunk; sliding it to the
+		// right keeps the leading ↑↓R aligned across turns.
+		if bar := formatContextBar(m.usage.lastTurnTotal, m.modelLabel); bar != "" {
+			fmt.Fprintf(&leftRaw, " %s", bar)
 		}
 	}
 	left := statusLeftStyle.Render(leftRaw.String())

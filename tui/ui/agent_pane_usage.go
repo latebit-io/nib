@@ -28,11 +28,20 @@ type usageState struct {
 	// from PromptTokens after adapter normalization, so totalCached
 	// + (totalIn - totalCached) = totalIn.
 	totalCached int
-	// lastTurnTotal is the most recent turn's full footprint
-	// (PromptTokens + CachedTokens + CompletionTokens). Stands in
-	// for "current context occupancy" — what would be re-shipped on
-	// the next turn's prefix — for the `N%/<window>` chip that
-	// matches pi's display.
+	// Last-turn snapshot fields. Pi (web-ui/Messages.ts) renders
+	// `formatUsage(this.message.usage)` per assistant message —
+	// i.e., the LATEST turn's per-message breakdown, not the
+	// session cumulative. nib's live displays (pane footer + status
+	// bar) match that convention so a watcher sees the most recent
+	// turn's shape change in real time rather than a slowly-growing
+	// running total.
+	lastTurnFresh  int // PromptTokens of the latest turn
+	lastTurnOut    int // CompletionTokens of the latest turn
+	lastTurnCached int // CachedTokens of the latest turn
+	// lastTurnTotal is the latest turn's full footprint
+	// (PromptTokens + CachedTokens + CompletionTokens). Used as the
+	// numerator of the `N%/<window>` chip and bar viz — stands in
+	// for "current context occupancy."
 	lastTurnTotal int
 	// hasExact flips true once any turn reported provider data.
 	hasExact          bool
@@ -64,12 +73,18 @@ func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
 		m.usage.totalIn += u.PromptTokens + u.CachedTokens
 		m.usage.totalOut += u.CompletionTokens
 		m.usage.totalCached += u.CachedTokens
+		m.usage.lastTurnFresh = u.PromptTokens
+		m.usage.lastTurnOut = u.CompletionTokens
+		m.usage.lastTurnCached = u.CachedTokens
 		m.usage.lastTurnTotal = u.PromptTokens + u.CachedTokens + u.CompletionTokens
 		m.usage.hasExact = true
 	} else {
 		est := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
 		m.usage.totalIn += est
 		m.usage.totalOut += u.CompletionEst
+		m.usage.lastTurnFresh = est
+		m.usage.lastTurnOut = u.CompletionEst
+		m.usage.lastTurnCached = 0
 		m.usage.lastTurnTotal = est + u.CompletionEst
 	}
 	m.usage.streamingChars = 0
@@ -77,38 +92,21 @@ func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
 	m.usage.turns++
 }
 
-// UsageIndicator returns a compact string for the main editor status bar.
-// Updates in real-time: shows streaming input/output estimates while tokens
-// arrive. Uses ~ prefix when only estimates are available.
+// UsageIndicator returns the status-bar indicator string for the
+// main editor footer. Renders the context-occupancy bar with a
+// `context window:` label so the global status row at a glance
+// answers "how full is the model's working memory right now."
 //
-// Format: `↑X ↓Y RZ N%⚡` — pi-compatible arrows (↑=input, ↓=output, R=cache
-// read) so a developer with both tools open can scan either status bar
-// with the same parser. The `⚡` cache-percentage stays nib-specific
-// chrome. The streaming input estimate is added to fresh tokens
-// in-flight because nothing's been cached for the current call yet.
+// The pane footer carries the per-turn ↑↓R numerical breakdown;
+// the status bar is intentionally dedicated to the bar viz alone
+// so the two surfaces don't compete. Empty string when no model
+// is known or no usage has been recorded yet.
 func (m *AgentPaneModel) UsageIndicator() string {
-	streamOut := (m.usage.streamingChars + 3) / 4
-	streamIn := m.usage.streamingInputEst
-
-	out := m.usage.totalOut + streamOut
-	fresh := m.usage.totalIn - m.usage.totalCached + streamIn
-
-	if fresh == 0 && out == 0 && m.usage.totalCached == 0 {
+	bar := formatContextBar(m.usage.lastTurnTotal, m.modelLabel)
+	if bar == "" {
 		return ""
 	}
-
-	prefix := "~"
-	if m.usage.hasExact {
-		prefix = ""
-	}
-	s := fmt.Sprintf("↑%s%s ↓%s%s",
-		prefix, formatTokenCount(fresh),
-		prefix, formatTokenCount(out))
-	if m.usage.totalCached > 0 && m.usage.totalIn > 0 {
-		pct := m.usage.totalCached * 100 / m.usage.totalIn
-		s += fmt.Sprintf(" R%s %d%%⚡", formatTokenCount(m.usage.totalCached), pct)
-	}
-	return s
+	return "context window: " + bar
 }
 
 // ResetUsage clears accumulated usage for a new agent run.
@@ -126,6 +124,24 @@ func formatTokenCount(n int) string {
 		return fmt.Sprintf("%.1fk", float64(n)/1000)
 	default:
 		return fmt.Sprintf("%d", n)
+	}
+}
+
+// formatRoundCount renders integer-friendly token counts (model
+// window sizes are always round numbers; rendering them as "272k"
+// instead of "272.0k" keeps the status-bar label compact and
+// matches the convention users see in opencode/pi when window
+// sizes are quoted.
+func formatRoundCount(n int) string {
+	switch {
+	case n >= 1_000_000 && n%1_000_000 == 0:
+		return fmt.Sprintf("%dM", n/1_000_000)
+	case n >= 1000 && n%1000 == 0:
+		return fmt.Sprintf("%dk", n/1000)
+	default:
+		// Non-round value — fall back to the standard compact form
+		// so we never lose precision on an unexpected window size.
+		return formatTokenCount(n)
 	}
 }
 
@@ -198,67 +214,63 @@ func formatContextChip(lastTurnTotal int, model string) string {
 	return fmt.Sprintf("%d%%/%s", pct, formatTokenCount(window))
 }
 
-// formatTurnUsage produces a compact per-turn footer: model · turn N ·
-// token counts · tool count. Rendered dim via the AppendMeta path, so the
-// reader skims it as chrome. Model is optional — omitted when empty so
-// the line still reads well before the model label is known.
-//
-// Arrow convention matches pi (web-ui/format.ts::formatUsage):
-//
-//	↑X  — fresh input tokens (paid at full rate)
-//	↓X  — output tokens
-//	RX  — cache-read tokens (paid at the discounted rate)
-//
-// "Up to the LLM" / "down from the LLM" — picking the same direction
-// pi uses means a reader coming from opencode/pi can compare a nib
-// session row against theirs without translating axes. The `total`
-// + `⚡` chrome stays nib-specific so the line is still legibly ours.
-//
-// `total` is the full per-turn token footprint (fresh + cached +
-// output) — opencode's headline number. Including it gives a single
-// scalar for whole-session comparison while the ↑↓R breakdown
-// surfaces where the cost actually lands.
-func formatTurnUsage(u event.AgentTurnUsage, model string) string {
-	var b strings.Builder
-	b.WriteString("\n◇ ")
-	if model != "" {
-		b.WriteString(sanitizeInlineDisplay(model))
-		b.WriteString(" · ")
-	}
-	fmt.Fprintf(&b, "turn %d", u.Turn)
+// contextBarCells is the visual width of the context-occupancy
+// bar. 20 cells = 5% per cell, granular enough to see 1-cell
+// growth on a turn-by-turn basis at typical session sizes.
+const contextBarCells = 20
 
+// formatContextBar renders an ASCII bar visualization of context
+// occupancy: ▓ for filled cells, ░ for empty, scaled to
+// [contextBarCells]. Trailing label `X%/Yk` matches the chip
+// elsewhere so the bar reads as a richer version of the same
+// number. Empty string when no model is known or usage is zero
+// (same guard as [formatContextChip]).
+//
+// Example: 16% of 272k →  "▓▓▓░░░░░░░░░░░░░░░░░ 16%/272.0k"
+func formatContextBar(lastTurnTotal int, model string) string {
+	if lastTurnTotal <= 0 || model == "" {
+		return ""
+	}
+	window := modelContextWindow(model)
+	if window <= 0 {
+		return ""
+	}
+	filled := lastTurnTotal * contextBarCells / window
+	if filled > contextBarCells {
+		filled = contextBarCells
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	bar := strings.Repeat("▓", filled) + strings.Repeat("░", contextBarCells-filled)
+	pct := lastTurnTotal * 100 / window
+	return fmt.Sprintf("%s %d%% / %s", bar, pct, formatRoundCount(window))
+}
+
+// formatTurnStatsInline renders the per-turn stats chunk that
+// trails a tool bullet: ` · ↑X ↓Y [R Z · N%⚡]`. Empty string when
+// the turn has no provider data (estimate-only fallback handles
+// this via formatTurnUsage's standalone path).
+//
+// Designed to fold into a `● tool_name` line so one row per turn
+// carries both the tool and its cost — the visually-dense Option B
+// layout the user picked. Matches the pi convention of putting
+// usage stats inline with the message-level marker.
+func formatTurnStatsInline(u event.AgentTurnUsage) string {
 	hasProvider := u.PromptTokens > 0 || u.CompletionTokens > 0 || u.CachedTokens > 0
-	if hasProvider {
-		total := u.PromptTokens + u.CachedTokens + u.CompletionTokens
-		fmt.Fprintf(&b, " · ↑%s ↓%s",
-			formatTokenCount(u.PromptTokens),
-			formatTokenCount(u.CompletionTokens))
-		if u.CachedTokens > 0 {
-			grossInput := u.PromptTokens + u.CachedTokens
-			pct := u.CachedTokens * 100 / grossInput
-			fmt.Fprintf(&b, " R%s · %s total (%d%%⚡)",
-				formatTokenCount(u.CachedTokens),
-				formatTokenCount(total), pct)
-		} else {
-			fmt.Fprintf(&b, " · %s total", formatTokenCount(total))
-		}
-		if chip := formatContextChip(total, model); chip != "" {
-			fmt.Fprintf(&b, " %s", chip)
-		}
-	} else {
-		total := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
-		if total > 0 {
-			// Estimate-only path: ~ marker glued to each number for
-			// consistency with the session-summary line.
-			fmt.Fprintf(&b, " · ↑~%s ↓~%s",
-				formatTokenCount(total),
-				formatTokenCount(u.CompletionEst))
-		}
+	if !hasProvider {
+		return ""
 	}
-	if u.ToolCalls > 0 {
-		fmt.Fprintf(&b, " · %d tools", u.ToolCalls)
+	var b strings.Builder
+	fmt.Fprintf(&b, " · ↑%s ↓%s",
+		formatTokenCount(u.PromptTokens),
+		formatTokenCount(u.CompletionTokens))
+	if u.CachedTokens > 0 {
+		grossInput := u.PromptTokens + u.CachedTokens
+		pct := u.CachedTokens * 100 / grossInput
+		fmt.Fprintf(&b, " R%s · %d%%⚡",
+			formatTokenCount(u.CachedTokens), pct)
 	}
-	b.WriteByte('\n')
 	return b.String()
 }
 
@@ -310,8 +322,8 @@ func formatSessionSummary(u usageState, model string) string {
 			total := u.totalIn + u.totalOut
 			fmt.Fprintf(&b, " · %s%s total", prefix, formatTokenCount(total))
 		}
-		if chip := formatContextChip(u.lastTurnTotal, model); chip != "" {
-			fmt.Fprintf(&b, " %s", chip)
+		if bar := formatContextBar(u.lastTurnTotal, model); bar != "" {
+			fmt.Fprintf(&b, " · %s", bar)
 		}
 	}
 	return b.String()

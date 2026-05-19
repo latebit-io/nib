@@ -41,10 +41,58 @@ func (m *AgentPaneModel) AppendToken(text string) {
 	m.AppendText(clean)
 }
 
-// AppendTurnUsage formats and appends the per-turn footer with the pane's
-// current model label as chrome.
+// AppendTurnUsage stashes the per-turn usage so the inline stats
+// chunk can fold into the next tool-call bullet (Option B layout).
+// If a prior turn's usage is still stashed (the prior turn ended
+// with no tools), flush it as a standalone line first so each
+// turn's stats appear exactly once.
+//
+// Also calls [UpdateUsage] to advance the running totals — those
+// drive the cumulative session-end summary regardless of how
+// per-turn stats are rendered.
 func (m *AgentPaneModel) AppendTurnUsage(u event.AgentTurnUsage) {
-	m.AppendMeta(formatTurnUsage(u, m.modelLabel))
+	m.FlushPendingTurnUsage()
+	uCopy := u
+	m.pendingTurnUsage = &uCopy
+	m.UpdateUsage(u)
+}
+
+// FlushPendingTurnUsage renders any stashed turn usage as a
+// standalone line (used when a turn ends with no tool to fold
+// into, e.g. the final assistant reply or a turn that consisted
+// only of streaming text). No-op when nothing is pending. Exported
+// so the app-level [event.AgentDone] handler can flush before the
+// session summary.
+//
+// The standalone format keeps the same `↑X ↓Y [R Z · N%⚡]` shape
+// the bullet line carries — just on its own row at column 0 with
+// a `◇` glyph as the visual anchor so it reads as turn chrome.
+func (m *AgentPaneModel) FlushPendingTurnUsage() {
+	if m.pendingTurnUsage == nil {
+		return
+	}
+	stats := formatTurnStatsInline(*m.pendingTurnUsage)
+	if stats != "" {
+		// Drop the leading " · " separator; this is a standalone
+		// line so the marker is the ◇ glyph, not the dot.
+		m.AppendMeta("\n◇" + stats + "\n")
+	}
+	m.pendingTurnUsage = nil
+}
+
+// AppendToolCall renders a tool-call bullet. If a turn-usage is
+// pending (this is the FIRST tool of a fresh turn), folds the
+// stats inline as `● tool · ↑X ↓Y [R Z · N%⚡]`; subsequent tool
+// bullets in the same turn (parallel tool calls) render unadorned
+// since the cost was already attributed to the first bullet.
+func (m *AgentPaneModel) AppendToolCall(name string) {
+	if m.pendingTurnUsage != nil {
+		stats := formatTurnStatsInline(*m.pendingTurnUsage)
+		m.pendingTurnUsage = nil
+		m.AppendMeta("\n  ● " + name + stats + "\n")
+		return
+	}
+	m.AppendMeta("\n  ● " + name + "\n")
 }
 
 // AppendMeta sanitizes and appends non-stream chrome text (tool calls, edit

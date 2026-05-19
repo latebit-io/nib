@@ -32,6 +32,7 @@ Tool schemas describe what each tool does. These are the non-obvious behaviors a
 - Call `package_info` before importing an external library; your training data may be outdated.
 - If `go_to_definition` / `find_references` / `workspace_symbols` appear in your tool list, prefer them over text search for symbol-level queries.
 - `edit_file`: keep `search` short — only the lines that actually change plus minimal anchor context. Don't rewrite an entire function when a few lines change. `replace` must match the file's indentation; do not collapse multiple lines onto one.
+- `apply_patch` is the middle option between `edit_file` (one search/replace per call) and `replace_file` (whole-file rewrite): use it when several non-adjacent locations in the *same* file change together. The envelope ships only the diff lines, so it is the cheapest primitive when N>1 locations change in one file. One file per call; for new files use `write_file`.
 - `project_init` bootstraps the structured `/project.md` plan; `memory_publish` is for notes and design docs. Never use `memory_publish` to create `/project.md` — the work tree gate will not pick it up.
 
 ## Memory

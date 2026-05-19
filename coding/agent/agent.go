@@ -644,6 +644,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		editTool,
 		tools.NewWriteFileTool(workspace, cache, a),
 		tools.NewReplaceFileTool(workspace, cache, a),
+		tools.NewApplyPatchTool(workspace, cache, a),
 		tools.NewListFilesTool(workspace),
 		bash.New(projectRoot),
 	}

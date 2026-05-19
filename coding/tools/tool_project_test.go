@@ -7,10 +7,14 @@ import (
 	"testing"
 )
 
-// stubTracker captures AddTask calls for assertion.
+// stubTracker captures AddTask calls for assertion. addErr applies
+// uniformly to every call; addErrFn overrides it per-call when a test
+// needs to script different outcomes (e.g., first call fails, second
+// succeeds — to exercise the post-AddTask dedup-register ordering).
 type stubTracker struct {
 	addCalls []struct{ phase, feature, task, link string }
 	addErr   error
+	addErrFn func(p, f, t string) error
 }
 
 func (s *stubTracker) ActivateTask(string) error          { return nil }
@@ -21,6 +25,9 @@ func (s *stubTracker) NextPendingTask() string            { return "" }
 func (s *stubTracker) InitProject(string, []string) error { return nil }
 func (s *stubTracker) AddTask(p, f, t, l string) error {
 	s.addCalls = append(s.addCalls, struct{ phase, feature, task, link string }{p, f, t, l})
+	if s.addErrFn != nil {
+		return s.addErrFn(p, f, t)
+	}
 	return s.addErr
 }
 
@@ -146,6 +153,57 @@ func TestProjectTaskAddTool_DedupesWithinBatch(t *testing.T) {
 	assertContains(t, result.Content, "tasks[3]")
 	if len(tracker.addCalls) != 2 {
 		t.Fatalf("expected 2 AddTask calls (2 dedup'd), got %d", len(tracker.addCalls))
+	}
+}
+
+// TestProjectTaskAddTool_FailedFirstOccurrenceDoesNotBlockRetry locks
+// the post-AddTask dedup-register ordering. Earlier draft registered
+// the dedup key BEFORE the AddTask call, so a tracker failure on
+// tasks[i] would silently block any later identical triple — even
+// though tasks[i] never wrote a bullet to /project.md. The documented
+// partial-success contract says tracker errors don't stop the others,
+// which must include later attempts at the same triple.
+//
+// Setup: tasks[0] and tasks[2] are the same triple. The tracker is
+// scripted to fail on the first AddTask but succeed on the second.
+// Expected: AddTask is called twice (NOT blocked as "duplicate"), and
+// tasks[2] lands in `added`, not `failed`. tasks[1] is a sanity-check
+// distinct entry that should also succeed.
+func TestProjectTaskAddTool_FailedFirstOccurrenceDoesNotBlockRetry(t *testing.T) {
+	calls := 0
+	tracker := &stubTracker{
+		addErrFn: func(p, f, t string) error {
+			calls++
+			if calls == 1 && p == "Foundation" && t == "Implement maze" {
+				return errors.New("transient: tree not yet loaded")
+			}
+			return nil
+		},
+	}
+	tool := NewProjectTaskAddTool(tracker)
+	args := `{"tasks":[
+		{"phase":"Foundation","feature":"Setup","task":"Implement maze"},
+		{"phase":"Foundation","feature":"Setup","task":"Implement ghosts"},
+		{"phase":"Foundation","feature":"Setup","task":"Implement maze"}
+	]}`
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
+
+	// tasks[0] fails (tracker error), tasks[1] succeeds, tasks[2]
+	// retries the same triple as tasks[0] and succeeds — must NOT be
+	// rejected as a duplicate, since tasks[0] never wrote a bullet.
+	assertContains(t, result.Content, "Added 2 task(s)")
+	assertContains(t, result.Content, "Implement ghosts")
+	assertContains(t, result.Content, "Failed 1 task(s)")
+	assertContains(t, result.Content, "tasks[0]")
+	assertContains(t, result.Content, "transient: tree not yet loaded")
+	if strings.Contains(result.Content, "duplicate of tasks[0]") {
+		t.Errorf("tasks[2] must NOT be rejected as duplicate when tasks[0] failed; got:\n%s", result.Content)
+	}
+	// Three AddTask calls: tasks[0] (fails), tasks[1] (succeeds),
+	// tasks[2] (succeeds — the retry). Without the fix this would be 2,
+	// because tasks[2] would be silently blocked as a duplicate.
+	if len(tracker.addCalls) != 3 {
+		t.Fatalf("expected 3 AddTask calls (incl. retry), got %d", len(tracker.addCalls))
 	}
 }
 

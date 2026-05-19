@@ -139,12 +139,20 @@ func (t *ProjectTaskAddTool) Execute(_ context.Context, call llm.ToolCall) ToolR
 			failed = append(failed, fmt.Sprintf("tasks[%d] (%s > %s > %s): duplicate of tasks[%d]", i, phase, feature, task, firstIdx))
 			continue
 		}
-		seen[key] = i
 
 		if err := t.tracker.AddTask(phase, feature, task, link); err != nil {
+			// Do NOT register in `seen` on tracker failure — the first
+			// occurrence never wrote a bullet, so a later identical entry
+			// is a legitimate retry, not a duplicate. The documented
+			// partial-success contract ("tracker errors don't stop the
+			// others") means each tracker call is independent.
 			failed = append(failed, fmt.Sprintf("tasks[%d] (%s > %s > %s): %v", i, phase, feature, task, err))
 			continue
 		}
+		// Register only after the bullet has actually landed in
+		// /project.md. From this point any later identical triple is a
+		// genuine within-batch duplicate.
+		seen[key] = i
 		added = append(added, fmt.Sprintf("%s > %s > %s", phase, feature, task))
 	}
 

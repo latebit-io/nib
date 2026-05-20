@@ -38,7 +38,16 @@ func (m *AgentPaneModel) AppendToken(text string) {
 	}
 	clean := m.sanitizer.Sanitize(text)
 	m.usage.streamingChars += len(clean)
+	tokenStart := len(m.RawLines) - 1
+	if tokenStart < 0 {
+		tokenStart = 0
+	}
 	m.AppendText(clean)
+	// Open or extend the streaming agent-text block on the current beat.
+	// Subsequent same-burst calls land on the same block (appendBlock
+	// extends an open block of matching kind), so a streaming run stays
+	// one logical block in the timeline.
+	m.appendBlock(BlockAgentText, tokenStart, blockOpen, "")
 }
 
 // AppendTurnUsage stashes the per-turn usage so the inline stats
@@ -75,7 +84,7 @@ func (m *AgentPaneModel) FlushPendingTurnUsage() {
 	if stats != "" {
 		// Drop the leading " · " separator; this is a standalone
 		// line so the marker is the ◇ glyph, not the dot.
-		m.AppendMeta("\n◇" + stats + "\n")
+		m.appendTypedMeta(BlockTurnUsage, "\n◇"+stats+"\n", "")
 	}
 	m.pendingTurnUsage = nil
 }
@@ -89,10 +98,10 @@ func (m *AgentPaneModel) AppendToolCall(name string) {
 	if m.pendingTurnUsage != nil {
 		stats := formatTurnStatsInline(*m.pendingTurnUsage)
 		m.pendingTurnUsage = nil
-		m.AppendMeta("\n  ● " + name + stats + "\n")
+		m.appendTypedMeta(BlockToolCall, "\n  ● "+name+stats+"\n", name)
 		return
 	}
-	m.AppendMeta("\n  ● " + name + "\n")
+	m.appendTypedMeta(BlockToolCall, "\n  ● "+name+"\n", name)
 }
 
 // AppendMeta sanitizes and appends non-stream chrome text (tool calls, edit
@@ -104,6 +113,19 @@ func (m *AgentPaneModel) AppendToolCall(name string) {
 // Uses a one-shot sanitizer so it doesn't interfere with the streaming
 // sanitizer state.
 func (m *AgentPaneModel) AppendMeta(text string) {
+	m.appendTypedMeta(BlockMeta, text, "")
+}
+
+// appendTypedMeta is the shared implementation behind [AppendMeta],
+// [AppendToolCall], and the turn-usage flush path. It performs the same
+// sanitize / newline-guard / raw-range-marking work AppendMeta has
+// always done, and additionally records a typed [Block] on the current
+// beat so the redesigned render path can classify the chunk without
+// pattern-matching against the rendered text.
+//
+// The toolName argument is only meaningful for [BlockToolCall];
+// callers should pass "" for other kinds.
+func (m *AgentPaneModel) appendTypedMeta(kind BlockKind, text, toolName string) {
 	var s sanitize.Sanitizer
 	clean := s.Sanitize(text)
 	if !strings.HasPrefix(clean, "\n") {
@@ -140,6 +162,35 @@ func (m *AgentPaneModel) AppendMeta(text string) {
 	// metaRawLines is populated — the skip branch resets fence state.
 	m.recomputeCodeBlock(firstRaw)
 	m.invalidateMdCache()
+
+	// Record the typed block on the current beat. A heterogeneous
+	// chunk like a tool call necessarily ends the open agent-text run,
+	// so appendBlock closes that block before opening this one.
+	m.appendBlock(kind, firstRaw, endRaw, toolName)
+}
+
+// AppendProposal records an edit proposal block. text is the human-
+// readable reason ("Fix nil direction path in ghost house movement
+// update"). The rendered placeholder reads "── Proposed: REASON ──"
+// and is marked [BlockProposal] so the render path draws the proposal-
+// hue left border.
+//
+// Same sanitize / newline-guard / meta-marking pipeline as [AppendMeta];
+// only the recorded block kind differs. Engine bridges that previously
+// hand-built the "--- Proposed: …" string and called AppendMeta should
+// migrate to this entry point so the kind survives to the renderer.
+func (m *AgentPaneModel) AppendProposal(reason string) {
+	m.appendTypedMeta(BlockProposal, "\n── Proposed: "+reason+" ──\n", "")
+}
+
+// AppendError records an error block with [BlockError] kind so the
+// render path draws the error-hue left border. text is the error
+// message body; callers should pass the raw message without any
+// "Error: " prefix — this method prepends the prefix.
+//
+// Same sanitize / newline-guard / meta-marking pipeline as [AppendMeta].
+func (m *AgentPaneModel) AppendError(text string) {
+	m.appendTypedMeta(BlockError, "\nError: "+text+"\n", "")
 }
 
 // QueueUserMessage stashes a developer submission that arrived while
@@ -174,12 +225,32 @@ func (m *AgentPaneModel) FlushPendingUserMessage() {
 	m.AppendUserMessage(text)
 }
 
-// AppendUserMessage appends the developer's follow-up message as plain text
-// and marks the raw lines so Render() can style them distinctly. Prepends a
-// "── turn N ──" divider and advances the dim watermark so the previous
-// exchange fades into the background. Tracks raw line indices (not wrapped)
-// so styling survives rewrap on resize.
+// AppendUserMessage classifies the developer's submission, picks a glyph
+// (see [classifyUserMessage]), then appends through the shared
+// [appendUserMessage] helper. Neutral / Attached are derived from the
+// text; interrupt-path submissions should go through
+// [AppendInterruptUserMessage] instead.
 func (m *AgentPaneModel) AppendUserMessage(text string) {
+	m.appendUserMessage(text, classifyUserMessage(text))
+}
+
+// AppendInterruptUserMessage records a user submission delivered through
+// the interrupt code path. The glyph is always [UserGlyphInterrupt] —
+// classification of text content is skipped because the path is what
+// makes this kind deterministic.
+func (m *AgentPaneModel) AppendInterruptUserMessage(text string) {
+	m.appendUserMessage(text, UserGlyphInterrupt)
+}
+
+// appendUserMessage is the shared implementation behind the public user-
+// message entry points. Marks the raw lines so Render() can style them
+// distinctly, prepends the glyph + space prefix in place of the legacy
+// "You: " label, and records the glyph kind on the prefixed raw line
+// so the renderer can color the glyph cell separately from the body.
+//
+// Also stamps a "── ♩ beat N ──" divider and advances the dim watermark
+// so the previous exchange fades into the background.
+func (m *AgentPaneModel) appendUserMessage(text string, glyph UserGlyph) {
 	var s sanitize.Sanitizer
 	text = s.Sanitize(text)
 
@@ -188,7 +259,7 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 	// belongs to the new turn (bright), and previous content fades.
 	turnStart := len(m.RawLines)
 	m.turnCounter++
-	label := fmt.Sprintf("turn %d", m.turnCounter)
+	label := fmt.Sprintf("♩ beat %d", m.turnCounter)
 	// Emit a compact placeholder — Render substitutes the full-width rule
 	// using the label from turnSeparatorRawLines. Storing the label (not
 	// parsing the rendered text) keeps the raw content small and stable
@@ -200,10 +271,20 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 	}
 	m.turnSeparatorRawLines[sepRaw] = label
 
+	// Close the prior beat (Done unless already terminal) and open a new
+	// one anchored at the separator. The user-message block on the new
+	// beat is opened below after AppendText records its raw range.
+	m.openBeat(m.turnCounter, sepRaw)
+
 	// Second AppendText for the actual user text. Tracks its own start
 	// index so the separator lines are NOT marked as user content.
+	// The glyph + space prefix replaces the legacy "You: " label —
+	// the prefix is part of the raw text so wrapping math sees it,
+	// while userGlyphForRaw records the kind so the renderer can
+	// color the glyph cell in its own hue.
 	userStart := len(m.RawLines)
-	m.AppendText("\n\nYou: " + text + "\n\n")
+	prefix := userGlyphPrefix(glyph)
+	m.AppendText("\n\n" + prefix + text + "\n\n")
 	// Exclude the trailing empty raw line — AppendText reuses the last
 	// raw line for the first chunk of the next append, so marking it
 	// would misclassify the first agent token as a user message.
@@ -226,6 +307,26 @@ func (m *AgentPaneModel) AppendUserMessage(text string) {
 	m.recomputeCodeBlock(turnStart)
 	m.turnStartRaw = turnStart
 	m.invalidateMdCache()
+
+	// Record the user message as the opening block of the new beat. The
+	// range is the same userStart..endRaw span the classification map
+	// already covers — beats track the same content, just grouped.
+	m.appendBlock(BlockUserMessage, userStart, endRaw, "")
+
+	// Stamp the glyph kind on the raw-line that carries the prefix —
+	// the first non-empty raw line in the appended range. AppendText
+	// emits leading/trailing empty raws around the content; only the
+	// content line carries the visible prefix and needs the glyph
+	// override at render time.
+	if m.userGlyphForRaw == nil {
+		m.userGlyphForRaw = make(map[int]UserGlyph)
+	}
+	for i := userStart; i < endRaw; i++ {
+		if m.RawLines[i] != "" {
+			m.userGlyphForRaw[i] = glyph
+			break
+		}
+	}
 }
 
 // recomputeCodeBlock rebuilds inCodeAfter starting from raw line index fromRaw.

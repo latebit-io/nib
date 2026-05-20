@@ -20,8 +20,8 @@ import (
 //
 // When the agent is mid-stream (status is animated — Thinking, Planning,
 // or Linting), the message is queued behind a banner instead of being
-// stamped immediately. Stamping now would put the "── turn N ──"
-// separator + "You: …" line above the prior turn's still-arriving tail
+// stamped immediately. Stamping now would put the "── ♩ beat N ──"
+// separator + "You: …" line above the prior beat's still-arriving tail
 // tokens, leaving the user's message visually adrift inside the agent's
 // previous output. [AgentPaneModel.FlushPendingUserMessage] commits the
 // queued text once the first tool-less AgentTurnUsage arrives (the

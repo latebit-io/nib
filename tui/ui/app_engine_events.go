@@ -58,7 +58,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.refreshDiagnostics(m.Session.ActiveFile())
 		}
 		if diff != nil {
-			m.AgentPane.AppendMeta("\n--- Proposed: " + e.Edit.Reason + " ---\n")
+			m.AgentPane.AppendProposal(e.Edit.Reason)
 			slog.Debug("overlay created", "startLine", diff.StartLine, "endLine", diff.EndLine, "newLines", len(diff.NewLines))
 
 			// Build the overlay — applyApproval reads it for
@@ -93,7 +93,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			}
 		} else {
 			slog.Warn("ReviewEdit returned nil — search text not found or not unique")
-			m.AgentPane.AppendMeta("[edit could not be matched — auto-rejecting]\n")
+			m.AgentPane.AppendError("edit could not be matched — auto-rejecting")
 			m.Session.RejectEdit("search-mismatch")
 		}
 	case event.AgentFileCreated:
@@ -116,7 +116,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		prevActive := m.activeEditor()
 		if err := m.Session.NavigateAgent(e.Path); err != nil {
 			slog.Warn("agent navigate failed", "path", e.Path, "err", err)
-			m.AgentPane.AppendMeta("[navigate failed: " + err.Error() + "]\n")
+			m.AgentPane.AppendError("navigate failed: " + err.Error())
 			break
 		}
 		// Place the cursor on the TUI's editor for the (possibly newly
@@ -140,7 +140,7 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		// Terminal branch — drop pane status to idle so the spinner loop
 		// stops rescheduling and any in-flight streaming tint settles.
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
-		m.AgentPane.AppendMeta("\nError: " + e.Err + "\n")
+		m.AgentPane.AppendError(e.Err)
 		m.clearEditorOverlay(false)
 	case event.AgentWaiting:
 		switch {

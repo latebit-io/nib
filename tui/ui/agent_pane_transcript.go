@@ -142,6 +142,38 @@ func (m *AgentPaneModel) AppendMeta(text string) {
 	m.invalidateMdCache()
 }
 
+// QueueUserMessage stashes a developer submission that arrived while
+// the agent was mid-stream. The Render() loop shows a transient
+// "[queued: …]" banner row until [FlushPendingUserMessage] runs.
+//
+// Sanitized once on entry so the banner preview and the eventual
+// committed "You: …" line share the same cleaned text.
+func (m *AgentPaneModel) QueueUserMessage(text string) {
+	var s sanitize.Sanitizer
+	m.pendingUserMessage = s.Sanitize(text)
+}
+
+// HasPendingUserMessage reports whether a queued submission is awaiting
+// the next turn boundary.
+func (m *AgentPaneModel) HasPendingUserMessage() bool {
+	return m.pendingUserMessage != ""
+}
+
+// FlushPendingUserMessage commits any queued user submission to the
+// transcript via AppendUserMessage and clears the banner. No-op when
+// nothing is pending. Called by the engine-event bridge on the first
+// tool-less AgentTurnUsage after submission (the natural park boundary
+// where the foundation would otherwise pick up the queued input), and
+// defensively on AgentWaiting / AgentDone.
+func (m *AgentPaneModel) FlushPendingUserMessage() {
+	if m.pendingUserMessage == "" {
+		return
+	}
+	text := m.pendingUserMessage
+	m.pendingUserMessage = ""
+	m.AppendUserMessage(text)
+}
+
 // AppendUserMessage appends the developer's follow-up message as plain text
 // and marks the raw lines so Render() can style them distinctly. Prepends a
 // "── turn N ──" divider and advances the dim watermark so the previous

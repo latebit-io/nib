@@ -224,6 +224,21 @@ type AgentPaneModel struct {
 	// arriving).
 	pendingTurnUsage *event.AgentTurnUsage
 
+	// pendingUserMessage holds a developer submission that arrived
+	// while the agent was mid-stream. Render() shows a transient
+	// "[queued: …]" banner row above the input area until the prior
+	// turn's first tool-less AgentTurnUsage (or AgentWaiting/AgentDone
+	// fallback) fires, at which point [FlushPendingUserMessage] commits
+	// the queued text to the transcript via the normal turn-separator
+	// + "You: …" flow. Empty when nothing is queued.
+	//
+	// Deferring the [AppendUserMessage] call is what keeps "You: …"
+	// from being stamped in the middle of the prior turn's tail —
+	// streaming tokens that continue to arrive after submission would
+	// otherwise pile up below the user message, looking as if they
+	// belonged to it.
+	pendingUserMessage string
+
 	// ModelSel holds the inline model selector state — when active,
 	// replaces the input area with a model list.
 	ModelSel                ModelSelectorModel
@@ -996,11 +1011,26 @@ func (m *AgentPaneModel) VisibleLines() int {
 	if m.ModelSel.IsActive() {
 		bottomH = m.modelSelHeight()
 	}
-	h := m.height - bottomH
+	h := m.height - bottomH - m.pendingBannerHeight()
 	if h < 1 {
 		h = 1
 	}
 	return h
+}
+
+// pendingBannerHeight returns the row count reserved for the
+// [pendingUserMessage] banner — 1 when a submission is queued and
+// neither the model selector nor the API-key prompt is occupying the
+// bottom area, else 0. Centralised so [VisibleLines] and Render stay
+// in agreement about the content/banner split.
+func (m *AgentPaneModel) pendingBannerHeight() int {
+	if m.pendingUserMessage == "" {
+		return 0
+	}
+	if m.ModelSel.IsActive() || m.apiKeyInputActive {
+		return 0
+	}
+	return 1
 }
 
 func (m *AgentPaneModel) scrollToBottom() {
@@ -1315,6 +1345,16 @@ func (m *AgentPaneModel) padLine(s string) string {
 	return s + strings.Repeat(" ", m.width-w)
 }
 
+// renderPendingBanner renders the single-row queued-message indicator
+// shown between the transcript and the input area when
+// [pendingUserMessage] is set. Newlines in the preview collapse to
+// spaces so the banner reads as one line; padLine handles truncation
+// at narrow widths.
+func (m *AgentPaneModel) renderPendingBanner() string {
+	preview := strings.TrimSpace(strings.ReplaceAll(m.pendingUserMessage, "\n", " "))
+	return agentDimStyle.Render(m.padLine(" [queued: " + preview + "]"))
+}
+
 // renderInputArea renders the textarea input into the output rows.
 func (m *AgentPaneModel) renderInputArea(output []string, row *int) {
 	inputRows := m.inputAreaEndRow - m.inputAreaStartRow
@@ -1451,27 +1491,34 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 // gracefully when the pane is narrow: drops the hint first, then the left
 // section, then truncates the chip label.
 func (m *AgentPaneModel) renderStatusLine() string {
-	// Left: model label + cumulative usage, dim.
-	var leftRaw strings.Builder
+	// Left section assembled in tiers — model label, per-turn stats,
+	// context bar — so narrow panes degrade gracefully: drop the bar
+	// first, then stats, then the whole left, instead of yanking
+	// model+stats together the moment the bar overflows.
+	hasUsage := m.usage.turns > 0 && (m.usage.totalIn > 0 || m.usage.totalOut > 0)
+
+	modelChunk := ""
 	if m.modelLabel != "" {
-		leftRaw.WriteString(" ◇ ")
-		leftRaw.WriteString(sanitizeInlineDisplay(m.modelLabel))
+		modelChunk = " ◇ " + sanitizeInlineDisplay(m.modelLabel)
 	}
-	if m.usage.turns > 0 && (m.usage.totalIn > 0 || m.usage.totalOut > 0) {
+
+	statsChunk := ""
+	if hasUsage {
 		prefix := "~"
 		if m.usage.hasExact {
 			prefix = ""
 		}
 		sep := " "
-		if leftRaw.Len() > 0 {
+		if modelChunk != "" {
 			sep = " · "
 		}
+		var b strings.Builder
 		// Pi-style per-turn snapshot: ↑input ↓output R<cache> for
 		// the LATEST turn. Matches pi's web-ui convention of
 		// rendering each message's usage independently rather than
 		// accumulating. Cumulative billing is surfaced in the
 		// session-end summary, not the live footer.
-		fmt.Fprintf(&leftRaw, "%s↑%s%s ↓%s%s",
+		fmt.Fprintf(&b, "%s↑%s%s ↓%s%s",
 			sep,
 			prefix, formatTokenCount(m.usage.lastTurnFresh),
 			prefix, formatTokenCount(m.usage.lastTurnOut))
@@ -1479,20 +1526,22 @@ func (m *AgentPaneModel) renderStatusLine() string {
 			gross := m.usage.lastTurnFresh + m.usage.lastTurnCached
 			if gross > 0 {
 				pct := m.usage.lastTurnCached * 100 / gross
-				fmt.Fprintf(&leftRaw, " R%s (%d%%⚡)",
+				fmt.Fprintf(&b, " R%s (%d%%⚡)",
 					formatTokenCount(m.usage.lastTurnCached), pct)
 			}
 		}
+		statsChunk = b.String()
+	}
+
+	barChunk := ""
+	if hasUsage {
 		// Bar visualization for context occupancy: ▓░ filled vs
-		// empty cells + N%/<window> label. Lives at the end of the
-		// line because it's the widest chunk; sliding it to the
-		// right keeps the leading ↑↓R aligned across turns.
+		// empty cells + N%/<window> label. Sits at the tail of the
+		// left section so it's the first thing dropped on narrow panes.
 		if bar := formatContextBar(m.usage.lastTurnTotal, m.modelLabel); bar != "" {
-			fmt.Fprintf(&leftRaw, " %s", bar)
+			barChunk = " " + bar
 		}
 	}
-	left := statusLeftStyle.Render(leftRaw.String())
-	leftW := lipgloss.Width(left)
 
 	// Right: chip + optional hint.
 	spec := m.chipFor()
@@ -1505,18 +1554,38 @@ func (m *AgentPaneModel) renderStatusLine() string {
 		hintW = lipgloss.Width(hint)
 	}
 
-	gap := m.width - leftW - chipW - hintW
-	if gap >= 1 {
-		return left + strings.Repeat(" ", gap) + chip + hint
+	// Try left-section variants widest-first; for each, try with hint
+	// and without. First combo whose total width fits wins. Variants
+	// are emitted in decreasing-width order, so skipping a raw value
+	// equal to the previous one filters duplicates (e.g. when barChunk
+	// or statsChunk is empty) without a map allocation per frame.
+	variants := [...]string{
+		modelChunk + statsChunk + barChunk,
+		modelChunk + statsChunk,
+		modelChunk,
 	}
-	// Drop the hint.
-	gap = m.width - leftW - chipW
-	if gap >= 1 {
-		return left + strings.Repeat(" ", gap) + chip
+	var prev string
+	for _, raw := range variants {
+		if raw == "" || raw == prev {
+			continue
+		}
+		prev = raw
+		styled := statusLeftStyle.Render(raw)
+		w := lipgloss.Width(styled)
+		if gap := m.width - w - chipW - hintW; gap >= 1 {
+			return styled + strings.Repeat(" ", gap) + chip + hint
+		}
+		if gap := m.width - w - chipW; gap >= 1 {
+			return styled + strings.Repeat(" ", gap) + chip
+		}
 	}
-	// Drop the left section — keep the chip right-aligned, padded.
-	gap = m.width - chipW
-	if gap >= 0 {
+	// No left section (either all chunks empty or none fit). Still try
+	// to keep the hint — for chips like REPLY/DONE/PLAN/REVIEW the
+	// keyboard hint is the most actionable thing on the line.
+	if gap := m.width - chipW - hintW; gap >= 1 {
+		return strings.Repeat(" ", gap) + chip + hint
+	}
+	if gap := m.width - chipW; gap >= 0 {
 		return strings.Repeat(" ", gap) + chip
 	}
 	// Chip itself doesn't fit — truncate the label (plain text) first so
@@ -1667,9 +1736,19 @@ func (m *AgentPaneModel) Render() string {
 	if m.ModelSel.IsActive() {
 		bottomH = m.modelSelHeight()
 	}
-	contentEnd := m.height - bottomH
+	pendingH := m.pendingBannerHeight()
+	contentEnd := m.height - bottomH - pendingH
 	for row < contentEnd {
 		output[row] = strings.Repeat(" ", m.width)
+		row++
+	}
+
+	// Pending queued-message banner sits between the transcript and
+	// the separator so the user sees immediate acknowledgement of a
+	// mid-stream submission without disturbing the still-streaming
+	// transcript above.
+	if pendingH > 0 && row < m.height-1 {
+		output[row] = m.renderPendingBanner()
 		row++
 	}
 

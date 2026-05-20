@@ -17,12 +17,26 @@ import (
 // reports the goal as a continuation of an in-flight conversation, the
 // goal is appended to the agent pane as a user message; otherwise the
 // pane is cleared so the new conversation starts on a clean slate.
+//
+// When the agent is mid-stream (status is animated — Thinking, Planning,
+// or Linting), the message is queued behind a banner instead of being
+// stamped immediately. Stamping now would put the "── turn N ──"
+// separator + "You: …" line above the prior turn's still-arriving tail
+// tokens, leaving the user's message visually adrift inside the agent's
+// previous output. [AgentPaneModel.FlushPendingUserMessage] commits the
+// queued text once the first tool-less AgentTurnUsage arrives (the
+// natural park boundary the foundation hits before picking up the
+// queued input).
 func (m *AppModel) handleGoalSubmitted(msg GoalSubmittedMsg) (tea.Model, tea.Cmd) {
 	continued := m.Session.SubmitGoal(msg.Goal)
-	if continued {
-		m.AgentPane.AppendUserMessage(msg.Goal)
-	} else {
+	if !continued {
 		m.AgentPane.Clear()
+		return m, nil
+	}
+	if statusAnimates(m.AgentPane.StatusKind()) {
+		m.AgentPane.QueueUserMessage(msg.Goal)
+	} else {
+		m.AgentPane.AppendUserMessage(msg.Goal)
 	}
 	return m, nil
 }

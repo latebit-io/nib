@@ -151,12 +151,23 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		default:
 			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusWaiting))
 		}
+		// Defensive flush: if a queued submission is still pending here
+		// (the tool-less AgentTurnUsage branch should normally have
+		// caught it first), commit it now so the banner doesn't outlive
+		// the parked run.
+		m.AgentPane.FlushPendingUserMessage()
 		m.AgentPane.SetInputActive(true)
 		m.AgentPane.ResetInput()
 		// Agent may have published /project.md — reload async to stay in sync.
 		cmd = tea.Batch(cmd, m.reloadWorkTreeCmd())
 	case event.AgentDone:
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusIdle))
+		// Defensive flush — see AgentWaiting branch. AgentDone shouldn't
+		// fire with a pending submission (kit.Reply would have queued
+		// the input and the foundation would process it before ending)
+		// but flushing here keeps the banner from leaking into the
+		// session-summary block in pathological cases.
+		m.AgentPane.FlushPendingUserMessage()
 		// Flush any stats stashed by the final turn before the session
 		// summary so the per-turn line for a tool-less final reply
 		// still surfaces (otherwise it would be silently dropped at
@@ -183,6 +194,16 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		// running totals internally — single call covers both
 		// formerly-separate concerns.
 		m.AgentPane.AppendTurnUsage(e)
+		// A turn that ended with no tool calls is the boundary at which
+		// the foundation will park on awaitReply — and pick up any
+		// queued user input as the next message. Flushing the pending
+		// user-message banner here means "You: …" lands between the
+		// settled prior turn and the queued-input-driven new turn, in
+		// the right order. Turns with ToolCalls > 0 keep streaming
+		// tools and would interrupt mid-task.
+		if e.ToolCalls == 0 {
+			m.AgentPane.FlushPendingUserMessage()
+		}
 	case event.AgentCompacted:
 		m.AgentPane.AppendMeta(formatCompacted(e))
 	}

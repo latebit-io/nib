@@ -18,6 +18,7 @@ import (
 	tuicmd "github.com/latebit-io/nib/tui/command"
 	"github.com/latebit-io/nib/tui/sanitize"
 	"github.com/latebit-io/nib/tui/ui/textarea"
+	"github.com/latebit-io/nib/tui/ui/theme"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -98,12 +99,20 @@ type fenceState struct {
 
 // Package-level styles — allocated once, never in render paths.
 var (
-	// userMessageStyle paints "You: ..." lines in a warm magenta-pink so
-	// your turn stands out from the agent's default-foreground prose.
-	// 212 is distinct enough from the ANSWER chip (162) that they don't
-	// read as "the same color" when both are on screen.
-	userMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	agentDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	// userMessageStyle paints the active beat's user-message body in the
+	// nib accent so your turn stands out from agent prose. The leading
+	// glyph cell ("◆ ", "⎙ ", "✕ ") is rendered separately by
+	// [AgentPaneModel.renderUserLine] in its own per-kind hue.
+	// The dim counterpart for past beats lives on [userMessageDimStyle] —
+	// hue-preserving via [theme.AccentDim] so a past user message still
+	// reads as a user message rather than fading into generic gray.
+	userMessageStyle    = lipgloss.NewStyle().Foreground(theme.Accent).Bold(true)
+	userMessageDimStyle = lipgloss.NewStyle().Foreground(theme.AccentDim).Bold(true)
+	// agentDimStyle is the catch-all dim chrome color — past-beat prose
+	// without a typed block, separators, "No LLM configured" splash,
+	// fill rows. Anchored to the palette so dim chrome stays in family
+	// with the rest of the redesign.
+	agentDimStyle    = lipgloss.NewStyle().Foreground(theme.PrimaryTextDim)
 	agentSelStyle    = lipgloss.NewStyle().Background(lipgloss.Color("24"))
 	agentInputStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("230"))
 	agentInputDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -144,6 +153,13 @@ var (
 	// statusLeftStyle renders the model/usage half of the status line in a
 	// muted tone that reads as metadata.
 	statusLeftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+
+	// Input-state divider styles — colored hairline above the textarea.
+	// Picked by [AgentPaneModel.inputStateDividerStyle]; one pre-built
+	// style per state keeps the render path allocation-free.
+	dividerStyleIdle    = lipgloss.NewStyle().Foreground(theme.DividerActive)
+	dividerStyleFocused = lipgloss.NewStyle().Foreground(theme.Accent)
+	dividerStyleRunning = lipgloss.NewStyle().Foreground(theme.Warning)
 )
 
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
@@ -319,13 +335,34 @@ type AgentPaneModel struct {
 	// each Render call resizes/clears in place rather than allocating a
 	// fresh []string. Capacity grows to the largest m.height seen.
 	renderBuf []string
+
+	// scrollTarget is the desired ScrollOffset value. During streaming,
+	// the spinner tick loop advances ScrollOffset toward scrollTarget
+	// via [advanceScrollEase] so auto-scroll-to-bottom slides smoothly
+	// instead of jumping per-token. Outside streaming it equals
+	// ScrollOffset since [scrollToBottom] snaps when no tick is in
+	// flight to drive the ease.
+	scrollTarget int
+
+	// beats is the structured timeline of user → agent exchange cycles
+	// (see agent_pane_beat.go). Step 0 of the agent-pane redesign — runs
+	// alongside the existing line buffer and classification maps; later
+	// steps will migrate the render path to walk beats directly.
+	beats []Beat
+
+	// userGlyphForRaw records the [UserGlyph] kind on the raw-line index
+	// that carries the glyph prefix ("◆ ", "⎙ ", or "✕ "). Set by
+	// AppendUserMessage at classify time; read by the render path so
+	// the glyph cell can be styled in its own hue while the rest of
+	// the user line keeps the uniform accent body color.
+	userGlyphForRaw map[int]UserGlyph
 }
 
 // NewAgentPaneModel creates a new agent pane.
 func NewAgentPaneModel(svc *Services, hasAgent bool) *AgentPaneModel {
 	input := textarea.New(1) // width set properly in SetSize
 	input.SetClipboard(svc.Clipboard)
-	return &AgentPaneModel{
+	m := &AgentPaneModel{
 		status:            event.StatusIdle,
 		services:          svc,
 		input:             input,
@@ -333,6 +370,8 @@ func NewAgentPaneModel(svc *Services, hasAgent bool) *AgentPaneModel {
 		turnCounter:       1,
 		streamingStartRaw: -1,
 	}
+	m.initBeats()
+	return m
 }
 
 // --- Accessors ---
@@ -551,9 +590,14 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 	case spinnerTickMsg:
 		if !statusAnimates(m.status) {
 			m.spinnerRunning = false
+			// Streaming has ended — settle the scroll at the last
+			// requested target so we land exactly at bottom rather
+			// than mid-ease.
+			m.ScrollOffset = m.scrollTarget
 			return nil
 		}
 		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+		m.advanceScrollEase()
 		return spinnerTickCmd()
 	}
 	return nil
@@ -1033,13 +1077,59 @@ func (m *AgentPaneModel) pendingBannerHeight() int {
 	return 1
 }
 
+// scrollToBottom requests an auto-scroll to the new bottom of the
+// transcript. When the agent is actively streaming (statusAnimates),
+// the existing spinner tick loop runs at [spinnerTickRate] and will
+// advance ScrollOffset toward [scrollTarget] one step per frame via
+// [advanceScrollEase] — turning what used to be a per-token jump into
+// a continuous slide. Outside streaming we snap immediately because
+// no tick is in flight to drive the ease.
+//
+// Direct ScrollOffset mutations from user input (mouse wheel, arrow
+// keys, page up/down) stay instant — easing is only for auto-scroll on
+// new content.
 func (m *AgentPaneModel) scrollToBottom() {
 	vis := m.VisibleLines()
+	target := 0
 	if len(m.Lines) > vis {
-		m.ScrollOffset = len(m.Lines) - vis
-	} else {
-		m.ScrollOffset = 0
+		target = len(m.Lines) - vis
 	}
+	m.scrollTarget = target
+	if !statusAnimates(m.status) || !m.spinnerRunning {
+		m.ScrollOffset = target
+	}
+}
+
+// advanceScrollEase moves ScrollOffset one frame closer to scrollTarget.
+// Critically damped at ~40% per frame so a 30-line jump settles in ~5
+// frames at the 100ms spinner cadence (=500ms perceived ease). Snaps
+// when within 2 lines so we never stall sub-line at the bottom.
+func (m *AgentPaneModel) advanceScrollEase() {
+	if m.ScrollOffset == m.scrollTarget {
+		return
+	}
+	delta := m.scrollTarget - m.ScrollOffset
+	const snap = 2
+	if delta < 0 {
+		if -delta <= snap {
+			m.ScrollOffset = m.scrollTarget
+			return
+		}
+	} else if delta <= snap {
+		m.ScrollOffset = m.scrollTarget
+		return
+	}
+	step := delta * 4 / 10
+	if step == 0 {
+		// Tiny delta but not within snap range — advance by one to
+		// avoid stalling at +/- snap+1.
+		if delta > 0 {
+			step = 1
+		} else {
+			step = -1
+		}
+	}
+	m.ScrollOffset += step
 }
 
 // SelectedRange returns the normalized (start, end) of the selection.
@@ -1200,7 +1290,7 @@ func (m *AgentPaneModel) turnSeparatorLabel(wrappedIdx int) string {
 // isTurnSeparatorContinuation reports whether the wrapped line is a non-
 // first wrapped segment of a separator raw line. This happens only at
 // widths narrow enough to wrap the placeholder text — we blank those
-// segments rather than let fragments of "── turn N ──" render as markdown.
+// segments rather than let fragments of "── ♩ beat N ──" render as markdown.
 func (m *AgentPaneModel) isTurnSeparatorContinuation(wrappedIdx int) bool {
 	if len(m.turnSeparatorRawLines) == 0 {
 		return false
@@ -1355,6 +1445,48 @@ func (m *AgentPaneModel) renderPendingBanner() string {
 	return agentDimStyle.Render(m.padLine(" [queued: " + preview + "]"))
 }
 
+// inputStateHintLine returns the dim hint shown on the empty placeholder
+// row beneath the textarea, picked per input state. Order of
+// precedence: an active agent stream wins (the user can still queue,
+// but the chrome should make the in-flight state obvious); then focus;
+// then the legacy slash-command hint that anchored this row before
+// the redesign.
+//
+// The spinner glyph comes from the same spinnerFrames array the
+// status-line chip uses, so a single redraw tick advances both
+// indicators in lock-step.
+func (m *AgentPaneModel) inputStateHintLine() string {
+	if statusAnimates(m.status) {
+		spin := string(spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
+		return " " + spin + " nib is working… · esc interrupt"
+	}
+	if m.inputActive {
+		return " enter send · shift+enter newline · esc cancel"
+	}
+	if m.input.Content() == "" {
+		return " ask nib something…"
+	}
+	return " Ctrl+G code | Alt+G plan"
+}
+
+// inputStateDividerStyle picks the pre-built lipgloss style for the
+// hairline divider directly above the input area. The divider is the
+// cheapest place to signal input state without eating any textarea
+// width or height — its hue tells you at a glance whether you're
+// idle, focused, or watching the agent work.
+//
+// Returns a package-level style var rather than building one per
+// frame; render-path allocations are an explicit project no-no.
+func (m *AgentPaneModel) inputStateDividerStyle() lipgloss.Style {
+	if statusAnimates(m.status) {
+		return dividerStyleRunning
+	}
+	if m.inputActive {
+		return dividerStyleFocused
+	}
+	return dividerStyleIdle
+}
+
 // renderInputArea renders the textarea input into the output rows.
 func (m *AgentPaneModel) renderInputArea(output []string, row *int) {
 	inputRows := m.inputAreaEndRow - m.inputAreaStartRow
@@ -1406,7 +1538,7 @@ func (m *AgentPaneModel) renderInputArea(output []string, row *int) {
 			}
 			output[*row] = style.Render(lineBuilder.String())
 		} else if !hasContent && i == 0 {
-			output[*row] = agentInputDim.Render(m.padLine(" Ctrl+G code | Alt+G plan"))
+			output[*row] = agentInputDim.Render(m.padLine(m.inputStateHintLine()))
 		} else {
 			output[*row] = strings.Repeat(" ", m.width)
 		}
@@ -1708,10 +1840,23 @@ func (m *AgentPaneModel) Render() string {
 				// widths — blank dim row rather than letting the raw
 				// fragment render as markdown garbage.
 				output[row] = agentDimStyle.Render(strings.Repeat(" ", m.width))
+			} else if blk, _, ok := m.blockAt(lineIdx); ok && hasLeftBorder(blk.Kind) {
+				// Proposal/Error blocks render with a colored 2-cell
+				// left border. Dimming preserves hue (theme.Dim) when
+				// the line is in a past beat so structural information
+				// (this beat errored / this proposal landed) survives
+				// the fade rather than collapsing into generic gray.
+				output[row] = m.renderBorderedLine(lineText, blk.Kind, m.isDim(lineIdx))
+			} else if m.isUserLine(lineIdx) {
+				// Typed user-message branch runs BEFORE the generic
+				// isDim short-circuit so past user messages dim through
+				// AccentDim (hue preserved) instead of fading to gray.
+				// renderUserLine handles the glyph-color split on the
+				// first wrapped line of an @-attached or interrupt
+				// message; neutral messages render uniformly.
+				output[row] = m.renderUserLine(lineText, lineIdx, m.isDim(lineIdx))
 			} else if m.isDim(lineIdx) {
 				output[row] = agentDimStyle.Render(m.padLine(lineText))
-			} else if m.isUserLine(lineIdx) {
-				output[row] = userMessageStyle.Render(m.padLine(lineText))
 			} else if m.isMeta(lineIdx) {
 				output[row] = agentDimStyle.Render(m.padLine(lineText))
 			} else if m.isPlain(lineIdx) {
@@ -1752,9 +1897,13 @@ func (m *AgentPaneModel) Render() string {
 		row++
 	}
 
-	// Separator line
+	// Separator line. Colored by input state so the hairline above the
+	// textarea is the cheapest legible state indicator: dim gray when
+	// idle, accent pink when focused, warning orange while the agent
+	// is streaming. Eats no input width or height — the divider
+	// already existed; we just route its color through state.
 	if row < m.height-1 { // -1 to leave room for status
-		output[row] = agentDimStyle.Render(m.padLine(strings.Repeat("─", m.width)))
+		output[row] = m.inputStateDividerStyle().Render(m.padLine(strings.Repeat("─", m.width)))
 		row++
 	}
 

@@ -342,13 +342,13 @@ func TestAgentPaneModel_isCodeLine_MetaFenceNoBleed(t *testing.T) {
 }
 
 // TestAgentPaneModel_TurnSeparator_NarrowWidthNoBleed verifies that at a
-// pane width narrow enough for the separator placeholder "── turn N ──"
+// pane width narrow enough for the separator placeholder "── ♩ beat N ──"
 // to wrap, the continuation wrapped segments render as dim blanks rather
-// than falling through to markdown (which would print "── tu" / "rn 2 ─"
+// than falling through to markdown (which would print "── ♩ " / "beat 2 ─"
 // fragments under the divider).
 func TestAgentPaneModel_TurnSeparator_NarrowWidthNoBleed(t *testing.T) {
 	m := NewAgentPaneModel(&Services{Clipboard: &testClipboard{}}, false)
-	m.SetSize(8, 20) // narrower than "── turn 2 ──" (12 cells)
+	m.SetSize(8, 20) // narrower than the separator placeholder; forces wrap
 
 	m.AppendText("agent before")
 	m.AppendUserMessage("hello")

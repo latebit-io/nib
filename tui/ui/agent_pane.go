@@ -1515,16 +1515,21 @@ func (m *AgentPaneModel) renderStatusLine() string {
 	}
 
 	// Try left-section variants widest-first; for each, try with hint
-	// and without. First combo whose total width fits wins.
-	leftVariants := []string{
+	// and without. First combo whose total width fits wins. Variants
+	// are emitted in decreasing-width order, so skipping a raw value
+	// equal to the previous one filters duplicates (e.g. when barChunk
+	// or statsChunk is empty) without a map allocation per frame.
+	variants := [...]string{
 		modelChunk + statsChunk + barChunk,
 		modelChunk + statsChunk,
 		modelChunk,
 	}
-	for _, raw := range leftVariants {
-		if raw == "" {
+	var prev string
+	for _, raw := range variants {
+		if raw == "" || raw == prev {
 			continue
 		}
+		prev = raw
 		styled := statusLeftStyle.Render(raw)
 		w := lipgloss.Width(styled)
 		if gap := m.width - w - chipW - hintW; gap >= 1 {
@@ -1534,7 +1539,12 @@ func (m *AgentPaneModel) renderStatusLine() string {
 			return styled + strings.Repeat(" ", gap) + chip
 		}
 	}
-	// Drop the left section — keep the chip right-aligned, padded.
+	// No left section (either all chunks empty or none fit). Still try
+	// to keep the hint — for chips like REPLY/DONE/PLAN/REVIEW the
+	// keyboard hint is the most actionable thing on the line.
+	if gap := m.width - chipW - hintW; gap >= 1 {
+		return strings.Repeat(" ", gap) + chip + hint
+	}
 	if gap := m.width - chipW; gap >= 0 {
 		return strings.Repeat(" ", gap) + chip
 	}

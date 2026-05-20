@@ -224,6 +224,21 @@ type AgentPaneModel struct {
 	// arriving).
 	pendingTurnUsage *event.AgentTurnUsage
 
+	// pendingUserMessage holds a developer submission that arrived
+	// while the agent was mid-stream. Render() shows a transient
+	// "[queued: …]" banner row above the input area until the prior
+	// turn's first tool-less AgentTurnUsage (or AgentWaiting/AgentDone
+	// fallback) fires, at which point [FlushPendingUserMessage] commits
+	// the queued text to the transcript via the normal turn-separator
+	// + "You: …" flow. Empty when nothing is queued.
+	//
+	// Deferring the [AppendUserMessage] call is what keeps "You: …"
+	// from being stamped in the middle of the prior turn's tail —
+	// streaming tokens that continue to arrive after submission would
+	// otherwise pile up below the user message, looking as if they
+	// belonged to it.
+	pendingUserMessage string
+
 	// ModelSel holds the inline model selector state — when active,
 	// replaces the input area with a model list.
 	ModelSel                ModelSelectorModel
@@ -996,11 +1011,26 @@ func (m *AgentPaneModel) VisibleLines() int {
 	if m.ModelSel.IsActive() {
 		bottomH = m.modelSelHeight()
 	}
-	h := m.height - bottomH
+	h := m.height - bottomH - m.pendingBannerHeight()
 	if h < 1 {
 		h = 1
 	}
 	return h
+}
+
+// pendingBannerHeight returns the row count reserved for the
+// [pendingUserMessage] banner — 1 when a submission is queued and
+// neither the model selector nor the API-key prompt is occupying the
+// bottom area, else 0. Centralised so [VisibleLines] and Render stay
+// in agreement about the content/banner split.
+func (m *AgentPaneModel) pendingBannerHeight() int {
+	if m.pendingUserMessage == "" {
+		return 0
+	}
+	if m.ModelSel.IsActive() || m.apiKeyInputActive {
+		return 0
+	}
+	return 1
 }
 
 func (m *AgentPaneModel) scrollToBottom() {
@@ -1313,6 +1343,16 @@ func (m *AgentPaneModel) padLine(s string) string {
 		return runewidth.Truncate(s, m.width, "")
 	}
 	return s + strings.Repeat(" ", m.width-w)
+}
+
+// renderPendingBanner renders the single-row queued-message indicator
+// shown between the transcript and the input area when
+// [pendingUserMessage] is set. Newlines in the preview collapse to
+// spaces so the banner reads as one line; padLine handles truncation
+// at narrow widths.
+func (m *AgentPaneModel) renderPendingBanner() string {
+	preview := strings.TrimSpace(strings.ReplaceAll(m.pendingUserMessage, "\n", " "))
+	return agentDimStyle.Render(m.padLine(" [queued: " + preview + "]"))
 }
 
 // renderInputArea renders the textarea input into the output rows.
@@ -1696,9 +1736,19 @@ func (m *AgentPaneModel) Render() string {
 	if m.ModelSel.IsActive() {
 		bottomH = m.modelSelHeight()
 	}
-	contentEnd := m.height - bottomH
+	pendingH := m.pendingBannerHeight()
+	contentEnd := m.height - bottomH - pendingH
 	for row < contentEnd {
 		output[row] = strings.Repeat(" ", m.width)
+		row++
+	}
+
+	// Pending queued-message banner sits between the transcript and
+	// the separator so the user sees immediate acknowledgement of a
+	// mid-stream submission without disturbing the still-streaming
+	// transcript above.
+	if pendingH > 0 && row < m.height-1 {
+		output[row] = m.renderPendingBanner()
 		row++
 	}
 

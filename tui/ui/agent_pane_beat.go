@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -240,46 +239,67 @@ func hasLeftBorder(kind BlockKind) bool {
 	return false
 }
 
-// blockBorderColor returns the bright-palette left-border color for a
-// kind that has a border. The dim caller is responsible for routing
-// the result through [theme.Dim] when the owning beat is past.
-//
-// Returns nil for kinds without a border — callers that pass an
-// unbordered kind are misusing the helper and should be guarded by
-// [hasLeftBorder] first.
-func blockBorderColor(kind BlockKind) color.Color {
-	switch kind {
-	case BlockProposal:
-		return theme.Proposal
-	case BlockError:
-		return theme.ErrorBorder
-	}
-	return nil
-}
+// Pre-built block body / border styles. Allocated once per
+// (kind, dim) combination so the render path can dispatch via a
+// switch without touching lipgloss.NewStyle() per frame — the
+// project rule explicitly forbids style allocations inside render
+// paths.
+var (
+	blockBodyStyleProposalBright = lipgloss.NewStyle().Foreground(theme.PrimaryText)
+	blockBodyStyleProposalDim    = lipgloss.NewStyle().Foreground(theme.PrimaryTextDim)
+	blockBodyStyleErrorBright    = lipgloss.NewStyle().Foreground(theme.ErrorText)
+	blockBodyStyleErrorDim       = lipgloss.NewStyle().Foreground(theme.ErrorTextDim)
 
-// blockBodyStyle returns the lipgloss style applied to the content of a
-// bordered block. Proposal text reads at primary brightness so the
-// reason is legible; error text takes the error-text hue so the body
-// echoes the border color.
+	blockBorderStyleProposalBright = lipgloss.NewStyle().Foreground(theme.Proposal)
+	blockBorderStyleProposalDim    = lipgloss.NewStyle().Foreground(theme.ProposalDim)
+	blockBorderStyleErrorBright    = lipgloss.NewStyle().Foreground(theme.ErrorBorder)
+	blockBorderStyleErrorDim       = lipgloss.NewStyle().Foreground(theme.ErrorBorderDim)
+)
+
+// blockBodyStyle returns the pre-built lipgloss style applied to the
+// content of a bordered block. Proposal text reads at primary
+// brightness so the reason is legible; error text takes the error-
+// text hue so the body echoes the border color.
 //
 // The dim flag is honored here (not just on the border) so a past
 // beat's bordered block fades both border and body together.
+//
+// Returns the zero value for unbordered kinds — callers should be
+// guarded by [hasLeftBorder] before invoking, so the zero branch is
+// dead under correct use.
 func blockBodyStyle(kind BlockKind, dim bool) lipgloss.Style {
 	switch kind {
 	case BlockProposal:
-		fg := theme.PrimaryText
 		if dim {
-			fg = theme.PrimaryTextDim
+			return blockBodyStyleProposalDim
 		}
-		return lipgloss.NewStyle().Foreground(fg)
+		return blockBodyStyleProposalBright
 	case BlockError:
-		fg := theme.ErrorText
 		if dim {
-			fg = theme.ErrorTextDim
+			return blockBodyStyleErrorDim
 		}
-		return lipgloss.NewStyle().Foreground(fg)
+		return blockBodyStyleErrorBright
 	}
-	return lipgloss.NewStyle()
+	return lipgloss.Style{}
+}
+
+// blockBorderStyle returns the pre-built lipgloss style for the 2-cell
+// left border of a bordered block. Mirrors [blockBodyStyle] — see its
+// doc for the dim contract and the unbordered-kind fallback.
+func blockBorderStyle(kind BlockKind, dim bool) lipgloss.Style {
+	switch kind {
+	case BlockProposal:
+		if dim {
+			return blockBorderStyleProposalDim
+		}
+		return blockBorderStyleProposalBright
+	case BlockError:
+		if dim {
+			return blockBorderStyleErrorDim
+		}
+		return blockBorderStyleErrorBright
+	}
+	return lipgloss.Style{}
 }
 
 // renderBorderedLine produces a fully-decorated row for a wrapped line
@@ -308,12 +328,7 @@ func (m *AgentPaneModel) renderBorderedLine(lineText string, kind BlockKind, dim
 		body = lineText + strings.Repeat(" ", contentW-bodyW)
 	}
 	body = blockBodyStyle(kind, dim).Render(body)
-
-	borderC := blockBorderColor(kind)
-	if dim {
-		borderC = theme.Dim(borderC)
-	}
-	border := lipgloss.NewStyle().Foreground(borderC).Render(blockBorderGlyph)
+	border := blockBorderStyle(kind, dim).Render(blockBorderGlyph)
 	return border + body
 }
 

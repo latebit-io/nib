@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -56,34 +55,47 @@ func userGlyphPrefix(g UserGlyph) string {
 // doesn't have to call runewidth on each frame.
 const userGlyphPrefixCells = 2
 
-// userGlyphColor returns the foreground color for a glyph kind. The
-// body of the user message keeps its uniform accent color — only the
-// glyph cell differentiates kind, per the cut-bubble-bg-tint scope.
+// Pre-built per-(kind, dim) glyph styles. Allocated once at package
+// init so [renderUserLine] dispatches via a switch without touching
+// lipgloss.NewStyle() per rendered frame — render-path allocations
+// are an explicit project no-no.
+var (
+	userGlyphStyleAttachedBright  = lipgloss.NewStyle().Foreground(theme.ProposalText)
+	userGlyphStyleAttachedDim     = lipgloss.NewStyle().Foreground(theme.ProposalTextDim)
+	userGlyphStyleInterruptBright = lipgloss.NewStyle().Foreground(theme.Interrupt)
+	userGlyphStyleInterruptDim    = lipgloss.NewStyle().Foreground(theme.InterruptDim)
+)
+
+// userGlyphStyle returns the pre-built lipgloss style for a glyph
+// kind. The body of the user message keeps its uniform accent color —
+// only the glyph cell differentiates kind (per the cut-bubble-bg-tint
+// scope).
 //
 // The dim flag picks the hue-preserving past-beat counterpart so a
-// past attached-message still reads as "attached" rather than fading
+// past attached message still reads as "attached" rather than fading
 // into the generic accent-dim.
-func userGlyphColor(g UserGlyph, dim bool) color.Color {
+//
+// Neutral falls back to the user-body styles since the glyph hue
+// matches the body — there's no per-frame visible difference between
+// split and uniform rendering for that kind. The render path's
+// fast-path short-circuit catches that case before this call.
+func userGlyphStyle(g UserGlyph, dim bool) lipgloss.Style {
 	switch g {
 	case UserGlyphAttached:
-		c := theme.ProposalText
 		if dim {
-			return theme.ProposalTextDim
+			return userGlyphStyleAttachedDim
 		}
-		return c
+		return userGlyphStyleAttachedBright
 	case UserGlyphInterrupt:
 		if dim {
-			return theme.InterruptDim
+			return userGlyphStyleInterruptDim
 		}
-		return theme.Interrupt
+		return userGlyphStyleInterruptBright
 	}
-	// Neutral defers to the user-message body color so the line reads
-	// as one coherent unit — caller passes the same Accent/AccentDim
-	// it uses for the body and a no-op render results.
 	if dim {
-		return theme.AccentDim
+		return userMessageDimStyle
 	}
-	return theme.Accent
+	return userMessageStyle
 }
 
 // classifyUserMessage picks a deterministic glyph for a freshly-submitted
@@ -147,8 +159,7 @@ func (m *AgentPaneModel) renderUserLine(lineText string, wrappedIdx int, dim boo
 	}
 	body += strings.Repeat(" ", pad)
 
-	glyphStyle := lipgloss.NewStyle().Foreground(userGlyphColor(glyph, dim))
-	return glyphStyle.Render(glyphPart) + bodyStyle.Render(body)
+	return userGlyphStyle(glyph, dim).Render(glyphPart) + bodyStyle.Render(body)
 }
 
 // hasFileRef reports whether text contains an @<path> token. A token

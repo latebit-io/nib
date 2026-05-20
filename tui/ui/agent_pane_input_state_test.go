@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
@@ -68,42 +69,31 @@ func TestInputStateDividerColor_StateAware(t *testing.T) {
 	cases := []struct {
 		name  string
 		setup func(*AgentPaneModel)
-		want  string
+		want  color.Color
 	}{
 		{
 			"idle → DividerActive",
 			func(m *AgentPaneModel) {},
-			"#333",
+			theme.DividerActive,
 		},
 		{
 			"focused → Accent",
 			func(m *AgentPaneModel) { m.SetInputActive(true) },
-			"#e879a0",
+			theme.Accent,
 		},
 		{
 			"running → Warning",
 			func(m *AgentPaneModel) { m.SetStatus(event.StatusThinking) },
-			"#EF9F27",
+			theme.Warning,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := beatPane()
 			tc.setup(m)
-			got := m.inputStateDividerColor()
-			// Compare via the corresponding theme constant — keeps the
-			// test resilient to representation changes inside lipgloss.
-			var want any
-			switch tc.want {
-			case "#333":
-				want = theme.DividerActive
-			case "#e879a0":
-				want = theme.Accent
-			case "#EF9F27":
-				want = theme.Warning
-			}
-			if got != want {
-				t.Errorf("divider color = %v; want %v (%s)", got, want, tc.want)
+			got := m.inputStateDividerStyle().GetForeground()
+			if got != tc.want {
+				t.Errorf("divider style foreground = %v; want %v", got, tc.want)
 			}
 		})
 	}

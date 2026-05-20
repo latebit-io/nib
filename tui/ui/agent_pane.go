@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"image/color"
 	"log/slog"
 	"slices"
 	"strings"
@@ -154,6 +153,13 @@ var (
 	// statusLeftStyle renders the model/usage half of the status line in a
 	// muted tone that reads as metadata.
 	statusLeftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+
+	// Input-state divider styles — colored hairline above the textarea.
+	// Picked by [AgentPaneModel.inputStateDividerStyle]; one pre-built
+	// style per state keeps the render path allocation-free.
+	dividerStyleIdle    = lipgloss.NewStyle().Foreground(theme.DividerActive)
+	dividerStyleFocused = lipgloss.NewStyle().Foreground(theme.Accent)
+	dividerStyleRunning = lipgloss.NewStyle().Foreground(theme.Warning)
 )
 
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
@@ -1463,19 +1469,22 @@ func (m *AgentPaneModel) inputStateHintLine() string {
 	return " Ctrl+G code | Alt+G plan"
 }
 
-// inputStateDividerColor picks the color for the hairline divider
-// directly above the input area. The divider is the cheapest place to
-// signal input state without eating any textarea width or height — its
-// hue tells you at a glance whether you're idle, focused, or watching
-// the agent work.
-func (m *AgentPaneModel) inputStateDividerColor() color.Color {
+// inputStateDividerStyle picks the pre-built lipgloss style for the
+// hairline divider directly above the input area. The divider is the
+// cheapest place to signal input state without eating any textarea
+// width or height — its hue tells you at a glance whether you're
+// idle, focused, or watching the agent work.
+//
+// Returns a package-level style var rather than building one per
+// frame; render-path allocations are an explicit project no-no.
+func (m *AgentPaneModel) inputStateDividerStyle() lipgloss.Style {
 	if statusAnimates(m.status) {
-		return theme.Warning
+		return dividerStyleRunning
 	}
 	if m.inputActive {
-		return theme.Accent
+		return dividerStyleFocused
 	}
-	return theme.DividerActive
+	return dividerStyleIdle
 }
 
 // renderInputArea renders the textarea input into the output rows.
@@ -1894,8 +1903,7 @@ func (m *AgentPaneModel) Render() string {
 	// is streaming. Eats no input width or height — the divider
 	// already existed; we just route its color through state.
 	if row < m.height-1 { // -1 to leave room for status
-		dividerStyle := lipgloss.NewStyle().Foreground(m.inputStateDividerColor())
-		output[row] = dividerStyle.Render(m.padLine(strings.Repeat("─", m.width)))
+		output[row] = m.inputStateDividerStyle().Render(m.padLine(strings.Repeat("─", m.width)))
 		row++
 	}
 

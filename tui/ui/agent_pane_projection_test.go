@@ -170,6 +170,36 @@ func TestRender_CollapsedBeatProducesSummaryRow(t *testing.T) {
 	}
 }
 
+// TestFormatBeatElapsed_BoundaryTruncation verifies the elapsed-time
+// formatter respects its case boundaries. A previous version used
+// d.Round(time.Second) — for inputs like 59.5s that rounded to 60s,
+// producing "60s" instead of falling into the minutes branch as "1m".
+// The same bug recurred at the hour boundary (59m59.5s → "59m60s").
+// Truncation by integer division keeps each cell within its band.
+func TestFormatBeatElapsed_BoundaryTruncation(t *testing.T) {
+	cases := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"sub-second", 500 * time.Millisecond, "<1s"},
+		{"exact second", time.Second, "1s"},
+		{"just under minute rounds-up boundary", 59*time.Second + 500*time.Millisecond, "59s"},
+		{"exact minute", time.Minute, "1m"},
+		{"minute plus seconds", 2*time.Minute + 13*time.Second, "2m13s"},
+		{"just under hour rounds-up boundary", 59*time.Minute + 59*time.Second + 500*time.Millisecond, "59m59s"},
+		{"exact hour", time.Hour, "1h"},
+		{"hours and minutes", 2*time.Hour + 30*time.Minute, "2h30m"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatBeatElapsed(tc.d); got != tc.want {
+				t.Errorf("formatBeatElapsed(%v) = %q; want %q", tc.d, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSelection_SkipsCollapsedBeatSilently locks down the v1
 // cross-collapse selection contract: dragging from a row before a
 // collapsed beat to a row after it copies the surrounding raw content

@@ -227,17 +227,23 @@ func (m *AgentPaneModel) beatSummaryLayout(b *Beat) beatSummaryLayout {
 }
 
 // formatBeatElapsed renders a wall-clock duration as a short label for
-// the collapsed-beat summary. Sub-second durations round up to "<1s"
-// so a near-zero beat doesn't show an empty cell.
+// the collapsed-beat summary. Sub-second durations show "<1s" so a
+// near-zero beat doesn't read as an empty cell.
+//
+// Integer truncation (d / time.Second) is used in place of
+// d.Round(time.Second) — rounding can push a value past the case
+// ceiling (59.5s rounds to 60s, which would print "60s" instead of
+// falling through to the minutes branch as "1m"). Truncation keeps
+// each cell strictly within its band.
 func formatBeatElapsed(d time.Duration) string {
 	switch {
 	case d < time.Second:
 		return "<1s"
 	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Round(time.Second).Seconds()))
+		return fmt.Sprintf("%ds", int(d/time.Second))
 	case d < time.Hour:
 		mins := int(d / time.Minute)
-		secs := int((d % time.Minute).Round(time.Second).Seconds())
+		secs := int((d % time.Minute) / time.Second)
 		if secs == 0 {
 			return fmt.Sprintf("%dm", mins)
 		}

@@ -18,33 +18,68 @@ func tab(m *AgentPaneModel, shift bool) {
 	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: mod})
 }
 
-// TestTab_TogglesActiveBeatCollapse verifies plain Tab on the active
-// beat flips its collapse flag and stamps UserOverride so the auto
-// policy can't undo it on the next transition.
-func TestTab_TogglesActiveBeatCollapse(t *testing.T) {
+// TestTab_TogglesFocusedBeat verifies plain Tab on an explicitly
+// focused beat flips its collapse flag and stamps UserOverride so
+// the auto policy can't undo it on the next transition.
+func TestTab_TogglesFocusedBeat(t *testing.T) {
 	m := beatPane()
 	m.AppendUserMessage("hello")
 	m.AppendToken("agent reply\n")
 
-	// Active beat is the last one, expanded by default.
-	active := len(m.beats) - 1
-	if m.beats[active].Collapsed {
-		t.Fatalf("active beat unexpectedly collapsed at test start")
+	// Pin focus to the active beat so the test is independent of the
+	// default-focus policy (which prefers the previous beat at bottom).
+	target := len(m.beats) - 1
+	m.focusBeat = target
+	if m.beats[target].Collapsed {
+		t.Fatalf("target beat unexpectedly collapsed at test start")
 	}
 
 	tab(m, false)
 
-	if !m.beats[active].Collapsed {
-		t.Errorf("Tab did not collapse the active beat")
+	if !m.beats[target].Collapsed {
+		t.Errorf("Tab did not collapse the focused beat")
 	}
-	if !m.beats[active].UserOverride {
-		t.Errorf("Tab did not set UserOverride on the active beat")
+	if !m.beats[target].UserOverride {
+		t.Errorf("Tab did not set UserOverride on the focused beat")
 	}
 
 	// Tab again — expands.
 	tab(m, false)
+	if m.beats[target].Collapsed {
+		t.Errorf("second Tab did not expand the focused beat")
+	}
+}
+
+// TestTab_AtBottom_DefaultsToPreviousBeat asserts the bottom-of-pane
+// default-focus rule: with no explicit focus, Tab at the bottom of
+// the viewport targets the most recent *past* beat (the one that
+// just got collapsed), not the active beat. This is the natural
+// "expand the previous exchange" gesture for someone typing the
+// next message.
+func TestTab_AtBottom_DefaultsToPreviousBeat(t *testing.T) {
+	m := beatPane()
+	m.AppendUserMessage("first")
+	m.AppendToken("first reply\n")
+	m.AppendUserMessage("second")
+	m.AppendToken("second reply\n")
+
+	// First user→agent beat (beats[1]) auto-collapsed when the second
+	// message arrived. Active beat is beats[2]. With no explicit focus
+	// and isAtBottom() true, Tab should expand beats[1].
+	previous := len(m.beats) - 2
+	if !m.beats[previous].Collapsed {
+		t.Fatalf("previous beat is not collapsed; can't verify default-focus expand")
+	}
+	m.focusBeat = -1
+
+	tab(m, false)
+
+	if m.beats[previous].Collapsed {
+		t.Errorf("Tab at bottom did not expand the previous beat (got Collapsed=true)")
+	}
+	active := len(m.beats) - 1
 	if m.beats[active].Collapsed {
-		t.Errorf("second Tab did not expand the active beat")
+		t.Errorf("Tab at bottom incorrectly toggled the active beat")
 	}
 }
 
@@ -103,6 +138,52 @@ func TestShiftTab_CollapsesAndMovesFocus(t *testing.T) {
 	}
 	if got, want := m.focusBeat, active-1; got != want {
 		t.Errorf("focus = %d after Shift+Tab; want %d (previous beat)", got, want)
+	}
+}
+
+// TestClick_ExpandsCollapsedSummaryRow verifies the mouse gesture for
+// expanding past beats: a left click that lands on a beat-summary row
+// expands the underlying beat in place. This is the discoverable
+// alternative to the Tab keybind — most developers don't think to Esc
+// out of the textarea first to use Tab, so the click has to work
+// directly.
+func TestClick_ExpandsCollapsedSummaryRow(t *testing.T) {
+	m := beatPane()
+	m.AppendUserMessage("first")
+	m.AppendToken("hidden\n")
+	m.AppendUserMessage("second")
+	m.AppendToken("active\n")
+
+	proj := m.projection()
+	summaryRow := -1
+	for i, pl := range proj {
+		if pl.Kind == projBeatSummary {
+			summaryRow = i
+			break
+		}
+	}
+	if summaryRow < 0 {
+		t.Fatalf("no summary row to click")
+	}
+	beatIdx := proj[summaryRow].BeatIdx
+	if !m.beats[beatIdx].Collapsed {
+		t.Fatalf("target beat not collapsed; cannot test expand-on-click")
+	}
+
+	// Synthesize a left-click at the summary row. Y is the visible
+	// row inside the content area, which matches the projection-row
+	// index since ScrollOffset is 0 (transcript fits in viewport).
+	m.handleMouseClick(tea.MouseClickMsg{
+		Button: tea.MouseLeft,
+		X:      2,
+		Y:      summaryRow - m.ScrollOffset,
+	})
+
+	if m.beats[beatIdx].Collapsed {
+		t.Errorf("click on summary row did not expand the beat")
+	}
+	if !m.beats[beatIdx].UserOverride {
+		t.Errorf("click on summary row did not set UserOverride")
 	}
 }
 

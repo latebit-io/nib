@@ -178,16 +178,18 @@ func (m *AgentPaneModel) appendTypedMeta(kind BlockKind, text, toolName string) 
 
 // AppendProposal records an edit proposal block. text is the human-
 // readable reason ("Fix nil direction path in ghost house movement
-// update"). The rendered placeholder reads "── Proposed: REASON ──"
-// and is marked [BlockProposal] so the render path draws the proposal-
-// hue left border.
+// update"). The rendered text reads "Proposed: REASON" and is marked
+// [BlockProposal] so the render path draws the proposal-hue left
+// border — the colored border already identifies the block kind, so
+// the historical "── … ──" en-dash bracketing is dropped as redundant
+// chrome.
 //
 // Same sanitize / newline-guard / meta-marking pipeline as [AppendMeta];
 // only the recorded block kind differs. Engine bridges that previously
 // hand-built the "--- Proposed: …" string and called AppendMeta should
 // migrate to this entry point so the kind survives to the renderer.
 func (m *AgentPaneModel) AppendProposal(reason string) {
-	m.appendTypedMeta(BlockProposal, "\n── Proposed: "+reason+" ──\n", "")
+	m.appendTypedMeta(BlockProposal, "\nProposed: "+reason+"\n", "")
 }
 
 // AppendError records an error block with [BlockError] kind so the

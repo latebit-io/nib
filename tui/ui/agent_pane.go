@@ -720,6 +720,28 @@ func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 		return nil
 	}
 	row, col := m.mouseToRowCol(msg.X, msg.Y)
+
+	// Click on a collapsed-beat summary row toggles the beat. The
+	// Tab keybind is the power-user shortcut but it only fires when
+	// the textarea is unfocused — most developers won't think to Esc
+	// out first. A direct click on the summary is the discoverable
+	// gesture and doesn't compete with any other UI affordance on
+	// that row.
+	proj := m.projection()
+	if row >= 0 && row < len(proj) && proj[row].Kind == projBeatSummary {
+		bi := proj[row].BeatIdx
+		if bi >= 0 && bi < len(m.beats) {
+			m.beats[bi].Collapsed = false
+			m.beats[bi].UserOverride = true
+			m.focusBeat = bi
+			m.invalidateMdCache()
+			m.clampScroll()
+			m.selActive = false
+			m.selDragging = false
+		}
+		return nil
+	}
+
 	m.selActive = true
 	m.selDragging = true
 	m.selStartLn = row
@@ -858,6 +880,20 @@ func (m *AgentPaneModel) rowCopyText(row int) string {
 // Submit (Enter) and Cancel (Escape) are intercepted to manage
 // the agent pane's input lifecycle.
 func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
+	// Tab navigates the beat timeline even while the textarea is
+	// focused — the alternative (textarea swallows Tab as a single
+	// space) was not a deliberate feature and made the beat-toggle
+	// shortcut undiscoverable. Esc-then-Tab still works the same way;
+	// this just removes the modal step.
+	if msg.Code == tea.KeyTab {
+		if msg.Mod&tea.ModShift != 0 {
+			m.collapseFocusedAndMoveUp()
+		} else {
+			m.toggleFocusedBeatCollapse()
+		}
+		return nil
+	}
+
 	cmd := m.input.Update(msg)
 	m.recomputeInputLayout() // cursor/content may have changed
 	if cmd == nil {
@@ -1010,11 +1046,13 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 //
 //   - Explicit [focusBeat] (>= 0) wins. Set by Tab/Shift+Tab so a
 //     navigation in progress is preserved across renders.
-//   - When the viewport is at the bottom (developer is following live
-//     output), focus defaults to the active (last) beat — Tab targets
-//     "the thing producing output now."
 //   - When scrolled back, focus is the topmost beat currently visible
 //     so Tab targets what the developer is reading.
+//   - When at the bottom (the default typing position), focus defaults
+//     to the most recent *past* beat — Tab is overwhelmingly used to
+//     peek at the previous exchange, not to collapse the active beat
+//     mid-stream. The active beat is the focus fallback only when no
+//     past beat exists.
 //
 // Returns -1 only when there are no beats — that would be a
 // construction bug since [initBeats] always seeds the first beat.
@@ -1025,35 +1063,45 @@ func (m *AgentPaneModel) effectiveFocusBeat() int {
 	if m.focusBeat >= 0 && m.focusBeat < len(m.beats) {
 		return m.focusBeat
 	}
-	if m.isAtBottom() {
-		return len(m.beats) - 1
-	}
-	// Scrolled back: pick the topmost beat under the viewport edge.
-	proj := m.projection()
-	if len(proj) == 0 {
-		return len(m.beats) - 1
-	}
-	idx := m.ScrollOffset
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(proj) {
-		idx = len(proj) - 1
-	}
-	// Walk forward from the viewport top until a projection row
-	// resolves to a beat. A summary row points at its beat directly;
-	// a raw row falls back to blockAt → beat lookup.
-	for ; idx < len(proj); idx++ {
-		pl := proj[idx]
-		if pl.Kind == projBeatSummary {
-			return pl.BeatIdx
+	if !m.isAtBottom() {
+		// Scrolled back: pick the topmost beat under the viewport edge.
+		proj := m.projection()
+		if len(proj) == 0 {
+			return len(m.beats) - 1
 		}
-		if _, beat, ok := m.blockAt(pl.LineIdx); ok && beat != nil {
-			for bi := range m.beats {
-				if &m.beats[bi] == beat {
-					return bi
+		idx := m.ScrollOffset
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(proj) {
+			idx = len(proj) - 1
+		}
+		// Walk forward from the viewport top until a projection row
+		// resolves to a beat. A summary row points at its beat directly;
+		// a raw row falls back to blockAt → beat lookup.
+		for ; idx < len(proj); idx++ {
+			pl := proj[idx]
+			if pl.Kind == projBeatSummary {
+				return pl.BeatIdx
+			}
+			if _, beat, ok := m.blockAt(pl.LineIdx); ok && beat != nil {
+				for bi := range m.beats {
+					if &m.beats[bi] == beat {
+						return bi
+					}
 				}
 			}
+		}
+		return len(m.beats) - 1
+	}
+	// At bottom: prefer the most recent past beat. Tab from the
+	// default typing position should expand the previous exchange,
+	// not collapse the one currently producing output. Empty-blocks
+	// past beats (auto-seeded first beat before any user send) are
+	// skipped so Tab doesn't target chrome.
+	for bi := len(m.beats) - 2; bi >= 0; bi-- {
+		if len(m.beats[bi].Blocks) > 0 {
+			return bi
 		}
 	}
 	return len(m.beats) - 1

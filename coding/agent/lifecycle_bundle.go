@@ -45,7 +45,9 @@ func parseLifecycleBundle(rawArgs string) lifecycleBundle {
 	if rawArgs == "" {
 		return b
 	}
-	_ = json.Unmarshal([]byte(rawArgs), &b)
+	if err := json.Unmarshal([]byte(rawArgs), &b); err != nil {
+		slog.Debug("lifecycle: ignoring malformed tool args", "err", err)
+	}
 	return b
 }
 

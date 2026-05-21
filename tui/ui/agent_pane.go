@@ -1455,10 +1455,15 @@ func (m *AgentPaneModel) SelectedRange() (int, int, int, int) {
 // SelectedText returns the text in the current selection. Operates in
 // projection-row coordinates — selStartLn / cursorLn index into
 // [AgentPaneModel.projection], not [AgentPaneModel.Lines]. A row that
-// happens to be a [projBeatSummary] contributes empty text (via
-// [rowCopyText]) so selecting across a collapsed beat silently skips
-// the hidden range — the user copies the surrounding raw content as
-// if the collapsed beat weren't there.
+// happens to be a [projBeatSummary] is elided entirely: no text, no
+// trailing newline. Selecting across a collapsed beat copies the
+// surrounding raw content as if the collapsed beat weren't there.
+//
+// The elision is structural — gated on the row's [projKind] rather
+// than on an empty [rowCopyText] return — so a genuinely blank raw
+// line still contributes its trailing newline. A previous version
+// keyed the separator on text emptiness and silently injected one
+// blank line per summary row crossed.
 //
 // Endpoints that *land on* a summary row are treated as zero-width
 // selections at that row; the start/end column is meaningless because
@@ -1490,8 +1495,12 @@ func (m *AgentPaneModel) SelectedText() string {
 		return string(runes[sc:ec])
 	}
 
+	rowIsCopy := func(i int) bool {
+		return i >= 0 && i < len(proj) && proj[i].Kind == projRawLine
+	}
+
 	var sb strings.Builder
-	{
+	if rowIsCopy(sl) {
 		text := m.rowCopyText(sl)
 		runes := []rune(text)
 		if sc > len(runes) {
@@ -1501,10 +1510,13 @@ func (m *AgentPaneModel) SelectedText() string {
 		sb.WriteRune('\n')
 	}
 	for i := sl + 1; i < el; i++ {
+		if !rowIsCopy(i) {
+			continue
+		}
 		sb.WriteString(m.rowCopyText(i))
 		sb.WriteRune('\n')
 	}
-	{
+	if rowIsCopy(el) {
 		text := m.rowCopyText(el)
 		runes := []rune(text)
 		if ec > len(runes) {

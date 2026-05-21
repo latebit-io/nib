@@ -257,6 +257,13 @@ func TestSelection_SkipsCollapsedBeatSilently(t *testing.T) {
 	if strings.Contains(got, "hidden body") {
 		t.Errorf("collapsed beat body leaked into selection text: %q", got)
 	}
+	// Skipped summary rows must not inject blank lines. The contract
+	// is "as if the collapsed beat weren't there"; a stray `\n\n` would
+	// signal exactly the kind of bug the prior selection path had,
+	// where every summary row crossed contributed an empty separator.
+	if strings.Contains(got, "\n\n") {
+		t.Errorf("selection across collapsed beat injected blank line(s): %q", got)
+	}
 }
 
 // TestSelection_SummaryRowOnlyReturnsEmpty checks the degenerate

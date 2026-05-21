@@ -59,7 +59,8 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		//   1. lint-pending skip
 		//   2. flush dirty buffers + emit AgentToolCall
 		//   3. planning blocklist
-		//   4. active-task gate
+		//   4. lifecycle bundle: activate_task (mutating tools only)
+		//   5. active-task gate
 		if res := a.lintPendingGate(); res.Block {
 			return res, nil
 		}
@@ -80,14 +81,39 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		if res := a.planningBlocklistGate(c); res.Block {
 			return res, nil
 		}
+		// Lifecycle activate fires only for mutating tools and only
+		// when activate_task is non-empty. A successful activation
+		// makes the following active-task gate pass naturally; a
+		// failed activate aborts dispatch with the activate error.
+		// Strict back-compat: the zero-value bundle is a no-op.
+		if mutatingTools[strings.ToLower(c.Name)] {
+			bundle := parseLifecycleBundle(c.Args)
+			if res := a.runLifecycleActivate(ctx, bundle, c.Name); res.Block {
+				return res, nil
+			}
+		}
 		if res := a.activeTaskGate(ctx, c); res.Block {
 			return res, nil
 		}
 		return upagent.BeforeToolCallResult{}, nil
 	}
 
-	after := func(_ context.Context, c upagent.AfterToolCallInput) (upagent.AfterToolCallResult, error) {
-		return a.foundationAfterToolCall(c), nil
+	after := func(ctx context.Context, c upagent.AfterToolCallInput) (upagent.AfterToolCallResult, error) {
+		res := a.foundationAfterToolCall(c)
+		// Lifecycle complete fires only for mutating tools that
+		// succeeded with complete_task=true set. The wrapper
+		// overrides the tool's content text with the auto-complete
+		// trailer ("Task completed: <title>" + review findings +
+		// "Next task auto-activated: ..."); IsError is left alone.
+		// Strict back-compat: the zero-value bundle leaves the
+		// result untouched.
+		if mutatingTools[strings.ToLower(c.Name)] {
+			bundle := parseLifecycleBundle(c.Args)
+			if override := a.runLifecycleComplete(ctx, bundle, c.Result); override != nil {
+				res.Content = override
+			}
+		}
+		return res, nil
 	}
 
 	transform := func(ctx context.Context, msgs []llm.Message) ([]llm.Message, error) {

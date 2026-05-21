@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/latebit-io/nib/tui/ui/theme"
@@ -123,11 +124,44 @@ type Beat struct {
 	StartRaw int
 	// Blocks are the structural elements of this beat in emission order.
 	Blocks []Block
+	// Collapsed is true when the projection renders this beat as a single
+	// summary row instead of its full block sequence. The active beat is
+	// never collapsed; a prior beat auto-collapses on transition to a
+	// terminal status unless the user has touched it via Tab (see
+	// [Beat.UserOverride]).
+	Collapsed bool
+	// UserOverride is set when the developer has explicitly toggled this
+	// beat's collapse state via Tab. Once set, the auto-collapse policy
+	// no longer touches the beat — a user-expanded past beat stays
+	// expanded for the rest of the session, and a user-collapsed active
+	// beat stays collapsed too.
+	UserOverride bool
+	// StartedAt is the wall-clock time the beat was opened. Drives the
+	// "elapsed" cell of the collapsed beat summary line. Zero value for
+	// the implicit first beat — its content is the boot transcript,
+	// elapsed isn't meaningful.
+	StartedAt time.Time
+	// EndedAt is the wall-clock time the beat transitioned to a terminal
+	// status. Zero while [Status] == [BeatRunning].
+	EndedAt time.Time
+	// TokensIn / TokensOut / TokensCached are aggregated from every
+	// [event.AgentTurnUsage] that fired while this beat was active.
+	// Used by the collapsed-beat summary to surface "↑X ↓Y" at a glance
+	// without re-parsing rendered text.
+	TokensIn     int
+	TokensOut    int
+	TokensCached int
 }
 
 // initBeats seeds the implicit first beat. Called by [NewAgentPaneModel]
 // so beats is never nil and the engine bridge can always find a current
 // beat to attach blocks to without nil-guards at every callsite.
+//
+// StartedAt is left as the zero value — the implicit first beat carries
+// any boot transcript (greeting, "ask nib something…") rather than a
+// real user→agent exchange, so an elapsed counter against the pane's
+// construction time would be misleading. The first beat with a real
+// StartedAt is the one openBeat creates on the developer's first send.
 func (m *AgentPaneModel) initBeats() {
 	m.beats = []Beat{{Number: 1, Status: BeatRunning, StartRaw: 0}}
 }
@@ -226,6 +260,27 @@ func (m *AgentPaneModel) blockAt(wrappedIdx int) (block Block, beat *Beat, ok bo
 		return Block{}, nil, false
 	}
 	return Block{}, nil, false
+}
+
+// beatIdxForRaw returns the index of the beat that owns the given raw
+// line, or -1 if none does. Same containment logic as [blockAt]'s
+// outer loop, but returns the index directly so callers needing
+// "which beat?" don't have to chase a [*Beat] pointer back to its
+// position with `&m.beats[bi] == beat`.
+//
+// Reverse walk for the same reason [blockAt] uses one — the active
+// beat is the hottest lookup, and beats are append-only so the
+// later-numbered entries occupy a contiguous suffix of [beats].
+func (m *AgentPaneModel) beatIdxForRaw(rawIdx int) int {
+	if rawIdx < 0 {
+		return -1
+	}
+	for bi := len(m.beats) - 1; bi >= 0; bi-- {
+		if m.beats[bi].StartRaw <= rawIdx {
+			return bi
+		}
+	}
+	return -1
 }
 
 // hasLeftBorder reports whether a [BlockKind] renders with a colored
@@ -340,11 +395,26 @@ func (m *AgentPaneModel) renderBorderedLine(lineText string, kind BlockKind, dim
 // to RawLines but before the user-message text — separatorRaw is the
 // index of the "── beat N ──" placeholder so the beat owns the divider
 // row alongside its blocks.
+//
+// Auto-collapse policy: the prior beat's [Beat.Collapsed] flips to true
+// on the transition to a terminal status — past beats default to a
+// single-row summary so the timeline stays scannable. The flip is
+// skipped when [Beat.UserOverride] is set (the developer has explicitly
+// toggled the beat via Tab); their preference wins for the session.
+// [Beat.EndedAt] is stamped at the same moment so the summary's elapsed
+// cell can read "Δ between StartedAt and EndedAt" without re-walking
+// the timeline.
 func (m *AgentPaneModel) openBeat(number, separatorRaw int) *Beat {
 	if len(m.beats) > 0 {
 		prev := &m.beats[len(m.beats)-1]
 		if prev.Status == BeatRunning {
 			prev.Status = BeatDone
+		}
+		if prev.EndedAt.IsZero() {
+			prev.EndedAt = m.now()
+		}
+		if !prev.UserOverride {
+			prev.Collapsed = true
 		}
 		// Close the trailing open block on the previous beat at the
 		// separator raw so its range is finite for later render walks
@@ -357,9 +427,36 @@ func (m *AgentPaneModel) openBeat(number, separatorRaw int) *Beat {
 		}
 	}
 	m.beats = append(m.beats, Beat{
-		Number:   number,
-		Status:   BeatRunning,
-		StartRaw: separatorRaw,
+		Number:    number,
+		Status:    BeatRunning,
+		StartRaw:  separatorRaw,
+		StartedAt: m.now(),
 	})
 	return &m.beats[len(m.beats)-1]
+}
+
+// now returns the wall-clock time, indirected through [AgentPaneModel.nowFunc]
+// so beat-summary tests can pin a deterministic clock without monkey-patching
+// time.Now globally. Production callers use [time.Now]; tests assign nowFunc
+// directly on the model.
+func (m *AgentPaneModel) now() time.Time {
+	if m.nowFunc != nil {
+		return m.nowFunc()
+	}
+	return time.Now()
+}
+
+// addTurnTokens accumulates a turn's usage event into the current beat's
+// running totals. Called from [AppendTurnUsage] so the collapsed-beat
+// summary can render "↑X ↓Y" without re-parsing the flushed turn-usage
+// line text.
+//
+// Cached tokens roll into TokensCached separately rather than collapsing
+// into TokensIn — the summary may want to surface a cache-hit ratio
+// even when the absolute input count is small.
+func (m *AgentPaneModel) addTurnTokens(promptIn, out, cached int) {
+	b := m.currentBeat()
+	b.TokensIn += promptIn
+	b.TokensOut += out
+	b.TokensCached += cached
 }

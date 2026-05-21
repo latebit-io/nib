@@ -209,17 +209,19 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	}
 }
 
-// emitOpening sends the per-run opening tokens + status the frontend
-// uses to render the "Thinking..." / "Planning..." preface — issued
-// before the foundation's first Stream so the user sees immediate
-// feedback.
+// emitOpening flips the frontend status to the per-run mode (Thinking
+// or Planning) so the user sees immediate feedback before the
+// foundation's first Stream lands its first token. Status alone is
+// the signal — the TUI's animated chip + colored input divider
+// already communicate the state, and headless consumers render
+// "[thinking...]" off the same AgentStatus event. The historical
+// literal "Thinking...\n\n" AgentToken preface was redundant chrome
+// that piled at the top of every transcript.
 func (a *Agent) emitOpening(mode event.Mode) {
 	if mode == event.ModePlanning {
-		a.send(event.AgentToken{Text: "Planning...\n\n"})
 		a.send(event.AgentStatus{Status: event.StatusPlanning})
 		return
 	}
-	a.send(event.AgentToken{Text: "Thinking...\n\n"})
 	a.send(event.AgentStatus{Status: event.StatusThinking})
 }
 

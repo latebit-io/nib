@@ -692,6 +692,11 @@ func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 			m.ScrollOffset = maxScroll
 		}
 	}
+	// Cancel any pending auto-scroll ease — the user has taken
+	// direct control of the viewport. Without this, the spinner-tick
+	// loop keeps dragging ScrollOffset back toward the previous
+	// auto-bottom target, which feels like fighting the wheel.
+	m.scrollTarget = m.ScrollOffset
 	return nil
 }
 
@@ -1013,10 +1018,12 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case tea.KeyUp:
 		if m.ScrollOffset > 0 {
 			m.ScrollOffset--
+			m.scrollTarget = m.ScrollOffset
 		}
 	case tea.KeyDown:
 		if m.ScrollOffset < len(m.projection())-m.VisibleLines() {
 			m.ScrollOffset++
+			m.scrollTarget = m.ScrollOffset
 		}
 	case tea.KeyTab:
 		if msg.Mod&tea.ModShift != 0 {
@@ -1077,18 +1084,17 @@ func (m *AgentPaneModel) effectiveFocusBeat() int {
 			idx = len(proj) - 1
 		}
 		// Walk forward from the viewport top until a projection row
-		// resolves to a beat. A summary row points at its beat directly;
-		// a raw row falls back to blockAt → beat lookup.
+		// resolves to a beat. Summary rows carry their beat index
+		// directly; raw rows go through [beatIdxForRaw] for a
+		// pointer-free index lookup.
 		for ; idx < len(proj); idx++ {
 			pl := proj[idx]
 			if pl.Kind == projBeatSummary {
 				return pl.BeatIdx
 			}
-			if _, beat, ok := m.blockAt(pl.LineIdx); ok && beat != nil {
-				for bi := range m.beats {
-					if &m.beats[bi] == beat {
-						return bi
-					}
+			if rawIdx := m.rawIndexOf(pl.LineIdx); rawIdx >= 0 {
+				if bi := m.beatIdxForRaw(rawIdx); bi >= 0 {
+					return bi
 				}
 			}
 		}
@@ -1778,7 +1784,7 @@ func (m *AgentPaneModel) renderBeatSummaryRow(_ int, beatIdx int) string {
 		return strings.Repeat(" ", m.width)
 	}
 	beat := &m.beats[beatIdx]
-	layout := m.beatSummaryLayout(beat)
+	layout := m.buildBeatSummaryLayout(beat)
 
 	styles := beatSummaryStylesActive
 	if layout.dimHues {

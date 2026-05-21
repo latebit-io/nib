@@ -150,6 +150,18 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusFinished))
 		default:
 			cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusWaiting))
+			// In terse mode the agent often ends a turn after a tool
+			// run with no closing prose, so the transcript trails off
+			// into apply_patch / [applied] lines and the user can't
+			// tell whether nib is still working or parked for input.
+			// The REPLY chip surfaces the state in the bottom-right
+			// corner but the eye lives at the transcript tail — drop
+			// a dim end-of-turn marker so the parked state is visible
+			// where the developer is reading. The marker is part of
+			// the current beat and disappears when that beat collapses
+			// on the next user message, so it never clutters the
+			// long-term history.
+			m.AgentPane.AppendMeta("\n↩ awaiting your reply\n")
 		}
 		// Defensive flush: if a queued submission is still pending here
 		// (the tool-less AgentTurnUsage branch should normally have

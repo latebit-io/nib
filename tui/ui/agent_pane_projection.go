@@ -137,22 +137,21 @@ func (m *AgentPaneModel) wrappedStart(rawIdx int) int {
 }
 
 // beatSummaryText returns the plain-text content of a collapsed beat's
-// summary row — the same string the renderer will style and emit. The
-// summary's structured payload (caret, beat number, divider rule, task
-// count, elapsed, token totals) is computed here in one place so mouse
-// hit-testing, copy/selection, and the styled render path all agree on
-// what the row "says".
+// summary row — what mouse hit-testing and clipboard copy see. The
+// returned string is **caret + label + meta only**; the horizontal
+// rule between the label and meta is emitted by
+// [renderBeatSummaryRow] because its length depends on the terminal
+// width, which the layout phase doesn't see.
 //
-// Format mirrors the redesign mockup:
+// For reference, the fully styled row reads:
 //
 //	▸ ♩ beat 6 ─────────────────── 4 tasks · 42s · ↑8.2k ↓312
 //
 // The right-side meta cluster drops cells when the underlying signal
 // is zero — a beat with no tool calls omits "N tasks"; a beat with no
-// token usage omits the arrows. The horizontal rule expands or
-// contracts to fill the gap between the label and the meta.
+// token usage omits the arrows.
 func (m *AgentPaneModel) beatSummaryText(b *Beat) string {
-	return m.beatSummaryLayout(b).plain()
+	return m.buildBeatSummaryLayout(b).plain()
 }
 
 // beatSummaryLayout precomputes the styled fragments of a beat summary
@@ -172,10 +171,12 @@ func (l beatSummaryLayout) plain() string {
 	return l.caret + l.label + l.meta
 }
 
-// beatSummaryLayout assembles the fragments. The horizontal rule is
-// emitted by the renderer (not here) since its length depends on the
-// terminal width, which the layout phase doesn't see.
-func (m *AgentPaneModel) beatSummaryLayout(b *Beat) beatSummaryLayout {
+// buildBeatSummaryLayout assembles the fragments. Named distinctly
+// from the [beatSummaryLayout] type so the doc reference and call site
+// disambiguate; the horizontal rule is emitted by the renderer (not
+// here) since its length depends on the terminal width, which the
+// layout phase doesn't see.
+func (m *AgentPaneModel) buildBeatSummaryLayout(b *Beat) beatSummaryLayout {
 	var tasks int
 	for i := range b.Blocks {
 		if b.Blocks[i].Kind == BlockToolCall {

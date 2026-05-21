@@ -262,6 +262,27 @@ func (m *AgentPaneModel) blockAt(wrappedIdx int) (block Block, beat *Beat, ok bo
 	return Block{}, nil, false
 }
 
+// beatIdxForRaw returns the index of the beat that owns the given raw
+// line, or -1 if none does. Same containment logic as [blockAt]'s
+// outer loop, but returns the index directly so callers needing
+// "which beat?" don't have to chase a [*Beat] pointer back to its
+// position with `&m.beats[bi] == beat`.
+//
+// Reverse walk for the same reason [blockAt] uses one — the active
+// beat is the hottest lookup, and beats are append-only so the
+// later-numbered entries occupy a contiguous suffix of [beats].
+func (m *AgentPaneModel) beatIdxForRaw(rawIdx int) int {
+	if rawIdx < 0 {
+		return -1
+	}
+	for bi := len(m.beats) - 1; bi >= 0; bi-- {
+		if m.beats[bi].StartRaw <= rawIdx {
+			return bi
+		}
+	}
+	return -1
+}
+
 // hasLeftBorder reports whether a [BlockKind] renders with a colored
 // left border in the redesigned pane. Centralized here so renderer and
 // width-math callers agree on the answer.

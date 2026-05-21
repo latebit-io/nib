@@ -36,8 +36,9 @@ func (t *TaskTool) Definition() llm.ToolDef {
 		Function: llm.FunctionDef{
 			Name: "update_task",
 			Description: "Update a task's status in the project plan. " +
-				"Use 'activate' to mark a task as in-progress before starting work on it. " +
-				"Use 'complete' to mark it done after finishing — on success the next pending task is auto-activated and named in the result, so you can proceed straight to its work without a separate activate call. " +
+				"Prefer bundling the transition into the mutating tool call via `activate_task` / `complete_task` when the lifecycle coincides with an edit; use this standalone call when no mutating tool accompanies the transition (e.g., a review-only turn). " +
+				"'activate' marks a task in-progress before work begins. " +
+				"'complete' marks it done after finishing — on success the next pending task is auto-activated and named in the result, so you can proceed straight to its work without a separate activate call. " +
 				"The title must exactly match a task item from the project plan.",
 			Parameters: llm.FunctionParams{
 				Type: "object",

@@ -8,7 +8,72 @@ import (
 	"strings"
 
 	upagent "github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/ai/llm"
 )
+
+// lifecycleActivateDescription is the schema-side prose handed to the
+// LLM for the activate_task field on mutating tool schemas. Kept as a
+// package constant so the prompt template can reference the same
+// wording without copy-paste drift.
+const lifecycleActivateDescription = "Optional. Title of a task to activate before running this tool. " +
+	"Use this when you're starting work on a new task — saves a separate update_task(activate) call. " +
+	"Title must match exactly a `- [ ]` task in /project.md."
+
+// lifecycleCompleteDescription is the schema-side prose for the
+// complete_task field. Same rationale as [lifecycleActivateDescription].
+const lifecycleCompleteDescription = "Optional. When true, auto-completes the currently active task after this tool succeeds. " +
+	"Saves a separate update_task(complete) call when this tool call is the final action of the task. " +
+	"The next pending task auto-activates (named in the result)."
+
+// lifecycleAwareTool wraps a mutating tool to advertise the optional
+// activate_task / complete_task fields in its JSON schema. Execute is
+// pass-through — the lifecycle dispatch happens entirely in the
+// Before/AfterToolCall hooks ([Agent.runLifecycleActivate] and
+// [Agent.runLifecycleComplete]). This decorator is the schema-side
+// counterpart that tells the LLM the fields are accepted.
+//
+// Wrapping happens once at toolset assembly ([Agent.registerTools]);
+// internal tool packages stay clean — they don't know they're being
+// wrapped.
+type lifecycleAwareTool struct {
+	Tool
+}
+
+// Definition returns the wrapped tool's definition with the
+// activate_task / complete_task fields injected into Properties. The
+// fields are NOT added to Required so the bundle is strictly additive
+// — every existing tool call shape continues to validate.
+func (t lifecycleAwareTool) Definition() llm.ToolDef {
+	return augmentWithLifecycleFields(t.Tool.Definition())
+}
+
+// augmentWithLifecycleFields returns a copy of def with the optional
+// activate_task / complete_task fields added to Properties. Idempotent
+// — a definition that already advertises both fields is returned
+// unchanged. The Properties map is copied, not mutated in place, so
+// the wrapped tool's cached Definition() is unaffected.
+func augmentWithLifecycleFields(def llm.ToolDef) llm.ToolDef {
+	if _, hasActivate := def.Function.Parameters.Properties["activate_task"]; hasActivate {
+		if _, hasComplete := def.Function.Parameters.Properties["complete_task"]; hasComplete {
+			return def
+		}
+	}
+	props := make(map[string]llm.FunctionParam, len(def.Function.Parameters.Properties)+2)
+	for k, v := range def.Function.Parameters.Properties {
+		props[k] = v
+	}
+	props["activate_task"] = llm.FunctionParam{
+		Type:        "string",
+		Description: lifecycleActivateDescription,
+	}
+	props["complete_task"] = llm.FunctionParam{
+		Type:        "boolean",
+		Description: lifecycleCompleteDescription,
+	}
+	out := def
+	out.Function.Parameters.Properties = props
+	return out
+}
 
 // Task-lifecycle bundle for mutating tool calls.
 //

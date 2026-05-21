@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	upagent "github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 )
 
@@ -454,6 +455,148 @@ func TestFoundationHooks_AfterToolCall_ToolErrorSkipsComplete(t *testing.T) {
 	}
 	if len(tracker.completed) != 0 {
 		t.Errorf("CompleteTask must not fire on tool error; got %v", tracker.completed)
+	}
+}
+
+// --- Schema augmentation (Commit 2) ---
+
+// fakeTool is a minimal Tool implementation for schema-augmentation
+// tests. Execute is unused — the tests only exercise Definition().
+type fakeTool struct {
+	def llm.ToolDef
+}
+
+func (f fakeTool) Definition() llm.ToolDef { return f.def }
+func (f fakeTool) Execute(_ context.Context, _ llm.ToolCall) upagent.ToolResult {
+	return upagent.ToolResult{}
+}
+
+func sampleDef(name string) llm.ToolDef {
+	return llm.ToolDef{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        name,
+			Description: name + " desc",
+			Parameters: llm.FunctionParams{
+				Type: "object",
+				Properties: map[string]llm.FunctionParam{
+					"path": {Type: "string", Description: "Path"},
+				},
+				Required: []string{"path"},
+			},
+		},
+	}
+}
+
+func TestAugmentWithLifecycleFields_AddsBothFields(t *testing.T) {
+	out := augmentWithLifecycleFields(sampleDef("edit_file"))
+	props := out.Function.Parameters.Properties
+	activate, ok := props["activate_task"]
+	if !ok {
+		t.Fatalf("activate_task missing from properties: %+v", props)
+	}
+	if activate.Type != "string" {
+		t.Errorf("activate_task type = %q, want \"string\"", activate.Type)
+	}
+	complete, ok := props["complete_task"]
+	if !ok {
+		t.Fatalf("complete_task missing from properties: %+v", props)
+	}
+	if complete.Type != "boolean" {
+		t.Errorf("complete_task type = %q, want \"boolean\"", complete.Type)
+	}
+}
+
+func TestAugmentWithLifecycleFields_PreservesExistingProperties(t *testing.T) {
+	out := augmentWithLifecycleFields(sampleDef("edit_file"))
+	if _, ok := out.Function.Parameters.Properties["path"]; !ok {
+		t.Errorf("existing 'path' property dropped after augmentation")
+	}
+}
+
+func TestAugmentWithLifecycleFields_DoesNotChangeRequired(t *testing.T) {
+	// Lifecycle fields are strictly additive — required-list must NOT
+	// gain them so existing call shapes keep validating.
+	out := augmentWithLifecycleFields(sampleDef("edit_file"))
+	for _, name := range out.Function.Parameters.Required {
+		if name == "activate_task" || name == "complete_task" {
+			t.Errorf("lifecycle field %q must not appear in Required", name)
+		}
+	}
+}
+
+func TestAugmentWithLifecycleFields_DoesNotMutateInput(t *testing.T) {
+	// The augmenter must copy Properties — mutating the input would
+	// poison the underlying tool's cached schema (tests reuse fixtures).
+	in := sampleDef("edit_file")
+	_ = augmentWithLifecycleFields(in)
+	if _, leaked := in.Function.Parameters.Properties["activate_task"]; leaked {
+		t.Errorf("augmentWithLifecycleFields mutated input Properties")
+	}
+}
+
+func TestAugmentWithLifecycleFields_Idempotent(t *testing.T) {
+	once := augmentWithLifecycleFields(sampleDef("edit_file"))
+	twice := augmentWithLifecycleFields(once)
+	// Idempotent: a second pass returns the same shape (same field
+	// count, same descriptions).
+	if len(once.Function.Parameters.Properties) != len(twice.Function.Parameters.Properties) {
+		t.Errorf("idempotency: prop counts differ: %d vs %d",
+			len(once.Function.Parameters.Properties),
+			len(twice.Function.Parameters.Properties))
+	}
+}
+
+func TestLifecycleAwareTool_DefinitionAdvertisesFields(t *testing.T) {
+	wrapped := lifecycleAwareTool{Tool: fakeTool{def: sampleDef("edit_file")}}
+	def := wrapped.Definition()
+	if _, ok := def.Function.Parameters.Properties["activate_task"]; !ok {
+		t.Errorf("wrapped Definition missing activate_task")
+	}
+	if _, ok := def.Function.Parameters.Properties["complete_task"]; !ok {
+		t.Errorf("wrapped Definition missing complete_task")
+	}
+}
+
+func TestApplyLifecycleDecorator_MutatingToolWrapped(t *testing.T) {
+	base := fakeTool{def: sampleDef("edit_file")}
+	got, def := applyLifecycleDecorator("edit_file", base, base.Definition())
+	if _, ok := got.(lifecycleAwareTool); !ok {
+		t.Errorf("expected mutating tool to be wrapped in lifecycleAwareTool; got %T", got)
+	}
+	if _, ok := def.Function.Parameters.Properties["activate_task"]; !ok {
+		t.Errorf("returned def must already carry activate_task")
+	}
+}
+
+func TestApplyLifecycleDecorator_NonMutatingToolUnwrapped(t *testing.T) {
+	base := fakeTool{def: sampleDef("read_file")}
+	got, def := applyLifecycleDecorator("read_file", base, base.Definition())
+	if _, ok := got.(lifecycleAwareTool); ok {
+		t.Errorf("non-mutating tool must NOT be wrapped")
+	}
+	if _, ok := def.Function.Parameters.Properties["activate_task"]; ok {
+		t.Errorf("non-mutating tool def must NOT carry activate_task; got %+v",
+			def.Function.Parameters.Properties)
+	}
+}
+
+func TestMutatingTools_IncludesApplyPatch(t *testing.T) {
+	// Gap fix: apply_patch landed in PR #173 as a fourth file-mutation
+	// primitive but was never registered as mutating, so it skipped the
+	// active-task gate AND missed the lifecycle schema. Lock that
+	// regression here.
+	if !mutatingTools["apply_patch"] {
+		t.Errorf("apply_patch must be in mutatingTools for the active-task gate + lifecycle schema to fire")
+	}
+}
+
+func TestMutatingTools_KnownMembers(t *testing.T) {
+	want := []string{"edit_file", "write_file", "replace_file", "apply_patch", "bash", "smoke_run"}
+	for _, name := range want {
+		if !mutatingTools[name] {
+			t.Errorf("expected %q in mutatingTools", name)
+		}
 	}
 }
 

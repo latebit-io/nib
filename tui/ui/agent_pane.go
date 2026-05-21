@@ -160,7 +160,35 @@ var (
 	dividerStyleIdle    = lipgloss.NewStyle().Foreground(theme.DividerActive)
 	dividerStyleFocused = lipgloss.NewStyle().Foreground(theme.Accent)
 	dividerStyleRunning = lipgloss.NewStyle().Foreground(theme.Warning)
+
+	// Beat-summary row styles — one full set per (active / past) state.
+	// Pre-built and dispatched via [beatSummaryStyles] so the render
+	// loop never touches lipgloss.NewStyle(). The dim family preserves
+	// hue (AccentDim, SecondaryTextDim) so a past collapsed beat still
+	// reads as a beat header rather than fading into generic gray
+	// chrome — same hue-preservation rule [theme.Dim] enforces.
+	summaryCaretStyleActive   = lipgloss.NewStyle().Foreground(theme.Accent).Bold(true)
+	summaryCaretStyleDim      = lipgloss.NewStyle().Foreground(theme.AccentDim).Bold(true)
+	summaryLabelStyleActive   = lipgloss.NewStyle().Foreground(theme.Accent).Bold(true)
+	summaryLabelStyleDim      = lipgloss.NewStyle().Foreground(theme.AccentDim).Bold(true)
+	summaryDividerStyleActive = lipgloss.NewStyle().Foreground(theme.DividerActive)
+	summaryDividerStyleDim    = lipgloss.NewStyle().Foreground(theme.DividerDim)
+	summaryMetaStyleActive    = lipgloss.NewStyle().Foreground(theme.SecondaryText)
+	summaryMetaStyleDim       = lipgloss.NewStyle().Foreground(theme.SecondaryTextDim)
+	beatSummaryStylesActive   = beatSummaryStyleSet{caret: summaryCaretStyleActive, label: summaryLabelStyleActive, divider: summaryDividerStyleActive, meta: summaryMetaStyleActive}
+	beatSummaryStylesDim      = beatSummaryStyleSet{caret: summaryCaretStyleDim, label: summaryLabelStyleDim, divider: summaryDividerStyleDim, meta: summaryMetaStyleDim}
 )
+
+// beatSummaryStyleSet bundles the four styles a collapsed-beat summary
+// row needs so [renderBeatSummaryRow] can pick one set with a single
+// branch instead of four. Both active and dim sets are pre-built at
+// package init.
+type beatSummaryStyleSet struct {
+	caret   lipgloss.Style
+	label   lipgloss.Style
+	divider lipgloss.Style
+	meta    lipgloss.Style
+}
 
 // AgentPaneModel is the Bubble Tea model for the agent reasoning pane.
 type AgentPaneModel struct {
@@ -356,6 +384,37 @@ type AgentPaneModel struct {
 	// the glyph cell can be styled in its own hue while the rest of
 	// the user line keeps the uniform accent body color.
 	userGlyphForRaw map[int]UserGlyph
+
+	// nowFunc is an indirection over [time.Now] so the beat-summary
+	// elapsed/timer logic stays deterministic in tests. nil falls back
+	// to [time.Now] — production callers never touch it. Set on the
+	// model from tests via direct assignment; see beat_test for the
+	// pinned-clock pattern.
+	nowFunc func() time.Time
+
+	// proj is the cached per-frame projection slice. The render loop,
+	// scroll math, scrollbar, mouse hit-testing, and selection all
+	// index into this slice rather than touching [Lines] directly so a
+	// collapsed beat's hidden rows truly drop out of every navigation
+	// surface. See [agent_pane_projection.go].
+	proj []projectedLine
+	// projDirty is set whenever a state change invalidates the cached
+	// projection (content append, rewrap, collapse toggle). The next
+	// call to [projection] rebuilds before returning.
+	projDirty bool
+	// collapseEnabled gates the projection's collapse branch. While
+	// false, beats with Collapsed=true still emit their raw-line rows —
+	// keeps the projection pure passthrough during the step-2 refactor
+	// checkpoint. Step 3 flips this on alongside the summary-row
+	// renderer.
+	collapseEnabled bool
+
+	// focusBeat is the index of the beat currently targeted by Tab /
+	// Shift+Tab. -1 means "no explicit focus; default to the active
+	// beat under the viewport top." Tracking explicit-vs-default lets
+	// focus reset to the active beat as new beats open without
+	// stomping on a user navigation that's still in progress.
+	focusBeat int
 }
 
 // NewAgentPaneModel creates a new agent pane.
@@ -369,6 +428,13 @@ func NewAgentPaneModel(svc *Services, hasAgent bool) *AgentPaneModel {
 		hasAgent:          hasAgent,
 		turnCounter:       1,
 		streamingStartRaw: -1,
+		// Step 3 of the agent-pane collapse plan: past beats render as
+		// 1-line summaries by default. The active beat stays expanded;
+		// auto-collapse in [openBeat] sets Collapsed on each beat as it
+		// transitions out of BeatRunning, and the projection layer
+		// honors that flag now that this gate is open.
+		collapseEnabled: true,
+		focusBeat:       -1,
 	}
 	m.initBeats()
 	return m
@@ -617,7 +683,7 @@ func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 			m.ScrollOffset = 0
 		}
 	case tea.MouseWheelDown:
-		maxScroll := len(m.Lines) - m.VisibleLines()
+		maxScroll := len(m.projection()) - m.VisibleLines()
 		if maxScroll < 0 {
 			maxScroll = 0
 		}
@@ -653,12 +719,12 @@ func (m *AgentPaneModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 	if msg.Y < 0 || msg.Y >= m.VisibleLines() {
 		return nil
 	}
-	line, col := m.mouseToLineCol(msg.X, msg.Y)
+	row, col := m.mouseToRowCol(msg.X, msg.Y)
 	m.selActive = true
 	m.selDragging = true
-	m.selStartLn = line
+	m.selStartLn = row
 	m.selStartCol = col
-	m.cursorLn = line
+	m.cursorLn = row
 	m.cursorCol = col
 	return nil
 }
@@ -674,8 +740,8 @@ func (m *AgentPaneModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
 	if !m.selDragging || msg.Y < 0 || msg.Y >= m.VisibleLines() {
 		return nil
 	}
-	line, col := m.mouseToLineCol(msg.X, msg.Y)
-	m.cursorLn = line
+	row, col := m.mouseToRowCol(msg.X, msg.Y)
+	m.cursorLn = row
 	m.cursorCol = col
 	return nil
 }
@@ -690,35 +756,102 @@ func (m *AgentPaneModel) handleMouseRelease(_ tea.MouseReleaseMsg) tea.Cmd {
 	return nil
 }
 
-// mouseToLineCol converts mouse coordinates to line and column indices.
-func (m *AgentPaneModel) mouseToLineCol(x, y int) (int, int) {
-	line := m.ScrollOffset + y
-	if line < 0 {
-		line = 0
+// mouseToRowCol converts mouse coordinates to a projection-row index
+// and a column. The row is into [AgentPaneModel.projection], so a
+// collapsed beat's summary row hits as a single addressable target
+// rather than spreading across all its underlying wrapped lines.
+//
+// Column is measured against the wrapped line backing the row when the
+// row is a passthrough; for a beat-summary row the column is the cell
+// offset within the summary text (Render emits the summary at column 0
+// with no leading inset).
+func (m *AgentPaneModel) mouseToRowCol(x, y int) (int, int) {
+	proj := m.projection()
+	row := m.ScrollOffset + y
+	if row < 0 {
+		row = 0
 	}
-	if line >= len(m.Lines) {
-		line = max(len(m.Lines)-1, 0)
+	if row >= len(proj) {
+		row = max(len(proj)-1, 0)
 	}
 
 	col := 0
-	if line < len(m.Lines) {
-		cellX := x
-		if cellX < 0 {
-			cellX = 0
+	rowText := m.rowText(row)
+	if rowText == "" {
+		return row, 0
+	}
+	cellX := x
+	if cellX < 0 {
+		cellX = 0
+	}
+	runes := []rune(rowText)
+	cellsSeen := 0
+	col = len(runes) // default: past end of line
+	for ri, r := range runes {
+		w := runewidth.RuneWidth(r)
+		if cellsSeen+w > cellX {
+			col = ri
+			break
 		}
-		runes := []rune(m.Lines[line])
-		cellsSeen := 0
-		col = len(runes) // default: past end of line
-		for ri, r := range runes {
-			w := runewidth.RuneWidth(r)
-			if cellsSeen+w > cellX {
-				col = ri
-				break
-			}
-			cellsSeen += w
+		cellsSeen += w
+	}
+	return row, col
+}
+
+// rowText returns the plain-text content of a projection row used for
+// mouse hit-testing (column resolution). For a passthrough row this is
+// the wrapped line; for a beat-summary row this is the unstyled summary
+// text so a click can resolve to a column within the header.
+//
+// [rowCopyText] is the analog for clipboard/selection — that one elides
+// summary rows so dragging across a collapsed beat doesn't smuggle the
+// summary chrome into the user's clipboard. The two paths are split
+// because the "what is here?" question (hit-testing) and the "what
+// would I copy?" question (selection) genuinely have different answers
+// for a synthetic row.
+func (m *AgentPaneModel) rowText(row int) string {
+	proj := m.projection()
+	if row < 0 || row >= len(proj) {
+		return ""
+	}
+	pl := proj[row]
+	switch pl.Kind {
+	case projRawLine:
+		if pl.LineIdx >= 0 && pl.LineIdx < len(m.Lines) {
+			return m.Lines[pl.LineIdx]
+		}
+	case projBeatSummary:
+		if pl.BeatIdx >= 0 && pl.BeatIdx < len(m.beats) {
+			return m.beatSummaryText(&m.beats[pl.BeatIdx])
 		}
 	}
-	return line, col
+	return ""
+}
+
+// rowCopyText returns the content a projection row contributes to a
+// clipboard copy. Identical to [rowText] for raw lines; empty string
+// for beat-summary rows so the "silent-skip" cross-collapse selection
+// contract holds — the user copies the surrounding raw content as if
+// the collapsed range weren't there.
+//
+// The alternative (auto-expand the beat when a selection crosses it)
+// was rejected for v1: it would mutate state during a read-only copy
+// gesture, which is surprising and racy when the agent is mid-stream.
+// Developers who want the hidden content can Tab to expand the beat
+// first, then drag.
+func (m *AgentPaneModel) rowCopyText(row int) string {
+	proj := m.projection()
+	if row < 0 || row >= len(proj) {
+		return ""
+	}
+	pl := proj[row]
+	if pl.Kind != projRawLine {
+		return ""
+	}
+	if pl.LineIdx < 0 || pl.LineIdx >= len(m.Lines) {
+		return ""
+	}
+	return m.Lines[pl.LineIdx]
 }
 
 // handleInput delegates key handling to the TextArea component.
@@ -846,8 +979,14 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.ScrollOffset--
 		}
 	case tea.KeyDown:
-		if m.ScrollOffset < len(m.Lines)-m.VisibleLines() {
+		if m.ScrollOffset < len(m.projection())-m.VisibleLines() {
 			m.ScrollOffset++
+		}
+	case tea.KeyTab:
+		if msg.Mod&tea.ModShift != 0 {
+			m.collapseFocusedAndMoveUp()
+		} else {
+			m.toggleFocusedBeatCollapse()
 		}
 	case 'c':
 		if msg.Mod == tea.ModCtrl {
@@ -864,6 +1003,113 @@ func (m *AgentPaneModel) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// effectiveFocusBeat resolves [focusBeat] to a concrete beat index.
+// The default-focus policy:
+//
+//   - Explicit [focusBeat] (>= 0) wins. Set by Tab/Shift+Tab so a
+//     navigation in progress is preserved across renders.
+//   - When the viewport is at the bottom (developer is following live
+//     output), focus defaults to the active (last) beat — Tab targets
+//     "the thing producing output now."
+//   - When scrolled back, focus is the topmost beat currently visible
+//     so Tab targets what the developer is reading.
+//
+// Returns -1 only when there are no beats — that would be a
+// construction bug since [initBeats] always seeds the first beat.
+func (m *AgentPaneModel) effectiveFocusBeat() int {
+	if len(m.beats) == 0 {
+		return -1
+	}
+	if m.focusBeat >= 0 && m.focusBeat < len(m.beats) {
+		return m.focusBeat
+	}
+	if m.isAtBottom() {
+		return len(m.beats) - 1
+	}
+	// Scrolled back: pick the topmost beat under the viewport edge.
+	proj := m.projection()
+	if len(proj) == 0 {
+		return len(m.beats) - 1
+	}
+	idx := m.ScrollOffset
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(proj) {
+		idx = len(proj) - 1
+	}
+	// Walk forward from the viewport top until a projection row
+	// resolves to a beat. A summary row points at its beat directly;
+	// a raw row falls back to blockAt → beat lookup.
+	for ; idx < len(proj); idx++ {
+		pl := proj[idx]
+		if pl.Kind == projBeatSummary {
+			return pl.BeatIdx
+		}
+		if _, beat, ok := m.blockAt(pl.LineIdx); ok && beat != nil {
+			for bi := range m.beats {
+				if &m.beats[bi] == beat {
+					return bi
+				}
+			}
+		}
+	}
+	return len(m.beats) - 1
+}
+
+// toggleFocusedBeatCollapse flips the focused beat's Collapsed flag and
+// stamps UserOverride so the auto-collapse policy doesn't fight the
+// developer's preference on subsequent beat transitions. The projection
+// is invalidated so the next render reflects the new layout.
+//
+// Toggling the active beat collapses it too — Tab is a uniform gesture
+// regardless of beat status. The developer can collapse a noisy in-flight
+// beat and expand it again when they want to follow along.
+func (m *AgentPaneModel) toggleFocusedBeatCollapse() {
+	idx := m.effectiveFocusBeat()
+	if idx < 0 || idx >= len(m.beats) {
+		return
+	}
+	wasAtBottom := m.isAtBottom()
+	m.beats[idx].Collapsed = !m.beats[idx].Collapsed
+	m.beats[idx].UserOverride = true
+	m.focusBeat = idx
+	m.invalidateMdCache()
+	if wasAtBottom {
+		m.scrollToBottom()
+	} else {
+		m.clampScroll()
+	}
+}
+
+// collapseFocusedAndMoveUp implements the Shift+Tab gesture: collapse
+// the focused beat (if it wasn't already) and shift focus to the
+// previous beat. A no-op when focus is already on the first beat.
+//
+// Always stamps UserOverride so the collapse "sticks" — same contract
+// as [toggleFocusedBeatCollapse].
+func (m *AgentPaneModel) collapseFocusedAndMoveUp() {
+	idx := m.effectiveFocusBeat()
+	if idx <= 0 {
+		// No-op at beat 0 — there's no previous beat to move to.
+		// Still collapse the current one if it wasn't.
+		if idx == 0 && !m.beats[0].Collapsed {
+			m.beats[0].Collapsed = true
+			m.beats[0].UserOverride = true
+			m.focusBeat = 0
+			m.invalidateMdCache()
+		}
+		return
+	}
+	if !m.beats[idx].Collapsed {
+		m.beats[idx].Collapsed = true
+		m.beats[idx].UserOverride = true
+		m.invalidateMdCache()
+	}
+	m.focusBeat = idx - 1
+	m.clampScroll()
 }
 
 // AppendText adds streaming text to the agent pane.
@@ -921,7 +1167,7 @@ func (m *AgentPaneModel) AppendText(text string) {
 // isAtBottom returns true if the view is scrolled to (or near) the bottom.
 func (m *AgentPaneModel) isAtBottom() bool {
 	vis := m.VisibleLines()
-	maxScroll := len(m.Lines) - vis
+	maxScroll := len(m.projection()) - vis
 	if maxScroll <= 0 {
 		return true
 	}
@@ -947,7 +1193,7 @@ func (m *AgentPaneModel) rewrap() {
 }
 
 func (m *AgentPaneModel) clampScroll() {
-	maxScroll := len(m.Lines) - m.VisibleLines()
+	maxScroll := len(m.projection()) - m.VisibleLines()
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
@@ -1043,6 +1289,15 @@ func (m *AgentPaneModel) Clear() {
 	// spinnerRunning intentionally not reset: a tick may still be in-flight
 	// from before Clear(); Update drops it on the next fire because
 	// status == StatusIdle.
+	// Reset the beat timeline + focus so a /clear after several beats
+	// doesn't leave stale Collapsed flags pointing at deleted RawLines.
+	// invalidateMdCache above already set projDirty=true, but we still
+	// need to drop the beats slice so the next openBeat starts from a
+	// clean numbering and initBeats re-seeds the implicit first beat.
+	m.beats = nil
+	m.focusBeat = -1
+	m.userGlyphForRaw = nil
+	m.initBeats()
 	if m.ModelSel.IsActive() {
 		m.ModelSel.Close()
 		m.recomputeInputLayout()
@@ -1091,8 +1346,9 @@ func (m *AgentPaneModel) pendingBannerHeight() int {
 func (m *AgentPaneModel) scrollToBottom() {
 	vis := m.VisibleLines()
 	target := 0
-	if len(m.Lines) > vis {
-		target = len(m.Lines) - vis
+	projLen := len(m.projection())
+	if projLen > vis {
+		target = projLen - vis
 	}
 	m.scrollTarget = target
 	if !statusAnimates(m.status) || !m.spinnerRunning {
@@ -1142,9 +1398,21 @@ func (m *AgentPaneModel) SelectedRange() (int, int, int, int) {
 	return sl, sc, el, ec
 }
 
-// SelectedText returns the text in the current selection.
+// SelectedText returns the text in the current selection. Operates in
+// projection-row coordinates — selStartLn / cursorLn index into
+// [AgentPaneModel.projection], not [AgentPaneModel.Lines]. A row that
+// happens to be a [projBeatSummary] contributes empty text (via
+// [rowCopyText]) so selecting across a collapsed beat silently skips
+// the hidden range — the user copies the surrounding raw content as
+// if the collapsed beat weren't there.
+//
+// Endpoints that *land on* a summary row are treated as zero-width
+// selections at that row; the start/end column is meaningless because
+// the summary text isn't part of the copy. Concretely: a single-line
+// selection on a summary row returns "".
 func (m *AgentPaneModel) SelectedText() string {
-	if !m.selActive || len(m.Lines) == 0 {
+	proj := m.projection()
+	if !m.selActive || len(proj) == 0 {
 		return ""
 	}
 	sl, sc, el, ec := m.SelectedRange()
@@ -1152,15 +1420,13 @@ func (m *AgentPaneModel) SelectedText() string {
 		sl = 0
 		sc = 0
 	}
-	if el >= len(m.Lines) {
-		el = len(m.Lines) - 1
-		ec = utf8.RuneCountInString(m.Lines[el])
+	if el >= len(proj) {
+		el = len(proj) - 1
+		ec = utf8.RuneCountInString(m.rowCopyText(el))
 	}
 	if sl == el {
-		if sl >= len(m.Lines) {
-			return ""
-		}
-		runes := []rune(m.Lines[sl])
+		text := m.rowCopyText(sl)
+		runes := []rune(text)
 		if sc > len(runes) {
 			sc = len(runes)
 		}
@@ -1171,20 +1437,22 @@ func (m *AgentPaneModel) SelectedText() string {
 	}
 
 	var sb strings.Builder
-	if sl < len(m.Lines) {
-		runes := []rune(m.Lines[sl])
+	{
+		text := m.rowCopyText(sl)
+		runes := []rune(text)
 		if sc > len(runes) {
 			sc = len(runes)
 		}
 		sb.WriteString(string(runes[sc:]))
 		sb.WriteRune('\n')
 	}
-	for i := sl + 1; i < el && i < len(m.Lines); i++ {
-		sb.WriteString(m.Lines[i])
+	for i := sl + 1; i < el; i++ {
+		sb.WriteString(m.rowCopyText(i))
 		sb.WriteRune('\n')
 	}
-	if el < len(m.Lines) {
-		runes := []rune(m.Lines[el])
+	{
+		text := m.rowCopyText(el)
+		runes := []rune(text)
 		if ec > len(runes) {
 			ec = len(runes)
 		}
@@ -1312,7 +1580,7 @@ func (m *AgentPaneModel) isTurnSeparatorContinuation(wrappedIdx int) bool {
 //
 // No-op when all lines fit — the column is left as content.
 func (m *AgentPaneModel) overlayScrollbar(output []string, vis int) {
-	total := len(m.Lines)
+	total := len(m.projection())
 	if total <= vis || m.width <= 1 || vis <= 0 {
 		return
 	}
@@ -1389,15 +1657,33 @@ func (m *AgentPaneModel) isSelected(line, col int) bool {
 
 // invalidateMdCache clears the viewport markdown cache so the next Render
 // recomputes it. Called when Lines content changes (AppendText, rewrap, Clear).
+//
+// The cached projection is paired with the markdown cache — every
+// content-change callsite that invalidates one needs the other dropped
+// too, otherwise a collapse-toggle that doesn't move ScrollOffset would
+// re-use stale rendered rows for the now-different projection slots.
+// Centralising the dual invalidation here keeps each callsite to one
+// line and prevents drift.
 func (m *AgentPaneModel) invalidateMdCache() {
 	m.mdCache = m.mdCache[:0]
 	m.mdCacheOffset = -1
+	m.projDirty = true
 }
 
-// cachedMarkdown returns the rendered markdown for Lines[lineIdx]. The cache
-// is viewport-scoped: it holds at most VisibleLines() entries starting at
-// m.ScrollOffset, so memory is O(visible) regardless of transcript length.
-func (m *AgentPaneModel) cachedMarkdown(lineIdx int) string {
+// cachedMarkdown returns the rendered markdown for the wrapped line at
+// lineIdx, with the per-frame viewport cache slotted by rowIdx (the
+// projection-row index). The cache is viewport-scoped: it holds at most
+// VisibleLines() entries starting at m.ScrollOffset, so memory is
+// O(visible) regardless of transcript length.
+//
+// rowIdx and lineIdx are separated because a collapse-toggle can shift
+// which wrapped line a given projection row points at without changing
+// the wrapped buffer itself — slot lookup must follow the row so a
+// stale rendered string doesn't survive across a toggle. Content
+// invalidation hooks (invalidateMdCache) drop the whole cache; the
+// row-keyed slotting catches the narrower case where projection
+// reshuffles but Lines doesn't.
+func (m *AgentPaneModel) cachedMarkdown(rowIdx, lineIdx int) string {
 	vis := m.VisibleLines()
 
 	// Rebuild cache if viewport moved or was invalidated.
@@ -1414,7 +1700,7 @@ func (m *AgentPaneModel) cachedMarkdown(lineIdx int) string {
 		m.mdCacheOffset = m.ScrollOffset
 	}
 
-	slot := lineIdx - m.mdCacheOffset
+	slot := rowIdx - m.mdCacheOffset
 	if slot < 0 || slot >= len(m.mdCache) {
 		// Outside viewport — compute without caching.
 		return renderMarkdownLine(m.Lines[lineIdx], m.isCodeLine(lineIdx), m.width)
@@ -1423,6 +1709,76 @@ func (m *AgentPaneModel) cachedMarkdown(lineIdx int) string {
 		m.mdCache[slot] = renderMarkdownLine(m.Lines[lineIdx], m.isCodeLine(lineIdx), m.width)
 	}
 	return m.mdCache[slot]
+}
+
+// renderBeatSummaryRow produces a single styled row that replaces a
+// collapsed beat in the projection. Layout, mirroring the redesign
+// mockup:
+//
+//	▸ ♩ beat 6 ─────────────────── 4 tasks · 42s · ↑8.2k ↓312
+//
+// The horizontal rule grows to fill the gap between the label and the
+// meta cluster — the row always consumes exactly m.width cells so the
+// scrollbar overlay can paint over the trailing cell without disturbing
+// the styled prefix.
+//
+// All four styles are pre-built at package level (see
+// [beatSummaryStylesActive] / [beatSummaryStylesDim]) — the render path
+// must never call lipgloss.NewStyle().
+func (m *AgentPaneModel) renderBeatSummaryRow(_ int, beatIdx int) string {
+	if beatIdx < 0 || beatIdx >= len(m.beats) {
+		return strings.Repeat(" ", m.width)
+	}
+	beat := &m.beats[beatIdx]
+	layout := m.beatSummaryLayout(beat)
+
+	styles := beatSummaryStylesActive
+	if layout.dimHues {
+		styles = beatSummaryStylesDim
+	}
+
+	caret := styles.caret.Render(layout.caret)
+	label := styles.label.Render(layout.label)
+	meta := styles.meta.Render(layout.meta)
+
+	consumed := lipgloss.Width(caret) + lipgloss.Width(label) + lipgloss.Width(meta)
+	gap := m.width - consumed
+	if gap <= 0 {
+		// Pane too narrow for the rule. Fall back to truncating the
+		// meta cluster so the label survives — beat identity beats meta.
+		return runewidthTruncatedSummary(caret, label, meta, m.width)
+	}
+	rule := styles.divider.Render(strings.Repeat("─", gap))
+	return caret + label + rule + meta
+}
+
+// runewidthTruncatedSummary handles the narrow-pane case where the
+// full styled summary doesn't fit. Keeps the caret + label intact and
+// drops the meta cluster from the right, padding with spaces if the
+// label alone is still narrower than the pane. Falls back to a blank
+// row if even the caret won't fit.
+func runewidthTruncatedSummary(caret, label, meta string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	caretW := lipgloss.Width(caret)
+	if caretW >= width {
+		return ansi.Truncate(caret, width, "")
+	}
+	labelW := lipgloss.Width(label)
+	if caretW+labelW > width {
+		// Truncate the label to fit.
+		remaining := width - caretW
+		return caret + ansi.Truncate(label, remaining, "")
+	}
+	remaining := width - caretW - labelW
+	if remaining <= 0 {
+		return caret + label
+	}
+	if metaW := lipgloss.Width(meta); metaW <= remaining {
+		return caret + label + meta + strings.Repeat(" ", remaining-metaW)
+	}
+	return caret + label + ansi.Truncate(meta, remaining, "")
 }
 
 // padLine pads or truncates a string to exactly width display cells.
@@ -1796,78 +2152,95 @@ func (m *AgentPaneModel) Render() string {
 		return strings.Join(output, "\n")
 	}
 
-	// Content rows
+	// Content rows. Walks the projection slice so collapsed beats hide
+	// their wrapped lines entirely — only one summary row appears per
+	// collapsed beat. ScrollOffset and selection are both in
+	// projection-row coordinates; the per-line classification helpers
+	// (isUserLine, isDim, etc.) keep their wrapped-line-index contract
+	// and are looked up via the projection entry's LineIdx.
+	proj := m.projection()
 	vis := m.VisibleLines()
 	for i := range vis {
 		if row >= m.height {
 			break
 		}
-		lineIdx := m.ScrollOffset + i
-		if lineIdx < len(m.Lines) {
-			lineText := m.Lines[lineIdx]
-
-			sl, _, el, _ := m.SelectedRange()
-			if m.selActive && lineIdx >= sl && lineIdx <= el {
-				// Render char-by-char with selection highlighting
-				var line strings.Builder
-				runes := []rune(lineText)
-				cellsUsed := 0
-				for j, r := range runes {
-					w := runewidth.RuneWidth(r)
-					if cellsUsed+w > m.width {
-						break
-					}
-					ch := string(r)
-					if m.isSelected(lineIdx, j) {
-						line.WriteString(agentSelStyle.Render(ch))
-					} else {
-						line.WriteString(ch)
-					}
-					cellsUsed += w
-				}
-				// Pad remaining cells
-				if cellsUsed < m.width {
-					line.WriteString(strings.Repeat(" ", m.width-cellsUsed))
-				}
-				output[row] = line.String()
-			} else if label := m.turnSeparatorLabel(lineIdx); label != "" {
-				// Separator check wins over dim so past-turn dividers
-				// get the same full-width rule as the current one;
-				// renderTurnSeparator already applies agentDimStyle.
-				output[row] = renderTurnSeparator(label, m.width)
-			} else if m.isTurnSeparatorContinuation(lineIdx) {
-				// Wrapped tail of a separator placeholder at narrow
-				// widths — blank dim row rather than letting the raw
-				// fragment render as markdown garbage.
-				output[row] = agentDimStyle.Render(strings.Repeat(" ", m.width))
-			} else if blk, _, ok := m.blockAt(lineIdx); ok && hasLeftBorder(blk.Kind) {
-				// Proposal/Error blocks render with a colored 2-cell
-				// left border. Dimming preserves hue (theme.Dim) when
-				// the line is in a past beat so structural information
-				// (this beat errored / this proposal landed) survives
-				// the fade rather than collapsing into generic gray.
-				output[row] = m.renderBorderedLine(lineText, blk.Kind, m.isDim(lineIdx))
-			} else if m.isUserLine(lineIdx) {
-				// Typed user-message branch runs BEFORE the generic
-				// isDim short-circuit so past user messages dim through
-				// AccentDim (hue preserved) instead of fading to gray.
-				// renderUserLine handles the glyph-color split on the
-				// first wrapped line of an @-attached or interrupt
-				// message; neutral messages render uniformly.
-				output[row] = m.renderUserLine(lineText, lineIdx, m.isDim(lineIdx))
-			} else if m.isDim(lineIdx) {
-				output[row] = agentDimStyle.Render(m.padLine(lineText))
-			} else if m.isMeta(lineIdx) {
-				output[row] = agentDimStyle.Render(m.padLine(lineText))
-			} else if m.isPlain(lineIdx) {
-				output[row] = m.padLine(lineText)
-			} else if m.isStreaming(lineIdx) {
-				output[row] = streamingTintStyle.Render(m.padLine(lineText))
-			} else {
-				output[row] = m.cachedMarkdown(lineIdx)
-			}
-		} else {
+		rowIdx := m.ScrollOffset + i
+		if rowIdx >= len(proj) {
 			output[row] = strings.Repeat(" ", m.width)
+			row++
+			continue
+		}
+		pl := proj[rowIdx]
+		if pl.Kind == projBeatSummary {
+			output[row] = m.renderBeatSummaryRow(rowIdx, pl.BeatIdx)
+			row++
+			continue
+		}
+		lineIdx := pl.LineIdx
+		lineText := m.Lines[lineIdx]
+
+		sl, _, el, _ := m.SelectedRange()
+		if m.selActive && rowIdx >= sl && rowIdx <= el {
+			// Render char-by-char with selection highlighting. Selection
+			// is in projection-row space, so the bound check is rowIdx
+			// against [sl, el]; per-rune selection bookkeeping
+			// (isSelected) likewise consumes a projection-row index.
+			var line strings.Builder
+			runes := []rune(lineText)
+			cellsUsed := 0
+			for j, r := range runes {
+				w := runewidth.RuneWidth(r)
+				if cellsUsed+w > m.width {
+					break
+				}
+				ch := string(r)
+				if m.isSelected(rowIdx, j) {
+					line.WriteString(agentSelStyle.Render(ch))
+				} else {
+					line.WriteString(ch)
+				}
+				cellsUsed += w
+			}
+			// Pad remaining cells
+			if cellsUsed < m.width {
+				line.WriteString(strings.Repeat(" ", m.width-cellsUsed))
+			}
+			output[row] = line.String()
+		} else if label := m.turnSeparatorLabel(lineIdx); label != "" {
+			// Separator check wins over dim so past-turn dividers
+			// get the same full-width rule as the current one;
+			// renderTurnSeparator already applies agentDimStyle.
+			output[row] = renderTurnSeparator(label, m.width)
+		} else if m.isTurnSeparatorContinuation(lineIdx) {
+			// Wrapped tail of a separator placeholder at narrow
+			// widths — blank dim row rather than letting the raw
+			// fragment render as markdown garbage.
+			output[row] = agentDimStyle.Render(strings.Repeat(" ", m.width))
+		} else if blk, _, ok := m.blockAt(lineIdx); ok && hasLeftBorder(blk.Kind) {
+			// Proposal/Error blocks render with a colored 2-cell
+			// left border. Dimming preserves hue (theme.Dim) when
+			// the line is in a past beat so structural information
+			// (this beat errored / this proposal landed) survives
+			// the fade rather than collapsing into generic gray.
+			output[row] = m.renderBorderedLine(lineText, blk.Kind, m.isDim(lineIdx))
+		} else if m.isUserLine(lineIdx) {
+			// Typed user-message branch runs BEFORE the generic
+			// isDim short-circuit so past user messages dim through
+			// AccentDim (hue preserved) instead of fading to gray.
+			// renderUserLine handles the glyph-color split on the
+			// first wrapped line of an @-attached or interrupt
+			// message; neutral messages render uniformly.
+			output[row] = m.renderUserLine(lineText, lineIdx, m.isDim(lineIdx))
+		} else if m.isDim(lineIdx) {
+			output[row] = agentDimStyle.Render(m.padLine(lineText))
+		} else if m.isMeta(lineIdx) {
+			output[row] = agentDimStyle.Render(m.padLine(lineText))
+		} else if m.isPlain(lineIdx) {
+			output[row] = m.padLine(lineText)
+		} else if m.isStreaming(lineIdx) {
+			output[row] = streamingTintStyle.Render(m.padLine(lineText))
+		} else {
+			output[row] = m.cachedMarkdown(rowIdx, lineIdx)
 		}
 		row++
 	}

@@ -64,6 +64,13 @@ func (m *AgentPaneModel) AppendTurnUsage(u event.AgentTurnUsage) {
 	uCopy := u
 	m.pendingTurnUsage = &uCopy
 	m.UpdateUsage(u)
+	// Aggregate onto the current beat so the collapsed-beat summary can
+	// surface "↑X ↓Y" without re-parsing the rendered usage line. Done
+	// here rather than in FlushPendingTurnUsage because some turns end
+	// with a tool call that folds the stats inline (no flush) — both
+	// paths still go through AppendTurnUsage first, so this is the one
+	// place the cost lands per turn.
+	m.addTurnTokens(u.PromptTokens, u.CompletionTokens, u.CachedTokens)
 }
 
 // FlushPendingTurnUsage renders any stashed turn usage as a

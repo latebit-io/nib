@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/nib/coding/event"
 )
@@ -229,6 +230,93 @@ func TestRender_PastUserMessage_DimsAccentNotGray(t *testing.T) {
 	}
 	if !strings.Contains(out, accentBrightSeq) {
 		t.Errorf("current user message missing Accent color sequence %q in output", accentBrightSeq)
+	}
+}
+
+// TestOpenBeat_AutoCollapsesPriorBeat verifies the auto-collapse policy:
+// when a new beat opens, the prior beat (which transitioned out of
+// BeatRunning) gets Collapsed=true so the past beat will render as a
+// 1-line summary in the projection layer. The fresh BeatRunning beat
+// stays expanded.
+func TestOpenBeat_AutoCollapsesPriorBeat(t *testing.T) {
+	m := beatPane()
+	m.AppendToken("first reply\n")
+	if m.beats[0].Collapsed {
+		t.Fatalf("active beat must not be collapsed pre-transition")
+	}
+
+	m.AppendUserMessage("follow-up")
+
+	if !m.beats[0].Collapsed {
+		t.Errorf("prior beat Collapsed = false; want true (auto-collapse on transition)")
+	}
+	if m.beats[1].Collapsed {
+		t.Errorf("active beat Collapsed = true; want false (new beat stays expanded)")
+	}
+}
+
+// TestOpenBeat_UserOverridePreservesExpand verifies that a user-touched
+// beat (UserOverride=true) is not re-collapsed by the auto policy. This
+// is the contract that lets "Tab to expand a past beat" stick across
+// subsequent beat boundaries — the developer's explicit preference wins.
+func TestOpenBeat_UserOverridePreservesExpand(t *testing.T) {
+	m := beatPane()
+	m.AppendToken("first reply\n")
+
+	// Simulate the user toggling open the active beat, then a new beat
+	// opening. The Collapsed=false state must survive.
+	m.beats[0].Collapsed = false
+	m.beats[0].UserOverride = true
+
+	m.AppendUserMessage("second send")
+
+	if m.beats[0].Collapsed {
+		t.Errorf("user-overridden beat was auto-collapsed; UserOverride must block the policy")
+	}
+}
+
+// TestOpenBeat_StampsTimestamps verifies the StartedAt / EndedAt
+// bookkeeping the collapsed-beat summary depends on: the new beat
+// records its StartedAt, and the prior beat receives EndedAt at the
+// same moment.
+func TestOpenBeat_StampsTimestamps(t *testing.T) {
+	m := beatPane()
+	clock := time.Unix(1_700_000_000, 0)
+	m.nowFunc = func() time.Time { return clock }
+
+	m.AppendToken("first reply\n")
+	clock = clock.Add(42 * time.Second)
+	m.AppendUserMessage("follow-up")
+
+	prev := m.beats[0]
+	if prev.EndedAt.IsZero() {
+		t.Errorf("prior beat EndedAt is zero after transition")
+	}
+	if got := m.beats[1].StartedAt; !got.Equal(clock) {
+		t.Errorf("new beat StartedAt = %v; want %v", got, clock)
+	}
+}
+
+// TestAppendTurnUsage_AggregatesOntoActiveBeat verifies turn-usage
+// events accumulate onto the current beat's TokensIn/Out/Cached
+// counters. The summary line draws from these instead of re-parsing
+// the rendered turn-usage row text.
+func TestAppendTurnUsage_AggregatesOntoActiveBeat(t *testing.T) {
+	m := beatPane()
+	m.AppendToken("prose\n")
+
+	m.AppendTurnUsage(event.AgentTurnUsage{PromptTokens: 100, CompletionTokens: 25, CachedTokens: 40})
+	m.AppendTurnUsage(event.AgentTurnUsage{PromptTokens: 60, CompletionTokens: 15})
+
+	b := m.beats[0]
+	if got, want := b.TokensIn, 160; got != want {
+		t.Errorf("TokensIn = %d; want %d", got, want)
+	}
+	if got, want := b.TokensOut, 40; got != want {
+		t.Errorf("TokensOut = %d; want %d", got, want)
+	}
+	if got, want := b.TokensCached, 40; got != want {
+		t.Errorf("TokensCached = %d; want %d", got, want)
 	}
 }
 

@@ -123,6 +123,9 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, call llm.ToolCall) ToolRes
 	if !inProject(t.workspace, canon) {
 		return errorResult(fmt.Sprintf("Error: %s is outside the project root", fp.Path))
 	}
+	if collidesWithWorkTree(t.workspace, canon) {
+		return workTreeCollisionError(fp.Path)
+	}
 
 	existing, err := t.cache.LoadOrRead(canon, func() (string, error) {
 		return t.workspace.ReadFile(fp.Path)

@@ -397,6 +397,9 @@ func (t *EditFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResul
 	if err != nil {
 		return errorResult(fmt.Sprintf("Error: cannot read %s: %v", args.Path, err))
 	}
+	if collidesWithWorkTree(t.workspace, canon) {
+		return workTreeCollisionError(args.Path)
+	}
 
 	if args.Search == "" && content != "" {
 		return errorResult("Error: search field cannot be empty (file is not empty — copy existing text to anchor your edit)")

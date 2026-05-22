@@ -104,6 +104,9 @@ func (t *ReplaceFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolRe
 	if !inProject(t.workspace, canon) {
 		return errorResult(fmt.Sprintf("Error: %s is outside the project root", args.Path))
 	}
+	if collidesWithWorkTree(t.workspace, canon) {
+		return workTreeCollisionError(args.Path)
+	}
 
 	// Read existing content via cache (populated by prior read_file
 	// calls or seeded by the orchestrator after every approved edit

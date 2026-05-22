@@ -7,7 +7,7 @@ import (
 	"github.com/latebit-io/nib/coding/session"
 )
 
-// Work-tree refresh + goal-state handlers.
+// Work-tree refresh handler.
 // Extracted from app.go's Update() (Phase 3 of AppModel decomposition).
 //
 // The work tree is the project's plan/goal/task graph fetched from the
@@ -15,6 +15,11 @@ import (
 // responsive: a tea.Cmd issues the fetch on a background goroutine, and
 // the result is applied to session state on the TUI goroutine via
 // reloadWorkTreeResultMsg, avoiding data races on workTree/workTreeVer.
+//
+// Developer-driven activate/complete handlers were removed: the project
+// pane is a read view, and /project.md mutations belong to the agent
+// (via update_task or the bundled activate_task / complete_task tool
+// fields).
 
 // reloadWorkTreeResultMsg delivers an async work-tree fetch result back to
 // the TUI goroutine for application via Session.ApplyWorkTreeSnapshot.
@@ -41,30 +46,6 @@ func (m *AppModel) handleReloadWorkTreeResult(msg reloadWorkTreeResultMsg) (tea.
 		m.AgentPane.AppendMeta("[reload project failed: " + msg.snap.Err.Error() + "]\n")
 	} else {
 		m.Session.ApplyWorkTreeSnapshot(msg.snap)
-	}
-	m.refreshProjectPane()
-	return m, nil
-}
-
-// handleProjectSetActiveGoal sets the active goal on the session and
-// surfaces any error in the agent pane. Project pane is refreshed
-// regardless so any optimistic UI rolls back on failure.
-func (m *AppModel) handleProjectSetActiveGoal(msg ProjectSetActiveGoalMsg) (tea.Model, tea.Cmd) {
-	if err := m.Session.SetActiveGoal(msg.Title); err != nil {
-		slog.Warn("set active goal", "err", err)
-		m.AgentPane.AppendMeta("[set active goal failed: " + err.Error() + "]\n")
-	}
-	m.refreshProjectPane()
-	return m, nil
-}
-
-// handleProjectMarkGoalDone marks a goal complete on the session and
-// surfaces any error in the agent pane. Project pane is refreshed
-// regardless so any optimistic UI rolls back on failure.
-func (m *AppModel) handleProjectMarkGoalDone(msg ProjectMarkGoalDoneMsg) (tea.Model, tea.Cmd) {
-	if err := m.Session.MarkGoalDone(msg.Title); err != nil {
-		slog.Warn("mark goal done", "err", err)
-		m.AgentPane.AppendMeta("[mark done failed: " + err.Error() + "]\n")
 	}
 	m.refreshProjectPane()
 	return m, nil

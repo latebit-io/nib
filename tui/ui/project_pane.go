@@ -20,14 +20,6 @@ import (
 // AppModel catches this and opens the file in the editor.
 type ProjectOpenFileMsg struct{ Path string }
 
-// ProjectSetActiveGoalMsg is sent when the user activates a work item.
-// AppModel handles the session mutation to keep writes in one place.
-type ProjectSetActiveGoalMsg struct{ Title string }
-
-// ProjectMarkGoalDoneMsg is sent when the user marks an active task as done.
-// AppModel handles the session mutation.
-type ProjectMarkGoalDoneMsg struct{ Title string }
-
 // ProjectCreateFileMsg is sent when the user creates a new file via inline input.
 // Path is relative to the project root.
 type ProjectCreateFileMsg struct{ Path string }
@@ -516,8 +508,11 @@ func (p *ProjectPaneModel) activateItem() tea.Cmd {
 	return func() tea.Msg { return ProjectOpenFileMsg{Path: absPath} }
 }
 
-// activateWorkItem handles Enter on a work tree node.
-// Headings toggle collapse; tasks cycle status: pending → active, active → done.
+// activateWorkItem handles Enter on a work tree node. Headings toggle
+// collapse; task nodes are read-only from the developer side — status
+// transitions go through the agent's update_task / activate_task /
+// complete_task surface so /project.md remains the agent's authoritative
+// work tree. The pane stays a read view over that tree.
 func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
 	if n.IsHeading {
 		p.workExpanded[n.Title] = !p.workExpanded[n.Title]
@@ -526,20 +521,8 @@ func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
 			p.cursorIdx = len(p.items) - 1
 		}
 		p.clampScroll()
-		return nil
 	}
-	title := n.Title
-	switch n.Status {
-	case project.TaskActive:
-		// Active → done
-		return func() tea.Msg { return ProjectMarkGoalDoneMsg{Title: title} }
-	case project.TaskPending:
-		// Pending → active
-		return func() tea.Msg { return ProjectSetActiveGoalMsg{Title: title} }
-	default:
-		// Done tasks are final — no action on Enter
-		return nil
-	}
+	return nil
 }
 
 // startFileCreate activates inline input for creating a new file.

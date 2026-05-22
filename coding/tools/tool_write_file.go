@@ -64,7 +64,7 @@ type writeArgs struct {
 // Validation order mirrors replace_file so a malformed call is
 // rejected with the same shape regardless of which file tool the LLM
 // picked: argument-size cap → unmarshal → path required → content
-// size cap → project-root containment → write.
+// size cap → project-root containment → work-tree collision → write.
 func (t *WriteFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	if len(call.Function.Arguments) > maxToolArgsBytes {
 		return errorResult(fmt.Sprintf("Error: arguments too large (%d bytes, max %d).", len(call.Function.Arguments), maxToolArgsBytes))
@@ -81,15 +81,19 @@ func (t *WriteFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResu
 			"Error: content too large (%d bytes, max %d). Split the file or use multiple edit_file calls.",
 			len(args.Content), maxDiffInputBytes))
 	}
-	if !inProject(t.workspace, t.workspace.CanonPath(args.Path)) {
+	canon := t.workspace.CanonPath(args.Path)
+	if !inProject(t.workspace, canon) {
 		return errorResult(fmt.Sprintf("Error: %s is outside the project root", args.Path))
+	}
+	if collidesWithWorkTree(t.workspace, canon) {
+		return workTreeCollisionError(args.Path)
 	}
 
 	if err := t.workspace.WriteFile(args.Path, args.Content); err != nil {
 		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 
-	t.cache.Set(t.workspace.CanonPath(args.Path), args.Content)
+	t.cache.Set(canon, args.Content)
 	t.creator.FileCreated(ctx, args.Path)
 
 	return textResult(fmt.Sprintf("File created: %s", args.Path))

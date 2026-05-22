@@ -114,6 +114,150 @@ project: X
 	}
 }
 
+// TestAddTask_RejectsTreeWideDuplicate locks the dedup contract: a
+// task body that already exists anywhere in the tree is refused, even
+// when the new entry targets a different (phase, feature). The
+// activate/complete tools resolve by title across the whole tree, so
+// two same-bodied tasks would make them ambiguous.
+func TestAddTask_RejectsTreeWideDuplicate(t *testing.T) {
+	src := `---
+project: X
+---
+# Phase 1: A
+## F1
+- [ ] Implement Cruise Elroy behavior for Blinky
+# Phase 2: B
+## F2
+`
+	tree := Parse(src)
+	// Identical body under a different (phase, feature) — must fail.
+	err := tree.AddTask("Phase 2", "F2", "Implement Cruise Elroy behavior for Blinky", "")
+	if err == nil {
+		t.Fatalf("expected duplicate rejection")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// And the tree must not have the duplicate.
+	body := Serialize(tree)
+	if strings.Count(body, "Implement Cruise Elroy") != 1 {
+		t.Errorf("expected exactly one Cruise Elroy task in tree:\n%s", body)
+	}
+}
+
+func TestAddTask_DuplicateDetectionCaseInsensitive(t *testing.T) {
+	src := `---
+project: X
+---
+# Phase 1: A
+## F
+- [ ] Build Tile Map
+`
+	tree := Parse(src)
+	err := tree.AddTask("Phase 1", "F", "build tile map", "")
+	if err == nil {
+		t.Fatalf("expected duplicate rejection for case-different body")
+	}
+}
+
+// TestAddTask_DuplicateDetectionIgnoresLinkSuffix covers the
+// "added once with no link, then re-added with a link" mistake — the
+// stored title carries the " ([details](...))" suffix but the body
+// equality check must collapse the two.
+func TestAddTask_DuplicateDetectionIgnoresLinkSuffix(t *testing.T) {
+	src := `---
+project: X
+---
+# Phase 1: A
+## F
+- [ ] Build tile map ([details](/game/tilemap.md))
+`
+	tree := Parse(src)
+	err := tree.AddTask("Phase 1", "F", "Build tile map", "")
+	if err == nil {
+		t.Fatalf("expected duplicate rejection ignoring link suffix")
+	}
+}
+
+// TestAddTask_DuplicateDetectionTrimsStoredTitle covers manually-edited
+// project.md content where a title carries surrounding whitespace. The
+// AddTask writer trims before insertion, but a hand-authored markdown
+// task can land with trailing spaces; without symmetric trim on the
+// stored-title side the dedup would silently miss the duplicate.
+func TestAddTask_DuplicateDetectionTrimsStoredTitle(t *testing.T) {
+	// Synthesize a tree with a trailing-whitespace task title that the
+	// parser would not normalize. Going through Parse is the realistic
+	// path; if a future parser trims this we can drop the test, but the
+	// guard belongs at the dedup site regardless.
+	tree := &Tree{
+		Roots: []*Node{
+			{
+				Title:     "Phase 1: A",
+				Depth:     0,
+				IsHeading: true,
+				Children: []*Node{
+					{
+						Title:     "F",
+						Depth:     1,
+						IsHeading: true,
+						Children: []*Node{
+							{
+								Title:     "  spaced task  ",
+								Depth:     2,
+								IsHeading: false,
+								Status:    TaskPending,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := tree.AddTask("Phase 1", "F", "spaced task", "")
+	if err == nil {
+		t.Fatalf("expected duplicate rejection when stored title has surrounding whitespace")
+	}
+}
+
+// TestAddTask_DistinctTaskAllowed sanity-checks that the dedup doesn't
+// over-reject — a clearly different body still lands.
+func TestAddTask_DistinctTaskAllowed(t *testing.T) {
+	src := `---
+project: X
+---
+# Phase 1: A
+## F
+- [ ] Build tile map
+`
+	tree := Parse(src)
+	if err := tree.AddTask("Phase 1", "F", "Render sprite atlas", ""); err != nil {
+		t.Fatalf("unrelated task should land: %v", err)
+	}
+	if !strings.Contains(Serialize(tree), "- [ ] Render sprite atlas") {
+		t.Errorf("expected new task in serialized tree")
+	}
+}
+
+// TestStripDetailsSuffix exercises the suffix-strip helper directly so
+// regressions on the format don't slip through via the higher-level
+// dedup tests.
+func TestStripDetailsSuffix(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"plain title", "plain title"},
+		{"Build tile map ([details](/game/tilemap.md))", "Build tile map"},
+		{"Nested parens (x) ([details](/p.md))", "Nested parens (x)"},
+		{"trailing parens))", "trailing parens))"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := stripDetailsSuffix(tc.in); got != tc.want {
+			t.Errorf("stripDetailsSuffix(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestAddTask_RoundTripsThroughSerializer(t *testing.T) {
 	src := `---
 project: X

@@ -179,6 +179,46 @@ project: X
 	}
 }
 
+// TestAddTask_DuplicateDetectionTrimsStoredTitle covers manually-edited
+// project.md content where a title carries surrounding whitespace. The
+// AddTask writer trims before insertion, but a hand-authored markdown
+// task can land with trailing spaces; without symmetric trim on the
+// stored-title side the dedup would silently miss the duplicate.
+func TestAddTask_DuplicateDetectionTrimsStoredTitle(t *testing.T) {
+	// Synthesize a tree with a trailing-whitespace task title that the
+	// parser would not normalize. Going through Parse is the realistic
+	// path; if a future parser trims this we can drop the test, but the
+	// guard belongs at the dedup site regardless.
+	tree := &Tree{
+		Roots: []*Node{
+			{
+				Title:     "Phase 1: A",
+				Depth:     0,
+				IsHeading: true,
+				Children: []*Node{
+					{
+						Title:     "F",
+						Depth:     1,
+						IsHeading: true,
+						Children: []*Node{
+							{
+								Title:     "  spaced task  ",
+								Depth:     2,
+								IsHeading: false,
+								Status:    TaskPending,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := tree.AddTask("Phase 1", "F", "spaced task", "")
+	if err == nil {
+		t.Fatalf("expected duplicate rejection when stored title has surrounding whitespace")
+	}
+}
+
 // TestAddTask_DistinctTaskAllowed sanity-checks that the dedup doesn't
 // over-reject — a clearly different body still lands.
 func TestAddTask_DistinctTaskAllowed(t *testing.T) {

@@ -303,7 +303,7 @@ func findTaskByBody(t *Tree, task string) *Node {
 		if n.IsHeading {
 			return true
 		}
-		if strings.ToLower(stripDetailsSuffix(n.Title)) == target {
+		if strings.ToLower(strings.TrimSpace(stripDetailsSuffix(n.Title))) == target {
 			found = n
 			return false
 		}

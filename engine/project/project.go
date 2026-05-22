@@ -141,11 +141,20 @@ func (t *Tree) SetActiveGoal(targetTitle string) bool {
 //   - link: optional memory-doc path; when non-empty, appended to the
 //     task title as a markdown link: "Title ([details](link))".
 //
-// Returns an error if the phase cannot be located.
+// Returns an error if the phase cannot be located OR if a task with the
+// same body already exists anywhere in the tree. Tree-scoped dedup is
+// load-bearing: the activate/complete tools resolve by title across
+// the whole tree, so two same-titled tasks make those tools ambiguous
+// and one ends up orphaned. Comparison is case-insensitive and ignores
+// the " ([details](...))" link suffix so two attempts at the same task
+// — one with a link, one without — still collide.
 func (t *Tree) AddTask(phase, feature, task, link string) error {
 	phaseNode := findPhaseBySubstring(t, phase)
 	if phaseNode == nil {
 		return fmt.Errorf("no phase matching %q", phase)
+	}
+	if existing := findTaskByBody(t, task); existing != nil {
+		return fmt.Errorf("task with body %q already exists (current title: %q)", strings.TrimSpace(task), existing.Title)
 	}
 	featureNode := findFeatureByTitle(phaseNode, feature)
 	if featureNode == nil {
@@ -273,6 +282,51 @@ func findTaskByTitle(n *Node, title string) *Node {
 		}
 	}
 	return nil
+}
+
+// findTaskByBody returns the first leaf task whose body matches the
+// given task text, case-insensitively, with the optional
+// " ([details](...))" link suffix stripped from the stored title
+// before comparing. Used by [Tree.AddTask] for tree-scoped duplicate
+// detection — the activate/complete tools resolve by title across the
+// whole tree, so the work tree must have at most one task per body.
+func findTaskByBody(t *Tree, task string) *Node {
+	target := strings.ToLower(strings.TrimSpace(task))
+	if target == "" {
+		return nil
+	}
+	var found *Node
+	t.Walk(func(n *Node) bool {
+		if found != nil {
+			return false
+		}
+		if n.IsHeading {
+			return true
+		}
+		if strings.ToLower(stripDetailsSuffix(n.Title)) == target {
+			found = n
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// stripDetailsSuffix removes the optional " ([details](path))" tail
+// that [Tree.AddTask] appends when a link is supplied. Pure suffix
+// strip — titles without the marker are returned unchanged. Defensive
+// HasSuffix check so a degenerate input ending in just "))" isn't
+// misread as having the marker.
+func stripDetailsSuffix(title string) string {
+	const opener = " ([details]("
+	if !strings.HasSuffix(title, "))") {
+		return title
+	}
+	idx := strings.LastIndex(title, opener)
+	if idx == -1 {
+		return title
+	}
+	return title[:idx]
 }
 
 // walkNode recursively visits n and its children.

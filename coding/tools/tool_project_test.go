@@ -31,6 +31,23 @@ func (s *stubTracker) AddTask(p, f, t, l string) error {
 	return s.addErr
 }
 
+// TestProjectTaskAddTool_SurfacesEngineDuplicateRejection verifies the
+// tool layer cleanly surfaces the engine's tree-scoped dedup error
+// (see engine/project.Tree.AddTask). The batch's within-call dedup
+// handles same-batch repeats; cross-call repeats are caught at the
+// tracker layer and the tool must format them into the same
+// failed-task line so the LLM can diagnose without scrolling.
+func TestProjectTaskAddTool_SurfacesEngineDuplicateRejection(t *testing.T) {
+	tracker := &stubTracker{addErr: errors.New(`task with body "Implement X" already exists (current title: "Implement X")`)}
+	tool := NewProjectTaskAddTool(tracker)
+	args := `{"tasks": [{"phase": "Phase 1", "feature": "F", "task": "Implement X"}]}`
+	result := tool.Execute(context.Background(), toolCall("test-id", "project_task_add", args))
+
+	assertContains(t, result.Content, "Failed 1 task(s)")
+	assertContains(t, result.Content, "Implement X")
+	assertContains(t, result.Content, "already exists")
+}
+
 func TestProjectTaskAddTool_SingleTask(t *testing.T) {
 	tracker := &stubTracker{}
 	tool := NewProjectTaskAddTool(tracker)

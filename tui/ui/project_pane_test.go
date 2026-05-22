@@ -194,69 +194,39 @@ func TestProjectPane_ActivateWorkHeading(t *testing.T) {
 	}
 }
 
-func TestProjectPane_ActivateWorkTask(t *testing.T) {
-	task := &project.Node{
-		Title: "Add Phase to Session", Depth: 2, Status: project.TaskPending,
+// TestProjectPane_ActivateWorkTaskNoop locks the contract that Enter
+// on a task node does NOT mutate task state. /project.md transitions
+// are the agent's responsibility (via update_task or the bundled
+// activate_task / complete_task tool fields); the pane is a read view.
+func TestProjectPane_ActivateWorkTaskNoop(t *testing.T) {
+	cases := []struct {
+		name   string
+		status project.TaskStatus
+	}{
+		{"pending", project.TaskPending},
+		{"active", project.TaskActive},
+		{"done", project.TaskDone},
 	}
-
-	items := []projectItem{
-		{isHeader: true, section: "work"},
-		{workNode: task, section: "work"},
-	}
-
-	p := &ProjectPaneModel{
-		width:        40,
-		height:       10,
-		items:        items,
-		workExpanded: make(map[string]bool),
-		cursorIdx:    1, // on task
-	}
-
-	cmd := p.activateItem()
-	if cmd == nil {
-		t.Fatal("expected cmd for task activation")
-	}
-
-	msg := cmd()
-	goalMsg, ok := msg.(ProjectSetActiveGoalMsg)
-	if !ok {
-		t.Fatalf("expected ProjectSetActiveGoalMsg, got %T", msg)
-	}
-	if goalMsg.Title != "Add Phase to Session" {
-		t.Errorf("Title = %q, want %q", goalMsg.Title, "Add Phase to Session")
-	}
-}
-
-func TestProjectPane_ActivateActiveTask_MarksDone(t *testing.T) {
-	task := &project.Node{
-		Title: "Complete this", Depth: 2, Status: project.TaskActive,
-	}
-
-	items := []projectItem{
-		{isHeader: true, section: "work"},
-		{workNode: task, section: "work"},
-	}
-
-	p := &ProjectPaneModel{
-		width:        40,
-		height:       10,
-		items:        items,
-		workExpanded: make(map[string]bool),
-		cursorIdx:    1,
-	}
-
-	cmd := p.activateItem()
-	if cmd == nil {
-		t.Fatal("expected cmd for active task")
-	}
-
-	msg := cmd()
-	doneMsg, ok := msg.(ProjectMarkGoalDoneMsg)
-	if !ok {
-		t.Fatalf("expected ProjectMarkGoalDoneMsg, got %T", msg)
-	}
-	if doneMsg.Title != "Complete this" {
-		t.Errorf("Title = %q, want %q", doneMsg.Title, "Complete this")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			task := &project.Node{
+				Title: "Some task", Depth: 2, Status: tc.status,
+			}
+			items := []projectItem{
+				{isHeader: true, section: "work"},
+				{workNode: task, section: "work"},
+			}
+			p := &ProjectPaneModel{
+				width:        40,
+				height:       10,
+				items:        items,
+				workExpanded: make(map[string]bool),
+				cursorIdx:    1,
+			}
+			if cmd := p.activateItem(); cmd != nil {
+				t.Errorf("expected nil cmd for task activation (status=%s); pane is read-only over /project.md", tc.name)
+			}
+		})
 	}
 }
 

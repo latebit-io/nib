@@ -1,6 +1,10 @@
 package tools
 
-import "strings"
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+)
 
 // FileReader provides read-only file access to agent tools. Used by
 // tools that only need to inspect project contents (read_file, glob,
@@ -52,4 +56,45 @@ func inProject(ws FileReader, canonPath string) bool {
 	}
 	prefix := strings.TrimSuffix(root, "/") + "/"
 	return canonPath == root || strings.HasPrefix(canonPath, prefix)
+}
+
+// workTreeFilename is the basename of the agent's work tree document.
+// The authoritative work tree lives in demarkus at "/project.md", not
+// on the filesystem — a literal project.md at the project root would
+// shadow the demarkus copy and silently diverge from the gate's view
+// of the world. [collidesWithWorkTree] rejects such paths before any
+// file mutation tool writes to disk.
+const workTreeFilename = "project.md"
+
+// collidesWithWorkTree reports whether canonPath points to a literal
+// `project.md` at the project root. The basename match is
+// case-insensitive so the guard holds on case-preserving (macOS,
+// Windows) filesystems where `Project.MD` and `project.md` refer to
+// the same file.
+//
+// Sub-paths (e.g. `docs/project.md`, `kit/memory/project.md`) are
+// allowed — those are ordinary project files, not the work tree.
+func collidesWithWorkTree(ws FileReader, canonPath string) bool {
+	root := ws.ProjectRoot()
+	if root == "" {
+		return false
+	}
+	clean := filepath.Clean(canonPath)
+	if !strings.EqualFold(filepath.Base(clean), workTreeFilename) {
+		return false
+	}
+	return filepath.Dir(clean) == filepath.Clean(root)
+}
+
+// workTreeCollisionError is the standard rejection message for paths
+// that collide with the work tree filename at the project root.
+// Names the proper tools so the LLM can recover in the next turn
+// instead of retrying the same misdirected write.
+func workTreeCollisionError(path string) ToolResult {
+	return errorResult(fmt.Sprintf(
+		"Error: %q would shadow the agent's work tree. /project.md lives in demarkus, not the filesystem. "+
+			"Use project_init to bootstrap it, update_task (or the bundled activate_task/complete_task fields) to change task status, "+
+			"and project_task_add to append new tasks.",
+		path,
+	))
 }

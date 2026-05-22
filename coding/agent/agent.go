@@ -84,6 +84,7 @@ var mutatingTools = map[string]bool{
 	"edit_file":    true,
 	"write_file":   true,
 	"replace_file": true,
+	"apply_patch":  true,
 	"bash":         true,
 	"smoke_run":    true,
 }
@@ -713,6 +714,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		def := t.Definition()
 		key := strings.ToLower(def.Function.Name)
 		builtinNames[key] = true
+		t, def = applyLifecycleDecorator(key, t, def)
 		a.tools[key] = t
 		a.toolDefs = append(a.toolDefs, def)
 	}
@@ -728,9 +730,24 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 			slog.Warn("extra tool collision, skipping duplicate", "name", def.Function.Name)
 			continue
 		}
+		t, def = applyLifecycleDecorator(key, t, def)
 		a.tools[key] = t
 		a.toolDefs = append(a.toolDefs, def)
 	}
+}
+
+// applyLifecycleDecorator wraps a mutating tool in [lifecycleAwareTool]
+// so its advertised schema carries the optional activate_task /
+// complete_task fields. Non-mutating tools are returned unchanged.
+// Centralized here so built-in and extra (MCP) registration paths
+// stay in lockstep — adding a new mutating tool only requires
+// updating the [mutatingTools] map.
+func applyLifecycleDecorator(name string, t Tool, def llm.ToolDef) (Tool, llm.ToolDef) {
+	if !mutatingTools[name] {
+		return t, def
+	}
+	wrapped := lifecycleAwareTool{Tool: t}
+	return wrapped, wrapped.Definition()
 }
 
 // adaptEngineSearch bridges engine/search.Search to kit's SearchFunc

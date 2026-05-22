@@ -15,10 +15,9 @@ import (
 // emits intent messages (ProjectCreate*, ProjectDelete*, etc.) and
 // AppModel mediates the actual session call. This is the bridge layer.
 //
-// Goal-state handlers (ProjectSetActiveGoalMsg, ProjectMarkGoalDoneMsg)
-// live in `app_work_tree.go` — they're work-tree concerns, not file-
-// system concerns. `reloadWorkTreeResultMsg` and `reloadWorkTreeCmd`
-// also live there.
+// The work tree (/project.md) is read-only from the developer side —
+// status transitions belong to the agent. `app_work_tree.go` holds the
+// async fetch + apply path for that read view.
 
 // handleProjectOpenFile opens the file selected in the project pane.
 func (m *AppModel) handleProjectOpenFile(msg ProjectOpenFileMsg) (tea.Model, tea.Cmd) {

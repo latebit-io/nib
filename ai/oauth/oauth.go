@@ -11,6 +11,7 @@ package oauth
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -80,6 +81,32 @@ func (a *Authenticator) Authenticate(ctx context.Context, req *http.Request) err
 		req.Header.Set("ChatGPT-Account-Id", tok.AccountID)
 	}
 	return nil
+}
+
+// invalidatableSource is the optional capability a [TokenSource] exposes
+// when it can discard its stored credential (e.g. delete a revoked token
+// from the backing store).
+type invalidatableSource interface {
+	Invalidate() error
+}
+
+// Invalidate discards the underlying credential when the token source
+// supports it, so a server-rejected (revoked) token is not replayed on the
+// next run. Satisfies the provider-side invalidation port used after a
+// 401. Best-effort: a store-delete failure is logged, not returned — the
+// caller has no recovery action, and the in-memory token is gone
+// regardless on the next process launch.
+//
+// No-op when the source cannot invalidate (it stays usable), so callers
+// can invoke this unconditionally after an auth failure.
+func (a *Authenticator) Invalidate() {
+	inv, ok := a.source.(invalidatableSource)
+	if !ok {
+		return
+	}
+	if err := inv.Invalidate(); err != nil {
+		slog.Warn("oauth: token invalidation failed", "err", err)
+	}
 }
 
 // DeviceCode holds the response from a device authorization request.

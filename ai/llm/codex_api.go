@@ -326,6 +326,18 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		if readErr != nil {
 			return nil, fmt.Errorf("codex error: status %d (body unreadable: %w)", resp.StatusCode, readErr)
 		}
+		// A 401 means the credential itself was rejected — the token
+		// source already refreshed during Authenticate above, so a 401
+		// here is a dead/revoked token. Discard it via the optional
+		// invalidation port (no-op for static API-key auth) so the next
+		// launch detects "no credential" and re-offers connect, then
+		// surface a typed, actionable error instead of the raw body.
+		if resp.StatusCode == http.StatusUnauthorized {
+			if inv, ok := c.auth.(CredentialInvalidator); ok {
+				inv.Invalidate()
+			}
+			return nil, parseAuthError("chatgpt", resp.StatusCode, respBody)
+		}
 		return nil, fmt.Errorf("codex error: status %d: %s", resp.StatusCode, string(respBody))
 	}
 

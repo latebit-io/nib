@@ -48,7 +48,7 @@ func spinnerTickCmd() tea.Cmd {
 // is a signal of backgrounded activity, not a generic attention indicator.
 func statusAnimates(s event.StatusKind) bool {
 	switch s {
-	case event.StatusThinking, event.StatusPlanning, event.StatusLinting:
+	case event.StatusThinking, event.StatusPlanning, event.StatusLinting, event.StatusSmoke:
 		return true
 	}
 	return false
@@ -140,6 +140,7 @@ var (
 	chipStyleReview   = chipBase.Background(lipgloss.Color("136")).Foreground(lipgloss.Color("232")).Bold(true)
 	chipStyleWaiting  = chipBase.Background(lipgloss.Color("89")).Foreground(lipgloss.Color("231")).Bold(true)
 	chipStyleLinting  = chipBase.Background(lipgloss.Color("30")).Foreground(lipgloss.Color("231")).Bold(true)
+	chipStyleSmoke    = chipBase.Background(lipgloss.Color("166")).Foreground(lipgloss.Color("231")).Bold(true)
 	// chipStyleFinished marks "all tracked tasks complete" yields. Green
 	// like editing-success but with a heavier weight so the developer
 	// distinguishes "I'm done with the planned work" from the routine
@@ -444,7 +445,7 @@ func NewAgentPaneModel(svc *Services, hasAgent bool) *AgentPaneModel {
 
 // SetStatus updates the agent status displayed in the status bar. Returns a
 // tea.Cmd to start the spinner loop when transitioning from a non-animated
-// state to an animated one (Thinking/Planning/Linting), otherwise nil. The
+// state to an animated one (Thinking/Planning/Linting/Smoke), otherwise nil. The
 // loop stops itself when Update sees a tick after the status has left the
 // animated set, so callers never need to cancel.
 //
@@ -2031,6 +2032,8 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 		spec = statusChipSpec{label: "DONE", hint: "all tracked tasks complete · type to continue", style: chipStyleFinished}
 	case event.StatusLinting:
 		spec = statusChipSpec{label: "LINTING", style: chipStyleLinting}
+	case event.StatusSmoke:
+		spec = statusChipSpec{label: "SMOKE", style: chipStyleSmoke}
 	default:
 		spec = statusChipSpec{label: "READY", style: chipStyleIdle}
 	}

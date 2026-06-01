@@ -179,6 +179,11 @@ func (a *Agent) runSmokeReview(ctx context.Context) string {
 	if cfg.Skipped {
 		return ""
 	}
+	// Flip the phase before the blocking RunSmoke call below. Without this
+	// the frontend status holds the prior StatusLinting for the entire
+	// smoke run — which launches the artifact and can block for the
+	// lifetime of that process.
+	a.send(event.AgentStatus{Status: event.StatusSmoke})
 	// Surface only the source (make-smoke / lua-main / config / …)
 	// not the resolved command — `.project/run.json` may contain
 	// inline env assignments or auth flags, and this banner ends up

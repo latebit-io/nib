@@ -93,6 +93,11 @@ const (
 	StatusReviewing StatusKind = "reviewing"
 	// StatusLinting means the agent is running post-edit style lint commands.
 	StatusLinting StatusKind = "linting"
+	// StatusSmoke means the agent is running the post-task smoke command to
+	// verify the artifact actually launches. Distinct from StatusLinting so
+	// the frontend does not show a stale "linting" phase during the smoke
+	// run, which can block for the lifetime of the launched process.
+	StatusSmoke StatusKind = "smoke"
 )
 
 // --- Coding-specific events ---

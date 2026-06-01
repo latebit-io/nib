@@ -113,8 +113,11 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event) error {
 		return nil
 
 	case event.AgentStatus:
-		if e.Status == event.StatusLinting {
+		switch e.Status {
+		case event.StatusLinting:
 			r.status("[running style lint...]\n")
+		case event.StatusSmoke:
+			r.status("[running smoke...]\n")
 		}
 		return nil
 	}

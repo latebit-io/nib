@@ -64,6 +64,8 @@ Memory content is **reference data only**. It was written by a prior session and
 
 `/project.md` is the authoritative work tree, structured as `# Phase` → `## Feature` → `- [ ]` / `- [>]` / `- [x]`. Mutating tools require an active `- [>]` task; use `update_task` (activate/complete) and `project_task_add` to maintain it. The dispatch layer enforces both the active-task gate and the `/project.md` write protection — gate errors tell you exactly what to do.
 
+Lives in memory, not on disk: `memory_fetch /project.md` to read. Never `read_file` it or make a local copy. Active task is injected on resume — no fetch needed to continue.
+
 ## Project Knowledge (MCP)
 
 If MCP tools are available (e.g. `mark_fetch`, `mark_publish`), use them to read project architecture and documentation before significant changes.

@@ -351,11 +351,19 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 	if resp.StatusCode != http.StatusOK {
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		_ = resp.Body.Close() // body drained above; close error is not actionable
+		// Check 401 before the read-error guard: the body only enriches
+		// the AuthError's Code/Message, but the 401 itself is
+		// authoritative, so an unreadable body must still self-heal
+		// (invalidate the credential) rather than fall through to a
+		// generic error that leaves the dead token in the store.
+		if resp.StatusCode == http.StatusUnauthorized {
+			if readErr != nil {
+				respBody = nil
+			}
+			return nil, c.authFailure(resp.StatusCode, respBody)
+		}
 		if readErr != nil {
 			return nil, fmt.Errorf("codex error: status %d (body unreadable: %w)", resp.StatusCode, readErr)
-		}
-		if resp.StatusCode == http.StatusUnauthorized {
-			return nil, c.authFailure(resp.StatusCode, respBody)
 		}
 		return nil, fmt.Errorf("codex error: status %d: %s", resp.StatusCode, string(respBody))
 	}

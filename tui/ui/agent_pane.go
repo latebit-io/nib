@@ -1127,7 +1127,7 @@ func (m *AgentPaneModel) toggleFocusedBeatCollapse() {
 	if idx < 0 || idx >= len(m.beats) {
 		return
 	}
-	wasAtBottom := m.isAtBottom()
+	wasAtBottom := m.isFollowingBottom()
 	m.beats[idx].Collapsed = !m.beats[idx].Collapsed
 	m.beats[idx].UserOverride = true
 	m.focusBeat = idx
@@ -1173,7 +1173,7 @@ func (m *AgentPaneModel) collapseFocusedAndMoveUp() {
 func (m *AgentPaneModel) AppendText(text string) {
 	slog.Debug("agent pane append", "text_len", len(text))
 
-	wasAtBottom := m.isAtBottom()
+	wasAtBottom := m.isFollowingBottom()
 
 	parts := strings.Split(text, "\n")
 
@@ -1220,6 +1220,10 @@ func (m *AgentPaneModel) AppendText(text string) {
 }
 
 // isAtBottom returns true if the view is scrolled to (or near) the bottom.
+// This is the *literal* current view position — it reads the eased
+// ScrollOffset, which lags scrollTarget during an in-flight auto-scroll.
+// For deciding whether new content should keep following the bottom, use
+// [isFollowingBottom] instead.
 func (m *AgentPaneModel) isAtBottom() bool {
 	vis := m.VisibleLines()
 	maxScroll := len(m.projection()) - vis
@@ -1227,6 +1231,28 @@ func (m *AgentPaneModel) isAtBottom() bool {
 		return true
 	}
 	return m.ScrollOffset >= maxScroll-1
+}
+
+// isFollowingBottom reports whether the pane is tracking the bottom of the
+// transcript — either parked there or mid auto-scroll toward it. The
+// auto-follow decision on new content (streaming tokens, layout changes)
+// must use this rather than [isAtBottom]: while an auto-scroll eases,
+// ScrollOffset trails scrollTarget, so isAtBottom would read the lagging
+// offset as "scrolled up" and stop following — the view and scrollbar
+// then stall above the true bottom while output keeps arriving. Manual
+// scrolls (wheel/keys) sync scrollTarget to ScrollOffset, so a genuine
+// scroll-up still reads as not-following and is not yanked back down.
+func (m *AgentPaneModel) isFollowingBottom() bool {
+	vis := m.VisibleLines()
+	maxScroll := len(m.projection()) - vis
+	if maxScroll <= 0 {
+		return true
+	}
+	pos := m.ScrollOffset
+	if m.scrollTarget > pos {
+		pos = m.scrollTarget
+	}
+	return pos >= maxScroll-1
 }
 
 // rewrap derives wrapped Lines from RawLines for the current width.

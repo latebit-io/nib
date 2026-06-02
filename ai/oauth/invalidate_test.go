@@ -1,8 +1,12 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,4 +71,27 @@ func TestAuthenticator_InvalidateIsNoOpForNonInvalidatableSource(t *testing.T) {
 	auth := NewAuthenticator(nonInvalidatableSource{})
 	// Must not panic; a source that cannot invalidate stays usable.
 	auth.Invalidate()
+}
+
+// erroringSource is invalidatable but always fails to delete — it drives
+// the slog.Warn branch in Authenticator.Invalidate.
+type erroringSource struct{}
+
+func (erroringSource) Token(context.Context) (*Token, error) { return &Token{AccessToken: "x"}, nil }
+func (erroringSource) Invalidate() error                     { return errors.New("delete failed") }
+
+func TestAuthenticator_InvalidateLogsSourceError(t *testing.T) {
+	// When the source's Invalidate returns an error, Authenticator must
+	// log it (never swallow) and must not panic or return early.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	auth := NewAuthenticator(erroringSource{})
+	auth.Invalidate()
+
+	if !strings.Contains(buf.String(), "token invalidation failed") {
+		t.Errorf("expected warn log when source Invalidate fails; got %q", buf.String())
+	}
 }

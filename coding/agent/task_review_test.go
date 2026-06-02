@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,6 +154,106 @@ func TestRunTaskReview_SiblingFindingsAreNonBlocking(t *testing.T) {
 	}
 	if a.pendingLint != "" {
 		t.Errorf("sibling findings must not populate pendingLint, got: %q", a.pendingLint)
+	}
+}
+
+func TestRunTaskReview_SiblingFindingsWrittenToReport(t *testing.T) {
+	root := t.TempDir()
+	linter := &fakeLinter{name: "fake", res: lint.Result{
+		Findings: []lint.Finding{
+			{Path: "pkg/sibling.go", Line: 7, Col: 2, Linter: "fake", Message: "pre-existing issue A"},
+			{Path: "pkg/other.go", Line: 12, Linter: "fake", Message: "pre-existing issue B"},
+		},
+	}}
+	a := &Agent{
+		bus:       newBus(),
+		workspace: &testWorkspace{root: root},
+		linters:   []lint.Linter{linter},
+	}
+	events := subscribeForTest(t, a)
+	a.taskEdits = []taskEdit{{Path: "pkg/foo.go"}}
+
+	_ = a.runTaskReview(context.Background(), "Done")
+	tokens := drainTokens(events)
+
+	// Banner stays clean (sibling-only) but now points at an inspectable
+	// report by project-relative path, alongside the count.
+	relPath := filepath.Join(".project", siblingLintReportName)
+	if !strings.Contains(tokens, "clean ✓") {
+		t.Errorf("sibling-only findings should not block, got: %q", tokens)
+	}
+	if !strings.Contains(tokens, "2 pre-existing in sibling files") {
+		t.Errorf("banner should carry the sibling count, got: %q", tokens)
+	}
+	if !strings.Contains(tokens, relPath) {
+		t.Errorf("banner should reference the report path %q, got: %q", relPath, tokens)
+	}
+
+	// The report file exists and carries every sibling finding in full —
+	// the detail the agent could not previously surface.
+	data, err := os.ReadFile(filepath.Join(root, ".project", siblingLintReportName))
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	report := string(data)
+	for _, want := range []string{"pkg/sibling.go:7:2", "pre-existing issue A", "pkg/other.go:12", "pre-existing issue B"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report missing %q; got:\n%s", want, report)
+		}
+	}
+	// Non-blocking invariant holds: sibling findings never gate the next task.
+	if a.pendingLint != "" {
+		t.Errorf("sibling findings must not populate pendingLint, got: %q", a.pendingLint)
+	}
+}
+
+func TestRunTaskReview_MixedEditedAndSiblingFindings(t *testing.T) {
+	// Both signals must coexist without conflation: the edited-file
+	// finding blocks (pendingLint) and emits the violations banner, while
+	// the sibling finding stays non-blocking — surfaced as the note +
+	// report, never in pendingLint.
+	root := t.TempDir()
+	linter := &fakeLinter{name: "fake", res: lint.Result{
+		Findings: []lint.Finding{
+			{Path: "pkg/foo.go", Line: 10, Col: 5, Linter: "fake", Message: "blocking issue"},
+			{Path: "pkg/sibling.go", Line: 3, Linter: "fake", Message: "pre-existing issue"},
+		},
+	}}
+	a := &Agent{
+		bus:       newBus(),
+		workspace: &testWorkspace{root: root},
+		linters:   []lint.Linter{linter},
+	}
+	events := subscribeForTest(t, a)
+	a.taskEdits = []taskEdit{{Path: "pkg/foo.go"}}
+
+	_ = a.runTaskReview(context.Background(), "Done")
+	tokens := drainTokens(events)
+
+	if !strings.Contains(tokens, "violations found") {
+		t.Errorf("expected violations banner for edited-file finding, got: %q", tokens)
+	}
+	relPath := filepath.Join(".project", siblingLintReportName)
+	if !strings.Contains(tokens, "1 pre-existing in sibling files") || !strings.Contains(tokens, relPath) {
+		t.Errorf("expected sibling note with report path alongside violations, got: %q", tokens)
+	}
+
+	// pendingLint carries ONLY the edited finding — the sibling one must
+	// not leak into the blocking path.
+	if !strings.Contains(a.pendingLint, "pkg/foo.go:10:5") {
+		t.Errorf("pendingLint should contain the edited-file finding, got: %q", a.pendingLint)
+	}
+	if strings.Contains(a.pendingLint, "pkg/sibling.go") {
+		t.Errorf("pendingLint must NOT contain the sibling finding, got: %q", a.pendingLint)
+	}
+
+	// The sibling finding lives in the report, not the transcript.
+	data, err := os.ReadFile(filepath.Join(root, ".project", siblingLintReportName))
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(data), "pkg/sibling.go:3") || !strings.Contains(string(data), "pre-existing issue") {
+		t.Errorf("report should contain the sibling finding; got:\n%s", string(data))
 	}
 }
 

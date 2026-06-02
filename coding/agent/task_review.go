@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -14,6 +15,12 @@ import (
 	"github.com/latebit-io/nib/coding/smoke"
 	enginelint "github.com/latebit-io/nib/engine/lint"
 )
+
+// siblingLintReportName is the file (under <projectRoot>/.project/) where
+// non-blocking sibling-file lint findings are written so the count in the
+// banner is inspectable rather than a dead-end number. Regenerated on
+// every task completion that surfaces sibling findings.
+const siblingLintReportName = "last-lint.txt"
 
 // Post-task review pipeline for Agent.
 //
@@ -112,10 +119,10 @@ func (a *Agent) runLinters(ctx context.Context, linters []enginelint.Linter, edi
 	}
 
 	var (
-		editedFindings []enginelint.Finding
-		siblingCount   int
-		infraErrors    []infraError
-		projectRoot    = a.workspace.ProjectRoot()
+		editedFindings  []enginelint.Finding
+		siblingFindings []enginelint.Finding
+		infraErrors     []infraError
+		projectRoot     = a.workspace.ProjectRoot()
 	)
 
 	for _, dir := range editedDirs {
@@ -130,7 +137,10 @@ func (a *Agent) runLinters(ctx context.Context, linters []enginelint.Linter, edi
 				if editedSet[f.Path] {
 					editedFindings = append(editedFindings, f)
 				} else {
-					siblingCount++
+					// Retain — not just count. The findings are persisted
+					// below so the banner's count is inspectable instead of
+					// a dead-end number the agent cannot expand.
+					siblingFindings = append(siblingFindings, f)
 				}
 			}
 		}
@@ -140,8 +150,13 @@ func (a *Agent) runLinters(ctx context.Context, linters []enginelint.Linter, edi
 		a.send(event.AgentToken{Text: fmt.Sprintf("[Style lint: %s failed — %v — not blocking]\n", ie.name, ie.err)})
 	}
 
+	siblingNote := a.siblingLintNote(projectRoot, siblingFindings)
+
 	if len(editedFindings) > 0 {
 		a.send(event.AgentToken{Text: "[Style lint: violations found — fix before next task]\n"})
+		if siblingNote != "" {
+			a.send(event.AgentToken{Text: "[Style lint: " + siblingNote + "]\n"})
+		}
 		a.mu.Lock()
 		a.pendingLint = formatFindings(editedFindings)
 		a.mu.Unlock()
@@ -149,10 +164,60 @@ func (a *Agent) runLinters(ctx context.Context, linters []enginelint.Linter, edi
 	}
 
 	banner := "[Style lint: clean ✓]"
-	if siblingCount > 0 {
-		banner = fmt.Sprintf("[Style lint: clean ✓ (%d pre-existing in sibling files — not blocking)]", siblingCount)
+	if siblingNote != "" {
+		banner = "[Style lint: clean ✓ (" + siblingNote + ")]"
 	}
 	a.send(event.AgentToken{Text: banner + "\n"})
+}
+
+// siblingLintNote builds the non-blocking sibling-file note for the lint
+// banner. It persists the findings to an inspectable report so the count
+// is actionable (the agent can read_file it; the developer can open it)
+// and references the report path. On write failure — or when there is no
+// project root to anchor the file — it degrades to the bare count rather
+// than blocking or losing the signal. Returns "" when there are no
+// sibling findings.
+func (a *Agent) siblingLintNote(projectRoot string, findings []enginelint.Finding) string {
+	if len(findings) == 0 {
+		return ""
+	}
+	note := fmt.Sprintf("%d pre-existing in sibling files — not blocking", len(findings))
+	path, err := a.writeSiblingLintReport(projectRoot, findings)
+	if err != nil {
+		slog.Warn("lint: write sibling report failed", "err", err)
+		return note
+	}
+	if path == "" {
+		return note
+	}
+	return note + "; details: " + path
+}
+
+// writeSiblingLintReport persists the non-blocking sibling-file findings
+// to <projectRoot>/.project/[siblingLintReportName] and returns the
+// project-relative path for display. Returns ("", nil) when the workspace
+// has no project root (nothing to anchor the file to) so the caller falls
+// back to a count-only note. The report is overwritten each task
+// completion — it always reflects the latest review.
+func (a *Agent) writeSiblingLintReport(projectRoot string, findings []enginelint.Finding) (string, error) {
+	if projectRoot == "" {
+		return "", nil
+	}
+	dir := filepath.Join(projectRoot, ".project")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create .project dir: %w", err)
+	}
+
+	var b strings.Builder
+	b.WriteString("Style lint — pre-existing findings in sibling files (not blocking)\n")
+	fmt.Fprintf(&b, "%d finding(s); regenerated on each task completion.\n\n", len(findings))
+	b.WriteString(formatFindings(findings))
+	b.WriteByte('\n')
+
+	if err := os.WriteFile(filepath.Join(dir, siblingLintReportName), []byte(b.String()), 0o644); err != nil {
+		return "", fmt.Errorf("write lint report: %w", err)
+	}
+	return filepath.Join(".project", siblingLintReportName), nil
 }
 
 // infraError pairs an adapter name with the infrastructure error it raised,

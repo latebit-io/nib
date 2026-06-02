@@ -150,7 +150,7 @@ func (a *Agent) runLinters(ctx context.Context, linters []enginelint.Linter, edi
 		a.send(event.AgentToken{Text: fmt.Sprintf("[Style lint: %s failed — %v — not blocking]\n", ie.name, ie.err)})
 	}
 
-	siblingNote := a.siblingLintNote(siblingFindings)
+	siblingNote := a.siblingLintNote(projectRoot, siblingFindings)
 
 	if len(editedFindings) > 0 {
 		a.send(event.AgentToken{Text: "[Style lint: violations found — fix before next task]\n"})
@@ -177,12 +177,12 @@ func (a *Agent) runLinters(ctx context.Context, linters []enginelint.Linter, edi
 // project root to anchor the file — it degrades to the bare count rather
 // than blocking or losing the signal. Returns "" when there are no
 // sibling findings.
-func (a *Agent) siblingLintNote(findings []enginelint.Finding) string {
+func (a *Agent) siblingLintNote(projectRoot string, findings []enginelint.Finding) string {
 	if len(findings) == 0 {
 		return ""
 	}
 	note := fmt.Sprintf("%d pre-existing in sibling files — not blocking", len(findings))
-	path, err := a.writeSiblingLintReport(findings)
+	path, err := a.writeSiblingLintReport(projectRoot, findings)
 	if err != nil {
 		slog.Warn("lint: write sibling report failed", "err", err)
 		return note
@@ -199,8 +199,7 @@ func (a *Agent) siblingLintNote(findings []enginelint.Finding) string {
 // has no project root (nothing to anchor the file to) so the caller falls
 // back to a count-only note. The report is overwritten each task
 // completion — it always reflects the latest review.
-func (a *Agent) writeSiblingLintReport(findings []enginelint.Finding) (string, error) {
-	projectRoot := a.workspace.ProjectRoot()
+func (a *Agent) writeSiblingLintReport(projectRoot string, findings []enginelint.Finding) (string, error) {
 	if projectRoot == "" {
 		return "", nil
 	}

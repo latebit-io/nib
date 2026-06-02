@@ -207,6 +207,56 @@ func TestRunTaskReview_SiblingFindingsWrittenToReport(t *testing.T) {
 	}
 }
 
+func TestRunTaskReview_MixedEditedAndSiblingFindings(t *testing.T) {
+	// Both signals must coexist without conflation: the edited-file
+	// finding blocks (pendingLint) and emits the violations banner, while
+	// the sibling finding stays non-blocking — surfaced as the note +
+	// report, never in pendingLint.
+	root := t.TempDir()
+	linter := &fakeLinter{name: "fake", res: lint.Result{
+		Findings: []lint.Finding{
+			{Path: "pkg/foo.go", Line: 10, Col: 5, Linter: "fake", Message: "blocking issue"},
+			{Path: "pkg/sibling.go", Line: 3, Linter: "fake", Message: "pre-existing issue"},
+		},
+	}}
+	a := &Agent{
+		bus:       newBus(),
+		workspace: &testWorkspace{root: root},
+		linters:   []lint.Linter{linter},
+	}
+	events := subscribeForTest(t, a)
+	a.taskEdits = []taskEdit{{Path: "pkg/foo.go"}}
+
+	_ = a.runTaskReview(context.Background(), "Done")
+	tokens := drainTokens(events)
+
+	if !strings.Contains(tokens, "violations found") {
+		t.Errorf("expected violations banner for edited-file finding, got: %q", tokens)
+	}
+	relPath := filepath.Join(".project", siblingLintReportName)
+	if !strings.Contains(tokens, "1 pre-existing in sibling files") || !strings.Contains(tokens, relPath) {
+		t.Errorf("expected sibling note with report path alongside violations, got: %q", tokens)
+	}
+
+	// pendingLint carries ONLY the edited finding — the sibling one must
+	// not leak into the blocking path.
+	if !strings.Contains(a.pendingLint, "pkg/foo.go:10:5") {
+		t.Errorf("pendingLint should contain the edited-file finding, got: %q", a.pendingLint)
+	}
+	if strings.Contains(a.pendingLint, "pkg/sibling.go") {
+		t.Errorf("pendingLint must NOT contain the sibling finding, got: %q", a.pendingLint)
+	}
+
+	// The sibling finding lives in the report, not the transcript.
+	data, err := os.ReadFile(filepath.Join(root, ".project", siblingLintReportName))
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(data), "pkg/sibling.go:3") || !strings.Contains(string(data), "pre-existing issue") {
+		t.Errorf("report should contain the sibling finding; got:\n%s", string(data))
+	}
+}
+
 func TestRunTaskReview_InfraErrorDoesNotFakeFindings(t *testing.T) {
 	linter := &fakeLinter{name: "fake", res: lint.Result{
 		Error: errString("binary not found"),

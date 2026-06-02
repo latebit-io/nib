@@ -83,6 +83,18 @@ func (s *OpenAITokenSource) Token(ctx context.Context) (*Token, error) {
 	return nil, fmt.Errorf("no valid OpenAI token (authenticate with 'connect to chatgpt')")
 }
 
+// Invalidate deletes the stored OpenAI token. Called after the Codex
+// endpoint rejects the token with a 401 (revoked or otherwise dead):
+// refresh has already been attempted in [OpenAITokenSource.Token], so a
+// 401 means even the refreshed token is unusable and the refresh token is
+// gone too. Removing it makes [Store.HasToken] report false, so the next
+// launch re-offers the connect flow instead of replaying a dead token.
+func (s *OpenAITokenSource) Invalidate() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store.Delete(ProviderOpenAI)
+}
+
 // OpenAIDeviceFlow runs OpenAI's custom device code flow.
 // OpenAI uses a non-standard flow: request a user code, poll a custom endpoint,
 // then exchange the result for a standard OAuth token.

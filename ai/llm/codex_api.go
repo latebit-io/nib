@@ -25,6 +25,20 @@ type CodexAPI struct {
 	maxTokens int // 0 means "omit max_output_tokens — use provider default"
 }
 
+// authFailure handles a 401 from the Codex endpoint, shared by Stream and
+// ListModels so both self-heal identically. The token source already
+// refreshed during Authenticate, so a 401 here means a dead/revoked token:
+// discard it via the optional invalidation port (a no-op for static
+// API-key auth) so the next launch detects "no credential" and re-offers
+// connect, then return a typed, actionable [AuthError] instead of the raw
+// body.
+func (c *CodexAPI) authFailure(statusCode int, body []byte) error {
+	if inv, ok := c.auth.(CredentialInvalidator); ok {
+		inv.Invalidate()
+	}
+	return parseAuthError("chatgpt", statusCode, body)
+}
+
 // NewCodexAPI creates a CodexAPI provider for the ChatGPT Codex endpoint.
 func NewCodexAPI(model string, auth Auth) *CodexAPI {
 	return &CodexAPI{
@@ -68,6 +82,20 @@ func (c *CodexAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	if resp.StatusCode != http.StatusOK {
+		// A 401 here is a revoked/dead token just as in Stream — apply
+		// the same self-heal so a token first rejected during model
+		// listing (e.g. at startup) is cleared and surfaced as a typed
+		// AuthError. Other statuses keep the generic message.
+		if resp.StatusCode == http.StatusUnauthorized {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			if readErr != nil {
+				// The body only enriches the AuthError's Code/Message;
+				// parseAuthError tolerates an empty body and the 401 is
+				// authoritative, so an unreadable body still self-heals.
+				body = nil
+			}
+			return nil, c.authFailure(resp.StatusCode, body)
+		}
 		// Body drained by deferred Close; no need to read it.
 		return nil, fmt.Errorf("codex: list models: HTTP %d", resp.StatusCode)
 	}
@@ -323,6 +351,17 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 	if resp.StatusCode != http.StatusOK {
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		_ = resp.Body.Close() // body drained above; close error is not actionable
+		// Check 401 before the read-error guard: the body only enriches
+		// the AuthError's Code/Message, but the 401 itself is
+		// authoritative, so an unreadable body must still self-heal
+		// (invalidate the credential) rather than fall through to a
+		// generic error that leaves the dead token in the store.
+		if resp.StatusCode == http.StatusUnauthorized {
+			if readErr != nil {
+				respBody = nil
+			}
+			return nil, c.authFailure(resp.StatusCode, respBody)
+		}
 		if readErr != nil {
 			return nil, fmt.Errorf("codex error: status %d (body unreadable: %w)", resp.StatusCode, readErr)
 		}

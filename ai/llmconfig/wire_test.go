@@ -5,8 +5,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/ai/oauth"
 )
+
+// The OAuth self-heal path depends on the wired Auth being recognizable as
+// an [llm.CredentialInvalidator] so the provider can discard a revoked
+// token after a 401. WireOAuth assigns *oauth.Authenticator to the
+// resolved profile's Auth field; this compile-time assertion fails loudly
+// if that type ever stops satisfying the invalidation port.
+var _ llm.CredentialInvalidator = (*oauth.Authenticator)(nil)
 
 func TestWireOAuth(t *testing.T) {
 	dir := t.TempDir()

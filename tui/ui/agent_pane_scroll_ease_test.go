@@ -53,6 +53,45 @@ func TestScrollToBottom_DefersToTickWhileStreaming(t *testing.T) {
 	}
 }
 
+// TestStreamingKeepsFollowingBottomMidEase is the regression test for the
+// "scrollbar does not follow the output" bug: tokens arriving while
+// ScrollOffset was still easing toward the bottom read the lagging offset
+// (via isAtBottom) as "scrolled up", so auto-follow disengaged and
+// scrollTarget froze above the true bottom — the view and scrollbar
+// stalled while output kept arriving below.
+func TestStreamingKeepsFollowingBottomMidEase(t *testing.T) {
+	m := beatPane()
+	for range 50 {
+		m.AppendText("line\n")
+	}
+	// Enter streaming so scrollToBottom defers to the ease, then force the
+	// mid-ease state: target at the bottom, ScrollOffset lagging at the top.
+	m.SetStatus(event.StatusThinking)
+	m.spinnerRunning = true
+	m.scrollToBottom()
+	m.ScrollOffset = 0
+
+	if m.scrollTarget == 0 {
+		t.Fatal("precondition: scrollTarget should sit at the bottom")
+	}
+	if m.isAtBottom() {
+		t.Fatal("precondition: literal isAtBottom must be false mid-ease")
+	}
+	if !m.isFollowingBottom() {
+		t.Fatal("isFollowingBottom must be true while auto-scroll is in flight")
+	}
+
+	// New output must keep the target tracking the growing bottom.
+	prevTarget := m.scrollTarget
+	for range 10 {
+		m.AppendText("more\n")
+	}
+	if m.scrollTarget <= prevTarget {
+		t.Errorf("scrollTarget did not advance with new output (%d → %d): auto-follow disengaged mid-ease",
+			prevTarget, m.scrollTarget)
+	}
+}
+
 // TestAdvanceScrollEase_StepsTowardTarget verifies the per-tick ease
 // math: each frame moves ~40% of the remaining delta, with a snap
 // threshold so we never stall sub-line short of the target. Stepping

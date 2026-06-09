@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
-	"path/filepath"
+	"strings"
 
 	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/kit"
@@ -20,10 +20,12 @@ import (
 //
 // Skills are discovered the same way as in nib-code — via the shared
 // kit/skill capability, NOT borrowed from the coding agent (which
-// nibster, the kit-boundary smoke test, cannot import). The returned
-// skipped slice names script-bearing skills refused in v1, so
-// [printPlugins] can surface them rather than dropping them silently.
-func nibsterToolset(root string, store memory.Store) (kit.Toolset, []string) {
+// nibster, the kit-boundary smoke test, cannot import). [skill.Discover]
+// resolves both the project-local and user-global layers (project
+// shadows global). The returned Result carries loaded/refused/shadowed
+// skills so [printPlugins] can surface each rather than dropping any
+// silently.
+func nibsterToolset(root string, store memory.Store) (kit.Toolset, skill.Result) {
 	tools := []kit.Tool{
 		bash.New(root),
 		memorytools.NewFetchTool(store),
@@ -32,13 +34,13 @@ func nibsterToolset(root string, store memory.Store) (kit.Toolset, []string) {
 		memorytools.NewListTool(store),
 	}
 
-	skills, err := skill.Discover(filepath.Join(root, ".project", "skills"))
+	skills, err := skill.Discover(root)
 	if err != nil {
 		slog.Warn("skills: some skills failed to load", "err", err)
 	}
 	tools = append(tools, skills.Tools...)
 
-	return kit.Toolset{Tools: tools}, skills.Skipped
+	return kit.Toolset{Tools: tools}, skills
 }
 
 // printPlugins prints the wired plug-in manifest for nibster. Lists
@@ -85,21 +87,18 @@ func printPlugins(root string, store memory.Store) error {
 		Description: "Mark Protocol versioned memory",
 	})
 
-	ts, skippedSkills := nibsterToolset(root, store)
+	ts, skills := nibsterToolset(root, store)
 	for _, t := range ts.Tools {
+		// Skill tools are rendered explicitly below (with source and
+		// shadow/refusal info); skip them in the generic loop so they
+		// are not listed twice.
+		if strings.HasPrefix(t.Definition().Function.Name, skill.ToolNamePrefix) {
+			continue
+		}
 		plugins = append(plugins, kit.DescribeTool(t))
 	}
 
-	// Skills refused in v1 (script-bearing) are not registered as tools;
-	// surface them so the manifest does not read as "no such skill".
-	for _, name := range skippedSkills {
-		plugins = append(plugins, kit.Plugin{
-			Kind:        kit.KindTool,
-			Name:        skill.ToolNamePrefix + name,
-			Description: "skill refused — requests shell execution (needs bash approval, not yet available)",
-			Source:      ".project/skills/" + name,
-		})
-	}
+	plugins = append(plugins, skill.Plugins(skills)...)
 
 	fmt.Print(kit.RenderPlugins(plugins))
 	return nil

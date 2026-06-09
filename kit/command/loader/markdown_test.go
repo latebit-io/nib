@@ -23,6 +23,15 @@ func writeMD(t *testing.T, dir, name, content string) string {
 	return path
 }
 
+func TestParse_RejectsOversizeFile(t *testing.T) {
+	dir := t.TempDir()
+	content := "---\ndescription: huge.\n---\n" + strings.Repeat("x", maxCommandFileBytes+1)
+	path := writeMD(t, dir, "huge.md", content)
+	if _, err := Parse(path, kitcmd.SourceProject); err == nil {
+		t.Fatal("expected an error for an oversize command file")
+	}
+}
+
 func TestParse_FullFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	path := writeMD(t, dir, "review.md", `---

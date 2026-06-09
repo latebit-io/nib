@@ -131,15 +131,17 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	mcpResult := wire.DiscoverMCPTools(projectRoot)
 	defer mcpResult.Cleanup()
 
-	// Discover model-invoked skills from .project/skills/. Pure-prompt
-	// skills become tools; script-bearing skills are refused (logged)
-	// until the bash-approval surface exists.
-	skillResult, skillErr := skill.Discover(filepath.Join(projectRoot, ".project", "skills"))
+	// Discover model-invoked skills from both layers — project-local
+	// (.project/skills) and user-global (<UserConfigDir>/nib/skills) —
+	// with project shadowing global. Pure-prompt skills become tools;
+	// script-bearing skills are refused (logged) until the bash-approval
+	// surface exists.
+	skillResult, skillErr := skill.Discover(projectRoot)
 	if skillErr != nil {
 		slog.Warn("skills: some skills failed to load", "err", skillErr)
 	}
-	for _, name := range skillResult.Loaded {
-		slog.Info("skills: loaded", "skill", name)
+	for _, s := range skillResult.Loaded {
+		slog.Info("skills: loaded", "skill", s.Name, "source", s.Source)
 	}
 
 	distributed := codingmemory.DetectDistributedMemory(mcpResult.ServerNames)
@@ -577,7 +579,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	if pluginsOnly {
-		fmt.Print(buildPluginsManifest(ag, cmdRegistry, mem.Store, llmResolved, skillResult.Skipped))
+		fmt.Print(buildPluginsManifest(ag, cmdRegistry, mem.Store, llmResolved, skillResult))
 		return nil
 	}
 

@@ -33,6 +33,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/treesitter"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	cmdloader "github.com/latebit-io/nib/kit/command/loader"
+	"github.com/latebit-io/nib/kit/skill"
 	nibTui "github.com/latebit-io/nib/tui"
 	tuicmd "github.com/latebit-io/nib/tui/command"
 )
@@ -129,6 +130,17 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// Discover MCP tools from .mcp.json or the brand-prefixed MCP env var.
 	mcpResult := wire.DiscoverMCPTools(projectRoot)
 	defer mcpResult.Cleanup()
+
+	// Discover model-invoked skills from .project/skills/. Pure-prompt
+	// skills become tools; script-bearing skills are refused (logged)
+	// until the bash-approval surface exists.
+	skillResult, skillErr := skill.Discover(filepath.Join(projectRoot, ".project", "skills"))
+	if skillErr != nil {
+		slog.Warn("skills: some skills failed to load", "err", skillErr)
+	}
+	for _, name := range skillResult.Loaded {
+		slog.Info("skills: loaded", "skill", name)
+	}
 
 	distributed := codingmemory.DetectDistributedMemory(mcpResult.ServerNames)
 	if len(distributed) > 0 {
@@ -228,7 +240,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 				treesitter.New(highlight.LanguageFor),
 			)
 		}
-		ag := agent.New(p, sess, opts, mcpResult.Tools...)
+		extraTools := append(append([]agent.Tool{}, mcpResult.Tools...), skillResult.Tools...)
+		ag := agent.New(p, sess, opts, extraTools...)
 		// Forward bus-published agent events into the shared `events`
 		// chan that LSP also writes to. The TUI reads this single
 		// merged stream via [session.Session.Events]. The forwarder
@@ -564,7 +577,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	if pluginsOnly {
-		fmt.Print(buildPluginsManifest(ag, cmdRegistry, mem.Store, llmResolved))
+		fmt.Print(buildPluginsManifest(ag, cmdRegistry, mem.Store, llmResolved, skillResult.Skipped))
 		return nil
 	}
 

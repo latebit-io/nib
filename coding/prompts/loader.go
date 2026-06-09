@@ -31,6 +31,11 @@ type SystemPromptData struct {
 	// Terse enables terse output mode. When true, the template injects
 	// instructions to minimize explanatory text, reducing output tokens.
 	Terse bool
+	// HasSkills is true when at least one model-invoked skill is wired
+	// into the agent. Gates a one-line prompt section explaining the
+	// `skill_*` tools; absent in the common no-skills case so the
+	// prefix is unchanged.
+	HasSkills bool
 }
 
 // UserPromptData holds the template variables for the user message.

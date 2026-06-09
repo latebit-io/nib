@@ -8,14 +8,14 @@ import (
 	"strings"
 
 	kitcmd "github.com/latebit-io/nib/kit/command"
-	"gopkg.in/yaml.v3"
+	"github.com/latebit-io/nib/kit/frontmatter"
 )
 
-// frontmatter is the YAML schema parsed from the head of a markdown
+// commandMeta is the YAML schema parsed from the head of a markdown
 // command file. All fields are optional at the YAML level; missing
 // name falls back to the filename basename so a single-line file is
 // a valid command.
-type frontmatter struct {
+type commandMeta struct {
 	Name        string   `yaml:"name"`
 	Aliases     []string `yaml:"aliases"`
 	Description string   `yaml:"description"`
@@ -86,7 +86,8 @@ func Parse(path string, kind kitcmd.SourceKind) (*MarkdownCommand, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	fm, body, err := splitFrontmatter(data)
+	var fm commandMeta
+	body, err := frontmatter.Split(data, &fm)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -164,70 +165,4 @@ func LoadDir(root string, kind kitcmd.SourceKind) ([]kitcmd.Command, error) {
 		cmds = append(cmds, cmd)
 	}
 	return cmds, errors.Join(errs...)
-}
-
-// splitFrontmatter extracts a YAML frontmatter block (if present)
-// from a markdown file's bytes and returns the parsed metadata plus
-// the remaining body. Files without a frontmatter block are valid:
-// the whole content becomes the body and the metadata is the zero
-// value.
-//
-// Frontmatter is detected by a leading `---` line; the closing `---`
-// must appear on its own line. Anything else (e.g. an in-body `---`
-// horizontal rule on a file with no frontmatter) is left untouched
-// in the body.
-func splitFrontmatter(data []byte) (frontmatter, string, error) {
-	const fence = "---"
-	// Strip a UTF-8 BOM if present so the fence detector lines up
-	// with the user's intended first line. Editors on Windows
-	// sometimes inject one; tolerating it costs nothing.
-	const utf8BOM = "\xef\xbb\xbf"
-	text := strings.TrimPrefix(string(data), utf8BOM)
-
-	if !strings.HasPrefix(text, fence) {
-		return frontmatter{}, text, nil
-	}
-	// First line must be exactly "---" (allow trailing whitespace
-	// but no other content). A `---` with content on the same line
-	// is treated as body content, matching the YAML frontmatter
-	// convention used by static site generators.
-	rest := text[len(fence):]
-	nl := strings.IndexByte(rest, '\n')
-	if nl < 0 || strings.TrimSpace(rest[:nl]) != "" {
-		return frontmatter{}, text, nil
-	}
-	rest = rest[nl+1:]
-
-	// Find the closing fence on its own line.
-	var fmText string
-	for {
-		eol := strings.IndexByte(rest, '\n')
-		var line string
-		if eol < 0 {
-			line = rest
-		} else {
-			line = rest[:eol]
-		}
-		if strings.TrimSpace(line) == fence {
-			body := ""
-			if eol >= 0 {
-				body = rest[eol+1:]
-			}
-			var fm frontmatter
-			if strings.TrimSpace(fmText) != "" {
-				if err := yaml.Unmarshal([]byte(fmText), &fm); err != nil {
-					return frontmatter{}, "", fmt.Errorf("frontmatter: %w", err)
-				}
-			}
-			return fm, body, nil
-		}
-		fmText += line + "\n"
-		if eol < 0 {
-			// EOF without closing fence — treat the whole file as
-			// body, matching the lenient policy ("missing close
-			// means no frontmatter").
-			return frontmatter{}, text, nil
-		}
-		rest = rest[eol+1:]
-	}
 }

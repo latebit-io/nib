@@ -9,10 +9,7 @@ require (
 	github.com/latebit-io/nib/kit v0.0.0
 )
 
-require (
-	github.com/mattn/go-pointer v0.0.1 // indirect
-	github.com/tree-sitter/go-tree-sitter v0.25.0 // indirect
-)
+require gopkg.in/yaml.v3 v3.0.1 // indirect
 
 replace (
 	github.com/latebit-io/nib/agent => ../agent

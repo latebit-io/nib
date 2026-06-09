@@ -458,6 +458,14 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if err := cmdRegistry.Register(kitcmd.NewHelp(cmdRegistry)); err != nil {
 		return fmt.Errorf("register /help: %w", err)
 	}
+	// /capabilities — the in-TUI `--plugins` view. The thunk re-renders
+	// the manifest on each invocation (ag/llmResolved captured by ref)
+	// so a provider hot-swap is reflected.
+	if err := cmdRegistry.Register(newCapabilitiesCommand(func() string {
+		return buildPluginsManifest(ag, cmdRegistry, mem.Store, llmResolved, skillResult)
+	})); err != nil {
+		return fmt.Errorf("register /capabilities: %w", err)
+	}
 	// Busy probe: refuse dispatch only when a turn is actively in
 	// flight (running AND not parked at AwaitInput). The agent is
 	// "running" between the first prompt and the final AgentDone —

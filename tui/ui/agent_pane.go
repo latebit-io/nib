@@ -360,6 +360,12 @@ type AgentPaneModel struct {
 	// dispatch itself still runs. Set via [SetCommandDispatch].
 	commandCtx context.Context //nolint:containedctx // long-lived dispatch ctx is the design
 
+	// cmdComplete is the slash-command autocomplete popup state. Active
+	// only while the user types a command name in the input; driven from
+	// [AgentPaneModel.handleInput] and painted by
+	// [AgentPaneModel.overlayCommandCompletion].
+	cmdComplete commandCompletion
+
 	// renderBuf is the per-frame output slice. Hoisted onto the model so
 	// each Render call resizes/clears in place rather than allocating a
 	// fresh []string. Capacity grows to the largest m.height seen.
@@ -570,6 +576,7 @@ func (m *AgentPaneModel) SetPlanningMode(planning bool) { m.planningMode = plann
 // ResetInput clears the textarea content and recomputes the input layout.
 func (m *AgentPaneModel) ResetInput() {
 	m.input.Reset()
+	m.cmdComplete.dismiss()
 	m.recomputeInputLayout()
 }
 
@@ -886,12 +893,31 @@ func (m *AgentPaneModel) rowCopyText(row int) string {
 // Submit (Enter) and Cancel (Escape) are intercepted to manage
 // the agent pane's input lifecycle.
 func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
-	// Tab navigates the beat timeline even while the textarea is
-	// focused — the alternative (textarea swallows Tab as a single
-	// space) was not a deliberate feature and made the beat-toggle
-	// shortcut undiscoverable. Esc-then-Tab still works the same way;
-	// this just removes the modal step.
-	if msg.Code == tea.KeyTab {
+	// Slash-command completion claims navigation/accept keys while its
+	// popup is open, so the arrows, Tab, Enter and Esc drive the popup
+	// instead of the textarea or the beat timeline. Typing keys fall
+	// through to the editor below and the popup re-filters.
+	if m.cmdComplete.active {
+		switch msg.Code {
+		case tea.KeyUp:
+			m.cmdComplete.selectPrev()
+			return nil
+		case tea.KeyDown:
+			m.cmdComplete.selectNext()
+			return nil
+		case tea.KeyTab, tea.KeyEnter:
+			m.acceptCommandCompletion()
+			return nil
+		case tea.KeyEsc:
+			m.cmdComplete.dismiss()
+			return nil
+		}
+	} else if msg.Code == tea.KeyTab {
+		// Tab navigates the beat timeline even while the textarea is
+		// focused — the alternative (textarea swallows Tab as a single
+		// space) was not a deliberate feature and made the beat-toggle
+		// shortcut undiscoverable. Esc-then-Tab still works the same way;
+		// this just removes the modal step.
 		if msg.Mod&tea.ModShift != 0 {
 			m.collapseFocusedAndMoveUp()
 		} else {
@@ -902,6 +928,8 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 
 	cmd := m.input.Update(msg)
 	m.recomputeInputLayout() // cursor/content may have changed
+	// Re-filter the slash-completion popup against the edited input.
+	m.cmdComplete.refresh(m.input.Content(), m.commandRegistry)
 	if cmd == nil {
 		return nil
 	}
@@ -910,6 +938,7 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 	result := cmd()
 	switch result.(type) {
 	case textarea.SubmitMsg:
+		m.cmdComplete.dismiss()
 		text := m.input.Content()
 		if strings.TrimSpace(text) == "" {
 			// Empty Enter: drop focus and reset planning bit so the
@@ -2382,6 +2411,9 @@ func (m *AgentPaneModel) Render() string {
 		m.renderAPIKeyInput(output, &row)
 	} else {
 		m.renderInputArea(output, &row)
+		// Slash-completion popup floats over the rows just above the
+		// input separator — painted last so it overwrites timeline fill.
+		m.overlayCommandCompletion(output)
 	}
 
 	// Status line (last row): model + usage on the left, colored chip

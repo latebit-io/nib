@@ -6,6 +6,7 @@ import (
 	"github.com/latebit-io/nib/kit"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/memory"
+	"github.com/latebit-io/nib/kit/skill"
 )
 
 // buildPluginsManifest assembles the `--plugins` output for nib-code.
@@ -21,6 +22,7 @@ func buildPluginsManifest(
 	registry *kitcmd.Registry,
 	store memory.Store,
 	resolved *llmconfig.Resolved,
+	skippedSkills []string,
 ) string {
 	var plugins []kit.Plugin
 
@@ -50,6 +52,18 @@ func buildPluginsManifest(
 		for _, c := range registry.List() {
 			plugins = append(plugins, kit.DescribeCommand(c))
 		}
+	}
+
+	// Skills refused in v1 (script-bearing) are not registered as tools,
+	// so surface them here as KindTool entries with an explicit refusal
+	// note — a silent skip would read as "no such skill".
+	for _, name := range skippedSkills {
+		plugins = append(plugins, kit.Plugin{
+			Kind:        kit.KindTool,
+			Name:        skill.ToolNamePrefix + name,
+			Description: "skill refused — requests shell execution (needs bash approval, not yet available)",
+			Source:      ".project/skills/" + name,
+		})
 	}
 
 	return kit.RenderPlugins(plugins)

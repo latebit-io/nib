@@ -3,10 +3,12 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
 	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/memory"
+	"github.com/latebit-io/nib/kit/skill"
 	"github.com/latebit-io/nib/kit/tools/bash"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 )
@@ -15,16 +17,28 @@ import (
 // bundle used by [runAgent] and by [printPlugins]. Sharing a single
 // constructor keeps the `--plugins` output honest: any tool listed
 // here is exactly the tool the agent would dispatch at runtime.
-func nibsterToolset(root string, store memory.Store) kit.Toolset {
-	return kit.Toolset{
-		Tools: []kit.Tool{
-			bash.New(root),
-			memorytools.NewFetchTool(store),
-			memorytools.NewPublishTool(store),
-			memorytools.NewAppendTool(store),
-			memorytools.NewListTool(store),
-		},
+//
+// Skills are discovered the same way as in nib-code — via the shared
+// kit/skill capability, NOT borrowed from the coding agent (which
+// nibster, the kit-boundary smoke test, cannot import). The returned
+// skipped slice names script-bearing skills refused in v1, so
+// [printPlugins] can surface them rather than dropping them silently.
+func nibsterToolset(root string, store memory.Store) (kit.Toolset, []string) {
+	tools := []kit.Tool{
+		bash.New(root),
+		memorytools.NewFetchTool(store),
+		memorytools.NewPublishTool(store),
+		memorytools.NewAppendTool(store),
+		memorytools.NewListTool(store),
 	}
+
+	skills, err := skill.Discover(filepath.Join(root, ".project", "skills"))
+	if err != nil {
+		slog.Warn("skills: some skills failed to load", "err", err)
+	}
+	tools = append(tools, skills.Tools...)
+
+	return kit.Toolset{Tools: tools}, skills.Skipped
 }
 
 // printPlugins prints the wired plug-in manifest for nibster. Lists
@@ -71,9 +85,20 @@ func printPlugins(root string, store memory.Store) error {
 		Description: "Mark Protocol versioned memory",
 	})
 
-	ts := nibsterToolset(root, store)
+	ts, skippedSkills := nibsterToolset(root, store)
 	for _, t := range ts.Tools {
 		plugins = append(plugins, kit.DescribeTool(t))
+	}
+
+	// Skills refused in v1 (script-bearing) are not registered as tools;
+	// surface them so the manifest does not read as "no such skill".
+	for _, name := range skippedSkills {
+		plugins = append(plugins, kit.Plugin{
+			Kind:        kit.KindTool,
+			Name:        skill.ToolNamePrefix + name,
+			Description: "skill refused — requests shell execution (needs bash approval, not yet available)",
+			Source:      ".project/skills/" + name,
+		})
 	}
 
 	fmt.Print(kit.RenderPlugins(plugins))

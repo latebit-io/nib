@@ -58,10 +58,11 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 	sessionID := newSessionID(time.Now(), message)
 	slog.Debug("session", "id", sessionID)
 
+	toolset, _ := nibsterToolset(root, store)
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,
 		SystemPrompt: buildSystemPrompt(sessionID),
-		Toolset:      nibsterToolset(root, store),
+		Toolset:      toolset,
 	})
 	if err != nil {
 		return setupErr("agent: %v", err)

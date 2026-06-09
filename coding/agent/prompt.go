@@ -8,7 +8,20 @@ import (
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/prompts"
+	"github.com/latebit-io/nib/kit/skill"
 )
+
+// hasSkills reports whether any model-invoked skill tool is registered,
+// detected by the [skill.ToolNamePrefix] convention. Drives the
+// prompt's skills section without threading extra construction state.
+func (a *Agent) hasSkills() bool {
+	for _, def := range a.toolDefs {
+		if strings.HasPrefix(def.Function.Name, skill.ToolNamePrefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // maxMemorySummaryBytes caps the memory summary injected into the prompt.
 // The summary is external content from demarkus — must be bounded.
@@ -76,6 +89,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, memorySummary 
 		Headless:          a.interactionMode == Headless,
 		DistributedMemory: a.distributedMemory,
 		Terse:             a.currentTerse(),
+		HasSkills:         a.hasSkills(),
 	}
 	systemPrompt := a.prompts.SystemPrompt(sysData)
 	if mode == event.ModePlanning {
@@ -97,6 +111,7 @@ func (a *Agent) rebuildSystemPrompt(mode event.Mode) string {
 		Headless:          a.interactionMode == Headless,
 		DistributedMemory: a.distributedMemory,
 		Terse:             a.currentTerse(),
+		HasSkills:         a.hasSkills(),
 	}
 	if mode == event.ModePlanning {
 		return a.prompts.PlanningSystemPrompt(sysData)

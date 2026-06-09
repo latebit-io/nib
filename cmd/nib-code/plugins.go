@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/coding/agent"
 	"github.com/latebit-io/nib/kit"
@@ -22,7 +24,7 @@ func buildPluginsManifest(
 	registry *kitcmd.Registry,
 	store memory.Store,
 	resolved *llmconfig.Resolved,
-	skippedSkills []string,
+	skills skill.Result,
 ) string {
 	var plugins []kit.Plugin
 
@@ -44,6 +46,12 @@ func buildPluginsManifest(
 
 	if ag != nil {
 		for _, t := range ag.Tools() {
+			// Skill tools are rendered explicitly below (with source and
+			// shadow/refusal info) — skip them in the generic tool loop
+			// to avoid listing them twice.
+			if strings.HasPrefix(t.Definition().Function.Name, skill.ToolNamePrefix) {
+				continue
+			}
 			plugins = append(plugins, kit.DescribeTool(t))
 		}
 	}
@@ -54,17 +62,7 @@ func buildPluginsManifest(
 		}
 	}
 
-	// Skills refused in v1 (script-bearing) are not registered as tools,
-	// so surface them here as KindTool entries with an explicit refusal
-	// note — a silent skip would read as "no such skill".
-	for _, name := range skippedSkills {
-		plugins = append(plugins, kit.Plugin{
-			Kind:        kit.KindTool,
-			Name:        skill.ToolNamePrefix + name,
-			Description: "skill refused — requests shell execution (needs bash approval, not yet available)",
-			Source:      ".project/skills/" + name,
-		})
-	}
+	plugins = append(plugins, skill.Plugins(skills)...)
 
 	return kit.RenderPlugins(plugins)
 }

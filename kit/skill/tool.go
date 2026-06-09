@@ -2,10 +2,14 @@ package skill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 
 	upagent "github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llm"
 )
 
@@ -53,45 +57,98 @@ func adaptTool(s Skill) skillTool {
 	}
 }
 
-// Result is the outcome of [Discover]: the adapted tools plus the names
-// of skills that loaded and skills that were refused, so the wiring
-// site can surface both (e.g. via --plugins).
+// ProjectDir returns the project-local skills directory,
+// <projectRoot>/.project/skills.
+func ProjectDir(projectRoot string) string {
+	return filepath.Join(projectRoot, ".project", "skills")
+}
+
+// GlobalDir returns the user-global skills directory and true, or
+// ("", false) when it cannot be resolved (no UserConfigDir on this
+// platform). The default is <UserConfigDir>/<brand.ConfigDirName>/skills,
+// mirroring the global-commands convention; [brand.EnvKeyGlobalSkillsDir]
+// overrides it when set non-empty.
+func GlobalDir() (string, bool) {
+	if dir := os.Getenv(brand.EnvKeyGlobalSkillsDir); dir != "" {
+		return dir, true
+	}
+	cfg, err := os.UserConfigDir()
+	if err != nil {
+		slog.Warn("skill: cannot resolve user config dir; skipping global skills layer", "err", err)
+		return "", false
+	}
+	return filepath.Join(cfg, brand.ConfigDirName, "skills"), true
+}
+
+// Result is the outcome of [Discover]: the adapted tools plus the skills
+// that loaded, were refused, or were shadowed, so the wiring site can
+// surface each (e.g. via --plugins). Loaded[i] corresponds to Tools[i].
 type Result struct {
 	// Tools are the agent-compatible adapters for supported skills,
 	// ready to pass as extra tools at agent construction.
 	Tools []upagent.Tool
-	// Loaded names the skills adapted into Tools.
-	Loaded []string
-	// Skipped names the skills refused in v1 (script-bearing), with the
+	// Loaded are the skills adapted into Tools, parallel to Tools.
+	Loaded []Skill
+	// Skipped are the skills refused in v1 (script-bearing), with the
 	// reason logged. Surfaced so the refusal is visible, not silent.
-	Skipped []string
+	Skipped []Skill
+	// Shadowed are the skills hidden by a higher-precedence same-name
+	// skill (a project skill shadows a global one). Surfaced so the
+	// override is visible, not silent.
+	Shadowed []Skill
 }
 
-// Discover loads skills from root and adapts the supported ones into
-// tools. Script-bearing skills ([Skill.NeedsShell]) are refused with a
-// logged warning and recorded in Result.Skipped rather than adapted —
-// executing third-party shell needs the (unbuilt) bash-approval
-// surface. Replacing this branch with a script-skill adapter is the
-// whole of the future extension; nothing else here changes.
+// Discover loads skills for a project from both layers — project-local
+// (<projectRoot>/.project/skills) and user-global ([GlobalDir]) — merges
+// them with project shadowing global ([Merge]), and adapts the
+// surviving pure-prompt skills into tools. Script-bearing skills
+// ([Skill.NeedsShell]) are refused with a logged warning and recorded in
+// Result.Skipped rather than adapted — executing third-party shell needs
+// the (unbuilt) bash-approval surface. Replacing that branch with a
+// script-skill adapter is the whole of the future extension; nothing
+// else here changes.
 //
-// A non-nil error reports per-skill parse failures (see [Load]); the
-// successfully-loaded skills are still returned, so callers may log and
-// proceed.
-func Discover(root string) (Result, error) {
-	skills, err := Load(root)
+// A missing directory on either layer is a no-op. A non-nil error
+// reports per-skill parse failures (see [Load]); everything that did
+// load is still returned, so callers may log and proceed.
+func Discover(projectRoot string) (Result, error) {
+	var errs []error
+
+	project, err := Load(ProjectDir(projectRoot), SourceProject)
+	if err != nil {
+		errs = append(errs, err)
+	}
+
+	var global []Skill
+	if gdir, ok := GlobalDir(); ok {
+		global, err = Load(gdir, SourceGlobal)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	// Project shadows global: pass project first so its names win.
+	winners, shadowed := Merge(project, global)
+
 	var res Result
-	for _, s := range skills {
+	res.Shadowed = shadowed
+	for _, s := range shadowed {
+		slog.Info("skill: shadowed by higher-precedence skill",
+			"skill", s.Name, "source", s.Source, "path", s.Path)
+	}
+	for _, s := range winners {
 		if s.NeedsShell() {
-			res.Skipped = append(res.Skipped, s.Name)
+			res.Skipped = append(res.Skipped, s)
 			slog.Warn("skill: refused script-bearing skill (shell execution needs bash approval, not yet available)",
-				"skill", s.Name, "path", s.Path, "allowed_tools", s.AllowedTools)
+				"skill", s.Name, "source", s.Source, "path", s.Path, "allowed_tools", s.AllowedTools)
 			continue
 		}
 		res.Tools = append(res.Tools, adaptTool(s))
-		res.Loaded = append(res.Loaded, s.Name)
+		res.Loaded = append(res.Loaded, s)
 	}
-	if err != nil {
-		return res, fmt.Errorf("load skills: %w", err)
+
+	if len(errs) > 0 {
+		return res, fmt.Errorf("load skills: %w", errors.Join(errs...))
 	}
 	return res, nil
 }

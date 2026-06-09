@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
@@ -31,7 +32,7 @@ description: Review a Go diff for correctness and layering.
 ---
 Check for layering violations and missing edge cases.
 `)
-	skills, err := Load(root)
+	skills, err := Load(root, SourceProject)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -57,7 +58,7 @@ description: Encode the repo's commit conventions.
 ---
 Use conventional commits.
 `)
-	skills, err := Load(root)
+	skills, err := Load(root, SourceProject)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -67,7 +68,7 @@ Use conventional commits.
 }
 
 func TestLoad_MissingRootIsNotAnError(t *testing.T) {
-	skills, err := Load(filepath.Join(t.TempDir(), "does-not-exist"))
+	skills, err := Load(filepath.Join(t.TempDir(), "does-not-exist"), SourceProject)
 	if err != nil {
 		t.Fatalf("missing root should not error, got %v", err)
 	}
@@ -83,7 +84,7 @@ name: nodesc
 ---
 body only
 `)
-	skills, err := Load(root)
+	skills, err := Load(root, SourceProject)
 	if err == nil {
 		t.Fatal("expected error for missing description")
 	}
@@ -99,7 +100,7 @@ description: has spaces and bang in the dir-derived name.
 ---
 body
 `)
-	_, err := Load(root)
+	_, err := Load(root, SourceProject)
 	if err == nil {
 		t.Fatal("expected error for invalid name")
 	}
@@ -116,12 +117,33 @@ do the thing
 	if err := os.MkdirAll(filepath.Join(root, "resources"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	skills, err := Load(root)
+	skills, err := Load(root, SourceProject)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(skills) != 1 {
 		t.Fatalf("got %d skills, want 1 (resources dir skipped)", len(skills))
+	}
+}
+
+func TestLoad_RejectsOversizeFile(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "huge")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A header that would parse fine, followed by a body over the cap.
+	body := strings.Repeat("x", maxSkillFileBytes+1)
+	content := "---\ndescription: huge.\n---\n" + body
+	if err := os.WriteFile(filepath.Join(dir, skillFile), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skills, err := Load(root, SourceProject)
+	if err == nil {
+		t.Fatal("expected an error for an oversize SKILL.md")
+	}
+	if len(skills) != 0 {
+		t.Fatalf("oversize skill should not load, got %v", skills)
 	}
 }
 
@@ -137,7 +159,7 @@ name: bad
 ---
 no description
 `)
-	skills, err := Load(root)
+	skills, err := Load(root, SourceProject)
 	if err == nil {
 		t.Fatal("expected joined error for the bad skill")
 	}
@@ -173,28 +195,127 @@ func TestNeedsShell(t *testing.T) {
 	}
 }
 
+// newProject creates a temp project root and points the global skills
+// dir at a sibling temp dir (so Discover never reads the developer's
+// real ~/.config/nib/skills). Returns (projectRoot, globalDir); project
+// skills go under ProjectDir(projectRoot), global under globalDir.
+func newProject(t *testing.T) (projectRoot, globalDir string) {
+	t.Helper()
+	projectRoot = t.TempDir()
+	globalDir = t.TempDir()
+	t.Setenv("NIB_GLOBAL_SKILLS_DIR", globalDir)
+	return projectRoot, globalDir
+}
+
 func TestDiscover_AdaptsPromptSkillsRefusesScriptSkills(t *testing.T) {
-	root := t.TempDir()
-	writeSkill(t, root, "prompt-only", `---
+	projectRoot, _ := newProject(t)
+	skillsDir := ProjectDir(projectRoot)
+	writeSkill(t, skillsDir, "prompt-only", `---
 description: pure prompt skill.
 ---
 instructions here
 `)
-	writeSkill(t, root, "scripted", `---
+	writeSkill(t, skillsDir, "scripted", `---
 description: needs shell.
 allowed-tools: [Bash]
 ---
 runs a script
 `)
-	res, err := Discover(root)
+	res, err := Discover(projectRoot)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	if len(res.Tools) != 1 || len(res.Loaded) != 1 || res.Loaded[0] != "prompt-only" {
+	if len(res.Tools) != 1 || len(res.Loaded) != 1 || res.Loaded[0].Name != "prompt-only" {
 		t.Fatalf("expected only prompt-only loaded, got Loaded=%v", res.Loaded)
 	}
-	if len(res.Skipped) != 1 || res.Skipped[0] != "scripted" {
+	if res.Loaded[0].Source != SourceProject {
+		t.Errorf("loaded skill source = %q, want project", res.Loaded[0].Source)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0].Name != "scripted" {
 		t.Fatalf("expected scripted skipped, got Skipped=%v", res.Skipped)
+	}
+}
+
+func TestDiscover_LoadsGlobalAndProject(t *testing.T) {
+	projectRoot, globalDir := newProject(t)
+	writeSkill(t, ProjectDir(projectRoot), "proj-skill", "---\ndescription: project one.\n---\nP")
+	writeSkill(t, globalDir, "glob-skill", "---\ndescription: global one.\n---\nG")
+
+	res, err := Discover(projectRoot)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := map[string]Source{}
+	for _, s := range res.Loaded {
+		got[s.Name] = s.Source
+	}
+	if got["proj-skill"] != SourceProject || got["glob-skill"] != SourceGlobal {
+		t.Fatalf("expected both layers loaded with correct source, got %v", got)
+	}
+}
+
+func TestDiscover_ProjectShadowsGlobal(t *testing.T) {
+	projectRoot, globalDir := newProject(t)
+	writeSkill(t, ProjectDir(projectRoot), "code-review", "---\ndescription: PROJECT version.\n---\nproject body")
+	writeSkill(t, globalDir, "code-review", "---\ndescription: GLOBAL version.\n---\nglobal body")
+
+	res, err := Discover(projectRoot)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(res.Loaded) != 1 || res.Loaded[0].Source != SourceProject {
+		t.Fatalf("expected the project skill to win, got %+v", res.Loaded)
+	}
+	if res.Loaded[0].Description != "PROJECT version." {
+		t.Errorf("winner description = %q, want PROJECT version.", res.Loaded[0].Description)
+	}
+	if len(res.Shadowed) != 1 || res.Shadowed[0].Source != SourceGlobal {
+		t.Fatalf("expected the global skill shadowed, got %+v", res.Shadowed)
+	}
+}
+
+func TestDiscover_NoSkillsAnywhereIsClean(t *testing.T) {
+	projectRoot, _ := newProject(t) // global points at an empty temp dir
+	res, err := Discover(projectRoot)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(res.Tools) != 0 || len(res.Loaded) != 0 || len(res.Skipped) != 0 || len(res.Shadowed) != 0 {
+		t.Fatalf("expected empty result with no skills, got %+v", res)
+	}
+}
+
+func TestMerge_FirstLayerWins(t *testing.T) {
+	project := []Skill{{Name: "a", Source: SourceProject}, {Name: "b", Source: SourceProject}}
+	global := []Skill{{Name: "b", Source: SourceGlobal}, {Name: "c", Source: SourceGlobal}}
+
+	winners, shadowed := Merge(project, global)
+
+	gotWin := map[string]Source{}
+	for _, s := range winners {
+		gotWin[s.Name] = s.Source
+	}
+	if len(winners) != 3 || gotWin["a"] != SourceProject || gotWin["b"] != SourceProject || gotWin["c"] != SourceGlobal {
+		t.Fatalf("merge winners wrong: %v", gotWin)
+	}
+	if len(shadowed) != 1 || shadowed[0].Name != "b" || shadowed[0].Source != SourceGlobal {
+		t.Fatalf("expected global b shadowed, got %+v", shadowed)
+	}
+}
+
+func TestProjectDir(t *testing.T) {
+	got := ProjectDir(filepath.Join("tmp", "proj"))
+	want := filepath.Join("tmp", "proj", ".project", "skills")
+	if got != want {
+		t.Errorf("ProjectDir = %q, want %q", got, want)
+	}
+}
+
+func TestGlobalDir_EnvOverride(t *testing.T) {
+	t.Setenv("NIB_GLOBAL_SKILLS_DIR", filepath.Join("custom", "skills"))
+	dir, ok := GlobalDir()
+	if !ok || dir != filepath.Join("custom", "skills") {
+		t.Fatalf("GlobalDir with override = (%q, %v), want (custom/skills, true)", dir, ok)
 	}
 }
 

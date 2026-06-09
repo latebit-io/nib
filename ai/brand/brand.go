@@ -46,6 +46,13 @@ const (
 	// cap is a net win on cache rate and billable tokens.
 	EnvKeyToolOutputCapDisabled = EnvPrefix + "TOOL_OUTPUT_CAP_DISABLED"
 
+	// EnvKeyGlobalSkillsDir overrides the user-global skills directory
+	// (default <UserConfigDir>/<ConfigDirName>/skills). Lets power users
+	// relocate it and lets tests point it at a temp dir for hermetic
+	// global-layer coverage. Project-local skills (.project/skills) are
+	// unaffected.
+	EnvKeyGlobalSkillsDir = EnvPrefix + "GLOBAL_SKILLS_DIR"
+
 	// ConfigDirName is the subdirectory under [os.UserConfigDir] where
 	// persisted product config lives (style.json, llm.json, OAuth tokens).
 	ConfigDirName = Name

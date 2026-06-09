@@ -8,10 +8,17 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/kit/frontmatter"
+	"github.com/latebit-io/nib/kit/internal/filecap"
 )
 
 // skillFile is the conventional filename inside each skill directory.
 const skillFile = "SKILL.md"
+
+// maxSkillFileBytes caps how much of a SKILL.md is read. A skill body is
+// instruction text, never near this size; the cap bounds memory against
+// a hostile or accidental giant file in an untrusted project's
+// .project/skills (a local DoS otherwise).
+const maxSkillFileBytes = 1 << 20 // 1 MiB
 
 // meta is the YAML frontmatter schema for a SKILL.md file. All fields
 // are optional at the YAML level; a missing name falls back to the
@@ -42,7 +49,9 @@ func validNameChars(name string) bool {
 }
 
 // Load parses every <root>/<name>/SKILL.md and returns the resulting
-// skills. root is typically "<projectRoot>/.project/skills".
+// skills, stamping each with source. root is typically
+// "<projectRoot>/.project/skills" (with [SourceProject]) or the
+// user-global skills directory (with [SourceGlobal]).
 //
 // Error policy mirrors the markdown command loader:
 //   - Missing root → (nil, nil). "No skills here" is not a failure.
@@ -54,7 +63,7 @@ func validNameChars(name string) bool {
 // Only immediate subdirectories are scanned, each expected to contain a
 // SKILL.md. A subdirectory without one is skipped silently (it may hold
 // unrelated resources). Files directly under root are ignored.
-func Load(root string) ([]Skill, error) {
+func Load(root string, source Source) ([]Skill, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -73,7 +82,7 @@ func Load(root string) ([]Skill, error) {
 		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
-		s, perr := parse(path, e.Name())
+		s, perr := parse(path, e.Name(), source)
 		if perr != nil {
 			errs = append(errs, perr)
 			continue
@@ -84,13 +93,16 @@ func Load(root string) ([]Skill, error) {
 }
 
 // parse reads a single SKILL.md and resolves it into a Skill. dirName is
-// the containing directory's basename, used as the name fallback.
-func parse(path, dirName string) (Skill, error) {
+// the containing directory's basename, used as the name fallback;
+// source stamps the resulting skill's layer.
+func parse(path, dirName string, source Source) (Skill, error) {
 	// gosec G304: path is built from os.ReadDir entries under a
 	// startup-configured root in the standard wiring, so attacker
-	// traversal is not reachable. External callers passing untrusted
-	// roots own that responsibility.
-	data, err := os.ReadFile(path) //nolint:gosec // see comment above
+	// traversal is not reachable (entry names are single path
+	// components — no separators or ".."). External callers passing
+	// untrusted roots own that responsibility. Size-capped so a hostile
+	// or accidental giant SKILL.md cannot exhaust memory.
+	data, err := filecap.Read(path, maxSkillFileBytes, "skill")
 	if err != nil {
 		return Skill{}, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -119,5 +131,6 @@ func parse(path, dirName string) (Skill, error) {
 		Body:         strings.TrimSpace(body),
 		AllowedTools: m.AllowedTools,
 		Path:         path,
+		Source:       source,
 	}, nil
 }

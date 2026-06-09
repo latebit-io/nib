@@ -17,6 +17,18 @@ package skill
 
 import "strings"
 
+// Source identifies which layer a skill was loaded from. Mirrors
+// command.SourceKind: project-local skills shadow user-global ones of
+// the same name (see [Merge]).
+type Source string
+
+const (
+	// SourceProject is a skill under <projectRoot>/.project/skills.
+	SourceProject Source = "project"
+	// SourceGlobal is a skill under the user-global skills directory.
+	SourceGlobal Source = "global"
+)
+
 // Skill is a parsed SKILL.md: the model-facing metadata plus the
 // instruction body injected on invocation. The zero value is not a
 // valid skill — construct via [Load].
@@ -37,6 +49,30 @@ type Skill struct {
 	AllowedTools []string
 	// Path is the source SKILL.md path, kept for diagnostics.
 	Path string
+	// Source is the layer this skill was loaded from. Stamped by [Load].
+	Source Source
+}
+
+// Merge deduplicates skills by name across precedence layers. Layers
+// are passed highest-precedence first (e.g. Merge(project, global)), so
+// the first occurrence of a name wins and any later same-name skill is
+// returned in shadowed rather than winners. Within a single layer the
+// first occurrence wins (a duplicate name inside one directory is
+// itself shadowed) — the loader does not otherwise dedup, so this is
+// the one place name collisions are resolved before adaptation.
+func Merge(layers ...[]Skill) (winners, shadowed []Skill) {
+	seen := make(map[string]bool)
+	for _, layer := range layers {
+		for _, s := range layer {
+			if seen[s.Name] {
+				shadowed = append(shadowed, s)
+				continue
+			}
+			seen[s.Name] = true
+			winners = append(winners, s)
+		}
+	}
+	return winners, shadowed
 }
 
 // shellTools are the whole-word tokens in an allowed-tools entry that

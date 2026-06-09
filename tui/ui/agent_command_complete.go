@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"sort"
 	"strings"
 
 	kitcmd "github.com/latebit-io/nib/kit/command"
@@ -29,6 +30,11 @@ type commandCompletion struct {
 	matches  []commandCandidate
 	selected int
 	scroll   int
+	// prefix is the command-name prefix the current matches were
+	// filtered by. Preserved across refreshes so a cursor move that
+	// doesn't change the prefix (left/right/home/end) keeps the
+	// highlighted command instead of snapping back to the top.
+	prefix string
 }
 
 // commandNamePrefix returns the command-name prefix the user is typing
@@ -64,18 +70,35 @@ func (c *commandCompletion) refresh(content string, reg *kitcmd.Registry) {
 	var matches []commandCandidate
 	for _, cmd := range reg.List() {
 		d := cmd.Definition()
-		if strings.HasPrefix(strings.ToLower(d.Name), lower) {
-			matches = append(matches, commandCandidate{name: d.Name, desc: d.Description})
+		// Match against the canonical name AND every alias, so a command
+		// reachable only via an alias (e.g. /plugins → capabilities) is
+		// still discoverable. Each matching invocation name is its own
+		// candidate; accepting fills exactly what was matched.
+		for _, name := range append([]string{d.Name}, d.Aliases...) {
+			if strings.HasPrefix(strings.ToLower(name), lower) {
+				matches = append(matches, commandCandidate{name: name, desc: d.Description})
+			}
 		}
 	}
 	if len(matches) == 0 {
 		c.dismiss()
 		return
 	}
+	// reg.List() is name-sorted, but interleaving aliases breaks that;
+	// re-sort so the popup reads alphabetically.
+	sort.Slice(matches, func(i, j int) bool { return matches[i].name < matches[j].name })
+
+	// Preserve the highlight when the prefix is unchanged (a cursor move,
+	// not a typed edit); reset to the top only when the filter changed.
+	samePrefix := c.active && c.prefix == prefix
 	c.matches = matches
 	c.active = true
-	c.selected = 0
-	c.scroll = 0
+	c.prefix = prefix
+	if !samePrefix || c.selected >= len(matches) {
+		c.selected = 0
+		c.scroll = 0
+	}
+	c.clampScroll()
 }
 
 // dismiss closes the popup and clears its state.
@@ -84,6 +107,7 @@ func (c *commandCompletion) dismiss() {
 	c.matches = nil
 	c.selected = 0
 	c.scroll = 0
+	c.prefix = ""
 }
 
 // selectNext / selectPrev move the highlight, wrapping at the ends.

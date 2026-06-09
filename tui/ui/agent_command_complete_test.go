@@ -92,6 +92,54 @@ func TestCompletion_RefreshNilRegistry(t *testing.T) {
 	}
 }
 
+// aliasDef builds a command definition with aliases for completion tests.
+func aliasDef(name string, aliases ...string) kitcmd.Definition {
+	d := builtinDef(name)
+	d.Aliases = aliases
+	return d
+}
+
+func TestCompletion_MatchesAliases(t *testing.T) {
+	reg := kitcmd.NewRegistry()
+	if err := reg.Register(&fakeDispatchHandler{def: aliasDef("capabilities", "plugins")}); err != nil {
+		t.Fatal(err)
+	}
+	var c commandCompletion
+
+	// Typing toward the alias must surface the command under that alias.
+	c.refresh("/plug", reg)
+	if !c.active || len(c.matches) != 1 || c.matches[0].name != "plugins" {
+		t.Fatalf("/plug should match the plugins alias, got active=%v matches=%+v", c.active, c.matches)
+	}
+	// Canonical name still matches under its own prefix.
+	c.refresh("/cap", reg)
+	if !c.active || len(c.matches) != 1 || c.matches[0].name != "capabilities" {
+		t.Fatalf("/cap should match capabilities, got %+v", c.matches)
+	}
+}
+
+func TestCompletion_PreservesSelectionOnSamePrefix(t *testing.T) {
+	reg := completionRegistry(t, "alpha", "beta", "gamma")
+	var c commandCompletion
+	c.refresh("/", reg)
+	c.selectNext()
+	c.selectNext() // selected = 2 (gamma)
+	if c.selected != 2 {
+		t.Fatalf("setup: selected = %d, want 2", c.selected)
+	}
+	// A refresh with the SAME content (e.g. a cursor move) must keep the
+	// highlight, not snap back to the top.
+	c.refresh("/", reg)
+	if c.selected != 2 {
+		t.Errorf("same-prefix refresh reset selection to %d, want 2", c.selected)
+	}
+	// A refresh with a DIFFERENT prefix resets to the top.
+	c.refresh("/a", reg)
+	if c.selected != 0 {
+		t.Errorf("changed-prefix refresh should reset to 0, got %d", c.selected)
+	}
+}
+
 func TestCompletion_SelectWraps(t *testing.T) {
 	reg := completionRegistry(t, "alpha", "beta", "gamma")
 	var c commandCompletion

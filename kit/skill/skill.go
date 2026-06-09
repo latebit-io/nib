@@ -12,7 +12,7 @@
 // execution ([Skill.NeedsShell]) is parsed but refused at adapt time,
 // because executing third-party shell needs the per-command approval
 // surface that does not exist yet. The refusal is the seam the future
-// script-skill extension slots into — see [Adapt] and [Discover].
+// script-skill extension slots into — see [Discover].
 package skill
 
 import "strings"
@@ -39,19 +39,38 @@ type Skill struct {
 	Path string
 }
 
-// shellTokens are the substrings in an allowed-tools entry that mark a
-// skill as requesting shell execution. Matched case-insensitively.
-var shellTokens = []string{"bash", "shell", "exec", "run", "sh"}
+// shellTools are the whole-word tokens in an allowed-tools entry that
+// mark a skill as requesting shell execution. Matched against each
+// token of an entry (split on non-alphanumerics), never as substrings:
+// substring matching on short tokens like "sh" would falsely flag
+// "publish"/"push"/"refresh", and "run" would flag "run_tests"/"rerun".
+var shellTools = map[string]bool{
+	"bash":    true,
+	"sh":      true,
+	"shell":   true,
+	"cmd":     true,
+	"exec":    true,
+	"execute": true,
+}
+
+// tokenize lowercases s and splits it into alphanumeric runs, so
+// "execute_command" → ["execute", "command"] and "Bash" → ["bash"].
+func tokenize(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+}
 
 // NeedsShell reports whether the skill requests shell execution via its
 // allowed-tools list. Such skills are refused in v1 (no bash-approval
 // surface yet); the predicate is the single branch the future
-// script-skill adapter flips.
+// script-skill adapter flips. Matching is whole-token, not substring,
+// so legitimate tool names like "publish" or "run_tests" are not
+// misclassified.
 func (s Skill) NeedsShell() bool {
 	for _, t := range s.AllowedTools {
-		l := strings.ToLower(strings.TrimSpace(t))
-		for _, tok := range shellTokens {
-			if l == tok || strings.Contains(l, tok) {
+		for _, tok := range tokenize(t) {
+			if shellTools[tok] {
 				return true
 			}
 		}

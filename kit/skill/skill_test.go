@@ -156,6 +156,14 @@ func TestNeedsShell(t *testing.T) {
 		{[]string{"Bash"}, true},
 		{[]string{"Read", "shell"}, true},
 		{[]string{"execute_command"}, true},
+		// False-positive guards: substring matching on "sh"/"run" would
+		// have wrongly flagged these.
+		{[]string{"publish"}, false},
+		{[]string{"push"}, false},
+		{[]string{"refresh"}, false},
+		{[]string{"run_tests"}, false},
+		{[]string{"rerun"}, false},
+		{[]string{"memory_publish", "find_references"}, false},
 	}
 	for _, c := range cases {
 		got := Skill{AllowedTools: c.tools}.NeedsShell()

@@ -22,9 +22,9 @@ type meta struct {
 	AllowedTools []string `yaml:"allowed-tools"`
 }
 
-// validNameChars reports whether r is allowed in a skill name. Skill
-// names become part of an LLM-facing tool name ("skill_<name>"), so the
-// set matches the tool-name-safe alphabet.
+// validNameChars reports whether name contains only characters allowed
+// in a skill name. Skill names become part of an LLM-facing tool name
+// ("skill_<name>"), so the set matches the tool-name-safe alphabet.
 func validNameChars(name string) bool {
 	if name == "" {
 		return false

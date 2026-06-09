@@ -58,6 +58,9 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 	sessionID := newSessionID(time.Now(), message)
 	slog.Debug("session", "id", sessionID)
 
+	// Discard the skipped-skills list here — Discover already logs each
+	// refusal via slog.Warn; the names are only needed for the
+	// --plugins manifest (see printPlugins).
 	toolset, _ := nibsterToolset(root, store)
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,

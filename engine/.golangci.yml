@@ -1,0 +1,94 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - cyclop
+    - funlen
+    - gocognit
+    - interfacebloat
+
+  settings:
+    # --- SOLID: Single Responsibility proxies ---
+
+    # Functions that are too long likely do too much (SRP).
+    funlen:
+      lines: 80
+      statements: 50
+
+    # High cyclomatic complexity = too many branches = likely multiple responsibilities.
+    cyclop:
+      max-complexity: 15
+
+    # Cognitive complexity measures how hard a function is to understand.
+    gocognit:
+      min-complexity: 30
+
+    # --- SOLID: Interface Segregation ---
+
+    # Fat interfaces violate ISP. Keep interfaces small and focused.
+    interfacebloat:
+      max: 6
+
+    # --- SOLID: Dependency Inversion (hexagonal boundaries) ---
+
+    depguard:
+      rules:
+        # buffer is the lowest layer — stdlib only, no engine imports.
+        buffer-isolation:
+          files:
+            - "**/buffer/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/tui/editor"
+              desc: "buffer must not import editor (dependency inversion; editor controller lives in tui after the editor-vs-buffer split)"
+            - pkg: "github.com/latebit-io/nib/ai/llm"
+              desc: "buffer must not import llm (dependency inversion)"
+            - pkg: "github.com/latebit-io/nib/engine/highlight"
+              desc: "buffer must not import highlight"
+            - pkg: "github.com/latebit-io/nib/engine/filelist"
+              desc: "buffer must not import filelist"
+            - pkg: "github.com/latebit-io/nib/engine/fuzzy"
+              desc: "buffer must not import fuzzy"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "engine must never import tui"
+
+        # openfile is a frontend-agnostic file handle (buffer + edit-domain
+        # ops). It must not pull in the editor controller or other
+        # rendering surface — that's what keeps headless binaries free of
+        # cursor/highlighter machinery.
+        openfile-isolation:
+          files:
+            - "**/openfile/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "openfile must not import tui — openfile is the buffer-only handle headless code consumes"
+            - pkg: "github.com/latebit-io/nib/tui/editor"
+              desc: "openfile must not import the tui editor controller (explicit sibling-path entry; depguard pkg matching does not prefix-cover sibling sub-packages reliably)"
+            - pkg: "github.com/latebit-io/nib/engine/highlight"
+              desc: "openfile must not import highlight — highlighting is a frontend concern"
+            - pkg: "github.com/latebit-io/nib/ai/llm"
+              desc: "openfile must not import llm"
+
+        # No engine package may import tui — dependencies point inward
+        # only. Both the umbrella path and the `tui/editor` sub-path are
+        # listed explicitly: depguard's matching does not prefix-cover
+        # sibling sub-packages reliably (the same pattern is used in
+        # buffer-isolation above), and tui/editor is the most dangerous
+        # one to leak in since it pulls UI controller machinery.
+        engine-no-tui:
+          deny:
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "engine must never import tui — dependencies point inward only"
+            - pkg: "github.com/latebit-io/nib/tui/editor"
+              desc: "engine must never import the tui editor controller — engine consumes openfile/buffer; cursor/scroll lives in tui"
+
+        # No engine package may import any coding package. Phase 5 split
+        # the application event vocabulary out of engine/event into
+        # coding/event so engine can stay reusable as an editor library;
+        # this rule locks the invariant in.
+        engine-no-coding:
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding"
+              desc: "engine must never import coding — engine is editor + shared infra; application logic lives in coding"
+            - pkg: "github.com/latebit-io/nib/agent"
+              desc: "engine must never import agent — agent composes engine, not the reverse"

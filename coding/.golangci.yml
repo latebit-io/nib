@@ -1,0 +1,95 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+
+  settings:
+    depguard:
+      rules:
+        # coding/agent is the application loop. It composes leaf
+        # subpackages and the foundation but must not reach laterally
+        # into composition roots (session/headless/wire) — those depend
+        # on agent, so the reverse would be a cycle.
+        agent-no-composition:
+          files:
+            - "**/agent/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding/session"
+              desc: "agent must not import session — composition root depends on agent, not the reverse"
+            - pkg: "github.com/latebit-io/nib/coding/headless"
+              desc: "agent must not import headless — composition root depends on agent, not the reverse"
+            - pkg: "github.com/latebit-io/nib/coding/wire"
+              desc: "agent must not import wire — composition root depends on agent, not the reverse"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "coding must not import tui — dependencies point inward only"
+            - pkg: "github.com/latebit-io/nib/engine/buffer"
+              desc: "agent must not import editor-internal engine packages"
+            - pkg: "github.com/latebit-io/nib/tui/editor"
+              desc: "agent must not import the editor controller — editor lives in tui after the editor-vs-buffer split; agent works against openfile/buffer interfaces"
+            - pkg: "github.com/latebit-io/nib/engine/highlight"
+              desc: "agent must not import editor-internal engine packages"
+            - pkg: "github.com/latebit-io/nib/engine/filelist"
+              desc: "agent must not import editor-internal engine packages"
+            - pkg: "github.com/latebit-io/nib/engine/fuzzy"
+              desc: "agent must not import editor-internal engine packages"
+
+        # Leaf subpackages must stay leaves. They must not import the
+        # agent loop (would be a cycle) or composition roots.
+        coding-leaves:
+          files:
+            - "**/budget/*.go"
+            - "**/event/*.go"
+            - "**/lint/*.go"
+            - "**/memory/*.go"
+            - "**/nudges/*.go"
+            - "**/prompts/*.go"
+            - "**/smoke/*.go"
+            - "**/style/*.go"
+            - "**/tools/*.go"
+            - "**/validation/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding/agent"
+              desc: "leaf subpackage must not import agent — agent composes leaves, not the reverse"
+            - pkg: "github.com/latebit-io/nib/coding/session"
+              desc: "leaf subpackage must not import session"
+            - pkg: "github.com/latebit-io/nib/coding/headless"
+              desc: "leaf subpackage must not import headless"
+            - pkg: "github.com/latebit-io/nib/coding/wire"
+              desc: "leaf subpackage must not import wire"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "coding must not import tui"
+
+        # approval is a coordination primitive consumed by agent. It
+        # must not import agent or composition roots.
+        approval-isolation:
+          files:
+            - "**/approval/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding/agent"
+              desc: "approval must not import agent — agent composes approval, not the reverse"
+            - pkg: "github.com/latebit-io/nib/coding/session"
+              desc: "approval must not import session"
+            - pkg: "github.com/latebit-io/nib/coding/headless"
+              desc: "approval must not import headless"
+            - pkg: "github.com/latebit-io/nib/coding/wire"
+              desc: "approval must not import wire"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "coding must not import tui"
+
+        # Composition roots and the headless runner must not depend on
+        # the TUI — frontends are downstream consumers.
+        composition-no-tui:
+          files:
+            - "**/session/*.go"
+            - "**/headless/*.go"
+            - "**/wire/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "coding must not import tui — dependencies point inward only"
+
+        # Whole-module backstop: no coding package may import tui.
+        coding-no-tui:
+          deny:
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "coding must not import tui — dependencies point inward only"

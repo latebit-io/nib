@@ -1,0 +1,898 @@
+package kit_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	agentevent "github.com/latebit-io/nib/agent/event"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/command"
+)
+
+// stubCommand is a test fake for [command.Command]. It implements only
+// the marker interface — neither HandlerCommand nor PromptCommand —
+// because [Merge] does not dispatch commands, only concatenates them.
+type stubCommand struct{ name string }
+
+func (s stubCommand) Definition() command.Definition {
+	return command.Definition{Name: s.name, Source: command.Source{Kind: command.SourceBuiltin}}
+}
+
+// resultTool returns a fixed result and records whether Execute was called.
+type resultTool struct {
+	name   string
+	result string
+	called bool
+}
+
+func (t *resultTool) Definition() llm.ToolDef {
+	return llm.ToolDef{Function: llm.FunctionDef{Name: t.name}}
+}
+
+func (t *resultTool) Execute(_ context.Context, _ llm.ToolCall) kit.ToolResult {
+	t.called = true
+	return kit.ToolResult{Content: t.result}
+}
+
+// --- Merge: tool concatenation ---
+
+func TestMerge_ConcatenatesToolsInOrder(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Tools: []kit.Tool{nopTool{name: "a"}}}
+	b := kit.Toolset{Tools: []kit.Tool{nopTool{name: "b"}, nopTool{name: "c"}}}
+	merged := kit.Merge(a, b)
+
+	want := []string{"a", "b", "c"}
+	if len(merged.Tools) != len(want) {
+		t.Fatalf("got %d tools, want %d", len(merged.Tools), len(want))
+	}
+	for i, w := range want {
+		got := merged.Tools[i].Definition().Function.Name
+		if got != w {
+			t.Errorf("tool[%d] = %q, want %q", i, got, w)
+		}
+	}
+}
+
+func TestMerge_ZeroValue(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Tools: []kit.Tool{nopTool{name: "x"}}}
+	merged := kit.Merge(a, kit.Toolset{})
+	if len(merged.Tools) != 1 {
+		t.Fatalf("got %d tools, want 1", len(merged.Tools))
+	}
+}
+
+func TestMerge_Empty(t *testing.T) {
+	t.Parallel()
+	merged := kit.Merge()
+	if len(merged.Tools) != 0 {
+		t.Fatalf("got %d tools, want 0", len(merged.Tools))
+	}
+	if merged.Hooks.BeforeToolCall != nil {
+		t.Fatal("expected nil BeforeToolCall")
+	}
+}
+
+func TestMerge_Associative(t *testing.T) {
+	t.Parallel()
+
+	a := kit.Toolset{
+		Tools: []kit.Tool{nopTool{name: "a"}},
+		Hooks: kit.Hooks{
+			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+				s := "from-a"
+				return kit.AfterToolCallResult{Content: &s}, nil
+			},
+			OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+				return kit.TruncationResult{Messages: []llm.Message{{Content: "a"}}}, nil
+			},
+		},
+	}
+	b := kit.Toolset{
+		Tools: []kit.Tool{nopTool{name: "b"}},
+		Hooks: kit.Hooks{
+			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+				s := "from-b"
+				return kit.AfterToolCallResult{Content: &s, Terminate: true}, nil
+			},
+			OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+				return kit.TruncationResult{Retry: true, Messages: []llm.Message{{Content: "b"}}}, nil
+			},
+		},
+	}
+	c := kit.Toolset{
+		Tools: []kit.Tool{nopTool{name: "c"}},
+		Hooks: kit.Hooks{
+			AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+				s := "from-c"
+				return kit.AfterToolCallResult{Content: &s}, nil
+			},
+			OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+				return kit.TruncationResult{Retry: false, Messages: []llm.Message{{Content: "c"}}}, nil
+			},
+		},
+	}
+
+	left := kit.Merge(a, kit.Merge(b, c))
+	right := kit.Merge(kit.Merge(a, b), c)
+	flat := kit.Merge(a, b, c)
+
+	// Tools: order must match across all three forms.
+	if len(left.Tools) != len(flat.Tools) || len(right.Tools) != len(flat.Tools) {
+		t.Fatalf("tool lengths mismatch: left=%d right=%d flat=%d", len(left.Tools), len(right.Tools), len(flat.Tools))
+	}
+	for i := range flat.Tools {
+		ln := left.Tools[i].Definition().Function.Name
+		rn := right.Tools[i].Definition().Function.Name
+		fn := flat.Tools[i].Definition().Function.Name
+		if ln != fn || rn != fn {
+			t.Errorf("tool[%d]: left=%q right=%q flat=%q", i, ln, rn, fn)
+		}
+	}
+
+	// AfterToolCall: all three forms must produce the same merged result.
+	ctx := context.Background()
+	ac := kit.AfterToolCallInput{}
+	flatRes, err := flat.Hooks.AfterToolCall(ctx, ac)
+	if err != nil {
+		t.Fatalf("flat AfterToolCall error: %v", err)
+	}
+	leftRes, err := left.Hooks.AfterToolCall(ctx, ac)
+	if err != nil {
+		t.Fatalf("left AfterToolCall error: %v", err)
+	}
+	rightRes, err := right.Hooks.AfterToolCall(ctx, ac)
+	if err != nil {
+		t.Fatalf("right AfterToolCall error: %v", err)
+	}
+	if flatRes.Content == nil || leftRes.Content == nil || rightRes.Content == nil {
+		t.Fatalf("expected non-nil Content: flat=%v left=%v right=%v", flatRes.Content, leftRes.Content, rightRes.Content)
+	}
+	if *flatRes.Content != *leftRes.Content || *flatRes.Content != *rightRes.Content {
+		t.Errorf("AfterToolCall Content: flat=%q left=%q right=%q", *flatRes.Content, *leftRes.Content, *rightRes.Content)
+	}
+	if flatRes.Terminate != leftRes.Terminate || flatRes.Terminate != rightRes.Terminate {
+		t.Errorf("AfterToolCall Terminate: flat=%v left=%v right=%v", flatRes.Terminate, leftRes.Terminate, rightRes.Terminate)
+	}
+
+	// OnTruncated: all three forms must produce the same result.
+	tc := kit.TruncationInput{}
+	flatTR, err := flat.Hooks.OnTruncated(ctx, tc)
+	if err != nil {
+		t.Fatalf("flat OnTruncated error: %v", err)
+	}
+	leftTR, err := left.Hooks.OnTruncated(ctx, tc)
+	if err != nil {
+		t.Fatalf("left OnTruncated error: %v", err)
+	}
+	rightTR, err := right.Hooks.OnTruncated(ctx, tc)
+	if err != nil {
+		t.Fatalf("right OnTruncated error: %v", err)
+	}
+	if flatTR.Retry != leftTR.Retry || flatTR.Retry != rightTR.Retry {
+		t.Errorf("OnTruncated Retry: flat=%v left=%v right=%v", flatTR.Retry, leftTR.Retry, rightTR.Retry)
+	}
+	if len(flatTR.Messages) != len(leftTR.Messages) || len(flatTR.Messages) != len(rightTR.Messages) {
+		t.Fatalf("OnTruncated message lengths differ: flat=%d left=%d right=%d",
+			len(flatTR.Messages), len(leftTR.Messages), len(rightTR.Messages))
+	}
+	for i := range flatTR.Messages {
+		if flatTR.Messages[i].Role != leftTR.Messages[i].Role || flatTR.Messages[i].Role != rightTR.Messages[i].Role ||
+			flatTR.Messages[i].Content != leftTR.Messages[i].Content || flatTR.Messages[i].Content != rightTR.Messages[i].Content {
+			t.Errorf("OnTruncated Messages[%d]: flat=%+v left=%+v right=%+v",
+				i, flatTR.Messages[i], leftTR.Messages[i], rightTR.Messages[i])
+		}
+	}
+}
+
+func TestMerge_Associative_ErrorPreservesPartialState(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+
+	b := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			s := "from-b"
+			return kit.AfterToolCallResult{Content: &s, Terminate: true}, nil
+		},
+	}}
+	c := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			s := "from-c"
+			return kit.AfterToolCallResult{Content: &s}, boom
+		},
+	}}
+
+	// Nested: Merge(b, c) produces one composed fn; flat: Merge(b, c)
+	// produces the same. Both must return b+c's partial content with
+	// c's error — b's Terminate and c's Content must be folded in.
+	nested := kit.Merge(b, c)
+	res, err := nested.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallInput{})
+	if !errors.Is(err, boom) {
+		t.Fatalf("want boom, got %v", err)
+	}
+	if res.Content == nil || *res.Content != "from-c" {
+		t.Fatalf("Content should be from-c (last override), got %v", res.Content)
+	}
+	if !res.Terminate {
+		t.Fatal("Terminate should be true from b (OR'd before error)")
+	}
+}
+
+// --- Merge: command concatenation ---
+
+func TestMerge_ConcatenatesCommandsInOrder(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Commands: []command.Command{stubCommand{name: "alpha"}}}
+	b := kit.Toolset{Commands: []command.Command{stubCommand{name: "beta"}, stubCommand{name: "gamma"}}}
+	merged := kit.Merge(a, b)
+
+	want := []string{"alpha", "beta", "gamma"}
+	if len(merged.Commands) != len(want) {
+		t.Fatalf("got %d commands, want %d", len(merged.Commands), len(want))
+	}
+	for i, w := range want {
+		got := merged.Commands[i].Definition().Name
+		if got != w {
+			t.Errorf("command[%d] = %q, want %q", i, got, w)
+		}
+	}
+}
+
+func TestMerge_NoCommands(t *testing.T) {
+	t.Parallel()
+	merged := kit.Merge(kit.Toolset{}, kit.Toolset{})
+	if len(merged.Commands) != 0 {
+		t.Fatalf("got %d commands, want 0", len(merged.Commands))
+	}
+}
+
+func TestMerge_CommandsAssociative(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Commands: []command.Command{stubCommand{name: "a"}}}
+	b := kit.Toolset{Commands: []command.Command{stubCommand{name: "b"}}}
+	c := kit.Toolset{Commands: []command.Command{stubCommand{name: "c"}}}
+
+	left := kit.Merge(a, kit.Merge(b, c))
+	right := kit.Merge(kit.Merge(a, b), c)
+	flat := kit.Merge(a, b, c)
+
+	if len(flat.Commands) != 3 || len(left.Commands) != 3 || len(right.Commands) != 3 {
+		t.Fatalf("lengths differ: left=%d right=%d flat=%d", len(left.Commands), len(right.Commands), len(flat.Commands))
+	}
+	for i := range flat.Commands {
+		fn := flat.Commands[i].Definition().Name
+		ln := left.Commands[i].Definition().Name
+		rn := right.Commands[i].Definition().Name
+		if ln != fn || rn != fn {
+			t.Errorf("command[%d]: left=%q right=%q flat=%q", i, ln, rn, fn)
+		}
+	}
+}
+
+// --- Hook chaining: BeforeToolCall ---
+
+func TestMerge_BeforeToolCall_ChainsInOrder(t *testing.T) {
+	t.Parallel()
+	var order []string
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			order = append(order, "a")
+			return kit.BeforeToolCallResult{}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			order = append(order, "b")
+			return kit.BeforeToolCallResult{}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	_, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 || order[0] != "a" || order[1] != "b" {
+		t.Fatalf("order = %v, want [a b]", order)
+	}
+}
+
+func TestMerge_BeforeToolCall_BlockShortCircuits(t *testing.T) {
+	t.Parallel()
+	var bCalled bool
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			return kit.BeforeToolCallResult{Block: true, Reason: "nope"}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			bCalled = true
+			return kit.BeforeToolCallResult{}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Block || res.Reason != "nope" {
+		t.Fatalf("expected block with reason 'nope', got %+v", res)
+	}
+	if bCalled {
+		t.Fatal("b should not have been called after block")
+	}
+}
+
+func TestMerge_BeforeToolCall_ErrorShortCircuits(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	var bCalled bool
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			return kit.BeforeToolCallResult{}, boom
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			bCalled = true
+			return kit.BeforeToolCallResult{}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	_, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{})
+	if !errors.Is(err, boom) {
+		t.Fatalf("want boom, got %v", err)
+	}
+	if bCalled {
+		t.Fatal("b should not have been called after error")
+	}
+}
+
+func TestMerge_BeforeToolCall_NilWhenEmpty(t *testing.T) {
+	t.Parallel()
+	merged := kit.Merge(kit.Toolset{}, kit.Toolset{})
+	if merged.Hooks.BeforeToolCall != nil {
+		t.Fatal("expected nil BeforeToolCall when no hooks contribute")
+	}
+}
+
+func TestMerge_BeforeToolCall_SinglePassthrough(t *testing.T) {
+	t.Parallel()
+	called := false
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			called = true
+			return kit.BeforeToolCallResult{Block: true, Reason: "only"}, nil
+		},
+	}}
+	merged := kit.Merge(a)
+	res, err := merged.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{})
+	if err != nil {
+		t.Fatalf("BeforeToolCall error: %v", err)
+	}
+	if !called || !res.Block {
+		t.Fatal("single hook should pass through directly")
+	}
+}
+
+// --- Hook chaining: AfterToolCall ---
+
+func TestMerge_AfterToolCall_LaterOverrides(t *testing.T) {
+	t.Parallel()
+	contentA := "from-a"
+	contentB := "from-b"
+	isErrTrue := true
+	a := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Content: &contentA}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Content: &contentB, IsError: &isErrTrue}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Content == nil || *res.Content != "from-b" {
+		t.Fatalf("Content = %v, want 'from-b'", res.Content)
+	}
+	if res.IsError == nil || !*res.IsError {
+		t.Fatal("IsError should be true from b")
+	}
+}
+
+func TestMerge_AfterToolCall_TerminateORd(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: true}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: false}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallInput{})
+	if err != nil {
+		t.Fatalf("AfterToolCall error: %v", err)
+	}
+	if !res.Terminate {
+		t.Fatal("Terminate should be OR'd to true")
+	}
+}
+
+func TestMerge_AfterToolCall_ErrorShortCircuits(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	a := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{}, boom
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			t.Fatal("should not be called")
+			return kit.AfterToolCallResult{}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	_, err := merged.Hooks.AfterToolCall(context.Background(), kit.AfterToolCallInput{})
+	if !errors.Is(err, boom) {
+		t.Fatalf("want boom, got %v", err)
+	}
+}
+
+// --- Hook chaining: TransformContext ---
+
+func TestMerge_TransformContext_Pipeline(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		TransformContext: func(_ context.Context, msgs []llm.Message) ([]llm.Message, error) {
+			return append(msgs, llm.Message{Role: "system", Content: "injected-a"}), nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		TransformContext: func(_ context.Context, msgs []llm.Message) ([]llm.Message, error) {
+			return append(msgs, llm.Message{Role: "system", Content: "injected-b"}), nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	input := []llm.Message{{Role: "user", Content: "hi"}}
+	out, err := merged.Hooks.TransformContext(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("got %d messages, want 3", len(out))
+	}
+	if out[1].Content != "injected-a" || out[2].Content != "injected-b" {
+		t.Fatalf("pipeline order wrong: %+v", out)
+	}
+}
+
+func TestMerge_TransformContext_NilPassthrough(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		TransformContext: func(_ context.Context, _ []llm.Message) ([]llm.Message, error) {
+			return nil, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		TransformContext: func(_ context.Context, msgs []llm.Message) ([]llm.Message, error) {
+			return msgs, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	input := []llm.Message{{Role: "user", Content: "hi"}}
+	out, err := merged.Hooks.TransformContext(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Content != "hi" {
+		t.Fatalf("nil return should pass input through: %+v", out)
+	}
+}
+
+func TestMerge_TransformContext_ErrorShortCircuits(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	a := kit.Toolset{Hooks: kit.Hooks{
+		TransformContext: func(_ context.Context, _ []llm.Message) ([]llm.Message, error) {
+			return nil, boom
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		TransformContext: func(_ context.Context, _ []llm.Message) ([]llm.Message, error) {
+			t.Fatal("should not be called")
+			return nil, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	_, err := merged.Hooks.TransformContext(context.Background(), nil)
+	if !errors.Is(err, boom) {
+		t.Fatalf("want boom, got %v", err)
+	}
+}
+
+// --- Hook chaining: SteeringMessages / FollowUpMessages ---
+
+func TestMerge_SteeringMessages_Concatenates(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+			return []llm.Message{{Role: "user", Content: "steer-a"}}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+			return []llm.Message{{Role: "user", Content: "steer-b"}}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	msgs, err := merged.Hooks.SteeringMessages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 || msgs[0].Content != "steer-a" || msgs[1].Content != "steer-b" {
+		t.Fatalf("got %+v, want [steer-a steer-b]", msgs)
+	}
+}
+
+func TestMerge_FollowUpMessages_Concatenates(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		FollowUpMessages: func(_ context.Context) ([]llm.Message, error) {
+			return []llm.Message{{Role: "user", Content: "follow-a"}}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		FollowUpMessages: func(_ context.Context) ([]llm.Message, error) {
+			return []llm.Message{{Role: "user", Content: "follow-b"}}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	msgs, err := merged.Hooks.FollowUpMessages(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 || msgs[0].Content != "follow-a" || msgs[1].Content != "follow-b" {
+		t.Fatalf("got %+v, want [follow-a follow-b]", msgs)
+	}
+}
+
+func TestMerge_GetMessages_ErrorShortCircuits(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	a := kit.Toolset{Hooks: kit.Hooks{
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+			return nil, boom
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		SteeringMessages: func(_ context.Context) ([]llm.Message, error) {
+			t.Fatal("should not be called")
+			return nil, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	_, err := merged.Hooks.SteeringMessages(context.Background())
+	if !errors.Is(err, boom) {
+		t.Fatalf("want boom, got %v", err)
+	}
+}
+
+// --- Hook chaining: OnTruncated ---
+
+func TestMerge_OnTruncated_LastNonZeroWins(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+			return kit.TruncationResult{Retry: true, Messages: []llm.Message{{Content: "a"}}}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+			return kit.TruncationResult{Retry: false, Messages: []llm.Message{{Content: "b"}}}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Retry {
+		t.Fatal("last non-zero should win: Retry=false")
+	}
+	if len(res.Messages) != 1 || res.Messages[0].Content != "b" {
+		t.Fatalf("last non-zero should win: got %+v", res)
+	}
+}
+
+func TestMerge_OnTruncated_ZeroSkipped(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+			return kit.TruncationResult{Retry: true, Messages: []llm.Message{{Content: "keep"}}}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+			return kit.TruncationResult{}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationInput{})
+	if err != nil {
+		t.Fatalf("OnTruncated error: %v", err)
+	}
+	if !res.Retry || len(res.Messages) != 1 || res.Messages[0].Content != "keep" {
+		t.Fatalf("zero result should not override: got %+v", res)
+	}
+}
+
+func TestMerge_OnTruncated_ErrorShortCircuits(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	a := kit.Toolset{Hooks: kit.Hooks{
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+			return kit.TruncationResult{}, boom
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		OnTruncated: func(_ context.Context, _ kit.TruncationInput) (kit.TruncationResult, error) {
+			t.Fatal("should not be called")
+			return kit.TruncationResult{}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	_, err := merged.Hooks.OnTruncated(context.Background(), kit.TruncationInput{})
+	if !errors.Is(err, boom) {
+		t.Fatalf("want boom, got %v", err)
+	}
+}
+
+func TestMerge_BeforePark_FinishedORd(t *testing.T) {
+	t.Parallel()
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			return agentevent.AgentParked{Finished: false}, nil
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			return agentevent.AgentParked{Finished: true}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.BeforePark(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Finished {
+		t.Errorf("Finished = false; any-true should win when chained")
+	}
+}
+
+func TestMerge_BeforePark_NilWhenEmpty(t *testing.T) {
+	t.Parallel()
+	merged := kit.Merge(kit.Toolset{}, kit.Toolset{})
+	if merged.Hooks.BeforePark != nil {
+		t.Errorf("BeforePark = non-nil; want nil when no toolset registers one")
+	}
+}
+
+func TestMerge_BeforePark_SinglePassthrough(t *testing.T) {
+	t.Parallel()
+	called := 0
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			called++
+			return agentevent.AgentParked{Finished: true}, nil
+		},
+	}}
+	merged := kit.Merge(a)
+	res, err := merged.Hooks.BeforePark(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Finished || called != 1 {
+		t.Errorf("single-hook passthrough wrong: finished=%v called=%d", res.Finished, called)
+	}
+}
+
+func TestMerge_BeforePark_ErrorShortCircuits(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	a := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			return agentevent.AgentParked{Finished: true}, boom
+		},
+	}}
+	b := kit.Toolset{Hooks: kit.Hooks{
+		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
+			t.Fatal("should not be called after error")
+			return agentevent.AgentParked{}, nil
+		},
+	}}
+	merged := kit.Merge(a, b)
+	res, err := merged.Hooks.BeforePark(context.Background())
+	if !errors.Is(err, boom) {
+		t.Fatalf("want boom, got %v", err)
+	}
+	if !res.Finished {
+		t.Errorf("partial Finished should still be returned alongside error")
+	}
+}
+
+// --- Tool dedup via New() ---
+
+func TestNew_DeduplicatesToolsFirstWins(t *testing.T) {
+	t.Parallel()
+
+	directTool := &resultTool{name: "echo", result: "direct-echo"}
+	toolsetTool := &resultTool{name: "Echo", result: "toolset-echo"}
+
+	provider := newScriptedProvider(
+		streamWithToolCall("call-1", "echo", `{}`),
+	)
+	hooks := kit.Hooks{
+		AfterToolCall: func(_ context.Context, c kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: true}, nil
+		},
+	}
+	a, err := kit.New(kit.Config{
+		Provider: provider,
+		Toolset: kit.Merge(
+			kit.Toolset{Tools: []kit.Tool{directTool}, Hooks: hooks},
+			kit.Toolset{Tools: []kit.Tool{toolsetTool, nopTool{name: "search"}}},
+		),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+	events := subscribeEvents(t, a)
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	a.WaitForIdle()
+	drainUntil(events, untilDone)
+
+	if !directTool.called {
+		t.Fatal("direct tool should have been called (first wins)")
+	}
+	if toolsetTool.called {
+		t.Fatal("toolset tool should NOT have been called (duplicate dropped)")
+	}
+}
+
+func TestNew_ToolsetsHooksChainWithDirectHooks(t *testing.T) {
+	t.Parallel()
+
+	var order []string
+	provider := newScriptedProvider(
+		streamWithToolCall("call-1", "echo", `{}`),
+	)
+	hooks := kit.Hooks{
+		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			order = append(order, "direct")
+			return kit.BeforeToolCallResult{}, nil
+		},
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: true}, nil
+		},
+	}
+	ts := kit.Toolset{
+		Hooks: kit.Hooks{
+			BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+				order = append(order, "toolset")
+				return kit.BeforeToolCallResult{}, nil
+			},
+		},
+	}
+	a, err := kit.New(kit.Config{
+		Provider: provider,
+		Toolset: kit.Merge(
+			kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
+			ts,
+		),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+	events := subscribeEvents(t, a)
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	a.WaitForIdle()
+	drainUntil(events, untilDone)
+
+	if len(order) != 2 || order[0] != "direct" || order[1] != "toolset" {
+		t.Fatalf("hook order = %v, want [direct toolset]", order)
+	}
+}
+
+// fakePluginPackage simulates the canonical external-plug-in shape:
+// a package exposes a Plugins() function returning a [kit.Toolset]
+// bundling its tools, hooks, and commands. The composition root
+// merges Plugins() outputs into a single Toolset for kit.New. This
+// test demonstrates the convention works end-to-end without kit
+// having to know anything about the plug-in's internals.
+type fakePluginPackage struct {
+	beforeCalls int
+}
+
+func (p *fakePluginPackage) Plugins() kit.Toolset {
+	return kit.Toolset{
+		Tools: []kit.Tool{nopTool{name: "fake-tool"}},
+		Hooks: kit.Hooks{
+			BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+				p.beforeCalls++
+				return kit.BeforeToolCallResult{}, nil
+			},
+		},
+		Commands: []command.Command{stubCommand{name: "fake-cmd"}},
+	}
+}
+
+func TestPluginsConvention_MergesIntoToolsetAndDispatches(t *testing.T) {
+	t.Parallel()
+
+	pkg := &fakePluginPackage{}
+	provider := newScriptedProvider(streamWithToolCall("call-1", "fake-tool", `{}`))
+
+	terminator := kit.Toolset{Hooks: kit.Hooks{
+		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{Terminate: true}, nil
+		},
+	}}
+
+	merged := kit.Merge(pkg.Plugins(), terminator)
+
+	if len(merged.Tools) != 1 || merged.Tools[0].Definition().Function.Name != "fake-tool" {
+		t.Fatalf("merged Tools wrong: %+v", merged.Tools)
+	}
+	if len(merged.Commands) != 1 || merged.Commands[0].Definition().Name != "fake-cmd" {
+		t.Fatalf("merged Commands wrong: %+v", merged.Commands)
+	}
+
+	a, err := kit.New(kit.Config{Provider: provider, Toolset: merged})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+	events := subscribeEvents(t, a)
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	a.WaitForIdle()
+	drainUntil(events, untilDone)
+
+	if pkg.beforeCalls != 1 {
+		t.Errorf("BeforeToolCall fired %d times, want 1", pkg.beforeCalls)
+	}
+}
+
+func TestNew_NilToolPassesToFoundationValidation(t *testing.T) {
+	t.Parallel()
+	_, err := kit.New(kit.Config{
+		Provider: newScriptedProvider(),
+		Toolset:  kit.Toolset{Tools: []kit.Tool{nil}},
+	})
+	if !errors.Is(err, kit.ErrInvalidOptions) {
+		t.Fatalf("want ErrInvalidOptions for nil tool, got %v", err)
+	}
+}

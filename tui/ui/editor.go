@@ -1,0 +1,1603 @@
+// Package ui provides the Bubble Tea TUI components for the editor.
+package ui
+
+import (
+	"fmt"
+	"image/color"
+	"log/slog"
+	"path/filepath"
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/latebit-io/nib/engine/highlight"
+	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/tui/editor"
+	"github.com/latebit-io/nib/tui/sanitize"
+	"github.com/mattn/go-runewidth"
+)
+
+// Agent provenance styles — applied to lines written by the agent.
+var (
+	// agentLineBgColor is the subtle dark-green background applied to lines
+	// written by the agent. Matches the diff-added colour so the visual meaning
+	// is consistent: green == agent contribution.
+	agentLineBgColor = lipgloss.Color("22")
+
+	// agentLineGutterStyle renders the gutter for agent-written lines.
+	// The background extends the green tint into the gutter column.
+	agentLineGutterStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("34")).
+				Background(agentLineBgColor)
+
+	// agentLineBgStyle is the background applied to plain-text spans
+	// (no syntax colour) on agent-written lines.
+	agentLineBgStyle = lipgloss.NewStyle().Background(agentLineBgColor)
+)
+
+// Hover overlay styles — floating panel for type info and documentation.
+var (
+	hoverStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("237")).
+			Foreground(lipgloss.Color("252")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 1)
+	hoverCodeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("114")) // green for code/signatures
+	hoverDimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("245")) // dim for doc text
+	hoverBoldStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")).
+			Bold(true)
+)
+
+// Status bar style — full-width bar at the bottom of the window.
+var statusBarStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("62")).
+	Foreground(lipgloss.Color("230")).
+	Bold(true)
+
+// Diagnostic gutter styles — severity-colored icons in the gutter margin.
+var (
+	diagErrorGutterStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
+	diagWarningGutterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
+	diagInfoGutterStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // blue
+	diagUnderlineStyle     = lipgloss.NewStyle().Underline(true)
+)
+
+// Editor rendering styles — hoisted to package level to avoid per-frame allocation.
+var (
+	gutterStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle     = lipgloss.NewStyle().Reverse(true)
+	selectionStyle  = lipgloss.NewStyle().Background(lipgloss.Color("24"))
+	removedBgColor  = lipgloss.Color("52") // dark red
+	removedBgStyle  = lipgloss.NewStyle().Background(removedBgColor)
+	removedGutterSt = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Background(removedBgColor)
+	addedBgColor    = lipgloss.Color("22") // dark green
+	addedBgStyle    = lipgloss.NewStyle().Background(addedBgColor)
+	addedGutterSt   = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Background(addedBgColor)
+)
+
+// Syntax highlight styles — one per TokenKind, map lookup avoids per-token allocation.
+var tokenKindStyles = map[highlight.TokenKind]lipgloss.Style{
+	highlight.KindKeyword:  lipgloss.NewStyle().Foreground(lipgloss.Color("5")),  // magenta
+	highlight.KindString:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")),  // green
+	highlight.KindComment:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")),  // gray
+	highlight.KindNumber:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")),  // yellow
+	highlight.KindType:     lipgloss.NewStyle().Foreground(lipgloss.Color("6")),  // cyan
+	highlight.KindProperty: lipgloss.NewStyle().Foreground(lipgloss.Color("14")), // bright cyan
+	highlight.KindOperator: lipgloss.NewStyle().Foreground(lipgloss.Color("9")),  // bright red
+	highlight.KindFunction: lipgloss.NewStyle().Foreground(lipgloss.Color("4")),  // blue
+	highlight.KindConstant: lipgloss.NewStyle().Foreground(lipgloss.Color("13")), // bright magenta
+}
+var tokenKindDefault = lipgloss.NewStyle()
+
+// Diagnostic gutter icons by severity.
+const (
+	diagErrorIcon   = "✖"
+	diagWarningIcon = "▲"
+	diagInfoIcon    = "●"
+)
+
+// lineKind classifies a viewport row for mouse click routing.
+type lineKind int
+
+const (
+	lineNormal  lineKind = iota
+	lineRemoved          // buffer line within the diff's removed range
+	lineAdded            // virtual overlay line (editable replacement)
+	lineEmpty            // tilde row past EOF
+)
+
+// viewportEntry maps a visual row to its source.
+type viewportEntry struct {
+	kind        lineKind
+	bufLine     int // meaningful for lineNormal and lineRemoved
+	overlayLine int // meaningful for lineAdded
+}
+
+// EditorModel is the Bubble Tea view for the code editor pane.
+// It wraps the engine's Editor (which owns all domain logic)
+// and adds only rendering + input mapping.
+//
+// The engine editor is a named field (not embedded) to prevent leaking
+// 30+ engine methods into the TUI surface. AppModel and other TUI code
+// access it via the Engine() accessor when direct engine interaction is
+// needed.
+type EditorModel struct {
+	// eng is the engine editor — all domain logic lives here.
+	// Named (not embedded) so engine methods aren't promoted into the TUI
+	// surface. Use Engine() for explicit access from outside this type.
+	eng *editor.Editor
+
+	// StatusMsg is a transient status message shown in the status bar, cleared on next key.
+	StatusMsg string
+
+	// Keymap holds the active key-binding configuration (shared with AppModel).
+	Keymap *Keymap
+
+	// Services holds shared runtime services (clipboard, LSP, etc.).
+	Services *Services
+
+	// Clipboard is the internal copy/paste buffer for the editor.
+	Clipboard string
+
+	// Overlay is the inline diff preview and editable replacement (nil when no edit is pending).
+	Overlay *DiffOverlay
+
+	// cursorMoved is set when the cursor position changes and cleared after
+	// Render. Used to avoid snapping scroll on every frame — only snap when
+	// the cursor actually moved, allowing free scrolling during diff review.
+	cursorMoved bool
+
+	// Mouse drag state — separate from SelectionActive so hover motion
+	// doesn't extend a persisted selection after the button is released.
+	mainDragging    bool
+	overlayDragging bool
+
+	// Viewport mapping rebuilt each Render() for mouse click resolution.
+	viewportMap []viewportEntry
+
+	// OnSave is called after a successful buffer save. Used by AppModel
+	// to notify the session (and language service) of saves. nil-safe.
+	OnSave func()
+
+	// diagnostics holds the current set of diagnostics for this file.
+	// Set via SetDiagnostics which also builds the per-line lookup map.
+	diagnostics []lang.Diagnostic
+
+	// diagByLine maps line number → highest-severity diagnostic on that line.
+	// Precomputed by SetDiagnostics for O(1) lookup during rendering.
+	diagByLine map[int]*lang.Diagnostic
+
+	// diagUnderline is a reusable scratch buffer for underline computation
+	// in renderNormalLine. Avoids per-line per-frame allocation.
+	diagUnderline []bool
+
+	// Reusable scratch buffers for span-based rendering.
+	// Avoids per-line per-frame allocation.
+	syntaxTagMap map[color.Color]int
+	charStyles   []lipgloss.Style
+	colTags      []int
+	dispToBuf    []int
+	displayBuf   []rune
+
+	// expandedBuf and bufToDispBuf back the per-line tab-expansion output.
+	// Each renderXLine() call invokes expandTabs once and consumes the
+	// result before returning, so a single set of scratch slices is safe
+	// even though three render functions share them.
+	expandedBuf  []rune
+	bufToDispBuf []int
+
+	// gutterBuf is a reusable byte scratch for gutter formatting.
+	// Replaces fmt.Sprintf("%*d", …) with strconv.AppendInt + manual
+	// leading-space padding so per-line gutter rendering is alloc-free.
+	gutterBuf []byte
+
+	// Find holds the find bar state.
+	Find FindBar
+
+	// findHighlight is a reusable scratch buffer for find match rendering.
+	findHighlight []byte
+
+	// Completion holds the autocomplete popup state.
+	Completion CompletionPopup
+
+	// hoverText holds the content for the hover overlay (type info, docs).
+	// Empty string means no hover is active.
+	hoverText string
+	// hoverLine/hoverCol record where the hover was triggered so the
+	// overlay dismisses when the cursor moves.
+	hoverLine, hoverCol int
+}
+
+// NewEditorModel creates an editor model from an engine Editor.
+func NewEditorModel(e *editor.Editor, km *Keymap, svc *Services) *EditorModel {
+	return &EditorModel{
+		eng:      e,
+		Keymap:   km,
+		Services: svc,
+	}
+}
+
+// Engine returns the underlying engine editor. Prefer the forwarder methods
+// below for common operations — Engine() is reserved for places that genuinely
+// need the full editor surface (e.g., Find bar wiring, read-only preview editors).
+func (m *EditorModel) Engine() *editor.Editor {
+	return m.eng
+}
+
+// CursorPosition returns the current cursor line and column (0-indexed).
+func (m *EditorModel) CursorPosition() (line, col int) {
+	return m.eng.CursorLine, m.eng.CursorCol
+}
+
+// ScrollOffset returns the current vertical scroll offset in visual-line space.
+func (m *EditorModel) ScrollOffset() int { return m.eng.ScrollOffset }
+
+// SetScrollOffset sets the vertical scroll offset. Callers should typically
+// follow this with ClampScroll() unless they already computed a valid target.
+func (m *EditorModel) SetScrollOffset(offset int) { m.eng.ScrollOffset = offset }
+
+// ClampScroll clamps the vertical scroll offset to valid bounds.
+func (m *EditorModel) ClampScroll() { m.eng.ClampScroll() }
+
+// VisibleLines returns the number of content lines visible in the viewport.
+func (m *EditorModel) VisibleLines() int { return m.eng.VisibleLines() }
+
+// MoveCursorTo moves the cursor to (line, col), clamped to buffer bounds.
+func (m *EditorModel) MoveCursorTo(line, col int) { m.eng.MoveCursorTo(line, col) }
+
+// EnsureCursorVisible scrolls the viewport so the cursor is in view.
+func (m *EditorModel) EnsureCursorVisible() { m.eng.EnsureCursorVisible() }
+
+// CollapseOverlay removes overlay-added visual lines and clamps scroll.
+func (m *EditorModel) CollapseOverlay(startLine, endLine, addedCount int, bufferMutated bool) {
+	m.eng.CollapseOverlay(startLine, endLine, addedCount, bufferMutated)
+}
+
+// ApplyEdit atomically replaces the first occurrence of search with replace.
+// Returns (true, "") on success, (false, reason) if the edit cannot be applied.
+// lineOrigins assigns provenance to replacement lines (index 0 = first line).
+func (m *EditorModel) ApplyEdit(search, replace string, lineOrigins []*editor.LineOrigin) (bool, string) {
+	return m.eng.ApplyEdit(search, replace, lineOrigins)
+}
+
+// LineCount returns the number of lines in the active buffer.
+func (m *EditorModel) LineCount() int { return m.eng.LineCount() }
+
+// LineText returns the text of line i.
+func (m *EditorModel) LineText(i int) string { return m.eng.LineText(i) }
+
+// Content returns the full buffer content.
+func (m *EditorModel) Content() string { return m.eng.Content() }
+
+// FilePath returns the absolute path of the active buffer. Empty for unsaved buffers.
+func (m *EditorModel) FilePath() string { return m.eng.FilePath() }
+
+// IsModified reports whether the active buffer has unsaved changes.
+func (m *EditorModel) IsModified() bool { return m.eng.IsModified() }
+
+// SetDiagnostics updates the diagnostic list and precomputes the per-line
+// lookup map. Use this instead of assigning diagnostics directly.
+func (m *EditorModel) SetDiagnostics(diags []lang.Diagnostic) {
+	m.diagnostics = diags
+	if len(diags) == 0 {
+		m.diagByLine = nil
+		return
+	}
+	m.diagByLine = make(map[int]*lang.Diagnostic, len(diags))
+	lineCount := m.eng.LineCount()
+	for i := range m.diagnostics {
+		d := &m.diagnostics[i]
+		startLine := max(d.StartLine, 0)
+		endLine := min(d.EndLine, lineCount-1)
+		if startLine > endLine {
+			continue
+		}
+		for line := startLine; line <= endLine; line++ {
+			if existing, ok := m.diagByLine[line]; !ok || d.Severity < existing.Severity {
+				m.diagByLine[line] = d
+			}
+		}
+	}
+}
+
+// diagnosticForLine returns the highest-severity diagnostic touching the given line.
+// O(1) lookup from the precomputed map built by SetDiagnostics.
+func (m *EditorModel) diagnosticForLine(line int) *lang.Diagnostic {
+	return m.diagByLine[line]
+}
+
+// Title returns the filename for display in the pane border. Implements Titled.
+func (m *EditorModel) Title() string {
+	name := m.eng.FilePath()
+	if name == "" {
+		return "[new]"
+	}
+	return filepath.Base(name)
+}
+
+// ShowHover displays a hover overlay with the given text at the current cursor.
+// Strips ANSI escapes (defense-in-depth) and markdown formatting from LSP hover output.
+func (m *EditorModel) ShowHover(text string) {
+	var san sanitize.Sanitizer
+	m.hoverText = renderHoverMarkdown(san.Sanitize(text))
+	m.hoverLine = m.eng.CursorLine
+	m.hoverCol = m.eng.CursorCol
+}
+
+// DismissHover clears the hover overlay.
+func (m *EditorModel) DismissHover() {
+	m.hoverText = ""
+}
+
+// acceptCompletion inserts the selected completion item's text.
+// Works in both the main buffer and the overlay editor.
+// Scans backward from the cursor to find the start of the partial identifier,
+// then replaces it with the full completion text.
+func (m *EditorModel) acceptCompletion() tea.Cmd {
+	item := m.Completion.SelectedItem()
+	if item == nil {
+		m.Completion.Dismiss()
+		return nil
+	}
+
+	insertText := item.InsertText
+	if insertText == "" {
+		insertText = item.Label
+	}
+
+	// Determine which editor to operate on (main or overlay).
+	e := m.eng
+	if m.Overlay != nil && m.Overlay.Active {
+		e = m.Overlay.Editor
+	}
+
+	// Find the start of the partial identifier by scanning backward.
+	line := e.CursorLine
+	col := e.CursorCol
+	lineText := []rune(e.LineText(line))
+	identStart := col
+	for identStart > 0 && lang.IsIdentChar(lineText[identStart-1]) {
+		identStart--
+	}
+
+	// Replace partial identifier with completion as one atomic undo group.
+	// Use editor methods for proper cursor positioning, origin tracking,
+	// and dirty state — handles multi-line insertions correctly.
+	e.BeginGroup()
+	if col > identStart {
+		e.DeleteRange(line, identStart, col-identStart)
+		e.CursorCol = identStart
+	}
+	e.PasteText(insertText)
+	e.EndGroup()
+
+	m.Completion.Dismiss()
+	m.cursorMoved = true
+	return nil
+}
+
+// SetSize updates the editor dimensions. Implements Pane.
+func (m *EditorModel) SetSize(width, height int) {
+	m.eng.SetSize(width, height)
+}
+
+// Update handles key and mouse events for the editor pane. Implements Pane.
+func (m *EditorModel) Update(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case tea.MouseClickMsg:
+		return m.handleMouseClick(msg)
+	case tea.MouseMotionMsg:
+		return m.handleMouseMotion(msg)
+	case tea.MouseReleaseMsg:
+		return m.handleMouseRelease(msg)
+	case tea.MouseWheelMsg:
+		return m.handleMouseWheel(msg)
+	case tea.KeyPressMsg:
+		// Dismiss hover on any key — cursor is about to move.
+		m.DismissHover()
+
+		// Find bar captures all keys when active.
+		if m.Find.Active {
+			cmd, consumed := m.Find.Update(msg)
+			if consumed {
+				// Cursor may have moved to a match — mark for scroll.
+				m.cursorMoved = true
+				return cmd
+			}
+		}
+
+		// Completion popup captures navigation keys when active.
+		if m.Completion.Active {
+			switch msg.Code {
+			case tea.KeyDown:
+				m.Completion.SelectNext()
+				return nil
+			case tea.KeyUp:
+				m.Completion.SelectPrev()
+				return nil
+			case tea.KeyTab, tea.KeyEnter:
+				return m.acceptCompletion()
+			case tea.KeyEscape:
+				m.Completion.Dismiss()
+				return nil
+			}
+			// Other keys dismiss completion and fall through to normal handling.
+			m.Completion.Dismiss()
+		}
+
+		// Any key event may move the cursor — mark for scroll adjustment.
+		m.cursorMoved = true
+		return m.handleKey(msg)
+	}
+	return nil
+}
+
+// --- Rendering ---
+
+// Per-line rendering (renderNormalLine, renderRemovedLine,
+// renderAddedLine) plus the tab/column helpers (expandTabs,
+// fillDisplay, displayColToBufCol) live in editor_render.go.
+
+// syncExtraVisualLines updates the engine's ExtraVisualLines field
+// to match the overlay state so scroll methods work correctly.
+func (m *EditorModel) syncExtraVisualLines() {
+	if m.Overlay != nil {
+		m.eng.SetExtraVisualLines(m.Overlay.LineCount())
+	} else {
+		m.eng.SetExtraVisualLines(0)
+	}
+}
+
+// Render renders the editor view. Implements Pane.
+//
+// When an overlay exists, ScrollOffset is in visual-line space. The visual
+// layout inserts the overlay's added lines between EndLine and EndLine+1:
+//
+//	visual 0..StartLine-1            → normal buffer lines
+//	visual StartLine..EndLine        → removed buffer lines (red)
+//	visual EndLine+1..EndLine+N      → added overlay lines (green, editable)
+//	visual EndLine+N+1..             → normal buffer lines (starting from buffer EndLine+1)
+//
+// When no overlay exists, visual space == buffer space.
+func (m *EditorModel) Render() string {
+	if m.cursorMoved {
+		m.ensureCursorVisibleVisual()
+		m.cursorMoved = false
+	}
+	m.syncExtraVisualLines()
+	m.eng.ClampScroll()
+
+	gutterW := m.eng.GutterWidth()
+	contentW := m.eng.ContentWidth()
+	vis := m.eng.VisibleLines()
+
+	output := make([]string, m.eng.Height)
+	m.viewportMap = m.viewportMap[:0]
+
+	overlay := m.Overlay
+	addedCount := 0
+	if overlay != nil {
+		addedCount = overlay.LineCount()
+	}
+	showBufferCursor := overlay == nil || !overlay.Active
+
+	for visualRow := range vis {
+		if visualRow >= m.eng.Height {
+			break
+		}
+		vLine := m.eng.ScrollOffset + visualRow
+
+		if overlay == nil {
+			// No overlay — visual line == buffer line.
+			if vLine >= m.eng.LineCount() {
+				output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
+				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
+			} else {
+				output[visualRow] = m.renderNormalLine(vLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor)
+				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineNormal, bufLine: vLine})
+			}
+			continue
+		}
+
+		// With overlay — map visual line to content type.
+		addedStart := overlay.EndLine + 1
+		addedEnd := overlay.EndLine + addedCount // inclusive
+
+		switch {
+		case vLine < overlay.StartLine:
+			// Normal line before diff.
+			output[visualRow] = m.renderNormalLine(vLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor)
+			m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineNormal, bufLine: vLine})
+
+		case vLine <= overlay.EndLine:
+			// Removed (red) line.
+			output[visualRow] = m.renderRemovedLine(vLine, gutterW, contentW, removedBgStyle, removedBgColor, removedGutterSt, cursorStyle, showBufferCursor)
+			m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineRemoved, bufLine: vLine})
+
+		case vLine >= addedStart && vLine <= addedEnd:
+			// Added (green) overlay line.
+			addedIdx := vLine - addedStart
+			output[visualRow] = m.renderAddedLine(addedIdx, gutterW, contentW, cursorStyle, selectionStyle, addedBgStyle, addedGutterSt)
+			m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineAdded, overlayLine: addedIdx})
+
+		default:
+			// Normal line after diff — subtract added lines to get buffer line.
+			bufLine := vLine - addedCount
+			if bufLine >= m.eng.LineCount() {
+				output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
+				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
+			} else {
+				output[visualRow] = m.renderNormalLine(bufLine, gutterW, contentW, gutterStyle, cursorStyle, selectionStyle, showBufferCursor)
+				m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineNormal, bufLine: bufLine})
+			}
+		}
+	}
+
+	// Fill remaining rows with tildes.
+	for visualRow := vis; visualRow < m.eng.Height; visualRow++ {
+		output[visualRow] = gutterStyle.Render(fmt.Sprintf("%*s ", gutterW-1, "~")) + strings.Repeat(" ", contentW)
+		m.viewportMap = append(m.viewportMap, viewportEntry{kind: lineEmpty})
+	}
+
+	// Hover overlay — auto-dismiss if cursor moved from trigger position.
+	if m.hoverText != "" {
+		if m.eng.CursorLine != m.hoverLine || m.eng.CursorCol != m.hoverCol {
+			m.hoverText = ""
+		} else {
+			m.overlayHover(output, gutterW, contentW)
+		}
+	}
+
+	// Completion popup — auto-dismiss if cursor moved off line, before trigger,
+	// or past the identifier being typed (e.g., mouse click, End key).
+	if m.Completion.Active {
+		var curLine, curCol int
+		var e *editor.Editor
+		if m.Overlay != nil && m.Overlay.Active {
+			e = m.Overlay.Editor
+			curLine = m.Overlay.StartLine + e.CursorLine
+			curCol = e.CursorCol
+		} else {
+			e = m.eng
+			curLine = e.CursorLine
+			curCol = e.CursorCol
+		}
+		dismiss := curLine != m.Completion.TriggerLine || curCol < m.Completion.TriggerCol
+		if !dismiss && curCol > m.Completion.TriggerCol {
+			// Verify text between trigger and cursor is all identifier chars.
+			// Dismisses on mouse click or End key past the identifier.
+			lineText := []rune(e.LineText(e.CursorLine))
+			for c := m.Completion.TriggerCol; c < curCol && c < len(lineText); c++ {
+				if !lang.IsIdentChar(lineText[c]) {
+					dismiss = true
+					break
+				}
+			}
+		}
+		if dismiss {
+			m.Completion.Dismiss()
+		} else {
+			m.overlayCompletion(output, gutterW, contentW)
+		}
+	}
+
+	// Find bar — overwrite bottom row(s) of the output.
+	if m.Find.Active {
+		barLines := m.Find.Render(gutterW + contentW)
+		for i, barLine := range barLines {
+			row := m.eng.Height - len(barLines) + i
+			if row >= 0 && row < len(output) {
+				output[row] = barLine
+			}
+		}
+	}
+
+	return strings.Join(output, "\n")
+}
+
+// ensureCursorVisibleVisual corrects ScrollOffset in visual-line space.
+// When an overlay exists, the active cursor (buffer or overlay) must be
+// mapped to its visual line before adjusting scroll.
+func (m *EditorModel) ensureCursorVisibleVisual() {
+	overlay := m.Overlay
+	if overlay == nil {
+		return
+	}
+	addedCount := overlay.LineCount()
+	vis := m.eng.VisibleLines()
+	if vis <= 0 {
+		return
+	}
+
+	var visualCursor int
+	if overlay.Active {
+		// Overlay cursor: added lines start at visual line EndLine+1.
+		visualCursor = overlay.EndLine + 1 + overlay.Editor.CursorLine
+	} else {
+		// Buffer cursor: shift by addedCount if past the diff.
+		visualCursor = m.eng.CursorLine
+		if m.eng.CursorLine > overlay.EndLine {
+			visualCursor = m.eng.CursorLine + addedCount
+		}
+	}
+
+	if visualCursor < m.eng.ScrollOffset {
+		m.eng.ScrollOffset = visualCursor
+	}
+	if visualCursor >= m.eng.ScrollOffset+vis {
+		m.eng.ScrollOffset = visualCursor - vis + 1
+	}
+}
+
+// overlayHover renders a floating hover panel over the editor output lines.
+// Positioned below the hover trigger line, capped to not exceed the editor area.
+func (m *EditorModel) overlayHover(output []string, gutterW, contentW int) {
+	// Determine the visual row to place the overlay below.
+	visualRow := m.hoverLine - m.eng.ScrollOffset + 1
+	if visualRow < 0 || visualRow >= m.eng.Height {
+		return // cursor scrolled off screen
+	}
+
+	// Wrap hover text to fit within the content area.
+	maxWidth := contentW
+	if maxWidth > 60 {
+		maxWidth = 60
+	}
+	if maxWidth < 10 {
+		return
+	}
+
+	// Split and truncate hover lines. Account for border (2 rows).
+	hoverLines := strings.Split(m.hoverText, "\n")
+	maxLines := m.eng.Height - 1 - visualRow - 2 // -2 for border rows
+	if maxLines > 10 {
+		maxLines = 10
+	}
+	if maxLines < 1 {
+		return
+	}
+	if len(hoverLines) > maxLines {
+		hoverLines = hoverLines[:maxLines]
+	}
+	if len(hoverLines) == 0 {
+		return
+	}
+
+	// Render the hover box via lipgloss with fixed width for consistent borders.
+	content := strings.Join(hoverLines, "\n")
+	box := hoverStyle.Width(maxWidth - 4).Render(content) // -4 for border+padding
+	boxLines := strings.Split(box, "\n")
+
+	// Replace entire output rows with gutter padding + hover box line.
+	// This avoids ANSI escape sequence corruption from rune-level splicing.
+	gutterPad := strings.Repeat(" ", gutterW)
+	for i, bl := range boxLines {
+		row := visualRow + i
+		if row >= m.eng.Height {
+			break
+		}
+		output[row] = gutterPad + bl
+	}
+}
+
+// overlayCompletion renders the completion popup below the cursor line.
+func (m *EditorModel) overlayCompletion(output []string, gutterW, contentW int) {
+	var visualRow int
+	if m.Overlay != nil && m.Overlay.Active {
+		// Overlay cursor: added lines start at visual EndLine+1.
+		oe := m.Overlay.Editor
+		visualRow = m.Overlay.EndLine + 1 + oe.CursorLine - m.eng.ScrollOffset + 1
+	} else {
+		visualRow = m.Completion.TriggerLine - m.eng.ScrollOffset + 1
+	}
+	if visualRow < 0 || visualRow >= m.eng.Height {
+		return
+	}
+
+	box := m.Completion.Render(contentW)
+	if box == "" {
+		return
+	}
+
+	boxLines := strings.Split(box, "\n")
+	gutterPad := strings.Repeat(" ", gutterW)
+	for i, bl := range boxLines {
+		row := visualRow + i
+		if row >= m.eng.Height {
+			break
+		}
+		output[row] = gutterPad + bl
+	}
+}
+
+// sanitizeStatusText strips ANSI escapes, collapses whitespace/newlines to
+// single spaces, and truncates to a safe length for the status bar.
+func sanitizeStatusText(s string) string {
+	const maxLen = 200
+	var b strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if inEscape {
+			if r >= 0x40 && r <= 0x7e {
+				inEscape = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if r == '\n' || r == '\r' || r == '\t' {
+			r = ' '
+		}
+		if b.Len() >= maxLen {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// statusBarInfo holds the editor-specific data needed to render the status bar.
+// Separates editor state gathering from bar layout/rendering.
+type statusBarInfo struct {
+	FileName  string // file path or "[new]"
+	Modified  bool
+	StatusMsg string // transient status text (e.g. "saved")
+	DiagMsg   string // diagnostic on current line (e.g. "error: ...")
+	CursorPos string // formatted cursor position
+}
+
+// statusInfo gathers editor state into a statusBarInfo for rendering.
+func (m *EditorModel) statusInfo() statusBarInfo {
+	info := statusBarInfo{
+		FileName: sanitizeStatusText(m.eng.FilePath()),
+		Modified: m.eng.IsModified(),
+	}
+	if info.FileName == "" {
+		info.FileName = "[new]"
+	}
+
+	if m.StatusMsg != "" {
+		info.StatusMsg = sanitizeStatusText(m.StatusMsg)
+	} else if diag := m.diagnosticForLine(m.eng.CursorLine); diag != nil {
+		var prefix string
+		switch diag.Severity {
+		case lang.SeverityError:
+			prefix = "error"
+		case lang.SeverityWarning:
+			prefix = "warning"
+		default:
+			prefix = "info"
+		}
+		info.DiagMsg = prefix + ": " + sanitizeStatusText(diag.Message)
+	}
+
+	if m.Overlay != nil && m.Overlay.Active {
+		info.CursorPos = fmt.Sprintf(" +%d:%d ", m.Overlay.Editor.CursorLine+1, m.Overlay.Editor.CursorCol+1)
+	} else {
+		info.CursorPos = fmt.Sprintf(" %d:%d ", m.eng.CursorLine+1, m.eng.CursorCol+1)
+	}
+	return info
+}
+
+// renderStatusBar renders the full-width status bar from editor info and
+// app-level indicators. Standalone function so the rendering concern is
+// not bound to either EditorModel or AppModel.
+func renderStatusBar(info statusBarInfo, width int, indicators ...string) string {
+	modified := ""
+	if info.Modified {
+		modified = " [+]"
+	}
+
+	left := fmt.Sprintf(" %s%s", info.FileName, modified)
+	if info.StatusMsg != "" {
+		left += "  " + info.StatusMsg
+	} else if info.DiagMsg != "" {
+		left += "  " + info.DiagMsg
+	}
+
+	right := info.CursorPos
+	if len(indicators) > 0 {
+		right = strings.Join(indicators, " | ") + " | " + right
+	}
+
+	leftW := runewidth.StringWidth(left)
+	rightW := runewidth.StringWidth(right)
+	padding := width - leftW - rightW
+	if padding < 0 {
+		padding = 0
+	}
+
+	bar := left + strings.Repeat(" ", padding) + right
+	bar = runewidth.Truncate(bar, width, "")
+
+	return statusBarStyle.Render(bar)
+}
+
+// --- Mouse Handling ---
+
+func (m *EditorModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	scrollLines := 3
+	switch msg.Button {
+	case tea.MouseWheelUp:
+		m.syncExtraVisualLines()
+		m.eng.ScrollUp(scrollLines)
+	case tea.MouseWheelDown:
+		m.syncExtraVisualLines()
+		m.eng.ScrollDown(scrollLines)
+	}
+	return nil
+}
+
+// mouseEntry returns the viewport entry and display column for a mouse event at (x, y).
+// The returned display column is in absolute display-column space (accounts for
+// horizontal scroll), so callers can feed it directly to DisplayColToBufferCol.
+func (m *EditorModel) mouseEntry(x, y int) (*viewportEntry, int) {
+	if y < 0 || y >= len(m.viewportMap) {
+		return nil, 0
+	}
+	gutterW := m.eng.GutterWidth()
+	displayCol := x - gutterW + m.eng.ScrollCol
+	if displayCol < 0 {
+		displayCol = 0
+	}
+	return &m.viewportMap[y], displayCol
+}
+
+func (m *EditorModel) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
+	if msg.Button != tea.MouseLeft {
+		return nil
+	}
+	entry, displayCol := m.mouseEntry(msg.X, msg.Y)
+	if entry == nil {
+		return nil
+	}
+	m.cursorMoved = true
+
+	switch entry.kind {
+	case lineNormal:
+		if m.Overlay != nil && m.Overlay.Active {
+			slog.Debug("overlay deactivated", "reason", "click on normal line", "bufLine", entry.bufLine)
+			m.Overlay.Active = false
+		}
+		m.normalLinePress(entry.bufLine, displayCol)
+
+	case lineAdded:
+		if m.Overlay != nil {
+			oe := m.Overlay.Editor
+			_, bufToDisp := m.expandTabs([]rune(oe.LineText(entry.overlayLine)))
+			col := displayColToBufCol(bufToDisp, displayCol)
+			slog.Debug("overlay click", "overlayLine", entry.overlayLine, "col", col)
+			m.Overlay.Active = true
+			oe.ClearSelection()
+			m.eng.ClearSelection()
+			oe.MoveCursorTo(entry.overlayLine, col)
+			oe.SelectionActive = true
+			oe.SelectStartLine = oe.CursorLine
+			oe.SelectStartCol = oe.CursorCol
+			m.overlayDragging = true
+			m.mainDragging = false
+		}
+
+	case lineRemoved:
+		if m.Overlay != nil && m.Overlay.Active {
+			slog.Debug("overlay deactivated", "reason", "click on removed line", "bufLine", entry.bufLine)
+			m.Overlay.Active = false
+		}
+		m.normalLinePress(entry.bufLine, displayCol)
+
+	case lineEmpty:
+		if m.Overlay != nil && m.Overlay.Active {
+			m.Overlay.Active = false
+		}
+		m.normalLinePress(m.eng.LineCount(), displayCol)
+	}
+
+	return nil
+}
+
+func (m *EditorModel) handleMouseMotion(msg tea.MouseMotionMsg) tea.Cmd {
+	entry, displayCol := m.mouseEntry(msg.X, msg.Y)
+	if entry == nil {
+		return nil
+	}
+
+	// Overlay drag — keep selection within overlay.
+	if m.overlayDragging && m.Overlay != nil {
+		m.cursorMoved = true
+		oe := m.Overlay.Editor
+		switch entry.kind {
+		case lineAdded:
+			_, bufToDisp := m.expandTabs([]rune(oe.LineText(entry.overlayLine)))
+			col := displayColToBufCol(bufToDisp, displayCol)
+			oe.MoveCursorTo(entry.overlayLine, col)
+		case lineNormal:
+			// Normal line — clamp to nearest overlay boundary.
+			if entry.bufLine < m.Overlay.StartLine {
+				oe.MoveCursorTo(0, 0)
+			} else {
+				lastLine := oe.LineCount() - 1
+				oe.MoveCursorTo(lastLine, oe.LineLen(lastLine))
+			}
+		case lineRemoved:
+			// Removed lines sit visually above the added lines — clamp to top.
+			oe.MoveCursorTo(0, 0)
+		case lineEmpty:
+			// Below all content — clamp to end.
+			lastLine := oe.LineCount() - 1
+			oe.MoveCursorTo(lastLine, oe.LineLen(lastLine))
+		}
+		return nil
+	}
+
+	// Normal drag — extend selection.
+	if m.mainDragging {
+		m.cursorMoved = true
+		switch entry.kind {
+		case lineNormal, lineRemoved:
+			bufLine, bufCol := m.resolveBufferPos(entry.bufLine, displayCol)
+			m.eng.MoveCursorTo(bufLine, bufCol)
+		case lineAdded:
+			// Dragged into overlay added lines — clamp to the line just
+			// after the overlay's removed range (overlay.EndLine + 1 in
+			// the original buffer doesn't exist visually, so use EndLine).
+			m.eng.MoveCursorTo(m.Overlay.EndLine, m.eng.LineLen(m.Overlay.EndLine))
+		case lineEmpty:
+			// Past end of buffer — clamp to last line.
+			lastLine := m.eng.LineCount() - 1
+			m.eng.MoveCursorTo(lastLine, m.eng.LineLen(lastLine))
+		}
+	}
+	return nil
+}
+
+func (m *EditorModel) handleMouseRelease(msg tea.MouseReleaseMsg) tea.Cmd {
+	wasDraggingOverlay := m.overlayDragging
+	m.mainDragging = false
+	m.overlayDragging = false
+
+	entry, displayCol := m.mouseEntry(msg.X, msg.Y)
+	if entry == nil {
+		return nil
+	}
+
+	// Overlay — finalize overlay selection.
+	if wasDraggingOverlay && m.Overlay != nil {
+		oe := m.Overlay.Editor
+		if oe.SelectionActive &&
+			oe.CursorLine == oe.SelectStartLine &&
+			oe.CursorCol == oe.SelectStartCol {
+			oe.ClearSelection()
+		}
+		return nil
+	}
+
+	// Normal release — clear selection if click (no drag).
+	_ = displayCol // unused in release
+	if m.eng.SelectionActive &&
+		m.eng.CursorLine == m.eng.SelectStartLine &&
+		m.eng.CursorCol == m.eng.SelectStartCol {
+		m.eng.ClearSelection()
+	}
+	return nil
+}
+
+// normalLinePress handles a left-click press on a normal buffer line.
+func (m *EditorModel) normalLinePress(bufLine, displayCol int) {
+	bufLine, bufCol := m.resolveBufferPos(bufLine, displayCol)
+	m.eng.ClearSelection()
+	m.eng.MoveCursorTo(bufLine, bufCol)
+	m.eng.SelectionActive = true
+	m.eng.SelectStartLine = m.eng.CursorLine
+	m.eng.SelectStartCol = m.eng.CursorCol
+	m.mainDragging = true
+	m.overlayDragging = false
+}
+
+// resolveBufferPos converts a display position to a buffer position,
+// clamping to valid bounds.
+func (m *EditorModel) resolveBufferPos(bufLine, displayCol int) (int, int) {
+	if bufLine >= m.eng.LineCount() {
+		bufLine = m.eng.LineCount() - 1
+		if bufLine < 0 {
+			bufLine = 0
+		}
+		return bufLine, m.eng.LineLen(bufLine)
+	}
+	return bufLine, m.eng.DisplayColToBufferCol(bufLine, displayCol)
+}
+
+// --- Key Handling ---
+
+// overlapsRemovedRange returns true when the cursor or selection touches the
+// overlay's removed line range or its immediate boundary lines. The boundary
+// extension prevents newline-join operations (Backspace at col 0 of EndLine+1,
+// Delete at end of StartLine-1) from merging into removed lines.
+func (m *EditorModel) overlapsRemovedRange() bool {
+	if m.Overlay == nil || m.Overlay.Active {
+		return false
+	}
+	start, end := m.Overlay.StartLine, m.Overlay.EndLine
+
+	// Cursor on a removed line → read-only.
+	if m.eng.CursorLine >= start && m.eng.CursorLine <= end {
+		return true
+	}
+	// Cursor on the line just before the removed range, at end of line:
+	// Delete would join into StartLine.
+	if m.eng.CursorLine == start-1 && m.eng.CursorCol >= m.eng.LineLen(m.eng.CursorLine) {
+		return true
+	}
+	// Cursor on the line just after the removed range, at col 0:
+	// Backspace would join into EndLine.
+	if m.eng.CursorLine == end+1 && m.eng.CursorCol == 0 {
+		return true
+	}
+
+	if m.eng.SelectionActive {
+		selStart, selEnd := m.eng.SelectStartLine, m.eng.CursorLine
+		if selStart > selEnd {
+			selStart, selEnd = selEnd, selStart
+		}
+		if selStart <= end && selEnd >= start {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *EditorModel) handleKey(keyMsg tea.KeyPressMsg) tea.Cmd {
+	m.StatusMsg = "" // clear transient status on any key
+
+	// Route to overlay when it owns the cursor.
+	if m.Overlay != nil && m.Overlay.Active {
+		return m.handleOverlayKey(keyMsg)
+	}
+
+	// Intercept arrow keys that would cross into the removed range.
+	// Enter the overlay directly so the cursor doesn't land invisibly
+	// on a removed line behind the green overlay.
+	if m.Overlay != nil && !m.Overlay.Active {
+		if entered := m.interceptOverlayEntry(keyMsg); entered {
+			return nil
+		}
+	}
+
+	// Track line count so we can adjust overlay position if the user
+	// inserts/deletes lines above the diff.
+	linesBefore := m.eng.LineCount()
+
+	readOnly := m.overlapsRemovedRange()
+	cmd := m.handleEditorKeyFor(keyMsg, m.eng, readOnly)
+
+	m.adjustOverlayPosition(linesBefore)
+	return cmd
+}
+
+// interceptOverlayEntry checks if an arrow key would move the cursor into the
+// removed range and enters the overlay instead. Returns true if intercepted.
+func (m *EditorModel) interceptOverlayEntry(keyMsg tea.KeyPressMsg) bool {
+	o := m.Overlay
+	if o == nil {
+		return false
+	}
+
+	if keyMsg.Mod != 0 {
+		return false // shift+arrow, ctrl+arrow, etc. — don't intercept
+	}
+
+	switch keyMsg.Code {
+	case tea.KeyDown:
+		// Cursor just above removed range → enter overlay at first line.
+		if m.eng.CursorLine == o.StartLine-1 {
+			o.Active = true
+			o.Editor.MoveCursorTo(0, m.eng.CursorCol)
+			m.eng.ClearSelection()
+			return true
+		}
+	case tea.KeyUp:
+		// Cursor just below removed range → enter overlay at last line.
+		if m.eng.CursorLine == o.EndLine+1 {
+			o.Active = true
+			lastLine := o.Editor.LineCount() - 1
+			o.Editor.MoveCursorTo(lastLine, m.eng.CursorCol)
+			m.eng.ClearSelection()
+			return true
+		}
+	}
+	return false
+}
+
+// adjustOverlayPosition shifts the overlay's line range when lines are
+// inserted or deleted above it in the main buffer.
+func (m *EditorModel) adjustOverlayPosition(linesBefore int) {
+	if m.Overlay == nil {
+		return
+	}
+	delta := m.eng.LineCount() - linesBefore
+	if delta == 0 {
+		return
+	}
+	// Edits happen at the cursor. Only adjust if the cursor is above the overlay.
+	if m.eng.CursorLine <= m.Overlay.StartLine {
+		m.Overlay.StartLine += delta
+		m.Overlay.EndLine += delta
+		slog.Debug("overlay position adjusted", "delta", delta, "newStart", m.Overlay.StartLine, "newEnd", m.Overlay.EndLine)
+		// If the overlay shifted to an invalid position, remove it.
+		if m.Overlay.StartLine < 0 || m.Overlay.EndLine < 0 {
+			slog.Debug("overlay removed", "reason", "shifted to invalid position")
+			m.Overlay = nil
+			m.eng.SetExtraVisualLines(0)
+		}
+	}
+}
+
+// handleOverlayKey handles keys when the overlay editor is active.
+// Overlay-specific: boundary exit (up/down past edges), escape to deactivate,
+// save always goes to main buffer. Everything else delegates to the shared handler.
+func (m *EditorModel) handleOverlayKey(keyMsg tea.KeyPressMsg) tea.Cmd {
+	o := m.Overlay
+	oe := o.Editor
+
+	// Escape — leave overlay, move cursor to nearest non-removed line
+	// so subsequent navigation doesn't immediately re-enter the overlay.
+	if keyMsg.Code == tea.KeyEscape {
+		slog.Debug("overlay deactivated", "reason", "escape")
+		oe.ClearSelection()
+		o.Active = false
+		if o.StartLine > 0 {
+			m.eng.MoveCursorTo(o.StartLine-1, oe.CursorCol)
+		} else if o.EndLine+1 < m.eng.LineCount() {
+			m.eng.MoveCursorTo(o.EndLine+1, oe.CursorCol)
+		}
+		return nil
+	}
+
+	// Up at top of overlay — exit upward if there's a safe line above.
+	if keyMsg.Code == tea.KeyUp && keyMsg.Mod == 0 && oe.CursorLine == 0 {
+		if o.StartLine <= 0 {
+			// No buffer line above the overlay — stay in overlay.
+			return nil
+		}
+		slog.Debug("overlay deactivated", "reason", "arrow up past top", "target", o.StartLine-1)
+		oe.ClearSelection()
+		o.Active = false
+		m.eng.MoveCursorTo(o.StartLine-1, oe.CursorCol)
+		return nil
+	}
+
+	// Down at bottom of overlay — exit downward if there's a safe line below.
+	if keyMsg.Code == tea.KeyDown && keyMsg.Mod == 0 && oe.CursorLine >= oe.LineCount()-1 {
+		if o.EndLine+1 >= m.eng.LineCount() {
+			// No buffer line below the overlay — stay in overlay.
+			return nil
+		}
+		slog.Debug("overlay deactivated", "reason", "arrow down past bottom", "target", o.EndLine+1)
+		oe.ClearSelection()
+		o.Active = false
+		m.eng.MoveCursorTo(o.EndLine+1, oe.CursorCol)
+		return nil
+	}
+
+	// Everything else — same as normal editor
+	return m.handleEditorKeyFor(keyMsg, oe, false)
+}
+
+// handleEditorKeyFor is the shared key handler that operates on any *editor.Editor.
+// Both the main editor and the overlay editor use this — no duplication.
+func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Editor, readOnly bool) tea.Cmd {
+	isShift := keyMsg.Mod&tea.ModShift != 0
+
+	action := m.Keymap.Match(keyMsg)
+
+	switch action {
+	case ActionSave:
+		// Save always operates on the main buffer.
+		if err := m.eng.Save(); err != nil {
+			m.StatusMsg = "Save failed: " + err.Error()
+		} else {
+			m.StatusMsg = "Saved"
+			if m.OnSave != nil {
+				m.OnSave()
+			}
+		}
+		return nil
+
+	case ActionUndo:
+		if !readOnly {
+			e.Undo()
+		}
+		return nil
+
+	case ActionRedo:
+		if !readOnly {
+			e.Redo()
+		}
+		return nil
+
+	case ActionCopy:
+		if e.SelectionActive {
+			m.Clipboard = e.SelectedText()
+			if err := m.Services.Clipboard.Write(m.Clipboard); err != nil {
+				slog.Warn("system clipboard write failed", "err", err)
+			}
+		}
+		return nil
+
+	case ActionCut:
+		if !readOnly && e.SelectionActive {
+			m.Clipboard = e.SelectedText()
+			if err := m.Services.Clipboard.Write(m.Clipboard); err != nil {
+				slog.Warn("system clipboard write failed", "err", err)
+			}
+			e.DeleteSelection()
+		}
+		return nil
+
+	case ActionPaste:
+		if !readOnly {
+			if sys := m.Services.Clipboard.Read(); sys != "" {
+				m.Clipboard = sys
+			}
+			if m.Clipboard != "" {
+				if e.SelectionActive {
+					e.DeleteSelection()
+				}
+				e.PasteText(m.Clipboard)
+			}
+		}
+		return nil
+
+	case ActionSelectAll:
+		e.SelectAll()
+		return nil
+
+	case ActionFileStart:
+		if isShift {
+			e.StartSelection()
+		} else {
+			e.ClearSelection()
+		}
+		e.FileStart()
+		return nil
+
+	case ActionFileEnd:
+		if isShift {
+			e.StartSelection()
+		} else {
+			e.ClearSelection()
+		}
+		e.FileEnd()
+		return nil
+
+	case ActionSelectLine:
+		e.SelectLine()
+		return nil
+
+	case ActionSelectNext:
+		e.SelectNextOccurrence()
+		return nil
+
+	case ActionDeleteLine:
+		if !readOnly {
+			e.DeleteLine()
+		}
+		return nil
+
+	case ActionDuplicateLine:
+		if !readOnly {
+			e.DuplicateLine()
+		}
+		return nil
+
+	case ActionSwapLineUp:
+		if !readOnly {
+			e.SwapLineUp()
+		}
+		return nil
+
+	case ActionSwapLineDown:
+		if !readOnly {
+			e.SwapLineDown()
+		}
+		return nil
+
+	case ActionToggleComment:
+		if !readOnly {
+			if prefix := lang.LineCommentPrefix(e.FilePath()); prefix != "" {
+				e.ToggleLineComment(prefix)
+			}
+		}
+		return nil
+
+	case ActionGoToLineStart:
+		if isShift {
+			e.StartSelection()
+		} else {
+			e.ClearSelection()
+		}
+		e.Home()
+		return nil
+
+	case ActionGoToLineEnd:
+		if isShift {
+			e.StartSelection()
+		} else {
+			e.ClearSelection()
+		}
+		e.End()
+		return nil
+
+	case ActionIndent:
+		if !readOnly {
+			if e.SelectionActive {
+				e.IndentSelection("    ")
+			} else {
+				e.InsertTab()
+			}
+		}
+		return nil
+
+	case ActionOutdent:
+		if !readOnly && e.SelectionActive {
+			e.OutdentSelection("    ")
+		}
+		return nil
+	}
+
+	if keyMsg.Code == tea.KeyEscape {
+		e.ClearSelection()
+		return nil
+	}
+
+	// Ctrl+Shift+arrow: word selection (must be checked before plain Shift)
+	if keyMsg.Mod == tea.ModCtrl|tea.ModShift {
+		switch keyMsg.Code {
+		case tea.KeyRight:
+			e.StartSelection()
+			e.WordRight()
+			return nil
+		case tea.KeyLeft:
+			e.StartSelection()
+			e.WordLeft()
+			return nil
+		case tea.KeyHome:
+			e.StartSelection()
+			e.FileStart()
+			return nil
+		case tea.KeyEnd:
+			e.StartSelection()
+			e.FileEnd()
+			return nil
+		}
+	}
+
+	// Alt+Shift+arrow: word selection (macOS Option+Shift, works in most terminals)
+	// Also handle Alt+Shift+b/f for Terminal.app compatibility.
+	if keyMsg.Mod == tea.ModAlt|tea.ModShift {
+		switch keyMsg.Code {
+		case tea.KeyRight, 'f', 'F':
+			e.StartSelection()
+			e.WordRight()
+			return nil
+		case tea.KeyLeft, 'b', 'B':
+			e.StartSelection()
+			e.WordLeft()
+			return nil
+		}
+	}
+
+	// Alt+arrow: word navigation (macOS Option+Arrow, works in most terminals)
+	// Also handle Alt+b/f — Terminal.app sends ESC b / ESC f for Option+Left/Right
+	// which Bubble Tea parses as Alt+b / Alt+f.
+	if keyMsg.Mod == tea.ModAlt {
+		switch keyMsg.Code {
+		case tea.KeyRight:
+			e.ClearSelection()
+			e.WordRight()
+			return nil
+		case tea.KeyLeft:
+			e.ClearSelection()
+			e.WordLeft()
+			return nil
+		case 'f':
+			e.ClearSelection()
+			e.WordRight()
+			return nil
+		case 'b':
+			e.ClearSelection()
+			e.WordLeft()
+			return nil
+		}
+	}
+
+	// Shift+arrow selection navigation
+	if isShift {
+		switch keyMsg.Code {
+		case tea.KeyUp:
+			e.StartSelection()
+			e.MoveCursor(-1, 0)
+			return nil
+		case tea.KeyDown:
+			e.StartSelection()
+			e.MoveCursor(1, 0)
+			return nil
+		case tea.KeyLeft:
+			e.StartSelection()
+			e.MoveCursor(0, -1)
+			return nil
+		case tea.KeyRight:
+			e.StartSelection()
+			e.MoveCursor(0, 1)
+			return nil
+		case tea.KeyHome:
+			e.StartSelection()
+			e.Home()
+			return nil
+		case tea.KeyEnd:
+			e.StartSelection()
+			e.End()
+			return nil
+		}
+	}
+
+	// Ctrl+arrow word navigation
+	if keyMsg.Mod&tea.ModCtrl != 0 {
+		switch keyMsg.Code {
+		case tea.KeyRight:
+			e.ClearSelection()
+			e.WordRight()
+			return nil
+		case tea.KeyLeft:
+			e.ClearSelection()
+			e.WordLeft()
+			return nil
+		}
+	}
+
+	switch keyMsg.Code {
+	// Navigation
+	case tea.KeyUp:
+		e.ClearSelection()
+		e.MoveCursor(-1, 0)
+		return nil
+	case tea.KeyDown:
+		e.ClearSelection()
+		e.MoveCursor(1, 0)
+		return nil
+	case tea.KeyLeft:
+		e.ClearSelection()
+		e.MoveCursor(0, -1)
+		return nil
+	case tea.KeyRight:
+		e.ClearSelection()
+		e.MoveCursor(0, 1)
+		return nil
+	case tea.KeyHome:
+		e.ClearSelection()
+		e.Home()
+		return nil
+	case tea.KeyEnd:
+		e.ClearSelection()
+		e.End()
+		return nil
+	case tea.KeyPgUp:
+		e.ClearSelection()
+		m.syncExtraVisualLines()
+		// Use the main viewport's visible height for page jumps, not the
+		// target editor's own Height (which may differ for the overlay editor).
+		e.MoveCursor(-m.eng.VisibleLines(), 0)
+		return nil
+	case tea.KeyPgDown:
+		e.ClearSelection()
+		m.syncExtraVisualLines()
+		e.MoveCursor(m.eng.VisibleLines(), 0)
+		return nil
+
+	// Editing
+	case tea.KeyEnter:
+		if readOnly {
+			return nil
+		}
+		if e.SelectionActive {
+			e.DeleteSelection()
+		}
+		e.InsertNewline()
+		return nil
+	case tea.KeyTab:
+		if readOnly {
+			return nil
+		}
+		// Shift+Tab: outdent
+		if isShift && e.SelectionActive {
+			e.OutdentSelection("    ")
+			return nil
+		}
+		// Tab with multi-line selection: indent block
+		if e.SelectionActive {
+			sl, _, el, _ := e.SelectedRange()
+			if sl != el {
+				e.IndentSelection("    ")
+				return nil
+			}
+			e.DeleteSelection()
+		}
+		e.InsertTab()
+		return nil
+	case tea.KeySpace:
+		if readOnly {
+			return nil
+		}
+		if e.SelectionActive {
+			e.DeleteSelection()
+		}
+		e.InsertChar(' ')
+		return nil
+	case tea.KeyBackspace:
+		if readOnly {
+			return nil
+		}
+		if e.SelectionActive {
+			e.DeleteSelection()
+		} else {
+			e.Backspace()
+		}
+		return nil
+	case tea.KeyDelete:
+		if readOnly {
+			return nil
+		}
+		if e.SelectionActive {
+			e.DeleteSelection()
+		} else {
+			e.DeleteChar()
+		}
+		return nil
+	}
+
+	// Printable text input
+	if keyMsg.Text != "" {
+		if readOnly {
+			return nil
+		}
+		runes := []rune(keyMsg.Text)
+		if len(runes) > 1 {
+			if e.SelectionActive {
+				e.DeleteSelection()
+			}
+			e.PasteText(keyMsg.Text)
+		} else {
+			if e.SelectionActive {
+				e.DeleteSelection()
+			}
+			for _, r := range runes {
+				e.InsertChar(r)
+			}
+		}
+		// Trigger completion after typing trigger characters.
+		if len(runes) == 1 && lang.IsCompletionTrigger(runes[0]) {
+			return func() tea.Msg { return completionTriggerMsg{} }
+		}
+		return nil
+	}
+
+	if !isShift {
+		e.ClearSelection()
+	}
+
+	return nil
+}
+
+// styleForTokenKind maps highlight.TokenKind to a pre-allocated lipgloss.Style.
+func styleForTokenKind(kind highlight.TokenKind) lipgloss.Style {
+	if s, ok := tokenKindStyles[kind]; ok {
+		return s
+	}
+	return tokenKindDefault
+}

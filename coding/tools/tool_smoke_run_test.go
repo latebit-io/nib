@@ -1,0 +1,115 @@
+package tools
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/runconfig"
+)
+
+// TestSmokeToolDefinitionAdvertisesSource verifies the tool definition
+// names the source (so the LLM knows what kind of target it is
+// invoking) but deliberately does NOT include the raw resolved command.
+// The command is surfaced only in per-call results where the LLM needs
+// it for failure diagnosis; keeping it out of the static description
+// avoids caching project-specific run config (potentially with inline
+// env/auth flags) into the system prompt across every turn.
+func TestSmokeToolDefinitionAdvertisesSource(t *testing.T) {
+	t.Parallel()
+
+	tool := NewSmokeRunTool("/tmp", runconfig.Resolved{
+		Command: "API_KEY=secret make smoke",
+		Source:  "make-smoke",
+		Timeout: 5 * time.Second,
+	})
+
+	def := tool.Definition()
+	if def.Function.Name != "smoke_run" {
+		t.Errorf("Name = %q, want smoke_run", def.Function.Name)
+	}
+	if !strings.Contains(def.Function.Description, "make-smoke") {
+		t.Errorf("Description missing source: %q", def.Function.Description)
+	}
+	// The raw command must never appear in the description. The static
+	// prefix mentions `make smoke` and `make run` as examples — a
+	// distinctive secret-bearing fixture proves the resolved command
+	// is NOT copied in.
+	if strings.Contains(def.Function.Description, "API_KEY=secret") {
+		t.Errorf("Description leaked raw command: %q", def.Function.Description)
+	}
+}
+
+// TestSmokeToolSkippedReturnsReason verifies a Skipped configuration
+// produces a clean tool result instead of running an empty command.
+func TestSmokeToolSkippedReturnsReason(t *testing.T) {
+	t.Parallel()
+
+	tool := NewSmokeRunTool("/tmp", runconfig.Resolved{
+		Skipped:    true,
+		SkipReason: "no runnable entry point detected",
+	})
+	res := tool.Execute(context.Background(), llm.ToolCall{})
+	if !strings.Contains(res.Content, "Smoke run skipped") {
+		t.Errorf("Content = %q, want Skipped banner", res.Content)
+	}
+	if !strings.Contains(res.Content, "no runnable entry point detected") {
+		t.Errorf("Content missing reason: %q", res.Content)
+	}
+}
+
+// TestSmokeToolSuccess verifies a passing smoke command produces a
+// "Passed" banner and the duration is rendered.
+func TestSmokeToolSuccess(t *testing.T) {
+	t.Parallel()
+
+	tool := NewSmokeRunTool("", runconfig.Resolved{
+		Command: "true",
+		Source:  "test",
+		Timeout: 5 * time.Second,
+	})
+	res := tool.Execute(context.Background(), llm.ToolCall{})
+	if !strings.Contains(res.Content, "Passed") {
+		t.Errorf("Content = %q, want 'Passed'", res.Content)
+	}
+}
+
+// TestSmokeToolFailure verifies a failing command surfaces exit code
+// and captured output. The output assertion uses indent's prefix so
+// the format change is locked in.
+func TestSmokeToolFailure(t *testing.T) {
+	t.Parallel()
+
+	tool := NewSmokeRunTool("", runconfig.Resolved{
+		Command: "echo broke && exit 3",
+		Source:  "test",
+		Timeout: 5 * time.Second,
+	})
+	res := tool.Execute(context.Background(), llm.ToolCall{})
+	if !strings.Contains(res.Content, "Failed (exit 3)") {
+		t.Errorf("Content missing failure banner: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "broke") {
+		t.Errorf("Content missing captured output: %q", res.Content)
+	}
+}
+
+// TestSmokeToolTimeout verifies a hanging command is killed by the
+// timeout and reported as such — the most important property since
+// `make run` may legitimately run forever in interactive form and we
+// must not hang the agent.
+func TestSmokeToolTimeout(t *testing.T) {
+	t.Parallel()
+
+	tool := NewSmokeRunTool("", runconfig.Resolved{
+		Command: "sleep 10",
+		Source:  "test",
+		Timeout: 100 * time.Millisecond,
+	})
+	res := tool.Execute(context.Background(), llm.ToolCall{})
+	if !strings.Contains(res.Content, "Timed out") {
+		t.Errorf("Content missing timeout banner: %q", res.Content)
+	}
+}

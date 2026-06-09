@@ -1,0 +1,641 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	upagent "github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/event"
+	"github.com/latebit-io/nib/coding/nudges"
+)
+
+// Foundation hook tests cover each gate in isolation, then exercise
+// the composed Hooks value to verify the in-order dispatch + the
+// closure-captured turn state.
+
+// --- planningBlocklistGate ---
+
+func TestPlanningBlocklistGate_BlocksInPlanningMode(t *testing.T) {
+	a := &Agent{
+		mode:              event.ModePlanning,
+		planningBlocklist: map[string]bool{"edit_file": true},
+	}
+
+	res := a.planningBlocklistGate(upagent.BeforeToolCallInput{Name: "edit_file"})
+	if !res.Block {
+		t.Fatalf("expected Block=true for blocklisted tool in planning mode")
+	}
+	if !strings.Contains(res.Reason, "edit_file") || !strings.Contains(res.Reason, "planning mode") {
+		t.Errorf("unexpected reason: %q", res.Reason)
+	}
+}
+
+func TestPlanningBlocklistGate_CaseInsensitive(t *testing.T) {
+	a := &Agent{
+		mode:              event.ModePlanning,
+		planningBlocklist: map[string]bool{"edit_file": true},
+	}
+	res := a.planningBlocklistGate(upagent.BeforeToolCallInput{Name: "Edit_File"})
+	if !res.Block {
+		t.Fatalf("expected Block for case-different name")
+	}
+}
+
+func TestPlanningBlocklistGate_AllowsNonBlocklisted(t *testing.T) {
+	a := &Agent{
+		mode:              event.ModePlanning,
+		planningBlocklist: map[string]bool{"edit_file": true},
+	}
+	res := a.planningBlocklistGate(upagent.BeforeToolCallInput{Name: "read_file"})
+	if res.Block {
+		t.Errorf("expected non-block for tool off the blocklist; reason=%q", res.Reason)
+	}
+}
+
+func TestPlanningBlocklistGate_OffInExecution(t *testing.T) {
+	a := &Agent{
+		mode:              event.ModeExecution,
+		planningBlocklist: map[string]bool{"edit_file": true},
+	}
+	res := a.planningBlocklistGate(upagent.BeforeToolCallInput{Name: "edit_file"})
+	if res.Block {
+		t.Errorf("planning-mode blocklist must not fire in execution mode")
+	}
+}
+
+// --- activeTaskGate ---
+
+func TestActiveTaskGate_BlocksWhenNoActiveTask(t *testing.T) {
+	tracker := &gateTracker{loaded: true, activePath: ""}
+	ws := &gateTestWorkspace{
+		testWorkspace: &testWorkspace{},
+		gateTracker:   tracker,
+	}
+	a := &Agent{mode: event.ModeExecution, workspace: ws}
+
+	res := a.activeTaskGate(context.Background(), upagent.BeforeToolCallInput{Name: "edit_file"})
+	if !res.Block {
+		t.Fatalf("expected Block when no active task")
+	}
+	if !strings.Contains(res.Reason, "no active task") {
+		t.Errorf("expected active-task error, got: %q", res.Reason)
+	}
+}
+
+func TestActiveTaskGate_AllowsWhenActiveTaskSet(t *testing.T) {
+	tracker := &gateTracker{loaded: true, activePath: "Phase 1 > task"}
+	ws := &gateTestWorkspace{
+		testWorkspace: &testWorkspace{},
+		gateTracker:   tracker,
+	}
+	a := &Agent{mode: event.ModeExecution, workspace: ws}
+
+	res := a.activeTaskGate(context.Background(), upagent.BeforeToolCallInput{Name: "edit_file"})
+	if res.Block {
+		t.Errorf("expected non-block with active task; reason=%q", res.Reason)
+	}
+}
+
+// --- FoundationHooks() composed behavior ---
+
+func TestFoundationHooks_MigratedHooksPresent(t *testing.T) {
+	// Pin the wiring contract so future commits notice when the
+	// migrated set changes. After the 8c cutover every hook the
+	// foundation exposes is wired by the application — the bare
+	// foundation has nothing application-specific to layer on, so
+	// missing wiring would silently drop a behavior.
+	a := &Agent{}
+	hooks := a.FoundationHooks(nil)
+	if hooks.BeforeToolCall == nil {
+		t.Errorf("BeforeToolCall must be wired (concerns #1, #2 + flushDirtyBuffers + AgentToolCall emit)")
+	}
+	if hooks.TransformContext == nil {
+		t.Errorf("TransformContext must be wired (concerns #2, #3, #6 + system prompt rebuild + EstimateAndBroadcast)")
+	}
+	if hooks.SteeringMessages == nil {
+		t.Errorf("SteeringMessages must be wired (concern #4)")
+	}
+	if hooks.AfterToolCall == nil {
+		t.Errorf("AfterToolCall must be wired (concern #5)")
+	}
+	if hooks.FollowUpMessages == nil {
+		t.Errorf("FollowUpMessages must be wired — drives AgentWaiting emission at the loop-park boundary")
+	}
+	if hooks.OnTruncated == nil {
+		t.Errorf("OnTruncated must be wired — drives the truncation-recovery contract")
+	}
+}
+
+// --- foundationCompactAndLint ---
+
+func TestFoundationCompactAndLint_NoLintNoCompactionPasses(t *testing.T) {
+	// Small transcript, no pending lint — TransformContext returns
+	// the slice untouched (modulo MaybeCompact's short-circuit).
+	a := &Agent{}
+	msgs := []llm.Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "hello"},
+	}
+	out, err := a.foundationCompactAndLint(context.Background(), msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != len(msgs) {
+		t.Errorf("expected unchanged length %d, got %d", len(msgs), len(out))
+	}
+}
+
+func TestFoundationCompactAndLint_InjectsLintMessage(t *testing.T) {
+	a := &Agent{pendingLint: "vet: declared but not used: foo"}
+	msgs := []llm.Message{{Role: "user", Content: "fix it"}}
+
+	out, err := a.foundationCompactAndLint(context.Background(), msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != len(msgs)+1 {
+		t.Fatalf("expected one appended message, got len=%d", len(out))
+	}
+	last := out[len(out)-1]
+	if last.Role != "user" {
+		t.Errorf("expected appended message Role=user, got %q", last.Role)
+	}
+	if !strings.Contains(last.Content, "STOP") || !strings.Contains(last.Content, "lint") {
+		t.Errorf("expected lint preamble in appended content, got: %q", last.Content)
+	}
+	if !strings.Contains(last.Content, "declared but not used") {
+		t.Errorf("expected lint output to be quoted into appended content, got: %q", last.Content)
+	}
+	// Drain semantics: pendingLint must be cleared after the call.
+	if a.pendingLint != "" {
+		t.Errorf("expected pendingLint to be drained, got %q", a.pendingLint)
+	}
+}
+
+func TestFoundationCompactAndLint_DrainOnlyOnce(t *testing.T) {
+	// Calling TransformContext twice in succession (e.g. retry path)
+	// must not re-inject the same lint preamble.
+	a := &Agent{pendingLint: "some violation"}
+	msgs := []llm.Message{{Role: "user", Content: "."}}
+
+	out1, err := a.foundationCompactAndLint(context.Background(), msgs)
+	if err != nil {
+		t.Fatalf("first foundationCompactAndLint: %v", err)
+	}
+	if len(out1) != 2 {
+		t.Fatalf("first call: expected len=2, got %d", len(out1))
+	}
+	out2, err := a.foundationCompactAndLint(context.Background(), msgs)
+	if err != nil {
+		t.Fatalf("second foundationCompactAndLint: %v", err)
+	}
+	if len(out2) != 1 {
+		t.Errorf("second call: expected drained pendingLint to leave msgs unchanged, len=%d", len(out2))
+	}
+}
+
+// --- activeToolDefs ---
+
+func TestActiveToolDefs_PlanningFiltersBlocklist(t *testing.T) {
+	defs := []llm.ToolDef{
+		{Function: llm.FunctionDef{Name: "read_file"}},
+		{Function: llm.FunctionDef{Name: "edit_file"}},
+		{Function: llm.FunctionDef{Name: "bash"}},
+	}
+	a := &Agent{
+		mode:              event.ModePlanning,
+		toolDefs:          defs,
+		planningBlocklist: map[string]bool{"edit_file": true, "bash": true},
+	}
+	got := a.activeToolDefs()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 tool after planning filter, got %d", len(got))
+	}
+	if got[0].Function.Name != "read_file" {
+		t.Errorf("expected read_file, got %q", got[0].Function.Name)
+	}
+}
+
+func TestActiveToolDefs_ExecutionReturnsAll(t *testing.T) {
+	defs := []llm.ToolDef{
+		{Function: llm.FunctionDef{Name: "read_file"}},
+		{Function: llm.FunctionDef{Name: "edit_file"}},
+	}
+	a := &Agent{
+		mode:              event.ModeExecution,
+		toolDefs:          defs,
+		planningBlocklist: map[string]bool{"edit_file": true},
+	}
+	if len(a.activeToolDefs()) != len(defs) {
+		t.Errorf("execution mode must not filter; got %d", len(a.activeToolDefs()))
+	}
+}
+
+// --- foundationSteering ---
+
+func TestFoundationSteering_NarrativeFiresWhenOutstandingAndAllComplete(t *testing.T) {
+	tracker := &gateTracker{loaded: true, activePath: ""}
+	ws := &gateTestWorkspace{
+		testWorkspace: &testWorkspace{},
+		gateTracker:   tracker,
+	}
+	a := &Agent{bus: newBus(), workspace: ws}
+	events := subscribeForTest(t, a)
+	_ = events
+
+	msgs := []llm.Message{
+		{Role: "user", Content: "wrap up"},
+		{Role: "assistant", Content: "All done. Outstanding work still needed: refactor lint."},
+	}
+	narrativeFired, permissionFired := false, false
+	out := a.foundationSteering(msgs, &narrativeFired, &permissionFired)
+	if len(out) != 1 {
+		t.Fatalf("expected one steering message, got %d", len(out))
+	}
+	if out[0].Role != "user" {
+		t.Errorf("expected user role, got %q", out[0].Role)
+	}
+	if out[0].Content != nudges.OutstandingNudgeMessage {
+		t.Errorf("expected OutstandingNudgeMessage, got %q", out[0].Content)
+	}
+	if !narrativeFired {
+		t.Errorf("expected narrativeFired=true after firing")
+	}
+	if permissionFired {
+		t.Errorf("permissionFired must remain false")
+	}
+}
+
+func TestFoundationSteering_NarrativeOneShot(t *testing.T) {
+	tracker := &gateTracker{loaded: true, activePath: ""}
+	ws := &gateTestWorkspace{
+		testWorkspace: &testWorkspace{},
+		gateTracker:   tracker,
+	}
+	a := &Agent{bus: newBus(), workspace: ws}
+	events := subscribeForTest(t, a)
+	_ = events
+
+	msgs := []llm.Message{
+		{Role: "assistant", Content: "All set. Items still needed: x."},
+	}
+	narrativeFired := true // already fired
+	permissionFired := false
+	if out := a.foundationSteering(msgs, &narrativeFired, &permissionFired); out != nil {
+		t.Errorf("expected nil when narrativeFired latched, got %d msgs", len(out))
+	}
+}
+
+func TestFoundationSteering_PermissionFires(t *testing.T) {
+	a := &Agent{bus: newBus()}
+
+	msgs := []llm.Message{
+		{Role: "assistant", Content: "Should I proceed with the refactor?"},
+	}
+	narrativeFired := true // make narrative latch so we test permission path
+	permissionFired := false
+	out := a.foundationSteering(msgs, &narrativeFired, &permissionFired)
+	if len(out) != 1 {
+		t.Fatalf("expected permission steering, got %d", len(out))
+	}
+	if !permissionFired {
+		t.Errorf("expected permissionFired=true after firing")
+	}
+}
+
+func TestFoundationSteering_NoFireWhenNothingMatches(t *testing.T) {
+	tracker := &gateTracker{loaded: true, activePath: "Phase 1 > task"}
+	ws := &gateTestWorkspace{
+		testWorkspace: &testWorkspace{},
+		gateTracker:   tracker,
+	}
+	a := &Agent{bus: newBus(), workspace: ws}
+
+	msgs := []llm.Message{
+		{Role: "assistant", Content: "Refactored the helper. Tests green."},
+	}
+	narrativeFired, permissionFired := false, false
+	if out := a.foundationSteering(msgs, &narrativeFired, &permissionFired); out != nil {
+		t.Errorf("expected nil when no nudge condition matches; got %d msgs", len(out))
+	}
+}
+
+// --- isFreshUserInput ---
+
+func TestIsFreshUserInput_TrailingUserResetsBudget(t *testing.T) {
+	cases := []struct {
+		name string
+		msgs []llm.Message
+		want bool
+	}{
+		{"empty", nil, false},
+		{"trailing tool", []llm.Message{{Role: "tool", Content: "x"}}, false},
+		{"trailing assistant", []llm.Message{{Role: "assistant", Content: "x"}}, false},
+		{"trailing fresh user", []llm.Message{{Role: "user", Content: "do the thing"}}, true},
+		{"trailing narrative nudge", []llm.Message{{Role: "user", Content: nudges.OutstandingNudgeMessage}}, false},
+		{"trailing permission nudge", []llm.Message{{Role: "user", Content: nudges.PermissionNudgeMessage}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isFreshUserInput(tc.msgs); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// --- FoundationHooks SteeringMessages composition ---
+
+func TestFoundationHooks_SteeringResetByFreshInput(t *testing.T) {
+	// Lifecycle: assistant produces outstanding-work prose → narrative
+	// fires once → next call is no-op (one-shot) → fresh user input
+	// arrives via TransformContext → narrative fires again on the
+	// next assistant turn matching the same pattern.
+	tracker := &gateTracker{loaded: true, activePath: ""}
+	ws := &gateTestWorkspace{
+		testWorkspace: &testWorkspace{},
+		gateTracker:   tracker,
+	}
+	a := &Agent{
+		bus:             newBus(),
+		workspace:       ws,
+		mode:            event.ModeExecution,
+		interactionMode: Interactive,
+	}
+	_ = subscribeForTest(t, a)
+
+	// Live-message snapshot the steering hook reads. Mutated by the
+	// test as the conversation evolves.
+	var transcript []llm.Message
+	hooks := a.FoundationHooks(func() []llm.Message { return transcript })
+	ctx := context.Background()
+
+	// Turn 1: assistant claims done with outstanding markers.
+	transcript = []llm.Message{
+		{Role: "user", Content: "finish it up"},
+		{Role: "assistant", Content: "All set. Outstanding work still needed: tests."},
+	}
+	out, err := hooks.SteeringMessages(ctx)
+	if err != nil {
+		t.Fatalf("first steering: %v", err)
+	}
+	if len(out) != 1 || out[0].Content != nudges.OutstandingNudgeMessage {
+		t.Fatalf("expected narrative nudge first call, got %+v", out)
+	}
+
+	// Append nudge to transcript (the foundation loop does this for us).
+	transcript = append(transcript, out...)
+
+	// Second steering call within the same input window: one-shot.
+	out, err = hooks.SteeringMessages(ctx)
+	if err != nil {
+		t.Fatalf("second steering: %v", err)
+	}
+	if out != nil {
+		t.Errorf("expected nil on second call (one-shot), got %d msgs", len(out))
+	}
+
+	// Fresh user input arrives → TransformContext fires.
+	transcript = append(transcript, llm.Message{Role: "user", Content: "ok keep going"})
+	if _, err := hooks.TransformContext(ctx, transcript); err != nil {
+		t.Fatalf("TransformContext: %v", err)
+	}
+
+	// Assistant produces the same outstanding-work response again.
+	transcript = append(transcript, llm.Message{Role: "assistant", Content: "Still done. Items still needed: tests."})
+
+	// Steering must fire again (budget reset).
+	out, err = hooks.SteeringMessages(ctx)
+	if err != nil {
+		t.Fatalf("third steering: %v", err)
+	}
+	if len(out) != 1 || out[0].Content != nudges.OutstandingNudgeMessage {
+		t.Errorf("expected narrative nudge after fresh input reset; got %+v", out)
+	}
+}
+
+// --- lintPendingGate ---
+
+func TestLintPendingGate_BlocksWhenPending(t *testing.T) {
+	a := &Agent{pendingLint: "vet: declared but not used"}
+	res := a.lintPendingGate()
+	if !res.Block {
+		t.Fatalf("expected Block when pendingLint set")
+	}
+	if !strings.Contains(res.Reason, "fix style lint violations first") {
+		t.Errorf("expected 'fix style lint violations first' message, got: %q", res.Reason)
+	}
+}
+
+func TestLintPendingGate_PassesWhenEmpty(t *testing.T) {
+	a := &Agent{}
+	res := a.lintPendingGate()
+	if res.Block {
+		t.Errorf("expected non-block when pendingLint empty")
+	}
+}
+
+// --- foundationAfterToolCall ---
+
+func TestFoundationAfterToolCall_NoContentOverride(t *testing.T) {
+	a := &Agent{
+		bus:   newBus(),
+		cache: NewFileCache(),
+	}
+	_ = subscribeForTest(t, a)
+	c := upagent.AfterToolCallInput{
+		Name:   "edit_file",
+		Result: upagent.ToolResult{Content: "edit applied"},
+	}
+
+	got := a.foundationAfterToolCall(c)
+	if got.Content != nil {
+		t.Errorf("expected no Content override, got: %q", *got.Content)
+	}
+}
+
+func TestFoundationAfterToolCall_BashFiresReloadBuffers(t *testing.T) {
+	a := &Agent{
+		bus:   newBus(),
+		cache: NewFileCache(),
+	}
+	events := subscribeForTest(t, a)
+	c := upagent.AfterToolCallInput{
+		Name:   "bash",
+		Result: upagent.ToolResult{Content: "ls output"},
+	}
+	a.foundationAfterToolCall(c)
+
+	select {
+	case ev := <-events:
+		if _, ok := ev.(event.ReloadBuffers); !ok {
+			t.Errorf("expected ReloadBuffers event, got %T", ev)
+		}
+	default:
+		t.Errorf("expected ReloadBuffers event to be emitted")
+	}
+}
+
+func TestFoundationAfterToolCall_BashFiresEvenWhenBlocked(t *testing.T) {
+	// Bash side effects (cache invalidation + ReloadBuffers) must fire
+	// for every "bash" tool call regardless of whether BeforeToolCall
+	// blocked the dispatch — the developer's filesystem may have
+	// changed even if the call was rejected.
+	a := &Agent{
+		bus:   newBus(),
+		cache: NewFileCache(),
+	}
+	events := subscribeForTest(t, a)
+	c := upagent.AfterToolCallInput{
+		Name:   "bash",
+		Result: upagent.ToolResult{Content: "Error: tool \"bash\" is not available", IsError: true},
+	}
+	a.foundationAfterToolCall(c)
+
+	select {
+	case ev := <-events:
+		if _, ok := ev.(event.ReloadBuffers); !ok {
+			t.Errorf("expected ReloadBuffers even on blocked-bash path, got %T", ev)
+		}
+	default:
+		t.Errorf("expected ReloadBuffers event on blocked-bash path")
+	}
+}
+
+func TestFoundationAfterToolCall_NonBashSkipsCacheReset(t *testing.T) {
+	a := &Agent{
+		bus:   newBus(),
+		cache: NewFileCache(),
+	}
+	events := subscribeForTest(t, a)
+	c := upagent.AfterToolCallInput{
+		Name:   "read_file",
+		Result: upagent.ToolResult{Content: "x"},
+	}
+	a.foundationAfterToolCall(c)
+
+	select {
+	case ev := <-events:
+		if _, ok := ev.(event.ReloadBuffers); ok {
+			t.Errorf("ReloadBuffers must not fire for non-bash tools")
+		}
+	default:
+		// expected — no event
+	}
+}
+
+// --- FoundationHooks Before/AfterToolCall integration ---
+
+// --- foundationBudgetCheck ---
+
+// agentWithUsage constructs a bare-minimum Agent with a providerProxy
+// seeded to a session-usage snapshot — replaces the earlier pattern
+// of inlining a sessionUsage field literal now that the canonical
+// usage source lives on providerProxy.
+func agentWithUsage(taskTokenBudget int, latched bool, prompt, completion int) *Agent {
+	a := &Agent{
+		taskTokenBudget: taskTokenBudget,
+		budgetExceeded:  latched,
+		providerProxy:   newProviderProxy(noopProvider{}, nil, nil),
+	}
+	if prompt > 0 || completion > 0 {
+		a.providerProxy.recordUsage(&llm.Usage{PromptTokens: prompt, CompletionTokens: completion})
+	}
+	return a
+}
+
+func TestFoundationBudgetCheck_NoBudgetIsNoop(t *testing.T) {
+	// taskTokenBudget == 0 means "disabled" per budget.Exceeded.
+	a := agentWithUsage(0, false, 999_999_999, 0)
+	if err := a.foundationBudgetCheck(); err != nil {
+		t.Errorf("disabled budget must not abort, got: %v", err)
+	}
+}
+
+func TestFoundationBudgetCheck_UnderThresholdPasses(t *testing.T) {
+	a := agentWithUsage(1_000, false, 100, 200)
+	if err := a.foundationBudgetCheck(); err != nil {
+		t.Errorf("under-threshold must not abort, got: %v", err)
+	}
+}
+
+func TestFoundationBudgetCheck_OverThresholdAbortsAndLatches(t *testing.T) {
+	// foundationBudgetCheck used to emit AgentError directly. After
+	// the 8c cutover the user-facing emission is owned by the
+	// foundation→engine event translator (Error → AgentError); this
+	// hook's contract is now "return a wrapped errBudgetExceeded with
+	// the formatted budget message; latch budgetExceeded so subsequent
+	// calls return without re-warning."
+	a := agentWithUsage(1_000, false, 600, 600)
+
+	err := a.foundationBudgetCheck()
+	if !errors.Is(err, errBudgetExceeded) {
+		t.Fatalf("expected errBudgetExceeded, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "budget exceeded") {
+		t.Errorf("expected wrapped error to carry the budget message, got %q", err.Error())
+	}
+	if !a.budgetExceeded {
+		t.Errorf("expected budgetExceeded=true after abort")
+	}
+}
+
+func TestFoundationBudgetCheck_LatchedDoesNotReEmit(t *testing.T) {
+	// Already-latched: foundationBudgetCheck must return errBudgetExceeded
+	// without re-running the math. Its err.Error() carries only the
+	// sentinel text (no formatted budget message) because the latch
+	// short-circuits before the wrap.
+	a := agentWithUsage(1_000, true, 999_999_999, 0)
+
+	err := a.foundationBudgetCheck()
+	if !errors.Is(err, errBudgetExceeded) {
+		t.Fatalf("expected errBudgetExceeded, got %v", err)
+	}
+	if strings.Contains(err.Error(), "tokens used") {
+		t.Errorf("latched return should NOT re-format the budget message; got %q", err.Error())
+	}
+}
+
+// --- FoundationHooks TransformContext budget integration ---
+
+func TestFoundationHooks_TransformContext_BudgetAbort(t *testing.T) {
+	a := agentWithUsage(100, false, 80, 80)
+	a.bus = newBus()
+	_ = subscribeForTest(t, a)
+	hooks := a.FoundationHooks(nil)
+
+	out, err := hooks.TransformContext(context.Background(), nil)
+	if !errors.Is(err, errBudgetExceeded) {
+		t.Fatalf("expected errBudgetExceeded from TransformContext, got %v", err)
+	}
+	if out != nil {
+		t.Errorf("expected nil msgs on abort, got %d", len(out))
+	}
+}
+
+// --- TransformContext drains pendingLint ---
+
+func TestFoundationHooks_TransformContext_DrainsLint(t *testing.T) {
+	// TransformContext fires at turn start and drains pendingLint into
+	// the message slice so the LLM sees lint findings on its next turn.
+	a := &Agent{
+		bus:             newBus(),
+		cache:           NewFileCache(),
+		mode:            event.ModeExecution,
+		interactionMode: Interactive,
+		pendingLint:     "violation",
+	}
+	hooks := a.FoundationHooks(nil)
+	ctx := context.Background()
+
+	out, err := hooks.TransformContext(ctx, []llm.Message{{Role: "user", Content: "."}})
+	if err != nil {
+		t.Fatalf("TransformContext: %v", err)
+	}
+	if len(out) != 2 || !strings.Contains(out[1].Content, "STOP") {
+		t.Errorf("expected lint message appended; got %+v", out)
+	}
+}

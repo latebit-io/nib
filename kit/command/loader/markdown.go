@@ -3,13 +3,13 @@ package loader
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/frontmatter"
+	"github.com/latebit-io/nib/kit/internal/filecap"
 )
 
 // maxCommandFileBytes caps how much of a command markdown file is read.
@@ -17,25 +17,6 @@ import (
 // or accidental giant file in an untrusted project's .project/commands
 // (a local DoS otherwise).
 const maxCommandFileBytes = 1 << 20 // 1 MiB
-
-// readCapped reads at most max bytes from the file at path, rejecting
-// the file outright when it is larger. The Size() pre-check fails fast;
-// the LimitReader guards against a file that grows between stat and read.
-func readCapped(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // path is a *.md under a LoadDir-walked root; see Parse.
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > max {
-		return nil, fmt.Errorf("%s is %d bytes, exceeds the %d-byte command cap", path, info.Size(), max)
-	}
-	return io.ReadAll(io.LimitReader(f, max))
-}
 
 // commandMeta is the YAML schema parsed from the head of a markdown
 // command file. All fields are optional at the YAML level; missing
@@ -110,7 +91,7 @@ func Parse(path string, kind kitcmd.SourceKind) (*MarkdownCommand, error) {
 	// pass untrusted paths take on the responsibility themselves.
 	// Size-capped so a hostile or accidental giant file cannot exhaust
 	// memory.
-	data, err := readCapped(path, maxCommandFileBytes)
+	data, err := filecap.Read(path, maxCommandFileBytes, "command")
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}

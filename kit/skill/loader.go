@@ -3,12 +3,12 @@ package skill
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/latebit-io/nib/kit/frontmatter"
+	"github.com/latebit-io/nib/kit/internal/filecap"
 )
 
 // skillFile is the conventional filename inside each skill directory.
@@ -19,26 +19,6 @@ const skillFile = "SKILL.md"
 // a hostile or accidental giant file in an untrusted project's
 // .project/skills (a local DoS otherwise).
 const maxSkillFileBytes = 1 << 20 // 1 MiB
-
-// readCapped reads at most max bytes from the file at path, rejecting
-// the file outright when it is larger. The Size() pre-check fails fast;
-// the LimitReader is belt-and-suspenders against a file that grows
-// between stat and read.
-func readCapped(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // path is a SKILL.md under a ReadDir-walked root; see parse.
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > max {
-		return nil, fmt.Errorf("%s is %d bytes, exceeds the %d-byte skill cap", path, info.Size(), max)
-	}
-	return io.ReadAll(io.LimitReader(f, max))
-}
 
 // meta is the YAML frontmatter schema for a SKILL.md file. All fields
 // are optional at the YAML level; a missing name falls back to the
@@ -122,7 +102,7 @@ func parse(path, dirName string, source Source) (Skill, error) {
 	// components — no separators or ".."). External callers passing
 	// untrusted roots own that responsibility. Size-capped so a hostile
 	// or accidental giant SKILL.md cannot exhaust memory.
-	data, err := readCapped(path, maxSkillFileBytes)
+	data, err := filecap.Read(path, maxSkillFileBytes, "skill")
 	if err != nil {
 		return Skill{}, fmt.Errorf("read %s: %w", path, err)
 	}

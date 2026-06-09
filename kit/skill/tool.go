@@ -74,6 +74,7 @@ func GlobalDir() (string, bool) {
 	}
 	cfg, err := os.UserConfigDir()
 	if err != nil {
+		slog.Warn("skill: cannot resolve user config dir; skipping global skills layer", "err", err)
 		return "", false
 	}
 	return filepath.Join(cfg, brand.ConfigDirName, "skills"), true

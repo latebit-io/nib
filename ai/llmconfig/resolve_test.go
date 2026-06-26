@@ -176,6 +176,15 @@ var resolveTests = []resolveTestCase{
 		wantHas:     true,
 	},
 	{
+		name:        "SAKANA_API_KEY preferred over GEMINI_API_KEY in fallback",
+		env:         map[string]string{"SAKANA_API_KEY": "sk-key", "GEMINI_API_KEY": "gem-key"},
+		wantProfile: "fugu",
+		wantBaseURL: "https://api.sakana.ai/v1",
+		wantModel:   "fugu",
+		wantKeyEnv:  "SAKANA_API_KEY",
+		wantHas:     true,
+	},
+	{
 		name:        "MINIMAX_API_KEY preferred over OPENROUTER_API_KEY in fallback",
 		env:         map[string]string{"MINIMAX_API_KEY": "mm-key", "OPENROUTER_API_KEY": "or-key"},
 		wantProfile: "minimax",

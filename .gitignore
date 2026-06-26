@@ -52,3 +52,6 @@ cmd/nibster/.project/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# macOS
+.DS_Store

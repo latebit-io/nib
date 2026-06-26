@@ -39,6 +39,14 @@ var builtinProfiles = map[string]Profile{
 		Model:     "MiniMax-M2.7",
 		APIKeyEnv: "MINIMAX_API_KEY",
 	},
+	"fugu": {
+		// Sakana AI's Fugu — OpenAI-compatible (Bearer auth, /chat/completions).
+		// Models: "fugu" (default router) and "fugu-ultra". Key from the
+		// console at https://console.sakana.ai/get-started.
+		BaseURL:   "https://api.sakana.ai/v1",
+		Model:     "fugu",
+		APIKeyEnv: "SAKANA_API_KEY",
+	},
 	"chatgpt": {
 		BaseURL:       "https://chatgpt.com/backend-api/codex",
 		Model:         "gpt-5.1-codex",
@@ -59,7 +67,7 @@ var builtinProfiles = map[string]Profile{
 
 // builtinFallbackOrder is the priority when auto-selecting a built-in profile
 // because the active profile has no API key. First match wins.
-var builtinFallbackOrder = []string{"anthropic", "gemini", "minimax", "openrouter"}
+var builtinFallbackOrder = []string{"anthropic", "fugu", "gemini", "minimax", "openrouter"}
 
 // ptrBool returns a pointer to a bool value.
 func ptrBool(b bool) *bool { return &b }

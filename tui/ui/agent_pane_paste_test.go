@@ -87,3 +87,52 @@ func TestPaste_NoActiveInput_NoOp(t *testing.T) {
 		t.Fatalf("apiKeyBuffer = %q, want empty", m.apiKeyBuffer)
 	}
 }
+
+func TestPaste_APIKeyInput_CapsOversizedPayload(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &mockClipboard{}}, true)
+	m.StartAPIKeyInput("fugu")
+
+	// A payload far over the buffer cap must be truncated, not appended whole.
+	m.Update(tea.PasteMsg{Content: strings.Repeat("a", maxAPIKeyBytes*2)})
+
+	if got := len(m.apiKeyBuffer); got != maxAPIKeyBytes {
+		t.Fatalf("apiKeyBuffer len = %d, want %d (capped)", got, maxAPIKeyBytes)
+	}
+}
+
+// TestPaste_AppUpdate_RoutesToActiveInput locks the routing contract that
+// lives in AppModel.handlePaste: a PasteMsg through AppModel.Update reaches
+// the agent pane only when one of its inputs is active.
+func TestPaste_AppUpdate_RoutesToActiveInput(t *testing.T) {
+	newApp := func() *AppModel {
+		return &AppModel{
+			AgentPane: NewAgentPaneModel(&Services{Clipboard: &mockClipboard{}}, true),
+		}
+	}
+
+	t.Run("API key input active → routed", func(t *testing.T) {
+		m := newApp()
+		m.AgentPane.StartAPIKeyInput("fugu")
+		m.Update(tea.PasteMsg{Content: "sk-routed"})
+		if got := m.AgentPane.apiKeyBuffer; got != "sk-routed" {
+			t.Fatalf("apiKeyBuffer = %q, want %q", got, "sk-routed")
+		}
+	})
+
+	t.Run("agent input active → routed", func(t *testing.T) {
+		m := newApp()
+		m.AgentPane.SetInputActive(true)
+		m.Update(tea.PasteMsg{Content: "hello"})
+		if got := m.AgentPane.input.Content(); !strings.Contains(got, "hello") {
+			t.Fatalf("input content = %q, want it to contain %q", got, "hello")
+		}
+	})
+
+	t.Run("no active input → not routed", func(t *testing.T) {
+		m := newApp()
+		m.Update(tea.PasteMsg{Content: "dropped"})
+		if m.AgentPane.apiKeyBuffer != "" || m.AgentPane.input.Content() != "" {
+			t.Fatal("paste should not reach any input when none is active")
+		}
+	})
+}

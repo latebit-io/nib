@@ -56,14 +56,6 @@ const (
 	codexModelsEndpoint = "https://chatgpt.com/backend-api/codex/models?client_version=0.1.0"
 )
 
-// CodexModelInfo describes an available model from the Codex API.
-type CodexModelInfo struct {
-	// Slug is the model identifier used in API requests.
-	Slug string
-	// DisplayName is the human-readable name.
-	DisplayName string
-}
-
 // ListModels queries the Codex models endpoint for available models.
 // Implements ModelLister.
 func (c *CodexAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
@@ -292,8 +284,6 @@ func toolsToCodexTools(tools []ToolDef) []codexTool {
 
 // --- Provider implementation ---
 
-// Stream sends a Responses API request to the Codex endpoint and returns
-// streaming events compatible with the codebase's StreamEvent type.
 // MaxTokens returns the current max_output_tokens value sent on requests.
 // Zero means no value is sent and the provider's default applies.
 func (c *CodexAPI) MaxTokens() int {
@@ -555,9 +545,13 @@ func (c *CodexAPI) readCodexSSE(ctx context.Context, resp *http.Response, ch cha
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
+	wd := newStreamWatchdog(resp.Body)
+	defer wd.stop()
+
 	state := &codexStreamState{calls: map[int]*pendingCall{}}
 
 	for scanner.Scan() {
+		wd.reset()
 		select {
 		case <-ctx.Done():
 			return
@@ -591,8 +585,14 @@ func (c *CodexAPI) readCodexSSE(ctx context.Context, resp *http.Response, ch cha
 		}
 	}
 
-	if err := scanner.Err(); err != nil && ctx.Err() == nil {
-		slog.Warn("codex SSE scanner error", "err", err)
+	if err := scanner.Err(); err != nil {
+		if wd.fired() {
+			send(StreamEvent{Done: true, Err: errStreamStalled})
+			return
+		}
+		if ctx.Err() == nil {
+			slog.Warn("codex SSE scanner error", "err", err)
+		}
 	}
 	if ctx.Err() == nil {
 		send(StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage})

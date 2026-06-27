@@ -79,15 +79,17 @@ func (s *Session) newOpenFile(buf *buffer.Buffer) *openfile.OpenFile {
 func (s *Session) SwitchTo(path string) error {
 	canon := s.CanonPath(path)
 
-	s.mu.Lock()
-
-	// Block switching while an edit is pending approval.
-	// PendingEdit covers the review phase; stagedEditFile covers the
-	// post-PrepareApproval window before CompleteApproval/AbortApproval.
+	// Block switching while an edit is pending approval. PendingEdit
+	// covers the review phase; stagedEditFile covers the post-
+	// PrepareApproval window before CompleteApproval/AbortApproval.
+	// These fields are single-TUI-goroutine state (see session.go field
+	// docs) and are read without mu — mu below guards only the open-files
+	// map and activeFile, which the agent goroutine also touches.
 	if s.pendingEdit != nil || s.stagedEditFile != "" {
-		s.mu.Unlock()
 		return ErrEditPending
 	}
+
+	s.mu.Lock()
 
 	// Already active
 	if canon == s.activeFile {
@@ -132,13 +134,15 @@ func (s *Session) SwitchTo(path string) error {
 func (s *Session) ReloadFile(path string) error {
 	canon := s.CanonPath(path)
 
-	s.mu.Lock()
+	// pendingEdit/stagedEditFile are single-TUI-goroutine state (see
+	// session.go field docs); read without mu. mu guards the open-files
+	// map read below.
 	if s.pendingEdit != nil || s.stagedEditFile != "" {
-		s.mu.Unlock()
 		return ErrEditPending
 	}
+	s.mu.RLock()
 	of, ok := s.openFiles[canon]
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	if !ok {
 		return nil // not open — nothing to reload
@@ -171,11 +175,10 @@ func (s *Session) DeleteFile(path string) error {
 	}
 
 	// Block deletion while an edit is pending approval or mid-animation,
-	// same guard as SwitchTo. Approval state may reference the deleted path.
-	s.mu.RLock()
-	pending := s.pendingEdit != nil || s.stagedEditFile != ""
-	s.mu.RUnlock()
-	if pending {
+	// same guard as SwitchTo. Approval state may reference the deleted
+	// path. pendingEdit/stagedEditFile are single-TUI-goroutine state
+	// (see session.go field docs); read without mu.
+	if s.pendingEdit != nil || s.stagedEditFile != "" {
 		return ErrEditPending
 	}
 

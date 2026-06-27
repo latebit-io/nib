@@ -257,6 +257,16 @@ func (a *App) Program() *tea.Program { return a.program }
 // fine because the assigned fields drive keystroke handlers, and
 // no keystroke can fire until Run has started and processed the
 // queued messages.
+//
+// Known caveat — goroutine leak without Run: the spawned goroutine
+// blocks on the unbuffered pre-Run channel until [App.Run] starts
+// draining it. If a caller does New() but never calls Run() (e.g. a
+// test or an early-exit error path), this goroutine never unblocks
+// and leaks (holding only the small message). There is no cancellation
+// seam because App exposes no lifecycle/done channel and shutdown only
+// runs after Run; closing such a channel would require a new Close()
+// API plus caller changes, so it is deliberately not guarded here.
+// Always pair New() with Run().
 func (a *App) SetAgentCallbacks(cb AgentCallbacks) {
 	msg := ui.SetAgentCallbacksMsg(cb.ToggleTerse, cb.InitialTerse)
 	go a.program.Send(msg)
@@ -264,7 +274,8 @@ func (a *App) SetAgentCallbacks(cb AgentCallbacks) {
 
 // SetCodingCallbacks installs coding-flavored agent callbacks.
 // Same any-time semantics, race-avoidance rationale, and async
-// caveat as [App.SetAgentCallbacks]. Currently a no-op — the
+// caveat as [App.SetAgentCallbacks] — including the never-Run
+// goroutine-leak caveat documented there. Currently a no-op — the
 // callback set is empty after the autonomy-dial removal but the
 // wiring seam is kept so future coding-flavored callbacks land
 // with a tiny diff.

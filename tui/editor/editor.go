@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/latebit-io/nib/engine/buffer"
+	"github.com/mattn/go-runewidth"
 )
 
 // TabWidth is the display width of a tab character. Frontends must use
@@ -238,7 +239,10 @@ func (e *Editor) ClampScrollCol() {
 }
 
 // BufferColToDisplayCol converts a buffer column on the given line to a
-// display column, accounting for tab expansion and wide characters.
+// display column. Tabs expand to TabWidth columns, the VS16 variation
+// selector is stripped (0 columns), and every other rune contributes its
+// terminal cell width via runewidth.RuneWidth \u2014 so wide CJK/emoji runes
+// count as 2 columns and zero-width combining marks as 0.
 // This is the engine-side equivalent of the frontend's tab-expansion mapping.
 func (e *Editor) BufferColToDisplayCol(line, bufCol int) int {
 	if line < 0 || line >= e.Buf.LineCount() {
@@ -253,9 +257,10 @@ func (e *Editor) BufferColToDisplayCol(line, bufCol int) int {
 			dispCol += TabWidth
 		case '\uFE0F':
 			// VS16 is skipped in the display buffer (see frontend tab-expansion),
-			// so it contributes 0 display columns.
+			// so it contributes 0 display columns. runewidth.RuneWidth reports
+			// 1 for VS16, so this case must precede the runewidth fallback.
 		default:
-			dispCol++
+			dispCol += runewidth.RuneWidth(runes[i])
 		}
 	}
 	return dispCol
@@ -1264,9 +1269,11 @@ func (e *Editor) DisplayColToBufferCol(line, displayCol int) int {
 		case '\t':
 			width = TabWidth
 		case '\uFE0F':
-			width = 0 // VS16 is stripped from display (see expandTabs)
+			width = 0 // VS16 is stripped from display (see expandTabs);
+			// runewidth.RuneWidth reports 1 for it, so this case must
+			// precede the runewidth fallback.
 		default:
-			width = 1
+			width = runewidth.RuneWidth(r)
 		}
 		if width > 0 && displayCol < dc+width {
 			return bi

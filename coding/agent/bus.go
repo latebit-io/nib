@@ -104,10 +104,17 @@ func (b *bus) publish(ev event.Event) {
 // not apply). Block-policy subscribers attempt a select-bounded inbox
 // send that aborts on ctx cancellation.
 //
-// Returns the first ctx.Err() observed across subscribers; subscribers
-// after the first deadline miss are still attempted on a best-effort
-// basis so a single slow Block-policy subscriber does not silently
-// drop the event for every subscriber behind it in iteration order.
+// Returns the first ctx.Err() observed across subscribers. Delivery to
+// each subscriber runs CONCURRENTLY (a goroutine per subscriber), so a
+// wedged Block-policy subscriber that burns the whole ctx deadline does
+// NOT consume the time budget of the subscribers behind it — each gets
+// the full deadline in parallel. Sequential delivery would let one slow
+// subscriber starve every subscriber after it (they would all observe
+// ctx.Done immediately and drop the event, including AgentEditProposed
+// to the real frontend). Because every per-subscriber error here is a
+// derivative of the SAME ctx, "first" error is value-equivalent across
+// goroutines; the firstErr-wins shape is preserved, only its iteration-
+// order determinism is relaxed (immaterial for identical ctx errors).
 // Returns [ErrAgentClosed] when the bus is closed.
 //
 // publishContext is the post-channel-removal home for the deadline
@@ -133,12 +140,30 @@ func (b *bus) publishContext(ctx context.Context, ev event.Event) error {
 	}
 	b.mu.Unlock()
 
-	var firstErr error
+	// deliverContext operates only on per-subscription state (its own
+	// inbox, done, drops counter and deliverWG), so concurrent calls
+	// across distinct subscriptions do not race. The deliverWG.Add(1)
+	// accounting was done above under the lock; each deliverContext
+	// defers its Done.
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
 	for _, sub := range subs {
-		if err := sub.deliverContext(ctx, ev); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		wg.Add(1)
+		go func(sub *Subscription) {
+			defer wg.Done()
+			if err := sub.deliverContext(ctx, ev); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+			}
+		}(sub)
 	}
+	wg.Wait()
 	return firstErr
 }
 

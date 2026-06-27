@@ -84,11 +84,7 @@ func (s *Session) InitProject(name string, phases []string) error {
 // to the task-completion review so the LLM has a clear next step
 // without the developer prompting between every task.
 func (s *Session) NextPendingTask() string {
-	t := s.WorkTree()
-	if t == nil {
-		return ""
-	}
-	return t.FindNextPendingTask()
+	return s.workTree.NextPendingTask()
 }
 
 // ReloadWorkTree re-fetches the work tree from demarkus.

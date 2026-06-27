@@ -12,7 +12,6 @@ import (
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/nudges"
-	"github.com/latebit-io/nib/kit/budget"
 )
 
 // errBudgetExceeded is the sentinel TransformContext returns when the
@@ -382,22 +381,16 @@ func (a *Agent) activeToolDefs() []llm.ToolDef {
 // TransformContext calls if a turn somehow re-enters past the abort
 // signal.
 func (a *Agent) foundationBudgetCheck() error {
-	a.mu.Lock()
-	if a.budgetExceeded {
-		a.mu.Unlock()
-		return errBudgetExceeded
-	}
-	a.mu.Unlock()
-
-	msg, exceeded := budget.Exceeded(a.sessionSnapshot(), a.taskTokenBudget)
+	msg, exceeded := a.evaluateBudgetLatch()
 	if !exceeded {
 		return nil
 	}
-
-	a.mu.Lock()
-	a.budgetExceeded = true
-	a.mu.Unlock()
-
+	if msg == "" {
+		// Already latched on a prior call (re-entrant TransformContext);
+		// abort with the bare sentinel — the message was emitted on the
+		// first crossing.
+		return errBudgetExceeded
+	}
 	slog.Warn("agent: task token budget exceeded; aborting (foundation hook)", "msg", msg)
 	return fmt.Errorf("%w: %s", errBudgetExceeded, msg)
 }

@@ -1,6 +1,12 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"io"
+	"sync/atomic"
+	"time"
+)
 
 // Message represents a single message in a conversation.
 type Message struct {
@@ -57,6 +63,12 @@ type Usage struct {
 	// at the discounted rate. Disjoint from PromptTokens. Zero
 	// when caching is not active.
 	CachedTokens int
+	// CacheWriteTokens is the number of input tokens written to the
+	// prompt cache on this turn (Anthropic cache_creation_input_tokens).
+	// Billed at a premium (~1.25x the fresh input rate) over PromptTokens,
+	// and disjoint from both PromptTokens and CachedTokens. Zero when no
+	// cache write occurred or the provider does not report it.
+	CacheWriteTokens int
 }
 
 // StreamEvent is one chunk from the LLM stream.
@@ -75,6 +87,13 @@ type StreamEvent struct {
 	// truncated event may have incomplete arguments and must not be
 	// executed — silently applying a truncated edit corrupts the file.
 	Truncated bool
+	// Err carries a provider-side stream failure as a terminal event:
+	// a streamed error block, a payload-limit breach, or a mid-stream
+	// stall. When non-nil this is the final event (Done is also set) and
+	// any accumulated content, tool calls, or usage may be partial.
+	// Consumers must surface Err instead of treating the turn as a clean
+	// completion. Nil on success.
+	Err error
 }
 
 // CacheControl marks a message or tool definition for provider-level prompt
@@ -92,6 +111,46 @@ const maxToolArgBytes = 10 * 1024 * 1024
 // maxToolCalls is the maximum number of concurrent tool calls in a single
 // response. Prevents unbounded slice/map growth from malformed SSE payloads.
 const maxToolCalls = 128
+
+// sseIdleTimeout caps the wait between consecutive SSE chunks. Normal slow
+// generation streams tokens well within this window; a longer gap means the
+// connection has stalled mid-stream, so the watchdog tears the body down to
+// fail the turn instead of hanging it forever. Generous enough not to kill a
+// model that pauses to think between tokens.
+const sseIdleTimeout = 60 * time.Second
+
+// streamWatchdog closes the response body when no SSE chunk has arrived
+// within sseIdleTimeout, converting a silent mid-stream stall into a prompt
+// read error. Callers reset it after every successful read and stop it on
+// return; fired reports whether the timeout (not a normal close) triggered.
+type streamWatchdog struct {
+	timer   *time.Timer
+	stalled atomic.Bool
+}
+
+// newStreamWatchdog starts a watchdog that closes body after sseIdleTimeout
+// of inactivity. The returned watchdog must be stopped by the caller.
+func newStreamWatchdog(body io.Closer) *streamWatchdog {
+	w := &streamWatchdog{}
+	w.timer = time.AfterFunc(sseIdleTimeout, func() {
+		w.stalled.Store(true)
+		_ = body.Close() // unblock the blocked read; close error is not actionable
+	})
+	return w
+}
+
+// reset restarts the idle countdown after a chunk is read.
+func (w *streamWatchdog) reset() { w.timer.Reset(sseIdleTimeout) }
+
+// stop halts the watchdog. Safe to call after it has fired.
+func (w *streamWatchdog) stop() { w.timer.Stop() }
+
+// fired reports whether the watchdog closed the body due to a stall.
+func (w *streamWatchdog) fired() bool { return w.stalled.Load() }
+
+// errStreamStalled is the terminal error surfaced when the watchdog tears
+// down a stalled stream.
+var errStreamStalled = fmt.Errorf("llm: stream stalled (no data for %s)", sseIdleTimeout)
 
 // trySend sends an event on ch, returning false if ctx is cancelled.
 // Prevents SSE goroutines from blocking indefinitely when the downstream

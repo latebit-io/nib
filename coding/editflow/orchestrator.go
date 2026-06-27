@@ -194,7 +194,7 @@ func (o *Orchestrator) handle(ctx context.Context, coord *approval.Coordinator, 
 	// Approved — record for end-of-turn review.
 	o.deps.RecordEdit(p)
 
-	return o.afterApproval(p, approved.Content)
+	return o.afterApproval(ctx, p, approved.Content)
 }
 
 // waitForApproval blocks until the developer approves or rejects
@@ -243,7 +243,13 @@ func (o *Orchestrator) waitForApproval(ctx context.Context, coord *approval.Coor
 // holds the true post-apply state; ExpectedContent holds the agent's
 // prediction. Diagnostics, when configured, are appended after a
 // brief delay so the language server has time to re-parse.
-func (o *Orchestrator) afterApproval(p tools.EditProposal, applied string) (string, outcome) {
+//
+// ctx is threaded so an aborted/cancelled run does not sit out the
+// DiagDelay sleep and then issue a now-pointless LSP diagnostics fetch:
+// on cancellation the cache is already seeded (the edit landed) so the
+// success body is returned immediately without diagnostics rather than
+// surfacing as a fatal — the run is unwinding regardless.
+func (o *Orchestrator) afterApproval(ctx context.Context, p tools.EditProposal, applied string) (string, outcome) {
 	o.deps.Cache.Set(p.CanonPath, applied)
 	o.deps.Send(event.AgentStatus{Status: event.StatusThinking})
 
@@ -251,7 +257,11 @@ func (o *Orchestrator) afterApproval(p tools.EditProposal, applied string) (stri
 		p.Path, tools.TruncateForPreview(applied))
 
 	if o.deps.DiagProvider != nil {
-		time.Sleep(o.deps.DiagDelay)
+		select {
+		case <-time.After(o.deps.DiagDelay):
+		case <-ctx.Done():
+			return result, outcomeOK
+		}
 		diagResult := tools.FormatDiagnostics(o.deps.DiagProvider, p.CanonPath, p.Path)
 		result += "\n\nDiagnostics after edit:\n" + diagResult
 	}

@@ -40,6 +40,9 @@ func (a *Agent) runLoop(ctx context.Context) {
 	a.send(event.AgentStart{})
 	defer a.cleanupRun()
 
+	// turn is the 1-indexed turn number within this run, incremented
+	// before each LLM call and threaded into the per-turn usage event.
+	turn := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return
@@ -51,9 +54,10 @@ func (a *Agent) runLoop(ctx context.Context) {
 			return
 		}
 
+		turn++
 		a.send(event.TurnStart{})
 
-		result, err := a.processTurn(ctx, msgs)
+		result, err := a.processTurn(ctx, msgs, turn)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
@@ -167,7 +171,7 @@ type turnResult struct {
 // [event.MessageEnd]) are emitted as the stream progresses. A truncated
 // terminal event is reported via [turnResult.Truncated] (NOT as an
 // error) so the loop can route it to the [Hooks.OnTruncated] hook.
-func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message) (turnResult, error) {
+func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (turnResult, error) {
 	a.send(event.MessageStart{})
 
 	a.setStreaming(true)
@@ -197,6 +201,13 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message) (turnResult
 				}
 				return turnResult{}, errProviderClosedEarly
 			}
+			if ev.Err != nil {
+				// Terminal provider-side failure (streamed error block,
+				// payload-limit breach, mid-stream stall): surface the
+				// real cause instead of the opaque errProviderClosedEarly.
+				a.setStreaming(false)
+				return turnResult{}, ev.Err
+			}
 			if ev.Token != "" {
 				content.WriteString(ev.Token)
 				a.send(event.MessageUpdate{Delta: ev.Token})
@@ -214,7 +225,7 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message) (turnResult
 				assistant.ToolCalls = toolCalls
 			}
 			a.send(event.MessageEnd{Message: assistant})
-			a.emitTurnUsage(usage, len(toolCalls))
+			a.emitTurnUsage(usage, len(toolCalls), turn)
 
 			return turnResult{Assistant: assistant, Truncated: truncated}, nil
 		}
@@ -268,8 +279,14 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 	defer a.clearPendingToolCalls()
 
 	allTerminate := true
-	for _, call := range calls {
+	for i, call := range calls {
 		if err := ctx.Err(); err != nil {
+			// The assistant message already carries every tool_use block;
+			// a cancel here would leave the unfinished calls without
+			// matching tool_result blocks, which Anthropic rejects on
+			// resume. Synthesize a cancelled result for each so the
+			// transcript stays well-formed.
+			a.appendCancelledResults(calls[i:])
 			return false, err
 		}
 
@@ -301,6 +318,21 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 	}
 
 	return allTerminate, nil
+}
+
+// appendCancelledResults appends a synthesized error tool_result for each
+// tool call that never ran, keeping the transcript well-formed when the
+// batch is abandoned mid-flight (ctx cancellation). Anthropic rejects an
+// assistant turn whose tool_use blocks lack matching tool_result blocks on
+// resume, so every unfinished call must still get a result.
+func (a *Agent) appendCancelledResults(calls []llm.ToolCall) {
+	for _, call := range calls {
+		a.appendMessage(llm.Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    "Error: tool call cancelled before execution.",
+		})
+	}
 }
 
 // dispatchTool runs a single tool call through the BeforeToolCall hook
@@ -556,8 +588,8 @@ func (a *Agent) emitError(err error) {
 // is application-dependent — applications can layer their own
 // estimation by emitting a richer event from a TransformContext hook
 // or wrapping the [llm.Provider].
-func (a *Agent) emitTurnUsage(usage *llm.Usage, toolCalls int) {
-	tu := event.TurnUsage{ToolCalls: toolCalls}
+func (a *Agent) emitTurnUsage(usage *llm.Usage, toolCalls, turn int) {
+	tu := event.TurnUsage{Turn: turn, ToolCalls: toolCalls}
 	if usage != nil {
 		tu.PromptTokens = usage.PromptTokens
 		tu.CompletionTokens = usage.CompletionTokens

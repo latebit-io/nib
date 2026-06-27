@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -224,6 +225,17 @@ func (h *Highlighter) Parse(source string) {
 		}
 		h.addCaptureTokens(cap.Node, kind, lines)
 	}
+
+	// Tokens are appended in query-match order, which is not column-sorted —
+	// overlapping or nested captures can interleave. Sort each line's tokens by
+	// start column (stable, so equal-column tokens keep their query-match
+	// precedence) so HighlightLine returns them left-to-right. Done once here
+	// rather than per HighlightLine call to keep that lookup O(1).
+	for i := range h.cache {
+		slices.SortStableFunc(h.cache[i], func(a, b Token) int {
+			return a.Col - b.Col
+		})
+	}
 }
 
 // Close frees tree-sitter resources.
@@ -237,7 +249,8 @@ func (h *Highlighter) Close() {
 	h.parser.Close()
 }
 
-// HighlightLine returns cached tokens for the given line. O(1) lookup.
+// HighlightLine returns cached tokens for the given line, sorted by start
+// column (stable). O(1) lookup — the sort is performed once in Parse.
 func (h *Highlighter) HighlightLine(lineNum int) []Token {
 	if lineNum < 0 || lineNum >= len(h.cache) {
 		return nil

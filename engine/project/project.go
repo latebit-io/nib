@@ -97,6 +97,48 @@ type Tree struct {
 	Roots []*Node
 }
 
+// Clone returns a deep copy of the tree: every [Node] (with its full
+// Children hierarchy) is duplicated so the returned tree shares no
+// mutable state with the receiver. Callers that read the tree from a
+// goroutine other than the one mutating it — e.g. a TUI render loop
+// walking nodes while the agent goroutine flips Node.Status via
+// [Tree.SetActiveGoal] / [Tree.MarkDone] — must operate on a Clone to
+// avoid a data race on Node.Status and the Children slices. Returns
+// nil when the receiver is nil.
+func (t *Tree) Clone() *Tree {
+	if t == nil {
+		return nil
+	}
+	clone := &Tree{ProjectName: t.ProjectName}
+	if t.Roots != nil {
+		clone.Roots = make([]*Node, len(t.Roots))
+		for i, root := range t.Roots {
+			clone.Roots[i] = root.clone()
+		}
+	}
+	return clone
+}
+
+// clone returns a deep copy of n and all its descendants.
+func (n *Node) clone() *Node {
+	if n == nil {
+		return nil
+	}
+	cp := &Node{
+		Title:     n.Title,
+		Depth:     n.Depth,
+		IsHeading: n.IsHeading,
+		Status:    n.Status,
+	}
+	if n.Children != nil {
+		cp.Children = make([]*Node, len(n.Children))
+		for i, child := range n.Children {
+			cp.Children[i] = child.clone()
+		}
+	}
+	return cp
+}
+
 // ActiveGoal returns the first task node with TaskActive status,
 // along with the ancestry path from root to that node (inclusive).
 // Returns nil, nil if no active goal exists.

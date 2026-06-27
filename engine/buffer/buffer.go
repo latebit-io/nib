@@ -143,6 +143,13 @@ func (b *Buffer) ReloadFromDisk() error {
 	b.undo = nil
 	b.redo = nil
 	if b.OnChange != nil {
+		// loadString does NOT trackChange, so the change log is empty after a
+		// reload. Push a full-content sentinel so DrainChanges (inside the
+		// OnChange callback) returns a change and the LSP consumer fires a
+		// DidChange with the whole document — otherwise the language server
+		// keeps the stale pre-reload content. A full reload supersedes any
+		// undrained incremental edits, so replace (don't append) the log.
+		b.changes = []ContentChange{{FullContent: true, Text: b.Content()}}
 		b.OnChange()
 	}
 	return nil
@@ -154,6 +161,11 @@ func (b *Buffer) loadString(s string) {
 	raw := strings.Split(s, "\n")
 	b.lines = make([]Line, len(raw))
 	for i, l := range raw {
+		// Strip a trailing CR so CRLF files don't carry a stray '\r' into the
+		// buffer as a rune (which would corrupt rune columns, search,
+		// ComputeDiff, and content shipped to the LSP). CRLF line endings are
+		// not round-tripped on save — content is normalized to LF.
+		l = strings.TrimSuffix(l, "\r")
 		b.lines[i] = Line{Runes: []rune(l)}
 	}
 	if len(b.lines) == 0 {
@@ -209,14 +221,24 @@ func (b *Buffer) SetLineOrigin(line int, origin Origin) {
 	})
 	b.redo = nil
 	b.lines[line].Origin = origin
+	// Fire OnChange so the provenance gutter repaints on a standalone call,
+	// consistent with the other mutators. fireOnChange respects suppressDepth,
+	// so this does not double-fire when called inside a group or via
+	// SetLineOrigins (both raise suppressDepth).
+	b.fireOnChange()
 }
 
 // SetLineOrigins sets the origin of a range of lines starting at startLine.
-// Each line change is tracked individually in the undo system.
+// Each line change is tracked individually in the undo system. OnChange fires
+// once at the end (not once per line): suppressDepth is raised while the
+// per-line SetLineOrigin calls run, then a single fireOnChange repaints.
 func (b *Buffer) SetLineOrigins(startLine, count int, origin Origin) {
+	b.suppressDepth++
 	for i := startLine; i < startLine+count; i++ {
 		b.SetLineOrigin(i, origin)
 	}
+	b.suppressDepth--
+	b.fireOnChange()
 }
 
 // ResetOriginToDeveloper flips a line's origin to Developer without tracking
@@ -451,7 +473,10 @@ func (b *Buffer) Undo() (int, int, bool) {
 		// redo stack top = GroupEnd, then ops in original order, then GroupStart.
 		// redo pops GroupEnd first, collects ops, replays forward.
 		b.redo = append(b.redo, operation{Kind: opGroupStart})
-		// ops[0] was the last undone (originally first inserted) — push in collected order
+		// ops were collected in reverse insertion order (last-inserted first,
+		// because the undo loop pops LIFO). Pushing them here and popping them
+		// again during redo reverses the order a second time, so redo replays
+		// in the original forward insertion order — a double reversal.
 		b.redo = append(b.redo, ops...)
 		b.redo = append(b.redo, operation{Kind: opGroupEnd})
 		b.Modified = true
@@ -706,7 +731,7 @@ func (b *Buffer) endOfInsert(line, col int, runes []rune) (int, int) {
 func (b *Buffer) collectRunes(line, col, count int) []rune {
 	var result []rune
 	l, c := line, col
-	for i := 0; i < count; i++ {
+	for range count {
 		if l >= len(b.lines) {
 			break
 		}

@@ -91,15 +91,38 @@ func walk(absDir, relDir string, matchers []*matcher, files, dirs *[]string) err
 			if err := walk(filepath.Join(absDir, name), rel, matchers, files, dirs); err != nil {
 				return err
 			}
-		} else if entry.Type().IsRegular() {
-			*files = append(*files, rel)
-			if len(*files) >= maxFiles {
-				return errFileCap
-			}
+		} else if appendRegularFile(absDir, name, rel, entry, files) {
+			return errFileCap
 		}
 	}
 
 	return nil
+}
+
+// appendRegularFile appends rel to files when entry is (or resolves to) a
+// regular file. A symlink is followed with os.Stat: if it points at a regular
+// file it is listed; a symlink to a directory is intentionally NOT recursed
+// into and NOT listed (following directory symlinks risks traversal loops).
+// Dangling/unresolvable symlinks are logged and skipped rather than silently
+// dropped. Returns true if the maxFiles cap was reached after appending.
+func appendRegularFile(absDir, name, rel string, entry os.DirEntry, files *[]string) bool {
+	switch {
+	case entry.Type().IsRegular():
+		*files = append(*files, rel)
+	case entry.Type()&os.ModeSymlink != 0:
+		info, statErr := os.Stat(filepath.Join(absDir, name))
+		if statErr != nil {
+			slog.Debug("filelist: skipping unresolvable symlink", "path", rel, "err", statErr)
+			return false
+		}
+		if !info.Mode().IsRegular() {
+			return false // symlinked dir or non-regular target — excluded
+		}
+		*files = append(*files, rel)
+	default:
+		return false
+	}
+	return len(*files) >= maxFiles
 }
 
 // ignored checks the matcher stack for a path. Returns true if the path

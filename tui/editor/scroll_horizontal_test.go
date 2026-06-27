@@ -29,6 +29,9 @@ func TestBufferColToDisplayCol(t *testing.T) {
 		{"tab in middle", "ab\tcd", 0, 3, 6}, // a=0, b=1, \t=2-5, c=6
 		{"multiple tabs", "\t\tx", 0, 2, 8},
 		{"VS16 has zero display width", "✏\uFE0Fx", 0, 2, 1},
+		{"CJK rune is two display cells", "世x", 0, 1, 2},
+		{"emoji rune is two display cells", "\U0001F600x", 0, 1, 2},
+		{"combining mark is zero width", "éx", 0, 2, 1},
 		{"col past line end", "abc", 0, 10, 3},
 		{"col zero", "anything", 0, 0, 0},
 		{"empty line", "", 0, 0, 0},

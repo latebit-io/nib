@@ -211,7 +211,6 @@ type sseDeltaCall struct {
 	} `json:"function"`
 }
 
-// Stream sends a chat completion request and returns a channel of streaming events.
 // MaxTokens returns the current max_tokens value sent on requests. Zero means
 // no value is sent and the provider's default applies. Safe for concurrent use.
 func (a *AgentAPI) MaxTokens() int {
@@ -359,6 +358,26 @@ func parseUsage(u *sseUsage) *Usage {
 type sseStreamState struct {
 	tc    toolCallAccumulator
 	usage *Usage
+	// truncated is set when a choice reports finish_reason="length",
+	// i.e. the model hit the output cap. Recorded on the finish_reason
+	// chunk and surfaced on the terminal event built at [DONE]/EOF.
+	truncated bool
+}
+
+// terminalEvent builds the Done event emitted from the [DONE]/EOF path in
+// readSSE. The terminal event is deferred to that path (not emitted on the
+// finish_reason chunk) because OpenAI's stream_options.include_usage sends
+// usage in a SEPARATE trailing chunk (choices:[]) AFTER the finish_reason
+// chunk; emitting Done early would drop that usage. parseUsage runs on every
+// chunk, so providers that instead bundle usage into the finish_reason chunk
+// still have it captured here.
+func (s *sseStreamState) terminalEvent() StreamEvent {
+	return StreamEvent{
+		Done:      true,
+		ToolCalls: s.tc.finalize(),
+		Usage:     s.usage,
+		Truncated: s.truncated,
+	}
 }
 
 // handleChunk processes one SSE data line. Returns true to stop the stream.
@@ -384,21 +403,25 @@ func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<-
 	}
 	if len(choice.Delta.ToolCalls) > 0 {
 		if !s.tc.merge(choice.Delta.ToolCalls) {
-			return true // tool args exceeded limit
+			// Payload-limit breach: surface a terminal error rather than
+			// closing silently, so the caller sees the real cause instead
+			// of the opaque errProviderClosedEarly.
+			trySend(ctx, ch, StreamEvent{
+				Done: true,
+				Err:  fmt.Errorf("llm: tool call stream exceeded limits (max %d calls, %d arg bytes)", maxToolCalls, maxToolArgBytes),
+			})
+			return true
 		}
 	}
 	if choice.FinishReason != nil {
-		truncated := *choice.FinishReason == "length"
-		if truncated {
+		if *choice.FinishReason == "length" {
+			s.truncated = true
 			slog.Warn("openai-compat: output truncated (finish_reason=length)")
 		}
-		trySend(ctx, ch, StreamEvent{
-			Done:      true,
-			ToolCalls: s.tc.finalize(),
-			Usage:     s.usage,
-			Truncated: truncated,
-		})
-		return true
+		// Do NOT emit Done here: usage arrives in a separate trailing
+		// chunk after this one. Keep reading; the terminal event is built
+		// from the [DONE]/EOF path once that chunk (if any) is consumed.
+		return false
 	}
 	return false
 }
@@ -407,9 +430,13 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // 10MB — large file content in tool results
 
+	wd := newStreamWatchdog(resp.Body)
+	defer wd.stop()
+
 	var state sseStreamState
 
 	for scanner.Scan() {
+		wd.reset()
 		select {
 		case <-ctx.Done():
 			return
@@ -422,7 +449,7 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
-			trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: state.tc.finalize(), Usage: state.usage})
+			trySend(ctx, ch, state.terminalEvent())
 			return
 		}
 		if state.handleChunk(ctx, data, ch) {
@@ -430,14 +457,19 @@ func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- S
 		}
 	}
 
-	// Check for scanner errors (I/O failures, buffer overflow).
+	// Check for scanner errors (I/O failures, buffer overflow, watchdog tear-down).
 	if err := scanner.Err(); err != nil {
+		if wd.fired() {
+			trySend(ctx, ch, StreamEvent{Done: true, Err: errStreamStalled})
+			return
+		}
 		if ctx.Err() == nil {
 			slog.Warn("SSE scanner error", "err", err)
 		}
 		return // truncated stream — don't synthesize a successful Done event
 	}
 
-	// Clean EOF without [DONE] or finish_reason.
-	trySend(ctx, ch, StreamEvent{Done: true, ToolCalls: state.tc.finalize(), Usage: state.usage})
+	// Clean EOF without [DONE]: emit the terminal event (finish_reason and/or
+	// usage already captured into state).
+	trySend(ctx, ch, state.terminalEvent())
 }

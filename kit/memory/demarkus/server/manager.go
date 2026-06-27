@@ -30,6 +30,16 @@ type StoreFactory func(*mcp.Client) memory.Store
 
 // Manager manages the demarkus-server child process and the demarkus-mcp
 // client subprocess that fronts it.
+//
+// Concurrency: a Manager is single-goroutine-owned. Its lifecycle calls
+// ([Manager.Start], [Manager.NewStore], [Manager.Stop]) mutate shared
+// fields (mcpClient, cmd, waitDone, process, port, lockFile) without a
+// mutex and must not be invoked concurrently — unlike Agent/Registry,
+// which document "safe from any goroutine". The two composition-root
+// callers drive it sequentially (Start → NewStore → … → Stop on one
+// goroutine), which satisfies this contract. A caller that needs to
+// reach Stop from a separate goroutine (e.g. a signal handler) must
+// provide its own synchronization.
 type Manager struct {
 	projectRoot string
 	binDir      string // .project/bin/
@@ -800,6 +810,15 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 func (b *limitedBuffer) String() string { return b.buf.String() }
 
 // freePort finds an available port by binding to :0 and reading the assigned port.
+//
+// Accepted race (TOCTOU): the OS assigns an ephemeral port here, this
+// closes the socket, and demarkus-server binds it moments later. In the
+// window between close and re-bind another process could claim the port,
+// in which case the server's bind fails and waitReady surfaces it. This
+// is the standard ephemeral-port handshake — there is no portable way to
+// hand an already-bound UDP socket to a child process, and the window is
+// vanishingly small on a local host — so the race is tolerated rather
+// than worked around.
 func freePort() (int, error) {
 	l, err := net.ListenPacket("udp", "localhost:0")
 	if err != nil {

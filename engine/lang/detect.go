@@ -8,8 +8,6 @@ import (
 // languageMap maps file extensions to LSP language identifiers.
 var languageMap = map[string]string{
 	".go":    "go",
-	".mod":   "go.mod",
-	".sum":   "go.sum",
 	".js":    "javascript",
 	".mjs":   "javascript",
 	".cjs":   "javascript",
@@ -56,9 +54,17 @@ var languageMap = map[string]string{
 	".tf":    "terraform",
 }
 
-// DetectLanguage returns the LSP language identifier for a file path
-// based on its extension. Returns empty string if unknown.
+// DetectLanguage returns the LSP language identifier for a file path.
+// go.mod and go.sum are matched on the full basename (not an extension) so a
+// non-Go file like foo.mod is not mislabeled. All other languages are matched
+// by extension. Returns empty string if unknown.
 func DetectLanguage(path string) string {
+	switch strings.ToLower(filepath.Base(path)) {
+	case "go.mod":
+		return "go.mod"
+	case "go.sum":
+		return "go.sum"
+	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == "" {
 		return ""
@@ -70,6 +76,7 @@ func DetectLanguage(path string) string {
 // Read-only after init — never mutate at runtime.
 var commentPrefixMap = map[string]string{
 	"go":              "//",
+	"go.mod":          "//",
 	"javascript":      "//",
 	"javascriptreact": "//",
 	"typescript":      "//",

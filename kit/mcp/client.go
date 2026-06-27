@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/latebit-io/nib/ai/brand"
 )
@@ -54,8 +55,10 @@ type Client struct {
 	mu     sync.Mutex
 	nextID int
 
-	// pending tracks in-flight requests awaiting responses.
-	pending map[int]chan json.RawMessage
+	// pending tracks in-flight requests awaiting responses. Each channel
+	// carries a [pendingResult] so readLoop can tag whether the response
+	// was a JSON-RPC result or error, rather than re-sniffing in call.
+	pending map[int]chan pendingResult
 
 	// closed is set by Close so subsequent RPC calls short-circuit with
 	// [ErrClientClosed] instead of writing to a torn-down pipe.
@@ -82,6 +85,19 @@ type jsonRPCResponse struct {
 type jsonRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// pendingResult is the discriminated response delivered to a waiting
+// [Client.call] via its pending channel. Exactly one arm is set:
+// rpcErr non-nil means the server returned a JSON-RPC error object;
+// otherwise result holds the success payload. Carrying the
+// discriminator explicitly avoids re-sniffing a result for a
+// top-level "code" field, which misclassifies a success payload that
+// happens to contain a numeric code as an error (and an error with
+// code 0 as success).
+type pendingResult struct {
+	result json.RawMessage
+	rpcErr *jsonRPCError
 }
 
 // NewStdioClient spawns an MCP server subprocess and connects via stdio.
@@ -112,7 +128,7 @@ func NewStdioClient(command string, args []string, env []string) (*Client, error
 		stdin:   stdin,
 		reader:  bufio.NewReaderSize(stdout, 64*1024),
 		done:    make(chan struct{}),
-		pending: make(map[int]chan json.RawMessage),
+		pending: make(map[int]chan pendingResult),
 	}
 
 	go c.readLoop()
@@ -151,11 +167,9 @@ func (c *Client) readLoop() {
 
 		if ok {
 			if resp.Error != nil {
-				// Marshal cannot fail: jsonRPCError contains only int and string.
-				errJSON, _ := json.Marshal(resp.Error)
-				ch <- errJSON
+				ch <- pendingResult{rpcErr: resp.Error}
 			} else {
-				ch <- resp.Result
+				ch <- pendingResult{result: resp.Result}
 			}
 			close(ch)
 		}
@@ -198,7 +212,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	}
 	id := c.nextID
 	c.nextID++
-	ch := make(chan json.RawMessage, 1)
+	ch := make(chan pendingResult, 1)
 	c.pending[id] = ch
 	c.mu.Unlock()
 
@@ -253,16 +267,15 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 		// If readLoop already extracted ch before we deleted, it may still
 		// send/close. The buffered channel absorbs the orphaned send; GC cleans up.
 		return nil, ctx.Err()
-	case result, ok := <-ch:
+	case res, ok := <-ch:
 		if !ok {
 			return nil, fmt.Errorf("mcp: connection closed")
 		}
-		// Check if result is actually an error response.
-		var rpcErr jsonRPCError
-		if json.Unmarshal(result, &rpcErr) == nil && rpcErr.Code != 0 {
-			return nil, fmt.Errorf("mcp: server error %d: %s", rpcErr.Code, rpcErr.Message)
+		// readLoop tagged which arm this is — no re-sniffing.
+		if res.rpcErr != nil {
+			return nil, fmt.Errorf("mcp: server error %d: %s", res.rpcErr.Code, res.rpcErr.Message)
 		}
-		return result, nil
+		return res.result, nil
 	}
 }
 
@@ -367,12 +380,22 @@ func (c *Client) CallToolResult(ctx context.Context, name string, args map[strin
 	return ToolResult{Text: sb.String(), IsError: resp.IsError}, nil
 }
 
+// closeGrace bounds how long Close waits for the subprocess to exit on
+// its own (after stdin is closed) before escalating to SIGKILL. Mirrors
+// the server package's grace-then-SIGKILL teardown window.
+const closeGrace = 5 * time.Second
+
 // Close terminates the MCP server subprocess and waits for the
 // readLoop goroutine to finish its pending-channel cleanup. After Close
 // returns, further calls to [Client.CallTool], [Client.CallToolResult],
 // [Client.ListTools], and [Client.Initialize] return [ErrClientClosed]
 // immediately — callers that hold a cached reference (memory adapter,
 // agent store) don't wait for a now-useless RPC to time out.
+//
+// Close is bounded: a wedged MCP server that does not exit on stdin
+// close is SIGKILLed after [closeGrace] so Close cannot hang forever.
+// This matters because server.Manager.Stop calls this first, so an
+// unbounded wait here would stall every downstream teardown step.
 func (c *Client) Close() error {
 	// Record closed state first so concurrent RPC calls short-circuit
 	// rather than enqueuing onto pending and then being orphaned.
@@ -380,7 +403,29 @@ func (c *Client) Close() error {
 	if err := c.stdin.Close(); err != nil {
 		slog.Debug("mcp: close stdin", "err", err)
 	}
-	err := c.cmd.Wait()
-	<-c.done // wait for readLoop to exit and clean up pending channels
-	return err
+
+	// readLoop must finish draining the StdoutPipe before cmd.Wait():
+	// os/exec forbids Wait while pipe reads are outstanding. A healthy
+	// server exits on stdin close, EOFs stdout, and readLoop closes
+	// c.done promptly. A wedged server never exits, so bound the wait —
+	// on expiry SIGKILL the process, which forces stdout EOF and unblocks
+	// readLoop.
+	select {
+	case <-c.done:
+	case <-time.After(closeGrace):
+		if err := c.cmd.Process.Kill(); err != nil {
+			slog.Debug("mcp: kill after grace", "err", err)
+		}
+		// SIGKILL is unblockable and closes the process's stdout, so
+		// readLoop's scanner hits EOF and closes c.done. Bound anyway
+		// against a process stuck in uninterruptible sleep; if c.done
+		// still hasn't closed, proceed to Wait as a best effort.
+		select {
+		case <-c.done:
+		case <-time.After(2 * time.Second):
+			slog.Warn("mcp: readLoop did not exit after kill")
+		}
+	}
+
+	return c.cmd.Wait()
 }

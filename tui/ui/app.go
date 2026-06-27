@@ -149,15 +149,6 @@ type AppModel struct {
 	highlighterFactory syntax.HighlighterFactory
 }
 
-// editorForOpenFile returns the pooled editor for the given open file,
-// creating and decorating one on first use. Returns nil if of is nil.
-// Cursor/scroll state is preserved across calls because each path
-// resolves to a single editor instance for the lifetime of the AppModel.
-//
-// Empty-path scratch handles (the fallback installed when Session has
-// no real active file) use "" as the pool key, mirroring
-// [Session.openFiles] so future iteration/lookup paths stay consistent.
-// Every other path is canonicalized.
 // SetProgram sets the tea.Program reference.
 func (m *AppModel) SetProgram(p *tea.Program) {
 	m.program = p
@@ -418,10 +409,16 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Drop leaked mouse escape sequence fragments. During rapid scrolling,
 	// Bubble Tea's parser can fail to consume full SGR sequences; the
 	// fragments leak as printable text. Gate behind recentMouse so we
-	// never silently drop legitimate typed/pasted text. Keep
-	// recentMouse=true while consecutive leaked sequences flow.
+	// never silently drop legitimate typed/pasted text. The matched shape
+	// is exact (optional '[', then '<', digits/';', terminating 'M'/'m'),
+	// which a single keystroke cannot produce — only multi-rune leaked
+	// fragments or pastes match. Keep recentMouse=true while consecutive
+	// leaked sequences flow. The drop is logged at Debug so it is never
+	// silent, satisfying the "never silently swallow" rule.
 	if m.recentMouse && msg.Text != "" {
 		if isLeakedMouseSequence([]rune(msg.Text)) {
+			slog.Debug("dropped suspected leaked mouse-sequence fragment after scroll",
+				"text", msg.Text)
 			return m, nil
 		}
 	}

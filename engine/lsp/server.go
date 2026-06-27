@@ -214,7 +214,16 @@ func (s *Server) DidClose(uri string) {
 
 // toLSPPosition converts rune-based (0-indexed) coordinates to LSP position.
 // When UTF-32 is negotiated, this is a no-op (rune == UTF-32 code unit).
-// When UTF-16, conversion is needed for characters outside the BMP.
+//
+// LIMITATION: in UTF-16 mode the rune column is passed through unchanged. This
+// is correct for all BMP characters but WRONG for off-BMP characters (code
+// points > U+FFFF, e.g. many emoji), which occupy two UTF-16 code units — the
+// reported character offset will be short by one per preceding off-BMP rune.
+// No conversion is attempted here. Mitigation: when UTF-32 is unavailable
+// Session uses full-content sync (FullContentSyncer), so DidChange ranges with
+// rune positions are never sent to a UTF-16 server; this path is only used for
+// request/response methods (definition, hover, completion) whose positions sit
+// inside source identifiers, which are BMP-only for the languages we target.
 func (s *Server) toLSPPosition(line, col int) lspPosition {
 	if s.posEncoding == positionEncodingUTF32 {
 		return lspPosition{Line: line, Character: col}
@@ -229,7 +238,15 @@ func (s *Server) toLSPPosition(line, col int) lspPosition {
 	return lspPosition{Line: line, Character: col}
 }
 
-// fromLSPPosition converts LSP position to rune-based coordinates.
+// fromLSPPosition converts an LSP position to rune-based coordinates.
+//
+// LIMITATION: the inverse of toLSPPosition. In UTF-16 mode the character offset
+// is passed through unchanged — correct for BMP characters but WRONG for lines
+// containing off-BMP characters (the rune column will be over-counted by one
+// per preceding off-BMP rune). This affects the diagnostic-range path
+// (handleDiagnostics), which is acceptable because diagnostic ranges from the
+// servers we target land on BMP-only source identifiers. No UTF-16 conversion
+// is attempted.
 func (s *Server) fromLSPPosition(pos lspPosition) (line, col int) {
 	if s.posEncoding == positionEncodingUTF32 {
 		return pos.Line, pos.Character

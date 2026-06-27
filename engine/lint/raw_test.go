@@ -142,8 +142,10 @@ func TestRawLinter_emptyCommand(t *testing.T) {
 
 func TestRawLinter_perFileDispatch(t *testing.T) {
 	// The {file} placeholder triggers per-file invocation. Command echoes a
-	// diagnostic line mentioning the filename; we should see one finding per file.
-	r := &RawLinter{Command: `echo "{file}:1:1: issue"`}
+	// diagnostic line mentioning the filename; we should see one finding per
+	// file. The placeholder is written unquoted — substituteArgs wraps it in
+	// "$1" so the path is passed positionally.
+	r := &RawLinter{Command: `echo {file}:1:1: issue`}
 	res := r.Run(context.Background(), "", "",
 		[]string{"foo.go", "bar.go"})
 	if res.Error != nil {
@@ -158,12 +160,14 @@ func TestRawLinter_perFileDispatch(t *testing.T) {
 	}
 }
 
-func TestRawLinter_unsafeDirRejected(t *testing.T) {
-	// dir flows directly into `sh -c` via {dir} substitution, so shell
-	// metacharacters must be rejected at the adapter boundary. A path like
-	// "foo$(whoami)" in an edit proposal would yield dir = "foo$(whoami)"
-	// after filepath.Dir.
-	r := &RawLinter{Command: `echo "{dir}"`}
+func TestRawLinter_unsafeDirSafe(t *testing.T) {
+	// dir is passed to sh as the positional parameter $2 (referenced via the
+	// rewritten "$2"), never interpolated into the command string. A dir with
+	// shell metacharacters is therefore handled safely — no rejection, and the
+	// metacharacters are not evaluated (no command substitution, no injection).
+	// The echoed line carries dir as the path, so we can assert it survived
+	// verbatim.
+	r := &RawLinter{Command: `echo {dir}:1:1: msg`}
 	cases := []string{
 		"foo$(whoami)",
 		"foo; rm -rf /",
@@ -173,11 +177,14 @@ func TestRawLinter_unsafeDirRejected(t *testing.T) {
 	for _, bad := range cases {
 		t.Run(bad, func(t *testing.T) {
 			res := r.Run(context.Background(), "", bad, nil)
-			if res.Error == nil {
-				t.Errorf("expected rejection for dir=%q, got clean result", bad)
+			if res.Error != nil {
+				t.Errorf("dir=%q should be handled safely, got error: %v", bad, res.Error)
 			}
-			if len(res.Findings) != 0 {
-				t.Errorf("expected no findings for unsafe dir, got %v", res.Findings)
+			if len(res.Findings) != 1 {
+				t.Fatalf("expected 1 finding for dir=%q, got %d: %+v", bad, len(res.Findings), res.Findings)
+			}
+			if res.Findings[0].Path != bad {
+				t.Errorf("dir not passed literally: got %q want %q (metachars were evaluated?)", res.Findings[0].Path, bad)
 			}
 		})
 	}
@@ -192,45 +199,22 @@ func TestRawLinter_dirDotAccepted(t *testing.T) {
 	}
 }
 
-func TestRawLinter_unsafePathSkipped(t *testing.T) {
-	r := &RawLinter{Command: `echo "{file}:1:1: issue"`}
+func TestRawLinter_pathWithMetacharsSafe(t *testing.T) {
+	// Paths with spaces and shell metacharacters are now passed positionally
+	// ($1), so they are processed (not skipped) and cannot inject commands.
+	// "bad; rm -rf /.go" is echoed literally — the ';' does not run rm.
+	r := &RawLinter{Command: `echo {file}:1:1: issue`}
 	res := r.Run(context.Background(), "", "",
 		[]string{"safe.go", "bad; rm -rf /.go"})
-	// The unsafe path is skipped, so only one finding appears.
-	if len(res.Findings) != 1 {
-		t.Fatalf("expected 1 finding (unsafe skipped), got %d: %+v", len(res.Findings), res.Findings)
+	if len(res.Findings) != 2 {
+		t.Fatalf("expected 2 findings (no path skipped), got %d: %+v", len(res.Findings), res.Findings)
 	}
 	if res.Findings[0].Path != "safe.go" {
-		t.Errorf("wrong path: %q", res.Findings[0].Path)
+		t.Errorf("first path wrong: %q", res.Findings[0].Path)
 	}
-}
-
-func TestSafeForShell(t *testing.T) {
-	safe := []string{"src/main.go", "internal/ui/app.go", "file-name_v2.txt", "a/b/c.rs"}
-	for _, s := range safe {
-		if !safeForShell(s) {
-			t.Errorf("safeForShell(%q) = false, want true", s)
-		}
-	}
-	unsafe := []string{
-		"",
-		"file name.go",
-		"src/';echo pwned",
-		"$(whoami).go",
-		"file`id`.go",
-		"a|b.go",
-		"a&b.go",
-		"a;b.go",
-		"file\nname.go",
-		"file\tname.go", // tab — completes whitespace coverage alongside space/newline
-		"file\rname.go", // CR — same rationale
-		"a>b.go",        // redirect
-		"a<b.go",        // redirect
-		"a*b.go",        // glob expansion
-	}
-	for _, s := range unsafe {
-		if safeForShell(s) {
-			t.Errorf("safeForShell(%q) = true, want false", s)
-		}
+	// The hostile path is preserved verbatim — proof the shell did not
+	// interpret the ';' (no injection, no truncation).
+	if res.Findings[1].Path != "bad; rm -rf /.go" {
+		t.Errorf("hostile path not passed literally: %q", res.Findings[1].Path)
 	}
 }

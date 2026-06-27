@@ -198,6 +198,16 @@ func (s *Session) RequestCompletionInContext(path, tempContent, originalContent 
 	s.completionMu.Lock()
 	defer s.completionMu.Unlock()
 
+	// Concurrency note: this runs in a tea.Cmd goroutine, not the TUI
+	// Update goroutine where the buffer's OnChange→DidChange fires.
+	// completionMu serializes overlay completions against each other but
+	// NOT against that Update-goroutine DidChange. This is safe because
+	// the engine lsp Manager.DidChange holds its mutex across the
+	// version-increment + send, so concurrent DidChange calls are
+	// version-safe (no torn version sequence). The temp/original content
+	// pair below brackets the request so the LSP's view is restored even
+	// if an Update-goroutine DidChange interleaves after the revert.
+
 	// Sync temporary content so LSP sees the overlay code.
 	s.langSyncer.DidChange(path, []lang.TextChange{{Text: tempContent, FullContent: true}})
 

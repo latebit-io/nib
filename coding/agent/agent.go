@@ -306,12 +306,14 @@ type Agent struct {
 	// run's [event.AgentDone] has been fully processed. Run-start
 	// methods (RunWithMode, Reply's resume path) [Agent.fenceForwarder]
 	// on the previously-installed channel before resetting per-run
-	// state ([Agent.sessionUsage], [Agent.turnCounter],
-	// [Agent.runUnsuccessful], [Agent.budgetExceeded], [Agent.running])
-	// and starting the next run — without the fence, a forwarder still
-	// processing the prior run's buffered events would mutate the new
-	// run's state and (worst case) charge the prior run's tokens
-	// against the new run's budget.
+	// state ([Agent.turnCounter], [Agent.runUnsuccessful],
+	// [Agent.budgetExceeded], [Agent.running]) and starting the next
+	// run — without the fence, a forwarder still processing the prior
+	// run's buffered events could flip [Agent.running] off via a stale
+	// [event.AgentDone] after the fresh run set it true, and close the
+	// new run's runDone against the prior run's tail. (Per-run token
+	// accounting lives in [providerProxy], reset via
+	// [providerProxy.ResetSession], not in the forwarder.)
 	runDone chan struct{}
 }
 
@@ -778,16 +780,17 @@ func adaptEngineSearch(_ context.Context, root, pattern string, opts searchtools
 // Provider / Mode, Usage, emitOpening, send, sendCritical) lives in
 // lifecycle.go.
 
-// Per-run budget integration (checkTaskBudget) lives in budget.go.
-// Per-turn accumulation lives in [Agent.augmentAndAccumulate]
-// (forwarder.go). The pure budget math + types live in [kit/budget].
+// Per-run budget integration (checkTaskBudget, evaluateBudgetLatch)
+// lives in budget.go. Per-run usage accumulation lives in
+// [providerProxy.recordUsage] (provider_proxy.go); the pure budget math
+// + types live in [kit/budget].
 
 // Kit event forwarding (forwardKitEvents) lives in forwarder.go. The
-// forwarder drains the [kit.Agent]'s event stream, augments
-// AgentTurnUsage with client-side estimates + sessionUsage
-// accounting, overrides AgentDone's Success flag from
-// [Agent.runUnsuccessful], and forwards every event to the frontend
-// channel.
+// forwarder drains the [kit.Agent]'s event stream, DROPS
+// [event.AgentTurnUsage] (providerProxy emits the authoritative one
+// directly), overrides AgentDone's Success flag from
+// [Agent.runUnsuccessful], and forwards every other event to the
+// frontend channel.
 
 // Foundation hook bridge (FoundationHooks + every gate it composes)
 // lives in foundation_hooks.go. The kit/foundation captures these

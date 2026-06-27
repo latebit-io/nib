@@ -129,9 +129,12 @@ func (s *Subscription) Events() <-chan event.Event {
 }
 
 // Drops returns the monotonic count of events dropped on this
-// subscription's inbox due to a configured [DropStreaming] policy
-// finding the inbox full. Observable so subscribers can detect when
-// they are falling behind without inspecting the channel internals.
+// subscription's inbox when a [Drop] policy found the inbox full.
+// Both event classes contribute: a streaming event dropped under
+// [SubscribeOptions.OnStreamingFull] and a control event dropped under
+// [SubscribeOptions.OnControlFull] each increment this counter.
+// Observable so subscribers can detect when they are falling behind
+// without inspecting the channel internals.
 func (s *Subscription) Drops() int64 {
 	return atomic.LoadInt64(&s.drops)
 }

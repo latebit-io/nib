@@ -460,24 +460,22 @@ func TestSSEUsageParsing(t *testing.T) {
 	}
 }
 
-// collectStream drains s.handleChunk for a list of JSON chunk strings and
-// returns the first Done event emitted. Tests that only care about the
-// terminal event use this to skip over token deltas.
+// collectFinalEvent feeds a list of JSON chunk strings through
+// s.handleChunk, then returns the terminal event the [DONE]/EOF path in
+// readSSE would emit. handleChunk no longer emits Done on the finish_reason
+// chunk (usage arrives in a separate trailing chunk), so the terminal event
+// is built from accumulated state — mirroring readSSE.
 func collectFinalEvent(t *testing.T, chunks []string) StreamEvent {
 	t.Helper()
 	ch := make(chan StreamEvent, len(chunks)+1)
 	state := &sseStreamState{}
 	for _, c := range chunks {
-		state.handleChunk(context.Background(), c, ch)
-	}
-	close(ch)
-	for ev := range ch {
-		if ev.Done {
-			return ev
+		if state.handleChunk(context.Background(), c, ch) {
+			break
 		}
 	}
-	t.Fatal("no Done event emitted")
-	return StreamEvent{}
+	close(ch)
+	return state.terminalEvent()
 }
 
 func TestAgentAPI_MaxTokensSerialization(t *testing.T) {
@@ -699,5 +697,61 @@ func TestSSEChunk_TruncatedFinishReason(t *testing.T) {
 				t.Errorf("Truncated = %v, want %v", ev.Truncated, tc.wantTrunc)
 			}
 		})
+	}
+}
+
+// TestSSE_UsageFromTrailingChunk verifies the real OpenAI
+// stream_options.include_usage wire behavior: the finish_reason chunk
+// carries NO usage (choices present, usage absent), and usage arrives in a
+// SEPARATE trailing chunk (choices:[]) emitted after it. The terminal event
+// must carry that trailing usage rather than nil.
+func TestSSE_UsageFromTrailingChunk(t *testing.T) {
+	chunks := []string{
+		// finish_reason chunk — no usage yet.
+		`{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+		// separate trailing usage-only chunk.
+		`{"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":567,"prompt_tokens_details":{"cached_tokens":1000}}}`,
+	}
+	ev := collectFinalEvent(t, chunks)
+	if !ev.Done {
+		t.Fatal("terminal event should have Done=true")
+	}
+	if ev.Usage == nil {
+		t.Fatal("usage from trailing chunk should be captured, got nil")
+	}
+	if ev.Usage.PromptTokens != 1234 || ev.Usage.CompletionTokens != 567 {
+		t.Errorf("Usage = %+v, want PromptTokens=1234 CompletionTokens=567", ev.Usage)
+	}
+	if ev.Usage.CachedTokens != 1000 {
+		t.Errorf("CachedTokens = %d, want 1000", ev.Usage.CachedTokens)
+	}
+	if ev.Truncated {
+		t.Error("finish_reason=stop should not be truncated")
+	}
+}
+
+// TestSSE_ToolArgOverflowEmitsError verifies a tool-argument payload-limit
+// breach surfaces a terminal error event (not a silent close).
+func TestSSE_ToolArgOverflowEmitsError(t *testing.T) {
+	ch := make(chan StreamEvent, 4)
+	state := &sseStreamState{}
+	big := strings.Repeat("a", maxToolArgBytes+1)
+	chunk := `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":"` + big + `"}}]}}]}`
+	stop := state.handleChunk(context.Background(), chunk, ch)
+	if !stop {
+		t.Fatal("handleChunk should stop the stream on overflow")
+	}
+	close(ch)
+	var gotErr StreamEvent
+	for ev := range ch {
+		if ev.Err != nil {
+			gotErr = ev
+		}
+	}
+	if gotErr.Err == nil {
+		t.Fatal("expected a terminal error event on tool-arg overflow")
+	}
+	if !gotErr.Done {
+		t.Error("error event should have Done=true")
 	}
 }

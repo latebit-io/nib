@@ -2,6 +2,7 @@ package kit
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -263,13 +264,16 @@ func chainOnTruncated(fns []func(context.Context, TruncationInput) (TruncationRe
 // deduplicateTools returns the unique tools from the input slice.
 // First tool with a given name (case-insensitive) wins; later
 // duplicates are logged at Warn level and dropped.
-func deduplicateTools(tools []Tool) []Tool {
+//
+// A nil tool entry is rejected with [ErrInvalidOptions] so the failure
+// stays in kit's vocabulary rather than surfacing later as a foundation
+// validation error from agent.New.
+func deduplicateTools(tools []Tool) ([]Tool, error) {
 	seen := make(map[string]bool, len(tools))
 	deduped := make([]Tool, 0, len(tools))
-	for _, t := range tools {
+	for i, t := range tools {
 		if t == nil {
-			deduped = append(deduped, t)
-			continue
+			return nil, fmt.Errorf("%w: nil tool at index %d", ErrInvalidOptions, i)
 		}
 		name := strings.ToLower(t.Definition().Function.Name)
 		if seen[name] {
@@ -279,5 +283,5 @@ func deduplicateTools(tools []Tool) []Tool {
 		seen[name] = true
 		deduped = append(deduped, t)
 	}
-	return deduped
+	return deduped, nil
 }

@@ -24,13 +24,13 @@ import (
 //     under [bus.mu].
 //   - publish snapshots the subscribers slice under [bus.mu], then
 //     calls [Subscription.deliver] for each snapshot entry without
-//     holding the lock — so a slow subscriber on BlockControl does
+//     holding the lock — so a slow subscriber on a [Block] policy does
 //     not freeze new subscribe/unsubscribe operations.
 //   - deliveries are serialized by the publisher (one goroutine
 //     iterates the snapshot in order). Per-subscriber ordering is
 //     therefore trivially preserved; cross-subscriber ordering is
-//     undefined when policies differ (a fast DropStreaming subscriber
-//     may "race ahead" of a slow BlockControl one, but each sees its
+//     undefined when policies differ (a fast [Drop]-policy subscriber
+//     may "race ahead" of a slow [Block]-policy one, but each sees its
 //     own stream in publish order).
 //   - Each [Subscription] holds its own [Subscription.deliverWG]
 //     counting in-flight deliver calls to that subscription.

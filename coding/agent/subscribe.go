@@ -242,15 +242,17 @@ func (s *Subscription) deliverContext(ctx context.Context, ev event.Event) error
 // Every other event is control: lifecycle, failure, or signal events
 // whose loss would strand the subscriber.
 //
-// The list mirrors the streaming class in [Agent.send] (lifecycle.go).
-// AgentStatus is here (unlike kit's narrower list) because coding
-// emits AgentStatus on every Thinking/Planning/Reviewing transition,
-// which is high-volume enough to deserve drop-on-full. AgentCompacted
-// is here because compaction can fire repeatedly within a single run.
+// This is the SINGLE source of truth for the streaming/control split.
+// [Agent.send] (lifecycle.go) no longer classifies events — it just
+// hands them to the bus, which resolves [DefaultPolicy] via
+// [Subscription.effectivePolicy], which calls this. AgentStatus is here
+// (unlike kit's narrower list) because coding emits AgentStatus on every
+// Thinking/Planning/Reviewing transition, which is high-volume enough to
+// deserve drop-on-full. AgentCompacted is here because compaction can
+// fire repeatedly within a single run.
 //
-// Keep this list aligned with the streaming-class switch in
-// [Agent.send]. Adding a new streaming event type means adding it in
-// both places; CodeRabbit will not catch the divergence automatically.
+// Adding a new streaming event type is a one-line edit here; there is no
+// parallel switch to keep in sync.
 func isStreamingEvent(ev event.Event) bool {
 	switch ev.(type) {
 	case event.AgentToken,

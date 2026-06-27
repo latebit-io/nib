@@ -222,7 +222,10 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("%w: Provider is required", ErrInvalidOptions)
 	}
 
-	tools := deduplicateTools(cfg.Toolset.Tools)
+	tools, err := deduplicateTools(cfg.Toolset.Tools)
+	if err != nil {
+		return nil, err
+	}
 
 	foundationEvents := make(chan agentevent.Event, 64)
 

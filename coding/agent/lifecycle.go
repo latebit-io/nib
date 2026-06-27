@@ -53,10 +53,14 @@ func (a *Agent) markReplyAccepted(input string) {
 // Both RunWithMode and Reply's resume path call this between
 // kit.WaitForIdle (which only fences the foundation goroutine) and
 // the per-run state reset. Without the fence a forwarder still
-// processing the prior run's buffered AgentTurnUsage could mutate the
-// new run's [Agent.sessionUsage] / [Agent.turnCounter] and falsely
-// trip the new run's budget gate; a stale AgentDone could flip
-// [Agent.running] off after RunWithMode set it true.
+// draining the prior run's buffered events could flip [Agent.running]
+// off via a stale [event.AgentDone] after RunWithMode set it true, read
+// [Agent.runUnsuccessful] for the wrong run, and close the new run's
+// runDone against the prior run's tail. (Per-run token accounting is
+// not at risk here: usage accumulates in [providerProxy.recordUsage]
+// keyed to each Stream and is reset per-run via
+// [providerProxy.ResetSession] — the forwarder drops
+// [event.AgentTurnUsage] and never touches the budget total.)
 func (a *Agent) fenceForwarder() {
 	a.runDoneMu.Lock()
 	prev := a.runDone
@@ -129,10 +133,10 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	// forwarder to fully unwind before resetting per-run state. kit.
 	// WaitForIdle only fences the foundation; fenceForwarder waits for
 	// the prior run's AgentDone (and thus all events from that run) to
-	// drain through forwardKitEvents — without this, late
-	// AgentTurnUsage events from the prior run would charge against the
-	// new run's sessionUsage/budget and a late AgentDone would flip
-	// running=false on the fresh run.
+	// drain through forwardKitEvents — without this, a late AgentDone
+	// from the prior run would flip running=false on the fresh run.
+	// (Per-run usage is isolated by providerProxy.ResetSession, not by
+	// this fence — the forwarder drops AgentTurnUsage.)
 	if prevCancel != nil {
 		prevCancel()
 	}

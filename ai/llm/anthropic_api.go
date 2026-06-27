@@ -167,6 +167,14 @@ type anthropicMessageDelta struct {
 	Usage *anthropicUsage `json:"usage"`
 }
 
+// anthropicErrorEvent is the payload of a streamed `event: error`.
+type anthropicErrorEvent struct {
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
 // anthropicUsage holds token consumption data from the Anthropic API.
 type anthropicUsage struct {
 	InputTokens              int `json:"input_tokens"`
@@ -203,7 +211,11 @@ func parseToolInput(args string) any {
 	}
 	var input any
 	if err := json.Unmarshal([]byte(args), &input); err != nil {
-		return json.RawMessage(args)
+		// Falling back to the raw (invalid-JSON) string would later fail
+		// json.Marshal of the WHOLE request, poisoning every subsequent
+		// call. Degrade only this one bad input to an empty object.
+		slog.Warn("anthropic: unparseable tool arguments, substituting empty object", "err", err)
+		return json.RawMessage("{}")
 	}
 	return input
 }
@@ -447,11 +459,22 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 		s.inputUsage = evt.Message.Usage
 	case "content_block_start":
 		if !s.handleBlockStart(data) {
+			// Index out of bounds: surface a terminal error instead of
+			// closing silently (which the caller reports as the opaque
+			// errProviderClosedEarly).
+			trySend(ctx, ch, StreamEvent{
+				Done: true,
+				Err:  fmt.Errorf("anthropic: content block index out of bounds (max %d)", maxToolCalls),
+			})
 			return anthropicDone
 		}
 	case "content_block_delta":
 		token, abort := s.handleBlockDelta(data)
 		if abort {
+			trySend(ctx, ch, StreamEvent{
+				Done: true,
+				Err:  fmt.Errorf("anthropic: tool arguments exceeded %d bytes", maxToolArgBytes),
+			})
 			return anthropicDone
 		}
 		if token != "" {
@@ -465,8 +488,20 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 		trySend(ctx, ch, s.finalEvent())
 		return anthropicDone
 	case "error":
-		slog.Warn("anthropic: stream error event", "data", data[:min(len(data), 500)])
-		return anthropicDone // don't send finalEvent — partial data is not a valid response
+		// Propagate the real cause: parse the error block and surface its
+		// message as a terminal error event. Without this the consumer only
+		// sees the generic errProviderClosedEarly.
+		var evt anthropicErrorEvent
+		msg := data
+		if err := json.Unmarshal([]byte(data), &evt); err == nil && evt.Error.Message != "" {
+			msg = evt.Error.Message
+		}
+		slog.Warn("anthropic: stream error event", "type", evt.Error.Type, "message", msg)
+		trySend(ctx, ch, StreamEvent{
+			Done: true,
+			Err:  fmt.Errorf("anthropic stream error: %s", msg),
+		})
+		return anthropicDone
 	}
 	return anthropicContinue
 }
@@ -476,10 +511,14 @@ func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, resp *http.Response
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
+	wd := newStreamWatchdog(resp.Body)
+	defer wd.stop()
+
 	state := &anthropicStreamState{blocks: make(map[int]*anthropicBlockState)}
 	var eventType string
 
 	for scanner.Scan() {
+		wd.reset()
 		select {
 		case <-ctx.Done():
 			return
@@ -502,8 +541,12 @@ func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, resp *http.Response
 		}
 	}
 
-	// Check for scanner errors (I/O failures, buffer overflow).
+	// Check for scanner errors (I/O failures, buffer overflow, watchdog tear-down).
 	if err := scanner.Err(); err != nil {
+		if wd.fired() {
+			trySend(ctx, ch, StreamEvent{Done: true, Err: errStreamStalled})
+			return
+		}
 		if ctx.Err() == nil {
 			slog.Warn("anthropic: SSE scanner error", "err", err)
 		}
@@ -521,12 +564,16 @@ func mergeAnthropicUsage(input, output *anthropicUsage) *Usage {
 	if input != nil {
 		u.PromptTokens = input.InputTokens
 		u.CachedTokens = input.CacheReadInputTokens
+		u.CacheWriteTokens = input.CacheCreationInputTokens
 	}
 	if output != nil {
 		u.CompletionTokens = output.OutputTokens
 		// Output usage also reports cache tokens — prefer the latest.
 		if output.CacheReadInputTokens > 0 {
 			u.CachedTokens = output.CacheReadInputTokens
+		}
+		if output.CacheCreationInputTokens > 0 {
+			u.CacheWriteTokens = output.CacheCreationInputTokens
 		}
 	}
 	return u

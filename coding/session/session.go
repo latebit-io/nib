@@ -89,6 +89,19 @@ type Session struct {
 	// phase tracks the current workflow phase (planning vs execution).
 	phase Phase
 
+	// Approval-flow state (pendingEdit, stagedEditFile, editReviewed,
+	// pendingApproval, pendingProposedReplace, lastEditedFile) is owned
+	// by the single TUI Update goroutine. Every mutator and reader runs
+	// there: HandleEvent (engine-event dispatch), the Submit*/Review/
+	// Prepare/Complete/Abort/Reject/Cancel approval methods, and the
+	// SwitchTo/ReloadFile/DeleteFile gate checks (all driven from the
+	// TUI's Update loop — see app_engine_events.go). NavigateAgent and
+	// GoBack reach SwitchTo from that same Update goroutine, not from
+	// the agent goroutine. These fields are therefore NOT guarded by mu;
+	// the agent goroutine (Workspace methods) never touches them. Do not
+	// read or write them off the Update goroutine without adding
+	// synchronization here and at every mutator.
+
 	// pendingEdit is the edit currently awaiting approval (nil = none)
 	pendingEdit *event.PendingEdit
 

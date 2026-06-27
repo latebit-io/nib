@@ -82,19 +82,20 @@ func (m *Manager) DidOpen(path string, languageID string, content string) {
 // DidChange sends incremental changes to the language server.
 // Routes to the server that handled DidOpen (not re-detected).
 func (m *Manager) DidChange(path string, changes []lang.TextChange) {
-	m.mu.RLock()
+	// Hold the lock across the version increment AND the send so the two are
+	// atomic — otherwise a concurrent driver of the same path could interleave
+	// increments and enqueue out-of-order versions, violating the LSP spec's
+	// monotonic-version requirement. srv.DidChange enqueues to a non-blocking
+	// outbox (Transport.send), so holding the lock does not block on I/O.
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	languageID := m.docLang[path]
 	srv, ok := m.servers[languageID]
-	m.mu.RUnlock()
 	if languageID == "" || !ok || srv == nil {
 		return
 	}
-
-	m.mu.Lock()
 	m.versions[path]++
 	version := m.versions[path]
-	m.mu.Unlock()
-
 	srv.DidChange(pathToURI(path), version, changes)
 }
 

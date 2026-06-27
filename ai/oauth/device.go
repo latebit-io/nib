@@ -167,12 +167,16 @@ func pollOnce(ctx context.Context, cfg DeviceFlowConfig, dc *DeviceCode) (*token
 func PollDeviceToken(ctx context.Context, cfg DeviceFlowConfig, dc *DeviceCode) (*tokenResponse, error) {
 	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
 	interval := time.Duration(dc.Interval) * time.Second
+	// Reuse one timer instead of time.After per iteration, which would
+	// leak a timer until fire on ctx-cancel.
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 
 		if time.Now().After(deadline) {
@@ -191,6 +195,9 @@ func PollDeviceToken(ctx context.Context, cfg DeviceFlowConfig, dc *DeviceCode) 
 		case pollPending:
 			// continue polling
 		}
+		// Channel drained by the select above, so Reset is safe. interval
+		// may have grown on a slow_down response.
+		timer.Reset(interval)
 	}
 }
 

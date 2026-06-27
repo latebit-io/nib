@@ -3,7 +3,6 @@ package lint
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -29,10 +28,15 @@ import (
 //   - Non-parseable output combined with non-zero exit becomes a single
 //     unstructured Finding (path-less) — the agent still sees the message
 //     rather than having it silently dropped.
-//   - Shell metacharacters in the file path abort the run with Error,
-//     preventing command injection via untrusted file names.
+//   - File and directory paths are passed to the shell as discrete positional
+//     parameters ($1, $2), never interpolated into the command string. A path
+//     containing spaces or shell metacharacters is therefore safe and is no
+//     longer silently skipped (the prior safeForShell denylist is gone).
 type RawLinter struct {
-	// Command is the shell command template (passed to `sh -c`).
+	// Command is the shell command template, run via `sh -c`. The {file} and
+	// {dir} placeholders are rewritten to the positional parameters "$1" and
+	// "$2"; the real paths are supplied to sh as discrete arguments, so they
+	// are never re-parsed for metacharacters.
 	Command string
 	// Timeout overrides defaultLintTimeout when non-zero.
 	Timeout time.Duration
@@ -45,12 +49,12 @@ func (*RawLinter) Name() string { return "style lint" }
 // Run implements Linter. Substitutes placeholders and invokes the command
 // once per file (when {file} is present) or once per dir (otherwise).
 //
-// Defense-in-depth: the adapter runs via `sh -c`, so any substituted value
-// that reaches the command string is shell-interpreted. Both {file} and
-// {dir} are validated with safeForShell before substitution. Upstream edit
-// approval SHOULD reject exotic paths, but the adapter enforces the
-// invariant locally rather than trusting the caller — a slipped character
-// here is a command-injection primitive.
+// Injection safety: the {file}/{dir} placeholders are rewritten to the
+// positional shell parameters "$1"/"$2" (see substituteArgs), and the real
+// paths are handed to `sh -c` as discrete trailing arguments. Because the
+// paths never appear in the command string the shell cannot re-parse them for
+// metacharacters, so a hostile or space-containing file name is safe — there
+// is no longer any path to skip or reject.
 func (r *RawLinter) Run(ctx context.Context, projectRoot, dir string, files []string) Result {
 	if r.Command == "" {
 		return Result{Error: errors.New("raw linter: empty command")}
@@ -61,14 +65,7 @@ func (r *RawLinter) Run(ctx context.Context, projectRoot, dir string, files []st
 		timeout = defaultLintTimeout
 	}
 
-	// filepath.Dir yields "." for root-level files — accepted. Empty dir is
-	// unusual but not exploitable; skip the check so it doesn't mask into a
-	// "contains metacharacters" error.
-	if dir != "" && !safeForShell(dir) {
-		slog.Warn("raw linter: dir contains shell metacharacters", "dir", dir)
-		return Result{Error: fmt.Errorf("raw linter: dir contains shell metacharacters: %q", dir)}
-	}
-
+	cmdStr := substituteArgs(r.Command)
 	hasFilePlaceholder := strings.Contains(r.Command, "{file}")
 
 	// Per-file dispatch: one invocation per edited file. Findings aggregate.
@@ -79,13 +76,7 @@ func (r *RawLinter) Run(ctx context.Context, projectRoot, dir string, files []st
 	if hasFilePlaceholder {
 		var agg Result
 		for _, f := range files {
-			if !safeForShell(f) {
-				slog.Warn("raw linter: skipping file with shell metacharacters", "path", f)
-				continue
-			}
-			cmdStr := strings.ReplaceAll(r.Command, "{file}", f)
-			cmdStr = strings.ReplaceAll(cmdStr, "{dir}", dir)
-			res := runRawCommand(ctx, projectRoot, cmdStr, timeout, f)
+			res := runRawCommand(ctx, projectRoot, cmdStr, timeout, f, dir, f)
 			if res.Error != nil {
 				if agg.Error == nil {
 					agg.Error = res.Error
@@ -99,21 +90,37 @@ func (r *RawLinter) Run(ctx context.Context, projectRoot, dir string, files []st
 		return agg
 	}
 
-	cmdStr := strings.ReplaceAll(r.Command, "{dir}", dir)
-	res := runRawCommand(ctx, projectRoot, cmdStr, timeout, "")
+	res := runRawCommand(ctx, projectRoot, cmdStr, timeout, "", dir, "")
 	stampLinter(res.Findings, r.Name())
 	return res
 }
 
+// substituteArgs rewrites the {file} and {dir} placeholders to the positional
+// shell parameters "$1" and "$2". The actual paths are NOT inserted here — they
+// are passed to sh as discrete positional arguments by runRawCommand, so a path
+// with spaces or shell metacharacters stays a single, un-re-parsed word. The
+// double quotes keep a spaced path from word-splitting when referenced.
+func substituteArgs(command string) string {
+	command = strings.ReplaceAll(command, "{file}", `"$1"`)
+	command = strings.ReplaceAll(command, "{dir}", `"$2"`)
+	return command
+}
+
 // runRawCommand executes a single shell command and classifies its output.
+// file and dir are passed to sh as the positional parameters $1 and $2 (which
+// the command string references via the rewritten "$1"/"$2" placeholders); they
+// are discrete arguments, so the shell never re-parses them for metacharacters.
 // fallbackPath is used as the Path of an unstructured Finding when the
 // output has no parseable diagnostic lines but exit was non-zero; empty
 // string leaves the Path unset.
-func runRawCommand(parent context.Context, projectRoot, cmdStr string, timeout time.Duration, fallbackPath string) Result {
+func runRawCommand(parent context.Context, projectRoot, cmdStr string, timeout time.Duration, file, dir, fallbackPath string) Result {
 	runCtx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, "sh", "-c", cmdStr)
+	// `sh -c <script> sh <file> <dir>`: the argument after the script becomes
+	// $0 ("sh"), then file is $1 and dir is $2. Passing the paths positionally
+	// keeps them out of the interpolated command string — injection-safe.
+	cmd := exec.CommandContext(runCtx, "sh", "-c", cmdStr, "sh", file, dir)
 	cmd.Dir = projectRoot
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -168,21 +175,6 @@ func runRawCommand(parent context.Context, projectRoot, cmdStr string, timeout t
 
 	// Zero exit and no parseable findings — clean.
 	return Result{}
-}
-
-// safeForShell reports whether s is safe to interpolate into a shell command.
-// Rejects paths containing shell metacharacters that could enable injection.
-// Empty strings are rejected so a misconfigured placeholder does not collapse
-// into an empty argument that the shell interprets differently.
-func safeForShell(s string) bool {
-	for _, c := range s {
-		switch c {
-		case '\'', '"', '`', '$', '\\', ';', '&', '|', '(', ')', '<', '>',
-			'\n', '\r', '\t', ' ', '*', '?', '[', ']', '{', '}', '~', '!', '#':
-			return false
-		}
-	}
-	return s != ""
 }
 
 // stampLinter sets Linter on every finding. Used by adapters so downstream

@@ -30,6 +30,11 @@ const (
 // openAIScopes are the OAuth scopes requested for ChatGPT access.
 var openAIScopes = []string{"openid", "profile", "email", "offline_access"}
 
+// refreshDefaultTTL is the conservative access-token lifetime assumed when a
+// refresh response omits expires_in. Short enough to force a prompt
+// re-refresh rather than treating the token as eternal.
+const refreshDefaultTTL = 5 * time.Minute
+
 // OpenAITokenSource provides tokens for the ChatGPT/Codex API.
 // It handles automatic refresh of expired tokens.
 type OpenAITokenSource struct {
@@ -69,6 +74,12 @@ func (s *OpenAITokenSource) Token(ctx context.Context) (*Token, error) {
 		}
 		if refreshed.ExpiresIn > 0 {
 			newTok.ExpiresAt = time.Now().Add(time.Duration(refreshed.ExpiresIn) * time.Second)
+		} else {
+			// A refresh response that omits expires_in would leave
+			// ExpiresAt zero, which Token.Valid() treats as never
+			// expiring — the token would never re-refresh. Apply a
+			// conservative default TTL so the next call refreshes.
+			newTok.ExpiresAt = time.Now().Add(refreshDefaultTTL)
 		}
 		// Re-extract account ID from new token if available.
 		if id := extractAccountID(refreshed.AccessToken, refreshed.IDToken); id != "" {
@@ -240,12 +251,16 @@ func openAIRequestDeviceCode(ctx context.Context) (*openAIDeviceCodeResp, error)
 func openAIPollDeviceAuth(ctx context.Context, deviceAuthID, userCode string, intervalSec, expiresInSec int) (*openAIAuthResult, error) {
 	deadline := time.Now().Add(time.Duration(expiresInSec) * time.Second)
 	interval := time.Duration(intervalSec) * time.Second
+	// Reuse one timer instead of time.After per iteration, which would
+	// leak a timer until fire on ctx-cancel.
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 
 		if time.Now().After(deadline) {
@@ -295,7 +310,9 @@ func openAIPollDeviceAuth(ctx context.Context, deviceAuthID, userCode string, in
 		case result.Status == "expired":
 			return nil, fmt.Errorf("device code expired")
 		}
-		// Still pending — continue polling.
+		// Still pending — rearm the timer and continue polling. The
+		// channel was drained by the select above, so Reset is safe.
+		timer.Reset(interval)
 	}
 }
 

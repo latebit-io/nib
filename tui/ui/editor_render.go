@@ -9,7 +9,35 @@ import (
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/tui/editor"
 	"github.com/latebit-io/nib/tui/sanitize"
+	"github.com/mattn/go-runewidth"
 )
+
+// wideContRune is a per-cell continuation sentinel. A wide rune (CJK/emoji,
+// 2 terminal cells) occupies one entry in the expanded display buffer plus
+// this sentinel for each extra cell it spans, so the expanded index keeps
+// matching the display column. spanText strips it before emitting a span:
+// the terminal already draws the lead rune across both cells, so the
+// continuation must contribute no glyph. U+FFFE is a permanent Unicode
+// noncharacter and never appears in valid text.
+const wideContRune = '￾'
+
+// spanText renders displayed[start:end] to a string, dropping any
+// wideContRune continuation sentinels. Pure-ASCII spans (the common case)
+// take the fast path with no extra allocation.
+func spanText(displayed []rune, start, end int) string {
+	for i := start; i < end; i++ {
+		if displayed[i] == wideContRune {
+			buf := make([]rune, 0, end-start)
+			for j := start; j < end; j++ {
+				if displayed[j] != wideContRune {
+					buf = append(buf, displayed[j])
+				}
+			}
+			return string(buf)
+		}
+	}
+	return string(displayed[start:end])
+}
 
 // Per-line rendering for EditorModel.
 //
@@ -25,7 +53,13 @@ import (
 // model's pre-allocated scratch state; the file boundary makes the
 // rendering subsystem visible without touching the public API.
 
-// expandTabs converts runes to display runes and builds buffer→display column mapping.
+// expandTabs converts runes to display runes and builds the buffer→display
+// column mapping. Tabs expand to TabWidth spaces; every other rune occupies
+// runewidth.RuneWidth cells. Wide runes (CJK/emoji, 2 cells) emit the rune
+// plus one wideContRune sentinel so the expanded index stays equal to the
+// display column. Zero-width runes (VS16, combining marks) are dropped from
+// the display buffer but still mapped in bufToDisp so cursor navigation and
+// selection stay aligned.
 func (m *EditorModel) expandTabs(runes []rune) (expanded []rune, bufToDisp []int) {
 	if cap(m.bufToDispBuf) < len(runes)+1 {
 		m.bufToDispBuf = make([]int, len(runes)+1)
@@ -48,10 +82,24 @@ func (m *EditorModel) expandTabs(runes []rune) (expanded []rune, bufToDisp []int
 			// Variation Selector 16 would force emoji presentation (2 cells)
 			// but terminal width measurement disagrees. Skip it in the
 			// display buffer — the base character renders fine without it.
-			// bufToDisp still maps this rune so cursor navigation works.
+			// runewidth.RuneWidth reports 1 for VS16, so it must be handled
+			// before the runewidth case. bufToDisp still maps this rune so
+			// cursor navigation works.
 		default:
+			w := runewidth.RuneWidth(r)
+			if w <= 0 {
+				// Zero-width (combining marks): no display cell, but still
+				// mapped in bufToDisp so column conversions stay consistent.
+				continue
+			}
 			expanded = append(expanded, r)
-			dispCol++
+			// Reserve the extra cells of a wide rune with continuation
+			// sentinels so the expanded index keeps tracking the display
+			// column. spanText strips them at render time.
+			for k := 1; k < w; k++ {
+				expanded = append(expanded, wideContRune)
+			}
+			dispCol += w
 		}
 	}
 	bufToDisp[len(runes)] = dispCol
@@ -358,7 +406,7 @@ func (m *EditorModel) renderNormalLine(
 	}
 
 	flushSpan := func(start, end int) {
-		text := string(displayed[start:end])
+		text := spanText(displayed, start, end)
 		ul := diagUnderline[start]
 		switch colTags[start] {
 		case tagCursor:
@@ -506,7 +554,7 @@ func (m *EditorModel) renderRemovedLine(
 			}
 		}
 		rFlush := func(start, end int) {
-			text := string(displayed[start:end])
+			text := spanText(displayed, start, end)
 			switch rColTags[start] {
 			case rTagCursor:
 				line.WriteString(cursorStyle.Render(text))
@@ -600,7 +648,7 @@ func (m *EditorModel) renderAddedLine(
 			}
 		}
 		aFlush := func(start, end int) {
-			text := string(displayed[start:end])
+			text := spanText(displayed, start, end)
 			switch aColTags[start] {
 			case aTagCursor:
 				line.WriteString(cursorStyle.Render(text))

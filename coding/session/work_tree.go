@@ -58,12 +58,35 @@ func (w *WorkTreeManager) SetStore(store memoryStore) {
 	}
 }
 
-// Tree returns the current work hierarchy. May be nil if no project.md
-// exists in demarkus or memory is not configured.
+// Tree returns a deep copy of the current work hierarchy. May be nil if
+// no project.md exists in demarkus or memory is not configured.
+//
+// A copy — not the live pointer — is returned deliberately. External
+// readers (the TUI project pane on the render goroutine, the agent's
+// next-task lookup) walk the returned tree's Node fields without holding
+// w.mu, while SetActiveGoal/MarkDone/AddTask mutate the live nodes in
+// place under w.mu.Lock. Handing out the live pointer would be a data
+// race on Node.Status; the clone is taken atomically under RLock with
+// respect to those mutations and the ApplySnapshot pointer swap.
 func (w *WorkTreeManager) Tree() *project.Tree {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return w.tree
+	return w.tree.Clone()
+}
+
+// NextPendingTask returns the title of the first leaf task in document
+// order whose status is TaskPending, or "" when none remains or no work
+// tree is loaded. Walks the live tree under RLock so the agent goroutine
+// reads task status without racing the in-place mutations performed under
+// w.mu.Lock — callers must not reach for Tree() for this, which would
+// clone the whole hierarchy just to read one title.
+func (w *WorkTreeManager) NextPendingTask() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.tree == nil {
+		return ""
+	}
+	return w.tree.FindNextPendingTask()
 }
 
 // TreeLoaded reports whether a work tree is currently held. False means
@@ -400,6 +423,20 @@ func (w *WorkTreeManager) saveAndUnlock() error {
 	defer cancel()
 	doc, err := store.Publish(ctx, workTreePath, body, ver)
 	if err != nil {
+		if errors.Is(err, memory.ErrConflict) {
+			// Another writer published since our last load, so the store
+			// is ahead of us. The in-memory tree already mutated and its
+			// dirty/ver bookkeeping has now diverged from the store —
+			// leaving it as-is would let the local tree silently stay
+			// ahead. Reconcile by reloading the authoritative version
+			// (discarding this unpublished mutation; the caller still gets
+			// the conflict error). Safe re-entrancy: saveAndUnlock is
+			// lock-free here (mu was released above before the Publish
+			// I/O), so Reload's internal locking does not deadlock on mu.
+			if rerr := w.Reload(); rerr != nil {
+				slog.Warn("work tree: reload after publish conflict failed", "err", rerr)
+			}
+		}
 		return err
 	}
 

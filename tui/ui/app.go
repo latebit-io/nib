@@ -35,12 +35,6 @@ type oauthConnectResultMsg struct {
 	err     error
 }
 
-// apiKeyEnteredMsg delivers a user-entered API key for a profile.
-type apiKeyEnteredMsg struct {
-	profile string
-	key     string
-}
-
 // setAgentCallbacksMsg installs generic agent callbacks on the
 // AppModel from inside the Update goroutine. Constructed via
 // [SetAgentCallbacksMsg]; sent through Program.Send so the field

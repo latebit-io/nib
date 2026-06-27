@@ -31,6 +31,14 @@ func OAuthInstruction(profile, instruction string) tea.Msg {
 	return ui.OAuthInstruction(profile, instruction)
 }
 
+// AgentResolver returns the live agent lifecycle the TUI shuts down on
+// exit, or a nil interface when no agent exists yet. It is a resolver
+// rather than a value because the agent may be constructed lazily after
+// the TUI starts. Implementations MUST return a true nil interface when
+// there is no agent — never a typed-nil pointer, which would satisfy a
+// `!= nil` check and panic when Close is dispatched on the nil receiver.
+type AgentResolver func() kit.AgentLifecycle
+
 // Config holds everything the TUI needs to run.
 type Config struct {
 	// Session is the engine session (required).
@@ -39,11 +47,21 @@ type Config struct {
 	// Events is the shared event channel the TUI reads from.
 	Events chan event.Event
 
-	// Agent is the kit-level agent the TUI shuts down on exit.
-	// Optional — nil for editor-only mode. *coding.Agent satisfies
-	// this via its embedded kit-agent handle; future agent shapes
-	// (research, refactor) can plug in by satisfying the same port.
-	Agent kit.AgentLifecycle
+	// Agent resolves the live agent the TUI shuts down on exit.
+	// Optional — nil (or a resolver returning nil) for editor-only
+	// mode. *coding.Agent satisfies [kit.AgentLifecycle] via its
+	// embedded kit-agent handle; future agent shapes (research,
+	// refactor) plug in by satisfying the same port.
+	//
+	// A resolver rather than a value because the agent may be built
+	// lazily after the TUI starts (no LLM credentials at startup →
+	// the model switcher constructs it on first connect). A value
+	// snapshot would capture nil forever — leaking the lazily-built
+	// agent's goroutines and, when the snapshot is a typed-nil
+	// pointer, panicking on the shutdown Close. The resolver MUST
+	// return a true nil interface (not a typed-nil pointer) when no
+	// agent exists.
+	Agent AgentResolver
 
 	// AgentCallbacks holds generic frontend callbacks that any
 	// kit-level agent can supply. Wired only when Agent is non-nil.
@@ -122,7 +140,7 @@ type OAuthCallbacks struct {
 type App struct {
 	model   *ui.AppModel
 	program *tea.Program
-	agent   kit.AgentLifecycle
+	agent   AgentResolver
 	events  chan event.Event
 	session *session.Session
 }
@@ -160,7 +178,13 @@ func New(cfg Config) *App {
 	// populated independently — a non-coding consumer wires
 	// AgentCallbacks alone and leaves CodingCallbacks zero.
 	if cfg.Agent != nil {
-		appPtr.AgentPane.SetHasAgent(true)
+		// Reflect whether an agent actually exists at construction.
+		// It may be built lazily after startup (no LLM credentials
+		// yet), in which case the composition root flips has-agent on
+		// when it builds the agent.
+		if cfg.Agent() != nil {
+			appPtr.AgentPane.SetHasAgent(true)
+		}
 
 		// Generic.
 		appPtr.ToggleTerse = cfg.AgentCallbacks.ToggleTerse
@@ -261,18 +285,26 @@ func (a *App) Run() error {
 // shutdown tears down resources in the correct order after the TUI exits.
 func (a *App) shutdown() {
 	a.model.CloseWatcher()
-	if a.agent != nil {
-		drainDone := make(chan struct{})
-		go func() {
-			for {
-				select {
-				case <-drainDone:
-					return
-				case <-a.events:
-				}
-			}
-		}()
-		a.agent.Close()
-		close(drainDone)
+	if a.agent == nil {
+		return
 	}
+	// Resolve the live agent. nil means no agent was ever built
+	// (editor-only mode, or startup without LLM credentials) — nothing
+	// to close.
+	ag := a.agent()
+	if ag == nil {
+		return
+	}
+	drainDone := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-drainDone:
+				return
+			case <-a.events:
+			}
+		}
+	}()
+	ag.Close()
+	close(drainDone)
 }

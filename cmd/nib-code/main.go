@@ -31,6 +31,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate"
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
+	"github.com/latebit-io/nib/kit"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	cmdloader "github.com/latebit-io/nib/kit/command/loader"
 	"github.com/latebit-io/nib/kit/skill"
@@ -365,9 +366,20 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// above so the agent's FlushDirtyBuffers callback (set inside
 	// buildAgent) can route through it via closure capture.
 	tuiApp = nibTui.New(nibTui.Config{
-		Session:            sess,
-		Events:             events,
-		Agent:              ag,
+		Session: sess,
+		Events:  events,
+		// Resolve the live agent at shutdown. `ag` is captured by
+		// reference: it is nil at startup without LLM credentials and
+		// is built lazily by the model switcher on first connect. Return
+		// a true nil interface (not a typed-nil *agent.Agent) when nil so
+		// the TUI's shutdown skips Close instead of panicking on a nil
+		// receiver.
+		Agent: func() kit.AgentLifecycle {
+			if ag == nil {
+				return nil
+			}
+			return ag
+		},
 		LLM:                llmCallbacks,
 		HighlighterFactory: highlight.NewHighlighter,
 	})

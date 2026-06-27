@@ -9,6 +9,45 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+// TestRender_APIKeyPrompt_VisibleWhenNoAgent locks the fix for the prompt
+// being invisible in the "No LLM configured" state — the very state in which a
+// first-time user supplies a key. Before the fix the !hasAgent render branch
+// painted only the model selector, so the prompt never appeared.
+func TestRender_APIKeyPrompt_VisibleWhenNoAgent(t *testing.T) {
+	m := NewAgentPaneModel(&Services{Clipboard: &mockClipboard{}}, false) // hasAgent=false
+	m.SetSize(60, 24)
+	m.StartAPIKeyInput("fugu")
+
+	out := m.Render()
+	if !strings.Contains(out, "API key for fugu") {
+		t.Fatalf("no-agent render must show the API-key prompt; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Esc cancel") {
+		t.Fatalf("no-agent render must show the prompt hint; got:\n%s", out)
+	}
+}
+
+// TestKey_AppUpdate_RoutesToAPIKeyPrompt locks the routing fix: typed keys must
+// reach the API-key prompt through the top-level AppModel.Update regardless of
+// which pane holds region focus (the prompt opens from the model selector,
+// which does not focus the agent pane). Before the fix, keys fell through to
+// the focused pane and leaked into the editor.
+func TestKey_AppUpdate_RoutesToAPIKeyPrompt(t *testing.T) {
+	m := &AppModel{AgentPane: NewAgentPaneModel(&Services{Clipboard: &mockClipboard{}}, true)}
+	m.AgentPane.StartAPIKeyInput("fugu")
+
+	m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if got := m.AgentPane.apiKeyInput.buffer; got != "x" {
+		t.Fatalf("apiKeyInput.buffer = %q, want %q (key must route to the prompt)", got, "x")
+	}
+
+	// Escape routes through the same path and cancels.
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.AgentPane.IsAPIKeyInputActive() {
+		t.Fatal("Escape via AppModel.Update should cancel the API-key prompt")
+	}
+}
+
 // These tests exercise APIKeyInputModel directly — the overlay is a
 // self-contained sub-model, so its key handling is testable without the
 // surrounding AgentPaneModel. Paste/clipboard routing through the parent is

@@ -80,6 +80,38 @@ func (m *AgentPaneModel) modelSelHeight() int {
 	return m.ModelSel.Height(m.height)
 }
 
+// apiKeyInputHeight returns the number of rows reserved for the API-key prompt
+// band — the same input-area span renderAPIKeyInput draws into.
+func (m *AgentPaneModel) apiKeyInputHeight() int {
+	h := m.inputAreaEndRow - m.inputAreaStartRow
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// renderNoAgentOverlay paints a bottom overlay band inside the "No LLM
+// configured" splash: it fills the content area above the band, draws a
+// divider, delegates to render, then pads any trailing rows. bottomH is the
+// number of rows the overlay reserves. Shared by the model selector and the
+// API-key prompt so both bottom overlays lay out identically in this state.
+func (m *AgentPaneModel) renderNoAgentOverlay(output []string, row *int, bottomH int, render func([]string, *int)) {
+	contentEnd := m.height - bottomH
+	for *row < contentEnd {
+		output[*row] = agentDimStyle.Render(m.padLine(""))
+		*row++
+	}
+	if *row < m.height-1 {
+		output[*row] = agentDimStyle.Render(m.padLine(strings.Repeat("─", m.width)))
+		*row++
+	}
+	render(output, row)
+	for *row < m.height {
+		output[*row] = agentDimStyle.Render(m.padLine(""))
+		*row++
+	}
+}
+
 // inlineDisplayReplacer strips newlines/carriage returns that would break
 // single-line display labels in the selector and status line.
 var inlineDisplayReplacer = strings.NewReplacer("\r", " ", "\n", " ")
@@ -2209,7 +2241,10 @@ func (m *AgentPaneModel) Render() string {
 	// Use package-level style vars directly — no local copies needed
 	// since lipgloss styles are immutable value types.
 
-	// No LLM configured — show message, but still render model selector if active.
+	// No LLM configured — show message, but still render the model selector or
+	// the API-key prompt if either overlay is active. The API-key prompt is
+	// reachable in this state (it is precisely how a user supplies a first
+	// key), so it must paint here too — not only in the has-agent layout.
 	if !m.hasAgent {
 		if row < m.height {
 			output[row] = agentDimStyle.Render(m.padLine(""))
@@ -2223,23 +2258,15 @@ func (m *AgentPaneModel) Render() string {
 			output[row] = agentDimStyle.Render(m.padLine(" Set LLM_API_KEY to enable"))
 			row++
 		}
-		if m.ModelSel.IsActive() {
-			bottomH := m.modelSelHeight()
-			contentEnd := m.height - bottomH
-			for row < contentEnd {
-				output[row] = agentDimStyle.Render(m.padLine(""))
-				row++
-			}
-			if row < m.height-1 {
-				output[row] = agentDimStyle.Render(m.padLine(strings.Repeat("─", m.width)))
-				row++
-			}
-			m.renderModelSelector(output, &row)
-			for row < m.height {
-				output[row] = agentDimStyle.Render(m.padLine(""))
-				row++
-			}
-		} else {
+		switch {
+		case m.ModelSel.IsActive():
+			m.renderNoAgentOverlay(output, &row, m.modelSelHeight(), m.renderModelSelector)
+		case m.apiKeyInput.IsActive():
+			// +1 reserves the divider row so the prompt's bottom hint row
+			// isn't clamped off (the band height is exact, unlike the
+			// model selector's generous half-pane reservation).
+			m.renderNoAgentOverlay(output, &row, m.apiKeyInputHeight()+1, m.renderAPIKeyInput)
+		default:
 			for row < m.height {
 				output[row] = agentDimStyle.Render(m.padLine(""))
 				row++

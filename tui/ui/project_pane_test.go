@@ -298,6 +298,7 @@ func TestActiveAncestorNodes(t *testing.T) {
 	got := activeAncestorNodes(tree)
 	phase1 := tree.Roots[0]           // Phase 1: A
 	feat := tree.Roots[0].Children[0] // Feat (holds the active task)
+	activeTask := feat.Children[0]    // the active leaf itself
 	phase2 := tree.Roots[1]           // Phase 2: B
 	if !got[phase1] {
 		t.Errorf("missing active phase node in ancestry: %v", got)
@@ -305,8 +306,14 @@ func TestActiveAncestorNodes(t *testing.T) {
 	if !got[feat] {
 		t.Errorf("missing active feature node in ancestry: %v", got)
 	}
+	if got[activeTask] {
+		t.Errorf("active task leaf must not be in active ancestry (headings only): %v", got)
+	}
 	if got[phase2] {
 		t.Errorf("Phase 2 node must not be in active ancestry: %v", got)
+	}
+	if len(got) != 2 {
+		t.Errorf("active ancestry should contain only the 2 heading ancestors, got %d: %v", len(got), got)
 	}
 
 	none := project.Parse("# Phase 1: A\n## F\n- [ ] pending\n")

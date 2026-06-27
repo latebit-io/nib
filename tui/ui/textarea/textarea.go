@@ -651,7 +651,14 @@ func (t *TextArea) paste() {
 	if t.clipboard == nil {
 		return
 	}
-	text := t.clipboard.Read()
+	t.Paste(t.clipboard.Read())
+}
+
+// Paste inserts text at the cursor, replacing any active selection. Use this
+// for bracketed-paste content delivered via tea.PasteMsg, which never reaches
+// the keypress path. Content is capped to the textarea's byte capacity on a
+// valid UTF-8 boundary, matching clipboard paste.
+func (t *TextArea) Paste(text string) {
 	if text == "" {
 		return
 	}
@@ -659,7 +666,7 @@ func (t *TextArea) paste() {
 	t.deleteSelectionIfActive()
 
 	// Cap pasted text to remaining capacity before processing to avoid
-	// allocating unbounded memory from a large clipboard payload.
+	// allocating unbounded memory from a large paste payload.
 	remaining := t.maxBytes - t.byteLen
 	if remaining <= 0 {
 		return

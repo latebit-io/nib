@@ -675,15 +675,18 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 
 	// Task tracking — conditionally registered via type assertion on workspace.
 	// update_task handles activate/complete; project_task_add handles new-task
-	// creation; project_init bootstraps /project.md so the work tree is loaded
-	// before any of those calls fire on a fresh repo. All three share the same
-	// TaskTracker instance so mutations route through the session's in-memory
-	// work tree.
+	// creation; project_phase_add appends top-level phases to an existing plan
+	// (the gap project_init's idempotency and project_task_add's
+	// existing-phase requirement leave open); project_init bootstraps
+	// /project.md so the work tree is loaded before any of those calls fire on
+	// a fresh repo. All share the same TaskTracker instance so mutations route
+	// through the session's in-memory work tree.
 	tt, hasTaskTracker := workspace.(TaskTracker)
 	if hasTaskTracker {
 		builtins = append(builtins,
 			tools.NewTaskTool(tt, a),
 			tools.NewProjectTaskAddTool(tt),
+			tools.NewProjectPhaseAddTool(tt),
 			tools.NewProjectInitTool(tt),
 		)
 	}

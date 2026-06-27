@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,15 @@ type stubTracker struct {
 	addCalls []struct{ phase, feature, task, link string }
 	addErr   error
 	addErrFn func(p, f, t string) error
+
+	// phaseCalls records the titles passed to AddPhase, in order.
+	// phaseErrFn overrides phaseErr per-call when a test scripts mixed
+	// outcomes; both default to nil (success). On success the stub
+	// echoes "Phase N: <title>" (N = call ordinal) so tool tests can
+	// assert the full title flows back into the result.
+	phaseCalls []string
+	phaseErr   error
+	phaseErrFn func(title string) error
 }
 
 func (s *stubTracker) ActivateTask(string) error          { return nil }
@@ -29,6 +39,18 @@ func (s *stubTracker) AddTask(p, f, t, l string) error {
 		return s.addErrFn(p, f, t)
 	}
 	return s.addErr
+}
+
+func (s *stubTracker) AddPhase(title string) (string, error) {
+	s.phaseCalls = append(s.phaseCalls, title)
+	if s.phaseErrFn != nil {
+		if err := s.phaseErrFn(title); err != nil {
+			return "", err
+		}
+	} else if s.phaseErr != nil {
+		return "", s.phaseErr
+	}
+	return fmt.Sprintf("Phase %d: %s", len(s.phaseCalls), title), nil
 }
 
 // TestProjectTaskAddTool_SurfacesEngineDuplicateRejection verifies the

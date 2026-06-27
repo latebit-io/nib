@@ -52,11 +52,12 @@ func (t *lifecycleTracker) CompleteTask(title string) error {
 	return nil
 }
 
-func (t *lifecycleTracker) AddTask(_, _, _, _ string) error    { return nil }
-func (t *lifecycleTracker) ActiveTaskPath() string             { return t.activePath }
-func (t *lifecycleTracker) WorkTreeLoaded() bool               { return t.loaded }
-func (t *lifecycleTracker) NextPendingTask() string            { return t.nextPending }
-func (t *lifecycleTracker) InitProject(string, []string) error { return nil }
+func (t *lifecycleTracker) AddTask(_, _, _, _ string) error       { return nil }
+func (t *lifecycleTracker) AddPhase(title string) (string, error) { return title, nil }
+func (t *lifecycleTracker) ActiveTaskPath() string                { return t.activePath }
+func (t *lifecycleTracker) WorkTreeLoaded() bool                  { return t.loaded }
+func (t *lifecycleTracker) NextPendingTask() string               { return t.nextPending }
+func (t *lifecycleTracker) InitProject(string, []string) error    { return nil }
 
 // lifecycleTestWorkspace satisfies Workspace and TaskTracker.
 type lifecycleTestWorkspace struct {

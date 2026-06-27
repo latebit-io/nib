@@ -63,6 +63,7 @@ func appendProjectMDValidator(path, _ string) error {
 	}
 	return llmError(
 		"Error: raw append to " + projectMDPath + " is not allowed — it would break the strict schema. " +
-			"Use project_task_add (for new tasks) or update_task (to activate/complete) instead.",
+			"Use project_phase_add (for new top-level phases), project_task_add (for new tasks), " +
+			"or update_task (to activate/complete) instead.",
 	)
 }

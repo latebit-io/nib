@@ -140,6 +140,26 @@ func (w *WorkTreeManager) AddTask(phase, feature, task, link string) error {
 	return w.saveAndUnlock()
 }
 
+// AddPhase appends a new top-level phase to the work tree and persists
+// the change to demarkus, returning the full (possibly auto-numbered)
+// phase title. Returns an error if the work tree is not loaded, the
+// title is empty or duplicates an existing phase, or persistence fails.
+func (w *WorkTreeManager) AddPhase(title string) (string, error) {
+	w.mu.Lock()
+	if w.tree == nil {
+		w.mu.Unlock()
+		return "", errors.New("work tree: not loaded")
+	}
+	full, err := w.tree.AddPhase(title)
+	if err != nil {
+		w.mu.Unlock()
+		return "", fmt.Errorf("work tree: %w", err)
+	}
+	w.dirty = true
+	w.modGen++
+	return full, w.saveAndUnlock()
+}
+
 // MarkGoalDone marks the named task as done in the work tree and persists
 // the change to demarkus. Returns an error if the target is not found,
 // the work tree is not loaded, or persistence fails.
@@ -238,6 +258,7 @@ func buildProjectSkeleton(name string, phases []string) string {
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "project: %s\n", sanitizeProjectInitLine(name))
 	b.WriteString("---\n")
+	num := 0
 	for i, p := range phases {
 		if i >= maxProjectInitPhases {
 			slog.Warn("buildProjectSkeleton: phase count exceeded cap; truncating",
@@ -248,7 +269,13 @@ func buildProjectSkeleton(name string, phases []string) string {
 		if title == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "\n# %s\n", title)
+		// Number the heading so the skeleton satisfies the strict
+		// "Phase N: Title" schema enforced by project.Validate — a tree
+		// seeded with bare h1 titles cannot round-trip through
+		// memory_publish. FormatPhaseHeading leaves an already-numbered
+		// title untouched.
+		num++
+		fmt.Fprintf(&b, "\n# %s\n", project.FormatPhaseHeading(num, title))
 	}
 	return b.String()
 }

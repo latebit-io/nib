@@ -47,6 +47,13 @@ func (s *Session) AddTask(phase, feature, task, link string) error {
 	return s.workTree.AddTask(phase, feature, task, link)
 }
 
+// AddPhase implements agent.TaskTracker. Appends a new top-level phase
+// to /project.md and persists, returning the full (auto-numbered)
+// phase title so the caller can target it with project_task_add.
+func (s *Session) AddPhase(title string) (string, error) {
+	return s.workTree.AddPhase(title)
+}
+
 // ActiveTaskPath implements agent.TaskTracker.
 func (s *Session) ActiveTaskPath() string {
 	_, path := s.ActiveGoal()

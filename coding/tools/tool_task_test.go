@@ -37,6 +37,9 @@ func (f *fakeTaskTracker) CompleteTask(title string) error {
 }
 
 func (f *fakeTaskTracker) AddTask(_, _, _, _ string) error { return nil }
+func (f *fakeTaskTracker) AddPhase(title string) (string, error) {
+	return title, nil
+}
 func (f *fakeTaskTracker) InitProject(_ string, _ []string) error {
 	return nil
 }

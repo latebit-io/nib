@@ -95,12 +95,11 @@ func (t *ProjectInitTool) Execute(_ context.Context, call llm.ToolCall) ToolResu
 		// project_task_add requires an existing phase, so no follow-up
 		// task call works yet. Re-running project_init won't add phases
 		// either (idempotent — see WorkTreeManager.InitProject). The
-		// only forward path is editing /project.md directly via the
-		// memory tools, then resuming task tracking.
+		// forward path is project_phase_add, which appends top-level
+		// phases to the now-existing plan.
 		return textResult(fmt.Sprintf(
-			"Initialised /project.md for %q (no phases). Add phase headings by editing "+
-				"/project.md directly via memory tools (memory_publish/memory_append), then "+
-				"call project_task_add to add tasks under them.", name))
+			"Initialised /project.md for %q (no phases). Add phases with project_phase_add, "+
+				"then project_task_add(phase, feature, task) to add tasks under them.", name))
 	}
 	return textResult(fmt.Sprintf(
 		"Initialised /project.md for %q with phases: %s. Add tasks via project_task_add(phase, feature, task).",

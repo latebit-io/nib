@@ -175,22 +175,111 @@ func TestProjectPane_ActivateWorkHeading(t *testing.T) {
 		cursorIdx:    1, // on heading
 	}
 
-	// Activate heading — should toggle to expanded
+	// A pending task means the heading shows expanded by default (no map
+	// entry), so the first Enter COLLAPSES it.
+	if !p.isHeadingExpanded(heading) {
+		t.Fatal("heading with a pending task should be expanded by default")
+	}
 	cmd := p.activateItem()
 	if cmd != nil {
 		t.Error("expected nil cmd for heading toggle")
 	}
-	if !p.workExpanded["Phase 6"] {
-		t.Error("expected heading to be expanded after activation")
+	if p.isHeadingExpanded(heading) {
+		t.Error("expected heading to be collapsed after first activation")
 	}
 
-	// Activate again — should collapse
-	// Reset items since flattenItems was called
+	// Activate again — should expand. Reset items since flattenItems ran.
 	p.cursorIdx = 1
 	p.items = items
 	p.activateItem()
-	if p.workExpanded["Phase 6"] {
-		t.Error("expected heading to be collapsed after second activation")
+	if !p.isHeadingExpanded(heading) {
+		t.Error("expected heading to be expanded after second activation")
+	}
+}
+
+// TestProjectPane_AutoExpandDefaults locks the default expansion rule:
+// a heading with an uncompleted task is expanded; a fully-done or empty
+// heading is collapsed — all without any user toggle.
+func TestProjectPane_AutoExpandDefaults(t *testing.T) {
+	pending := &project.Node{
+		Title: "Phase 1: Open", Depth: 0, IsHeading: true,
+		Children: []*project.Node{{Title: "t", Depth: 2, Status: project.TaskPending}},
+	}
+	done := &project.Node{
+		Title: "Phase 2: Done", Depth: 0, IsHeading: true,
+		Children: []*project.Node{{Title: "t", Depth: 2, Status: project.TaskDone}},
+	}
+	empty := &project.Node{Title: "Phase 3: Empty", Depth: 0, IsHeading: true}
+
+	p := &ProjectPaneModel{workExpanded: make(map[string]bool)}
+
+	if !p.isHeadingExpanded(pending) {
+		t.Error("heading with uncompleted task should default to expanded")
+	}
+	if p.isHeadingExpanded(done) {
+		t.Error("fully-done heading should default to collapsed")
+	}
+	if p.isHeadingExpanded(empty) {
+		t.Error("empty heading should default to collapsed")
+	}
+}
+
+// TestProjectPane_ActiveAncestryAlwaysExpanded locks "active always
+// wins": the phase containing the active task stays open even when the
+// user has explicitly collapsed it.
+func TestProjectPane_ActiveAncestryAlwaysExpanded(t *testing.T) {
+	heading := &project.Node{
+		Title: "Phase 1: Movement", Depth: 0, IsHeading: true,
+		Children: []*project.Node{{Title: "input", Depth: 2, Status: project.TaskActive}},
+	}
+
+	p := &ProjectPaneModel{
+		workExpanded:    map[string]bool{"Phase 1: Movement": false}, // user collapsed it
+		activeAncestors: map[string]bool{"Phase 1: Movement": true},  // but it holds the active task
+	}
+
+	if !p.isHeadingExpanded(heading) {
+		t.Error("active task's phase must stay expanded despite a user collapse")
+	}
+}
+
+// TestProjectPane_UserCollapseRespectedForPending locks that a manual
+// collapse of a phase whose only work is pending (not active) is honored
+// across rebuilds — auto-expansion must not fight the user there.
+func TestProjectPane_UserCollapseRespectedForPending(t *testing.T) {
+	heading := &project.Node{
+		Title: "Phase 3: Polish", Depth: 0, IsHeading: true,
+		Children: []*project.Node{{Title: "t", Depth: 2, Status: project.TaskPending}},
+	}
+
+	p := &ProjectPaneModel{
+		workExpanded:    map[string]bool{"Phase 3: Polish": false}, // user collapsed
+		activeAncestors: nil,                                       // not the active phase
+	}
+
+	if p.isHeadingExpanded(heading) {
+		t.Error("user collapse of a pending-but-inactive phase should be respected")
+	}
+}
+
+// TestActiveAncestorTitles verifies the ancestry set contains the
+// heading path to the active task and nothing when no task is active.
+func TestActiveAncestorTitles(t *testing.T) {
+	tree := project.Parse("---\nproject: P\n---\n# Phase 1: A\n## Feat\n- [>] go\n# Phase 2: B\n## F2\n- [ ] later\n")
+
+	got := activeAncestorTitles(tree)
+	for _, want := range []string{"Phase 1: A", "Feat"} {
+		if !got[want] {
+			t.Errorf("missing %q in active ancestry: %v", want, got)
+		}
+	}
+	if got["Phase 2: B"] {
+		t.Errorf("Phase 2 must not be in active ancestry: %v", got)
+	}
+
+	none := project.Parse("# Phase 1: A\n## F\n- [ ] pending\n")
+	if len(activeAncestorTitles(none)) != 0 {
+		t.Errorf("no active task → empty ancestry, got %v", activeAncestorTitles(none))
 	}
 }
 

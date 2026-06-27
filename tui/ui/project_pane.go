@@ -95,10 +95,19 @@ type ProjectPaneModel struct {
 
 	// Work tree display state — collapse tracking is TUI-specific,
 	// separate from the engine's project.Tree.
-	// workExpanded tracks headings the user has explicitly expanded.
-	// Headings not in the map default to collapsed; headings with
-	// active descendants are auto-expanded on rebuild.
-	workExpanded    map[string]bool // title → expanded (headings only)
+	//
+	// workExpanded records ONLY the user's explicit toggles (title →
+	// expanded). It is never written by auto-expansion, so it cleanly
+	// represents intent. A heading absent from the map follows the
+	// default rule in [ProjectPaneModel.isHeadingExpanded]: expanded
+	// when it has an uncompleted descendant, collapsed otherwise.
+	//
+	// activeAncestors holds the heading titles on the ancestry path of
+	// the currently active task, recomputed each rebuild. Those headings
+	// always render expanded — the active task must stay visible — and
+	// this overrides both the default and an explicit user collapse.
+	workExpanded    map[string]bool // title → expanded; user toggles only
+	activeAncestors map[string]bool // title → on active task's path (force-expanded)
 	workDepthOffset int             // subtracted from node.Depth for rendering (root elision)
 
 	// Flattened display items — rebuilt on refresh
@@ -336,8 +345,9 @@ func (p *ProjectPaneModel) flattenItems() {
 		p.items = append(p.items, projectItem{isHeader: true, section: "work"})
 		p.workDepthOffset = 0
 
-		// Auto-expand headings that contain active tasks.
-		p.autoExpandActive(tree.Roots)
+		// Recompute which headings sit on the active task's ancestry —
+		// those are force-expanded so the active task is always visible.
+		p.activeAncestors = activeAncestorTitles(tree)
 
 		// If there's a single root whose title matches the project name
 		// (already shown in the pane border), elide it and promote children.
@@ -360,43 +370,70 @@ func (p *ProjectPaneModel) flattenItems() {
 	}
 }
 
-// autoExpandActive expands headings that contain incomplete tasks,
-// without overriding headings the user has explicitly toggled.
-// A heading is "explicitly toggled" if it's in workExpanded; headings
-// absent from the map get their state set here based on incomplete descendants.
-func (p *ProjectPaneModel) autoExpandActive(roots []*project.Node) {
-	for _, root := range roots {
-		p.autoExpandNode(root)
+// isHeadingExpanded decides whether a heading renders expanded. The
+// precedence, highest first:
+//
+//  1. Active-task ancestry always wins — the heading containing the
+//     currently active task (and its ancestors) stays open even if the
+//     user collapsed it, so the agent's current work is never hidden.
+//  2. An explicit user toggle (present in workExpanded) wins next.
+//  3. Default: expanded when the heading has an uncompleted descendant,
+//     collapsed when everything beneath it is done (or it is empty).
+//
+// Auto-expansion never writes to workExpanded, so a user's collapse of
+// a pending-but-inactive phase is honored across rebuilds — while a new
+// task going active still forces its phase open via rule 1.
+func (p *ProjectPaneModel) isHeadingExpanded(n *project.Node) bool {
+	if p.activeAncestors[n.Title] {
+		return true
 	}
+	if v, ok := p.workExpanded[n.Title]; ok {
+		return v
+	}
+	return hasUncompletedDescendant(n)
 }
 
-// autoExpandNode sets workExpanded for headings with incomplete descendants,
-// skipping headings the user has already toggled (present in the map).
-func (p *ProjectPaneModel) autoExpandNode(n *project.Node) bool {
-	if !n.IsHeading {
-		return n.Status != project.TaskDone
-	}
-
-	active := false
+// hasUncompletedDescendant reports whether any leaf task beneath n is
+// not yet done (pending or active). Headings recurse; tasks are checked
+// against project.TaskDone.
+func hasUncompletedDescendant(n *project.Node) bool {
 	for _, child := range n.Children {
-		if p.autoExpandNode(child) {
-			active = true
+		if child.IsHeading {
+			if hasUncompletedDescendant(child) {
+				return true
+			}
+			continue
+		}
+		if child.Status != project.TaskDone {
+			return true
 		}
 	}
+	return false
+}
 
-	// Only auto-set if the user hasn't explicitly toggled this heading.
-	if _, toggled := p.workExpanded[n.Title]; !toggled && active {
-		p.workExpanded[n.Title] = true
+// activeAncestorTitles returns the set of heading titles on the path
+// from a root to the tree's single active task, or an empty set when no
+// task is active. Used to force those headings expanded.
+func activeAncestorTitles(tree *project.Tree) map[string]bool {
+	goal, ancestry := tree.ActiveGoal()
+	if goal == nil {
+		return nil
 	}
-	return active
+	titles := make(map[string]bool, len(ancestry))
+	for _, n := range ancestry {
+		if n.IsHeading {
+			titles[n.Title] = true
+		}
+	}
+	return titles
 }
 
 // flattenWorkNode recursively flattens a work tree node into display items,
-// respecting TUI-specific collapse state.
+// respecting the expansion decision in isHeadingExpanded.
 func (p *ProjectPaneModel) flattenWorkNode(n *project.Node, depth int) {
 	p.items = append(p.items, projectItem{workNode: n, section: "work"})
 
-	if n.IsHeading && !p.workExpanded[n.Title] {
+	if n.IsHeading && !p.isHeadingExpanded(n) {
 		return // collapsed — skip children
 	}
 	for _, child := range n.Children {
@@ -515,7 +552,10 @@ func (p *ProjectPaneModel) activateItem() tea.Cmd {
 // work tree. The pane stays a read view over that tree.
 func (p *ProjectPaneModel) activateWorkItem(n *project.Node) tea.Cmd {
 	if n.IsHeading {
-		p.workExpanded[n.Title] = !p.workExpanded[n.Title]
+		// Toggle relative to what's currently shown (which may be an
+		// auto-expanded default, not an existing map entry). The active
+		// task's phase ignores this — isHeadingExpanded keeps it open.
+		p.workExpanded[n.Title] = !p.isHeadingExpanded(n)
 		p.flattenItems()
 		if p.cursorIdx >= len(p.items) {
 			p.cursorIdx = len(p.items) - 1
@@ -727,7 +767,7 @@ func (p *ProjectPaneModel) renderWorkNode(n *project.Node, selected bool) string
 
 	var icon, name string
 	if n.IsHeading {
-		if p.workExpanded[n.Title] {
+		if p.isHeadingExpanded(n) {
 			icon = "▾ "
 		} else {
 			icon = "▸ "

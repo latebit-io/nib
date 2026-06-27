@@ -424,6 +424,16 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleAgentInputKey(msg)
 	}
 
+	// API-key prompt captures all input while active. The masked field is
+	// modal like the agent input — keys must reach it regardless of which
+	// pane holds focus (it is opened from the model-selector overlay, which
+	// does not move region focus to the agent pane). Without this, typed key
+	// characters leak into the focused editor and Escape never cancels. The
+	// paste path is already routed the same way in handlePaste.
+	if m.AgentPane.IsAPIKeyInputActive() {
+		return m, m.AgentPane.Update(msg)
+	}
+
 	// Project pane inline input — all keys go to the pane.
 	if m.ProjectPane != nil && m.ProjectPane.IsInputActive() {
 		return m, m.ProjectPane.Update(msg)

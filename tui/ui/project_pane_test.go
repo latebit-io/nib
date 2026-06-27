@@ -235,11 +235,38 @@ func TestProjectPane_ActiveAncestryAlwaysExpanded(t *testing.T) {
 
 	p := &ProjectPaneModel{
 		workExpanded:    map[string]bool{"Phase 1: Movement": false}, // user collapsed it
-		activeAncestors: map[string]bool{"Phase 1: Movement": true},  // but it holds the active task
+		activeAncestors: map[*project.Node]bool{heading: true},       // but it holds the active task
 	}
 
 	if !p.isHeadingExpanded(heading) {
 		t.Error("active task's phase must stay expanded despite a user collapse")
+	}
+}
+
+// TestProjectPane_DuplicateTitleNotForceExpanded locks that active-
+// ancestry expansion is by node identity, not title: a sibling heading
+// sharing a title with the active heading must NOT be force-expanded.
+func TestProjectPane_DuplicateTitleNotForceExpanded(t *testing.T) {
+	active := &project.Node{
+		Title: "Implementation", Depth: 1, IsHeading: true,
+		Children: []*project.Node{{Title: "do it", Depth: 2, Status: project.TaskActive}},
+	}
+	// Same title, but its only task is done and the user collapsed it.
+	namesake := &project.Node{
+		Title: "Implementation", Depth: 1, IsHeading: true,
+		Children: []*project.Node{{Title: "old", Depth: 2, Status: project.TaskDone}},
+	}
+
+	p := &ProjectPaneModel{
+		workExpanded:    map[string]bool{"Implementation": false},
+		activeAncestors: map[*project.Node]bool{active: true}, // only the active node
+	}
+
+	if !p.isHeadingExpanded(active) {
+		t.Error("active heading must be expanded")
+	}
+	if p.isHeadingExpanded(namesake) {
+		t.Error("same-titled inactive heading must NOT be force-expanded (node identity, not title)")
 	}
 }
 
@@ -262,24 +289,29 @@ func TestProjectPane_UserCollapseRespectedForPending(t *testing.T) {
 	}
 }
 
-// TestActiveAncestorTitles verifies the ancestry set contains the
-// heading path to the active task and nothing when no task is active.
-func TestActiveAncestorTitles(t *testing.T) {
+// TestActiveAncestorNodes verifies the ancestry set contains the heading
+// nodes on the path to the active task (by identity) and nothing when no
+// task is active.
+func TestActiveAncestorNodes(t *testing.T) {
 	tree := project.Parse("---\nproject: P\n---\n# Phase 1: A\n## Feat\n- [>] go\n# Phase 2: B\n## F2\n- [ ] later\n")
 
-	got := activeAncestorTitles(tree)
-	for _, want := range []string{"Phase 1: A", "Feat"} {
-		if !got[want] {
-			t.Errorf("missing %q in active ancestry: %v", want, got)
-		}
+	got := activeAncestorNodes(tree)
+	phase1 := tree.Roots[0]           // Phase 1: A
+	feat := tree.Roots[0].Children[0] // Feat (holds the active task)
+	phase2 := tree.Roots[1]           // Phase 2: B
+	if !got[phase1] {
+		t.Errorf("missing active phase node in ancestry: %v", got)
 	}
-	if got["Phase 2: B"] {
-		t.Errorf("Phase 2 must not be in active ancestry: %v", got)
+	if !got[feat] {
+		t.Errorf("missing active feature node in ancestry: %v", got)
+	}
+	if got[phase2] {
+		t.Errorf("Phase 2 node must not be in active ancestry: %v", got)
 	}
 
 	none := project.Parse("# Phase 1: A\n## F\n- [ ] pending\n")
-	if len(activeAncestorTitles(none)) != 0 {
-		t.Errorf("no active task → empty ancestry, got %v", activeAncestorTitles(none))
+	if len(activeAncestorNodes(none)) != 0 {
+		t.Errorf("no active task → empty ancestry, got %v", activeAncestorNodes(none))
 	}
 }
 

@@ -48,6 +48,17 @@ func FormatPhaseHeading(num int, title string) string {
 	return fmt.Sprintf("Phase %d: %s", num, title)
 }
 
+// StripPhaseNumber returns a phase heading's descriptive body with any
+// leading "Phase N:" prefix removed and surrounding whitespace trimmed.
+// A title without the prefix is returned trimmed but otherwise unchanged.
+// Callers use it to compare phases by descriptive identity — "Phase 9:
+// Polish" and a bare "Polish" denote the same phase, so a duplicate guard
+// keyed on this value catches mixed bare/numbered forms.
+func StripPhaseNumber(title string) string {
+	stripped := phaseNumberPattern.ReplaceAllString(strings.TrimSpace(title), "")
+	return strings.TrimSpace(stripped)
+}
+
 // TaskStatus represents the completion state of a goal item.
 type TaskStatus int
 

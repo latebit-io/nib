@@ -70,6 +70,29 @@ func TestProjectPhaseAddTool_WithinBatchDuplicate(t *testing.T) {
 	}
 }
 
+// TestProjectPhaseAddTool_WithinBatchDuplicateMixedForm locks the
+// bug-prone path: a bare title and an explicitly-numbered form of the
+// same descriptive phase ("Polish" vs "Phase 9: Polish") must collide.
+// The dedup key strips the "Phase N:" prefix, so only one AddPhase fires
+// and the numbered entry is reported as the duplicate.
+func TestProjectPhaseAddTool_WithinBatchDuplicateMixedForm(t *testing.T) {
+	tracker := &stubTracker{}
+	tool := NewProjectPhaseAddTool(tracker)
+
+	args := `{"phases": ["Polish", "Phase 9: Polish"]}`
+	result := tool.Execute(context.Background(), toolCall("id", "project_phase_add", args))
+
+	if len(tracker.phaseCalls) != 1 {
+		t.Fatalf("phaseCalls = %v, want exactly 1 (numbered form is the same phase)", tracker.phaseCalls)
+	}
+	if tracker.phaseCalls[0] != "Polish" {
+		t.Errorf("first added = %q, want %q", tracker.phaseCalls[0], "Polish")
+	}
+	if !strings.Contains(result.Content, "duplicate of phases[0]") {
+		t.Errorf("result missing within-batch dup line for numbered form:\n%s", result.Content)
+	}
+}
+
 // TestProjectPhaseAddTool_EmptyTitle verifies a blank entry is rejected
 // without reaching the tracker.
 func TestProjectPhaseAddTool_EmptyTitle(t *testing.T) {

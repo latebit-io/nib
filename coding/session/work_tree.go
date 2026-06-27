@@ -254,11 +254,7 @@ func sanitizeProjectInitLine(s string) string {
 // [sanitizeProjectInitLine] and [maxProjectInitPhases] for the
 // threat model.
 func buildProjectSkeleton(name string, phases []string) string {
-	var b strings.Builder
-	b.WriteString("---\n")
-	fmt.Fprintf(&b, "project: %s\n", sanitizeProjectInitLine(name))
-	b.WriteString("---\n")
-	num := 0
+	tree := &project.Tree{ProjectName: sanitizeProjectInitLine(name)}
 	for i, p := range phases {
 		if i >= maxProjectInitPhases {
 			slog.Warn("buildProjectSkeleton: phase count exceeded cap; truncating",
@@ -269,15 +265,20 @@ func buildProjectSkeleton(name string, phases []string) string {
 		if title == "" {
 			continue
 		}
-		// Number the heading so the skeleton satisfies the strict
-		// "Phase N: Title" schema enforced by project.Validate — a tree
-		// seeded with bare h1 titles cannot round-trip through
-		// memory_publish. FormatPhaseHeading leaves an already-numbered
-		// title untouched.
-		num++
-		fmt.Fprintf(&b, "\n# %s\n", project.FormatPhaseHeading(num, title))
+		// Tree.AddPhase owns numbering — it auto-numbers bare titles,
+		// keeps an explicit "Phase N:" verbatim, and carries the highest
+		// number forward — so the skeleton stays internally consistent
+		// (e.g. ["Phase 7: Discovery", "Polish"] → 7 then 8, not 7 then
+		// 2) and matches what later project_phase_add calls produce. It
+		// also satisfies the strict schema project.Validate enforces, so
+		// the tree round-trips through memory_publish. A duplicate
+		// descriptive title is an LLM slip — skip it rather than emit a
+		// colliding heading.
+		if _, err := tree.AddPhase(title); err != nil {
+			slog.Warn("buildProjectSkeleton: skipped phase", "title", title, "err", err)
+		}
 	}
-	return b.String()
+	return project.Serialize(tree)
 }
 
 // WorkTreeSnapshot holds the result of a background work tree fetch.

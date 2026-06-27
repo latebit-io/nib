@@ -102,13 +102,15 @@ type ProjectPaneModel struct {
 	// default rule in [ProjectPaneModel.isHeadingExpanded]: expanded
 	// when it has an uncompleted descendant, collapsed otherwise.
 	//
-	// activeAncestors holds the heading titles on the ancestry path of
+	// activeAncestors holds the heading NODES on the ancestry path of
 	// the currently active task, recomputed each rebuild. Those headings
 	// always render expanded — the active task must stay visible — and
 	// this overrides both the default and an explicit user collapse.
-	workExpanded    map[string]bool // title → expanded; user toggles only
-	activeAncestors map[string]bool // title → on active task's path (force-expanded)
-	workDepthOffset int             // subtracted from node.Depth for rendering (root elision)
+	// Keyed by node identity, not title: features like "## Tests" recur
+	// across phases, so a title key would force-expand every namesake.
+	workExpanded    map[string]bool        // title → expanded; user toggles only
+	activeAncestors map[*project.Node]bool // node → on active task's path (force-expanded)
+	workDepthOffset int                    // subtracted from node.Depth for rendering (root elision)
 
 	// Flattened display items — rebuilt on refresh
 	items []projectItem
@@ -347,7 +349,7 @@ func (p *ProjectPaneModel) flattenItems() {
 
 		// Recompute which headings sit on the active task's ancestry —
 		// those are force-expanded so the active task is always visible.
-		p.activeAncestors = activeAncestorTitles(tree)
+		p.activeAncestors = activeAncestorNodes(tree)
 
 		// If there's a single root whose title matches the project name
 		// (already shown in the pane border), elide it and promote children.
@@ -384,7 +386,7 @@ func (p *ProjectPaneModel) flattenItems() {
 // a pending-but-inactive phase is honored across rebuilds — while a new
 // task going active still forces its phase open via rule 1.
 func (p *ProjectPaneModel) isHeadingExpanded(n *project.Node) bool {
-	if p.activeAncestors[n.Title] {
+	if p.activeAncestors[n] {
 		return true
 	}
 	if v, ok := p.workExpanded[n.Title]; ok {
@@ -411,21 +413,25 @@ func hasUncompletedDescendant(n *project.Node) bool {
 	return false
 }
 
-// activeAncestorTitles returns the set of heading titles on the path
-// from a root to the tree's single active task, or an empty set when no
-// task is active. Used to force those headings expanded.
-func activeAncestorTitles(tree *project.Tree) map[string]bool {
+// activeAncestorNodes returns the set of heading nodes on the path from
+// a root to the tree's single active task, or an empty set when no task
+// is active. Keyed by node identity so only the true ancestry path is
+// force-expanded — duplicate heading titles elsewhere are unaffected.
+// The returned pointers are the tree's own nodes, the same ones
+// flattenWorkNode walks, so the identity lookup in isHeadingExpanded
+// matches.
+func activeAncestorNodes(tree *project.Tree) map[*project.Node]bool {
 	goal, ancestry := tree.ActiveGoal()
 	if goal == nil {
 		return nil
 	}
-	titles := make(map[string]bool, len(ancestry))
+	nodes := make(map[*project.Node]bool, len(ancestry))
 	for _, n := range ancestry {
 		if n.IsHeading {
-			titles[n.Title] = true
+			nodes[n] = true
 		}
 	}
-	return titles
+	return nodes
 }
 
 // flattenWorkNode recursively flattens a work tree node into display items,

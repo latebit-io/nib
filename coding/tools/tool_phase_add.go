@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/engine/project"
 )
 
 // ProjectPhaseAddTool appends one or more top-level phase (h1)
@@ -63,12 +64,13 @@ func (t *ProjectPhaseAddTool) Definition() llm.ToolDef {
 // Execute appends each phase via the TaskTracker. Partial success is
 // the contract (mirrors project_task_add): an invalid, duplicate, or
 // rejected entry does not stop the others. Within-batch duplicates are
-// caught by case-folded descriptive title — the LLM occasionally emits
-// the same phase twice when sketching a plan, and auto-numbering would
-// otherwise turn that slip into two near-identical phases the
-// substring-matched project_task_add can no longer target unambiguously.
-// The result names the full numbered title of each added phase so the
-// LLM can reference it in a follow-up project_task_add call.
+// caught by case-folded *descriptive* title (the "Phase N:" prefix
+// stripped via project.StripPhaseNumber) so a mixed slip like "Polish"
+// and "Phase 9: Polish" collides — auto-numbering would otherwise turn
+// it into two near-identical phases the substring-matched
+// project_task_add can no longer target unambiguously. The result names
+// the full numbered title of each added phase so the LLM can reference
+// it in a follow-up project_task_add call.
 func (t *ProjectPhaseAddTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args projectPhaseAddArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
@@ -89,7 +91,7 @@ func (t *ProjectPhaseAddTool) Execute(_ context.Context, call llm.ToolCall) Tool
 			failed = append(failed, fmt.Sprintf("phases[%d]: title is required", i))
 			continue
 		}
-		key := strings.ToLower(title)
+		key := strings.ToLower(project.StripPhaseNumber(title))
 		if firstIdx, dup := seen[key]; dup {
 			failed = append(failed, fmt.Sprintf("phases[%d] (%s): duplicate of phases[%d]", i, title, firstIdx))
 			continue

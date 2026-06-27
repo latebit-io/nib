@@ -110,8 +110,10 @@ func (s *APIKeyInputModel) Update(msg tea.KeyPressMsg, clip ClipboardService) te
 			return apiKeyEnteredMsg{profile: profile, key: key}
 		}
 	case tea.KeyBackspace:
-		if len(s.buffer) > 0 {
-			s.buffer = s.buffer[:len(s.buffer)-1]
+		// Delete the last rune, not the last byte — a pasted multi-byte
+		// character would otherwise leave buffer as invalid UTF-8.
+		if _, size := utf8.DecodeLastRuneInString(s.buffer); size > 0 {
+			s.buffer = s.buffer[:len(s.buffer)-size]
 		}
 		return nil
 	default:
@@ -141,7 +143,7 @@ func (s *APIKeyInputModel) Render(output []string, row *int, width, height, star
 		inputRows = 1
 	}
 	prompt := fmt.Sprintf(" API key for %s: ", s.profile)
-	masked := strings.Repeat("*", len(s.buffer))
+	masked := strings.Repeat("*", utf8.RuneCountInString(s.buffer))
 	cursor := agentCursorStyle.Render(" ")
 
 	for i := range inputRows {

@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -62,6 +63,33 @@ func TestAPIKeyInput_Backspace(t *testing.T) {
 	s.Update(tea.KeyPressMsg{Code: tea.KeyBackspace}, nil)
 	if s.buffer != "" {
 		t.Fatalf("buffer = %q, want empty", s.buffer)
+	}
+}
+
+func TestAPIKeyInput_BackspaceAndMaskAreRuneAware(t *testing.T) {
+	var s APIKeyInputModel
+	s.Open("fugu")
+	s.Paste("k🔑") // ASCII byte + 4-byte rune
+
+	// Backspace must remove the whole multi-byte rune, not one byte, so the
+	// buffer stays valid UTF-8.
+	s.Update(tea.KeyPressMsg{Code: tea.KeyBackspace}, nil)
+	if s.buffer != "k" {
+		t.Fatalf("buffer = %q, want %q (whole rune deleted)", s.buffer, "k")
+	}
+	if !utf8.ValidString(s.buffer) {
+		t.Fatalf("buffer is not valid UTF-8 after backspace: %q", s.buffer)
+	}
+
+	// Masking counts runes, not bytes: "é🔑" is 6 bytes but 2 runes → 2 stars.
+	s.buffer = "é🔑"
+	const width, height = 40, 10
+	output := make([]string, height)
+	row := 5
+	s.Render(output, &row, width, height, 5, 8)
+	first := ansi.Strip(output[5])
+	if !strings.Contains(first, "fugu: **") || strings.Contains(first, "***") {
+		t.Fatalf("masked row = %q, want exactly 2 mask glyphs (rune count, not byte count)", first)
 	}
 }
 

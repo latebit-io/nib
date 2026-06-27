@@ -175,22 +175,150 @@ func TestProjectPane_ActivateWorkHeading(t *testing.T) {
 		cursorIdx:    1, // on heading
 	}
 
-	// Activate heading — should toggle to expanded
+	// A pending task means the heading shows expanded by default (no map
+	// entry), so the first Enter COLLAPSES it.
+	if !p.isHeadingExpanded(heading) {
+		t.Fatal("heading with a pending task should be expanded by default")
+	}
 	cmd := p.activateItem()
 	if cmd != nil {
 		t.Error("expected nil cmd for heading toggle")
 	}
-	if !p.workExpanded["Phase 6"] {
-		t.Error("expected heading to be expanded after activation")
+	if p.isHeadingExpanded(heading) {
+		t.Error("expected heading to be collapsed after first activation")
 	}
 
-	// Activate again — should collapse
-	// Reset items since flattenItems was called
+	// Activate again — should expand. Reset items since flattenItems ran.
 	p.cursorIdx = 1
 	p.items = items
 	p.activateItem()
-	if p.workExpanded["Phase 6"] {
-		t.Error("expected heading to be collapsed after second activation")
+	if !p.isHeadingExpanded(heading) {
+		t.Error("expected heading to be expanded after second activation")
+	}
+}
+
+// TestProjectPane_AutoExpandDefaults locks the default expansion rule:
+// a heading with an uncompleted task is expanded; a fully-done or empty
+// heading is collapsed — all without any user toggle.
+func TestProjectPane_AutoExpandDefaults(t *testing.T) {
+	pending := &project.Node{
+		Title: "Phase 1: Open", Depth: 0, IsHeading: true,
+		Children: []*project.Node{{Title: "t", Depth: 2, Status: project.TaskPending}},
+	}
+	done := &project.Node{
+		Title: "Phase 2: Done", Depth: 0, IsHeading: true,
+		Children: []*project.Node{{Title: "t", Depth: 2, Status: project.TaskDone}},
+	}
+	empty := &project.Node{Title: "Phase 3: Empty", Depth: 0, IsHeading: true}
+
+	p := &ProjectPaneModel{workExpanded: make(map[string]bool)}
+
+	if !p.isHeadingExpanded(pending) {
+		t.Error("heading with uncompleted task should default to expanded")
+	}
+	if p.isHeadingExpanded(done) {
+		t.Error("fully-done heading should default to collapsed")
+	}
+	if p.isHeadingExpanded(empty) {
+		t.Error("empty heading should default to collapsed")
+	}
+}
+
+// TestProjectPane_ActiveAncestryAlwaysExpanded locks "active always
+// wins": the phase containing the active task stays open even when the
+// user has explicitly collapsed it.
+func TestProjectPane_ActiveAncestryAlwaysExpanded(t *testing.T) {
+	heading := &project.Node{
+		Title: "Phase 1: Movement", Depth: 0, IsHeading: true,
+		Children: []*project.Node{{Title: "input", Depth: 2, Status: project.TaskActive}},
+	}
+
+	p := &ProjectPaneModel{
+		workExpanded:    map[string]bool{"Phase 1: Movement": false}, // user collapsed it
+		activeAncestors: map[*project.Node]bool{heading: true},       // but it holds the active task
+	}
+
+	if !p.isHeadingExpanded(heading) {
+		t.Error("active task's phase must stay expanded despite a user collapse")
+	}
+}
+
+// TestProjectPane_DuplicateTitleNotForceExpanded locks that active-
+// ancestry expansion is by node identity, not title: a sibling heading
+// sharing a title with the active heading must NOT be force-expanded.
+func TestProjectPane_DuplicateTitleNotForceExpanded(t *testing.T) {
+	active := &project.Node{
+		Title: "Implementation", Depth: 1, IsHeading: true,
+		Children: []*project.Node{{Title: "do it", Depth: 2, Status: project.TaskActive}},
+	}
+	// Same title, but its only task is done and the user collapsed it.
+	namesake := &project.Node{
+		Title: "Implementation", Depth: 1, IsHeading: true,
+		Children: []*project.Node{{Title: "old", Depth: 2, Status: project.TaskDone}},
+	}
+
+	p := &ProjectPaneModel{
+		workExpanded:    map[string]bool{"Implementation": false},
+		activeAncestors: map[*project.Node]bool{active: true}, // only the active node
+	}
+
+	if !p.isHeadingExpanded(active) {
+		t.Error("active heading must be expanded")
+	}
+	if p.isHeadingExpanded(namesake) {
+		t.Error("same-titled inactive heading must NOT be force-expanded (node identity, not title)")
+	}
+}
+
+// TestProjectPane_UserCollapseRespectedForPending locks that a manual
+// collapse of a phase whose only work is pending (not active) is honored
+// across rebuilds — auto-expansion must not fight the user there.
+func TestProjectPane_UserCollapseRespectedForPending(t *testing.T) {
+	heading := &project.Node{
+		Title: "Phase 3: Polish", Depth: 0, IsHeading: true,
+		Children: []*project.Node{{Title: "t", Depth: 2, Status: project.TaskPending}},
+	}
+
+	p := &ProjectPaneModel{
+		workExpanded:    map[string]bool{"Phase 3: Polish": false}, // user collapsed
+		activeAncestors: nil,                                       // not the active phase
+	}
+
+	if p.isHeadingExpanded(heading) {
+		t.Error("user collapse of a pending-but-inactive phase should be respected")
+	}
+}
+
+// TestActiveAncestorNodes verifies the ancestry set contains the heading
+// nodes on the path to the active task (by identity) and nothing when no
+// task is active.
+func TestActiveAncestorNodes(t *testing.T) {
+	tree := project.Parse("---\nproject: P\n---\n# Phase 1: A\n## Feat\n- [>] go\n# Phase 2: B\n## F2\n- [ ] later\n")
+
+	got := activeAncestorNodes(tree)
+	phase1 := tree.Roots[0]           // Phase 1: A
+	feat := tree.Roots[0].Children[0] // Feat (holds the active task)
+	activeTask := feat.Children[0]    // the active leaf itself
+	phase2 := tree.Roots[1]           // Phase 2: B
+	if !got[phase1] {
+		t.Errorf("missing active phase node in ancestry: %v", got)
+	}
+	if !got[feat] {
+		t.Errorf("missing active feature node in ancestry: %v", got)
+	}
+	if got[activeTask] {
+		t.Errorf("active task leaf must not be in active ancestry (headings only): %v", got)
+	}
+	if got[phase2] {
+		t.Errorf("Phase 2 node must not be in active ancestry: %v", got)
+	}
+	if len(got) != 2 {
+		t.Errorf("active ancestry should contain only the 2 heading ancestors, got %d: %v", len(got), got)
+	}
+
+	none := project.Parse("# Phase 1: A\n## F\n- [ ] pending\n")
+	if len(activeAncestorNodes(none)) != 0 {
+		t.Errorf("no active task → empty ancestry, got %v", activeAncestorNodes(none))
 	}
 }
 

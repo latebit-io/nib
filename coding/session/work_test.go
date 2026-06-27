@@ -255,6 +255,48 @@ func TestMarkGoalDone(t *testing.T) {
 	}
 }
 
+func TestAddPhase(t *testing.T) {
+	store := newMockMemoryStore()
+	store.seed(workTreePath, "---\nproject: P\n---\n# Phase 1: Foundation\n## F\n- [ ] t\n", 1)
+
+	sess := newWorkTestSession(t)
+	sess.SetMemoryStore(store)
+
+	full, err := sess.AddPhase("Polish")
+	if err != nil {
+		t.Fatalf("AddPhase: %v", err)
+	}
+	if full != "Phase 2: Polish" {
+		t.Errorf("full = %q, want %q", full, "Phase 2: Polish")
+	}
+
+	// Verify in-memory state gained the phase.
+	tree := sess.WorkTree()
+	if len(tree.Roots) != 2 || tree.Roots[1].Title != "Phase 2: Polish" {
+		t.Fatalf("Roots = %+v, want appended 'Phase 2: Polish'", tree.Roots)
+	}
+
+	// Verify persisted and schema-valid on round-trip.
+	doc, err := store.Fetch(context.Background(), workTreePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reparsed := project.Parse(doc.Body)
+	if len(reparsed.Roots) != 2 || reparsed.Roots[1].Title != "Phase 2: Polish" {
+		t.Errorf("persisted Roots = %+v, want appended phase", reparsed.Roots)
+	}
+	if errs := project.Validate(reparsed); errs != nil {
+		t.Errorf("persisted tree must validate: %v", errs)
+	}
+}
+
+func TestAddPhase_NoWorkTree(t *testing.T) {
+	sess := newWorkTestSession(t)
+	if _, err := sess.AddPhase("Polish"); err == nil {
+		t.Error("AddPhase returned nil error without work tree")
+	}
+}
+
 func TestMarkGoalDone_NotFound(t *testing.T) {
 	store := newMockMemoryStore()
 	store.seed(workTreePath, "# A\n- [ ] task\n", 1)

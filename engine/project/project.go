@@ -8,21 +8,56 @@
 //	---
 //	project: My Project
 //	---
-//	# Component
-//	## Phase
-//	### Feature
+//	# Phase 1: Foundation
+//	## Feature
 //	- [ ] pending goal
 //	- [x] completed goal
 //	- [>] active goal
 //
-// Heading depth maps to tree depth (h1 = depth 0, h2 = depth 1, etc.).
-// Task-list items are leaf nodes beneath their nearest heading ancestor.
+// Heading depth maps to tree depth: h1 (depth 0) is a phase, h2
+// (depth 1) is a feature. Task-list items are leaf nodes directly
+// beneath a feature. The strict schema (h1 phases matching
+// "Phase N: Title", h2 features, tasks under features, at most one
+// active task) is enforced by [Validate]; the parser itself is lenient
+// so a malformed document still loads for diagnosis.
 package project
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
+
+// phaseNumberPattern captures the leading number N from a
+// "Phase N: Title" heading. Used by [Tree.nextPhaseNumber] to compute
+// the number for an appended phase.
+var phaseNumberPattern = regexp.MustCompile(`^Phase\s+(\d+):`)
+
+// FormatPhaseHeading returns a schema-valid phase heading title. A
+// title already in the canonical "Phase N: Title" form is returned
+// trimmed and verbatim — the caller's explicit numbering wins —
+// otherwise the descriptive title is prefixed as "Phase <num>: <title>".
+// Used by both [Tree.AddPhase] and the session's project_init skeleton
+// builder so every write path produces a heading that [Validate] accepts.
+func FormatPhaseHeading(num int, title string) string {
+	title = strings.TrimSpace(title)
+	if phaseHeadingPattern.MatchString(title) {
+		return title
+	}
+	return fmt.Sprintf("Phase %d: %s", num, title)
+}
+
+// StripPhaseNumber returns a phase heading's descriptive body with any
+// leading "Phase N:" prefix removed and surrounding whitespace trimmed.
+// A title without the prefix is returned trimmed but otherwise unchanged.
+// Callers use it to compare phases by descriptive identity — "Phase 9:
+// Polish" and a bare "Polish" denote the same phase, so a duplicate guard
+// keyed on this value catches mixed bare/numbered forms.
+func StripPhaseNumber(title string) string {
+	stripped := phaseNumberPattern.ReplaceAllString(strings.TrimSpace(title), "")
+	return strings.TrimSpace(stripped)
+}
 
 // TaskStatus represents the completion state of a goal item.
 type TaskStatus int
@@ -176,6 +211,62 @@ func (t *Tree) AddTask(phase, feature, task, link string) error {
 		Status:    TaskPending,
 	})
 	return nil
+}
+
+// AddPhase appends a new top-level phase (h1) heading to the tree and
+// returns its full, schema-valid title. A bare descriptive title
+// ("Polish") is auto-numbered as "Phase N: Polish" where N is one
+// greater than the highest existing phase number; a title already in
+// the "Phase N: Title" form is used verbatim (see [FormatPhaseHeading]).
+// Phases always append at the end of the document.
+//
+// This fills the gap between project_init (which seeds phases on a
+// fresh repo but is idempotent — it refuses to touch an existing plan)
+// and AddTask (which creates features under an existing phase, never a
+// new phase).
+//
+// Returns an error if the trimmed title is empty or a phase with the
+// same full title already exists (case-insensitive). Unlike tasks,
+// phases are not de-duplicated by descriptive body — two phases that
+// share a suffix under different numbers ("Phase 2: Polish",
+// "Phase 5: Polish") are legitimate, so only an exact full-title
+// collision is rejected.
+func (t *Tree) AddPhase(title string) (string, error) {
+	if strings.TrimSpace(title) == "" {
+		return "", fmt.Errorf("phase title is empty")
+	}
+	full := FormatPhaseHeading(t.nextPhaseNumber(), title)
+	for _, root := range t.Roots {
+		if strings.EqualFold(strings.TrimSpace(root.Title), full) {
+			return "", fmt.Errorf("phase %q already exists", full)
+		}
+	}
+	t.Roots = append(t.Roots, &Node{
+		Title:     full,
+		Depth:     0,
+		IsHeading: true,
+	})
+	return full, nil
+}
+
+// nextPhaseNumber returns the number to assign the next appended phase:
+// one greater than the highest "Phase N" number present, or one greater
+// than the root count when no root carries a parseable number (e.g. a
+// tree seeded by an older project_init that wrote bare h1 titles).
+// Falling back to the root count rather than 1 avoids handing the same
+// number to successive appends against a tree of legacy bare phases.
+func (t *Tree) nextPhaseNumber() int {
+	maxN := len(t.Roots)
+	for _, root := range t.Roots {
+		m := phaseNumberPattern.FindStringSubmatch(root.Title)
+		if m == nil {
+			continue
+		}
+		if n, err := strconv.Atoi(m[1]); err == nil && n > maxN {
+			maxN = n
+		}
+	}
+	return maxN + 1
 }
 
 // MarkDone marks the task at targetTitle as done (TaskDone).

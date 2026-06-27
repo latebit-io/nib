@@ -140,6 +140,26 @@ func (w *WorkTreeManager) AddTask(phase, feature, task, link string) error {
 	return w.saveAndUnlock()
 }
 
+// AddPhase appends a new top-level phase to the work tree and persists
+// the change to demarkus, returning the full (possibly auto-numbered)
+// phase title. Returns an error if the work tree is not loaded, the
+// title is empty or duplicates an existing phase, or persistence fails.
+func (w *WorkTreeManager) AddPhase(title string) (string, error) {
+	w.mu.Lock()
+	if w.tree == nil {
+		w.mu.Unlock()
+		return "", errors.New("work tree: not loaded")
+	}
+	full, err := w.tree.AddPhase(title)
+	if err != nil {
+		w.mu.Unlock()
+		return "", fmt.Errorf("work tree: %w", err)
+	}
+	w.dirty = true
+	w.modGen++
+	return full, w.saveAndUnlock()
+}
+
 // MarkGoalDone marks the named task as done in the work tree and persists
 // the change to demarkus. Returns an error if the target is not found,
 // the work tree is not loaded, or persistence fails.
@@ -234,10 +254,7 @@ func sanitizeProjectInitLine(s string) string {
 // [sanitizeProjectInitLine] and [maxProjectInitPhases] for the
 // threat model.
 func buildProjectSkeleton(name string, phases []string) string {
-	var b strings.Builder
-	b.WriteString("---\n")
-	fmt.Fprintf(&b, "project: %s\n", sanitizeProjectInitLine(name))
-	b.WriteString("---\n")
+	tree := &project.Tree{ProjectName: sanitizeProjectInitLine(name)}
 	for i, p := range phases {
 		if i >= maxProjectInitPhases {
 			slog.Warn("buildProjectSkeleton: phase count exceeded cap; truncating",
@@ -248,9 +265,20 @@ func buildProjectSkeleton(name string, phases []string) string {
 		if title == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "\n# %s\n", title)
+		// Tree.AddPhase owns numbering — it auto-numbers bare titles,
+		// keeps an explicit "Phase N:" verbatim, and carries the highest
+		// number forward — so the skeleton stays internally consistent
+		// (e.g. ["Phase 7: Discovery", "Polish"] → 7 then 8, not 7 then
+		// 2) and matches what later project_phase_add calls produce. It
+		// also satisfies the strict schema project.Validate enforces, so
+		// the tree round-trips through memory_publish. A duplicate
+		// descriptive title is an LLM slip — skip it rather than emit a
+		// colliding heading.
+		if _, err := tree.AddPhase(title); err != nil {
+			slog.Warn("buildProjectSkeleton: skipped phase", "title", title, "err", err)
+		}
 	}
-	return b.String()
+	return project.Serialize(tree)
 }
 
 // WorkTreeSnapshot holds the result of a background work tree fetch.

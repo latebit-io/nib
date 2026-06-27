@@ -31,6 +31,14 @@ type TaskMutator interface {
 	// is non-empty, it is appended to the task title as a markdown link.
 	AddTask(phase, feature, task, link string) error
 
+	// AddPhase appends a new top-level phase (h1) heading to the work
+	// tree and persists, returning the full schema-valid phase title.
+	// A bare descriptive title is auto-numbered as "Phase N: Title".
+	// Fills the gap between InitProject (seeds phases at bootstrap but
+	// is idempotent — refuses to touch an existing plan) and AddTask
+	// (creates features under an existing phase, never a new phase).
+	AddPhase(title string) (string, error)
+
 	// InitProject ensures /project.md exists with the given project
 	// name and h1-level phases, then reloads the work tree so subsequent
 	// task operations succeed without manual memory bootstrapping.

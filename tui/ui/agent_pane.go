@@ -516,6 +516,59 @@ func (m *AgentPaneModel) StartAPIKeyInput(profile string) {
 // IsAPIKeyInputActive reports whether the API key input mode is active.
 func (m *AgentPaneModel) IsAPIKeyInputActive() bool { return m.apiKeyInputActive }
 
+// handlePaste inserts bracketed-paste content into whichever input is active.
+// Terminal pastes arrive as tea.PasteMsg (not key events), so the API-key
+// prompt and the agent input textarea must each be offered the paste here.
+// API keys are single-line, so CR/LF and surrounding whitespace are stripped
+// from the key buffer; the agent input keeps multi-line paste intact.
+func (m *AgentPaneModel) handlePaste(msg tea.PasteMsg) tea.Cmd {
+	switch {
+	case m.apiKeyInputActive:
+		m.apiKeyBuffer = appendAPIKey(m.apiKeyBuffer, sanitizeKeyPaste(msg.Content))
+		return nil
+	case m.inputActive:
+		m.input.Paste(msg.Content)
+		m.recomputeInputLayout()
+		m.cmdComplete.refresh(m.input.Content(), m.commandRegistry)
+		return nil
+	}
+	return nil
+}
+
+// sanitizeKeyPaste strips line breaks and surrounding whitespace from pasted
+// API-key text. A trailing newline (common when copying a key from a file or
+// web page) would otherwise corrupt the stored credential.
+func sanitizeKeyPaste(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", "")
+	return strings.TrimSpace(s)
+}
+
+// maxAPIKeyBytes bounds the API-key input buffer so an oversized clipboard or
+// paste payload can't grow it without limit (the textarea applies the same
+// guard via TextArea.Paste). Real keys are far smaller; this is a DoS guard,
+// not validation.
+const maxAPIKeyBytes = 8 * 1024
+
+// appendAPIKey appends src to the API-key buffer, capping the total at
+// maxAPIKeyBytes and truncating any overflow on a valid UTF-8 boundary.
+func appendAPIKey(dst, src string) string {
+	if src == "" {
+		return dst
+	}
+	remaining := maxAPIKeyBytes - len(dst)
+	if remaining <= 0 {
+		return dst
+	}
+	if len(src) > remaining {
+		src = src[:remaining]
+		for len(src) > 0 && !utf8.Valid([]byte(src)) {
+			src = src[:len(src)-1]
+		}
+	}
+	return dst + src
+}
+
 // handleAPIKeyInput processes key events during API key input.
 func (m *AgentPaneModel) handleAPIKeyInput(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.Code {
@@ -540,11 +593,30 @@ func (m *AgentPaneModel) handleAPIKeyInput(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	default:
+		// Ctrl/Cmd+V — read the system clipboard directly. Terminals that
+		// don't use bracketed paste deliver the paste shortcut as this key
+		// chord (the content never arrives as a PasteMsg or as key text),
+		// so the textarea's clipboard path must be mirrored here.
+		if isPasteChord(msg) {
+			if c := m.services.Clipboard; c != nil {
+				m.apiKeyBuffer = appendAPIKey(m.apiKeyBuffer, sanitizeKeyPaste(c.Read()))
+			}
+			return nil
+		}
 		if msg.Text != "" {
-			m.apiKeyBuffer += msg.Text
+			m.apiKeyBuffer = appendAPIKey(m.apiKeyBuffer, msg.Text)
 		}
 		return nil
 	}
+}
+
+// isPasteChord reports whether a keypress is the clipboard-paste shortcut
+// (Ctrl+V or, on terminals that forward the macOS Command key, Super+V).
+func isPasteChord(msg tea.KeyPressMsg) bool {
+	if msg.Code != 'v' && msg.Code != 'V' {
+		return false
+	}
+	return msg.Mod&tea.ModCtrl != 0 || msg.Mod&tea.ModSuper != 0
 }
 
 // UpdateModelSelector handles key input for the inline model selector.
@@ -653,6 +725,8 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 		return m.handleMouseRelease(msg)
 	case tea.MouseWheelMsg:
 		return m.handleMouseWheel(msg)
+	case tea.PasteMsg:
+		return m.handlePaste(msg)
 	case tea.KeyPressMsg:
 		if m.apiKeyInputActive {
 			return m.handleAPIKeyInput(msg)

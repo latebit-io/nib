@@ -366,9 +366,25 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 
+	case tea.PasteMsg:
+		return m.handlePaste(msg)
+
 	case tea.KeyPressMsg:
 		slog.Debug("key event", "code", msg.Code, "mod", msg.Mod)
 		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+// handlePaste routes a terminal bracketed-paste to the active text input.
+// Bubbletea delivers pastes as a distinct PasteMsg rather than key events,
+// so any input that accepts typed text must be offered the paste explicitly.
+// The agent pane owns the API-key prompt and the agent input textarea — the
+// common paste targets (API keys, multi-line prompts). When neither is active
+// the paste is ignored (the editor handles its own clipboard via Ctrl/Cmd+V).
+func (m *AppModel) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if m.AgentPane.IsAPIKeyInputActive() || m.AgentPane.IsInputActive() {
+		return m, m.AgentPane.Update(msg)
 	}
 	return m, nil
 }

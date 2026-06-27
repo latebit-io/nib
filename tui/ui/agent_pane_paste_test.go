@@ -18,7 +18,7 @@ func TestPaste_APIKeyInput_StripsNewlineAndStores(t *testing.T) {
 	// and surrounding whitespace; both must be stripped.
 	m.Update(tea.PasteMsg{Content: "  sk-abc123\n"})
 
-	if got := m.apiKeyBuffer; got != "sk-abc123" {
+	if got := m.apiKeyInput.buffer; got != "sk-abc123" {
 		t.Fatalf("apiKeyBuffer = %q, want %q", got, "sk-abc123")
 	}
 	if !m.IsAPIKeyInputActive() {
@@ -33,7 +33,7 @@ func TestPaste_APIKeyInput_AppendsToTypedPrefix(t *testing.T) {
 
 	m.Update(tea.PasteMsg{Content: "k-rest"})
 
-	if got := m.apiKeyBuffer; got != "sk-rest" {
+	if got := m.apiKeyInput.buffer; got != "sk-rest" {
 		t.Fatalf("apiKeyBuffer = %q, want %q", got, "sk-rest")
 	}
 }
@@ -48,7 +48,7 @@ func TestPaste_APIKeyInput_CtrlVReadsClipboard(t *testing.T) {
 
 	m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 
-	if got := m.apiKeyBuffer; got != "sk-from-clipboard" {
+	if got := m.apiKeyInput.buffer; got != "sk-from-clipboard" {
 		t.Fatalf("apiKeyBuffer = %q, want %q", got, "sk-from-clipboard")
 	}
 }
@@ -60,7 +60,7 @@ func TestPaste_APIKeyInput_SuperVReadsClipboard(t *testing.T) {
 
 	m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModSuper})
 
-	if got := m.apiKeyBuffer; got != "sk-cmd-v" {
+	if got := m.apiKeyInput.buffer; got != "sk-cmd-v" {
 		t.Fatalf("apiKeyBuffer = %q, want %q", got, "sk-cmd-v")
 	}
 }
@@ -83,8 +83,8 @@ func TestPaste_NoActiveInput_NoOp(t *testing.T) {
 	if cmd := m.handlePaste(tea.PasteMsg{Content: "ignored"}); cmd != nil {
 		t.Fatal("paste with no active input should be a no-op")
 	}
-	if m.apiKeyBuffer != "" {
-		t.Fatalf("apiKeyBuffer = %q, want empty", m.apiKeyBuffer)
+	if m.apiKeyInput.buffer != "" {
+		t.Fatalf("apiKeyBuffer = %q, want empty", m.apiKeyInput.buffer)
 	}
 }
 
@@ -95,7 +95,7 @@ func TestPaste_APIKeyInput_CapsOversizedPayload(t *testing.T) {
 	// A payload far over the buffer cap must be truncated, not appended whole.
 	m.Update(tea.PasteMsg{Content: strings.Repeat("a", maxAPIKeyBytes*2)})
 
-	if got := len(m.apiKeyBuffer); got != maxAPIKeyBytes {
+	if got := len(m.apiKeyInput.buffer); got != maxAPIKeyBytes {
 		t.Fatalf("apiKeyBuffer len = %d, want %d (capped)", got, maxAPIKeyBytes)
 	}
 }
@@ -114,7 +114,7 @@ func TestPaste_AppUpdate_RoutesToActiveInput(t *testing.T) {
 		m := newApp()
 		m.AgentPane.StartAPIKeyInput("fugu")
 		m.Update(tea.PasteMsg{Content: "sk-routed"})
-		if got := m.AgentPane.apiKeyBuffer; got != "sk-routed" {
+		if got := m.AgentPane.apiKeyInput.buffer; got != "sk-routed" {
 			t.Fatalf("apiKeyBuffer = %q, want %q", got, "sk-routed")
 		}
 	})
@@ -131,7 +131,7 @@ func TestPaste_AppUpdate_RoutesToActiveInput(t *testing.T) {
 	t.Run("no active input → not routed", func(t *testing.T) {
 		m := newApp()
 		m.Update(tea.PasteMsg{Content: "dropped"})
-		if m.AgentPane.apiKeyBuffer != "" || m.AgentPane.input.Content() != "" {
+		if m.AgentPane.apiKeyInput.buffer != "" || m.AgentPane.input.Content() != "" {
 			t.Fatal("paste should not reach any input when none is active")
 		}
 	})

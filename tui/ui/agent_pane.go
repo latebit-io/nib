@@ -308,10 +308,9 @@ type AgentPaneModel struct {
 	inputDragging     bool               // true while dragging inside the input area
 	inputPadLeft      int                // cell offset from pane left edge to textarea content
 
-	// API key input mode
-	apiKeyInputActive bool   // true when collecting an API key from the user
-	apiKeyProfile     string // profile the key is for
-	apiKeyBuffer      string // accumulated key text (masked in display)
+	// apiKeyInput holds the inline API-key entry overlay — when active,
+	// replaces the input area with a masked credential prompt.
+	apiKeyInput APIKeyInputModel
 
 	// Shared services
 	services *Services
@@ -507,14 +506,12 @@ func (m *AgentPaneModel) IsModelSelectorActive() bool { return m.ModelSel.IsActi
 // StartAPIKeyInput activates the API key input mode for a profile.
 // Shows a masked input field where the user can type their API key.
 func (m *AgentPaneModel) StartAPIKeyInput(profile string) {
-	m.apiKeyInputActive = true
-	m.apiKeyProfile = profile
-	m.apiKeyBuffer = ""
-	m.inputActive = false
+	m.apiKeyInput.Open(profile)
+	m.inputActive = false // overlay replaces input area — deactivate textarea
 }
 
 // IsAPIKeyInputActive reports whether the API key input mode is active.
-func (m *AgentPaneModel) IsAPIKeyInputActive() bool { return m.apiKeyInputActive }
+func (m *AgentPaneModel) IsAPIKeyInputActive() bool { return m.apiKeyInput.IsActive() }
 
 // handlePaste inserts bracketed-paste content into whichever input is active.
 // Terminal pastes arrive as tea.PasteMsg (not key events), so the API-key
@@ -523,8 +520,8 @@ func (m *AgentPaneModel) IsAPIKeyInputActive() bool { return m.apiKeyInputActive
 // from the key buffer; the agent input keeps multi-line paste intact.
 func (m *AgentPaneModel) handlePaste(msg tea.PasteMsg) tea.Cmd {
 	switch {
-	case m.apiKeyInputActive:
-		m.apiKeyBuffer = appendAPIKey(m.apiKeyBuffer, sanitizeKeyPaste(msg.Content))
+	case m.apiKeyInput.IsActive():
+		m.apiKeyInput.Paste(msg.Content)
 		return nil
 	case m.inputActive:
 		m.input.Paste(msg.Content)
@@ -535,45 +532,15 @@ func (m *AgentPaneModel) handlePaste(msg tea.PasteMsg) tea.Cmd {
 	return nil
 }
 
-// handleAPIKeyInput processes key events during API key input.
+// handleAPIKeyInput processes key events during API key input, delegating to
+// the overlay sub-model. When the overlay closes (Escape or Enter), input
+// focus returns to the textarea — the parent owns input-activation state.
 func (m *AgentPaneModel) handleAPIKeyInput(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.Code {
-	case tea.KeyEscape:
-		m.apiKeyInputActive = false
-		m.apiKeyBuffer = ""
+	cmd := m.apiKeyInput.Update(msg, m.services.Clipboard)
+	if !m.apiKeyInput.IsActive() {
 		m.inputActive = true
-		return nil
-	case tea.KeyEnter:
-		profile := m.apiKeyProfile
-		key := m.apiKeyBuffer
-		m.apiKeyInputActive = false
-		m.apiKeyBuffer = ""
-		m.apiKeyProfile = ""
-		m.inputActive = true
-		return func() tea.Msg {
-			return apiKeyEnteredMsg{profile: profile, key: key}
-		}
-	case tea.KeyBackspace:
-		if len(m.apiKeyBuffer) > 0 {
-			m.apiKeyBuffer = m.apiKeyBuffer[:len(m.apiKeyBuffer)-1]
-		}
-		return nil
-	default:
-		// Ctrl/Cmd+V — read the system clipboard directly. Terminals that
-		// don't use bracketed paste deliver the paste shortcut as this key
-		// chord (the content never arrives as a PasteMsg or as key text),
-		// so the textarea's clipboard path must be mirrored here.
-		if isPasteChord(msg) {
-			if c := m.services.Clipboard; c != nil {
-				m.apiKeyBuffer = appendAPIKey(m.apiKeyBuffer, sanitizeKeyPaste(c.Read()))
-			}
-			return nil
-		}
-		if msg.Text != "" {
-			m.apiKeyBuffer = appendAPIKey(m.apiKeyBuffer, msg.Text)
-		}
-		return nil
 	}
+	return cmd
 }
 
 // UpdateModelSelector handles key input for the inline model selector.
@@ -685,7 +652,7 @@ func (m *AgentPaneModel) Update(msg tea.Msg) tea.Cmd {
 	case tea.PasteMsg:
 		return m.handlePaste(msg)
 	case tea.KeyPressMsg:
-		if m.apiKeyInputActive {
+		if m.apiKeyInput.IsActive() {
 			return m.handleAPIKeyInput(msg)
 		}
 		if m.inputActive {
@@ -1467,7 +1434,7 @@ func (m *AgentPaneModel) pendingBannerHeight() int {
 	if m.pendingUserMessage == "" {
 		return 0
 	}
-	if m.ModelSel.IsActive() || m.apiKeyInputActive {
+	if m.ModelSel.IsActive() || m.apiKeyInput.IsActive() {
 		return 0
 	}
 	return 1
@@ -1937,11 +1904,7 @@ func runewidthTruncatedSummary(caret, label, meta string, width int) string {
 // padLine pads or truncates a string to exactly width display cells.
 // Uses cell-width measurement to handle wide characters (CJK, emoji).
 func (m *AgentPaneModel) padLine(s string) string {
-	w := runewidth.StringWidth(s)
-	if w >= m.width {
-		return runewidth.Truncate(s, m.width, "")
-	}
-	return s + strings.Repeat(" ", m.width-w)
+	return padLineToWidth(s, m.width)
 }
 
 // renderPendingBanner renders the single-row queued-message indicator
@@ -2055,31 +2018,9 @@ func (m *AgentPaneModel) renderInputArea(output []string, row *int) {
 	}
 }
 
-// renderAPIKeyInput renders the API key input prompt.
+// renderAPIKeyInput delegates to the extracted APIKeyInputModel.
 func (m *AgentPaneModel) renderAPIKeyInput(output []string, row *int) {
-	inputRows := m.inputAreaEndRow - m.inputAreaStartRow
-	if inputRows < 1 {
-		inputRows = 1
-	}
-	prompt := fmt.Sprintf(" API key for %s: ", m.apiKeyProfile)
-	masked := strings.Repeat("*", len(m.apiKeyBuffer))
-	cursor := agentCursorStyle.Render(" ")
-
-	for i := range inputRows {
-		if *row >= m.height {
-			break
-		}
-		switch i {
-		case 0:
-			line := prompt + masked + cursor
-			output[*row] = agentInputStyle.Render(m.padLine(line))
-		case inputRows - 1:
-			output[*row] = agentInputDim.Render(m.padLine(" Enter confirm · Esc cancel"))
-		default:
-			output[*row] = strings.Repeat(" ", m.width)
-		}
-		*row++
-	}
+	m.apiKeyInput.Render(output, row, m.width, m.height, m.inputAreaStartRow, m.inputAreaEndRow)
 }
 
 // renderModelSelector delegates to the extracted ModelSelectorModel.
@@ -2438,7 +2379,7 @@ func (m *AgentPaneModel) Render() string {
 	// Model selector and API key input replace the normal input area.
 	if m.ModelSel.IsActive() {
 		m.renderModelSelector(output, &row)
-	} else if m.apiKeyInputActive {
+	} else if m.apiKeyInput.IsActive() {
 		m.renderAPIKeyInput(output, &row)
 	} else {
 		m.renderInputArea(output, &row)

@@ -46,6 +46,14 @@ const (
 	// cap is a net win on cache rate and billable tokens.
 	EnvKeyToolOutputCapDisabled = EnvPrefix + "TOOL_OUTPUT_CAP_DISABLED"
 
+	// EnvKeyTaskTokenBudget sets the per-task token budget cap (see
+	// [coding/agent.NewOptions.TaskTokenBudget]). The cap is disabled by
+	// default; set this to a positive integer to arm it (e.g. the value
+	// of [kit/budget.RecommendedTaskTokens]). Zero or negative leaves it
+	// disabled; unset or unparseable leaves the built-in default (also
+	// disabled) in force.
+	EnvKeyTaskTokenBudget = EnvPrefix + "TASK_TOKEN_BUDGET"
+
 	// EnvKeyGlobalSkillsDir overrides the user-global skills directory
 	// (default <UserConfigDir>/<ConfigDirName>/skills). Lets power users
 	// relocate it and lets tests point it at a temp dir for hermetic

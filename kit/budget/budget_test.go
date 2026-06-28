@@ -14,17 +14,44 @@ func TestResolve(t *testing.T) {
 		in   int
 		want int
 	}{
-		{"zero falls back to default", 0, DefaultTaskTokens},
-		{"negative is unlimited", -1, 0},
-		{"large negative is unlimited", -1_000_000, 0},
+		{"zero is disabled by default", 0, 0},
+		{"negative is disabled", -1, 0},
+		{"large negative is disabled", -1_000_000, 0},
 		{"positive passes through", 500, 500},
 		{"large positive passes through", 10_000_000, 10_000_000},
+		{"recommended opt-in passes through", RecommendedTaskTokens, RecommendedTaskTokens},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := Resolve(tc.in); got != tc.want {
 				t.Errorf("Resolve(%d) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFromEnv(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		raw     string
+		want    int
+		wantSet bool
+	}{
+		{"empty leaves default", "", 0, false},
+		{"unparseable leaves default", "lots", 0, false},
+		{"trailing junk leaves default", "100x", 0, false},
+		{"positive raises cap", "10000000", 10_000_000, true},
+		{"negative one disables", "-1", -1, true},
+		{"explicit zero passes through", "0", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, set := FromEnv(tc.raw)
+			if got != tc.want || set != tc.wantSet {
+				t.Errorf("FromEnv(%q) = (%d, %t), want (%d, %t)", tc.raw, got, set, tc.want, tc.wantSet)
 			}
 		})
 	}

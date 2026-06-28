@@ -35,6 +35,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate"
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
+	"github.com/latebit-io/nib/kit/budget"
 )
 
 // errSetup is a sentinel wrapped into setup errors so main can distinguish
@@ -233,6 +234,9 @@ func run() error {
 		DistributedMemory: codingmemory.DetectDistributedMemory(mcpResult.ServerNames),
 		Linters:           linters.PostTask,
 		SmokeConfig:       smokeCfg,
+	}
+	if v, ok := budget.FromEnv(os.Getenv(brand.EnvKeyTaskTokenBudget)); ok {
+		opts.TaskTokenBudget = v
 	}
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr

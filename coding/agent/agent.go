@@ -389,15 +389,17 @@ type NewOptions struct {
 	SmokeConfig runconfig.Resolved
 
 	// TaskTokenBudget caps total prompt+completion tokens consumed by a
-	// single agent run (RunWithMode → Done). Once the budget is exceeded
-	// the run aborts with an AgentError so a runaway loop cannot quietly
-	// burn the developer's wallet. The 2026-04-26 pacman regression burned
-	// 55M+ tokens on a single broken task; the budget is the safety net
-	// that keeps that from recurring.
+	// single agent run (RunWithMode → Done). When armed, the run aborts
+	// with an AgentError once the budget is exceeded so a runaway loop
+	// cannot quietly burn the developer's wallet. The 2026-04-26 pacman
+	// regression burned 55M+ tokens on a single broken task; arming the
+	// budget is the safety net that keeps that from recurring.
 	//
-	//	== 0 — use the default ([defaultTaskTokenBudget]).
-	//	 < 0 — unlimited (disable the check; not recommended).
+	//	== 0 — disabled (no cap). This is the default.
+	//	 < 0 — disabled (no cap).
 	//	 > 0 — explicit cap in tokens.
+	//
+	// Opt into the recommended cap with [budget.RecommendedTaskTokens].
 	TaskTokenBudget int
 
 	// FlushDirtyBuffers is the frontend-supplied autosave callback. See

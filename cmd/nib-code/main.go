@@ -32,6 +32,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/budget"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	cmdloader "github.com/latebit-io/nib/kit/command/loader"
 	"github.com/latebit-io/nib/kit/skill"
@@ -233,6 +234,9 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			Terse:             true,
 			SmokeConfig:       smokeCfg,
 			FlushDirtyBuffers: flushDirtyBuffersFn,
+		}
+		if v, ok := budget.FromEnv(os.Getenv(brand.EnvKeyTaskTokenBudget)); ok {
+			opts.TaskTokenBudget = v
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr

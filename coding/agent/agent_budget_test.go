@@ -259,17 +259,28 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 	}
 }
 
-// TestAgent_TokenBudget_DefaultApplied checks that when
-// NewOptions.TaskTokenBudget is left zero, [New] resolves it to
-// [budget.DefaultTaskTokens] rather than leaving the budget disabled.
-// Disabling the budget by default would make the safety net silently
-// absent — the regression guard would not fire.
-func TestAgent_TokenBudget_DefaultApplied(t *testing.T) {
+// TestAgent_TokenBudget_DisabledByDefault checks that when
+// NewOptions.TaskTokenBudget is left zero, [New] resolves it to 0 —
+// the cap is OFF by default and must be armed explicitly (via a
+// positive NewOptions value or NIB_TASK_TOKEN_BUDGET).
+func TestAgent_TokenBudget_DisabledByDefault(t *testing.T) {
 	t.Parallel()
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, nil)
-	if ag.taskTokenBudget != budget.DefaultTaskTokens {
-		t.Errorf("taskTokenBudget = %d, want default %d",
-			ag.taskTokenBudget, budget.DefaultTaskTokens)
+	if ag.taskTokenBudget != 0 {
+		t.Errorf("taskTokenBudget = %d, want 0 (disabled by default)",
+			ag.taskTokenBudget)
+	}
+}
+
+// TestAgent_TokenBudget_RecommendedOptIn checks that a caller can arm
+// the recommended cap by passing [budget.RecommendedTaskTokens].
+func TestAgent_TokenBudget_RecommendedOptIn(t *testing.T) {
+	t.Parallel()
+	ag := New(&multiTurnProvider{}, stubWorkspace{},
+		&NewOptions{TaskTokenBudget: budget.RecommendedTaskTokens})
+	if ag.taskTokenBudget != budget.RecommendedTaskTokens {
+		t.Errorf("taskTokenBudget = %d, want %d",
+			ag.taskTokenBudget, budget.RecommendedTaskTokens)
 	}
 }
 

@@ -94,9 +94,10 @@ func Resolve(input int) int {
 // FromEnv parses an environment-variable override for the per-task
 // token budget into the value expected by NewOptions.TaskTokenBudget.
 // It reports set=false for an empty or unparseable raw string, so the
-// caller leaves the field at its zero value (built-in default). A
-// parsed integer — including a negative one, which Resolve treats as
-// "unlimited" — is returned verbatim with set=true.
+// caller leaves the field at its zero value (the cap disabled by
+// default). A parsed integer — including zero or a negative value,
+// which Resolve treats as disabled — is returned verbatim with
+// set=true.
 //
 // Keeping the parse here (rather than inline at each binary's wiring)
 // lets the env-override semantics be table-tested without a real

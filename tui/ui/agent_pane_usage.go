@@ -43,6 +43,15 @@ type usageState struct {
 	// numerator of the `N%/<window>` chip and bar viz — stands in
 	// for "current context occupancy."
 	lastTurnTotal int
+	// runIn / runOut are the per-RUN gross input + output sums,
+	// zeroed at each run boundary by [AgentPaneModel.BeginRun]. They
+	// mirror the scope of the agent's per-task token budget gate,
+	// which resets on every RunWithMode and Reply
+	// ([coding/agent] lifecycle). The session totals (totalIn/totalOut)
+	// span the whole conversation and would drift from the gate after
+	// the first follow-up, so the budget indicator reads these instead.
+	runIn  int
+	runOut int
 	// hasExact flips true once any turn reported provider data.
 	hasExact          bool
 	turns             int
@@ -73,6 +82,8 @@ func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
 		m.usage.totalIn += u.PromptTokens + u.CachedTokens
 		m.usage.totalOut += u.CompletionTokens
 		m.usage.totalCached += u.CachedTokens
+		m.usage.runIn += u.PromptTokens + u.CachedTokens
+		m.usage.runOut += u.CompletionTokens
 		m.usage.lastTurnFresh = u.PromptTokens
 		m.usage.lastTurnOut = u.CompletionTokens
 		m.usage.lastTurnCached = u.CachedTokens
@@ -82,6 +93,8 @@ func (m *AgentPaneModel) UpdateUsage(u event.AgentTurnUsage) {
 		est := u.SystemEst + u.ToolsEst + u.HistoryEst + u.NewEst
 		m.usage.totalIn += est
 		m.usage.totalOut += u.CompletionEst
+		m.usage.runIn += est
+		m.usage.runOut += u.CompletionEst
 		m.usage.lastTurnFresh = est
 		m.usage.lastTurnOut = u.CompletionEst
 		m.usage.lastTurnCached = 0
@@ -112,6 +125,49 @@ func (m *AgentPaneModel) UsageIndicator() string {
 // ResetUsage clears accumulated usage for a new agent run.
 func (m *AgentPaneModel) ResetUsage() {
 	m.usage = usageState{}
+}
+
+// BeginRun zeroes the per-run spend counters that back the budget
+// indicator. Called at each run boundary (every goal submission,
+// including a follow-up that continues an existing conversation) so
+// the indicator's scope matches the agent's per-task budget gate,
+// which resets on every RunWithMode and Reply. The conversation-wide
+// session totals are intentionally left untouched.
+func (m *AgentPaneModel) BeginRun() {
+	m.usage.runIn = 0
+	m.usage.runOut = 0
+}
+
+// SetTaskTokenBudget records the armed per-task token cap (0 = the cap
+// is disabled). Drives [AgentPaneModel.BudgetIndicator]; it must equal
+// the value the agent resolves via [kit/budget.Resolve] so the
+// status-bar percentage matches the gate that actually aborts the run.
+func (m *AgentPaneModel) SetTaskTokenBudget(cap int) {
+	m.taskTokenBudget = cap
+}
+
+// BudgetIndicator returns the status-bar segment reporting this run's
+// cumulative token spend — the same prompt+cached+completion footprint
+// the budget gate accumulates. When a cap is armed it shows progress
+// toward it (`budget 1.2M/2M 60%`, flagged with ⚠ past 90%); with the
+// cap disabled it shows the bare per-run tally (`tokens 1.2M`) so the
+// runaway-cost signal survives even though nothing will abort the run.
+// Empty string before any tokens land in the current run.
+func (m *AgentPaneModel) BudgetIndicator() string {
+	spent := m.usage.runIn + m.usage.runOut
+	if spent <= 0 {
+		return ""
+	}
+	if m.taskTokenBudget <= 0 {
+		return "tokens " + formatTokenCount(spent)
+	}
+	pct := spent * 100 / m.taskTokenBudget
+	seg := fmt.Sprintf("budget %s/%s %d%%",
+		formatTokenCount(spent), formatRoundCount(m.taskTokenBudget), pct)
+	if pct >= 90 {
+		seg += " ⚠"
+	}
+	return seg
 }
 
 // formatTokenCount renders a token count as a compact string.

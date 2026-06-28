@@ -21,17 +21,20 @@ func (m *AppModel) View() tea.View {
 		content = "Initializing..."
 	} else {
 		mem := m.Session.DistributedMemory()
-		extra := 2 // terse + usage always shown
-		indicators := make([]string, len(mem)+extra)
-		copy(indicators, mem)
-		idx := len(mem)
+		indicators := append([]string{}, mem...)
 		if m.terse {
-			indicators[idx] = "terse:on"
+			indicators = append(indicators, "terse:on")
 		} else {
-			indicators[idx] = "terse:off"
+			indicators = append(indicators, "terse:off")
 		}
-		idx++
-		indicators[idx] = m.AgentPane.UsageIndicator()
+		// Drop empty segments so the status bar doesn't render doubled
+		// "| |" separators before any usage has been recorded.
+		if seg := m.AgentPane.BudgetIndicator(); seg != "" {
+			indicators = append(indicators, seg)
+		}
+		if seg := m.AgentPane.UsageIndicator(); seg != "" {
+			indicators = append(indicators, seg)
+		}
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + renderStatusBar(m.Editor.statusInfo(), m.Width, indicators...)
 		if m.Dialog.Active {
 			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)

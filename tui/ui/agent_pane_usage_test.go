@@ -138,6 +138,87 @@ func TestUsageIndicator_EmptyWhenNoUsage(t *testing.T) {
 	}
 }
 
+// TestBudgetIndicator_ArmedShowsProgress covers the cap-armed path:
+// the segment reads the per-run spend as a percentage of the cap, and
+// the number must match the prompt+cached+completion footprint the
+// budget gate accumulates.
+func TestBudgetIndicator_ArmedShowsProgress(t *testing.T) {
+	svc := &Services{Clipboard: &mockClipboard{}}
+	m := NewAgentPaneModel(svc, true)
+	m.SetTaskTokenBudget(2_000_000)
+	m.UpdateUsage(event.AgentTurnUsage{
+		PromptTokens:     800_000,
+		CachedTokens:     100_000,
+		CompletionTokens: 300_000, // 1.2M spend = 60% of 2M
+	})
+	got := m.BudgetIndicator()
+	if got != "budget 1.2M/2M 60%" {
+		t.Errorf("armed budget indicator = %q, want %q", got, "budget 1.2M/2M 60%")
+	}
+}
+
+// TestBudgetIndicator_WarnsPastThreshold checks the ⚠ flag fires at
+// 90%+ so a run approaching the cap is visually obvious.
+func TestBudgetIndicator_WarnsPastThreshold(t *testing.T) {
+	svc := &Services{Clipboard: &mockClipboard{}}
+	m := NewAgentPaneModel(svc, true)
+	m.SetTaskTokenBudget(1_000_000)
+	m.UpdateUsage(event.AgentTurnUsage{PromptTokens: 950_000, CompletionTokens: 0})
+	if got := m.BudgetIndicator(); !strings.HasSuffix(got, " ⚠") {
+		t.Errorf("budget indicator at 95%% should carry ⚠; got %q", got)
+	}
+}
+
+// TestBudgetIndicator_DisabledShowsBareTally covers the cap-off
+// default: no percentage, just the per-run token tally so the
+// runaway-cost signal survives without a cap.
+func TestBudgetIndicator_DisabledShowsBareTally(t *testing.T) {
+	svc := &Services{Clipboard: &mockClipboard{}}
+	m := NewAgentPaneModel(svc, true)
+	// taskTokenBudget left 0 (disabled).
+	m.UpdateUsage(event.AgentTurnUsage{PromptTokens: 1_200_000, CompletionTokens: 0})
+	if got := m.BudgetIndicator(); got != "tokens 1.2M" {
+		t.Errorf("disabled budget indicator = %q, want %q", got, "tokens 1.2M")
+	}
+}
+
+// TestBudgetIndicator_EmptyBeforeSpend pins the pre-run blank: no
+// tokens this run means no segment, so the status bar stays quiet.
+func TestBudgetIndicator_EmptyBeforeSpend(t *testing.T) {
+	svc := &Services{Clipboard: &mockClipboard{}}
+	m := NewAgentPaneModel(svc, true)
+	m.SetTaskTokenBudget(2_000_000)
+	if got := m.BudgetIndicator(); got != "" {
+		t.Errorf("pre-spend budget indicator should be empty, got %q", got)
+	}
+}
+
+// TestBeginRun_ResetsSpendButKeepsTotals is the core alignment guard:
+// the per-run spend must reset on a run boundary (matching the gate),
+// while the conversation-wide session totals continue accumulating.
+func TestBeginRun_ResetsSpendButKeepsTotals(t *testing.T) {
+	svc := &Services{Clipboard: &mockClipboard{}}
+	m := NewAgentPaneModel(svc, true)
+	m.SetTaskTokenBudget(2_000_000)
+	m.UpdateUsage(event.AgentTurnUsage{PromptTokens: 500_000, CompletionTokens: 100_000})
+
+	m.BeginRun() // new run boundary (e.g. a follow-up Reply)
+	if got := m.BudgetIndicator(); got != "" {
+		t.Errorf("after BeginRun the per-run spend should be zero; got %q", got)
+	}
+	// Session totals must survive the run boundary.
+	if m.usage.totalIn != 500_000 || m.usage.totalOut != 100_000 {
+		t.Errorf("BeginRun should not touch session totals; got in=%d out=%d",
+			m.usage.totalIn, m.usage.totalOut)
+	}
+
+	// Spend re-accumulates from zero in the new run.
+	m.UpdateUsage(event.AgentTurnUsage{PromptTokens: 200_000, CompletionTokens: 0})
+	if got := m.BudgetIndicator(); got != "budget 200.0k/2M 10%" {
+		t.Errorf("post-BeginRun spend = %q, want %q", got, "budget 200.0k/2M 10%")
+	}
+}
+
 // TestFormatContextChip pins the model→window lookup and the
 // resulting `N%/<window>` chip format. Matches pi's `4.0%/272k`
 // shape so users coming from pi recognize it at a glance.

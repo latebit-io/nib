@@ -225,6 +225,17 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return tuiApp.FlushDirtyBuffers(ctx)
 	}
 
+	// Resolve the per-task token budget once so every rebuilt agent and
+	// the TUI status indicator agree on the same armed cap.
+	// taskTokenBudgetInput is the raw NewOptions value (env override or
+	// 0); taskTokenBudgetCap is its resolved form (0 = disabled) for
+	// display.
+	taskTokenBudgetInput := 0
+	if v, ok := budget.FromEnv(os.Getenv(brand.EnvKeyTaskTokenBudget)); ok {
+		taskTokenBudgetInput = v
+	}
+	taskTokenBudgetCap := budget.Resolve(taskTokenBudgetInput)
+
 	buildAgent := func(p llm.Provider) *agent.Agent {
 		opts := &agent.NewOptions{
 			MemoryStore:       mem.Store,
@@ -234,9 +245,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			Terse:             true,
 			SmokeConfig:       smokeCfg,
 			FlushDirtyBuffers: flushDirtyBuffersFn,
-		}
-		if v, ok := budget.FromEnv(os.Getenv(brand.EnvKeyTaskTokenBudget)); ok {
-			opts.TaskTokenBudget = v
+			TaskTokenBudget:   taskTokenBudgetInput,
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
@@ -385,6 +394,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			return ag
 		},
 		LLM:                llmCallbacks,
+		TaskTokenBudget:    taskTokenBudgetCap,
 		HighlighterFactory: highlight.NewHighlighter,
 	})
 	app := tuiApp.Model()

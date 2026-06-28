@@ -185,6 +185,7 @@ func convertCommands(src, dst, pluginName string, vars Vars, report *ConvertRepo
 		return fmt.Errorf("pluginstore: read commands dir: %w", err)
 	}
 	outDir := filepath.Join(dst, "commands")
+	seen := map[string]string{} // namespaced name → source filename
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
@@ -208,6 +209,11 @@ func convertCommands(src, dst, pluginName string, vars Vars, report *ConvertRepo
 			report.add("command", e.Name(), "could not derive a valid name; skipped")
 			continue
 		}
+		if prev, dup := seen[name]; dup {
+			report.add("command", e.Name(), fmt.Sprintf("name %q collides with %s after sanitization; skipped", name, prev))
+			continue
+		}
+		seen[name] = e.Name()
 		if shellBearing(fm["allowed-tools"]) {
 			report.add("command-tools", name, "declares shell tools; grants enforced at M2")
 		}
@@ -244,6 +250,7 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 		}
 		return fmt.Errorf("pluginstore: read skills dir: %w", err)
 	}
+	seen := map[string]string{} // namespaced name → source skill dir
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -272,6 +279,11 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 			report.add("skill", e.Name(), "could not derive a valid name; skipped")
 			continue
 		}
+		if prev, dup := seen[name]; dup {
+			report.add("skill", e.Name(), fmt.Sprintf("name %q collides with %s after sanitization; skipped", name, prev))
+			continue
+		}
+		seen[name] = e.Name()
 		if shellBearing(fm["allowed-tools"]) {
 			report.add("skill-shell", name, "shell-bearing skill deferred to M2 (trust + execution)")
 			continue

@@ -85,6 +85,12 @@ func loadRegistry(path string) (*Registry, error) {
 	if r.Version == 0 {
 		r.Version = registryVersion
 	}
+	// Refuse a registry written by a newer nib: loading then save()-ing it
+	// would silently rewrite it as the older schema and could drop fields
+	// the newer version added.
+	if r.Version > registryVersion {
+		return nil, fmt.Errorf("pluginstore: registry %s is version %d, newer than supported %d; upgrade nib", path, r.Version, registryVersion)
+	}
 	return &r, nil
 }
 

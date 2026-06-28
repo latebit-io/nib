@@ -79,7 +79,11 @@ func (s Source) Validate() error {
 		if s.Repo == "" {
 			return fmt.Errorf("pluginstore: github source missing repo")
 		}
-		if !strings.Contains(s.Repo, "/") {
+		// Require exactly two non-empty segments: "owner/repo". A bare
+		// Contains("/") would accept "/repo", "owner/", and
+		// "owner/repo/extra", which only fail later at clone time.
+		parts := strings.Split(s.Repo, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return fmt.Errorf("pluginstore: github source repo %q must be owner/repo", s.Repo)
 		}
 	case SourceNPM:

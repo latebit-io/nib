@@ -85,6 +85,10 @@ type InstallOptions struct {
 // returning the resulting ledger entry. Reinstalling an existing plugin
 // (same derived ID) replaces its source tree but preserves the user's
 // enabled/trusted/userConfig state and its data directory.
+//
+// Conversion runs against the staging tree before the source and
+// converted trees are promoted, so a conversion failure leaves any
+// prior install fully intact rather than half-replaced.
 func (s *Store) Install(ctx context.Context, src Source, opts InstallOptions) (InstalledPlugin, error) {
 	if err := src.Validate(); err != nil {
 		return InstalledPlugin{}, err
@@ -92,36 +96,35 @@ func (s *Store) Install(ctx context.Context, src Source, opts InstallOptions) (I
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	staged, pin, name, version, err := s.fetchStaged(ctx, src, opts.Name)
+	st, err := s.fetchStaged(ctx, src, opts.Name)
 	if err != nil {
 		return InstalledPlugin{}, err
 	}
-	// Best-effort cleanup; on success the tree is renamed out of staging
-	// first, so this removes only an abandoned staging dir on error.
-	defer func() { _ = os.RemoveAll(staged) }()
+	defer func() { _ = os.RemoveAll(st.cleanupRoot) }() // always clear the whole staging tree
 
-	id := deriveID(opts.Marketplace, name)
-	if err := s.promote(staged, id); err != nil {
-		return InstalledPlugin{}, err
-	}
-	if err := s.runConvert(id, name, version); err != nil {
-		return InstalledPlugin{}, err
-	}
+	id := deriveID(opts.Marketplace, st.name)
 
 	entry := InstalledPlugin{
 		ID:          id,
-		Name:        name,
+		Name:        st.name,
 		Marketplace: opts.Marketplace,
 		Source:      src,
-		Pin:         pin,
-		Version:     version,
+		Pin:         st.pin,
+		Version:     st.version,
 		Enabled:     opts.Enabled,
 	}
-	// Carry forward survive-on-update state from a prior install.
+	// Carry forward survive-on-update state from a prior install. Enabled
+	// is preserved too: a reinstall must not silently re-enable a plugin
+	// the user disabled. (Direct index lookup — we already hold s.mu.)
 	if i := s.reg.pluginIndex(id); i >= 0 {
 		prev := s.reg.Plugins[i]
+		entry.Enabled = prev.Enabled
 		entry.Trusted = prev.Trusted
 		entry.UserConfig = prev.UserConfig
+	}
+
+	if err := s.promoteInstall(id, st.name, st.version, st.dir); err != nil {
+		return InstalledPlugin{}, err
 	}
 	s.reg.upsertPlugin(entry)
 	if err := s.reg.save(s.registryPath()); err != nil {
@@ -135,6 +138,9 @@ func (s *Store) Install(ctx context.Context, src Source, opts InstallOptions) (I
 // the source tree actually changed. User state and the data directory
 // are preserved. Local sources have no pin and are always re-copied
 // (reported as changed).
+//
+// As in [Install], conversion runs before promotion, so a failed update
+// leaves the existing install untouched rather than partially upgraded.
 func (s *Store) Update(ctx context.Context, id string) (changed bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,31 +151,64 @@ func (s *Store) Update(ctx context.Context, id string) (changed bool, err error)
 	}
 	prev := s.reg.Plugins[i]
 
-	staged, pin, name, version, err := s.fetchStaged(ctx, prev.Source, prev.Name)
+	st, err := s.fetchStaged(ctx, prev.Source, prev.Name)
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = os.RemoveAll(staged) }() // best-effort staging cleanup
+	defer func() { _ = os.RemoveAll(st.cleanupRoot) }() // always clear the whole staging tree
 
 	// Git sources with an unchanged SHA are a no-op; local sources lack a
 	// pin so we always promote and report changed.
-	if pin != "" && pin == prev.Pin {
+	if st.pin != "" && st.pin == prev.Pin {
 		return false, nil
 	}
-	if err := s.promote(staged, id); err != nil {
+	if err := s.promoteInstall(id, prev.Name, st.version, st.dir); err != nil {
 		return false, err
 	}
-	if err := s.runConvert(id, prev.Name, version); err != nil {
-		return false, err
-	}
-	prev.Pin = pin
-	prev.Version = version
-	_ = name // name is immutable across updates; ignore any drift
+	prev.Pin = st.pin
+	prev.Version = st.version
 	s.reg.Plugins[i] = prev
 	if err := s.reg.save(s.registryPath()); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// promoteInstall converts the staged source tree into a temporary
+// converted tree, then atomically swaps both the source and converted
+// trees into place. Converting first means a failure here never replaces
+// or removes the live install.
+func (s *Store) promoteInstall(id, name, version, stagedDir string) error {
+	// Convert from the staged tree into a temporary converted tree so a
+	// conversion failure touches nothing live.
+	convParent := filepath.Join(s.root, "converted")
+	if err := os.MkdirAll(convParent, 0o755); err != nil {
+		return fmt.Errorf("pluginstore: create converted dir: %w", err)
+	}
+	tmpConv, err := os.MkdirTemp(convParent, ".staging-*")
+	if err != nil {
+		return fmt.Errorf("pluginstore: create converted staging dir: %w", err)
+	}
+	cleanupConv := true
+	defer func() {
+		if cleanupConv {
+			_ = os.RemoveAll(tmpConv)
+		}
+	}()
+	if err := s.convertInto(id, name, version, stagedDir, tmpConv); err != nil {
+		return err
+	}
+
+	// Both conversions succeeded: promote source then converted. swapDir
+	// preserves the prior tree until each rename lands.
+	if err := swapDir(stagedDir, s.srcDir(id)); err != nil {
+		return err
+	}
+	if err := swapDir(tmpConv, s.ConvertedDir(id)); err != nil {
+		return err
+	}
+	cleanupConv = false
+	return nil
 }
 
 // Remove uninstalls a plugin: deletes its source, converted, and data
@@ -280,14 +319,13 @@ func (s *Store) mutatePlugin(id string, fn func(*InstalledPlugin)) error {
 // conversion report for a plugin.
 const importReportName = "import-report.json"
 
-// runConvert (re)builds the nib-native converted tree for a plugin from
-// its raw source, freezing import-time variables, and persists the
-// conversion report. The converted directory is rebuilt from scratch so
-// a re-sync never leaves stale artifacts behind.
-func (s *Store) runConvert(id, name, version string) error {
-	if err := os.RemoveAll(s.ConvertedDir(id)); err != nil {
-		return fmt.Errorf("pluginstore: clear converted dir: %w", err)
-	}
+// convertInto builds the nib-native converted tree for a plugin from the
+// given source directory into dstDir, freezing import-time variables to
+// the plugin's FINAL installed location (not the staging path, so frozen
+// ${…_PLUGIN_ROOT}/${…_PLUGIN_DATA} paths are correct at runtime), and
+// writes the conversion report into dstDir. dstDir is a caller-owned
+// temporary tree swapped into place only after this succeeds.
+func (s *Store) convertInto(id, name, version, srcDir, dstDir string) error {
 	srcAbs, err := filepath.Abs(s.srcDir(id))
 	if err != nil {
 		return fmt.Errorf("pluginstore: resolve source path: %w", err)
@@ -297,7 +335,7 @@ func (s *Store) runConvert(id, name, version string) error {
 		return fmt.Errorf("pluginstore: resolve data path: %w", err)
 	}
 	vars := Vars{PluginRoot: srcAbs, PluginData: dataAbs}
-	report, err := Convert(s.srcDir(id), s.ConvertedDir(id), Manifest{Name: name, Version: version}, vars)
+	report, err := Convert(srcDir, dstDir, Manifest{Name: name, Version: version}, vars)
 	if err != nil {
 		return err
 	}
@@ -305,7 +343,7 @@ func (s *Store) runConvert(id, name, version string) error {
 	if err != nil {
 		return fmt.Errorf("pluginstore: marshal import report: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(s.ConvertedDir(id), importReportName), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dstDir, importReportName), data, 0o644); err != nil {
 		return fmt.Errorf("pluginstore: write import report: %w", err)
 	}
 	return nil
@@ -327,52 +365,62 @@ func (s *Store) ImportReport(id string) (ConvertReport, error) {
 	return report, nil
 }
 
+// staged carries the result of a fetch into a temporary tree.
+type staged struct {
+	// cleanupRoot is the .staging-* directory the caller must remove. It
+	// is distinct from dir so a subdir-scoped source still cleans up the
+	// whole fetched repo, not just the promoted subdir.
+	cleanupRoot string
+	// dir is the effective plugin directory (the subdir when the source
+	// scopes one, else cleanupRoot). This is what gets promoted.
+	dir     string
+	pin     string
+	name    string
+	version string
+}
+
 // fetchStaged fetches src into a fresh staging directory and resolves
 // the plugin's name and version. nameOverride, when non-empty, wins over
-// the manifest (and lets manifest-less plugins install). Returns the
-// staging path (caller must remove it), the resolved pin, name, and
-// version.
-func (s *Store) fetchStaged(ctx context.Context, src Source, nameOverride string) (staged, pin, name, version string, err error) {
+// the manifest (and lets manifest-less plugins install). On any error
+// the staging tree is removed; on success the caller owns cleanupRoot.
+func (s *Store) fetchStaged(ctx context.Context, src Source, nameOverride string) (staged, error) {
 	storeDir := filepath.Join(s.root, "store")
-	if err = os.MkdirAll(storeDir, 0o755); err != nil {
-		return "", "", "", "", fmt.Errorf("pluginstore: create store dir: %w", err)
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		return staged{}, fmt.Errorf("pluginstore: create store dir: %w", err)
 	}
-	staged, err = os.MkdirTemp(storeDir, ".staging-*")
+	root, err := os.MkdirTemp(storeDir, ".staging-*")
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("pluginstore: create staging dir: %w", err)
+		return staged{}, fmt.Errorf("pluginstore: create staging dir: %w", err)
 	}
-	cleanup := true
+	ok := false
 	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(staged)
+		if !ok {
+			_ = os.RemoveAll(root) // remove the whole staging tree on failure
 		}
 	}()
 
-	pin, err = s.fetcher.Fetch(ctx, src, staged)
+	pin, err := s.fetcher.Fetch(ctx, src, root)
 	if err != nil {
-		return "", "", "", "", err
+		return staged{}, err
 	}
 
-	// Scope to a git subdir when requested.
-	root := staged
+	// Scope to a git subdir when requested, guarding against traversal
+	// that would point outside the fetched repo.
+	dir := root
 	if src.Subdir != "" {
-		root = filepath.Join(staged, filepath.Clean(src.Subdir))
+		dir = filepath.Join(root, filepath.Clean(src.Subdir))
+		if !withinDir(root, dir) {
+			return staged{}, fmt.Errorf("pluginstore: subdir %q escapes the fetched repo", src.Subdir)
+		}
 	}
 
-	name, version, err = resolveIdentity(root, nameOverride)
+	name, version, err := resolveIdentity(dir, nameOverride)
 	if err != nil {
-		return "", "", "", "", err
+		return staged{}, err
 	}
 
-	// If scoped to a subdir, the promoted tree should be the subdir, not
-	// the whole repo. Re-point staged at the subdir by returning it; the
-	// caller promotes `staged`, so collapse it here.
-	if root != staged {
-		staged = root
-	}
-
-	cleanup = false
-	return staged, pin, name, version, nil
+	ok = true
+	return staged{cleanupRoot: root, dir: dir, pin: pin, name: name, version: version}, nil
 }
 
 // resolveIdentity determines the plugin name and version from the fetched
@@ -399,23 +447,6 @@ func resolveIdentity(dir, nameOverride string) (name, version string, err error)
 		return "", "", fmt.Errorf("pluginstore: could not determine plugin name at %s", dir)
 	}
 	return name, version, nil
-}
-
-// promote atomically replaces the plugin's source directory with the
-// staged tree (rename within the same parent, so the swap is atomic on
-// any sane filesystem).
-func (s *Store) promote(staged, id string) error {
-	final := s.srcDir(id)
-	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
-		return fmt.Errorf("pluginstore: create store dir: %w", err)
-	}
-	if err := os.RemoveAll(final); err != nil {
-		return fmt.Errorf("pluginstore: clear %s: %w", final, err)
-	}
-	if err := os.Rename(staged, final); err != nil {
-		return fmt.Errorf("pluginstore: promote %s → %s: %w", staged, final, err)
-	}
-	return nil
 }
 
 // idSanitizer strips characters unsafe for a filesystem directory name.

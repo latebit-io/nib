@@ -123,6 +123,9 @@ func (e *MarketplaceEntry) UnmarshalJSON(data []byte) error {
 	e.Name = a.Name
 	e.Description = a.Description
 	e.Version = a.Version
+	if a.Name == "" {
+		return fmt.Errorf("pluginstore: marketplace entry missing name")
+	}
 	if len(a.Source) == 0 {
 		return fmt.Errorf("pluginstore: marketplace entry %q missing source", a.Name)
 	}
@@ -131,18 +134,22 @@ func (e *MarketplaceEntry) UnmarshalJSON(data []byte) error {
 	var asString string
 	if err := json.Unmarshal(a.Source, &asString); err == nil {
 		e.Source = LocalSource(asString)
-		return nil
+	} else {
+		var obj ccSourceObject
+		if err := json.Unmarshal(a.Source, &obj); err != nil {
+			return fmt.Errorf("pluginstore: parse source for entry %q: %w", a.Name, err)
+		}
+		src, err := sourceFromCC(obj)
+		if err != nil {
+			return fmt.Errorf("pluginstore: entry %q: %w", a.Name, err)
+		}
+		e.Source = src
 	}
-
-	var obj ccSourceObject
-	if err := json.Unmarshal(a.Source, &obj); err != nil {
-		return fmt.Errorf("pluginstore: parse source for entry %q: %w", a.Name, err)
-	}
-	src, err := sourceFromCC(obj)
-	if err != nil {
+	// Reject a structurally-broken source at parse time rather than
+	// letting bad catalog data persist and fail only at install.
+	if err := e.Source.Validate(); err != nil {
 		return fmt.Errorf("pluginstore: entry %q: %w", a.Name, err)
 	}
-	e.Source = src
 	return nil
 }
 

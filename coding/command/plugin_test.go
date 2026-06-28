@@ -114,6 +114,23 @@ func TestPlugin_UnknownSubcommand(t *testing.T) {
 	}
 }
 
+func TestParseSource_ExistingRelativePathIsLocal(t *testing.T) {
+	// A real relative dir that also looks like "owner/repo" must resolve
+	// as a local path, not a GitHub slug.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "plugins", "demo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	src, err := parseSource("plugins/demo")
+	if err != nil {
+		t.Fatalf("parseSource: %v", err)
+	}
+	if src.Type != pluginstore.SourceLocal {
+		t.Errorf("type = %q, want local", src.Type)
+	}
+}
+
 func TestParseSource(t *testing.T) {
 	dir := t.TempDir()
 	cases := []struct {

@@ -48,21 +48,29 @@ func (DefaultFetcher) Fetch(ctx context.Context, src Source, dest string) (strin
 // and returns the checked-out commit SHA. A subdir source clones the
 // whole repo (git has no first-class sparse single-dir clone that is
 // also portable) and the caller scopes to the subdir afterward.
+//
+// Ref handling: with no ref we shallow-clone the default branch (fast).
+// With a ref we do a full clone and `checkout`, because `--branch` only
+// accepts branch/tag names — a SHA-pinned ref fails there. Trading the
+// shallow optimization for a ref keeps pin-by-commit working, which the
+// re-sync ledger relies on.
 func gitFetch(ctx context.Context, src Source, dest string) (string, error) {
 	url, err := src.gitURL()
 	if err != nil {
 		return "", err
 	}
 
-	// Clone shallow to keep imports fast; a specific ref needs its own
-	// fetch since --depth 1 of the default branch may not contain it.
-	args := []string{"clone", "--depth", "1"}
-	if src.Ref != "" {
-		args = append(args, "--branch", src.Ref)
-	}
-	args = append(args, url, dest)
-	if out, err := runGit(ctx, "", args...); err != nil {
-		return "", fmt.Errorf("pluginstore: git clone %s: %w: %s", url, err, out)
+	if src.Ref == "" {
+		if out, err := runGit(ctx, "", "clone", "--depth", "1", url, dest); err != nil {
+			return "", fmt.Errorf("pluginstore: git clone %s: %w: %s", url, err, out)
+		}
+	} else {
+		if out, err := runGit(ctx, "", "clone", url, dest); err != nil {
+			return "", fmt.Errorf("pluginstore: git clone %s: %w: %s", url, err, out)
+		}
+		if out, err := runGit(ctx, dest, "checkout", "--detach", src.Ref); err != nil {
+			return "", fmt.Errorf("pluginstore: git checkout %s: %w: %s", src.Ref, err, out)
+		}
 	}
 
 	sha, err := runGit(ctx, dest, "rev-parse", "HEAD")

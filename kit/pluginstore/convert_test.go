@@ -113,6 +113,29 @@ func TestConvert_FullPlugin(t *testing.T) {
 	}
 }
 
+func TestConvert_NameCollisionReported(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude-plugin", "plugin.json"), `{"name":"demo"}`)
+	// Two command files that sanitize to the same namespaced name.
+	writeFile(t, filepath.Join(src, "commands", "foo bar.md"), "---\ndescription: a\n---\nA\n")
+	writeFile(t, filepath.Join(src, "commands", "foo-bar.md"), "---\ndescription: b\n---\nB\n")
+
+	report, err := Convert(src, t.TempDir(), Manifest{Name: "demo"}, Vars{})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	// Exactly one survives; the collision is reported, not silently dropped.
+	if len(report.Commands) != 1 {
+		t.Errorf("expected 1 converted command, got %v", report.Commands)
+	}
+	if !slices.ContainsFunc(report.Unsupported, func(u Unsupported) bool {
+		return u.Kind == "command" && strings.Contains(u.Reason, "collides")
+	}) {
+		t.Errorf("expected a collision report entry, got %+v", report.Unsupported)
+	}
+}
+
 func TestExpandVars(t *testing.T) {
 	t.Parallel()
 	v := Vars{PluginRoot: "/r", PluginData: "/d"}

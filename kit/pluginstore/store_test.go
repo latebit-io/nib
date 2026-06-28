@@ -172,6 +172,31 @@ func TestStore_TrustSurvivesReinstall(t *testing.T) {
 	}
 }
 
+func TestStore_ReinstallPreservesDisabled(t *testing.T) {
+	t.Parallel()
+	fixture := filepath.Join(t.TempDir(), "src")
+	writePlugin(t, fixture, "foo", "1.0.0")
+	st, err := New(t.TempDir(), WithFetcher(&fakeFetcher{srcDir: fixture, pin: "sha1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Install(context.Background(), LocalSource(fixture), InstallOptions{Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetEnabled("foo", false); err != nil {
+		t.Fatal(err)
+	}
+	// Reinstall with Enabled:true must NOT silently re-enable a plugin the
+	// user disabled.
+	ent, err := st.Install(context.Background(), LocalSource(fixture), InstallOptions{Enabled: true})
+	if err != nil {
+		t.Fatalf("reinstall: %v", err)
+	}
+	if ent.Enabled {
+		t.Errorf("reinstall re-enabled a user-disabled plugin")
+	}
+}
+
 // TestStore_MarketplaceFlow exercises the full loop through a real local
 // copy fetch: add a marketplace, install a catalog plugin by name.
 func TestStore_MarketplaceFlow(t *testing.T) {

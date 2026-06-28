@@ -27,26 +27,22 @@ func (s *Store) AddMarketplace(ctx context.Context, src Source) (Marketplace, er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	staged, pin, err := s.fetchMarketplaceStaged(ctx, src)
+	root, dir, pin, err := s.fetchMarketplaceStaged(ctx, src)
 	if err != nil {
 		return Marketplace{}, err
 	}
-	defer func() { _ = os.RemoveAll(staged) }() // best-effort staging cleanup
+	defer func() { _ = os.RemoveAll(root) }() // always clear the whole staging tree
 
-	mkt, err := ReadMarketplace(staged)
+	mkt, err := ReadMarketplace(dir)
 	if err != nil {
 		return Marketplace{}, err
 	}
 
-	final := s.marketplaceDir(mkt.Name)
-	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
-		return Marketplace{}, fmt.Errorf("pluginstore: create marketplaces dir: %w", err)
-	}
-	if err := os.RemoveAll(final); err != nil {
-		return Marketplace{}, fmt.Errorf("pluginstore: clear %s: %w", final, err)
-	}
-	if err := os.Rename(staged, final); err != nil {
-		return Marketplace{}, fmt.Errorf("pluginstore: promote marketplace %s: %w", mkt.Name, err)
+	// swapDir keeps the existing marketplace until the replacement lands,
+	// so a failed promotion never leaves the registry pointing at a
+	// directory we already deleted.
+	if err := swapDir(dir, s.marketplaceDir(mkt.Name)); err != nil {
+		return Marketplace{}, err
 	}
 
 	ref := MarketplaceRef{Name: mkt.Name, Source: src, Pin: pin}
@@ -96,7 +92,14 @@ func (s *Store) InstallFromMarketplace(ctx context.Context, marketplaceName, plu
 	src := entry.Source
 	if src.Type == SourceLocal {
 		// Catalog-relative path → absolute under the fetched marketplace.
-		src.Path = filepath.Join(mktDir, filepath.Clean(src.Path))
+		// Reject paths that escape the checkout: filepath.Clean does not
+		// stop `../` traversal, so a hostile catalog could otherwise point
+		// the install at an arbitrary location on disk.
+		abs := filepath.Join(mktDir, filepath.Clean(src.Path))
+		if !withinDir(mktDir, abs) {
+			return InstalledPlugin{}, fmt.Errorf("pluginstore: plugin %q source path %q escapes marketplace %q", pluginName, src.Path, marketplaceName)
+		}
+		src.Path = abs
 	}
 	return s.Install(ctx, src, InstallOptions{
 		Name:        entry.Name,
@@ -105,24 +108,31 @@ func (s *Store) InstallFromMarketplace(ctx context.Context, marketplaceName, plu
 	})
 }
 
-// fetchMarketplaceStaged fetches a marketplace repo into a staging dir,
-// returning the staging path (caller removes it) and resolved pin.
-func (s *Store) fetchMarketplaceStaged(ctx context.Context, src Source) (staged, pin string, err error) {
+// fetchMarketplaceStaged fetches a marketplace repo into a staging dir.
+// It returns root (the .staging-* dir the caller must remove — distinct
+// from dir so a subdir source still cleans up the whole fetched repo),
+// dir (the effective marketplace directory), and the resolved pin.
+func (s *Store) fetchMarketplaceStaged(ctx context.Context, src Source) (root, dir, pin string, err error) {
 	base := filepath.Join(s.root, marketplacesSubdir)
 	if err = os.MkdirAll(base, 0o755); err != nil {
-		return "", "", fmt.Errorf("pluginstore: create marketplaces dir: %w", err)
+		return "", "", "", fmt.Errorf("pluginstore: create marketplaces dir: %w", err)
 	}
-	staged, err = os.MkdirTemp(base, ".staging-*")
+	root, err = os.MkdirTemp(base, ".staging-*")
 	if err != nil {
-		return "", "", fmt.Errorf("pluginstore: create staging dir: %w", err)
+		return "", "", "", fmt.Errorf("pluginstore: create staging dir: %w", err)
 	}
-	pin, err = s.fetcher.Fetch(ctx, src, staged)
+	pin, err = s.fetcher.Fetch(ctx, src, root)
 	if err != nil {
-		_ = os.RemoveAll(staged)
-		return "", "", err
+		_ = os.RemoveAll(root)
+		return "", "", "", err
 	}
+	dir = root
 	if src.Subdir != "" {
-		staged = filepath.Join(staged, filepath.Clean(src.Subdir))
+		dir = filepath.Join(root, filepath.Clean(src.Subdir))
+		if !withinDir(root, dir) {
+			_ = os.RemoveAll(root)
+			return "", "", "", fmt.Errorf("pluginstore: marketplace subdir %q escapes the fetched repo", src.Subdir)
+		}
 	}
-	return staged, pin, nil
+	return root, dir, pin, nil
 }

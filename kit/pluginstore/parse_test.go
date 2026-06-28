@@ -15,6 +15,9 @@ func TestSourceValidate(t *testing.T) {
 		{"git missing url", Source{Type: SourceGit}, true},
 		{"github ok", GitHubSource("owner/repo", "main"), false},
 		{"github missing slash", GitHubSource("ownerrepo", ""), true},
+		{"github empty owner", GitHubSource("/repo", ""), true},
+		{"github empty repo", GitHubSource("owner/", ""), true},
+		{"github extra segment", GitHubSource("owner/repo/extra", ""), true},
 		{"npm ok", Source{Type: SourceNPM, Package: "@x/y"}, false},
 		{"unknown type", Source{Type: "weird"}, true},
 		{"empty type", Source{}, true},
@@ -78,6 +81,13 @@ func TestParseMarketplace_SourceForms(t *testing.T) {
 
 	if _, err := ParseMarketplace([]byte(`{"plugins":[]}`)); err == nil {
 		t.Errorf("expected error on missing marketplace name")
+	}
+	// A structurally-broken entry is rejected at parse time, not at install.
+	if _, err := ParseMarketplace([]byte(`{"name":"mp","plugins":[{"name":"","source":"./x"}]}`)); err == nil {
+		t.Errorf("expected error on empty entry name")
+	}
+	if _, err := ParseMarketplace([]byte(`{"name":"mp","plugins":[{"name":"p","source":{"source":"github"}}]}`)); err == nil {
+		t.Errorf("expected error on github source missing repo")
 	}
 }
 

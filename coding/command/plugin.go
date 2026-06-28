@@ -31,7 +31,7 @@ func NewPlugin(store *pluginstore.Store) *PluginCommand {
 		store: store,
 		def: kitcmd.Definition{
 			Name:        "plugin",
-			Description: "Manage imported Claude Code plugins (list|install|update|remove|enable|disable|marketplace)",
+			Description: "Manage imported Claude Code plugins (list|info|install|update|remove|enable|disable|trust|marketplace)",
 			Source:      kitcmd.Source{Kind: kitcmd.SourceBuiltin},
 		},
 	}
@@ -51,6 +51,8 @@ func (c *PluginCommand) Handle(ctx context.Context, sess kitcmd.Session, args st
 	switch sub {
 	case "list", "ls":
 		return c.handleList(sess)
+	case "info":
+		return c.handleInfo(sess, fields)
 	case "install", "add":
 		return c.handleInstall(ctx, sess, fields)
 	case "update", "sync":
@@ -66,7 +68,7 @@ func (c *PluginCommand) Handle(ctx context.Context, sess kitcmd.Session, args st
 	case "marketplace", "mp":
 		return c.handleMarketplace(ctx, sess, fields)
 	default:
-		return fmt.Errorf("unknown /plugin subcommand %q (try: list, install, update, remove, enable, disable, marketplace)", sub)
+		return fmt.Errorf("unknown /plugin subcommand %q (try: list, info, install, update, remove, enable, disable, trust, marketplace)", sub)
 	}
 }
 
@@ -91,11 +93,36 @@ func (c *PluginCommand) handleList(sess kitcmd.Session) error {
 		if rep, err := c.store.ImportReport(p.ID); err == nil {
 			fmt.Fprintf(&b, "      %d commands, %d skills, %d mcp", len(rep.Commands), len(rep.Skills), len(rep.MCPServers))
 			if n := len(rep.Unsupported); n > 0 {
-				fmt.Fprintf(&b, "; %d unsupported (see /plugin info %s)", n, p.ID)
+				fmt.Fprintf(&b, "; %d unsupported (run /plugin info %s)", n, p.ID)
 			}
 			b.WriteString("\n")
 		}
 	}
+	sess.Display(strings.TrimRight(b.String(), "\n"))
+	return nil
+}
+
+func (c *PluginCommand) handleInfo(sess kitcmd.Session, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: /plugin info <id>")
+	}
+	id := args[0]
+	p, ok := c.store.Get(id)
+	if !ok {
+		return fmt.Errorf("plugin %q not installed", id)
+	}
+	rep, err := c.store.ImportReport(id)
+	if err != nil {
+		return err
+	}
+	var b strings.Builder
+	state := "enabled"
+	if !p.Enabled {
+		state = "disabled"
+	}
+	fmt.Fprintf(&b, "%s  [%s]  %s\n", p.ID, state, p.Source.String())
+	fmt.Fprintf(&b, "Converted: %d commands, %d skills, %d mcp.\n", len(rep.Commands), len(rep.Skills), len(rep.MCPServers))
+	writeUnsupported(&b, rep)
 	sess.Display(strings.TrimRight(b.String(), "\n"))
 	return nil
 }
@@ -253,21 +280,34 @@ func writeUnsupported(b *strings.Builder, rep pluginstore.ConvertReport) {
 }
 
 // parseSource infers a plugin/marketplace source from a single CLI
-// token: an existing path or one starting with "." or "/" is local; a
-// URL ("://" or "git@") is a git source; a bare "owner/repo" is github.
+// token. It expands a leading "~" and env vars, then prefers an existing
+// local path (so a real relative dir like "plugins/demo" is not
+// misclassified as an "owner/repo" GitHub slug). Otherwise: a URL
+// ("://" or "git@") is git, a "." or "/" prefix is a local path, and a
+// bare "owner/repo" is GitHub.
 func parseSource(s string) (pluginstore.Source, error) {
+	if s == "~" || strings.HasPrefix(s, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return pluginstore.Source{}, fmt.Errorf("resolve home dir: %w", err)
+		}
+		s = home + strings.TrimPrefix(s, "~")
+	} else {
+		s = os.ExpandEnv(s)
+	}
+	// An existing path wins outright — covers relative dirs that also look
+	// like "owner/repo".
+	if _, err := os.Stat(s); err == nil {
+		return pluginstore.LocalSource(s), nil
+	}
 	switch {
 	case strings.Contains(s, "://"), strings.HasPrefix(s, "git@"):
 		return pluginstore.GitSource(s, ""), nil
-	case strings.HasPrefix(s, "."), strings.HasPrefix(s, "/"), strings.HasPrefix(s, "~"):
-		return pluginstore.LocalSource(os.ExpandEnv(s)), nil
+	case strings.HasPrefix(s, "."), strings.HasPrefix(s, "/"):
+		return pluginstore.LocalSource(s), nil
 	case strings.Count(s, "/") == 1 && !strings.Contains(s, " "):
 		return pluginstore.GitHubSource(s, ""), nil
 	default:
-		// Last resort: treat as a local path if it exists.
-		if _, err := os.Stat(s); err == nil {
-			return pluginstore.LocalSource(s), nil
-		}
 		return pluginstore.Source{}, fmt.Errorf("cannot infer source from %q (use a path, owner/repo, or git URL)", s)
 	}
 }

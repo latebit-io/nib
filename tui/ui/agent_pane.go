@@ -292,6 +292,11 @@ type AgentPaneModel struct {
 	// usage tracks cumulative token consumption for the status line display.
 	usage usageState
 
+	// taskTokenBudget is the armed per-task token cap mirrored from the
+	// agent (0 = disabled). Drives BudgetIndicator. Set via
+	// SetTaskTokenBudget.
+	taskTokenBudget int
+
 	// pendingTurnUsage stashes the most recent AgentTurnUsage so the
 	// stats can be folded into the next tool-call bullet (Option B
 	// — one row per turn carrying both the tool name and its cost).

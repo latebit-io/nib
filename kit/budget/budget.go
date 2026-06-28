@@ -9,20 +9,23 @@ package budget
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/latebit-io/nib/ai/llm"
 )
 
-// DefaultTaskTokens caps prompt+completion tokens for a single agent
-// run when the caller does not set NewOptions.TaskTokenBudget
-// explicitly. Sized to comfortably cover a multi-file refactor or a
-// small game build while still tripping long before a runaway loop
-// burns the developer's wallet. The 2026-04-26 pacman regression
-// burned 55M+ tokens on a single task; this default catches that
-// class of cascade two orders of magnitude earlier. Override with
-// NewOptions.TaskTokenBudget when a larger or smaller cap suits the
-// workload.
-const DefaultTaskTokens = 2_000_000
+// RecommendedTaskTokens is the suggested cap on prompt+completion
+// tokens for a single agent run. It is NOT applied by default — the
+// zero value of NewOptions.TaskTokenBudget leaves the budget disabled
+// (see [Resolve]). It is exported so a caller that wants the safety
+// net can opt in with NewOptions.TaskTokenBudget =
+// budget.RecommendedTaskTokens (or NIB_TASK_TOKEN_BUDGET set to this
+// value). Sized to comfortably cover a multi-file refactor or a small
+// game build while still tripping long before a runaway loop burns the
+// developer's wallet. The 2026-04-26 pacman regression burned 55M+
+// tokens on a single task; this value catches that class of cascade
+// two orders of magnitude earlier.
+const RecommendedTaskTokens = 2_000_000
 
 // Session holds accumulated token consumption across an agent run.
 type Session struct {
@@ -73,22 +76,44 @@ func (t *Turn) AddUsage(usage *llm.Usage) {
 // Resolve maps the user-facing NewOptions.TaskTokenBudget value to
 // the internal token cap:
 //
-//	== 0 — use [DefaultTaskTokens].
-//	 < 0 — explicit unlimited (returns 0; the budget check is skipped).
+//	== 0 — disabled (returns 0; the budget check is skipped). Default.
+//	 < 0 — disabled (returns 0; the budget check is skipped).
 //	 > 0 — passed through verbatim as the cap.
 //
-// Returning 0 to mean "disabled" inside the Agent is a deliberate
-// asymmetry: a developer who wants the safety net off has to opt in
-// with a negative number; the default is always-on.
+// The safety net is OFF by default: only a positive value arms it. A
+// caller that wants the recommended cap opts in with
+// [RecommendedTaskTokens]; a caller that wants none leaves the field
+// zero. Both 0 and any negative collapse to the same disabled state.
 func Resolve(input int) int {
-	switch {
-	case input < 0:
-		return 0
-	case input > 0:
+	if input > 0 {
 		return input
-	default:
-		return DefaultTaskTokens
 	}
+	return 0
+}
+
+// ParseEnvCap resolves a raw NIB_TASK_TOKEN_BUDGET-style env value
+// into the per-task token cap. An empty string means "unset" and
+// yields 0 — the cap disabled by default. A parsed integer is mapped
+// through [Resolve] (<= 0 disabled, > 0 the cap).
+//
+// A non-empty value that is not an integer is a configuration error,
+// not a silent no-op: ParseEnvCap returns a non-nil error so the
+// caller fails loudly. The variable is only ever set with intent to
+// change the cap, so a typo (e.g. "2_000_000" or "2m") must not slip
+// through and leave the guardrail off without a word.
+//
+// Keeping the parse here (rather than inline at each binary's wiring)
+// lets the env-override semantics be table-tested without a real
+// process environment and keeps the construction sites identical.
+func ParseEnvCap(raw string) (limit int, err error) {
+	if raw == "" {
+		return 0, nil
+	}
+	n, convErr := strconv.Atoi(raw)
+	if convErr != nil {
+		return 0, fmt.Errorf("budget: invalid token budget %q: expected an integer token count", raw)
+	}
+	return Resolve(n), nil
 }
 
 // wouldExceed reports whether committed + pending usage crosses the

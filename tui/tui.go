@@ -75,6 +75,12 @@ type Config struct {
 	// Optional — nil disables model switching UI.
 	LLM *LLMCallbacks
 
+	// TaskTokenBudget is the armed per-task token cap, already resolved
+	// via [kit/budget.Resolve] (0 = disabled). Drives the status-bar
+	// budget indicator; must equal the value the agent enforces so the
+	// displayed percentage matches the gate that aborts the run.
+	TaskTokenBudget int
+
 	// OAuth holds OAuth connection callbacks.
 	// Optional — nil disables OAuth UI flows.
 	OAuth *OAuthCallbacks
@@ -167,6 +173,10 @@ func New(cfg Config) *App {
 			appPtr.AgentPane.SetModelLabel(cfg.LLM.ModelLabel)
 		}
 	}
+
+	// Mirror the resolved per-task token cap into the agent pane so the
+	// status-bar budget indicator tracks the same number the gate enforces.
+	appPtr.AgentPane.SetTaskTokenBudget(cfg.TaskTokenBudget)
 
 	// Wire OAuth callbacks.
 	if cfg.OAuth != nil {

@@ -28,6 +28,12 @@ import (
 // natural park boundary the foundation hits before picking up the
 // queued input).
 func (m *AppModel) handleGoalSubmitted(msg GoalSubmittedMsg) (tea.Model, tea.Cmd) {
+	// Reset the per-run spend counter on every submission so the budget
+	// indicator tracks the same per-run scope the agent's budget gate
+	// uses (the gate resets on both RunWithMode and Reply). The fresh
+	// path's Clear() below also zeroes it; the continued path relies on
+	// this call since it preserves the transcript and totals.
+	m.AgentPane.BeginRun()
 	continued := m.Session.SubmitGoal(msg.Goal)
 	if !continued {
 		m.AgentPane.Clear()
@@ -45,6 +51,7 @@ func (m *AppModel) handleGoalSubmitted(msg GoalSubmittedMsg) (tea.Model, tea.Cmd
 // and clears the agent pane. Planning goals always start fresh —
 // there's no "continued conversation" branch.
 func (m *AppModel) handlePlanningGoalSubmitted(msg PlanningGoalSubmittedMsg) (tea.Model, tea.Cmd) {
+	m.AgentPane.BeginRun()
 	m.Session.SubmitPlanningGoal(msg.Goal)
 	m.AgentPane.Clear()
 	return m, nil

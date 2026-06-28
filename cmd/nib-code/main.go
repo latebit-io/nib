@@ -32,6 +32,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/budget"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	cmdloader "github.com/latebit-io/nib/kit/command/loader"
 	"github.com/latebit-io/nib/kit/skill"
@@ -224,6 +225,15 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return tuiApp.FlushDirtyBuffers(ctx)
 	}
 
+	// Resolve the per-task token budget once so every rebuilt agent and
+	// the TUI status indicator agree on the same armed cap. A malformed
+	// override is a hard error rather than a silent fall-through to
+	// disabled — the var is only set with intent to change the cap.
+	taskTokenBudgetCap, err := budget.ParseEnvCap(os.Getenv(brand.EnvKeyTaskTokenBudget))
+	if err != nil {
+		return err
+	}
+
 	buildAgent := func(p llm.Provider) *agent.Agent {
 		opts := &agent.NewOptions{
 			MemoryStore:       mem.Store,
@@ -233,6 +243,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			Terse:             true,
 			SmokeConfig:       smokeCfg,
 			FlushDirtyBuffers: flushDirtyBuffersFn,
+			TaskTokenBudget:   taskTokenBudgetCap,
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
@@ -381,6 +392,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			return ag
 		},
 		LLM:                llmCallbacks,
+		TaskTokenBudget:    taskTokenBudgetCap,
 		HighlighterFactory: highlight.NewHighlighter,
 	})
 	app := tuiApp.Model()

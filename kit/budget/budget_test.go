@@ -14,17 +14,51 @@ func TestResolve(t *testing.T) {
 		in   int
 		want int
 	}{
-		{"zero falls back to default", 0, DefaultTaskTokens},
-		{"negative is unlimited", -1, 0},
-		{"large negative is unlimited", -1_000_000, 0},
+		{"zero is disabled by default", 0, 0},
+		{"negative is disabled", -1, 0},
+		{"large negative is disabled", -1_000_000, 0},
 		{"positive passes through", 500, 500},
 		{"large positive passes through", 10_000_000, 10_000_000},
+		{"recommended opt-in passes through", RecommendedTaskTokens, RecommendedTaskTokens},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := Resolve(tc.in); got != tc.want {
 				t.Errorf("Resolve(%d) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseEnvCap(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		raw     string
+		want    int
+		wantErr bool
+	}{
+		{"empty is unset and disabled", "", 0, false},
+		{"positive arms the cap", "10000000", 10_000_000, false},
+		{"recommended value passes through", "2000000", RecommendedTaskTokens, false},
+		{"negative resolves to disabled", "-1", 0, false},
+		{"explicit zero is disabled", "0", 0, false},
+		// Non-empty + non-integer is a user error, not a silent no-op.
+		{"non-numeric is an error", "lots", 0, true},
+		{"trailing junk is an error", "100x", 0, true},
+		{"underscore-grouped is an error", "2_000_000", 0, true},
+		{"suffix notation is an error", "2m", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseEnvCap(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ParseEnvCap(%q) err = %v, wantErr %t", tc.raw, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ParseEnvCap(%q) = %d, want %d", tc.raw, got, tc.want)
 			}
 		})
 	}

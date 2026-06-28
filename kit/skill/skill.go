@@ -27,6 +27,10 @@ const (
 	SourceProject Source = "project"
 	// SourceGlobal is a skill under the user-global skills directory.
 	SourceGlobal Source = "global"
+	// SourcePlugin is a skill imported from a managed plugin's converted
+	// tree. Lowest precedence of the three: a user's own project or
+	// global skill of the same name shadows a third-party plugin skill.
+	SourcePlugin Source = "plugin"
 )
 
 // Skill is a parsed SKILL.md: the model-facing metadata plus the

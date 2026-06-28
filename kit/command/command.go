@@ -90,6 +90,13 @@ const (
 	// project root (e.g. .nib/commands/). Highest precedence —
 	// project commands shadow everything else.
 	SourceProject
+
+	// SourcePlugin is for commands imported from a managed plugin's
+	// converted tree. Ranked above MCP/builtin but below user-authored
+	// markdown (project/global) so a user's own command always wins over
+	// a third-party plugin command. Its iota position is irrelevant —
+	// shadowing rank is set explicitly in precedenceOrder.
+	SourcePlugin
 )
 
 // Command is the marker every registered command implements.

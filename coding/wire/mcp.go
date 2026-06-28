@@ -43,6 +43,49 @@ type MCPResult struct {
 // DiscoverMCPTools connects to MCP servers and returns their tools as
 // agent.Tool adapters. The caller must invoke MCPResult.Cleanup on shutdown.
 func DiscoverMCPTools(projectRoot string) MCPResult {
+	return connectMCPServers(loadMCPConfigs(projectRoot))
+}
+
+// DiscoverMCPToolsFromSources connects to MCP servers declared in the
+// given converted plugin .mcp.json files. Each source's server names are
+// namespaced with the plugin id (`<id>__<server>`) so two plugins that
+// ship a server of the same name do not collide. The caller must invoke
+// MCPResult.Cleanup on shutdown.
+func DiscoverMCPToolsFromSources(sources []MCPConfigSource) MCPResult {
+	merged := map[string]mcpServerConfig{}
+	for _, src := range sources {
+		data, err := os.ReadFile(src.Path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				slog.Warn("mcp: read plugin config", "path", src.Path, "err", err)
+			}
+			continue
+		}
+		var cfg mcpConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			slog.Warn("mcp: invalid plugin config", "path", src.Path, "err", err)
+			continue
+		}
+		for name, server := range cfg.Servers {
+			merged[src.Prefix+"__"+name] = server
+		}
+	}
+	return connectMCPServers(merged)
+}
+
+// MCPConfigSource points at one plugin's converted .mcp.json and the
+// namespace prefix (the plugin id) to apply to its server names.
+type MCPConfigSource struct {
+	// Prefix namespaces the file's server names (typically the plugin id).
+	Prefix string
+	// Path is the converted .mcp.json file path.
+	Path string
+}
+
+// connectMCPServers starts each configured server, performs the MCP
+// handshake, and adapts the discovered tools. Shared by project and
+// plugin discovery so both honor identical connect/cleanup semantics.
+func connectMCPServers(configs map[string]mcpServerConfig) MCPResult {
 	var tools []agent.Tool
 	var serverNames []string
 	var clients []*mcp.Client
@@ -53,7 +96,6 @@ func DiscoverMCPTools(projectRoot string) MCPResult {
 		}
 	}
 
-	configs := loadMCPConfigs(projectRoot)
 	if len(configs) == 0 {
 		slog.Debug("mcp: no servers configured")
 		return MCPResult{Cleanup: cleanup}

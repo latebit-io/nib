@@ -112,6 +112,17 @@ type Result struct {
 // reports per-skill parse failures (see [Load]); everything that did
 // load is still returned, so callers may log and proceed.
 func Discover(projectRoot string) (Result, error) {
+	return DiscoverWithPlugins(projectRoot, nil)
+}
+
+// DiscoverWithPlugins extends [Discover] with skills imported from
+// managed plugins. pluginSkillDirs are the converted "skills" roots of
+// the enabled plugins (each a directory of <name>/SKILL.md). Plugin
+// skills join as the lowest-precedence layer ([SourcePlugin]): a
+// same-named project or global skill shadows them, so a user's own
+// skills always win over a third-party import. A nil/empty slice makes
+// this identical to the historic [Discover] behavior.
+func DiscoverWithPlugins(projectRoot string, pluginSkillDirs []string) (Result, error) {
 	var errs []error
 
 	project, err := Load(ProjectDir(projectRoot), SourceProject)
@@ -127,8 +138,18 @@ func Discover(projectRoot string) (Result, error) {
 		}
 	}
 
-	// Project shadows global: pass project first so its names win.
-	winners, shadowed := Merge(project, global)
+	var plugin []Skill
+	for _, dir := range pluginSkillDirs {
+		ps, perr := Load(dir, SourcePlugin)
+		if perr != nil {
+			errs = append(errs, perr)
+		}
+		plugin = append(plugin, ps...)
+	}
+
+	// Precedence high→low: project shadows global shadows plugin. Pass in
+	// that order so earlier layers' names win.
+	winners, shadowed := Merge(project, global, plugin)
 
 	var res Result
 	res.Shadowed = shadowed

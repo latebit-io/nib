@@ -91,26 +91,29 @@ func Resolve(input int) int {
 	return 0
 }
 
-// FromEnv parses an environment-variable override for the per-task
-// token budget into the value expected by NewOptions.TaskTokenBudget.
-// It reports set=false for an empty or unparseable raw string, so the
-// caller leaves the field at its zero value (the cap disabled by
-// default). A parsed integer — including zero or a negative value,
-// which Resolve treats as disabled — is returned verbatim with
-// set=true.
+// ParseEnvCap resolves a raw NIB_TASK_TOKEN_BUDGET-style env value
+// into the per-task token cap. An empty string means "unset" and
+// yields 0 — the cap disabled by default. A parsed integer is mapped
+// through [Resolve] (<= 0 disabled, > 0 the cap).
+//
+// A non-empty value that is not an integer is a configuration error,
+// not a silent no-op: ParseEnvCap returns a non-nil error so the
+// caller fails loudly. The variable is only ever set with intent to
+// change the cap, so a typo (e.g. "2_000_000" or "2m") must not slip
+// through and leave the guardrail off without a word.
 //
 // Keeping the parse here (rather than inline at each binary's wiring)
 // lets the env-override semantics be table-tested without a real
-// process environment and keeps the two construction sites identical.
-func FromEnv(raw string) (value int, set bool) {
+// process environment and keeps the construction sites identical.
+func ParseEnvCap(raw string) (limit int, err error) {
 	if raw == "" {
-		return 0, false
+		return 0, nil
 	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, false
+	n, convErr := strconv.Atoi(raw)
+	if convErr != nil {
+		return 0, fmt.Errorf("budget: invalid token budget %q: expected an integer token count", raw)
 	}
-	return n, true
+	return Resolve(n), nil
 }
 
 // wouldExceed reports whether committed + pending usage crosses the

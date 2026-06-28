@@ -31,27 +31,34 @@ func TestResolve(t *testing.T) {
 	}
 }
 
-func TestFromEnv(t *testing.T) {
+func TestParseEnvCap(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
 		raw     string
 		want    int
-		wantSet bool
+		wantErr bool
 	}{
-		{"empty leaves default", "", 0, false},
-		{"unparseable leaves default", "lots", 0, false},
-		{"trailing junk leaves default", "100x", 0, false},
-		{"positive raises cap", "10000000", 10_000_000, true},
-		{"negative one disables", "-1", -1, true},
-		{"explicit zero passes through", "0", 0, true},
+		{"empty is unset and disabled", "", 0, false},
+		{"positive arms the cap", "10000000", 10_000_000, false},
+		{"recommended value passes through", "2000000", RecommendedTaskTokens, false},
+		{"negative resolves to disabled", "-1", 0, false},
+		{"explicit zero is disabled", "0", 0, false},
+		// Non-empty + non-integer is a user error, not a silent no-op.
+		{"non-numeric is an error", "lots", 0, true},
+		{"trailing junk is an error", "100x", 0, true},
+		{"underscore-grouped is an error", "2_000_000", 0, true},
+		{"suffix notation is an error", "2m", 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, set := FromEnv(tc.raw)
-			if got != tc.want || set != tc.wantSet {
-				t.Errorf("FromEnv(%q) = (%d, %t), want (%d, %t)", tc.raw, got, set, tc.want, tc.wantSet)
+			got, err := ParseEnvCap(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ParseEnvCap(%q) err = %v, wantErr %t", tc.raw, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("ParseEnvCap(%q) = %d, want %d", tc.raw, got, tc.want)
 			}
 		})
 	}

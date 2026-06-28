@@ -235,9 +235,14 @@ func run() error {
 		Linters:           linters.PostTask,
 		SmokeConfig:       smokeCfg,
 	}
-	if v, ok := budget.FromEnv(os.Getenv(brand.EnvKeyTaskTokenBudget)); ok {
-		opts.TaskTokenBudget = v
+	// A malformed override is a hard error rather than a silent
+	// fall-through to disabled — matters most here in headless / CI mode
+	// where no human is watching the run burn tokens uncapped.
+	taskTokenBudgetCap, err := budget.ParseEnvCap(os.Getenv(brand.EnvKeyTaskTokenBudget))
+	if err != nil {
+		return setupErr("%v", err)
 	}
+	opts.TaskTokenBudget = taskTokenBudgetCap
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr
 	}

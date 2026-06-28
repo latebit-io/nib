@@ -226,15 +226,13 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	// Resolve the per-task token budget once so every rebuilt agent and
-	// the TUI status indicator agree on the same armed cap.
-	// taskTokenBudgetInput is the raw NewOptions value (env override or
-	// 0); taskTokenBudgetCap is its resolved form (0 = disabled) for
-	// display.
-	taskTokenBudgetInput := 0
-	if v, ok := budget.FromEnv(os.Getenv(brand.EnvKeyTaskTokenBudget)); ok {
-		taskTokenBudgetInput = v
+	// the TUI status indicator agree on the same armed cap. A malformed
+	// override is a hard error rather than a silent fall-through to
+	// disabled — the var is only set with intent to change the cap.
+	taskTokenBudgetCap, err := budget.ParseEnvCap(os.Getenv(brand.EnvKeyTaskTokenBudget))
+	if err != nil {
+		return err
 	}
-	taskTokenBudgetCap := budget.Resolve(taskTokenBudgetInput)
 
 	buildAgent := func(p llm.Provider) *agent.Agent {
 		opts := &agent.NewOptions{
@@ -245,7 +243,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			Terse:             true,
 			SmokeConfig:       smokeCfg,
 			FlushDirtyBuffers: flushDirtyBuffersFn,
-			TaskTokenBudget:   taskTokenBudgetInput,
+			TaskTokenBudget:   taskTokenBudgetCap,
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr

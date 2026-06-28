@@ -49,9 +49,9 @@ const (
 	// EnvKeyTaskTokenBudget sets the per-task token budget cap (see
 	// [coding/agent.NewOptions.TaskTokenBudget]). The cap is disabled by
 	// default; set this to a positive integer to arm it (e.g. the value
-	// of [kit/budget.RecommendedTaskTokens]). Zero or negative leaves it
-	// disabled; unset or unparseable leaves the built-in default (also
-	// disabled) in force.
+	// of [kit/budget.RecommendedTaskTokens]). Unset, zero, or negative
+	// leaves it disabled. A non-empty, non-integer value is rejected at
+	// startup ([kit/budget.ParseEnvCap]) rather than silently ignored.
 	EnvKeyTaskTokenBudget = EnvPrefix + "TASK_TOKEN_BUDGET"
 
 	// EnvKeyGlobalSkillsDir overrides the user-global skills directory

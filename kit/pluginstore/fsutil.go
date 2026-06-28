@@ -39,12 +39,28 @@ func swapDir(staged, final string) error {
 	return nil
 }
 
-// withinDir reports whether target resolves inside base (after cleaning),
-// guarding catalog-relative paths against `../` traversal that would
-// escape the marketplace checkout. base and target should be absolute or
-// share a base for the relative computation to be meaningful.
+// withinDir reports whether target resolves inside base, guarding
+// catalog-relative paths against escape. It is symlink-aware: a lexical
+// `filepath.Rel` check alone can be defeated by a symlink that sits under
+// base textually but dereferences outside it, so both base and target are
+// resolved with [filepath.EvalSymlinks] before the containment test.
+//
+// base must exist (it is always a freshly-fetched checkout at the call
+// sites). target may not exist yet (e.g. the final source dir before
+// promotion); in that case its deepest existing ancestor is resolved and
+// the non-existent remainder re-appended, so a symlinked ancestor is
+// still caught while a not-yet-created leaf is allowed. Any resolution
+// failure is treated as "not contained" — fail closed.
 func withinDir(base, target string) bool {
-	rel, err := filepath.Rel(filepath.Clean(base), filepath.Clean(target))
+	rb, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return false
+	}
+	rt, err := resolveExisting(target)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(rb, rt)
 	if err != nil {
 		return false
 	}
@@ -52,4 +68,26 @@ func withinDir(base, target string) bool {
 		return false
 	}
 	return !filepath.IsAbs(rel)
+}
+
+// resolveExisting resolves symlinks in path, tolerating a not-yet-created
+// leaf: it walks up to the deepest ancestor that exists, resolves that
+// with [filepath.EvalSymlinks], and re-appends the missing tail. This
+// keeps a symlinked ancestor honest while allowing a target whose final
+// component has not been written yet.
+func resolveExisting(path string) (string, error) {
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved, nil
+	}
+	parent, leaf := filepath.Split(path)
+	parent = filepath.Clean(parent)
+	if parent == path { // reached the root without an existing ancestor
+		return "", os.ErrNotExist
+	}
+	rp, err := resolveExisting(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(rp, leaf), nil
 }

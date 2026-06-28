@@ -292,9 +292,10 @@ func parseSource(s string) (pluginstore.Source, error) {
 			return pluginstore.Source{}, fmt.Errorf("resolve home dir: %w", err)
 		}
 		s = home + strings.TrimPrefix(s, "~")
-	} else {
-		s = os.ExpandEnv(s)
 	}
+	// Expand env vars in all cases, including after ~ normalization, so
+	// inputs like "~/plugins/$NAME" resolve fully.
+	s = os.ExpandEnv(s)
 	// An existing path wins outright — covers relative dirs that also look
 	// like "owner/repo".
 	if _, err := os.Stat(s); err == nil {

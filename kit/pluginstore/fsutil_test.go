@@ -8,22 +8,44 @@ import (
 
 func TestWithinDir(t *testing.T) {
 	t.Parallel()
-	base := "/a/b"
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "base")
+	outside := filepath.Join(tmp, "outside")
+	for _, d := range []string{base, outside, filepath.Join(base, "child", "grand")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	cases := []struct {
+		name   string
 		target string
 		want   bool
 	}{
-		{"/a/b/c", true},
-		{"/a/b", true},
-		{"/a/b/c/d", true},
-		{"/a/b/../c", false},
-		{"/a", false},
-		{"/a/bb", false},
+		{"child dir", filepath.Join(base, "child"), true},
+		{"grandchild", filepath.Join(base, "child", "grand"), true},
+		{"base itself", base, true},
+		{"not-yet-created leaf under base", filepath.Join(base, "newleaf"), true},
+		{"lexical traversal", filepath.Join(base, "..", "outside"), false},
+		{"sibling", outside, false},
 	}
 	for _, tc := range cases {
 		if got := withinDir(base, tc.target); got != tc.want {
-			t.Errorf("withinDir(%q,%q) = %t, want %t", base, tc.target, got, tc.want)
+			t.Errorf("%s: withinDir(base, %q) = %t, want %t", tc.name, tc.target, got, tc.want)
 		}
+	}
+
+	// Security case the lexical check missed: a symlink that sits under
+	// base textually but dereferences outside it must be rejected.
+	escape := filepath.Join(base, "escape")
+	if err := os.Symlink(outside, escape); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if withinDir(base, escape) {
+		t.Errorf("withinDir must reject a symlink escaping the base dir")
+	}
+	if withinDir(base, filepath.Join(escape, "x")) {
+		t.Errorf("withinDir must reject a path under an escaping symlink")
 	}
 }
 

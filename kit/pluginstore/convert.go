@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/latebit-io/nib/kit/agentdef"
 	"github.com/latebit-io/nib/kit/frontmatter"
 	"github.com/latebit-io/nib/kit/toolperm"
 	"gopkg.in/yaml.v3"
@@ -25,6 +26,8 @@ type ConvertReport struct {
 	Commands []string
 	// Skills are the converted skill names (namespaced).
 	Skills []string
+	// Agents are the converted subagent definition names (namespaced).
+	Agents []string
 	// MCPServers are the converted MCP server names.
 	MCPServers []string
 	// Unsupported lists components/fields not yet honored.
@@ -71,9 +74,13 @@ func Convert(src, dst string, m Manifest, vars Vars) (ConvertReport, error) {
 	if err := convertSkills(src, dst, m.Name, vars, &report); err != nil {
 		return report, err
 	}
+	if err := convertAgents(src, dst, m.Name, vars, &report); err != nil {
+		return report, err
+	}
 	noteDeferredComponents(src, &report)
 	slices.Sort(report.Commands)
 	slices.Sort(report.Skills)
+	slices.Sort(report.Agents)
 	slices.Sort(report.MCPServers)
 	return report, nil
 }
@@ -333,16 +340,74 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 	return nil
 }
 
-// noteDeferredComponents records agents and hooks present in the plugin
-// but not yet runnable, pointing at the milestone that will handle them.
-func noteDeferredComponents(src string, report *ConvertReport) {
-	if entries, err := os.ReadDir(filepath.Join(src, "agents")); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
-				report.add("agent", strings.TrimSuffix(e.Name(), ".md"), "requires subagent engine (M4)")
-			}
+// nibAgentMeta is the frontmatter emitted for a converted subagent
+// definition. Mirrors the CC agent keys nib's loader reads.
+type nibAgentMeta struct {
+	Name            string   `yaml:"name"`
+	Description     string   `yaml:"description,omitempty"`
+	Tools           []string `yaml:"tools,omitempty"`
+	DisallowedTools []string `yaml:"disallowedTools,omitempty"`
+	Model           string   `yaml:"model,omitempty"`
+	Effort          string   `yaml:"effort,omitempty"`
+	MaxTurns        int      `yaml:"maxTurns,omitempty"`
+	Skills          []string `yaml:"skills,omitempty"`
+	Isolation       string   `yaml:"isolation,omitempty"`
+}
+
+// convertAgents translates <src>/agents/*.md into nib-native subagent
+// definitions under <dst>/agents/, namespacing each name and preserving
+// its grants/config. The definitions are inert until the subagent engine
+// lands, but converting them now means a re-sync lights them up rather
+// than requiring a re-import. A malformed definition is reported and
+// skipped, not silently dropped.
+func convertAgents(src, dst, pluginName string, vars Vars, report *ConvertReport) error {
+	dir := filepath.Join(src, "agents")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
+		return fmt.Errorf("pluginstore: read agents dir: %w", err)
 	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		def, perr := agentdef.Parse(filepath.Join(dir, e.Name()), agentdef.SourcePlugin)
+		if perr != nil {
+			report.add("agent", e.Name(), "malformed agent definition; skipped: "+perr.Error())
+			continue
+		}
+		name := namespacedName(pluginName, def.Name)
+		if name == "" {
+			report.add("agent", e.Name(), "could not derive a valid name; skipped")
+			continue
+		}
+		prompt, un := expandVars(def.SystemPrompt, vars)
+		noteVars(report, un)
+		meta := nibAgentMeta{
+			Name:            name,
+			Description:     def.Description,
+			Tools:           def.AllowedTools,
+			DisallowedTools: def.DisallowedTools,
+			Model:           def.Model,
+			Effort:          def.Effort,
+			MaxTurns:        def.MaxTurns,
+			Skills:          def.Skills,
+			Isolation:       string(def.Isolation),
+		}
+		if err := writeMarkdown(filepath.Join(dst, "agents", name+".md"), meta, prompt); err != nil {
+			return err
+		}
+		report.Agents = append(report.Agents, name)
+		report.add("agent", name, "converted; runs once the subagent engine lands (M4)")
+	}
+	return nil
+}
+
+// noteDeferredComponents records components present in the plugin but not
+// yet runnable, pointing at the milestone that will handle them.
+func noteDeferredComponents(src string, report *ConvertReport) {
 	if _, err := os.Stat(filepath.Join(src, "hooks", "hooks.json")); err == nil {
 		report.add("hooks", "hooks.json", "requires hooks engine (M3)")
 	}

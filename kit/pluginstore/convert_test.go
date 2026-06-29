@@ -34,7 +34,8 @@ func buildDemoPlugin(t *testing.T) string {
 		"---\ndescription: runs things\nallowed-tools: Bash(git *)\n---\nrun it\n")
 	writeFile(t, filepath.Join(root, ".mcp.json"),
 		`{"mcpServers":{"db":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/db","args":["--data","${CLAUDE_PLUGIN_DATA}"]},"remote":{"type":"sse","url":"https://x/mcp"}}}`)
-	writeFile(t, filepath.Join(root, "agents", "reviewer.md"), "---\nname: reviewer\n---\nreview\n")
+	writeFile(t, filepath.Join(root, "agents", "reviewer.md"),
+		"---\nname: reviewer\ndescription: reviews code\ntools: Read Grep\n---\nReview the code in ${CLAUDE_PLUGIN_ROOT}.\n")
 	writeFile(t, filepath.Join(root, "hooks", "hooks.json"), `{"hooks":{}}`)
 	return root
 }
@@ -62,11 +63,22 @@ func TestConvert_FullPlugin(t *testing.T) {
 		t.Errorf("mcp = %v", report.MCPServers)
 	}
 
+	// The agent converts now (namespaced), with its var frozen.
+	if !slices.Equal(report.Agents, []string{"demo-reviewer"}) {
+		t.Errorf("agents = %v", report.Agents)
+	}
+	agentMD, err := os.ReadFile(filepath.Join(dst, "agents", "demo-reviewer.md"))
+	if err != nil {
+		t.Fatalf("converted agent missing: %v", err)
+	}
+	if !strings.Contains(string(agentMD), "name: demo-reviewer") || !strings.Contains(string(agentMD), "Review the code in /ROOT.") {
+		t.Errorf("converted agent wrong:\n%s", agentMD)
+	}
+
 	// Deferred/unsupported components are reported, not dropped silently.
 	wantUnsupported := map[string]string{
 		"skill-shell":   "demo-runner",
 		"mcp-transport": "remote",
-		"agent":         "reviewer",
 		"hooks":         "hooks.json",
 	}
 	for kind, name := range wantUnsupported {

@@ -165,6 +165,33 @@ func TestConvert_CarriesCommandGrants(t *testing.T) {
 	}
 }
 
+func TestConvert_SkipsMalformedGrant(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude-plugin", "plugin.json"), `{"name":"demo"}`)
+	// Broad allow + malformed deny: must be skipped, not converted with the
+	// deny silently dropped.
+	writeFile(t, filepath.Join(src, "commands", "danger.md"),
+		"---\ndescription: x\nallowed-tools: Bash(*)\ndisallowed-tools: Bash(rm *\n---\nbody\n")
+
+	dst := t.TempDir()
+	report, err := Convert(src, dst, Manifest{Name: "demo"}, Vars{})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if len(report.Commands) != 0 {
+		t.Errorf("malformed-grant command should be skipped, got %v", report.Commands)
+	}
+	if !slices.ContainsFunc(report.Unsupported, func(u Unsupported) bool {
+		return u.Kind == "command" && strings.Contains(u.Reason, "malformed")
+	}) {
+		t.Errorf("expected malformed-grant report entry, got %+v", report.Unsupported)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "commands", "demo-danger.md")); !os.IsNotExist(err) {
+		t.Errorf("malformed-grant artifact must not be written")
+	}
+}
+
 func TestExpandVars(t *testing.T) {
 	t.Parallel()
 	v := Vars{PluginRoot: "/r", PluginData: "/d"}

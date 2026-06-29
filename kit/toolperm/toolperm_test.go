@@ -20,6 +20,8 @@ func TestParseRule(t *testing.T) {
 		{"", Rule{}, true},
 		{"Bash(git *", Rule{}, true},
 		{"(x)", Rule{}, true},
+		{"Bash()", Rule{}, true},   // empty parens must not mean "any arg"
+		{"Bash(  )", Rule{}, true}, // whitespace-only too
 	}
 	for _, tc := range cases {
 		got, err := ParseRule(tc.in)
@@ -112,6 +114,14 @@ func TestMatcher_EmptyAllowDeniesAll(t *testing.T) {
 	}
 	if m.Allows("Read", "") {
 		t.Errorf("empty allow set must deny")
+	}
+}
+
+func TestDenyAll(t *testing.T) {
+	t.Parallel()
+	m := DenyAll()
+	if m.Allows("Read", "x") || m.Allows("Bash", "git status") {
+		t.Errorf("DenyAll must permit nothing")
 	}
 }
 

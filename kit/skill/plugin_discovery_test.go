@@ -56,6 +56,45 @@ func TestSkill_PermissionsFromGrants(t *testing.T) {
 	}
 }
 
+func TestSkill_PermissionsFailClosed(t *testing.T) {
+	t.Parallel()
+	// A broad allow plus a malformed deny must NOT leave the allow active.
+	s := Skill{
+		AllowedTools:    []string{"Bash(*)"},
+		DisallowedTools: []string{"Bash(rm *"}, // unbalanced paren
+	}
+	if s.Permissions().Allows("Bash", "rm -rf /") {
+		t.Errorf("malformed deny must fail closed, not drop and let the allow win")
+	}
+}
+
+func TestSkill_LoadRejectsMalformedGrant(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeSkillFile(t, dir, "bad",
+		"---\ndescription: d\nallowed-tools: Bash(*)\ndisallowed-tools: Bash(rm *\n---\nbody\n")
+	_, err := Load(dir, SourcePlugin)
+	if err == nil {
+		t.Errorf("expected load error for malformed grant")
+	}
+}
+
+func TestDiscoverWithPlugins_EmptyIDNotTrusted(t *testing.T) {
+	t.Setenv(brand.EnvKeyGlobalSkillsDir, t.TempDir())
+	pluginDir := t.TempDir()
+	writeSkillFile(t, pluginDir, "runner",
+		"---\ndescription: runs\nallowed-tools: Bash(git *)\n---\nrun\n")
+	// Empty ID + trust-everything must still NOT load the shell skill.
+	res, err := DiscoverWithPlugins(t.TempDir(),
+		[]PluginSkillSource{{ID: "", Dir: pluginDir}}, func(string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(loadedNames(res), "runner") {
+		t.Errorf("empty-id plugin source must not be trusted: %v", loadedNames(res))
+	}
+}
+
 // TestDiscoverWithPlugins_TrustGate covers the shell trust gate: a
 // plugin's shell-bearing skill loads only when its plugin is trusted;
 // untrusted it is refused, and a non-shell plugin skill always loads.

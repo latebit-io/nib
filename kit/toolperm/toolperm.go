@@ -84,6 +84,13 @@ func ParseRule(s string) (Rule, error) {
 	if tool == "" {
 		return Rule{}, fmt.Errorf("toolperm: rule %q has no tool name", s)
 	}
+	if arg == "" {
+		// Empty parentheses are a likely authoring mistake: an empty Arg
+		// matches ANY argument, so "Bash()" would silently mean
+		// unrestricted "Bash". Reject it so the intent is explicit — use a
+		// bare tool name for "any argument".
+		return Rule{}, fmt.Errorf("toolperm: rule %q has empty parentheses (use bare %q for any argument)", s, tool)
+	}
 	return Rule{Tool: tool, Arg: arg}, nil
 }
 
@@ -177,6 +184,12 @@ type Matcher struct {
 func New(allow, deny []Rule) *Matcher {
 	return &Matcher{allow: allow, deny: deny}
 }
+
+// DenyAll returns a matcher that permits nothing. It is the fail-closed
+// default callers use when grant parsing fails: a dropped deny rule must
+// never let an otherwise-broad allow through, so the safe response to a
+// malformed grant set is to deny everything.
+func DenyAll() *Matcher { return &Matcher{} }
 
 // HasAllowList reports whether any allow rules are present. An empty
 // allow list grants nothing — useful for callers that want to treat a

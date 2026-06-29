@@ -163,6 +163,13 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 
 	var plugin []Skill
 	for _, src := range pluginSkills {
+		// An empty id cannot be a trust key — every trust lookup would
+		// collapse onto trusted(""). Skip such a source rather than load
+		// skills whose provenance cannot be verified.
+		if src.ID == "" {
+			slog.Warn("skill: skipping plugin skills source with empty id", "dir", src.Dir)
+			continue
+		}
 		ps, perr := Load(src.Dir, SourcePlugin)
 		if perr != nil {
 			errs = append(errs, perr)
@@ -202,8 +209,10 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 }
 
 // shellTrusted reports whether a shell-bearing skill may load: only a
-// plugin skill whose plugin the user has trusted. Project/global shell
-// skills are never auto-trusted here.
+// plugin skill with a non-empty id whose plugin the user has trusted. The
+// empty-id guard is defense-in-depth against an unidentified plugin
+// collapsing onto trusted(""). Project/global shell skills are never
+// auto-trusted here.
 func shellTrusted(s Skill, trusted TrustFunc) bool {
-	return s.Source == SourcePlugin && trusted != nil && trusted(s.PluginID)
+	return s.Source == SourcePlugin && s.PluginID != "" && trusted != nil && trusted(s.PluginID)
 }

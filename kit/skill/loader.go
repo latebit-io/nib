@@ -9,6 +9,7 @@ import (
 
 	"github.com/latebit-io/nib/kit/frontmatter"
 	"github.com/latebit-io/nib/kit/internal/filecap"
+	"github.com/latebit-io/nib/kit/toolperm"
 )
 
 // skillFile is the conventional filename inside each skill directory.
@@ -124,6 +125,16 @@ func parse(path, dirName string, source Source) (Skill, error) {
 	desc := strings.TrimSpace(m.Description)
 	if desc == "" {
 		return Skill{}, fmt.Errorf("parse %s: skill %q has no description (the model needs one to select it)", path, name)
+	}
+
+	// Validate tool-permission grants at load so a malformed
+	// disallowed-tools rule fails loudly rather than silently dropping
+	// when the matcher is built (which would fail closed but hide the bug).
+	if _, err := toolperm.ParseField([]string(m.AllowedTools)); err != nil {
+		return Skill{}, fmt.Errorf("parse %s: invalid allowed-tools: %w", path, err)
+	}
+	if _, err := toolperm.ParseField([]string(m.DisallowedTools)); err != nil {
+		return Skill{}, fmt.Errorf("parse %s: invalid disallowed-tools: %w", path, err)
 	}
 
 	return Skill{

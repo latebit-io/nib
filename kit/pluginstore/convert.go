@@ -218,7 +218,11 @@ func convertCommands(src, dst, pluginName string, vars Vars, report *ConvertRepo
 		}
 		seen[name] = e.Name()
 
-		allow, deny := parseGrants(fm)
+		allow, deny, gErr := parseGrants(fm)
+		if gErr != nil {
+			report.add("command", e.Name(), "malformed tool grant; skipped: "+gErr.Error())
+			continue
+		}
 		if toolperm.AnyShell(allow) {
 			report.add("command-tools", name, "carries shell grants; per-command enforcement lands at M2")
 		}
@@ -297,7 +301,11 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 		}
 		seen[name] = e.Name()
 
-		allow, deny := parseGrants(fm)
+		allow, deny, gErr := parseGrants(fm)
+		if gErr != nil {
+			report.add("skill", e.Name(), "malformed tool grant; skipped: "+gErr.Error())
+			continue
+		}
 		// Shell-bearing skills are converted WITH their grants preserved,
 		// but they will not execute until the trust + shell-execution layer
 		// lands: the skill loader still refuses script-bearing skills. Note
@@ -356,13 +364,20 @@ func namespacedName(pluginName, base string) string {
 }
 
 // parseGrants extracts the allowed-tools and disallowed-tools grants from
-// a skill/command frontmatter map, tolerating malformed individual grants
-// (they are dropped, the rest survive). Returns parsed rule sets ready to
-// re-render via [toolperm.Strings] or test via [toolperm.AnyShell].
-func parseGrants(fm map[string]any) (allow, deny []toolperm.Rule) {
-	allow, _ = toolperm.ParseField(fm["allowed-tools"])
-	deny, _ = toolperm.ParseField(fm["disallowed-tools"])
-	return allow, deny
+// a skill/command frontmatter map. A malformed grant is an error, not a
+// silent drop: converting an artifact with a broad allow but a dropped
+// (malformed) deny would weaken the imported policy. Callers skip and
+// report the artifact on error.
+func parseGrants(fm map[string]any) (allow, deny []toolperm.Rule, err error) {
+	allow, aerr := toolperm.ParseField(fm["allowed-tools"])
+	if aerr != nil {
+		return nil, nil, fmt.Errorf("allowed-tools: %w", aerr)
+	}
+	deny, derr := toolperm.ParseField(fm["disallowed-tools"])
+	if derr != nil {
+		return nil, nil, fmt.Errorf("disallowed-tools: %w", derr)
+	}
+	return allow, deny, nil
 }
 
 // stringField reads a string frontmatter field, empty when absent.

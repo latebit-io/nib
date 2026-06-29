@@ -132,13 +132,16 @@ func (s Skill) NeedsShell() bool {
 }
 
 // Permissions compiles the skill's allowed/disallowed tool grants into a
-// [toolperm.Matcher]. Parse errors in individual grants are tolerated —
-// the malformed grant is dropped and the matcher is built from the rest —
-// so a single bad frontmatter entry never disables an otherwise valid
-// skill. A skill with no allowed-tools yields a matcher that permits
-// nothing (prompt-only); see [toolperm.Matcher].
+// [toolperm.Matcher]. It fails CLOSED: if either grant field is
+// malformed, the matcher permits nothing ([toolperm.DenyAll]) rather than
+// dropping the bad rule — silently discarding a malformed disallowed-tools
+// entry could let a broad allowed-tools rule through. A skill with no
+// allowed-tools likewise yields a matcher that permits nothing.
 func (s Skill) Permissions() *toolperm.Matcher {
-	allow, _ := toolperm.ParseField(s.AllowedTools)
-	deny, _ := toolperm.ParseField(s.DisallowedTools)
+	allow, aerr := toolperm.ParseField(s.AllowedTools)
+	deny, derr := toolperm.ParseField(s.DisallowedTools)
+	if aerr != nil || derr != nil {
+		return toolperm.DenyAll()
+	}
 	return toolperm.New(allow, deny)
 }

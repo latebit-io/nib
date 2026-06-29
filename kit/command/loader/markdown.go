@@ -10,6 +10,7 @@ import (
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/frontmatter"
 	"github.com/latebit-io/nib/kit/internal/filecap"
+	"github.com/latebit-io/nib/kit/toolperm"
 )
 
 // maxCommandFileBytes caps how much of a command markdown file is read.
@@ -116,6 +117,16 @@ func Parse(path string, kind kitcmd.SourceKind) (*MarkdownCommand, error) {
 	// validator concern.
 	if !kitcmd.ValidName(name) {
 		return nil, fmt.Errorf("parse %s: invalid command name %q (must match [a-zA-Z0-9_-]+)", path, name)
+	}
+
+	// Validate tool-permission grants at load time so a malformed
+	// disallowed-tools rule fails loudly here rather than being silently
+	// dropped when the matcher is later built.
+	if _, err := toolperm.ParseField([]string(fm.AllowedTools)); err != nil {
+		return nil, fmt.Errorf("parse %s: invalid allowed-tools: %w", path, err)
+	}
+	if _, err := toolperm.ParseField([]string(fm.DisallowedTools)); err != nil {
+		return nil, fmt.Errorf("parse %s: invalid disallowed-tools: %w", path, err)
 	}
 
 	return &MarkdownCommand{

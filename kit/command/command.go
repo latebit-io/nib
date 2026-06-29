@@ -64,12 +64,17 @@ type Definition struct {
 }
 
 // Permissions compiles the command's allowed/disallowed tool grants into
-// a [toolperm.Matcher]. Malformed grants are dropped rather than failing
-// the whole command. A command with no allowed-tools yields a matcher
-// that permits nothing.
+// a [toolperm.Matcher]. It fails CLOSED: if either grant field is
+// malformed the matcher permits nothing ([toolperm.DenyAll]), so a
+// dropped disallowed-tools rule can never leave a broad allowed-tools
+// rule active. A command with no allowed-tools yields a matcher that
+// permits nothing.
 func (d Definition) Permissions() *toolperm.Matcher {
-	allow, _ := toolperm.ParseField(d.AllowedTools)
-	deny, _ := toolperm.ParseField(d.DisallowedTools)
+	allow, aerr := toolperm.ParseField(d.AllowedTools)
+	deny, derr := toolperm.ParseField(d.DisallowedTools)
+	if aerr != nil || derr != nil {
+		return toolperm.DenyAll()
+	}
 	return toolperm.New(allow, deny)
 }
 

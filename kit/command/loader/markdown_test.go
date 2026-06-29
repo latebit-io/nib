@@ -103,6 +103,21 @@ Deploy.
 	}
 }
 
+func TestParse_RejectsMalformedGrant(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMD(t, dir, "bad.md", `---
+name: bad
+description: d
+allowed-tools: Bash(*)
+disallowed-tools: Bash(rm *
+---
+body
+`)
+	if _, err := Parse(path, kitcmd.SourceProject); err == nil {
+		t.Errorf("expected parse error for malformed disallowed-tools")
+	}
+}
+
 func TestParse_FilenameFallbackForName(t *testing.T) {
 	// Files without a frontmatter `name:` use the filename basename.
 	// Lets users author one-line commands without ceremony.

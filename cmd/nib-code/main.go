@@ -35,6 +35,7 @@ import (
 	"github.com/latebit-io/nib/kit/budget"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	cmdloader "github.com/latebit-io/nib/kit/command/loader"
+	"github.com/latebit-io/nib/kit/pluginstore"
 	"github.com/latebit-io/nib/kit/skill"
 	nibTui "github.com/latebit-io/nib/tui"
 	tuicmd "github.com/latebit-io/nib/tui/command"
@@ -129,16 +130,52 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	sess := session.New(of, projectRoot)
 	sess.SetContext(appCtx)
 
-	// Discover MCP tools from .mcp.json or the brand-prefixed MCP env var.
+	// Construct the managed plugin store. Non-fatal on failure: nib runs
+	// fine without plugins, so we log and proceed with an empty set.
+	var pluginStore *pluginstore.Store
+	var activePlugins []pluginstore.ActivePlugin
+	if pdir, perr := brand.PluginsDir(); perr != nil {
+		slog.Warn("plugins: cannot resolve store dir; plugins disabled", "err", perr)
+	} else if ps, perr := pluginstore.New(pdir); perr != nil {
+		slog.Warn("plugins: store init failed; plugins disabled", "err", perr)
+	} else {
+		pluginStore = ps
+		activePlugins = ps.ActivePlugins()
+	}
+
+	// Discover MCP tools from .mcp.json or the brand-prefixed MCP env var,
+	// then add MCP servers contributed by enabled plugins' converted
+	// configs (namespaced by plugin id to avoid cross-plugin collisions).
 	mcpResult := wire.DiscoverMCPTools(projectRoot)
+	if len(activePlugins) > 0 {
+		var sources []wire.MCPConfigSource
+		for _, p := range activePlugins {
+			sources = append(sources, wire.MCPConfigSource{Prefix: p.ID, Path: p.MCPConfigPath})
+		}
+		mcpResult = combineMCPResults(mcpResult, wire.DiscoverMCPToolsFromSources(sources))
+	}
 	defer mcpResult.Cleanup()
 
-	// Discover model-invoked skills from both layers — project-local
-	// (.project/skills) and user-global (<UserConfigDir>/nib/skills) —
-	// with project shadowing global. Pure-prompt skills become tools;
-	// script-bearing skills are refused (logged) until the bash-approval
-	// surface exists.
-	skillResult, skillErr := skill.Discover(projectRoot)
+	// Discover model-invoked skills from project-local (.project/skills),
+	// user-global (<UserConfigDir>/nib/skills), and enabled plugins'
+	// converted skills (lowest precedence). Pure-prompt skills become
+	// tools; script-bearing skills are refused (logged) until the
+	// bash-approval surface exists.
+	var pluginSkills []skill.PluginSkillSource
+	for _, p := range activePlugins {
+		pluginSkills = append(pluginSkills, skill.PluginSkillSource{ID: p.ID, Dir: p.SkillsDir})
+	}
+	// Trust gate: a plugin's shell-bearing skills load only when the user
+	// has trusted that plugin (via `/plugin trust`). Backed by the store's
+	// persisted grant; nil store ⇒ nothing trusted.
+	trusted := func(pluginID string) bool {
+		if pluginStore == nil {
+			return false
+		}
+		p, ok := pluginStore.Get(pluginID)
+		return ok && p.Trusted
+	}
+	skillResult, skillErr := skill.DiscoverWithPlugins(projectRoot, pluginSkills, trusted)
 	if skillErr != nil {
 		slog.Warn("skills: some skills failed to load", "err", skillErr)
 	}
@@ -457,6 +494,19 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	} else {
 		slog.Debug("commands: skipping global dir, UserConfigDir unavailable", "err", err)
 	}
+	// Commands imported from enabled plugins (lower precedence than the
+	// user's own project/global markdown).
+	for _, p := range activePlugins {
+		loadCommandDir(p.CommandsDir, kitcmd.SourcePlugin)
+	}
+
+	// /plugin — manage imported Claude Code plugins. Registered only when
+	// the store initialized; without it the command would have no backend.
+	if pluginStore != nil {
+		if err := cmdRegistry.Register(codingcmd.NewPlugin(pluginStore)); err != nil {
+			return fmt.Errorf("register /plugin: %w", err)
+		}
+	}
 
 	// /new-command — scaffold a new markdown command. Registered
 	// after the markdown loader runs so its CommandLookup probe
@@ -731,4 +781,18 @@ func modelsToItems(models []llm.ModelInfo, profile, defaultModel string) []nibTu
 		items[0], items[defaultIdx] = items[defaultIdx], items[0]
 	}
 	return items
+}
+
+// combineMCPResults merges two MCP discovery results into one, chaining
+// their cleanups so both sets of clients close on shutdown. Used to fold
+// plugin-contributed MCP servers into the project's discovery result.
+func combineMCPResults(a, b wire.MCPResult) wire.MCPResult {
+	return wire.MCPResult{
+		Tools:       append(append([]agent.Tool{}, a.Tools...), b.Tools...),
+		ServerNames: append(append([]string{}, a.ServerNames...), b.ServerNames...),
+		Cleanup: func() {
+			a.Cleanup()
+			b.Cleanup()
+		},
+	}
 }

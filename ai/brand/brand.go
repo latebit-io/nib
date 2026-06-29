@@ -54,6 +54,12 @@ const (
 	// startup ([kit/budget.ParseEnvCap]) rather than silently ignored.
 	EnvKeyTaskTokenBudget = EnvPrefix + "TASK_TOKEN_BUDGET"
 
+	// EnvKeyPluginsDir overrides the managed plugin store root (default
+	// <UserConfigDir>/<ConfigDirName>/plugins). Lets power users
+	// relocate it and lets tests point it at a temp dir for hermetic
+	// plugin-store coverage.
+	EnvKeyPluginsDir = EnvPrefix + "PLUGINS_DIR"
+
 	// EnvKeyGlobalSkillsDir overrides the user-global skills directory
 	// (default <UserConfigDir>/<ConfigDirName>/skills). Lets power users
 	// relocate it and lets tests point it at a temp dir for hermetic
@@ -82,6 +88,22 @@ const (
 	// arguments to MkdirTemp.
 	TempDirPrefix = Name + "-lint-"
 )
+
+// PluginsDir resolves the managed plugin store root:
+// <UserConfigDir>/<ConfigDirName>/plugins (e.g.
+// ~/.config/<brand>/plugins on Linux). [EnvKeyPluginsDir] overrides it
+// verbatim when set non-empty. Returns an error only when the override
+// is unset and the user config directory cannot be resolved.
+func PluginsDir() (string, error) {
+	if override := os.Getenv(EnvKeyPluginsDir); override != "" {
+		return override, nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("brand: resolve user config dir: %w", err)
+	}
+	return filepath.Join(dir, ConfigDirName, "plugins"), nil
+}
 
 // DebugLogPath resolves a debug-log path under the user's cache directory
 // ([os.UserCacheDir]/[ConfigDirName]/<name>) and ensures the parent

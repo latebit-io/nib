@@ -95,15 +95,17 @@ func WithBusyCheck(busy func() bool) DispatchOption {
 // Same-rank collision returns [ErrCollision].
 //
 // Project commands trump everything (the user explicitly authored
-// them inside the repo). Global markdown trumps MCP and builtins
-// (the user installed them under their config directory). MCP
-// trumps builtins (the user installed the MCP server). Builtins
-// are the floor.
+// them inside the repo). Global markdown trumps plugin, MCP, and
+// builtins (the user authored them under their config directory).
+// Plugin commands (imported third-party) trump MCP and builtins but
+// yield to user-authored markdown. MCP trumps builtins (the user
+// installed the MCP server). Builtins are the floor.
 var precedenceOrder = map[SourceKind]int{
 	SourceBuiltin: 0,
 	SourceMCP:     1,
-	SourceGlobal:  2,
-	SourceProject: 3,
+	SourcePlugin:  2,
+	SourceGlobal:  3,
+	SourceProject: 4,
 }
 
 // registryEntry is the registry's per-name slot.

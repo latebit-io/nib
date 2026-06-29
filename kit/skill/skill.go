@@ -15,7 +15,11 @@
 // script-skill extension slots into — see [Discover].
 package skill
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/latebit-io/nib/kit/toolperm"
+)
 
 // Source identifies which layer a skill was loaded from. Mirrors
 // command.SourceKind: project-local skills shadow user-global ones of
@@ -27,6 +31,10 @@ const (
 	SourceProject Source = "project"
 	// SourceGlobal is a skill under the user-global skills directory.
 	SourceGlobal Source = "global"
+	// SourcePlugin is a skill imported from a managed plugin's converted
+	// tree. Lowest precedence of the three: a user's own project or
+	// global skill of the same name shadows a third-party plugin skill.
+	SourcePlugin Source = "plugin"
 )
 
 // Skill is a parsed SKILL.md: the model-facing metadata plus the
@@ -47,10 +55,19 @@ type Skill struct {
 	// entry naming shell execution marks the skill script-bearing; see
 	// [Skill.NeedsShell].
 	AllowedTools []string
+	// DisallowedTools is the frontmatter `disallowed-tools` list — tool
+	// grants explicitly denied even if otherwise allowed. Deny wins; see
+	// [Skill.Permissions].
+	DisallowedTools []string
 	// Path is the source SKILL.md path, kept for diagnostics.
 	Path string
 	// Source is the layer this skill was loaded from. Stamped by [Load].
 	Source Source
+	// PluginID is the managed-plugin id this skill was imported from,
+	// empty for project/global skills. It is the provenance the trust
+	// gate keys on: a [SourcePlugin] shell skill loads only if its plugin
+	// is trusted. Stamped by [DiscoverWithPlugins].
+	PluginID string
 }
 
 // Merge deduplicates skills by name across precedence layers. Layers
@@ -112,4 +129,19 @@ func (s Skill) NeedsShell() bool {
 		}
 	}
 	return false
+}
+
+// Permissions compiles the skill's allowed/disallowed tool grants into a
+// [toolperm.Matcher]. It fails CLOSED: if either grant field is
+// malformed, the matcher permits nothing ([toolperm.DenyAll]) rather than
+// dropping the bad rule — silently discarding a malformed disallowed-tools
+// entry could let a broad allowed-tools rule through. A skill with no
+// allowed-tools likewise yields a matcher that permits nothing.
+func (s Skill) Permissions() *toolperm.Matcher {
+	allow, aerr := toolperm.ParseField(s.AllowedTools)
+	deny, derr := toolperm.ParseField(s.DisallowedTools)
+	if aerr != nil || derr != nil {
+		return toolperm.DenyAll()
+	}
+	return toolperm.New(allow, deny)
 }

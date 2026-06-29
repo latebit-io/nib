@@ -9,6 +9,7 @@ import (
 
 	"github.com/latebit-io/nib/kit/frontmatter"
 	"github.com/latebit-io/nib/kit/internal/filecap"
+	"github.com/latebit-io/nib/kit/toolperm"
 )
 
 // skillFile is the conventional filename inside each skill directory.
@@ -24,9 +25,10 @@ const maxSkillFileBytes = 1 << 20 // 1 MiB
 // are optional at the YAML level; a missing name falls back to the
 // directory basename.
 type meta struct {
-	Name         string   `yaml:"name"`
-	Description  string   `yaml:"description"`
-	AllowedTools []string `yaml:"allowed-tools"`
+	Name            string                 `yaml:"name"`
+	Description     string                 `yaml:"description"`
+	AllowedTools    frontmatter.StringList `yaml:"allowed-tools"`
+	DisallowedTools frontmatter.StringList `yaml:"disallowed-tools"`
 }
 
 // validNameChars reports whether name contains only characters allowed
@@ -125,12 +127,23 @@ func parse(path, dirName string, source Source) (Skill, error) {
 		return Skill{}, fmt.Errorf("parse %s: skill %q has no description (the model needs one to select it)", path, name)
 	}
 
+	// Validate tool-permission grants at load so a malformed
+	// disallowed-tools rule fails loudly rather than silently dropping
+	// when the matcher is built (which would fail closed but hide the bug).
+	if _, err := toolperm.ParseField([]string(m.AllowedTools)); err != nil {
+		return Skill{}, fmt.Errorf("parse %s: invalid allowed-tools: %w", path, err)
+	}
+	if _, err := toolperm.ParseField([]string(m.DisallowedTools)); err != nil {
+		return Skill{}, fmt.Errorf("parse %s: invalid disallowed-tools: %w", path, err)
+	}
+
 	return Skill{
-		Name:         name,
-		Description:  desc,
-		Body:         strings.TrimSpace(body),
-		AllowedTools: m.AllowedTools,
-		Path:         path,
-		Source:       source,
+		Name:            name,
+		Description:     desc,
+		Body:            strings.TrimSpace(body),
+		AllowedTools:    []string(m.AllowedTools),
+		DisallowedTools: []string(m.DisallowedTools),
+		Path:            path,
+		Source:          source,
 	}, nil
 }

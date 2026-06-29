@@ -26,7 +26,11 @@
 // Kit owns only the framework plus [NewHelp].
 package command
 
-import "context"
+import (
+	"context"
+
+	"github.com/latebit-io/nib/kit/toolperm"
+)
 
 // Definition is the descriptive surface every command shares. It
 // drives /help rendering, registration-time conflict resolution,
@@ -49,6 +53,29 @@ type Definition struct {
 	// shadowing precedence at registration time and is surfaced
 	// in /help.
 	Source Source
+
+	// AllowedTools / DisallowedTools are the command's tool-permission
+	// grants (the `allowed-tools` / `disallowed-tools` frontmatter).
+	// Carried so an imported plugin command's grants survive; enforcement
+	// of a per-command permission scope is a later milestone. Build a
+	// matcher via [Definition.Permissions].
+	AllowedTools    []string
+	DisallowedTools []string
+}
+
+// Permissions compiles the command's allowed/disallowed tool grants into
+// a [toolperm.Matcher]. It fails CLOSED: if either grant field is
+// malformed the matcher permits nothing ([toolperm.DenyAll]), so a
+// dropped disallowed-tools rule can never leave a broad allowed-tools
+// rule active. A command with no allowed-tools yields a matcher that
+// permits nothing.
+func (d Definition) Permissions() *toolperm.Matcher {
+	allow, aerr := toolperm.ParseField(d.AllowedTools)
+	deny, derr := toolperm.ParseField(d.DisallowedTools)
+	if aerr != nil || derr != nil {
+		return toolperm.DenyAll()
+	}
+	return toolperm.New(allow, deny)
 }
 
 // Source identifies where a command originated. The kind drives
@@ -90,6 +117,13 @@ const (
 	// project root (e.g. .nib/commands/). Highest precedence —
 	// project commands shadow everything else.
 	SourceProject
+
+	// SourcePlugin is for commands imported from a managed plugin's
+	// converted tree. Ranked above MCP/builtin but below user-authored
+	// markdown (project/global) so a user's own command always wins over
+	// a third-party plugin command. Its iota position is irrelevant —
+	// shadowing rank is set explicitly in precedenceOrder.
+	SourcePlugin
 )
 
 // Command is the marker every registered command implements.

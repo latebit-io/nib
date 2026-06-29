@@ -10,6 +10,7 @@ import (
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/frontmatter"
 	"github.com/latebit-io/nib/kit/internal/filecap"
+	"github.com/latebit-io/nib/kit/toolperm"
 )
 
 // maxCommandFileBytes caps how much of a command markdown file is read.
@@ -23,9 +24,11 @@ const maxCommandFileBytes = 1 << 20 // 1 MiB
 // name falls back to the filename basename so a single-line file is
 // a valid command.
 type commandMeta struct {
-	Name        string   `yaml:"name"`
-	Aliases     []string `yaml:"aliases"`
-	Description string   `yaml:"description"`
+	Name            string                 `yaml:"name"`
+	Aliases         []string               `yaml:"aliases"`
+	Description     string                 `yaml:"description"`
+	AllowedTools    frontmatter.StringList `yaml:"allowed-tools"`
+	DisallowedTools frontmatter.StringList `yaml:"disallowed-tools"`
 }
 
 // MarkdownCommand is a [kit/command.PromptCommand] backed by an
@@ -116,11 +119,23 @@ func Parse(path string, kind kitcmd.SourceKind) (*MarkdownCommand, error) {
 		return nil, fmt.Errorf("parse %s: invalid command name %q (must match [a-zA-Z0-9_-]+)", path, name)
 	}
 
+	// Validate tool-permission grants at load time so a malformed
+	// disallowed-tools rule fails loudly here rather than being silently
+	// dropped when the matcher is later built.
+	if _, err := toolperm.ParseField([]string(fm.AllowedTools)); err != nil {
+		return nil, fmt.Errorf("parse %s: invalid allowed-tools: %w", path, err)
+	}
+	if _, err := toolperm.ParseField([]string(fm.DisallowedTools)); err != nil {
+		return nil, fmt.Errorf("parse %s: invalid disallowed-tools: %w", path, err)
+	}
+
 	return &MarkdownCommand{
 		def: kitcmd.Definition{
-			Name:        name,
-			Aliases:     fm.Aliases,
-			Description: strings.TrimSpace(fm.Description),
+			Name:            name,
+			Aliases:         fm.Aliases,
+			Description:     strings.TrimSpace(fm.Description),
+			AllowedTools:    []string(fm.AllowedTools),
+			DisallowedTools: []string(fm.DisallowedTools),
 			Source: kitcmd.Source{
 				Kind: kind,
 				Path: path,

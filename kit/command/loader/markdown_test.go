@@ -76,6 +76,48 @@ Focus areas: $@
 	}
 }
 
+func TestParse_ToolGrants(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMD(t, dir, "deploy.md", `---
+name: deploy
+description: ship it
+allowed-tools: Bash(git *) Read
+disallowed-tools: Bash(git push *)
+---
+Deploy.
+`)
+	cmd, err := Parse(path, kitcmd.SourceProject)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	def := cmd.Definition()
+	if len(def.AllowedTools) == 0 || len(def.DisallowedTools) == 0 {
+		t.Fatalf("grants not parsed: allowed=%v disallowed=%v", def.AllowedTools, def.DisallowedTools)
+	}
+	perm := def.Permissions()
+	if !perm.Allows("Bash", "git status") || !perm.Allows("Read", "x") {
+		t.Errorf("expected git/read allowed")
+	}
+	if perm.Allows("Bash", "git push origin") {
+		t.Errorf("git push must be denied")
+	}
+}
+
+func TestParse_RejectsMalformedGrant(t *testing.T) {
+	dir := t.TempDir()
+	path := writeMD(t, dir, "bad.md", `---
+name: bad
+description: d
+allowed-tools: Bash(*)
+disallowed-tools: Bash(rm *
+---
+body
+`)
+	if _, err := Parse(path, kitcmd.SourceProject); err == nil {
+		t.Errorf("expected parse error for malformed disallowed-tools")
+	}
+}
+
 func TestParse_FilenameFallbackForName(t *testing.T) {
 	// Files without a frontmatter `name:` use the filename basename.
 	// Lets users author one-line commands without ceremony.

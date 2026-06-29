@@ -11,6 +11,8 @@ import (
 	upagent "github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit/dyncontext"
+	"github.com/latebit-io/nib/kit/toolperm"
 )
 
 // ToolNamePrefix namespaces skill tool names so a skill can never
@@ -19,12 +21,15 @@ import (
 // layer can detect skill tools without re-deriving the convention.
 const ToolNamePrefix = "skill_"
 
-// skillTool adapts a pure-prompt [Skill] into an [agent.Tool]. The
-// description is advertised in the tool list; Execute returns the body
-// so the instructions load only when the model invokes the skill.
+// skillTool adapts a [Skill] into an [agent.Tool]. The description is
+// advertised in the tool list; Execute returns the body so the
+// instructions load only when the model invokes the skill, expanding any
+// dynamic-context directives gated by the skill's tool grants.
 type skillTool struct {
-	def  llm.ToolDef
-	body string
+	def    llm.ToolDef
+	body   string
+	perm   *toolperm.Matcher
+	runner dyncontext.Runner
 }
 
 // Definition returns the advertised schema: the skill's description and
@@ -32,14 +37,24 @@ type skillTool struct {
 // it pulls the instructions, then the model continues).
 func (t skillTool) Definition() llm.ToolDef { return t.def }
 
-// Execute returns the skill body verbatim as the tool result. It never
-// fails and ignores the call arguments — the skill is pure instruction
-// text, with no side effects.
-func (t skillTool) Execute(_ context.Context, _ llm.ToolCall) upagent.ToolResult {
-	return upagent.ToolResult{Content: t.body}
+// Execute returns the skill body as the tool result. A directive-free
+// body (the common case) is returned verbatim. A body with dynamic
+// context (“ !`cmd` “ / fenced ` ```! `) has each directive expanded by
+// [dyncontext.Expand], which runs a command only if the skill's grants
+// permit it — so a prompt-only skill (deny-all matcher) never executes
+// shell, and a trusted plugin's shell skill runs only its declared
+// commands.
+func (t skillTool) Execute(ctx context.Context, _ llm.ToolCall) upagent.ToolResult {
+	body := t.body
+	if dyncontext.HasDirectives(body) {
+		body = dyncontext.Expand(ctx, body, t.perm, t.runner)
+	}
+	return upagent.ToolResult{Content: body}
 }
 
-// adaptTool builds the agent.Tool for a pure-prompt skill.
+// adaptTool builds the agent.Tool for a skill, wiring its permission
+// matcher and the default shell runner so dynamic-context directives are
+// gated by the skill's grants at invocation time.
 func adaptTool(s Skill) skillTool {
 	return skillTool{
 		def: llm.ToolDef{
@@ -53,7 +68,9 @@ func adaptTool(s Skill) skillTool {
 				},
 			},
 		},
-		body: s.Body,
+		body:   s.Body,
+		perm:   s.Permissions(),
+		runner: dyncontext.NewShellRunner(0),
 	}
 }
 
@@ -142,9 +159,10 @@ type TrustFunc func(pluginID string) bool
 // user-authored skills yet). Nil pluginSkills + nil trusted reproduces
 // the historic [Discover] behavior.
 //
-// NOTE: this gate decides whether a shell skill's instructions LOAD.
-// Fine-grained enforcement of which shell commands a grant permits
-// (the [toolperm] matcher applied at bash dispatch) is the next step.
+// This gate decides whether a shell skill's instructions LOAD. Which
+// shell commands those instructions may actually run is enforced
+// per-command at invocation by the skill's [toolperm.Matcher] over its
+// dynamic-context directives (see [skillTool.Execute] / [dyncontext]).
 func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, trusted TrustFunc) (Result, error) {
 	var errs []error
 

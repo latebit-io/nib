@@ -35,29 +35,39 @@ type Runner interface {
 }
 
 var (
-	// fencedRe matches a ```! … ``` block; the command is captured.
-	fencedRe = regexp.MustCompile("(?s)```!\\s*\n(.*?)\n```")
+	// fencedExecRe matches an executable ```! … ``` block; the command
+	// is captured.
+	fencedExecRe = regexp.MustCompile("(?s)```!\\s*\n(.*?)\n```")
 	// inlineRe matches an inline !`cmd` directive.
 	inlineRe = regexp.MustCompile("!`([^`]+)`")
+	// inlinePassRe matches EITHER a normal code fence (group 1) or an
+	// inline directive (group 2). Used for the inline pass so an example
+	// like !`git status` inside a documentation fence is left as literal
+	// text rather than executed.
+	inlinePassRe = regexp.MustCompile("(?s)(```.*?```)|!`([^`]+)`")
 )
 
 // Expand replaces every dynamic-context directive in body with its gated
-// output and returns the result. Fenced blocks are processed before
-// inline directives. A nil matcher denies everything (fail closed); a nil
-// runner turns every otherwise-permitted directive into an error marker
-// rather than executing.
+// output and returns the result. Executable ```! blocks are processed
+// first; then inline “ !`cmd` “ directives are expanded everywhere
+// EXCEPT inside normal code fences (so documentation snippets stay
+// literal). A nil matcher denies everything (fail closed); a nil runner
+// turns every otherwise-permitted directive into an error marker.
 func Expand(ctx context.Context, body string, perm *toolperm.Matcher, runner Runner) string {
 	if perm == nil {
 		perm = toolperm.DenyAll()
 	}
-	repl := func(re *regexp.Regexp) func(string) string {
-		return func(match string) string {
-			cmd := strings.TrimSpace(re.FindStringSubmatch(match)[1])
-			return renderDirective(ctx, cmd, perm, runner)
+	body = fencedExecRe.ReplaceAllStringFunc(body, func(match string) string {
+		cmd := strings.TrimSpace(fencedExecRe.FindStringSubmatch(match)[1])
+		return renderDirective(ctx, cmd, perm, runner)
+	})
+	body = inlinePassRe.ReplaceAllStringFunc(body, func(match string) string {
+		sm := inlinePassRe.FindStringSubmatch(match)
+		if sm[1] != "" {
+			return match // a normal code fence — leave its contents verbatim
 		}
-	}
-	body = fencedRe.ReplaceAllStringFunc(body, repl(fencedRe))
-	body = inlineRe.ReplaceAllStringFunc(body, repl(inlineRe))
+		return renderDirective(ctx, strings.TrimSpace(sm[2]), perm, runner)
+	})
 	return body
 }
 
@@ -65,7 +75,7 @@ func Expand(ctx context.Context, body string, perm *toolperm.Matcher, runner Run
 // directive — a cheap pre-check so callers can skip Expand (and its
 // matcher/runner plumbing) for the common directive-free body.
 func HasDirectives(body string) bool {
-	return inlineRe.MatchString(body) || fencedRe.MatchString(body)
+	return inlineRe.MatchString(body) || fencedExecRe.MatchString(body)
 }
 
 // renderDirective gates one command and returns the text to inline.
@@ -76,6 +86,14 @@ func renderDirective(ctx context.Context, cmd string, perm *toolperm.Matcher, ru
 	if !perm.Allows(gateTool, cmd) {
 		return fmt.Sprintf("[blocked: command %q is not permitted by this skill's tool grants]", cmd)
 	}
+	// A matcher glob like `git *` matches the whole command string, so it
+	// would also match a chained `git x; rm -rf y`. Reject shell control
+	// operators outright so a grant cannot be escaped via chaining,
+	// subshells, redirects, or command substitution — the command must be
+	// a single simple invocation to run.
+	if op, bad := shellControl(cmd); bad {
+		return fmt.Sprintf("[blocked: command %q contains shell operator %q, not permitted in dynamic context]", cmd, op)
+	}
 	if runner == nil {
 		return fmt.Sprintf("[unavailable: no command runner for %q]", cmd)
 	}
@@ -84,4 +102,19 @@ func renderDirective(ctx context.Context, cmd string, perm *toolperm.Matcher, ru
 		return fmt.Sprintf("[error running %q: %v]\n%s", cmd, err, strings.TrimRight(out, "\n"))
 	}
 	return strings.TrimRight(out, "\n")
+}
+
+// shellControl reports whether cmd contains a shell control operator that
+// could chain, redirect, background, or substitute commands — the vectors
+// by which a matcher glob (`git *`) could be escaped. It returns the
+// offending token for a clear diagnostic.
+func shellControl(cmd string) (string, bool) {
+	if i := strings.Index(cmd, "$("); i >= 0 {
+		return "$(", true
+	}
+	const operators = ";|&`<>()\n"
+	if i := strings.IndexAny(cmd, operators); i >= 0 {
+		return string(cmd[i]), true
+	}
+	return "", false
 }

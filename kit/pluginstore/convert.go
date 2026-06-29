@@ -369,6 +369,7 @@ func convertAgents(src, dst, pluginName string, vars Vars, report *ConvertReport
 		}
 		return fmt.Errorf("pluginstore: read agents dir: %w", err)
 	}
+	seen := map[string]string{} // namespaced name → source filename
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
@@ -383,6 +384,11 @@ func convertAgents(src, dst, pluginName string, vars Vars, report *ConvertReport
 			report.add("agent", e.Name(), "could not derive a valid name; skipped")
 			continue
 		}
+		if prev, dup := seen[name]; dup {
+			report.add("agent", e.Name(), fmt.Sprintf("name %q collides with %s after sanitization; skipped", name, prev))
+			continue
+		}
+		seen[name] = e.Name()
 		prompt, un := expandVars(def.SystemPrompt, vars)
 		noteVars(report, un)
 		meta := nibAgentMeta{
@@ -393,8 +399,12 @@ func convertAgents(src, dst, pluginName string, vars Vars, report *ConvertReport
 			Model:           def.Model,
 			Effort:          def.Effort,
 			MaxTurns:        def.MaxTurns,
-			Skills:          def.Skills,
-			Isolation:       string(def.Isolation),
+			// The agent's preloaded skills are plugin-local; rewrite each
+			// reference to the namespaced name the skill converter emitted,
+			// so the future subagent loader binds to this plugin's skill
+			// rather than missing it or matching another layer's skill.
+			Skills:    namespaceRefs(pluginName, def.Skills),
+			Isolation: string(def.Isolation),
 		}
 		if err := writeMarkdown(filepath.Join(dst, "agents", name+".md"), meta, prompt); err != nil {
 			return err
@@ -418,6 +428,22 @@ func noteDeferredComponents(src string, report *ConvertReport) {
 // nameSanitizer collapses runs of characters outside nib's name alphabet
 // (lowercase alnum, underscore, dash) into a single dash.
 var nameSanitizer = regexp.MustCompile(`[^a-z0-9_-]+`)
+
+// namespaceRefs maps a list of plugin-local skill references through
+// [namespacedName] so they match the converter's emitted skill names.
+// Empty results (a ref that sanitizes to nothing) are dropped.
+func namespaceRefs(pluginName string, refs []string) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if n := namespacedName(pluginName, r); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 // namespacedName builds a nib-valid, plugin-namespaced command/skill
 // name: "<plugin>-<base>", lowercased and sanitized. Returns "" when

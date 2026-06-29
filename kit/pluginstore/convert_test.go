@@ -204,6 +204,32 @@ func TestConvert_SkipsMalformedGrant(t *testing.T) {
 	}
 }
 
+func TestConvert_AgentSkillRefsNamespaced(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude-plugin", "plugin.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(src, "agents", "rev.md"),
+		"---\nname: rev\ndescription: d\nskills: [runner, helper]\n---\nReview.\n")
+
+	dst := t.TempDir()
+	if _, err := Convert(src, dst, Manifest{Name: "demo"}, Vars{}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(filepath.Join(dst, "agents", "demo-rev.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{"demo-runner", "demo-helper"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("agent skill ref not namespaced to %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "- runner\n") || strings.Contains(s, "- helper\n") {
+		t.Errorf("bare (un-namespaced) skill ref leaked:\n%s", s)
+	}
+}
+
 func TestExpandVars(t *testing.T) {
 	t.Parallel()
 	v := Vars{PluginRoot: "/r", PluginData: "/d"}

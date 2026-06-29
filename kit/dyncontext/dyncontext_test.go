@@ -104,6 +104,54 @@ func TestExpand_RunErrorMarker(t *testing.T) {
 	}
 }
 
+func TestExpand_SkipsInsideCodeFence(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{out: "RAN"}
+	// An inline directive inside a normal documentation fence must stay
+	// literal, not execute.
+	body := "Example:\n```\n!`git status`\n```\nend"
+	got := Expand(context.Background(), body, matcher(t, "Bash(git *)", ""), r)
+	if len(r.ran) != 0 {
+		t.Errorf("directive inside a code fence must not run: %v", r.ran)
+	}
+	if !strings.Contains(got, "!`git status`") {
+		t.Errorf("fenced directive should be preserved literally:\n%s", got)
+	}
+}
+
+func TestExpand_BlocksShellChaining(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{out: "NOPE"}
+	// Even with a broad grant, shell chaining is blocked so the grant
+	// glob cannot be escaped.
+	for _, cmd := range []string{"git status; rm -rf /", "git x && rm y", "echo $(whoami)", "cat a | sh"} {
+		got := Expand(context.Background(), "!`"+cmd+"`", matcher(t, "Bash(*)", ""), r)
+		if !strings.Contains(got, "[blocked:") {
+			t.Errorf("expected %q blocked, got %q", cmd, got)
+		}
+	}
+	if len(r.ran) != 0 {
+		t.Errorf("no chained command should run: %v", r.ran)
+	}
+}
+
+func TestCapWriter_Truncates(t *testing.T) {
+	t.Parallel()
+	w := &capWriter{limit: 10}
+	n, _ := w.Write([]byte("0123456789ABCDEF"))
+	if n != 16 {
+		t.Errorf("Write should report full len, got %d", n)
+	}
+	if w.b.Len() != 10 || !w.truncated {
+		t.Errorf("expected 10 bytes kept + truncated, got %d trunc=%t", w.b.Len(), w.truncated)
+	}
+	// Further writes stay truncated and keep nothing.
+	_, _ = w.Write([]byte("more"))
+	if w.b.Len() != 10 {
+		t.Errorf("over-cap writes must be dropped, got %d", w.b.Len())
+	}
+}
+
 func TestExpand_NoDirectivesUnchanged(t *testing.T) {
 	t.Parallel()
 	body := "Plain skill body with no directives."

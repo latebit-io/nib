@@ -47,6 +47,16 @@ func TestWithinDir(t *testing.T) {
 	if withinDir(base, filepath.Join(escape, "x")) {
 		t.Errorf("withinDir must reject a path under an escaping symlink")
 	}
+
+	// A dangling symlink under base exists but cannot be resolved; it must
+	// fail closed rather than fall back to lexical reconstruction.
+	dangling := filepath.Join(base, "dangling")
+	if err := os.Symlink(filepath.Join(tmp, "nonexistent-target"), dangling); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if withinDir(base, dangling) {
+		t.Errorf("withinDir must fail closed on an existing-but-unresolvable path")
+	}
 }
 
 func TestSwapDir_ReplacesAndPreservesOnSuccess(t *testing.T) {

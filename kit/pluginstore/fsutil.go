@@ -75,10 +75,23 @@ func withinDir(base, target string) bool {
 // with [filepath.EvalSymlinks], and re-appends the missing tail. This
 // keeps a symlinked ancestor honest while allowing a target whose final
 // component has not been written yet.
+//
+// The "not created yet" fallback is taken ONLY when the path is genuinely
+// absent. A path that exists but cannot be resolved (dangling symlink,
+// symlink loop, permission error) fails closed: reconstructing it
+// lexically would let exactly the escapes this guard exists to block slip
+// through. [os.Lstat] (which does not follow the final symlink)
+// distinguishes the two cases.
 func resolveExisting(path string) (string, error) {
 	path = filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved, nil
+	}
+	if _, lerr := os.Lstat(path); lerr == nil {
+		// The path exists but EvalSymlinks could not resolve it — fail closed.
+		return "", fmt.Errorf("pluginstore: cannot resolve existing path %s", path)
+	} else if !os.IsNotExist(lerr) {
+		return "", lerr
 	}
 	parent, leaf := filepath.Split(path)
 	parent = filepath.Clean(parent)

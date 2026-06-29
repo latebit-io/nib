@@ -161,11 +161,21 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// converted skills (lowest precedence). Pure-prompt skills become
 	// tools; script-bearing skills are refused (logged) until the
 	// bash-approval surface exists.
-	var pluginSkillDirs []string
+	var pluginSkills []skill.PluginSkillSource
 	for _, p := range activePlugins {
-		pluginSkillDirs = append(pluginSkillDirs, p.SkillsDir)
+		pluginSkills = append(pluginSkills, skill.PluginSkillSource{ID: p.ID, Dir: p.SkillsDir})
 	}
-	skillResult, skillErr := skill.DiscoverWithPlugins(projectRoot, pluginSkillDirs)
+	// Trust gate: a plugin's shell-bearing skills load only when the user
+	// has trusted that plugin (via `/plugin trust`). Backed by the store's
+	// persisted grant; nil store ⇒ nothing trusted.
+	trusted := func(pluginID string) bool {
+		if pluginStore == nil {
+			return false
+		}
+		p, ok := pluginStore.Get(pluginID)
+		return ok && p.Trusted
+	}
+	skillResult, skillErr := skill.DiscoverWithPlugins(projectRoot, pluginSkills, trusted)
 	if skillErr != nil {
 		slog.Warn("skills: some skills failed to load", "err", skillErr)
 	}

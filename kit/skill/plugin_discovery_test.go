@@ -29,6 +29,77 @@ func loadedNames(res Result) []string {
 	return names
 }
 
+// TestSkill_PermissionsFromGrants checks allowed/disallowed-tools are
+// parsed and compile into a working matcher (deny wins).
+func TestSkill_PermissionsFromGrants(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillFile(t, dir, "runner",
+		"---\ndescription: runs git\nallowed-tools: Bash(git *)\ndisallowed-tools: Bash(git push *)\n---\nbody\n")
+
+	skills, err := Load(dir, SourcePlugin)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(skills) != 1 {
+		t.Fatalf("got %d skills", len(skills))
+	}
+	s := skills[0]
+	if len(s.AllowedTools) != 1 || len(s.DisallowedTools) != 1 {
+		t.Fatalf("grants not parsed: allowed=%v disallowed=%v", s.AllowedTools, s.DisallowedTools)
+	}
+	perm := s.Permissions()
+	if !perm.Allows("Bash", "git status") {
+		t.Errorf("git status should be allowed")
+	}
+	if perm.Allows("Bash", "git push origin main") {
+		t.Errorf("git push should be denied (disallowed wins)")
+	}
+}
+
+// TestDiscoverWithPlugins_TrustGate covers the shell trust gate: a
+// plugin's shell-bearing skill loads only when its plugin is trusted;
+// untrusted it is refused, and a non-shell plugin skill always loads.
+func TestDiscoverWithPlugins_TrustGate(t *testing.T) {
+	t.Setenv(brand.EnvKeyGlobalSkillsDir, t.TempDir())
+	projectRoot := t.TempDir()
+
+	pluginDir := t.TempDir()
+	writeSkillFile(t, pluginDir, "runner",
+		"---\ndescription: runs git\nallowed-tools: Bash(git *)\n---\nrun\n")
+	writeSkillFile(t, pluginDir, "helper",
+		"---\ndescription: prompt only\n---\nhelp\n")
+	srcs := []PluginSkillSource{{ID: "demo", Dir: pluginDir}}
+
+	// Untrusted: the shell skill is refused, the prompt skill loads.
+	untrusted, err := DiscoverWithPlugins(projectRoot, srcs, func(string) bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(loadedNames(untrusted), "runner") {
+		t.Errorf("untrusted plugin shell skill must not load: %v", loadedNames(untrusted))
+	}
+	if !slices.Contains(loadedNames(untrusted), "helper") {
+		t.Errorf("prompt-only plugin skill should load regardless of trust")
+	}
+	if !slices.ContainsFunc(untrusted.Skipped, func(s Skill) bool { return s.Name == "runner" }) {
+		t.Errorf("refused shell skill should be in Skipped")
+	}
+
+	// Trusted: the shell skill loads, with provenance stamped.
+	trusted, err := DiscoverWithPlugins(projectRoot, srcs, func(id string) bool { return id == "demo" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(loadedNames(trusted), "runner") {
+		t.Errorf("trusted plugin shell skill must load: %v", loadedNames(trusted))
+	}
+	for _, s := range trusted.Loaded {
+		if s.Name == "runner" && s.PluginID != "demo" {
+			t.Errorf("PluginID provenance not stamped: %q", s.PluginID)
+		}
+	}
+}
+
 // TestDiscoverWithPlugins_LoadsAndShadows verifies plugin skills load as
 // the lowest layer and a same-named project skill shadows the plugin one.
 func TestDiscoverWithPlugins_LoadsAndShadows(t *testing.T) {
@@ -43,7 +114,7 @@ func TestDiscoverWithPlugins_LoadsAndShadows(t *testing.T) {
 	writeSkillFile(t, pluginDir, "shared", "---\ndescription: plugin version\n---\nplugin body\n")
 	writeSkillFile(t, pluginDir, "plugonly", "---\ndescription: pg\n---\nbody\n")
 
-	res, err := DiscoverWithPlugins(projectRoot, []string{pluginDir})
+	res, err := DiscoverWithPlugins(projectRoot, []PluginSkillSource{{ID: "p", Dir: pluginDir}}, nil)
 	if err != nil {
 		t.Fatalf("DiscoverWithPlugins: %v", err)
 	}

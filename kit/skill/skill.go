@@ -15,7 +15,11 @@
 // script-skill extension slots into — see [Discover].
 package skill
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/latebit-io/nib/kit/toolperm"
+)
 
 // Source identifies which layer a skill was loaded from. Mirrors
 // command.SourceKind: project-local skills shadow user-global ones of
@@ -51,10 +55,19 @@ type Skill struct {
 	// entry naming shell execution marks the skill script-bearing; see
 	// [Skill.NeedsShell].
 	AllowedTools []string
+	// DisallowedTools is the frontmatter `disallowed-tools` list — tool
+	// grants explicitly denied even if otherwise allowed. Deny wins; see
+	// [Skill.Permissions].
+	DisallowedTools []string
 	// Path is the source SKILL.md path, kept for diagnostics.
 	Path string
 	// Source is the layer this skill was loaded from. Stamped by [Load].
 	Source Source
+	// PluginID is the managed-plugin id this skill was imported from,
+	// empty for project/global skills. It is the provenance the trust
+	// gate keys on: a [SourcePlugin] shell skill loads only if its plugin
+	// is trusted. Stamped by [DiscoverWithPlugins].
+	PluginID string
 }
 
 // Merge deduplicates skills by name across precedence layers. Layers
@@ -116,4 +129,16 @@ func (s Skill) NeedsShell() bool {
 		}
 	}
 	return false
+}
+
+// Permissions compiles the skill's allowed/disallowed tool grants into a
+// [toolperm.Matcher]. Parse errors in individual grants are tolerated —
+// the malformed grant is dropped and the matcher is built from the rest —
+// so a single bad frontmatter entry never disables an otherwise valid
+// skill. A skill with no allowed-tools yields a matcher that permits
+// nothing (prompt-only); see [toolperm.Matcher].
+func (s Skill) Permissions() *toolperm.Matcher {
+	allow, _ := toolperm.ParseField(s.AllowedTools)
+	deny, _ := toolperm.ParseField(s.DisallowedTools)
+	return toolperm.New(allow, deny)
 }

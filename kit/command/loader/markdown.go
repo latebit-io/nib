@@ -23,9 +23,11 @@ const maxCommandFileBytes = 1 << 20 // 1 MiB
 // name falls back to the filename basename so a single-line file is
 // a valid command.
 type commandMeta struct {
-	Name        string   `yaml:"name"`
-	Aliases     []string `yaml:"aliases"`
-	Description string   `yaml:"description"`
+	Name            string                 `yaml:"name"`
+	Aliases         []string               `yaml:"aliases"`
+	Description     string                 `yaml:"description"`
+	AllowedTools    frontmatter.StringList `yaml:"allowed-tools"`
+	DisallowedTools frontmatter.StringList `yaml:"disallowed-tools"`
 }
 
 // MarkdownCommand is a [kit/command.PromptCommand] backed by an
@@ -118,9 +120,11 @@ func Parse(path string, kind kitcmd.SourceKind) (*MarkdownCommand, error) {
 
 	return &MarkdownCommand{
 		def: kitcmd.Definition{
-			Name:        name,
-			Aliases:     fm.Aliases,
-			Description: strings.TrimSpace(fm.Description),
+			Name:            name,
+			Aliases:         fm.Aliases,
+			Description:     strings.TrimSpace(fm.Description),
+			AllowedTools:    []string(fm.AllowedTools),
+			DisallowedTools: []string(fm.DisallowedTools),
 			Source: kitcmd.Source{
 				Kind: kind,
 				Path: path,

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/kit/frontmatter"
+	"github.com/latebit-io/nib/kit/toolperm"
 	"gopkg.in/yaml.v3"
 )
 
@@ -167,8 +168,10 @@ func convertMCP(src, dst string, vars Vars, report *ConvertReport) error {
 // --- commands ---
 
 type nibCommandMeta struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description,omitempty"`
+	Name            string   `yaml:"name"`
+	Description     string   `yaml:"description,omitempty"`
+	AllowedTools    []string `yaml:"allowed-tools,omitempty"`
+	DisallowedTools []string `yaml:"disallowed-tools,omitempty"`
 }
 
 // convertCommands translates <src>/commands/*.md into nib command files
@@ -214,13 +217,20 @@ func convertCommands(src, dst, pluginName string, vars Vars, report *ConvertRepo
 			continue
 		}
 		seen[name] = e.Name()
-		if shellBearing(fm["allowed-tools"]) {
-			report.add("command-tools", name, "declares shell tools; grants enforced at M2")
+
+		allow, deny := parseGrants(fm)
+		if toolperm.AnyShell(allow) {
+			report.add("command-tools", name, "carries shell grants; per-command enforcement lands at M2")
 		}
 		expBody, un := expandVars(body, vars)
 		noteVars(report, un)
 
-		meta := nibCommandMeta{Name: name, Description: stringField(fm, "description")}
+		meta := nibCommandMeta{
+			Name:            name,
+			Description:     stringField(fm, "description"),
+			AllowedTools:    toolperm.Strings(allow),
+			DisallowedTools: toolperm.Strings(deny),
+		}
 		if err := writeMarkdown(filepath.Join(outDir, name+".md"), meta, expBody); err != nil {
 			return err
 		}
@@ -232,8 +242,10 @@ func convertCommands(src, dst, pluginName string, vars Vars, report *ConvertRepo
 // --- skills ---
 
 type nibSkillMeta struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description,omitempty"`
+	Name            string   `yaml:"name"`
+	Description     string   `yaml:"description,omitempty"`
+	AllowedTools    []string `yaml:"allowed-tools,omitempty"`
+	DisallowedTools []string `yaml:"disallowed-tools,omitempty"`
 }
 
 // convertSkills translates <src>/skills/<n>/SKILL.md into nib skills
@@ -284,9 +296,14 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 			continue
 		}
 		seen[name] = e.Name()
-		if shellBearing(fm["allowed-tools"]) {
-			report.add("skill-shell", name, "shell-bearing skill deferred to M2 (trust + execution)")
-			continue
+
+		allow, deny := parseGrants(fm)
+		// Shell-bearing skills are converted WITH their grants preserved,
+		// but they will not execute until the trust + shell-execution layer
+		// lands: the skill loader still refuses script-bearing skills. Note
+		// it so the user knows the artifact exists but is inert for now.
+		if toolperm.AnyShell(allow) {
+			report.add("skill-shell", name, "shell grant carried; runs only once the plugin is trusted (M2)")
 		}
 		skillDst := filepath.Join(dst, "skills", name)
 		if err := copyTree(skillSrc, skillDst); err != nil {
@@ -294,7 +311,12 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 		}
 		expBody, un := expandVars(body, vars)
 		noteVars(report, un)
-		meta := nibSkillMeta{Name: name, Description: stringField(fm, "description")}
+		meta := nibSkillMeta{
+			Name:            name,
+			Description:     stringField(fm, "description"),
+			AllowedTools:    toolperm.Strings(allow),
+			DisallowedTools: toolperm.Strings(deny),
+		}
 		if err := writeMarkdown(filepath.Join(skillDst, "SKILL.md"), meta, expBody); err != nil {
 			return err
 		}
@@ -333,36 +355,14 @@ func namespacedName(pluginName, base string) string {
 	return strings.Trim(n, "-_")
 }
 
-// shellBearing reports whether an allowed-tools value (string or list)
-// grants shell/exec access — the signal nib's skill loader uses to
-// refuse a skill until the trust+execution layer lands.
-func shellBearing(v any) bool {
-	for _, tok := range toStrings(v) {
-		l := strings.ToLower(tok)
-		if strings.Contains(l, "bash") || strings.Contains(l, "shell") || strings.Contains(l, "exec") {
-			return true
-		}
-	}
-	return false
-}
-
-// toStrings normalizes a frontmatter value that may be a string or a
-// list of strings into a slice.
-func toStrings(v any) []string {
-	switch t := v.(type) {
-	case string:
-		return strings.Fields(t)
-	case []any:
-		out := make([]string, 0, len(t))
-		for _, e := range t {
-			if s, ok := e.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	default:
-		return nil
-	}
+// parseGrants extracts the allowed-tools and disallowed-tools grants from
+// a skill/command frontmatter map, tolerating malformed individual grants
+// (they are dropped, the rest survive). Returns parsed rule sets ready to
+// re-render via [toolperm.Strings] or test via [toolperm.AnyShell].
+func parseGrants(fm map[string]any) (allow, deny []toolperm.Rule) {
+	allow, _ = toolperm.ParseField(fm["allowed-tools"])
+	deny, _ = toolperm.ParseField(fm["disallowed-tools"])
+	return allow, deny
 }
 
 // stringField reads a string frontmatter field, empty when absent.

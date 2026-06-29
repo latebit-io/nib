@@ -24,9 +24,10 @@ const maxSkillFileBytes = 1 << 20 // 1 MiB
 // are optional at the YAML level; a missing name falls back to the
 // directory basename.
 type meta struct {
-	Name         string   `yaml:"name"`
-	Description  string   `yaml:"description"`
-	AllowedTools []string `yaml:"allowed-tools"`
+	Name            string                 `yaml:"name"`
+	Description     string                 `yaml:"description"`
+	AllowedTools    frontmatter.StringList `yaml:"allowed-tools"`
+	DisallowedTools frontmatter.StringList `yaml:"disallowed-tools"`
 }
 
 // validNameChars reports whether name contains only characters allowed
@@ -126,11 +127,12 @@ func parse(path, dirName string, source Source) (Skill, error) {
 	}
 
 	return Skill{
-		Name:         name,
-		Description:  desc,
-		Body:         strings.TrimSpace(body),
-		AllowedTools: m.AllowedTools,
-		Path:         path,
-		Source:       source,
+		Name:            name,
+		Description:     desc,
+		Body:            strings.TrimSpace(body),
+		AllowedTools:    []string(m.AllowedTools),
+		DisallowedTools: []string(m.DisallowedTools),
+		Path:            path,
+		Source:          source,
 	}, nil
 }

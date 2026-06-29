@@ -31,7 +31,7 @@ func NewPlugin(store *pluginstore.Store) *PluginCommand {
 		store: store,
 		def: kitcmd.Definition{
 			Name:        "plugin",
-			Description: "Manage imported Claude Code plugins (list|info|install|update|remove|enable|disable|trust|marketplace)",
+			Description: "Manage imported Claude Code plugins (list|info|install|update|remove|enable|disable|trust|untrust|marketplace)",
 			Source:      kitcmd.Source{Kind: kitcmd.SourceBuiltin},
 		},
 	}
@@ -64,11 +64,13 @@ func (c *PluginCommand) Handle(ctx context.Context, sess kitcmd.Session, args st
 	case "disable":
 		return c.handleEnable(sess, fields, false)
 	case "trust":
-		return c.handleTrust(sess, fields)
+		return c.handleTrust(sess, fields, true)
+	case "untrust":
+		return c.handleTrust(sess, fields, false)
 	case "marketplace", "mp":
 		return c.handleMarketplace(ctx, sess, fields)
 	default:
-		return fmt.Errorf("unknown /plugin subcommand %q (try: list, info, install, update, remove, enable, disable, trust, marketplace)", sub)
+		return fmt.Errorf("unknown /plugin subcommand %q (try: list, info, install, update, remove, enable, disable, trust, untrust, marketplace)", sub)
 	}
 }
 
@@ -206,14 +208,23 @@ func (c *PluginCommand) handleEnable(sess kitcmd.Session, args []string, enabled
 	return nil
 }
 
-func (c *PluginCommand) handleTrust(sess kitcmd.Session, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: /plugin trust <id>")
+func (c *PluginCommand) handleTrust(sess kitcmd.Session, args []string, trust bool) error {
+	verb := "trust"
+	if !trust {
+		verb = "untrust"
 	}
-	if err := c.store.SetTrusted(args[0], true); err != nil {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: /plugin %s <id>", verb)
+	}
+	if err := c.store.SetTrusted(args[0], trust); err != nil {
 		return err
 	}
-	sess.Display(fmt.Sprintf("Trusted %s. Shell/hook execution from this plugin will be allowed once that layer ships (M2).", args[0]))
+	if trust {
+		sess.Display(fmt.Sprintf("Trusted %s. Restart nib to load its shell-bearing skills. "+
+			"(Per-command grant enforcement arrives in a later step.)", args[0]))
+	} else {
+		sess.Display(fmt.Sprintf("Untrusted %s. Restart nib to unload its shell-bearing skills.", args[0]))
+	}
 	return nil
 }
 

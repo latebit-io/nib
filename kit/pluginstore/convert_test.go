@@ -53,7 +53,9 @@ func TestConvert_FullPlugin(t *testing.T) {
 	if !slices.Equal(report.Commands, []string{"demo-greet"}) {
 		t.Errorf("commands = %v", report.Commands)
 	}
-	if !slices.Equal(report.Skills, []string{"demo-helper"}) {
+	// Shell-bearing skills are now converted too (grants preserved), so
+	// both helper and runner appear.
+	if !slices.Equal(report.Skills, []string{"demo-helper", "demo-runner"}) {
 		t.Errorf("skills = %v", report.Skills)
 	}
 	if !slices.Equal(report.MCPServers, []string{"db"}) {
@@ -95,9 +97,13 @@ func TestConvert_FullPlugin(t *testing.T) {
 	if !strings.Contains(string(skill), "name: demo-helper") {
 		t.Errorf("skill frontmatter missing namespaced name:\n%s", skill)
 	}
-	// Shell skill NOT copied.
-	if _, err := os.Stat(filepath.Join(dst, "skills", "demo-runner")); !os.IsNotExist(err) {
-		t.Errorf("shell-bearing skill should not be converted, stat err=%v", err)
+	// Shell skill IS converted now, with its grant preserved in frontmatter.
+	runner, err := os.ReadFile(filepath.Join(dst, "skills", "demo-runner", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("shell-bearing skill should be converted: %v", err)
+	}
+	if !strings.Contains(string(runner), "allowed-tools:") || !strings.Contains(string(runner), "Bash(git *)") {
+		t.Errorf("shell skill grant not carried into frontmatter:\n%s", runner)
 	}
 
 	// MCP converted: stdio kept + frozen, sse dropped.
@@ -133,6 +139,29 @@ func TestConvert_NameCollisionReported(t *testing.T) {
 		return u.Kind == "command" && strings.Contains(u.Reason, "collides")
 	}) {
 		t.Errorf("expected a collision report entry, got %+v", report.Unsupported)
+	}
+}
+
+func TestConvert_CarriesCommandGrants(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude-plugin", "plugin.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(src, "commands", "deploy.md"),
+		"---\ndescription: ship\nallowed-tools: Bash(git *) Read\ndisallowed-tools: Bash(rm *)\n---\nDeploy.\n")
+
+	dst := t.TempDir()
+	if _, err := Convert(src, dst, Manifest{Name: "demo"}, Vars{}); err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	out, err := os.ReadFile(filepath.Join(dst, "commands", "demo-deploy.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{"allowed-tools:", "Bash(git *)", "Read", "disallowed-tools:", "Bash(rm *)"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("converted command missing %q:\n%s", want, s)
+		}
 	}
 }
 

@@ -112,17 +112,40 @@ type Result struct {
 // reports per-skill parse failures (see [Load]); everything that did
 // load is still returned, so callers may log and proceed.
 func Discover(projectRoot string) (Result, error) {
-	return DiscoverWithPlugins(projectRoot, nil)
+	return DiscoverWithPlugins(projectRoot, nil, nil)
 }
 
+// PluginSkillSource locates one enabled plugin's converted skills
+// directory together with the plugin id the trust gate keys on.
+type PluginSkillSource struct {
+	// ID is the managed-plugin id (stamped onto each loaded skill).
+	ID string
+	// Dir is the converted skills root (<converted>/skills).
+	Dir string
+}
+
+// TrustFunc reports whether a managed plugin is trusted to run shell.
+// Supplied by the wiring layer (backed by the plugin store's persisted
+// trust grant). A nil TrustFunc means no plugin is trusted.
+type TrustFunc func(pluginID string) bool
+
 // DiscoverWithPlugins extends [Discover] with skills imported from
-// managed plugins. pluginSkillDirs are the converted "skills" roots of
-// the enabled plugins (each a directory of <name>/SKILL.md). Plugin
-// skills join as the lowest-precedence layer ([SourcePlugin]): a
-// same-named project or global skill shadows them, so a user's own
-// skills always win over a third-party import. A nil/empty slice makes
-// this identical to the historic [Discover] behavior.
-func DiscoverWithPlugins(projectRoot string, pluginSkillDirs []string) (Result, error) {
+// managed plugins. Each [PluginSkillSource] contributes its converted
+// skills as the lowest-precedence layer ([SourcePlugin]); a same-named
+// project or global skill shadows them, so a user's own skills always
+// win over a third-party import.
+//
+// Shell-bearing skills ([Skill.NeedsShell]) remain refused EXCEPT a
+// plugin skill whose plugin trusted reports true: trusting a plugin
+// (via `/plugin trust`) opts its shell skills in. Project and global
+// shell skills stay refused (nib has no per-skill shell surface for
+// user-authored skills yet). Nil pluginSkills + nil trusted reproduces
+// the historic [Discover] behavior.
+//
+// NOTE: this gate decides whether a shell skill's instructions LOAD.
+// Fine-grained enforcement of which shell commands a grant permits
+// (the [toolperm] matcher applied at bash dispatch) is the next step.
+func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, trusted TrustFunc) (Result, error) {
 	var errs []error
 
 	project, err := Load(ProjectDir(projectRoot), SourceProject)
@@ -139,10 +162,13 @@ func DiscoverWithPlugins(projectRoot string, pluginSkillDirs []string) (Result, 
 	}
 
 	var plugin []Skill
-	for _, dir := range pluginSkillDirs {
-		ps, perr := Load(dir, SourcePlugin)
+	for _, src := range pluginSkills {
+		ps, perr := Load(src.Dir, SourcePlugin)
 		if perr != nil {
 			errs = append(errs, perr)
+		}
+		for i := range ps {
+			ps[i].PluginID = src.ID // stamp provenance for the trust gate
 		}
 		plugin = append(plugin, ps...)
 	}
@@ -158,10 +184,11 @@ func DiscoverWithPlugins(projectRoot string, pluginSkillDirs []string) (Result, 
 			"skill", s.Name, "source", s.Source, "path", s.Path)
 	}
 	for _, s := range winners {
-		if s.NeedsShell() {
+		if s.NeedsShell() && !shellTrusted(s, trusted) {
 			res.Skipped = append(res.Skipped, s)
-			slog.Warn("skill: refused script-bearing skill (shell execution needs bash approval, not yet available)",
-				"skill", s.Name, "source", s.Source, "path", s.Path, "allowed_tools", s.AllowedTools)
+			slog.Warn("skill: refused script-bearing skill (untrusted or no shell surface)",
+				"skill", s.Name, "source", s.Source, "plugin", s.PluginID,
+				"path", s.Path, "allowed_tools", s.AllowedTools)
 			continue
 		}
 		res.Tools = append(res.Tools, adaptTool(s))
@@ -172,4 +199,11 @@ func DiscoverWithPlugins(projectRoot string, pluginSkillDirs []string) (Result, 
 		return res, fmt.Errorf("load skills: %w", errors.Join(errs...))
 	}
 	return res, nil
+}
+
+// shellTrusted reports whether a shell-bearing skill may load: only a
+// plugin skill whose plugin the user has trusted. Project/global shell
+// skills are never auto-trusted here.
+func shellTrusted(s Skill, trusted TrustFunc) bool {
+	return s.Source == SourcePlugin && trusted != nil && trusted(s.PluginID)
 }

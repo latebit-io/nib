@@ -26,7 +26,11 @@
 // Kit owns only the framework plus [NewHelp].
 package command
 
-import "context"
+import (
+	"context"
+
+	"github.com/latebit-io/nib/kit/toolperm"
+)
 
 // Definition is the descriptive surface every command shares. It
 // drives /help rendering, registration-time conflict resolution,
@@ -49,6 +53,24 @@ type Definition struct {
 	// shadowing precedence at registration time and is surfaced
 	// in /help.
 	Source Source
+
+	// AllowedTools / DisallowedTools are the command's tool-permission
+	// grants (the `allowed-tools` / `disallowed-tools` frontmatter).
+	// Carried so an imported plugin command's grants survive; enforcement
+	// of a per-command permission scope is a later milestone. Build a
+	// matcher via [Definition.Permissions].
+	AllowedTools    []string
+	DisallowedTools []string
+}
+
+// Permissions compiles the command's allowed/disallowed tool grants into
+// a [toolperm.Matcher]. Malformed grants are dropped rather than failing
+// the whole command. A command with no allowed-tools yields a matcher
+// that permits nothing.
+func (d Definition) Permissions() *toolperm.Matcher {
+	allow, _ := toolperm.ParseField(d.AllowedTools)
+	deny, _ := toolperm.ParseField(d.DisallowedTools)
+	return toolperm.New(allow, deny)
 }
 
 // Source identifies where a command originated. The kind drives

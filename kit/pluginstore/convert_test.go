@@ -79,7 +79,6 @@ func TestConvert_FullPlugin(t *testing.T) {
 	wantUnsupported := map[string]string{
 		"skill-shell":   "demo-runner",
 		"mcp-transport": "remote",
-		"hooks":         "hooks.json",
 	}
 	for kind, name := range wantUnsupported {
 		if !slices.ContainsFunc(report.Unsupported, func(u Unsupported) bool {
@@ -227,6 +226,64 @@ func TestConvert_AgentSkillRefsNamespaced(t *testing.T) {
 	}
 	if strings.Contains(s, "- runner\n") || strings.Contains(s, "- helper\n") {
 		t.Errorf("bare (un-namespaced) skill ref leaked:\n%s", s)
+	}
+}
+
+func TestConvert_Hooks(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude-plugin", "plugin.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(src, "hooks", "hooks.json"), `{
+      "hooks": {
+        "PostToolUse": [{"matcher":"Write|Edit","hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/fmt.sh"}]}],
+        "SessionStart": [{"hooks":[{"type":"http","url":"https://x/hook"}]}],
+        "Bogus": [{"hooks":[{"type":"command","command":"x.sh"}]}]
+      }
+    }`)
+
+	dst := t.TempDir()
+	report, err := Convert(src, dst, Manifest{Name: "demo"}, Vars{PluginRoot: "/ROOT"})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+
+	// Only known events with a runnable command hook are listed.
+	if !slices.Equal(report.Hooks, []string{"PostToolUse"}) {
+		t.Errorf("report.Hooks = %v", report.Hooks)
+	}
+	// Converted config written with the var frozen.
+	out, err := os.ReadFile(filepath.Join(dst, "hooks", "hooks.json"))
+	if err != nil {
+		t.Fatalf("converted hooks missing: %v", err)
+	}
+	if !strings.Contains(string(out), "/ROOT/fmt.sh") {
+		t.Errorf("hook command var not frozen:\n%s", out)
+	}
+	// http hook + unknown event reported, not silently dropped.
+	wantUnsupported := map[string]string{"SessionStart": `"http" hook type not yet runnable`, "Bogus": "unrecognized event"}
+	for ev, reason := range wantUnsupported {
+		if !slices.ContainsFunc(report.Unsupported, func(u Unsupported) bool {
+			return u.Kind == "hook" && u.Name == ev && u.Reason == reason
+		}) {
+			t.Errorf("missing unsupported hook %s/%s in %+v", ev, reason, report.Unsupported)
+		}
+	}
+}
+
+func TestConvert_MalformedHooksReported(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude-plugin", "plugin.json"), `{"name":"demo"}`)
+	writeFile(t, filepath.Join(src, "hooks", "hooks.json"), `{not json`)
+
+	report, err := Convert(src, t.TempDir(), Manifest{Name: "demo"}, Vars{})
+	if err != nil {
+		t.Fatalf("Convert should not fail on malformed hooks: %v", err)
+	}
+	if !slices.ContainsFunc(report.Unsupported, func(u Unsupported) bool {
+		return u.Kind == "hooks" && strings.Contains(u.Reason, "malformed")
+	}) {
+		t.Errorf("malformed hooks should be reported, got %+v", report.Unsupported)
 	}
 }
 

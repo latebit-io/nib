@@ -147,6 +147,10 @@ func TestParse_RejectsEmptyCommand(t *testing.T) {
 	if _, err := Parse([]byte(`{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":[]}]}]}}`)); err == nil {
 		t.Errorf("command hook with empty array should be rejected")
 	}
+	// An empty-string command unmarshals to a single blank part; reject it too.
+	if _, err := Parse([]byte(`{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":""}]}]}}`)); err == nil {
+		t.Errorf("command hook with empty string should be rejected")
+	}
 }
 
 func TestEvent_Known(t *testing.T) {

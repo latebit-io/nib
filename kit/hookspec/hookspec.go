@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Event is a lifecycle point at which hooks fire. The constants are the
@@ -81,9 +82,9 @@ type Hook struct {
 }
 
 // Runnable reports whether nib can execute this hook today — a command
-// hook with a non-empty command. Other types parse but are inert until
+// hook with a non-blank command. Other types parse but are inert until
 // their runner lands.
-func (h Hook) Runnable() bool { return h.Type == Command && len(h.Command.Parts) > 0 }
+func (h Hook) Runnable() bool { return h.Type == Command && !h.Command.Blank() }
 
 // CommandSpec is a hook command that remembers whether it was authored as
 // a bare shell string or an argv array, so the runner can run the former
@@ -110,6 +111,14 @@ func (c *CommandSpec) UnmarshalJSON(b []byte) error {
 	}
 	c.Parts, c.Shell = a, false
 	return nil
+}
+
+// Blank reports whether the command is effectively empty — no parts, or
+// a first part (the shell string, or the program for argv) that is blank.
+// A blank command would be a silent no-op, so it is rejected at parse and
+// is never [Hook.Runnable].
+func (c CommandSpec) Blank() bool {
+	return len(c.Parts) == 0 || strings.TrimSpace(c.Parts[0]) == ""
 }
 
 // MarshalJSON re-emits the authored form: a string for a shell command,
@@ -219,10 +228,10 @@ func Parse(data []byte) (Config, error) {
 				return Config{}, fmt.Errorf("hookspec: event %s: %w", ev, err)
 			}
 			for _, h := range groups[i].Hooks {
-				// A command hook with no command would silently no-op at
-				// runtime — reject it so a broken hook fails import instead
-				// of disappearing.
-				if h.Type == Command && len(h.Command.Parts) == 0 {
+				// A command hook with a blank command (missing, empty array,
+				// or empty string) would silently no-op at runtime — reject
+				// it so a broken hook fails import instead of disappearing.
+				if h.Type == Command && h.Command.Blank() {
 					return Config{}, fmt.Errorf("hookspec: event %s: command hook has an empty command", ev)
 				}
 			}

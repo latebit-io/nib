@@ -52,7 +52,7 @@ func (d *Dispatcher) PreToolUse(ctx context.Context, toolName, argsJSON string) 
 		ToolArgs: rawJSON(argsJSON),
 		Cwd:      d.cwd,
 	}
-	return d.dispatch(ctx, hookspec.PreToolUse, in, toolName, true)
+	return d.dispatch(ctx, hookspec.PreToolUse, in, toolName, true, true)
 }
 
 // PostToolUse runs the PostToolUse hooks whose matcher matches the tool.
@@ -71,7 +71,7 @@ func (d *Dispatcher) PostToolUse(ctx context.Context, toolName, argsJSON, result
 		ToolResult: resultText,
 		Cwd:        d.cwd,
 	}
-	dec := d.dispatch(ctx, hookspec.PostToolUse, in, toolName, true)
+	dec := d.dispatch(ctx, hookspec.PostToolUse, in, toolName, true, true)
 	if !dec.Deny {
 		return nil, nil
 	}
@@ -91,7 +91,7 @@ func (d *Dispatcher) UserPromptSubmit(ctx context.Context, prompt string) Decisi
 		Prompt: prompt,
 		Cwd:    d.cwd,
 	}
-	return d.dispatch(ctx, hookspec.UserPromptSubmit, in, "", false)
+	return d.dispatch(ctx, hookspec.UserPromptSubmit, in, "", false, true)
 }
 
 // SessionStart runs the SessionStart hooks for their side effects. A deny
@@ -120,26 +120,33 @@ func (d *Dispatcher) SubagentStop(ctx context.Context) {
 	d.fireAndForget(ctx, hookspec.SubagentStop)
 }
 
-// fireAndForget runs every hook under a non-vetoable lifecycle event for
-// its side effects, discarding the decision. Used by the SessionStart /
+// fireAndForget runs EVERY hook under a non-vetoable lifecycle event for
+// its side effects, discarding decisions. Used by the SessionStart /
 // Stop / PreCompact / SubagentStop emit points, none of which act on a
-// deny in v1.
+// deny in v1 — so stopOnDeny is false: a hook that denies must NOT
+// suppress the lifecycle hooks that follow it.
 func (d *Dispatcher) fireAndForget(ctx context.Context, ev hookspec.Event) {
 	if d == nil {
 		return
 	}
 	in := hookrun.Input{Event: string(ev), Cwd: d.cwd}
-	_ = d.dispatch(ctx, ev, in, "", false)
+	_ = d.dispatch(ctx, ev, in, "", false, false)
 }
 
-// dispatch runs the hooks under ev across every config and returns the
-// first Deny. When matchTool is true, only groups whose matcher matches
-// toolName (via [hookmap.Matches], reconciling CC and nib tool names)
-// fire; otherwise every group under the event fires (matchers are
-// meaningless for non-tool events). Hooks run in config order, then group
-// order, then hook order, so "first deny wins" is deterministic for the
-// wiring layer's plugin-ID-sorted config slice.
-func (d *Dispatcher) dispatch(ctx context.Context, ev hookspec.Event, in hookrun.Input, toolName string, matchTool bool) Decision {
+// dispatch runs the hooks under ev across every config. When matchTool is
+// true, only groups whose matcher matches toolName (via [hookmap.Matches],
+// reconciling CC and nib tool names) fire; otherwise every group under the
+// event fires (matchers are meaningless for non-tool events).
+//
+// stopOnDeny selects the semantics for a hook's deny. Vetoable events
+// (Pre/PostToolUse, UserPromptSubmit) pass true: the first Deny short-
+// circuits and is returned ("first deny wins", deterministic over the
+// wiring layer's plugin-ID-sorted config slice). Non-vetoable lifecycle
+// events pass false: a deny is ignored and the remaining hooks still run
+// for their side effects, so the returned zero Decision is meaningless.
+//
+// Hooks run in config order, then group order, then hook order.
+func (d *Dispatcher) dispatch(ctx context.Context, ev hookspec.Event, in hookrun.Input, toolName string, matchTool, stopOnDeny bool) Decision {
 	for _, cfg := range d.configs {
 		for _, g := range cfg.Hooks[ev] {
 			if matchTool && !hookmap.Matches(g, toolName) {
@@ -157,7 +164,7 @@ func (d *Dispatcher) dispatch(ctx context.Context, ev hookspec.Event, in hookrun
 					slog.Warn("pluginhooks: hook execution failed; proceeding",
 						"event", ev, "tool", toolName, "err", res.Err)
 				}
-				if res.Decision == hookrun.Deny {
+				if res.Decision == hookrun.Deny && stopOnDeny {
 					return Decision{Deny: true, Reason: res.Reason}
 				}
 			}

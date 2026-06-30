@@ -65,6 +65,9 @@ func (a *Agent) Compact(ctx context.Context) error {
 	toolDefs := a.toolDefs
 	a.mu.Unlock()
 	before := llm.EstimateMessageTokens(saved, toolDefs)
+	// PreCompact fires before history is rewritten (the user asked to
+	// compact, so it fires even if nothing turns out to be prunable).
+	a.pluginPreCompact(ctx)
 	compacted, changed := llm.CompactMessages(saved, compactKeepTurns, compactMinBytes)
 	if !changed {
 		return ErrNothingToCompact
@@ -185,10 +188,15 @@ const compactMinBytes = 200
 // [llm.CompactMessages] reports that something actually changed
 // (a tree of small tool results may estimate over the threshold
 // but contain nothing prunable).
-func maybeCompact(messages []llm.Message, toolDefs []llm.ToolDef, send sender) []llm.Message {
+// beforeCompact, when non-nil, fires once the threshold is crossed and
+// just before [llm.CompactMessages] runs — the PreCompact emit point.
+func maybeCompact(messages []llm.Message, toolDefs []llm.ToolDef, send sender, beforeCompact func()) []llm.Message {
 	est := llm.EstimateMessageTokens(messages, toolDefs)
 	if est.History < compactHistoryThreshold {
 		return messages
+	}
+	if beforeCompact != nil {
+		beforeCompact()
 	}
 	compacted, changed := llm.CompactMessages(messages, compactKeepTurns, compactMinBytes)
 	if !changed {

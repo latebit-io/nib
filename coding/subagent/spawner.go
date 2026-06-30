@@ -57,6 +57,9 @@ type Spawner struct {
 	onEvent     func(event.Event)
 	run         runFunc
 	worktree    worktreeFactory
+	// onSubagentStop fires after a child run returns — the parent
+	// session's SubagentStop emit point. Nil discards it.
+	onSubagentStop func(ctx context.Context)
 }
 
 // Options configures a [Spawner].
@@ -84,19 +87,25 @@ type Options struct {
 	// forwarded into the parent's event stream). Optional; nil discards
 	// progress. The Spawner name-prefixes events before calling it.
 	OnEvent func(event.Event)
+	// OnSubagentStop fires after a spawned child finishes (success or
+	// error) — the parent session's SubagentStop hook emit point. The
+	// wiring layer passes the parent dispatcher's SubagentStop. Optional;
+	// nil discards it. Not fired when Spawn fails before the child runs.
+	OnSubagentStop func(ctx context.Context)
 }
 
 // New builds a Spawner from Options.
 func New(o Options) *Spawner {
 	return &Spawner{
-		workspace:   o.Workspace,
-		provider:    o.Provider,
-		providerFor: o.ProviderFor,
-		baseTools:   o.BaseTools,
-		budget:      o.TokenBudget,
-		onEvent:     o.OnEvent,
-		run:         realRun,
-		worktree:    gitWorktree,
+		workspace:      o.Workspace,
+		provider:       o.Provider,
+		providerFor:    o.ProviderFor,
+		baseTools:      o.BaseTools,
+		budget:         o.TokenBudget,
+		onEvent:        o.OnEvent,
+		run:            realRun,
+		worktree:       gitWorktree,
+		onSubagentStop: o.OnSubagentStop,
 	}
 }
 
@@ -169,7 +178,13 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 		ws = headless.NewDiskWorkspace(root)
 	}
 
-	return s.run(ctx, prov, ws, opts, tools, composeGoal(def, task), s.progressSink(def.Name))
+	res, err := s.run(ctx, prov, ws, opts, tools, composeGoal(def, task), s.progressSink(def.Name))
+	// SubagentStop fires once the child has run and returned, regardless
+	// of success — the child stopped either way.
+	if s.onSubagentStop != nil {
+		s.onSubagentStop(ctx)
+	}
+	return res, err
 }
 
 // grantFilter selects the extra tools a child may use under its grants.

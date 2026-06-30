@@ -170,6 +170,21 @@ func TestLifecycleEvents_FireForSideEffects(t *testing.T) {
 	}
 }
 
+func TestLifecycleEvents_DenyDoesNotSuppressLaterHooks(t *testing.T) {
+	// Lifecycle events run every hook for side effects; a hook that denies
+	// (here a non-zero exit) must NOT short-circuit the hooks after it.
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran.marker")
+	body := fmt.Sprintf(
+		`{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"exit 2"},{"type":"command","command":%q}]}]}}`,
+		"touch "+marker)
+	d := New([]hookspec.Config{parseCfg(t, body)}, hookrun.Runner{}, dir)
+	d.SessionStart(context.Background())
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("second SessionStart hook did not run after the first denied: %v", err)
+	}
+}
+
 func TestNilDispatcher_NoOps(t *testing.T) {
 	var d *Dispatcher
 	if dec := d.PreToolUse(context.Background(), "write_file", `{}`); dec.Deny {

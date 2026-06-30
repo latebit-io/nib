@@ -197,6 +197,32 @@ func DenyAll() *Matcher { return &Matcher{} }
 // matcher.
 func (m *Matcher) HasAllowList() bool { return len(m.allow) > 0 }
 
+// GrantsTool reports whether the tool is granted in any form — an allow
+// rule names it, regardless of argument pattern. Used for tool-LEVEL
+// filtering (does the child get this tool at all), distinct from
+// [Matcher.Allows] which gates a specific invocation's arguments.
+func (m *Matcher) GrantsTool(tool string) bool {
+	for _, r := range m.allow {
+		if strings.EqualFold(r.Tool, tool) {
+			return true
+		}
+	}
+	return false
+}
+
+// DeniesTool reports whether the tool is denied outright — a bare deny
+// rule names it with no argument pattern (e.g. `Write`). An
+// argument-scoped deny like `Bash(rm *)` does NOT deny the tool itself,
+// only matching invocations, so it is not reported here.
+func (m *Matcher) DeniesTool(tool string) bool {
+	for _, r := range m.deny {
+		if r.Arg == "" && strings.EqualFold(r.Tool, tool) {
+			return true
+		}
+	}
+	return false
+}
+
 // Allows reports whether the named tool may run with the given argument
 // string. Deny rules take precedence: a single matching deny rule blocks
 // the call regardless of the allow set. Otherwise the call is permitted

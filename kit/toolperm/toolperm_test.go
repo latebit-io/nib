@@ -117,6 +117,27 @@ func TestMatcher_EmptyAllowDeniesAll(t *testing.T) {
 	}
 }
 
+func TestGrantsAndDeniesTool(t *testing.T) {
+	t.Parallel()
+	allow, _ := ParseField("Read Bash(git *)")
+	deny, _ := ParseField("Write Bash(rm *)")
+	m := New(allow, deny)
+
+	if !m.GrantsTool("Read") || !m.GrantsTool("bash") {
+		t.Errorf("Read and Bash should be granted (tool-level)")
+	}
+	if m.GrantsTool("Edit") {
+		t.Errorf("Edit is not granted")
+	}
+	if !m.DeniesTool("Write") {
+		t.Errorf("bare Write deny should deny the tool")
+	}
+	// An argument-scoped deny does not remove the tool itself.
+	if m.DeniesTool("Bash") {
+		t.Errorf("Bash(rm *) must not deny the Bash tool outright")
+	}
+}
+
 func TestDenyAll(t *testing.T) {
 	t.Parallel()
 	m := DenyAll()

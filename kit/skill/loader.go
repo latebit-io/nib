@@ -29,6 +29,8 @@ type meta struct {
 	Description     string                 `yaml:"description"`
 	AllowedTools    frontmatter.StringList `yaml:"allowed-tools"`
 	DisallowedTools frontmatter.StringList `yaml:"disallowed-tools"`
+	Context         string                 `yaml:"context"`
+	Agent           string                 `yaml:"agent"`
 }
 
 // validNameChars reports whether name contains only characters allowed
@@ -137,12 +139,19 @@ func parse(path, dirName string, source Source) (Skill, error) {
 		return Skill{}, fmt.Errorf("parse %s: invalid disallowed-tools: %w", path, err)
 	}
 
+	ctxMode := strings.ToLower(strings.TrimSpace(m.Context))
+	if ctxMode != "" && ctxMode != "fork" {
+		return Skill{}, fmt.Errorf("parse %s: invalid context %q (fork or empty)", path, m.Context)
+	}
+
 	return Skill{
 		Name:            name,
 		Description:     desc,
 		Body:            strings.TrimSpace(body),
 		AllowedTools:    []string(m.AllowedTools),
 		DisallowedTools: []string(m.DisallowedTools),
+		Context:         ctxMode,
+		Agent:           strings.TrimSpace(m.Agent),
 		Path:            path,
 		Source:          source,
 	}, nil

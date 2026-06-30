@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	upagent "github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/brand"
 )
 
@@ -92,6 +93,65 @@ func TestDiscoverWithPlugins_EmptyIDNotTrusted(t *testing.T) {
 	}
 	if slices.Contains(loadedNames(res), "runner") {
 		t.Errorf("empty-id plugin source must not be trusted: %v", loadedNames(res))
+	}
+}
+
+func TestSkill_LoadFork(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeSkillFile(t, dir, "forker", "---\ndescription: forks\ncontext: fork\nagent: reviewer\n---\ndo work\n")
+	skills, err := Load(dir, SourcePlugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 || !skills[0].IsFork() || skills[0].Agent != "reviewer" {
+		t.Fatalf("fork frontmatter not parsed: %+v", skills)
+	}
+
+	writeSkillFile(t, dir, "bad", "---\ndescription: d\ncontext: spoon\n---\nbody\n")
+	if _, err := Load(dir, SourcePlugin); err == nil {
+		t.Errorf("invalid context value should error")
+	}
+}
+
+func hasSkill(ss []Skill, name string) bool {
+	return slices.ContainsFunc(ss, func(s Skill) bool { return s.Name == name })
+}
+
+func hasToolNamed(tools []upagent.Tool, name string) bool {
+	return slices.ContainsFunc(tools, func(tl upagent.Tool) bool { return tl.Definition().Function.Name == name })
+}
+
+func TestDiscoverWithPlugins_ForkRouting(t *testing.T) {
+	t.Setenv(brand.EnvKeyGlobalSkillsDir, t.TempDir())
+	projectRoot := t.TempDir()
+	writeSkillFile(t, ProjectDir(projectRoot), "forker", "---\ndescription: forks\ncontext: fork\n---\nwork\n")
+	pluginDir := t.TempDir()
+	writeSkillFile(t, pluginDir, "pforker", "---\ndescription: p forks\ncontext: fork\n---\nwork\n")
+	srcs := []PluginSkillSource{{ID: "demo", Dir: pluginDir}}
+
+	// Project fork → Forking (not a prompt tool). Untrusted plugin fork → Skipped.
+	un, err := DiscoverWithPlugins(projectRoot, srcs, func(string) bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSkill(un.Forking, "forker") {
+		t.Errorf("project fork skill should be routed to Forking")
+	}
+	if hasToolNamed(un.Tools, "skill_forker") {
+		t.Errorf("fork skill must not be adapted to a prompt tool")
+	}
+	if !hasSkill(un.Skipped, "pforker") {
+		t.Errorf("untrusted plugin fork skill must be skipped")
+	}
+
+	// Trusted plugin fork → Forking.
+	tr, err := DiscoverWithPlugins(projectRoot, srcs, func(id string) bool { return id == "demo" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasSkill(tr.Forking, "pforker") {
+		t.Errorf("trusted plugin fork skill should be in Forking")
 	}
 }
 

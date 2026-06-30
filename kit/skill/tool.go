@@ -113,6 +113,11 @@ type Result struct {
 	// skill (a project skill shadows a global one). Surfaced so the
 	// override is visible, not silent.
 	Shadowed []Skill
+	// Forking are skills with `context: fork`: they run as a child agent
+	// rather than injecting prompt text, so they are NOT adapted to a
+	// prompt tool here. The coding layer turns each into a spawn tool.
+	// Plugin forking skills appear here only when their plugin is trusted.
+	Forking []Skill
 }
 
 // Discover loads skills for a project from both layers — project-local
@@ -209,6 +214,20 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 			"skill", s.Name, "source", s.Source, "path", s.Path)
 	}
 	for _, s := range winners {
+		// Forking skills run as a child agent; they are routed to the
+		// coding layer rather than adapted to a prompt tool. A plugin
+		// forking skill requires trust — it spawns an agent (tools/edits),
+		// so it is at least as powerful as a shell skill.
+		if s.IsFork() {
+			if s.Source == SourcePlugin && !shellTrusted(s, trusted) {
+				res.Skipped = append(res.Skipped, s)
+				slog.Warn("skill: refused untrusted plugin fork skill (run /plugin trust to enable)",
+					"skill", s.Name, "plugin", s.PluginID, "path", s.Path)
+				continue
+			}
+			res.Forking = append(res.Forking, s)
+			continue
+		}
 		if s.NeedsShell() && !shellTrusted(s, trusted) {
 			res.Skipped = append(res.Skipped, s)
 			slog.Warn("skill: refused script-bearing skill (untrusted or no shell surface)",

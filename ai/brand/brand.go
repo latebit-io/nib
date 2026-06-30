@@ -67,6 +67,12 @@ const (
 	// unaffected.
 	EnvKeyGlobalSkillsDir = EnvPrefix + "GLOBAL_SKILLS_DIR"
 
+	// EnvKeyGlobalAgentsDir overrides the user-global subagent-definitions
+	// directory (default <UserConfigDir>/<ConfigDirName>/agents). Mirrors
+	// EnvKeyGlobalSkillsDir; project-local agents (.project/agents) are
+	// unaffected.
+	EnvKeyGlobalAgentsDir = EnvPrefix + "GLOBAL_AGENTS_DIR"
+
 	// ConfigDirName is the subdirectory under [os.UserConfigDir] where
 	// persisted product config lives (style.json, llm.json, OAuth tokens).
 	ConfigDirName = Name

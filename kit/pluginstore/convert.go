@@ -257,6 +257,8 @@ type nibSkillMeta struct {
 	Description     string   `yaml:"description,omitempty"`
 	AllowedTools    []string `yaml:"allowed-tools,omitempty"`
 	DisallowedTools []string `yaml:"disallowed-tools,omitempty"`
+	Context         string   `yaml:"context,omitempty"`
+	Agent           string   `yaml:"agent,omitempty"`
 }
 
 // convertSkills translates <src>/skills/<n>/SKILL.md into nib skills
@@ -331,6 +333,8 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 			Description:     stringField(fm, "description"),
 			AllowedTools:    toolperm.Strings(allow),
 			DisallowedTools: toolperm.Strings(deny),
+			Context:         stringField(fm, "context"),
+			Agent:           stringField(fm, "agent"),
 		}
 		if err := writeMarkdown(filepath.Join(skillDst, "SKILL.md"), meta, expBody); err != nil {
 			return err

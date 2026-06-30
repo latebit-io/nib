@@ -68,7 +68,21 @@ type Skill struct {
 	// gate keys on: a [SourcePlugin] shell skill loads only if its plugin
 	// is trusted. Stamped by [DiscoverWithPlugins].
 	PluginID string
+	// Context selects how the skill runs. Empty injects the body as
+	// prompt instructions (the default). "fork" runs the body as an
+	// isolated child agent instead — see [Skill.IsFork]. A forking skill
+	// is not adapted to a prompt tool here; the coding layer turns it into
+	// a spawn tool.
+	Context string
+	// Agent optionally names a subagent type to fork into when
+	// Context=="fork". Empty forks an agent built from the skill itself.
+	Agent string
 }
+
+// IsFork reports whether the skill runs as an isolated child agent
+// (frontmatter `context: fork`) rather than injecting its body as prompt
+// text.
+func (s Skill) IsFork() bool { return strings.EqualFold(strings.TrimSpace(s.Context), "fork") }
 
 // Merge deduplicates skills by name across precedence layers. Layers
 // are passed highest-precedence first (e.g. Merge(project, global)), so

@@ -279,6 +279,9 @@ type ActivePlugin struct {
 	AgentsDir string
 	// MCPConfigPath is the converted MCP config (<converted>/.mcp.json).
 	MCPConfigPath string
+	// HooksConfigPath is the converted hooks config
+	// (<converted>/hooks/hooks.json).
+	HooksConfigPath string
 }
 
 // ActivePlugins returns the converted component locations of every
@@ -295,12 +298,13 @@ func (s *Store) ActivePlugins() []ActivePlugin {
 		}
 		conv := s.ConvertedDir(p.ID)
 		out = append(out, ActivePlugin{
-			ID:            p.ID,
-			Name:          p.Name,
-			SkillsDir:     filepath.Join(conv, "skills"),
-			CommandsDir:   filepath.Join(conv, "commands"),
-			AgentsDir:     filepath.Join(conv, "agents"),
-			MCPConfigPath: filepath.Join(conv, ".mcp.json"),
+			ID:              p.ID,
+			Name:            p.Name,
+			SkillsDir:       filepath.Join(conv, "skills"),
+			CommandsDir:     filepath.Join(conv, "commands"),
+			AgentsDir:       filepath.Join(conv, "agents"),
+			MCPConfigPath:   filepath.Join(conv, ".mcp.json"),
+			HooksConfigPath: filepath.Join(conv, "hooks", "hooks.json"),
 		})
 	}
 	slices.SortFunc(out, func(a, b ActivePlugin) int { return strings.Compare(a.ID, b.ID) })

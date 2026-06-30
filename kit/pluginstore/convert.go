@@ -12,6 +12,7 @@ import (
 
 	"github.com/latebit-io/nib/kit/agentdef"
 	"github.com/latebit-io/nib/kit/frontmatter"
+	"github.com/latebit-io/nib/kit/hookspec"
 	"github.com/latebit-io/nib/kit/toolperm"
 	"gopkg.in/yaml.v3"
 )
@@ -28,6 +29,9 @@ type ConvertReport struct {
 	Skills []string
 	// Agents are the converted subagent definition names (namespaced).
 	Agents []string
+	// Hooks are the lifecycle events that have at least one runnable
+	// (command) hook in the converted config.
+	Hooks []string
 	// MCPServers are the converted MCP server names.
 	MCPServers []string
 	// Unsupported lists components/fields not yet honored.
@@ -77,10 +81,13 @@ func Convert(src, dst string, m Manifest, vars Vars) (ConvertReport, error) {
 	if err := convertAgents(src, dst, m.Name, vars, &report); err != nil {
 		return report, err
 	}
-	noteDeferredComponents(src, &report)
+	if err := convertHooks(src, dst, vars, &report); err != nil {
+		return report, err
+	}
 	slices.Sort(report.Commands)
 	slices.Sort(report.Skills)
 	slices.Sort(report.Agents)
+	slices.Sort(report.Hooks)
 	slices.Sort(report.MCPServers)
 	return report, nil
 }
@@ -433,10 +440,77 @@ func convertAgents(src, dst, pluginName string, vars Vars, report *ConvertReport
 
 // noteDeferredComponents records components present in the plugin but not
 // yet runnable, pointing at the milestone that will handle them.
-func noteDeferredComponents(src string, report *ConvertReport) {
-	if _, err := os.Stat(filepath.Join(src, "hooks", "hooks.json")); err == nil {
-		report.add("hooks", "hooks.json", "requires hooks engine (M3)")
+// convertHooks parses <src>/hooks/hooks.json, freezes import-time vars in
+// each command/env, and writes the managed copy to <dst>/hooks/hooks.json.
+// Unknown events and non-command hook types are reported (not silently
+// dropped); a malformed file is reported and skipped rather than failing
+// the whole import. Events that retain a runnable command hook are listed
+// in report.Hooks.
+func convertHooks(src, dst string, vars Vars, report *ConvertReport) error {
+	path := filepath.Join(src, "hooks", "hooks.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("pluginstore: read hooks: %w", err)
 	}
+	cfg, perr := hookspec.Parse(data)
+	if perr != nil {
+		report.add("hooks", "hooks.json", "malformed; skipped: "+perr.Error())
+		return nil
+	}
+
+	// Freeze import-time variables in command args and env values.
+	for ev, groups := range cfg.Hooks {
+		for gi := range groups {
+			for hi := range groups[gi].Hooks {
+				h := &groups[gi].Hooks[hi]
+				for i, part := range h.Command.Parts {
+					ex, un := expandVars(part, vars)
+					noteVars(report, un)
+					h.Command.Parts[i] = ex // Shell form preserved
+				}
+				for k, v := range h.Env {
+					ev, un := expandVars(v, vars)
+					noteVars(report, un)
+					h.Env[k] = ev
+				}
+			}
+		}
+		if ev.Known() && eventHasRunnable(groups) {
+			report.Hooks = append(report.Hooks, string(ev))
+		}
+	}
+
+	for _, u := range cfg.Unsupported() {
+		report.add("hook", string(u.Event), u.Reason)
+	}
+
+	out, err := cfg.Marshal()
+	if err != nil {
+		return fmt.Errorf("pluginstore: marshal hooks: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dst, "hooks"), 0o755); err != nil {
+		return fmt.Errorf("pluginstore: create hooks dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "hooks", "hooks.json"), out, 0o644); err != nil {
+		return fmt.Errorf("pluginstore: write converted hooks: %w", err)
+	}
+	return nil
+}
+
+// eventHasRunnable reports whether any group under an event has a runnable
+// (command) hook.
+func eventHasRunnable(groups []hookspec.Group) bool {
+	for _, g := range groups {
+		for _, h := range g.Hooks {
+			if h.Runnable() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // --- helpers ---

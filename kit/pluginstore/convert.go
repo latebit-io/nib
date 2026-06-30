@@ -257,6 +257,8 @@ type nibSkillMeta struct {
 	Description     string   `yaml:"description,omitempty"`
 	AllowedTools    []string `yaml:"allowed-tools,omitempty"`
 	DisallowedTools []string `yaml:"disallowed-tools,omitempty"`
+	Context         string   `yaml:"context,omitempty"`
+	Agent           string   `yaml:"agent,omitempty"`
 }
 
 // convertSkills translates <src>/skills/<n>/SKILL.md into nib skills
@@ -313,6 +315,19 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 			report.add("skill", e.Name(), "malformed tool grant; skipped: "+gErr.Error())
 			continue
 		}
+		// Normalize + validate `context` so the converted SKILL.md always
+		// satisfies the loader (which accepts only ""/"fork"). An invalid
+		// value would convert "successfully" then fail every later load.
+		ctxMode := strings.ToLower(strings.TrimSpace(stringField(fm, "context")))
+		if ctxMode != "" && ctxMode != "fork" {
+			report.add("skill", e.Name(), fmt.Sprintf("invalid context %q; skipped", ctxMode))
+			continue
+		}
+		// `agent:` references are not yet supported and the loader rejects
+		// them; drop (and report) rather than emit an unloadable artifact.
+		if strings.TrimSpace(stringField(fm, "agent")) != "" {
+			report.add("skill", name, "agent: reference dropped (not yet supported)")
+		}
 		// Shell-bearing skills are converted WITH their grants preserved,
 		// but they will not execute until the trust + shell-execution layer
 		// lands: the skill loader still refuses script-bearing skills. Note
@@ -331,6 +346,7 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 			Description:     stringField(fm, "description"),
 			AllowedTools:    toolperm.Strings(allow),
 			DisallowedTools: toolperm.Strings(deny),
+			Context:         ctxMode, // normalized; agent dropped (unsupported)
 		}
 		if err := writeMarkdown(filepath.Join(skillDst, "SKILL.md"), meta, expBody); err != nil {
 			return err

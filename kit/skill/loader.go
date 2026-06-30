@@ -29,6 +29,8 @@ type meta struct {
 	Description     string                 `yaml:"description"`
 	AllowedTools    frontmatter.StringList `yaml:"allowed-tools"`
 	DisallowedTools frontmatter.StringList `yaml:"disallowed-tools"`
+	Context         string                 `yaml:"context"`
+	Agent           string                 `yaml:"agent"`
 }
 
 // validNameChars reports whether name contains only characters allowed
@@ -137,12 +139,28 @@ func parse(path, dirName string, source Source) (Skill, error) {
 		return Skill{}, fmt.Errorf("parse %s: invalid disallowed-tools: %w", path, err)
 	}
 
+	ctxMode := strings.ToLower(strings.TrimSpace(m.Context))
+	if ctxMode != "" && ctxMode != "fork" {
+		return Skill{}, fmt.Errorf("parse %s: invalid context %q (fork or empty)", path, m.Context)
+	}
+	// `agent:` selects a named subagent type to fork into. Resolving that
+	// reference is not implemented yet, so accepting it would silently run
+	// the wrong thing (a synthetic agent built from the skill) instead of
+	// the named one. Reject it outright until the resolution path exists,
+	// rather than dropping it on a non-fork skill or honoring it falsely on
+	// a fork skill.
+	if strings.TrimSpace(m.Agent) != "" {
+		return Skill{}, fmt.Errorf("parse %s: skill %q sets agent:%q — agent references are not yet supported (omit it)", path, name, m.Agent)
+	}
+
 	return Skill{
 		Name:            name,
 		Description:     desc,
 		Body:            strings.TrimSpace(body),
 		AllowedTools:    []string(m.AllowedTools),
 		DisallowedTools: []string(m.DisallowedTools),
+		Context:         ctxMode,
+		Agent:           strings.TrimSpace(m.Agent),
 		Path:            path,
 		Source:          source,
 	}, nil

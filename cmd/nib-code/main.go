@@ -20,8 +20,10 @@ import (
 	"github.com/latebit-io/nib/coding/agent"
 	codingcmd "github.com/latebit-io/nib/coding/command"
 	"github.com/latebit-io/nib/coding/event"
+	"github.com/latebit-io/nib/coding/headless"
 	codingmemory "github.com/latebit-io/nib/coding/memory"
 	"github.com/latebit-io/nib/coding/session"
+	"github.com/latebit-io/nib/coding/subagent"
 	"github.com/latebit-io/nib/coding/wire"
 	"github.com/latebit-io/nib/engine/buffer"
 	"github.com/latebit-io/nib/engine/capture/demarkus"
@@ -206,6 +208,82 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		sess.SetLLMInfo(llmResolved.Model, llmResolved.Profile)
 	}
 
+	// Resolve the per-task token budget once so every rebuilt agent, the
+	// subagent spawner, and the TUI status indicator agree on the same
+	// armed cap. A malformed override is a hard error rather than a silent
+	// fall-through to disabled — the var is only set with intent to change
+	// the cap.
+	taskTokenBudgetCap, err := budget.ParseEnvCap(os.Getenv(brand.EnvKeyTaskTokenBudget))
+	if err != nil {
+		return err
+	}
+
+	// Subagents: discover definitions (project/global/enabled-plugin),
+	// trust-gate plugin agents, and adapt each into an `agent_<name>`
+	// spawn tool. Children run headless against the project root,
+	// inheriting the parent's MCP + skill tools filtered by the
+	// definition's grants. A definition's model override is resolved by
+	// cloning the active profile with the requested model id.
+	var subagentProviderFor func(string) (llm.Provider, error)
+	if llmResolved != nil {
+		baseResolved := *llmResolved
+		subagentProviderFor = func(model string) (llm.Provider, error) {
+			r := baseResolved
+			r.Model = model
+			return r.NewProvider(), nil
+		}
+	}
+	// Track the live provider so subagents stay in sync with credential /
+	// model switches instead of capturing the (possibly nil) startup one.
+	// buildAgent updates this on every (re)build via setSubagentProvider.
+	var (
+		subagentProviderMu sync.Mutex
+		subagentProvider   = provider
+	)
+	setSubagentProvider := func(p llm.Provider) {
+		subagentProviderMu.Lock()
+		subagentProvider = p
+		subagentProviderMu.Unlock()
+	}
+	spawner := subagent.New(subagent.Options{
+		Workspace: headless.NewDiskWorkspace(projectRoot),
+		Provider: func() llm.Provider {
+			subagentProviderMu.Lock()
+			defer subagentProviderMu.Unlock()
+			return subagentProvider
+		},
+		ProviderFor: subagentProviderFor,
+		BaseTools:   append(append([]agent.Tool{}, mcpResult.Tools...), skillResult.Tools...),
+		TokenBudget: taskTokenBudgetCap,
+		// Surface child-agent progress (tool calls, name-prefixed) in the
+		// parent's transcript. Best-effort: drop on a full event buffer
+		// rather than stall the subagent run.
+		OnEvent: func(ev event.Event) {
+			select {
+			case events <- ev:
+			default:
+			}
+		},
+	})
+	var pluginAgentSources []subagent.PluginAgentSource
+	for _, p := range activePlugins {
+		pluginAgentSources = append(pluginAgentSources, subagent.PluginAgentSource{ID: p.ID, Dir: p.AgentsDir})
+	}
+	subagentResult, subagentErr := subagent.Discover(projectRoot, pluginAgentSources, trusted, spawner)
+	if subagentErr != nil {
+		slog.Warn("subagents: some definitions failed to load", "err", subagentErr)
+	}
+	for _, d := range subagentResult.Loaded {
+		slog.Info("subagent: loaded", "agent", d.Name, "source", d.Source)
+	}
+	// context:fork skills become spawn tools (skill_<name>) backed by the
+	// same spawner, running their body as an isolated child agent.
+	var forkSkillTools []agent.Tool
+	for _, s := range skillResult.Forking {
+		forkSkillTools = append(forkSkillTools, subagent.AdaptForkSkill(s, spawner))
+		slog.Info("skill: loaded as fork (subagent)", "skill", s.Name, "source", s.Source)
+	}
+
 	linters := wire.NewLinters(projectRoot)
 
 	smokeCfg := runconfig.Load(projectRoot)
@@ -262,16 +340,9 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return tuiApp.FlushDirtyBuffers(ctx)
 	}
 
-	// Resolve the per-task token budget once so every rebuilt agent and
-	// the TUI status indicator agree on the same armed cap. A malformed
-	// override is a hard error rather than a silent fall-through to
-	// disabled — the var is only set with intent to change the cap.
-	taskTokenBudgetCap, err := budget.ParseEnvCap(os.Getenv(brand.EnvKeyTaskTokenBudget))
-	if err != nil {
-		return err
-	}
-
 	buildAgent := func(p llm.Provider) *agent.Agent {
+		// Keep subagents pointed at the provider the parent is now using.
+		setSubagentProvider(p)
 		opts := &agent.NewOptions{
 			MemoryStore:       mem.Store,
 			MemorySummary:     mem.Summary,
@@ -292,6 +363,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			)
 		}
 		extraTools := append(append([]agent.Tool{}, mcpResult.Tools...), skillResult.Tools...)
+		extraTools = append(extraTools, subagentResult.Tools...)
+		extraTools = append(extraTools, forkSkillTools...)
 		ag := agent.New(p, sess, opts, extraTools...)
 		// Forward bus-published agent events into the shared `events`
 		// chan that LSP also writes to. The TUI reads this single

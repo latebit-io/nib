@@ -274,6 +274,9 @@ type ActivePlugin struct {
 	SkillsDir string
 	// CommandsDir is the converted commands dir (<converted>/commands).
 	CommandsDir string
+	// AgentsDir is the converted subagent-definitions dir
+	// (<converted>/agents).
+	AgentsDir string
 	// MCPConfigPath is the converted MCP config (<converted>/.mcp.json).
 	MCPConfigPath string
 }
@@ -296,6 +299,7 @@ func (s *Store) ActivePlugins() []ActivePlugin {
 			Name:          p.Name,
 			SkillsDir:     filepath.Join(conv, "skills"),
 			CommandsDir:   filepath.Join(conv, "commands"),
+			AgentsDir:     filepath.Join(conv, "agents"),
 			MCPConfigPath: filepath.Join(conv, ".mcp.json"),
 		})
 	}

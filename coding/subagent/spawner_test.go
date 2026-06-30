@@ -117,9 +117,9 @@ func TestSpawn_Orchestration(t *testing.T) {
 	var gotTools []agent.Tool
 	var gotGoal string
 	s := &Spawner{
-		parentProv: stubProvider{id: "parent"},
-		baseTools:  []agent.Tool{fakeTool{"Read"}, fakeTool{"Write"}},
-		budget:     5,
+		provider:  func() llm.Provider { return stubProvider{id: "parent"} },
+		baseTools: []agent.Tool{fakeTool{"Read"}, fakeTool{"Write"}},
+		budget:    5,
 		run: func(_ context.Context, p llm.Provider, _ *headless.DiskWorkspace, opts *agent.NewOptions, tools []agent.Tool, goal string, _ func(event.Event)) (headless.Result, error) {
 			gotProv, gotTools, gotGoal = p, tools, goal
 			if opts.Interaction != agent.Headless || !opts.Terse || opts.TaskTokenBudget != 5 {
@@ -128,14 +128,17 @@ func TestSpawn_Orchestration(t *testing.T) {
 			return headless.Result{Success: true, Summary: "ok"}, nil
 		},
 	}
-	def := agentdef.Definition{Name: "rev", SystemPrompt: "persona", AllowedTools: []string{"Read"}}
+	// An unrestricted definition inherits all base tools (grant-filtering
+	// is unit-tested separately; a restricted def is rejected — see
+	// TestSpawn_RejectsUnenforceableGrants).
+	def := agentdef.Definition{Name: "rev", SystemPrompt: "persona"}
 	if _, err := s.Spawn(context.Background(), def, "do it"); err != nil {
 		t.Fatal(err)
 	}
 	if gotProv.(stubProvider).id != "parent" {
 		t.Errorf("expected parent provider")
 	}
-	if want := []string{"Read"}; !slices.Equal(toolNames(gotTools), want) {
+	if want := []string{"Read", "Write"}; !slices.Equal(toolNames(gotTools), want) {
 		t.Errorf("tools = %v, want %v", toolNames(gotTools), want)
 	}
 	if gotGoal != "persona\n\n---\n\nTask:\ndo it" {
@@ -143,10 +146,31 @@ func TestSpawn_Orchestration(t *testing.T) {
 	}
 }
 
+func TestSpawn_RejectsUnenforceableGrants(t *testing.T) {
+	t.Parallel()
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{} },
+		run: func(context.Context, llm.Provider, *headless.DiskWorkspace, *agent.NewOptions, []agent.Tool, string, func(event.Event)) (headless.Result, error) {
+			t.Errorf("run must not be called for a restricted definition")
+			return headless.Result{}, nil
+		},
+	}
+	// A definition that restricts tools cannot be honored against builtins
+	// yet, so it is refused rather than run with a false boundary.
+	for _, def := range []agentdef.Definition{
+		{Name: "a", SystemPrompt: "p", AllowedTools: []string{"Read"}},
+		{Name: "b", SystemPrompt: "p", DisallowedTools: []string{"Write"}},
+	} {
+		if _, err := s.Spawn(context.Background(), def, "t"); err == nil {
+			t.Errorf("def %q: expected rejection of unenforceable tool restriction", def.Name)
+		}
+	}
+}
+
 func TestSpawn_ModelOverride(t *testing.T) {
 	t.Parallel()
 	s := &Spawner{
-		parentProv:  stubProvider{id: "parent"},
+		provider:    func() llm.Provider { return stubProvider{id: "parent"} },
 		providerFor: func(model string) (llm.Provider, error) { return stubProvider{id: model}, nil },
 		run: func(_ context.Context, p llm.Provider, _ *headless.DiskWorkspace, _ *agent.NewOptions, _ []agent.Tool, _ string, _ func(event.Event)) (headless.Result, error) {
 			return headless.Result{Success: true, Summary: p.(stubProvider).id}, nil
@@ -175,8 +199,8 @@ func TestSpawn_WorktreeIsolation(t *testing.T) {
 	var ranIn string
 
 	s := &Spawner{
-		parentProv: stubProvider{},
-		workspace:  parent,
+		provider:  func() llm.Provider { return stubProvider{} },
+		workspace: parent,
 		worktree: func(_ context.Context, repo string) (string, func(), error) {
 			if repo != parent.ProjectRoot() {
 				t.Errorf("worktree repo = %q, want parent root %q", repo, parent.ProjectRoot())
@@ -218,8 +242,8 @@ func TestSpawn_WorktreeIsolation(t *testing.T) {
 func TestSpawn_WorktreeError(t *testing.T) {
 	t.Parallel()
 	s := &Spawner{
-		parentProv: stubProvider{},
-		workspace:  headless.NewDiskWorkspace(t.TempDir()),
+		provider:  func() llm.Provider { return stubProvider{} },
+		workspace: headless.NewDiskWorkspace(t.TempDir()),
 		worktree: func(context.Context, string) (string, func(), error) {
 			return "", nil, errors.New("not a git repo")
 		},
@@ -238,7 +262,7 @@ func TestSpawnTool_Execute(t *testing.T) {
 	t.Parallel()
 	makeSpawner := func(res headless.Result, err error) *Spawner {
 		return &Spawner{
-			parentProv: stubProvider{},
+			provider: func() llm.Provider { return stubProvider{} },
 			run: func(context.Context, llm.Provider, *headless.DiskWorkspace, *agent.NewOptions, []agent.Tool, string, func(event.Event)) (headless.Result, error) {
 				return res, err
 			},

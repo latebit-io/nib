@@ -233,9 +233,25 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			return r.NewProvider(), nil
 		}
 	}
+	// Track the live provider so subagents stay in sync with credential /
+	// model switches instead of capturing the (possibly nil) startup one.
+	// buildAgent updates this on every (re)build via setSubagentProvider.
+	var (
+		subagentProviderMu sync.Mutex
+		subagentProvider   = provider
+	)
+	setSubagentProvider := func(p llm.Provider) {
+		subagentProviderMu.Lock()
+		subagentProvider = p
+		subagentProviderMu.Unlock()
+	}
 	spawner := subagent.New(subagent.Options{
-		Workspace:   headless.NewDiskWorkspace(projectRoot),
-		Provider:    provider,
+		Workspace: headless.NewDiskWorkspace(projectRoot),
+		Provider: func() llm.Provider {
+			subagentProviderMu.Lock()
+			defer subagentProviderMu.Unlock()
+			return subagentProvider
+		},
 		ProviderFor: subagentProviderFor,
 		BaseTools:   append(append([]agent.Tool{}, mcpResult.Tools...), skillResult.Tools...),
 		TokenBudget: taskTokenBudgetCap,
@@ -325,6 +341,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	buildAgent := func(p llm.Provider) *agent.Agent {
+		// Keep subagents pointed at the provider the parent is now using.
+		setSubagentProvider(p)
 		opts := &agent.NewOptions{
 			MemoryStore:       mem.Store,
 			MemorySummary:     mem.Summary,

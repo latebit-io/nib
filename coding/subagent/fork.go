@@ -17,9 +17,10 @@ import (
 // summary. The skill body becomes the child's task; the skill grants
 // become the child's tool filter.
 //
-// A `context: fork` skill that also names an `agent:` type is not yet
-// resolved to that named subagent — v1 forks an agent built from the
-// skill itself; honoring the reference is a later refinement.
+// A fork skill always runs an agent built from the skill itself: the
+// skill loader rejects a non-empty `agent:` reference (resolving a named
+// subagent type is a later refinement), so there is never a target to
+// honor here.
 func AdaptForkSkill(s skill.Skill, spawner *Spawner) upagent.Tool {
 	return forkSkillTool{
 		def: llm.ToolDef{

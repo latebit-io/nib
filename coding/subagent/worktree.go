@@ -37,8 +37,16 @@ func gitWorktree(ctx context.Context, repo string) (root string, cleanup func(),
 		// worktree remove --force` drops uncommitted changes (the v1
 		// isolated-run semantics — changes are not merged back).
 		if out, rerr := runGit(context.Background(), repo, "worktree", "remove", "--force", wt); rerr != nil {
-			slog.Warn("subagent: git worktree remove failed", "worktree", wt, "err", rerr, "out", strings.TrimSpace(out))
+			// Leave the directory in place: deleting it now would orphan
+			// git's .git/worktrees/<id> entry and drift the repo metadata
+			// for later spawns. The admin- (or a future prune-) path can
+			// reclaim it.
+			slog.Warn("subagent: git worktree remove failed; leaving directory to avoid metadata drift",
+				"worktree", wt, "err", rerr, "out", strings.TrimSpace(out))
+			return
 		}
+		// git removed the registered worktree; clear the now-empty staging
+		// parent too.
 		if rerr := os.RemoveAll(parent); rerr != nil {
 			slog.Warn("subagent: worktree staging cleanup failed", "dir", parent, "err", rerr)
 		}

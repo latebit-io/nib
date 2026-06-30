@@ -71,6 +71,11 @@ func GlobalAgentsDir() (string, bool) {
 // and global agents are user-authored and always adapted. A nil/empty
 // plugins slice + nil trusted yields just the project/global agents.
 func Discover(projectRoot string, plugins []PluginAgentSource, trusted TrustFunc, spawner *Spawner) (DiscoverResult, error) {
+	if spawner == nil {
+		// Every adapted tool dereferences the spawner on Execute; a nil one
+		// would panic on first use, so fail fast at discovery.
+		return DiscoverResult{}, fmt.Errorf("subagent: Discover requires a non-nil spawner")
+	}
 	var errs []error
 
 	project, err := agentdef.LoadDir(ProjectAgentsDir(projectRoot), agentdef.SourceProject)

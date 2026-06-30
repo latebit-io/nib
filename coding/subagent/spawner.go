@@ -50,7 +50,7 @@ type worktreeFactory func(ctx context.Context, repo string) (root string, cleanu
 // Spawn builds its own single-run [agent.Agent].
 type Spawner struct {
 	workspace   *headless.DiskWorkspace
-	parentProv  llm.Provider
+	provider    func() llm.Provider
 	providerFor func(model string) (llm.Provider, error)
 	baseTools   []agent.Tool
 	budget      int
@@ -64,9 +64,12 @@ type Options struct {
 	// Workspace is the disk workspace children run against (the project
 	// root). Required.
 	Workspace *headless.DiskWorkspace
-	// Provider is the default LLM provider, used when a definition does
-	// not override the model. Required.
-	Provider llm.Provider
+	// Provider returns the CURRENT default LLM provider, used when a
+	// definition does not override the model. It is a getter (not a value)
+	// so a child resolves the live provider at spawn time — staying in
+	// sync with credential/model switches rather than capturing a stale or
+	// nil startup provider. Required.
+	Provider func() llm.Provider
 	// ProviderFor resolves a provider bound to a specific model id, for a
 	// definition's model override. Optional — a definition that requests a
 	// model errors if this is nil.
@@ -87,7 +90,7 @@ type Options struct {
 func New(o Options) *Spawner {
 	return &Spawner{
 		workspace:   o.Workspace,
-		parentProv:  o.Provider,
+		provider:    o.Provider,
 		providerFor: o.ProviderFor,
 		baseTools:   o.BaseTools,
 		budget:      o.TokenBudget,
@@ -115,7 +118,18 @@ func (s *Spawner) progressSink(name string) func(event.Event) {
 
 // Spawn runs def against task to completion and returns the result.
 func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task string) (headless.Result, error) {
-	prov := s.parentProv
+	// A definition's tool grants can be enforced on the EXTRA tools nib
+	// passes the child, but not on the built-in tools (read/write/edit/
+	// bash/…) that agent.New registers internally. So an advertised
+	// restriction like `tools: Read` would not actually prevent
+	// write_file/bash. Refuse to run a falsely-sandboxed child rather than
+	// pretend the boundary holds; restrictions become honorable once
+	// built-in tool gating (and CC→nib tool-name mapping) land.
+	if len(def.AllowedTools) > 0 || len(def.DisallowedTools) > 0 {
+		return headless.Result{}, fmt.Errorf("subagent %q declares tool restrictions (tools/disallowedTools) that nib cannot yet enforce on its built-in tools; remove them or wait for built-in tool gating", def.Name)
+	}
+
+	var prov llm.Provider
 	if def.Model != "" {
 		if s.providerFor == nil {
 			return headless.Result{}, fmt.Errorf("subagent %q requests model %q but no model resolver is configured", def.Name, def.Model)
@@ -125,6 +139,8 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 			return headless.Result{}, fmt.Errorf("subagent %q: resolve model %q: %w", def.Name, def.Model, err)
 		}
 		prov = p
+	} else if s.provider != nil {
+		prov = s.provider()
 	}
 	if prov == nil {
 		return headless.Result{}, fmt.Errorf("subagent %q: no LLM provider available", def.Name)

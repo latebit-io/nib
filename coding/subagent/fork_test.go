@@ -17,20 +17,19 @@ func TestAdaptForkSkill_SpawnsBodyAsTask(t *testing.T) {
 	var gotTools []agent.Tool
 	var gotGoal string
 	s := &Spawner{
-		parentProv: stubProvider{},
-		baseTools:  []agent.Tool{fakeTool{"Read"}, fakeTool{"Write"}},
+		provider:  func() llm.Provider { return stubProvider{} },
+		baseTools: []agent.Tool{fakeTool{"Read"}, fakeTool{"Write"}},
 		run: func(_ context.Context, _ llm.Provider, _ *headless.DiskWorkspace, _ *agent.NewOptions, tools []agent.Tool, goal string, _ func(event.Event)) (headless.Result, error) {
 			gotTools, gotGoal = tools, goal
 			return headless.Result{Success: true, Summary: "forked-result"}, nil
 		},
 	}
 	sk := skill.Skill{
-		Name:         "f",
-		Description:  "forks",
-		Body:         "do the work",
-		AllowedTools: []string{"Read"},
-		Context:      "fork",
-		Source:       skill.SourceProject,
+		Name:        "f",
+		Description: "forks",
+		Body:        "do the work",
+		Context:     "fork",
+		Source:      skill.SourceProject,
 	}
 
 	tool := AdaptForkSkill(sk, s)
@@ -46,12 +45,13 @@ func TestAdaptForkSkill_SpawnsBodyAsTask(t *testing.T) {
 	if out.IsError || out.Content != "forked-result" {
 		t.Errorf("execute = %+v", out)
 	}
-	// The skill body is the child's goal (persona empty), grant-filtered to Read.
+	// The skill body is the child's goal (persona empty); an unrestricted
+	// fork skill inherits the base tools.
 	if gotGoal != "do the work" {
 		t.Errorf("child goal = %q, want the skill body", gotGoal)
 	}
-	if want := []string{"Read"}; !slices.Equal(toolNames(gotTools), want) {
-		t.Errorf("child tools = %v, want %v (grant-filtered)", toolNames(gotTools), want)
+	if want := []string{"Read", "Write"}; !slices.Equal(toolNames(gotTools), want) {
+		t.Errorf("child tools = %v, want %v", toolNames(gotTools), want)
 	}
 }
 

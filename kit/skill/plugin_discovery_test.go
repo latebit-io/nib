@@ -99,18 +99,25 @@ func TestDiscoverWithPlugins_EmptyIDNotTrusted(t *testing.T) {
 func TestSkill_LoadFork(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeSkillFile(t, dir, "forker", "---\ndescription: forks\ncontext: fork\nagent: reviewer\n---\ndo work\n")
+	writeSkillFile(t, dir, "forker", "---\ndescription: forks\ncontext: fork\n---\ndo work\n")
 	skills, err := Load(dir, SourcePlugin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(skills) != 1 || !skills[0].IsFork() || skills[0].Agent != "reviewer" {
+	if len(skills) != 1 || !skills[0].IsFork() {
 		t.Fatalf("fork frontmatter not parsed: %+v", skills)
 	}
 
-	writeSkillFile(t, dir, "bad", "---\ndescription: d\ncontext: spoon\n---\nbody\n")
+	// Invalid context value is rejected.
+	writeSkillFile(t, dir, "forker", "---\ndescription: d\ncontext: spoon\n---\nbody\n")
 	if _, err := Load(dir, SourcePlugin); err == nil {
 		t.Errorf("invalid context value should error")
+	}
+
+	// `agent:` references are not yet supported — rejected at load.
+	writeSkillFile(t, dir, "forker", "---\ndescription: d\ncontext: fork\nagent: reviewer\n---\nbody\n")
+	if _, err := Load(dir, SourcePlugin); err == nil {
+		t.Errorf("agent: reference should be rejected")
 	}
 }
 

@@ -143,6 +143,15 @@ func parse(path, dirName string, source Source) (Skill, error) {
 	if ctxMode != "" && ctxMode != "fork" {
 		return Skill{}, fmt.Errorf("parse %s: invalid context %q (fork or empty)", path, m.Context)
 	}
+	// `agent:` selects a named subagent type to fork into. Resolving that
+	// reference is not implemented yet, so accepting it would silently run
+	// the wrong thing (a synthetic agent built from the skill) instead of
+	// the named one. Reject it outright until the resolution path exists,
+	// rather than dropping it on a non-fork skill or honoring it falsely on
+	// a fork skill.
+	if strings.TrimSpace(m.Agent) != "" {
+		return Skill{}, fmt.Errorf("parse %s: skill %q sets agent:%q — agent references are not yet supported (omit it)", path, name, m.Agent)
+	}
 
 	return Skill{
 		Name:            name,

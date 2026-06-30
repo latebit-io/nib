@@ -20,9 +20,9 @@ import (
 // "no plugin hooks": the gate methods below short-circuit to a proceed,
 // so the agent never has to nil-check at the call sites.
 //
-// Only PreToolUse / PostToolUse are wired in this vertical (M3.3c); the
-// lifecycle methods are declared now so the field type is stable when the
-// remaining emit points land (M3.3d).
+// All emit points are wired: PreToolUse / PostToolUse through the gate
+// methods below, and the prompt, run, compaction, and subagent lifecycle
+// events through their respective helpers.
 type HookDispatcher interface {
 	// PreToolUse returns a deny to block a pending tool call.
 	PreToolUse(ctx context.Context, toolName, argsJSON string) pluginhooks.Decision
@@ -78,11 +78,16 @@ func (a *Agent) pluginPostToolUse(ctx context.Context, c upagent.AfterToolCallIn
 		return res
 	}
 	content, isErr := a.hooks.PostToolUse(ctx, c.Name, c.Args, c.Result.Content)
+	// Each override is independent (mirroring [upagent.AfterToolCallResult]'s
+	// per-field pointer semantics): apply whichever the hook returned. The
+	// v1 dispatcher only ever returns both together (deny → reason + error)
+	// or neither, but honoring them separately keeps this correct if a hook
+	// ever sets content alone.
+	if content != nil {
+		res.Content = content
+	}
 	if isErr != nil {
 		res.IsError = isErr
-		if content != nil {
-			res.Content = content
-		}
 	}
 	return res
 }

@@ -190,6 +190,9 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	// same shape as the kit-rejection path below.
 	a.pluginSessionStart(runCtx)
 	if dec := a.pluginUserPromptSubmit(runCtx, goal); dec.Deny {
+		// The run never starts, so release its context now rather than
+		// leaving it live on a.cancel until the next run replaces it.
+		cancel()
 		a.mu.Lock()
 		a.running = false
 		a.mu.Unlock()

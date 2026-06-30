@@ -174,14 +174,21 @@ func TestLifecycleEvents_DenyDoesNotSuppressLaterHooks(t *testing.T) {
 	// Lifecycle events run every hook for side effects; a hook that denies
 	// (here a non-zero exit) must NOT short-circuit the hooks after it.
 	dir := t.TempDir()
+	denyMarker := filepath.Join(dir, "deny.marker")
 	marker := filepath.Join(dir, "ran.marker")
+	// First hook leaves its own marker THEN denies (non-zero exit); second
+	// hook leaves a marker. Asserting both proves the denying hook actually
+	// ran and did not short-circuit the one after it.
 	body := fmt.Sprintf(
-		`{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"exit 2"},{"type":"command","command":%q}]}]}}`,
-		"touch "+marker)
+		`{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":%q},{"type":"command","command":%q}]}]}}`,
+		"touch "+denyMarker+"; exit 2", "touch "+marker)
 	d := New([]hookspec.Config{parseCfg(t, body)}, hookrun.Runner{}, dir)
 	d.SessionStart(context.Background())
+	if _, err := os.Stat(denyMarker); err != nil {
+		t.Fatalf("the denying SessionStart hook did not run: %v", err)
+	}
 	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("second SessionStart hook did not run after the first denied: %v", err)
+		t.Fatalf("the second SessionStart hook did not run after the first denied: %v", err)
 	}
 }
 

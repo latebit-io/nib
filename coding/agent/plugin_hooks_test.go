@@ -21,6 +21,12 @@ type fakeHookDispatcher struct {
 	promptDeny bool
 	promptMsg  string
 
+	// postCustom returns postContent/postIsErr verbatim, to exercise
+	// content-only / error-only overrides the v1 dispatcher never emits.
+	postCustom  bool
+	postContent *string
+	postIsErr   *bool
+
 	sawPreTool, sawPreArgs string
 	sawPostResult          string
 	sawPrompt              string
@@ -41,6 +47,9 @@ func (f *fakeHookDispatcher) PreToolUse(_ context.Context, tool, args string) pl
 
 func (f *fakeHookDispatcher) PostToolUse(_ context.Context, _, _, resultText string) (*string, *bool) {
 	f.sawPostResult = resultText
+	if f.postCustom {
+		return f.postContent, f.postIsErr
+	}
 	if f.postDeny {
 		reason, isErr := f.postReason, true
 		return &reason, &isErr
@@ -121,6 +130,34 @@ func TestPluginPostToolUse_ProceedLeavesResultUntouched(t *testing.T) {
 	}
 	if res.Content != &prior {
 		t.Fatalf("Content pointer changed; want the prior override preserved on proceed")
+	}
+}
+
+func TestPluginPostToolUse_ContentAndErrorOverridesAreIndependent(t *testing.T) {
+	// A content-only override (isError nil) must still apply — the two
+	// override fields are independent.
+	rewritten := "rewritten output"
+	a := &Agent{hooks: &fakeHookDispatcher{postCustom: true, postContent: &rewritten}}
+	res := a.pluginPostToolUse(context.Background(),
+		upagent.AfterToolCallInput{Name: "bash", Result: upagent.ToolResult{Content: "orig"}},
+		upagent.AfterToolCallResult{})
+	if res.Content == nil || *res.Content != rewritten {
+		t.Fatalf("Content = %v, want content-only override applied", res.Content)
+	}
+	if res.IsError != nil {
+		t.Fatalf("IsError = %v, want nil (no error override given)", res.IsError)
+	}
+
+	// An error-only override (content nil) flips IsError without touching content.
+	isErr := true
+	a = &Agent{hooks: &fakeHookDispatcher{postCustom: true, postIsErr: &isErr}}
+	res = a.pluginPostToolUse(context.Background(),
+		upagent.AfterToolCallInput{Name: "bash"}, upagent.AfterToolCallResult{})
+	if res.IsError == nil || !*res.IsError {
+		t.Fatalf("IsError = %v, want true", res.IsError)
+	}
+	if res.Content != nil {
+		t.Fatalf("Content = %v, want nil (no content override given)", res.Content)
 	}
 }
 

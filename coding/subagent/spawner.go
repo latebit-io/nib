@@ -180,9 +180,11 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 
 	res, err := s.run(ctx, prov, ws, opts, tools, composeGoal(def, task), s.progressSink(def.Name))
 	// SubagentStop fires once the child has run and returned, regardless
-	// of success — the child stopped either way.
+	// of success — the child stopped either way. Detach from ctx: a
+	// canceled child (parent cancellation) must not stop the hook from
+	// firing, mirroring the parent Stop emit point.
 	if s.onSubagentStop != nil {
-		s.onSubagentStop(ctx)
+		s.onSubagentStop(context.WithoutCancel(ctx))
 	}
 	return res, err
 }

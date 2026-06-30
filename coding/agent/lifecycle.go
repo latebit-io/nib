@@ -183,6 +183,24 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	memorySummary := a.fetchMemorySummary(runCtx)
 	messages := a.buildMessages(fileName, fileContent, goal, memorySummary, mode)
 
+	// Plugin lifecycle: SessionStart fires once for the fresh
+	// conversation, then UserPromptSubmit may veto the goal before it
+	// reaches the model. A denied prompt ends the run before it starts —
+	// surface the reason and emit AgentDone so the frontend unwinds, the
+	// same shape as the kit-rejection path below.
+	a.pluginSessionStart(runCtx)
+	if dec := a.pluginUserPromptSubmit(runCtx, goal); dec.Deny {
+		// The run never starts, so release its context now rather than
+		// leaving it live on a.cancel until the next run replaces it.
+		cancel()
+		a.mu.Lock()
+		a.running = false
+		a.mu.Unlock()
+		a.send(event.AgentError{Err: promptBlockedReason(dec.Reason)})
+		a.send(event.AgentDone{Success: false})
+		return
+	}
+
 	a.emitOpening(mode)
 
 	// Arm runDone BEFORE PromptWithMessages so a super-fast run that
@@ -240,6 +258,15 @@ func (a *Agent) emitOpening(mode event.Mode) {
 // The ctx parameter is used only for the resume path (starting a new
 // kit run); it is ignored when the agent is already running.
 func (a *Agent) Reply(ctx context.Context, input string) bool {
+	// UserPromptSubmit may veto a follow-up before it is queued or
+	// resumed. A deny surfaces the reason and leaves the conversation
+	// untouched (the agent stays parked); the input is treated as handled
+	// so no fallback resume fires.
+	if dec := a.pluginUserPromptSubmit(ctx, input); dec.Deny {
+		a.send(event.AgentError{Err: promptBlockedReason(dec.Reason)})
+		return true
+	}
+
 	// Try queueing into an active run first. kit.Reply returns true iff
 	// the foundation accepted the message (run alive, queue not full),
 	// which is the race-free signal we used to derive from the

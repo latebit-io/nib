@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+
 	"github.com/latebit-io/nib/coding/event"
 )
 
@@ -58,6 +60,13 @@ func (a *Agent) forwardKitEvents() {
 			a.mu.Unlock()
 			if unsuccessful && e.Success {
 				ev = event.AgentDone{Success: false}
+			}
+			// Stop fires at run completion. Async (own context) so a slow
+			// hook never stalls the forwarder — the sole kitSub reader —
+			// nor delays the runDone close a follow-up run waits on. Guard
+			// avoids spawning a goroutine when no plugin supplies hooks.
+			if a.hooks != nil {
+				go a.pluginStop(context.Background())
 			}
 		}
 		a.send(ev)

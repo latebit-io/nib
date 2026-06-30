@@ -245,7 +245,14 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		subagentProvider = p
 		subagentProviderMu.Unlock()
 	}
-	spawner := subagent.New(subagent.Options{
+	// Plugin lifecycle-hooks dispatcher, built once from the enabled +
+	// trusted plugins' converted hook configs (trust gate inside
+	// buildHookDispatcher). Shared by every rebuilt agent and the
+	// subagent spawner so all emit points run the same trusted hook set.
+	// Nil when no trusted plugin contributes hooks.
+	hookDispatcher := buildHookDispatcher(activePlugins, trusted, projectRoot)
+
+	spawnerOpts := subagent.Options{
 		Workspace: headless.NewDiskWorkspace(projectRoot),
 		Provider: func() llm.Provider {
 			subagentProviderMu.Lock()
@@ -264,7 +271,14 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			default:
 			}
 		},
-	})
+	}
+	// SubagentStop is a parent-session event: fire the parent's trusted
+	// hooks when a spawned child finishes. Left nil (no-op) when no plugin
+	// supplies hooks so the spawner skips the call entirely.
+	if hookDispatcher != nil {
+		spawnerOpts.OnSubagentStop = hookDispatcher.SubagentStop
+	}
+	spawner := subagent.New(spawnerOpts)
 	var pluginAgentSources []subagent.PluginAgentSource
 	for _, p := range activePlugins {
 		pluginAgentSources = append(pluginAgentSources, subagent.PluginAgentSource{ID: p.ID, Dir: p.AgentsDir})
@@ -355,6 +369,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr
+		}
+		// Set the interface only when a dispatcher exists: assigning a
+		// typed-nil *Dispatcher would make the interface non-nil and defeat
+		// the agent's nil-dispatcher fast path.
+		if hookDispatcher != nil {
+			opts.HookDispatcher = hookDispatcher
 		}
 		if os.Getenv(brand.EnvKeyValidatorsDisabled) == "" {
 			opts.ValidationPipeline = validate.NewPipeline(

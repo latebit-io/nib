@@ -202,6 +202,11 @@ type Agent struct {
 	// [Agent.flushDirtyBuffers] short-circuits to a no-op.
 	flushDirtyBuffersFn FlushDirtyBuffersFunc
 
+	// hooks dispatches Claude Code plugin lifecycle hooks at the run
+	// loop's emit points (see [HookDispatcher]). Nil when no trusted
+	// plugin supplies hooks; the gate methods short-circuit to a proceed.
+	hooks HookDispatcher
+
 	// Per-run session usage lives on [providerProxy.session] —
 	// accumulated synchronously inside the Stream channel wrapper so
 	// the foundation's pre-Stream budget check ([Agent.foundationBudgetCheck])
@@ -406,6 +411,12 @@ type NewOptions struct {
 	// [FlushDirtyBuffersFunc]. Nil disables the pre-tool-dispatch flush
 	// step — appropriate for headless callers with no in-memory buffers.
 	FlushDirtyBuffers FlushDirtyBuffersFunc
+
+	// HookDispatcher runs trusted plugins' lifecycle hooks at the run
+	// loop's emit points. The binary builds it from the enabled+trusted
+	// plugins' converted hook configs (the trust gate lives there, not
+	// here). Nil disables plugin hooks entirely.
+	HookDispatcher HookDispatcher
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -435,6 +446,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var pipeline validate.Pipeline
 	var taskTokenBudgetInput int
 	var flushDirtyBuffersFn FlushDirtyBuffersFunc
+	var hooks HookDispatcher
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -450,6 +462,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		}
 		taskTokenBudgetInput = opts.TaskTokenBudget
 		flushDirtyBuffersFn = opts.FlushDirtyBuffers
+		hooks = opts.HookDispatcher
 	}
 	taskTokenBudget := budget.Resolve(taskTokenBudgetInput)
 
@@ -481,6 +494,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		smokeConfig:         smokeCfg,
 		taskTokenBudget:     taskTokenBudget,
 		flushDirtyBuffersFn: flushDirtyBuffersFn,
+		hooks:               hooks,
 	}
 
 	a.approvalFlow = editflow.NewOrchestrator(editflow.Deps{

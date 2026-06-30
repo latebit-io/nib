@@ -146,6 +146,61 @@ func TestSpawn_Orchestration(t *testing.T) {
 	}
 }
 
+func TestSpawn_FiresSubagentStop(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		runErr  error
+		wantErr bool
+	}{
+		{name: "success", runErr: nil},
+		{name: "child errored", runErr: errors.New("boom"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stops := 0
+			s := &Spawner{
+				provider: func() llm.Provider { return stubProvider{} },
+				run: func(context.Context, llm.Provider, *headless.DiskWorkspace, *agent.NewOptions, []agent.Tool, string, func(event.Event)) (headless.Result, error) {
+					return headless.Result{Success: tc.runErr == nil}, tc.runErr
+				},
+				onSubagentStop: func(context.Context) { stops++ },
+			}
+			_, err := s.Spawn(context.Background(), agentdef.Definition{Name: "rev", SystemPrompt: "p"}, "task")
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("Spawn err = %v, wantErr %v", err, tc.wantErr)
+			}
+			// SubagentStop fires once the child ran and returned, error or not.
+			if stops != 1 {
+				t.Fatalf("SubagentStop fired %d times, want 1", stops)
+			}
+		})
+	}
+}
+
+func TestSpawn_NoSubagentStopOnEarlyReject(t *testing.T) {
+	t.Parallel()
+	stops := 0
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{} },
+		run: func(context.Context, llm.Provider, *headless.DiskWorkspace, *agent.NewOptions, []agent.Tool, string, func(event.Event)) (headless.Result, error) {
+			t.Error("run must not be called for a rejected definition")
+			return headless.Result{}, nil
+		},
+		onSubagentStop: func(context.Context) { stops++ },
+	}
+	// A restricted definition is rejected before the child runs (see
+	// TestSpawn_RejectsUnenforceableGrants), so SubagentStop must not fire.
+	def := agentdef.Definition{Name: "x", SystemPrompt: "p", AllowedTools: []string{"Read"}}
+	if _, err := s.Spawn(context.Background(), def, "task"); err == nil {
+		t.Fatal("expected rejection for restricted definition")
+	}
+	if stops != 0 {
+		t.Fatalf("SubagentStop fired %d times on early reject, want 0", stops)
+	}
+}
+
 func TestSpawn_RejectsUnenforceableGrants(t *testing.T) {
 	t.Parallel()
 	s := &Spawner{

@@ -21,7 +21,7 @@ func TestMaybeCompact_BelowThresholdNoOp(t *testing.T) {
 	var sent []event.Event
 	send := func(ev event.Event) { sent = append(sent, ev) }
 
-	out := maybeCompact(in, nil, send)
+	out := maybeCompact(in, nil, send, nil)
 
 	if len(out) != len(in) {
 		t.Errorf("len(out) = %d, want %d (no-op below threshold)", len(out), len(in))
@@ -69,7 +69,7 @@ func TestMaybeCompact_AboveThresholdCompactsAndEmits(t *testing.T) {
 	var sent []event.Event
 	send := func(ev event.Event) { sent = append(sent, ev) }
 
-	out := maybeCompact(msgs, nil, send)
+	out := maybeCompact(msgs, nil, send, nil)
 
 	after := llm.EstimateMessageTokens(out, nil)
 	if after.History >= before.History {
@@ -88,6 +88,44 @@ func TestMaybeCompact_AboveThresholdCompactsAndEmits(t *testing.T) {
 	}
 	if ev.AfterTokens != after.History {
 		t.Errorf("AgentCompacted.AfterTokens = %d, want %d", ev.AfterTokens, after.History)
+	}
+}
+
+// TestMaybeCompact_BeforeCompactCallback verifies the PreCompact emit
+// hook fires exactly when compaction runs — once above threshold, never
+// below — so PreCompact does not fire on every quiet turn.
+func TestMaybeCompact_BeforeCompactCallback(t *testing.T) {
+	t.Parallel()
+	noopSend := func(event.Event) {}
+
+	// Below threshold: the callback must NOT fire.
+	small := []llm.Message{{Role: "system", Content: "tiny"}, {Role: "user", Content: "hi"}}
+	calls := 0
+	maybeCompact(small, nil, noopSend, func() { calls++ })
+	if calls != 0 {
+		t.Fatalf("beforeCompact fired %d times below threshold, want 0", calls)
+	}
+
+	// Above threshold: the callback fires once.
+	heavy := strings.Repeat("garbage ", 20_000)
+	msgs := []llm.Message{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "ok"},
+		{Role: "tool", ToolCallID: "old-1", Content: heavy},
+		{Role: "user", Content: "next"},
+		{Role: "assistant", Content: "ok"},
+		{Role: "tool", ToolCallID: "old-2", Content: heavy},
+		{Role: "user", Content: "recent"},
+		{Role: "assistant", Content: "ok"},
+	}
+	if est := llm.EstimateMessageTokens(msgs, nil); est.History < compactHistoryThreshold {
+		t.Skipf("fixture below threshold: history=%d threshold=%d", est.History, compactHistoryThreshold)
+	}
+	calls = 0
+	maybeCompact(msgs, nil, noopSend, func() { calls++ })
+	if calls != 1 {
+		t.Fatalf("beforeCompact fired %d times above threshold, want 1", calls)
 	}
 }
 

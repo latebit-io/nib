@@ -94,6 +94,12 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		if res := a.activeTaskGate(ctx, c); res.Block {
 			return res, nil
 		}
+		// Plugin PreToolUse runs LAST — only for calls nib's own gates
+		// cleared, matching CC's "final gate before execution". A deny
+		// becomes a Block, never a returned error (terminal).
+		if res := a.pluginPreToolUseGate(ctx, c); res.Block {
+			return res, nil
+		}
 		return upagent.BeforeToolCallResult{}, nil
 	}
 
@@ -112,6 +118,9 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 				res.Content = override
 			}
 		}
+		// Plugin PostToolUse runs last; a deny flips the result to an
+		// error with the hook's reason (overriding any trailer above).
+		res = a.pluginPostToolUse(ctx, c, res)
 		return res, nil
 	}
 
@@ -350,9 +359,9 @@ func (a *Agent) lintPendingGate() upagent.BeforeToolCallResult {
 // The cap is idempotent (see [capStaleToolResults]) and disabled
 // when [brand.EnvKeyToolOutputCapDisabled] is set non-empty — the
 // commit-2 kill switch for the smoke-testing soak.
-func (a *Agent) foundationCompactAndLint(_ context.Context, msgs []llm.Message) ([]llm.Message, error) {
+func (a *Agent) foundationCompactAndLint(ctx context.Context, msgs []llm.Message) ([]llm.Message, error) {
 	msgs = capToolOutputsIfEnabled(msgs)
-	msgs = maybeCompact(msgs, a.activeToolDefs(), a.send)
+	msgs = maybeCompact(msgs, a.activeToolDefs(), a.send, func() { a.pluginPreCompact(ctx) })
 	if lint := a.drainPendingLint(); lint != "" {
 		msgs = append(msgs, llm.Message{Role: "user", Content: lint})
 	}

@@ -90,46 +90,69 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 		}
 	}
 	cmd.Stdin = bytes.NewReader(payload)
-	out := &capBuffer{limit: maxHookOutput}
-	cmd.Stdout = out
-	cmd.Stderr = out
+	// Keep stdout and stderr SEPARATE: the decision is parsed from stdout
+	// only, so a hook may write diagnostics to stderr without corrupting
+	// its JSON decision. Output keeps both for display.
+	stdout := &capBuffer{limit: maxHookOutput}
+	stderr := &capBuffer{limit: maxHookOutput}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	runErr := cmd.Run()
-	output := out.String()
+	out, errOut := stdout.String(), stderr.String()
+	combined := joinStreams(out, errOut)
 
 	// Infrastructure failures fail OPEN (a broken/slow hook must not wedge
 	// all work): a timeout/cancel, or a process that never started.
 	if runErr != nil {
 		if ctx.Err() != nil {
-			return Result{Decision: Proceed, ExitCode: -1, Output: output, Err: fmt.Errorf("hookrun: hook timed out: %w", ctx.Err())}
+			return Result{Decision: Proceed, ExitCode: -1, Output: combined, Err: fmt.Errorf("hookrun: hook timed out: %w", ctx.Err())}
 		}
 		if cmd.ProcessState == nil {
-			return Result{Decision: Proceed, ExitCode: -1, Output: output, Err: fmt.Errorf("hookrun: run hook: %w", runErr)}
+			return Result{Decision: Proceed, ExitCode: -1, Output: combined, Err: fmt.Errorf("hookrun: run hook: %w", runErr)}
 		}
 		// Otherwise the hook ran and exited non-zero — a real Deny, handled
 		// by the exit-code logic below.
 	}
 	exit := cmd.ProcessState.ExitCode()
 
-	if dec, reason, ok := parseDecision(output); ok {
-		return Result{Decision: dec, Reason: reason, Output: output, ExitCode: exit}
+	// A JSON decision on stdout wins.
+	if dec, reason, ok := parseDecision(out); ok {
+		return Result{Decision: dec, Reason: reason, Output: combined, ExitCode: exit}
 	}
-	// No JSON decision: exit code decides.
+	// No JSON decision: exit code decides. Prefer stderr as the reason.
 	if exit != 0 {
-		return Result{Decision: Deny, Reason: strings.TrimSpace(output), Output: output, ExitCode: exit}
+		reason := strings.TrimSpace(errOut)
+		if reason == "" {
+			reason = strings.TrimSpace(out)
+		}
+		return Result{Decision: Deny, Reason: reason, Output: combined, ExitCode: exit}
 	}
-	return Result{Decision: Proceed, Output: output, ExitCode: exit}
+	return Result{Decision: Proceed, Output: combined, ExitCode: exit}
 }
 
-// buildCmd builds the exec command. A single-element command is run via
-// `sh -c` (CC's shell-string form, supporting pipes/quotes); a multi-
-// element command is run argv-style (no shell). Hooks run only for
-// trusted plugins, so shell execution is acceptable here.
-func buildCmd(ctx context.Context, command []string) *exec.Cmd {
-	if len(command) == 1 {
-		return exec.CommandContext(ctx, "sh", "-c", command[0])
+// joinStreams renders captured stdout+stderr for display, dropping an
+// empty side so the combined output has no stray blank line.
+func joinStreams(out, errOut string) string {
+	switch {
+	case errOut == "":
+		return out
+	case out == "":
+		return errOut
+	default:
+		return strings.TrimRight(out, "\n") + "\n" + errOut
 	}
-	return exec.CommandContext(ctx, command[0], command[1:]...)
+}
+
+// buildCmd builds the exec command, honoring the authored form: a shell
+// string runs via `sh -c` (pipes/quotes supported); an argv array runs
+// directly with no shell. Hooks run only for trusted plugins, so shell
+// execution is acceptable.
+func buildCmd(ctx context.Context, c hookspec.CommandSpec) *exec.Cmd {
+	if c.Shell {
+		return exec.CommandContext(ctx, "sh", "-c", strings.Join(c.Parts, " "))
+	}
+	return exec.CommandContext(ctx, c.Parts[0], c.Parts[1:]...)
 }
 
 // hookOutput is the recognized JSON decision shape on a hook's stdout.

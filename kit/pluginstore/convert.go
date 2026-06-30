@@ -466,13 +466,11 @@ func convertHooks(src, dst string, vars Vars, report *ConvertReport) error {
 		for gi := range groups {
 			for hi := range groups[gi].Hooks {
 				h := &groups[gi].Hooks[hi]
-				cmd := make([]string, len(h.Command))
-				for i, part := range h.Command {
+				for i, part := range h.Command.Parts {
 					ex, un := expandVars(part, vars)
 					noteVars(report, un)
-					cmd[i] = ex
+					h.Command.Parts[i] = ex // Shell form preserved
 				}
-				h.Command = cmd
 				for k, v := range h.Env {
 					ev, un := expandVars(v, vars)
 					noteVars(report, un)

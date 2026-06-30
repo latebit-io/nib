@@ -10,7 +10,7 @@ import (
 )
 
 func cmdHook(command string) hookspec.Hook {
-	return hookspec.Hook{Type: hookspec.Command, Command: []string{command}}
+	return hookspec.Hook{Type: hookspec.Command, Command: hookspec.CommandSpec{Parts: []string{command}, Shell: true}}
 }
 
 func TestRun_JSONDecision(t *testing.T) {
@@ -40,6 +40,21 @@ func TestRun_ExitCodeFallback(t *testing.T) {
 	res = Runner{}.Run(context.Background(), cmdHook(`echo fine`), Input{})
 	if res.Decision != Proceed {
 		t.Errorf("zero exit → proceed, got %+v", res)
+	}
+}
+
+func TestRun_DecisionFromStdoutNotStderr(t *testing.T) {
+	t.Parallel()
+	// Deny JSON on stdout, diagnostics on stderr, exit 0. The decision must
+	// come from stdout (Deny), not fall back to the exit code (Proceed).
+	res := Runner{}.Run(context.Background(),
+		cmdHook(`echo '{"decision":"deny","reason":"blocked"}'; echo "some warning" >&2`),
+		Input{})
+	if res.Decision != Deny || res.Reason != "blocked" {
+		t.Errorf("decision must parse from stdout only, got %+v", res)
+	}
+	if !strings.Contains(res.Output, "some warning") {
+		t.Errorf("stderr should still appear in Output: %q", res.Output)
 	}
 }
 

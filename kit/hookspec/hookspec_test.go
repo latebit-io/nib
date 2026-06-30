@@ -34,8 +34,8 @@ func TestParse_StructureAndNormalization(t *testing.T) {
 		t.Fatalf("PreToolUse shape: %+v", pre)
 	}
 	h := pre[0].Hooks[0]
-	if h.Type != Command || !slices.Equal([]string(h.Command), []string{"fmt.sh"}) {
-		t.Errorf("command string not normalized: %+v", h)
+	if h.Type != Command || !slices.Equal(h.Command.Parts, []string{"fmt.sh"}) || !h.Command.Shell {
+		t.Errorf("command string form not preserved: %+v", h)
 	}
 	if h.Env["X"] != "1" || h.TimeoutMS != 5000 {
 		t.Errorf("env/timeout: %+v", h)
@@ -44,9 +44,9 @@ func TestParse_StructureAndNormalization(t *testing.T) {
 		t.Errorf("command hook should be runnable")
 	}
 
-	// Array command normalizes to a slice.
+	// Array command keeps argv form (Shell false).
 	post := cfg.Hooks[PostToolUse][0].Hooks[0]
-	if !slices.Equal([]string(post.Command), []string{"prettier", "--write"}) {
+	if !slices.Equal(post.Command.Parts, []string{"prettier", "--write"}) || post.Command.Shell {
 		t.Errorf("array command: %+v", post.Command)
 	}
 
@@ -109,6 +109,43 @@ func TestParse_Errors(t *testing.T) {
 	// Malformed JSON.
 	if _, err := Parse([]byte(`{not json`)); err == nil {
 		t.Errorf("malformed json should error")
+	}
+}
+
+func TestCommandSpec_FormRoundTrips(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]byte(`{"hooks":{"PreToolUse":[
+	  {"hooks":[{"type":"command","command":"a | b"}]},
+	  {"hooks":[{"type":"command","command":["c","--flag"]}]}
+	]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := cfg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Re-parsing the managed copy must preserve shell vs argv form.
+	rt, err := Parse(out)
+	if err != nil {
+		t.Fatalf("re-parse: %v\n%s", err, out)
+	}
+	g := rt.Hooks[PreToolUse]
+	if !g[0].Hooks[0].Command.Shell {
+		t.Errorf("shell command form lost on round-trip")
+	}
+	if g[1].Hooks[0].Command.Shell {
+		t.Errorf("argv command form became shell on round-trip")
+	}
+}
+
+func TestParse_RejectsEmptyCommand(t *testing.T) {
+	t.Parallel()
+	if _, err := Parse([]byte(`{"hooks":{"PreToolUse":[{"hooks":[{"type":"command"}]}]}}`)); err == nil {
+		t.Errorf("command hook with no command should be rejected")
+	}
+	if _, err := Parse([]byte(`{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":[]}]}]}}`)); err == nil {
+		t.Errorf("command hook with empty array should be rejected")
 	}
 }
 

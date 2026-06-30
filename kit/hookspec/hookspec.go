@@ -61,9 +61,10 @@ const (
 type Hook struct {
 	// Type selects the action kind.
 	Type HookType `json:"type"`
-	// Command is the shell command for [Command] hooks, normalized to a
-	// slice (CC permits a bare string or an argv array).
-	Command jsonStrings `json:"command"`
+	// Command is the shell command for [Command] hooks. It preserves the
+	// authored form — a bare string runs via the shell, an argv array runs
+	// without one (see [CommandSpec]).
+	Command CommandSpec `json:"command"`
 	// Env are extra environment variables for a command hook.
 	Env map[string]string `json:"env,omitempty"`
 	// TimeoutMS bounds a command/http hook (0 = caller default).
@@ -82,7 +83,43 @@ type Hook struct {
 // Runnable reports whether nib can execute this hook today — a command
 // hook with a non-empty command. Other types parse but are inert until
 // their runner lands.
-func (h Hook) Runnable() bool { return h.Type == Command && len(h.Command) > 0 }
+func (h Hook) Runnable() bool { return h.Type == Command && len(h.Command.Parts) > 0 }
+
+// CommandSpec is a hook command that remembers whether it was authored as
+// a bare shell string or an argv array, so the runner can run the former
+// via the shell and the latter directly, and so the form round-trips
+// through [Config.Marshal] (the importer writes a managed copy).
+type CommandSpec struct {
+	// Parts is the command: a single shell string (Shell true) or argv
+	// tokens (Shell false).
+	Parts []string
+	// Shell reports whether Parts is a single shell string.
+	Shell bool
+}
+
+// UnmarshalJSON accepts a string (shell form) or a string array (argv).
+func (c *CommandSpec) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		c.Parts, c.Shell = []string{s}, true
+		return nil
+	}
+	var a []string
+	if err := json.Unmarshal(b, &a); err != nil {
+		return fmt.Errorf("command must be a string or string array: %w", err)
+	}
+	c.Parts, c.Shell = a, false
+	return nil
+}
+
+// MarshalJSON re-emits the authored form: a string for a shell command,
+// an array otherwise.
+func (c CommandSpec) MarshalJSON() ([]byte, error) {
+	if c.Shell && len(c.Parts) == 1 {
+		return json.Marshal(c.Parts[0])
+	}
+	return json.Marshal(c.Parts)
+}
 
 // Group binds a tool-name matcher to a set of hooks under one event.
 type Group struct {
@@ -181,27 +218,16 @@ func Parse(data []byte) (Config, error) {
 			if err := groups[i].compile(); err != nil {
 				return Config{}, fmt.Errorf("hookspec: event %s: %w", ev, err)
 			}
+			for _, h := range groups[i].Hooks {
+				// A command hook with no command would silently no-op at
+				// runtime — reject it so a broken hook fails import instead
+				// of disappearing.
+				if h.Type == Command && len(h.Command.Parts) == 0 {
+					return Config{}, fmt.Errorf("hookspec: event %s: command hook has an empty command", ev)
+				}
+			}
 		}
 		f.Hooks[ev] = groups
 	}
 	return Config(f), nil
-}
-
-// jsonStrings unmarshals a JSON field that may be a single string or an
-// array of strings into a []string (CC allows a command as either form).
-type jsonStrings []string
-
-// UnmarshalJSON implements [json.Unmarshaler].
-func (j *jsonStrings) UnmarshalJSON(b []byte) error {
-	var s string
-	if err := json.Unmarshal(b, &s); err == nil {
-		*j = jsonStrings{s}
-		return nil
-	}
-	var a []string
-	if err := json.Unmarshal(b, &a); err != nil {
-		return fmt.Errorf("expected string or string array: %w", err)
-	}
-	*j = a
-	return nil
 }

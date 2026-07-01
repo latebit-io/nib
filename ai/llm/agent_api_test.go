@@ -530,7 +530,7 @@ func TestAgentAPI_SetMaxTokens(t *testing.T) {
 func TestAnthropicAPI_SetMaxTokens(t *testing.T) {
 	// Anthropic requires max_tokens on every request, so the default is
 	// non-zero; SetMaxTokens overrides it for runtime escalation.
-	a := NewAnthropicAPI("https://example", "m", AnthropicKeyAuth("k"), false)
+	a := NewAnthropicAPI("https://example", "m", AnthropicKeyAuth("k"), false, "")
 	if got := a.MaxTokens(); got != anthropicDefaultMaxTokens {
 		t.Errorf("default MaxTokens = %d, want %d", got, anthropicDefaultMaxTokens)
 	}

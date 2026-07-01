@@ -18,6 +18,39 @@ type Message struct {
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID identifies which tool call this result is for (tool role only).
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// Reasoning is the provider's reasoning trace for an assistant turn
+	// (extended thinking), preserved so it can be replayed on later
+	// requests. Nil for turns without one and for providers that do not
+	// produce reasoning. It rides the message through history — some
+	// providers (Anthropic extended thinking) REQUIRE the trace, with its
+	// signature, replayed verbatim on tool-use turns or the request fails.
+	// Structurally parallel to [Message.ToolCalls]: provider-produced
+	// content that belongs to the assistant turn.
+	Reasoning *ReasoningTrace `json:"reasoning,omitempty"`
+}
+
+// ReasoningTrace is an assistant turn's preserved reasoning, as an ordered
+// list of blocks. Provider-agnostic so an OpenAI-style reasoning-item trace
+// can reuse it; today only the Anthropic adapter populates it.
+type ReasoningTrace struct {
+	// Blocks are the reasoning blocks in the order the model produced them,
+	// which must be preserved on replay.
+	Blocks []ReasoningBlock
+}
+
+// ReasoningBlock is one block of a [ReasoningTrace].
+type ReasoningBlock struct {
+	// Type is the block kind: "thinking" (Text + Signature) or
+	// "redacted_thinking" (opaque Data, no readable text).
+	Type string
+	// Text is the visible reasoning text for a "thinking" block.
+	Text string
+	// Signature is the provider's cryptographic signature over a "thinking"
+	// block, required verbatim on replay.
+	Signature string
+	// Data is the opaque payload of a "redacted_thinking" block, replayed
+	// verbatim.
+	Data string
 }
 
 // ToolCall represents a function call the LLM wants to make.
@@ -77,6 +110,11 @@ type StreamEvent struct {
 	Token string
 	// ToolCalls are the accumulated tool calls (populated when Done is true).
 	ToolCalls []ToolCall
+	// Reasoning is the assistant turn's reasoning trace, populated when Done
+	// is true for providers that produce one (else nil). The foundation
+	// copies it onto the assembled assistant [Message.Reasoning], mirroring
+	// how it copies ToolCalls.
+	Reasoning *ReasoningTrace
 	// Done is true when the stream is complete.
 	Done bool
 	// Usage holds token consumption data, populated on the final event
@@ -111,6 +149,11 @@ const maxToolArgBytes = 10 * 1024 * 1024
 // maxToolCalls is the maximum number of concurrent tool calls in a single
 // response. Prevents unbounded slice/map growth from malformed SSE payloads.
 const maxToolCalls = 128
+
+// maxThinkingBytes bounds a captured extended-thinking block. Generous
+// (well above any real reasoning budget) but finite so a malformed or
+// runaway stream cannot exhaust memory.
+const maxThinkingBytes = 2 * 1024 * 1024
 
 // sseIdleTimeout caps the wait between consecutive SSE chunks. Normal slow
 // generation streams tokens well within this window; a longer gap means the

@@ -253,6 +253,68 @@ Parked:
 	}
 }
 
+// TestPrompt_CarriesReasoningTrace verifies the foundation copies a Done
+// event's Reasoning onto the assembled assistant message AND into the
+// persisted transcript, so a provider's reasoning trace round-trips
+// through history (required for extended-thinking replay).
+func TestPrompt_CarriesReasoningTrace(t *testing.T) {
+	t.Parallel()
+
+	trace := &llm.ReasoningTrace{Blocks: []llm.ReasoningBlock{
+		{Type: "thinking", Text: "let me think", Signature: "sig-abc"},
+	}}
+	provider := newScriptedProvider([]llm.StreamEvent{
+		{Token: "answer"},
+		{Done: true, Reasoning: trace, Usage: &llm.Usage{PromptTokens: 5, CompletionTokens: 1}},
+	})
+	events := make(chan event.Event, 32)
+
+	a, err := New(Options{Provider: provider, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "hi"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	collected := make([]event.Event, 0, 8)
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			collected = append(collected, ev)
+			if _, ok := ev.(event.TurnEnd); ok {
+				goto Parked
+			}
+		case <-deadline:
+			t.Fatalf("timed out before TurnEnd")
+		}
+	}
+Parked:
+	a.Abort()
+	a.WaitForIdle()
+	all := append(collected, drainEvents(events, 4)...)
+
+	end, ok := findEvent[event.MessageEnd](all)
+	if !ok {
+		t.Fatal("missing MessageEnd")
+	}
+	if end.Message.Reasoning != trace {
+		t.Errorf("MessageEnd.Message.Reasoning = %v; want the verbatim trace pointer", end.Message.Reasoning)
+	}
+
+	// The trace must live on the persisted assistant turn so it survives
+	// into the next request's history.
+	msgs := a.State().Messages
+	last := msgs[len(msgs)-1]
+	if last.Role != "assistant" || last.Reasoning == nil || len(last.Reasoning.Blocks) != 1 {
+		t.Fatalf("persisted assistant message missing reasoning: %+v", last)
+	}
+	if last.Reasoning.Blocks[0].Signature != "sig-abc" {
+		t.Errorf("reasoning signature not preserved in history: %q", last.Reasoning.Blocks[0].Signature)
+	}
+}
+
 // TestPrompt_RejectsConcurrentRun verifies Prompt fails fast when a
 // run is already active.
 func TestPrompt_RejectsConcurrentRun(t *testing.T) {

@@ -29,6 +29,7 @@ type AnthropicAPI struct {
 	baseURL       string
 	model         string
 	promptCaching bool
+	effort        Effort // reasoning effort; "" disables extended thinking
 	client        *http.Client
 
 	mu        sync.Mutex
@@ -38,13 +39,15 @@ type AnthropicAPI struct {
 // anthropicVersion is the API version header required by the Anthropic API.
 const anthropicVersion = "2023-06-01"
 
-// NewAnthropicAPI creates an AnthropicAPI provider.
-func NewAnthropicAPI(baseURL, model string, auth Auth, promptCaching bool) *AnthropicAPI {
+// NewAnthropicAPI creates an AnthropicAPI provider. effort enables
+// extended thinking at the mapped budget ("" leaves it off).
+func NewAnthropicAPI(baseURL, model string, auth Auth, promptCaching bool, effort Effort) *AnthropicAPI {
 	return &AnthropicAPI{
 		auth:          auth,
 		baseURL:       baseURL,
 		model:         model,
 		promptCaching: promptCaching,
+		effort:        effort,
 		maxTokens:     anthropicDefaultMaxTokens,
 		client: &http.Client{
 			Transport: agentTransport(),
@@ -93,6 +96,33 @@ type anthropicRequest struct {
 	Tools     []anthropicToolDef `json:"tools,omitempty"`
 	Stream    bool               `json:"stream"`
 	Metadata  *anthropicMetadata `json:"metadata,omitempty"`
+	Thinking  *anthropicThinking `json:"thinking,omitempty"`
+}
+
+// anthropicThinking enables extended thinking with a token budget.
+type anthropicThinking struct {
+	Type         string `json:"type"` // "enabled"
+	BudgetTokens int    `json:"budget_tokens"`
+}
+
+// anthropicThinkingBudget maps an effort level to an extended-thinking
+// token budget. Returns 0 for an unset/unrecognized effort, which leaves
+// thinking disabled.
+func anthropicThinkingBudget(e Effort) int {
+	switch e {
+	case EffortLow:
+		return 1024
+	case EffortMedium:
+		return 4096
+	case EffortHigh:
+		return 8192
+	case EffortXHigh:
+		return 16384
+	case EffortMax:
+		return 24576
+	default:
+		return 0
+	}
 }
 
 // anthropicMessage is a single message in the Anthropic format.
@@ -111,6 +141,9 @@ type anthropicContent struct {
 	ToolUseID    string        `json:"tool_use_id,omitempty"` // tool_result only
 	Content      any           `json:"content,omitempty"`     // tool_result content (string or []anthropicContent)
 	IsError      bool          `json:"is_error,omitempty"`    // tool_result only
+	Thinking     string        `json:"thinking,omitempty"`    // "thinking" block text
+	Signature    string        `json:"signature,omitempty"`   // "thinking" block signature
+	Data         string        `json:"data,omitempty"`        // "redacted_thinking" opaque payload
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
@@ -146,6 +179,9 @@ type anthropicContentBlockStart struct {
 		Name  string          `json:"name,omitempty"`
 		Text  string          `json:"text,omitempty"`
 		Input json.RawMessage `json:"input,omitempty"`
+		// Data is the opaque payload of a redacted_thinking block, which
+		// arrives whole on block start (no deltas follow).
+		Data string `json:"data,omitempty"`
 	} `json:"content_block"`
 }
 
@@ -156,6 +192,10 @@ type anthropicContentBlockDelta struct {
 		Type        string `json:"type"`
 		Text        string `json:"text,omitempty"`
 		PartialJSON string `json:"partial_json,omitempty"`
+		// Thinking is the delta text for a thinking_delta; Signature is the
+		// (single) signature_delta over a completed thinking block.
+		Thinking  string `json:"thinking,omitempty"`
+		Signature string `json:"signature,omitempty"`
 	} `json:"delta"`
 }
 
@@ -189,6 +229,19 @@ type anthropicUsage struct {
 // into Anthropic content blocks.
 func convertAssistantMessage(m Message) anthropicMessage {
 	var blocks []anthropicContent
+	// Reasoning blocks MUST lead the assistant turn: Anthropic requires the
+	// thinking block first and replayed verbatim (with its signature) when
+	// the turn is followed by tool results, or the request 400s.
+	if m.Reasoning != nil {
+		for _, rb := range m.Reasoning.Blocks {
+			switch rb.Type {
+			case "thinking":
+				blocks = append(blocks, anthropicContent{Type: "thinking", Thinking: rb.Text, Signature: rb.Signature})
+			case "redacted_thinking":
+				blocks = append(blocks, anthropicContent{Type: "redacted_thinking", Data: rb.Data})
+			}
+		}
+	}
 	if m.Content != "" {
 		blocks = append(blocks, anthropicContent{Type: "text", Text: m.Content})
 	}
@@ -297,7 +350,7 @@ func (a *AnthropicAPI) buildAnthropicRequest(messages []Message, tools []ToolDef
 	maxTokens := a.maxTokens
 	a.mu.Unlock()
 
-	return &anthropicRequest{
+	req := &anthropicRequest{
 		Model:     a.model,
 		MaxTokens: maxTokens,
 		System:    system,
@@ -305,6 +358,14 @@ func (a *AnthropicAPI) buildAnthropicRequest(messages []Message, tools []ToolDef
 		Tools:     convertToolDefs(tools, a.promptCaching),
 		Stream:    true,
 	}
+	// Extended thinking: enable when effort maps to a budget. Anthropic
+	// requires max_tokens > budget_tokens (max_tokens covers thinking AND
+	// output), so give the configured output cap ON TOP of the budget.
+	if budget := anthropicThinkingBudget(a.effort); budget > 0 {
+		req.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: budget}
+		req.MaxTokens = budget + maxTokens
+	}
+	return req
 }
 
 // --- Streaming ---
@@ -351,10 +412,15 @@ func (a *AnthropicAPI) Stream(ctx context.Context, messages []Message, tools []T
 
 // anthropicBlockState tracks the state of an in-progress content block.
 type anthropicBlockState struct {
-	blockType string // "text" or "tool_use"
+	blockType string // "text", "tool_use", "thinking", or "redacted_thinking"
 	toolID    string
 	toolName  string
 	args      strings.Builder
+	// thinking accumulates a thinking block's text; signature is its
+	// verbatim signature; data is a redacted_thinking block's opaque payload.
+	thinking  strings.Builder
+	signature string
+	data      string
 }
 
 // anthropicStreamState accumulates state across the SSE stream.
@@ -383,6 +449,7 @@ func (s *anthropicStreamState) handleBlockStart(data string) bool {
 		blockType: evt.ContentBlock.Type,
 		toolID:    evt.ContentBlock.ID,
 		toolName:  evt.ContentBlock.Name,
+		data:      evt.ContentBlock.Data, // redacted_thinking payload (whole on start)
 	}
 	return true
 }
@@ -409,6 +476,17 @@ func (s *anthropicStreamState) handleBlockDelta(data string) (token string, abor
 			return "", true
 		}
 		block.args.WriteString(evt.Delta.PartialJSON)
+	case "thinking_delta":
+		// Reasoning text is captured for replay, NOT surfaced as a token —
+		// it is internal reasoning, not assistant output. Bounded so a
+		// runaway stream cannot exhaust memory; the budget already caps it
+		// in practice.
+		if block.thinking.Len()+len(evt.Delta.Thinking) <= maxThinkingBytes {
+			block.thinking.WriteString(evt.Delta.Thinking)
+		}
+	case "signature_delta":
+		// The signature must be preserved verbatim for replay.
+		block.signature += evt.Delta.Signature
 	}
 	return "", false
 }
@@ -432,6 +510,7 @@ func (s *anthropicStreamState) finalEvent() StreamEvent {
 	return StreamEvent{
 		Done:      true,
 		ToolCalls: finalizeAnthropicBlocks(s.blocks),
+		Reasoning: finalizeReasoning(s.blocks),
 		Usage:     s.usage,
 		Truncated: s.truncated,
 	}
@@ -604,6 +683,37 @@ func finalizeAnthropicBlocks(blocks map[int]*anthropicBlockState) []ToolCall {
 		})
 	}
 	return calls
+}
+
+// finalizeReasoning collects the thinking / redacted_thinking blocks into
+// a reasoning trace, preserving their order (block index) so replay is
+// faithful. Returns nil when the response contained no reasoning, keeping
+// the common (non-thinking) path's StreamEvent.Reasoning nil.
+func finalizeReasoning(blocks map[int]*anthropicBlockState) *ReasoningTrace {
+	indices := make([]int, 0, len(blocks))
+	for i := range blocks {
+		indices = append(indices, i)
+	}
+	slices.Sort(indices)
+
+	var out []ReasoningBlock
+	for _, i := range indices {
+		b := blocks[i]
+		switch b.blockType {
+		case "thinking":
+			out = append(out, ReasoningBlock{
+				Type:      "thinking",
+				Text:      b.thinking.String(),
+				Signature: b.signature,
+			})
+		case "redacted_thinking":
+			out = append(out, ReasoningBlock{Type: "redacted_thinking", Data: b.data})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return &ReasoningTrace{Blocks: out}
 }
 
 // anthropicModelsResponse is the JSON response from GET /v1/models.

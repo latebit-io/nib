@@ -224,6 +224,11 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (
 			if len(toolCalls) > 0 {
 				assistant.ToolCalls = toolCalls
 			}
+			// Carry the provider's reasoning trace on the message so it
+			// round-trips through history (some providers require it
+			// replayed on tool-use turns). Pure passthrough — mirrors
+			// ToolCalls above.
+			assistant.Reasoning = ev.Reasoning
 			a.send(event.MessageEnd{Message: assistant})
 			a.emitTurnUsage(usage, len(toolCalls), turn)
 

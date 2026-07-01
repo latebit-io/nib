@@ -26,6 +26,20 @@ func TestOpenAIEffort(t *testing.T) {
 	}
 }
 
+func TestEffort_IsValid(t *testing.T) {
+	valid := []Effort{"", EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax}
+	for _, e := range valid {
+		if !e.IsValid() {
+			t.Errorf("IsValid(%q) = false, want true", e)
+		}
+	}
+	for _, e := range []Effort{"hihg", "none", "LOW", "extreme"} {
+		if e.IsValid() {
+			t.Errorf("IsValid(%q) = true, want false", e)
+		}
+	}
+}
+
 func TestChatRequest_ReasoningEffortSerialization(t *testing.T) {
 	// Set → present.
 	data, _ := json.Marshal(chatRequest{Model: "m", ReasoningEffort: "high"})

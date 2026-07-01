@@ -194,6 +194,20 @@ const (
 	EffortMax    Effort = "max"
 )
 
+// IsValid reports whether e is a recognized effort level, treating the
+// empty value (unset) as valid. Call sites that cast an arbitrary config
+// string into [Effort] can use it to fail fast on a typo (e.g. "hihg")
+// instead of silently degrading to the provider default, which is what
+// the providers' internal mapping does for an unrecognized value.
+func (e Effort) IsValid() bool {
+	switch e {
+	case "", EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax:
+		return true
+	default:
+		return false
+	}
+}
+
 // openAIEffort maps an [Effort] to an OpenAI reasoning-effort value
 // (low|medium|high). nib's higher tiers (xhigh, max) collapse to "high",
 // the ceiling the OpenAI reasoning API accepts. Returns "" for an unset or

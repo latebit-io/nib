@@ -106,6 +106,61 @@ func TestMatcher_Allows(t *testing.T) {
 	}
 }
 
+func TestMatcher_PermitsArg(t *testing.T) {
+	t.Parallel()
+
+	t.Run("allowlist scopes the tool", func(t *testing.T) {
+		// `tools: Bash(git *)` — bash is admitted only for git commands.
+		allow, _ := ParseField("Bash(git *)")
+		m := New(allow, nil)
+		cases := []struct {
+			arg  string
+			want bool
+		}{
+			{"git status", true},
+			{"git push origin main", true},
+			{"rm -rf /", false}, // named in allow ⇒ must match a bash rule
+		}
+		for _, c := range cases {
+			if got := m.PermitsArg("bash", c.arg); got != c.want {
+				t.Errorf("PermitsArg(bash, %q) = %t, want %t", c.arg, got, c.want)
+			}
+		}
+	})
+
+	t.Run("deny-only grant blocks only matching commands", func(t *testing.T) {
+		// `disallowedTools: Bash(rm *)` with no allow list — bash is
+		// unrestricted except for the denied pattern. Allows would wrongly
+		// deny everything here (empty allow list); PermitsArg does not.
+		deny, _ := ParseField("Bash(rm *)")
+		m := New(nil, deny)
+		if !m.PermitsArg("bash", "git status") {
+			t.Error("deny-only grant must permit a non-denied command")
+		}
+		if m.PermitsArg("bash", "rm -rf /") {
+			t.Error("deny-only grant must block the denied command")
+		}
+		// Contrast with Allows: the empty allow list denies everything.
+		if m.Allows("bash", "git status") {
+			t.Error("Allows must deny under an empty allow list (allowlist semantics)")
+		}
+	})
+
+	t.Run("tool not named is permitted (deny-aware)", func(t *testing.T) {
+		// An allow list that names other tools imposes no arg restriction
+		// on bash, but a bash deny still blocks.
+		allow, _ := ParseField("Read")
+		deny, _ := ParseField("Bash(sudo *)")
+		m := New(allow, deny)
+		if !m.PermitsArg("bash", "ls") {
+			t.Error("tool absent from allow list should be permitted")
+		}
+		if m.PermitsArg("bash", "sudo rm") {
+			t.Error("deny rule must still block")
+		}
+	})
+}
+
 func TestMatcher_EmptyAllowDeniesAll(t *testing.T) {
 	t.Parallel()
 	m := New(nil, nil)

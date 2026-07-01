@@ -9,10 +9,14 @@
 //   - The agent definition's body is layered into the run GOAL, because
 //     [agent.New] has no system-prompt override yet. A proper
 //     NewOptions.SystemPrompt is the right fix (a core change).
-//   - Tool grants filter the EXTRA tools passed to the child (MCP,
-//     skills). Built-in tools (read/write/edit/bash/…) are registered
-//     inside [agent.New] and cannot be filtered or per-command gated from
-//     here; that needs a core agent option.
+//   - Tool grants constrain BOTH the extra tools (MCP, skills) via
+//     [grantFilter] AND the built-in tools via
+//     [agent.NewOptions.BuiltinToolGrants] — the child's builtins are
+//     dropped or (for bash) per-command gated per the definition's
+//     grants, translated from CC to nib tool names. CC names that nib
+//     has no equivalent for map 1:1 only (Edit→edit_file; apply_patch /
+//     replace_file have no CC name, so an `Edit` grant does not admit
+//     them).
 //   - maxTurns and effort are not yet honored ([agent.NewOptions] has no
 //     such fields); TaskTokenBudget is the only run cap.
 //   - The child shares the parent's working tree. isolation:worktree is
@@ -21,6 +25,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -31,6 +36,7 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/headless"
 	"github.com/latebit-io/nib/kit/agentdef"
+	"github.com/latebit-io/nib/kit/hookmap"
 	"github.com/latebit-io/nib/kit/toolperm"
 )
 
@@ -127,15 +133,13 @@ func (s *Spawner) progressSink(name string) func(event.Event) {
 
 // Spawn runs def against task to completion and returns the result.
 func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task string) (headless.Result, error) {
-	// A definition's tool grants can be enforced on the EXTRA tools nib
-	// passes the child, but not on the built-in tools (read/write/edit/
-	// bash/…) that agent.New registers internally. So an advertised
-	// restriction like `tools: Read` would not actually prevent
-	// write_file/bash. Refuse to run a falsely-sandboxed child rather than
-	// pretend the boundary holds; restrictions become honorable once
-	// built-in tool gating (and CC→nib tool-name mapping) land.
-	if len(def.AllowedTools) > 0 || len(def.DisallowedTools) > 0 {
-		return headless.Result{}, fmt.Errorf("subagent %q declares tool restrictions (tools/disallowedTools) that nib cannot yet enforce on its built-in tools; remove them or wait for built-in tool gating", def.Name)
+	// Translate the definition's CC-named tool grants into a nib-keyed
+	// matcher so agent.New can gate the child's BUILT-IN tools (drop the
+	// ungranted, per-command gate bash). Malformed grants refuse the spawn
+	// rather than run a child with a half-applied boundary.
+	builtinGrants, err := nibBuiltinGrants(def)
+	if err != nil {
+		return headless.Result{}, fmt.Errorf("subagent %q: %w", def.Name, err)
 	}
 
 	var prov llm.Provider
@@ -157,9 +161,10 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 
 	tools := grantFilter(s.baseTools, def.Permissions())
 	opts := &agent.NewOptions{
-		Interaction:     agent.Headless,
-		Terse:           true,
-		TaskTokenBudget: s.budget,
+		Interaction:       agent.Headless,
+		Terse:             true,
+		TaskTokenBudget:   s.budget,
+		BuiltinToolGrants: builtinGrants,
 	}
 
 	// isolation:worktree runs the child in a throwaway git worktree so its
@@ -192,9 +197,9 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 // grantFilter selects the extra tools a child may use under its grants.
 // With no allow list the child inherits every extra tool (minus any
 // outright deny); with an allow list it keeps only granted tools. An
-// argument-scoped grant like Bash(git *) still admits the Bash tool —
-// per-command enforcement of those args is a builtin-tool concern this
-// layer cannot reach (see package doc).
+// argument-scoped grant like Bash(git *) still admits the Bash tool here;
+// per-command enforcement of those args happens on the built-in bash tool
+// via [nibBuiltinGrants] → [agent.NewOptions.BuiltinToolGrants].
 func grantFilter(tools []agent.Tool, perm *toolperm.Matcher) []agent.Tool {
 	hasAllow := perm.HasAllowList()
 	var out []agent.Tool
@@ -209,6 +214,43 @@ func grantFilter(tools []agent.Tool, perm *toolperm.Matcher) []agent.Tool {
 		out = append(out, t)
 	}
 	return out
+}
+
+// nibBuiltinGrants translates a definition's CC-named tool grants into a
+// nib-keyed matcher for [agent.NewOptions.BuiltinToolGrants], gating the
+// child's built-in tools by the CC-authored `tools:` / `disallowedTools:`.
+// Returns (nil, nil) when the definition imposes no restriction (the child
+// keeps every builtin). Malformed grants are an error — refuse the spawn
+// rather than run with a half-applied boundary.
+//
+// CC→nib name mapping is via [hookmap] (Read→read_file, Bash→bash, …).
+// Tokens with no CC mapping — nib-native names, MCP/skill names — pass
+// through unchanged so they still match their targets.
+func nibBuiltinGrants(def agentdef.Definition) (*toolperm.Matcher, error) {
+	if len(def.AllowedTools) == 0 && len(def.DisallowedTools) == 0 {
+		return nil, nil
+	}
+	allow, aerr := nibRules(def.AllowedTools)
+	deny, derr := nibRules(def.DisallowedTools)
+	if err := errors.Join(aerr, derr); err != nil {
+		return nil, fmt.Errorf("invalid tool grants: %w", err)
+	}
+	return toolperm.New(allow, deny), nil
+}
+
+// nibRules parses CC grant tokens, rewriting each rule's tool name to its
+// nib built-in equivalent where one exists.
+func nibRules(tokens []string) ([]toolperm.Rule, error) {
+	rules, err := toolperm.ParseField(tokens)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rules {
+		if nib, ok := hookmap.NibName(rules[i].Tool); ok {
+			rules[i].Tool = nib
+		}
+	}
+	return rules, nil
 }
 
 // composeGoal layers the definition's system prompt into the run goal.

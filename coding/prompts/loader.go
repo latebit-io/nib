@@ -12,8 +12,22 @@ import (
 	"text/template"
 )
 
-//go:embed templates/system.md.tmpl templates/planning_system.md.tmpl templates/user.md.tmpl
+//go:embed templates/system.md.tmpl templates/planning_system.md.tmpl templates/user.md.tmpl templates/_persona_section.tmpl
 var defaultPrompts embed.FS
+
+// personaPartial is the shared {{define "personaSection"}} both system
+// templates invoke via {{template "personaSection" .}}. Parsed into every
+// system-template set (see [renderTemplate]) so the persona wording lives
+// in one file instead of duplicated across system.md.tmpl and
+// planning_system.md.tmpl. Embedded-only; a project override of a system
+// template still invokes the embedded partial.
+var personaPartial = func() string {
+	b, err := defaultPrompts.ReadFile("templates/_persona_section.tmpl")
+	if err != nil {
+		panic("prompts: embedded persona partial missing: " + err.Error())
+	}
+	return string(b)
+}()
 
 // maxPromptFileBytes is the size limit for project prompt overrides (1MB).
 // No sane prompt file should approach this; protects against accidental
@@ -36,6 +50,13 @@ type SystemPromptData struct {
 	// `skill_*` tools; absent in the common no-skills case so the
 	// prefix is unchanged.
 	HasSkills bool
+	// AgentPersona is a subagent definition's body (its role and
+	// instructions), injected as a high-salience section at the TOP of the
+	// system prompt. Empty for the top-level agent, leaving the prompt
+	// byte-identical. It augments — does not replace — nib's operational
+	// scaffolding, so a spawned child keeps the tool/edit/task guidance a
+	// headless run needs while adopting its specialization.
+	AgentPersona string
 }
 
 // UserPromptData holds the template variables for the user message.
@@ -129,10 +150,15 @@ func (l *PromptLoader) renderSystemTemplate(name string, data SystemPromptData) 
 	return strings.TrimSpace(raw)
 }
 
-// renderTemplate parses and executes a Go template, returning the trimmed result.
+// renderTemplate parses and executes a system-prompt template, returning
+// the trimmed result. The shared persona partial is parsed into the set
+// first so the template body can invoke {{template "personaSection" .}}.
 func renderTemplate(name, raw string, data SystemPromptData) (string, error) {
-	tmpl, err := template.New(name).Parse(raw)
-	if err != nil {
+	tmpl := template.New(name)
+	if _, err := tmpl.Parse(personaPartial); err != nil {
+		return "", fmt.Errorf("parse persona partial: %w", err)
+	}
+	if _, err := tmpl.Parse(raw); err != nil {
 		return "", fmt.Errorf("parse: %w", err)
 	}
 	var buf bytes.Buffer

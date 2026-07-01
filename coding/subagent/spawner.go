@@ -6,9 +6,11 @@
 // how skills become `skill_<name>` tools.
 //
 // v1 scope and limitations (see /nib/plans/m4-subagent-engine.md):
-//   - The agent definition's body is layered into the run GOAL, because
-//     [agent.New] has no system-prompt override yet. A proper
-//     NewOptions.SystemPrompt is the right fix (a core change).
+//   - The agent definition's body becomes the child's persona: it is
+//     injected as a high-salience section at the top of the coding system
+//     prompt via [agent.NewOptions.SystemPromptPersona], augmenting (not
+//     replacing) nib's operational scaffolding. The run goal is just the
+//     task.
 //   - Tool grants constrain BOTH the extra tools (MCP, skills) via
 //     [grantFilter] AND the built-in tools via
 //     [agent.NewOptions.BuiltinToolGrants] — the child's builtins are
@@ -161,10 +163,11 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 
 	tools := grantFilter(s.baseTools, def.Permissions())
 	opts := &agent.NewOptions{
-		Interaction:       agent.Headless,
-		Terse:             true,
-		TaskTokenBudget:   s.budget,
-		BuiltinToolGrants: builtinGrants,
+		Interaction:         agent.Headless,
+		Terse:               true,
+		TaskTokenBudget:     s.budget,
+		BuiltinToolGrants:   builtinGrants,
+		SystemPromptPersona: strings.TrimSpace(def.SystemPrompt),
 	}
 
 	// isolation:worktree runs the child in a throwaway git worktree so its
@@ -183,7 +186,7 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 		ws = headless.NewDiskWorkspace(root)
 	}
 
-	res, err := s.run(ctx, prov, ws, opts, tools, composeGoal(def, task), s.progressSink(def.Name))
+	res, err := s.run(ctx, prov, ws, opts, tools, task, s.progressSink(def.Name))
 	// SubagentStop fires once the child has run and returned, regardless
 	// of success — the child stopped either way. Detach from ctx: a
 	// canceled child (parent cancellation) must not stop the hook from
@@ -251,18 +254,6 @@ func nibRules(tokens []string) ([]toolperm.Rule, error) {
 		}
 	}
 	return rules, nil
-}
-
-// composeGoal layers the definition's system prompt into the run goal.
-// This is the v1 stand-in for a real system-prompt override (see package
-// doc): the child still runs under nib's coding system prompt, with the
-// agent persona prepended to the task.
-func composeGoal(def agentdef.Definition, task string) string {
-	persona := strings.TrimSpace(def.SystemPrompt)
-	if persona == "" {
-		return task
-	}
-	return persona + "\n\n---\n\nTask:\n" + task
 }
 
 // realRun builds the child agent, forwards its events into the headless

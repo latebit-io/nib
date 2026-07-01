@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	upagent "github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/kit/toolperm"
 )
 
@@ -216,4 +218,24 @@ func toolSet(ag *Agent) map[string]bool {
 		m[t.Definition().Function.Name] = true
 	}
 	return m
+}
+
+func TestNew_SystemPromptPersona_SurvivesRebuild(t *testing.T) {
+	const persona = "You are a database migration specialist."
+	ag := New(&multiTurnProvider{}, stubWorkspace{},
+		&NewOptions{SystemPromptPersona: persona})
+	t.Cleanup(ag.Close)
+
+	// rebuildSystemPrompt runs every turn; the persona must persist through
+	// it (it lives in SystemPromptData, not just the first buildMessages).
+	if got := ag.rebuildSystemPrompt(event.ModeExecution); !strings.Contains(got, persona) {
+		t.Fatal("persona missing from rebuilt system prompt")
+	}
+
+	// The top-level agent (nil persona) gets no persona section.
+	plain := New(&multiTurnProvider{}, stubWorkspace{}, nil)
+	t.Cleanup(plain.Close)
+	if strings.Contains(plain.rebuildSystemPrompt(event.ModeExecution), "specialized subagent") {
+		t.Error("top-level agent must not carry a persona section")
+	}
 }

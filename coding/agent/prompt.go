@@ -90,6 +90,7 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, memorySummary 
 		DistributedMemory: a.distributedMemory,
 		Terse:             a.currentTerse(),
 		HasSkills:         a.hasSkills(),
+		AgentPersona:      a.systemPromptPersona,
 	}
 	systemPrompt := a.prompts.SystemPrompt(sysData)
 	if mode == event.ModePlanning {
@@ -112,6 +113,7 @@ func (a *Agent) rebuildSystemPrompt(mode event.Mode) string {
 		DistributedMemory: a.distributedMemory,
 		Terse:             a.currentTerse(),
 		HasSkills:         a.hasSkills(),
+		AgentPersona:      a.systemPromptPersona,
 	}
 	if mode == event.ModePlanning {
 		return a.prompts.PlanningSystemPrompt(sysData)

@@ -139,6 +139,8 @@ func TestBashGrantGate_CompoundCommandsBlocked(t *testing.T) {
 		for _, cmd := range []string{
 			"git status; rm -rf /",
 			"git status && rm -rf /",
+			"git status || rm -rf /",
+			"git status & rm -rf /",
 			"git log | tee /etc/passwd",
 			"git status\nrm -rf /",
 			"git $(rm -rf /)",

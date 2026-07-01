@@ -19,6 +19,7 @@ import (
 type CodexAPI struct {
 	auth   Auth
 	model  string
+	effort Effort // reasoning effort; "" omits the reasoning field
 	client *http.Client
 
 	mu        sync.Mutex
@@ -40,10 +41,12 @@ func (c *CodexAPI) authFailure(statusCode int, body []byte) error {
 }
 
 // NewCodexAPI creates a CodexAPI provider for the ChatGPT Codex endpoint.
-func NewCodexAPI(model string, auth Auth) *CodexAPI {
+// effort sets the reasoning effort ("" for the provider default).
+func NewCodexAPI(model string, auth Auth, effort Effort) *CodexAPI {
 	return &CodexAPI{
-		auth:  auth,
-		model: model,
+		auth:   auth,
+		model:  model,
+		effort: effort,
 		client: &http.Client{
 			Transport: agentTransport(),
 		},
@@ -116,16 +119,23 @@ func (c *CodexAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 // --- Request types (Responses API wire format) ---
 
 type codexRequest struct {
-	Model        string      `json:"model"`
-	Instructions string      `json:"instructions"`
-	Input        []any       `json:"input"`
-	Tools        []codexTool `json:"tools,omitempty"`
-	Stream       bool        `json:"stream"`
-	Store        bool        `json:"store"`
+	Model        string          `json:"model"`
+	Instructions string          `json:"instructions"`
+	Input        []any           `json:"input"`
+	Tools        []codexTool     `json:"tools,omitempty"`
+	Stream       bool            `json:"stream"`
+	Store        bool            `json:"store"`
+	Reasoning    *codexReasoning `json:"reasoning,omitempty"`
 	// MaxOutputTokens caps the response length. Omitted (0) means the
 	// provider's default applies; set after a truncated turn to give the
 	// retry more headroom.
 	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+}
+
+// codexReasoning carries the Responses-API reasoning control. Effort is
+// one of low|medium|high.
+type codexReasoning struct {
+	Effort string `json:"effort"`
 }
 
 // codexMessageItem is a role-based message in the Responses API input.
@@ -318,6 +328,9 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		Tools:           toolsToCodexTools(tools),
 		Stream:          true,
 		MaxOutputTokens: maxTokens,
+	}
+	if eff := openAIEffort(c.effort); eff != "" {
+		reqBody.Reasoning = &codexReasoning{Effort: eff}
 	}
 
 	body, err := json.Marshal(reqBody)

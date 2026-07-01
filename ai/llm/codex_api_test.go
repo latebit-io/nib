@@ -17,7 +17,7 @@ func (f *fakeInvalidatableAuth) Invalidate()                                    
 
 func TestCodexAPI_AuthFailureInvalidatesAndReturnsTypedError(t *testing.T) {
 	auth := &fakeInvalidatableAuth{}
-	c := NewCodexAPI("gpt-5-codex", auth)
+	c := NewCodexAPI("gpt-5-codex", auth, "")
 
 	body := []byte(`{"error":{"message":"Encountered invalidated oauth token","code":"token_revoked"},"status":401}`)
 	err := c.authFailure(http.StatusUnauthorized, body)
@@ -41,7 +41,7 @@ type staticAuth struct{}
 func (staticAuth) Authenticate(context.Context, *http.Request) error { return nil }
 
 func TestCodexAPI_AuthFailureNoInvalidatorStillTypesError(t *testing.T) {
-	c := NewCodexAPI("gpt-5-codex", staticAuth{})
+	c := NewCodexAPI("gpt-5-codex", staticAuth{}, "")
 
 	err := c.authFailure(http.StatusUnauthorized, nil)
 

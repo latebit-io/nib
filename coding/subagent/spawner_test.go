@@ -123,6 +123,24 @@ func TestSpawn_PersonaToSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestSpawn_PassesMaxTurns(t *testing.T) {
+	t.Parallel()
+	var gotMax int
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{} },
+		run: func(_ context.Context, _ llm.Provider, _ *headless.DiskWorkspace, opts *agent.NewOptions, _ []agent.Tool, _ string, _ func(event.Event)) (headless.Result, error) {
+			gotMax = opts.MaxTurns
+			return headless.Result{Success: true}, nil
+		},
+	}
+	if _, err := s.Spawn(context.Background(), agentdef.Definition{Name: "x", MaxTurns: 7}, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if gotMax != 7 {
+		t.Errorf("opts.MaxTurns = %d, want 7 (from def.MaxTurns)", gotMax)
+	}
+}
+
 func TestSpawn_NoPersonaWhenBodyEmpty(t *testing.T) {
 	t.Parallel()
 	gotPersona := "sentinel"
@@ -309,7 +327,7 @@ func TestSpawn_ModelOverride(t *testing.T) {
 	t.Parallel()
 	s := &Spawner{
 		provider:    func() llm.Provider { return stubProvider{id: "parent"} },
-		providerFor: func(model string) (llm.Provider, error) { return stubProvider{id: model}, nil },
+		providerFor: func(model, _ string) (llm.Provider, error) { return stubProvider{id: model}, nil },
 		run: func(_ context.Context, p llm.Provider, _ *headless.DiskWorkspace, _ *agent.NewOptions, _ []agent.Tool, _ string, _ func(event.Event)) (headless.Result, error) {
 			return headless.Result{Success: true, Summary: p.(stubProvider).id}, nil
 		},
@@ -326,6 +344,38 @@ func TestSpawn_ModelOverride(t *testing.T) {
 	s.providerFor = nil
 	if _, err := s.Spawn(context.Background(), agentdef.Definition{Name: "x", SystemPrompt: "p", Model: "m"}, "t"); err == nil {
 		t.Errorf("expected error when a model is requested with no resolver")
+	}
+}
+
+func TestSpawn_EffortOverride(t *testing.T) {
+	t.Parallel()
+	var gotModel, gotEffort string
+	called := false
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{id: "parent"} },
+		providerFor: func(model, effort string) (llm.Provider, error) {
+			called = true
+			gotModel, gotEffort = model, effort
+			return stubProvider{id: "child"}, nil
+		},
+		run: func(_ context.Context, p llm.Provider, _ *headless.DiskWorkspace, _ *agent.NewOptions, _ []agent.Tool, _ string, _ func(event.Event)) (headless.Result, error) {
+			return headless.Result{Success: true, Summary: p.(stubProvider).id}, nil
+		},
+	}
+	// An effort override with NO model override still builds a child
+	// provider (effort is fixed at construction), keeping the parent model.
+	res, err := s.Spawn(context.Background(), agentdef.Definition{Name: "x", SystemPrompt: "p", Effort: "high"}, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("providerFor not called for an effort-only override")
+	}
+	if gotModel != "" || gotEffort != "high" {
+		t.Errorf("providerFor got (model=%q, effort=%q), want (\"\", \"high\")", gotModel, gotEffort)
+	}
+	if res.Summary != "child" {
+		t.Errorf("effort-override provider not used, provider id = %q", res.Summary)
 	}
 }
 

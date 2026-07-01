@@ -224,12 +224,15 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// inheriting the parent's MCP + skill tools filtered by the
 	// definition's grants. A definition's model override is resolved by
 	// cloning the active profile with the requested model id.
-	var subagentProviderFor func(string) (llm.Provider, error)
+	var subagentProviderFor func(model, effort string) (llm.Provider, error)
 	if llmResolved != nil {
 		baseResolved := *llmResolved
-		subagentProviderFor = func(model string) (llm.Provider, error) {
+		subagentProviderFor = func(model, effort string) (llm.Provider, error) {
 			r := baseResolved
-			r.Model = model
+			if model != "" {
+				r.Model = model
+			}
+			r.Effort = effort
 			return r.NewProvider(), nil
 		}
 	}

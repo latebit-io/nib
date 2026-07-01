@@ -176,3 +176,37 @@ type Provider interface {
 	// response is complete or ctx is cancelled.
 	Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error)
 }
+
+// Effort is a provider-agnostic reasoning-effort level. Providers map it
+// to their own reasoning control (OpenAI-style reasoning_effort, Anthropic
+// extended-thinking budget). The empty value means "unset" — no reasoning
+// field is sent and the provider's default applies. Effort is fixed at
+// provider construction, like the model, since [Provider.Stream] takes no
+// per-call parameters.
+type Effort string
+
+// Effort levels, mirroring the set an agent definition may request.
+const (
+	EffortLow    Effort = "low"
+	EffortMedium Effort = "medium"
+	EffortHigh   Effort = "high"
+	EffortXHigh  Effort = "xhigh"
+	EffortMax    Effort = "max"
+)
+
+// openAIEffort maps an [Effort] to an OpenAI reasoning-effort value
+// (low|medium|high). nib's higher tiers (xhigh, max) collapse to "high",
+// the ceiling the OpenAI reasoning API accepts. Returns "" for an unset or
+// unrecognized effort so the caller omits the field entirely.
+func openAIEffort(e Effort) string {
+	switch e {
+	case EffortLow:
+		return "low"
+	case EffortMedium:
+		return "medium"
+	case EffortHigh, EffortXHigh, EffortMax:
+		return "high"
+	default:
+		return ""
+	}
+}

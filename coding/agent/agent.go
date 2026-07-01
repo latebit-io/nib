@@ -240,8 +240,13 @@ type Agent struct {
 	// this wrapper-level flag to surface as Success=false. Reset on
 	// each new run.
 	runUnsuccessful bool
-	// turnCounter is the 1-indexed turn number within the current run.
+	// turnCounter is the 1-indexed turn number within the current run,
+	// incremented once per provider round-trip in [Agent.foundationTurnCheck].
 	turnCounter int
+	// maxTurns caps turnCounter per run (0 = no cap). See
+	// [NewOptions.MaxTurns]. When crossed, foundationTurnCheck aborts the
+	// run before the next provider call.
+	maxTurns int
 	// Per-turn estimate emission and AgentTurnUsage pairing live on
 	// [providerProxy] — its Stream wrapper is the only point where
 	// the estimate (computed pre-Stream from the exact msgs+tools the
@@ -442,6 +447,13 @@ type NewOptions struct {
 	// adopt its specialization while keeping the tool/edit/task guidance a
 	// headless run needs, replacing the earlier persona-in-goal stand-in.
 	SystemPromptPersona string
+
+	// MaxTurns caps the number of LLM turns (provider round-trips) in a
+	// single run: once the run has taken this many turns, the next is
+	// refused and the run ends. 0 (the default) means no cap. Used to
+	// bound a subagent definition's maxTurns; the top-level agent leaves
+	// it 0 and relies on TaskTokenBudget / the developer.
+	MaxTurns int
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -474,6 +486,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var hooks HookDispatcher
 	var builtinGrants *toolperm.Matcher
 	var systemPromptPersona string
+	var maxTurns int
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -492,6 +505,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		hooks = opts.HookDispatcher
 		builtinGrants = opts.BuiltinToolGrants
 		systemPromptPersona = opts.SystemPromptPersona
+		maxTurns = opts.MaxTurns
 	}
 	taskTokenBudget := budget.Resolve(taskTokenBudgetInput)
 
@@ -525,6 +539,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		flushDirtyBuffersFn: flushDirtyBuffersFn,
 		hooks:               hooks,
 		systemPromptPersona: systemPromptPersona,
+		maxTurns:            maxTurns,
 	}
 
 	a.approvalFlow = editflow.NewOrchestrator(editflow.Deps{

@@ -136,6 +136,12 @@ func (a *Agent) FoundationHooks(liveMessages func() []llm.Message) upagent.Hooks
 		if err := a.foundationBudgetCheck(); err != nil {
 			return nil, err
 		}
+		// Per-run turn cap. Counts this provider round-trip and refuses it
+		// when the cap is already reached — same pre-Stream abort point as
+		// the budget gate.
+		if err := a.foundationTurnCheck(); err != nil {
+			return nil, err
+		}
 		msgs, err := a.foundationCompactAndLint(ctx, msgs)
 		if err != nil {
 			return nil, err
@@ -402,4 +408,32 @@ func (a *Agent) foundationBudgetCheck() error {
 	}
 	slog.Warn("agent: task token budget exceeded; aborting (foundation hook)", "msg", msg)
 	return fmt.Errorf("%w: %s", errBudgetExceeded, msg)
+}
+
+// errMaxTurnsExceeded is the sentinel foundationTurnCheck returns when a
+// run reaches its per-run turn cap. Like [errBudgetExceeded], the
+// foundation surfaces it as an [agent/event.Error] that the translator
+// re-emits as [event.AgentError] + AgentDone{Success:false}.
+var errMaxTurnsExceeded = errors.New("coding/agent: max turns reached")
+
+// foundationTurnCheck counts this provider round-trip and enforces
+// [Agent.maxTurns]. It runs in TransformContext (once per Stream), so
+// incrementing here counts turns exactly; the cap is checked BEFORE the
+// Stream, so a run takes at most maxTurns turns. Returns nil when the cap
+// is disabled (0) or not yet reached.
+func (a *Agent) foundationTurnCheck() error {
+	a.mu.Lock()
+	a.turnCounter++
+	turn, max := a.turnCounter, a.maxTurns
+	a.mu.Unlock()
+	if max <= 0 || turn <= max {
+		return nil
+	}
+	// The first over-limit call carries the message; a re-entrant call
+	// (turn > max+1) aborts with the bare sentinel to avoid re-emitting.
+	if turn > max+1 {
+		return errMaxTurnsExceeded
+	}
+	slog.Warn("agent: max turns reached; aborting (foundation hook)", "maxTurns", max)
+	return fmt.Errorf("%w: reached the maximum of %d turns for this run", errMaxTurnsExceeded, max)
 }

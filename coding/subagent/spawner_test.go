@@ -129,8 +129,8 @@ func TestSpawn_Orchestration(t *testing.T) {
 		},
 	}
 	// An unrestricted definition inherits all base tools (grant-filtering
-	// is unit-tested separately; a restricted def is rejected — see
-	// TestSpawn_RejectsUnenforceableGrants).
+	// is unit-tested separately; a restricted def's builtin gating is
+	// covered by TestSpawn_AppliesBuiltinGrants).
 	def := agentdef.Definition{Name: "rev", SystemPrompt: "persona"}
 	if _, err := s.Spawn(context.Background(), def, "do it"); err != nil {
 		t.Fatal(err)
@@ -190,35 +190,86 @@ func TestSpawn_NoSubagentStopOnEarlyReject(t *testing.T) {
 		},
 		onSubagentStop: func(context.Context) { stops++ },
 	}
-	// A restricted definition is rejected before the child runs (see
-	// TestSpawn_RejectsUnenforceableGrants), so SubagentStop must not fire.
-	def := agentdef.Definition{Name: "x", SystemPrompt: "p", AllowedTools: []string{"Read"}}
+	// A malformed tool grant is rejected before the child runs, so
+	// SubagentStop must not fire.
+	def := agentdef.Definition{Name: "x", SystemPrompt: "p", AllowedTools: []string{"Bash("}}
 	if _, err := s.Spawn(context.Background(), def, "task"); err == nil {
-		t.Fatal("expected rejection for restricted definition")
+		t.Fatal("expected rejection for malformed tool grant")
 	}
 	if stops != 0 {
 		t.Fatalf("SubagentStop fired %d times on early reject, want 0", stops)
 	}
 }
 
-func TestSpawn_RejectsUnenforceableGrants(t *testing.T) {
+func TestSpawn_AppliesBuiltinGrants(t *testing.T) {
+	t.Parallel()
+	var gotGrants *toolperm.Matcher
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{} },
+		run: func(_ context.Context, _ llm.Provider, _ *headless.DiskWorkspace, opts *agent.NewOptions, _ []agent.Tool, _ string, _ func(event.Event)) (headless.Result, error) {
+			gotGrants = opts.BuiltinToolGrants
+			return headless.Result{Success: true}, nil
+		},
+	}
+	// A restricted definition now RUNS (no longer refused); its CC-named
+	// grants reach agent.New translated to nib built-in names.
+	def := agentdef.Definition{Name: "r", SystemPrompt: "p", AllowedTools: []string{"Read", "Bash(git *)"}}
+	if _, err := s.Spawn(context.Background(), def, "t"); err != nil {
+		t.Fatalf("restricted def should run now: %v", err)
+	}
+	if gotGrants == nil {
+		t.Fatal("BuiltinToolGrants not set for a restricted def")
+	}
+	if !gotGrants.GrantsTool("read_file") {
+		t.Error("Read did not translate to a read_file grant")
+	}
+	if !gotGrants.GrantsTool("bash") {
+		t.Error("Bash(git *) did not grant bash")
+	}
+	if gotGrants.GrantsTool("write_file") {
+		t.Error("write_file must not be granted under tools: Read Bash")
+	}
+	// The bash argument pattern survived translation.
+	if !gotGrants.PermitsArg("bash", "git status") || gotGrants.PermitsArg("bash", "rm -rf /") {
+		t.Error("bash arg pattern (git *) not enforced after CC→nib translation")
+	}
+}
+
+func TestSpawn_RefusesMalformedGrants(t *testing.T) {
 	t.Parallel()
 	s := &Spawner{
 		provider: func() llm.Provider { return stubProvider{} },
 		run: func(context.Context, llm.Provider, *headless.DiskWorkspace, *agent.NewOptions, []agent.Tool, string, func(event.Event)) (headless.Result, error) {
-			t.Errorf("run must not be called for a restricted definition")
+			t.Error("run must not be called for a malformed grant")
 			return headless.Result{}, nil
 		},
 	}
-	// A definition that restricts tools cannot be honored against builtins
-	// yet, so it is refused rather than run with a false boundary.
-	for _, def := range []agentdef.Definition{
-		{Name: "a", SystemPrompt: "p", AllowedTools: []string{"Read"}},
-		{Name: "b", SystemPrompt: "p", DisallowedTools: []string{"Write"}},
-	} {
-		if _, err := s.Spawn(context.Background(), def, "t"); err == nil {
-			t.Errorf("def %q: expected rejection of unenforceable tool restriction", def.Name)
-		}
+	def := agentdef.Definition{Name: "bad", SystemPrompt: "p", AllowedTools: []string{"Bash("}}
+	if _, err := s.Spawn(context.Background(), def, "t"); err == nil {
+		t.Error("expected refusal for a malformed tool grant")
+	}
+}
+
+func TestSpawn_NoRestrictionsGrantsNil(t *testing.T) {
+	t.Parallel()
+	called := false
+	var gotGrants *toolperm.Matcher
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{} },
+		run: func(_ context.Context, _ llm.Provider, _ *headless.DiskWorkspace, opts *agent.NewOptions, _ []agent.Tool, _ string, _ func(event.Event)) (headless.Result, error) {
+			called = true
+			gotGrants = opts.BuiltinToolGrants
+			return headless.Result{Success: true}, nil
+		},
+	}
+	if _, err := s.Spawn(context.Background(), agentdef.Definition{Name: "u", SystemPrompt: "p"}, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("run was not called")
+	}
+	if gotGrants != nil {
+		t.Error("an unrestricted def must pass nil BuiltinToolGrants (full builtins)")
 	}
 }
 

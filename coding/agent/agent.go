@@ -29,6 +29,7 @@ import (
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/budget"
 	"github.com/latebit-io/nib/kit/memory"
+	"github.com/latebit-io/nib/kit/toolperm"
 	"github.com/latebit-io/nib/kit/tools/bash"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 	searchtools "github.com/latebit-io/nib/kit/tools/search"
@@ -417,6 +418,16 @@ type NewOptions struct {
 	// plugins' converted hook configs (the trust gate lives there, not
 	// here). Nil disables plugin hooks entirely.
 	HookDispatcher HookDispatcher
+
+	// BuiltinToolGrants restricts the agent's BUILT-IN tools to those the
+	// matcher admits, and gates the bash tool's commands per-invocation.
+	// The matcher is keyed by nib tool names (the caller translates any CC
+	// aliases first). Nil means no restriction — every builtin is
+	// registered with full access, the default for the top-level agent.
+	// Used to enforce a subagent definition's `tools:` / `disallowedTools:`
+	// grants, which the spawner cannot apply itself because builtins are
+	// registered here, inside New.
+	BuiltinToolGrants *toolperm.Matcher
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -447,6 +458,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var taskTokenBudgetInput int
 	var flushDirtyBuffersFn FlushDirtyBuffersFunc
 	var hooks HookDispatcher
+	var builtinGrants *toolperm.Matcher
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -463,6 +475,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		taskTokenBudgetInput = opts.TaskTokenBudget
 		flushDirtyBuffersFn = opts.FlushDirtyBuffers
 		hooks = opts.HookDispatcher
+		builtinGrants = opts.BuiltinToolGrants
 	}
 	taskTokenBudget := budget.Resolve(taskTokenBudgetInput)
 
@@ -507,7 +520,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		DiagDelay:    a.diagDelay,
 	})
 
-	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools)
+	a.registerTools(workspace, cache, projectRoot, diagProvider, memStore, extraTools, builtinGrants)
 
 	a.buildKitAgent()
 
@@ -655,7 +668,7 @@ func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 // satisfies via methods on *Agent (Propose, FileCreated, Navigate,
 // OnComplete). The collaborators stay private to this package; the
 // tools depend on the abstract interfaces only.
-func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, memStore memory.Store, extraTools []Tool) {
+func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, memStore memory.Store, extraTools []Tool, builtinGrants *toolperm.Matcher) {
 	editTool := tools.NewEditFileTool(workspace, cache, a)
 
 	builtins := []Tool{
@@ -725,6 +738,13 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 			memorytools.NewAppendTool(memStore, appendOpts...),
 			memorytools.NewListTool(memStore),
 		)
+	}
+
+	// Apply per-child built-in tool grants (subagents): drop ungranted
+	// builtins and wrap bash with a per-command gate. No-op for the
+	// top-level agent (nil grants).
+	if builtinGrants != nil {
+		builtins = gateBuiltins(builtins, builtinGrants)
 	}
 
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))

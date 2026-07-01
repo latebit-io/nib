@@ -242,6 +242,54 @@ func (m *Matcher) Allows(tool, arg string) bool {
 	return false
 }
 
+// PermitsArg reports whether a tool that has ALREADY been granted at the
+// tool level may run with the given argument. It differs from [Allows] in
+// the empty-allow-list case: [Allows] is a strict allowlist (no matching
+// allow rule ⇒ deny), whereas PermitsArg permits a tool the allow set
+// never names, gating only by argument patterns when the tool IS named.
+//
+// This is the right check for command-level enforcement of an already-
+// admitted tool (e.g. gating a granted bash tool's command): a deny rule
+// always blocks; an allow list that scopes the tool (`bash(git *)`)
+// restricts it to matching arguments; a deny-only grant
+// (`disallowedTools: bash(rm *)`) blocks only the matching commands.
+func (m *Matcher) PermitsArg(tool, arg string) bool {
+	for _, r := range m.deny {
+		if r.matches(tool, arg) {
+			return false
+		}
+	}
+	if !m.GrantsTool(tool) {
+		// The allow set never names this tool, so it imposes no
+		// argument restriction on it — permit (deny rules already checked).
+		return true
+	}
+	for _, r := range m.allow {
+		if r.matches(tool, arg) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasArgRules reports whether any rule (allow or deny) constrains the
+// named tool by argument — a rule naming the tool with a non-empty Arg.
+// Callers use it to decide whether a tool's invocations need
+// argument-level scrutiny: e.g. whether a bash grant scopes commands
+// (`Bash(git *)` / `disallowedTools: Bash(rm *)`), in which case a
+// compound shell command must be rejected because the per-argument glob
+// can only be trusted against a single simple command.
+func (m *Matcher) HasArgRules(tool string) bool {
+	for _, set := range [][]Rule{m.allow, m.deny} {
+		for _, r := range set {
+			if r.Arg != "" && strings.EqualFold(r.Tool, tool) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // matches reports whether the rule applies to an invocation of tool with
 // the given argument string.
 func (r Rule) matches(tool, arg string) bool {

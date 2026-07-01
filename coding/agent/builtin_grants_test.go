@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"testing"
 
@@ -129,6 +130,56 @@ func TestBashGrantGate_Execute(t *testing.T) {
 			t.Fatalf("inner Execute called %d times, want 1 (forwarded)", calls)
 		}
 	})
+}
+
+func TestBashGrantGate_CompoundCommandsBlocked(t *testing.T) {
+	t.Run("scoped allow blocks command chaining", func(t *testing.T) {
+		// `Bash(git *)` must not let a second command ride past the glob.
+		gate := bashGrantGate{inner: stubTool{name: "bash"}, grants: mkMatcher(t, "bash(git *)", "")}
+		for _, cmd := range []string{
+			"git status; rm -rf /",
+			"git status && rm -rf /",
+			"git log | tee /etc/passwd",
+			"git status\nrm -rf /",
+			"git $(rm -rf /)",
+			"git `rm -rf /`",
+		} {
+			calls := 0
+			gate.inner = stubTool{name: "bash", calls: &calls}
+			res := gate.Execute(context.Background(), call(`{"command":`+quote(cmd)+`}`))
+			if !res.IsError {
+				t.Errorf("compound command %q was permitted, want blocked", cmd)
+			}
+			if calls != 0 {
+				t.Errorf("compound command %q reached inner bash", cmd)
+			}
+		}
+	})
+
+	t.Run("scoped deny blocks chaining that evades the deny", func(t *testing.T) {
+		// `disallowedTools: Bash(rm *)` must reject `true; rm -rf /`.
+		gate := bashGrantGate{inner: stubTool{name: "bash"}, grants: mkMatcher(t, "", "bash(rm *)")}
+		res := gate.Execute(context.Background(), call(`{"command":"true; rm -rf /"}`))
+		if !res.IsError {
+			t.Fatal("chained command evaded a scoped deny, want blocked")
+		}
+	})
+
+	t.Run("bare bash grant permits compound commands", func(t *testing.T) {
+		// A bare `Bash` grant imposes no arg rules — unrestricted.
+		calls := 0
+		gate := bashGrantGate{inner: stubTool{name: "bash", calls: &calls}, grants: mkMatcher(t, "bash", "")}
+		res := gate.Execute(context.Background(), call(`{"command":"git status; ls"}`))
+		if res.IsError || calls != 1 {
+			t.Fatalf("bare bash grant should permit compound command; res=%+v calls=%d", res, calls)
+		}
+	})
+}
+
+// quote JSON-encodes a string for embedding in a tool-call arguments body.
+func quote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func call(args string) llm.ToolCall {

@@ -81,6 +81,19 @@ func (g bashGrantGate) Execute(ctx context.Context, call llm.ToolCall) upagent.T
 		// confusing grant denial.
 		return g.inner.Execute(ctx, call)
 	}
+	// When the grant scopes bash by argument (e.g. Bash(git *) or
+	// disallowedTools: Bash(rm *)), the glob is checked against the whole
+	// command string — which a compound command defeats: `git status; rm
+	// -rf /` matches `git *`, and `true; rm -rf /` evades `rm *`. A single
+	// arg-glob can only be trusted against one simple command, so reject
+	// shell control/substitution operators conservatively. A bare `Bash`
+	// grant imposes no arg rules and is left unrestricted.
+	if g.grants.HasArgRules("bash") && hasShellControl(args.Command) {
+		return upagent.ToolResult{
+			Content: "Command blocked: compound, piped, or substituted shell commands are not permitted under this subagent's argument-scoped bash grant. Run a single command.",
+			IsError: true,
+		}
+	}
 	if !g.grants.PermitsArg("bash", args.Command) {
 		return upagent.ToolResult{
 			Content: fmt.Sprintf("Command blocked by this subagent's tool grants: %q is not permitted.", args.Command),
@@ -88,4 +101,14 @@ func (g bashGrantGate) Execute(ctx context.Context, call llm.ToolCall) upagent.T
 		}
 	}
 	return g.inner.Execute(ctx, call)
+}
+
+// hasShellControl reports whether a command contains shell operators that
+// chain, pipe, background, or substitute commands — the constructs that
+// let a second command ride along past an argument-scoped grant. The check
+// is intentionally conservative (a plain substring scan, so an operator
+// inside quotes is also rejected): for a security gate, over-rejecting a
+// quoted `;` is preferable to parsing shell grammar and risking a miss.
+func hasShellControl(cmd string) bool {
+	return strings.ContainsAny(cmd, ";|&\n`") || strings.Contains(cmd, "$(")
 }

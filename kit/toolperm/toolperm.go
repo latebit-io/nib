@@ -272,6 +272,24 @@ func (m *Matcher) PermitsArg(tool, arg string) bool {
 	return false
 }
 
+// HasArgRules reports whether any rule (allow or deny) constrains the
+// named tool by argument — a rule naming the tool with a non-empty Arg.
+// Callers use it to decide whether a tool's invocations need
+// argument-level scrutiny: e.g. whether a bash grant scopes commands
+// (`Bash(git *)` / `disallowedTools: Bash(rm *)`), in which case a
+// compound shell command must be rejected because the per-argument glob
+// can only be trusted against a single simple command.
+func (m *Matcher) HasArgRules(tool string) bool {
+	for _, set := range [][]Rule{m.allow, m.deny} {
+		for _, r := range set {
+			if r.Arg != "" && strings.EqualFold(r.Tool, tool) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // matches reports whether the rule applies to an invocation of tool with
 // the given argument string.
 func (r Rule) matches(tool, arg string) bool {

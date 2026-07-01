@@ -161,6 +161,32 @@ func TestMatcher_PermitsArg(t *testing.T) {
 	})
 }
 
+func TestMatcher_HasArgRules(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		allow, deny string
+		tool        string
+		want        bool
+	}{
+		{"arg-scoped allow", "Bash(git *)", "", "bash", true},
+		{"arg-scoped deny", "", "Bash(rm *)", "bash", true},
+		{"bare allow only", "Bash", "", "bash", false},
+		{"other tool arg-scoped", "Read(secret*)", "", "bash", false},
+		{"case-insensitive tool", "bash(git *)", "", "Bash", true},
+		{"no rules", "", "", "bash", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			allow, _ := ParseField(c.allow)
+			deny, _ := ParseField(c.deny)
+			if got := New(allow, deny).HasArgRules(c.tool); got != c.want {
+				t.Fatalf("HasArgRules(%q) = %v, want %v", c.tool, got, c.want)
+			}
+		})
+	}
+}
+
 func TestMatcher_EmptyAllowDeniesAll(t *testing.T) {
 	t.Parallel()
 	m := New(nil, nil)

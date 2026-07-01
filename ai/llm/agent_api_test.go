@@ -517,7 +517,7 @@ func TestAgentAPI_MaxTokensSerialization(t *testing.T) {
 }
 
 func TestAgentAPI_SetMaxTokens(t *testing.T) {
-	a := NewAgentAPI("http://example", "m", StaticKeyAuth("k"), false)
+	a := NewAgentAPI("http://example", "m", StaticKeyAuth("k"), false, "")
 	if got := a.MaxTokens(); got != 0 {
 		t.Errorf("default MaxTokens = %d, want 0", got)
 	}
@@ -541,7 +541,7 @@ func TestAnthropicAPI_SetMaxTokens(t *testing.T) {
 }
 
 func TestCodexAPI_SetMaxTokens(t *testing.T) {
-	c := NewCodexAPI("m", StaticKeyAuth("k"))
+	c := NewCodexAPI("m", StaticKeyAuth("k"), "")
 	if got := c.MaxTokens(); got != 0 {
 		t.Errorf("default MaxTokens = %d, want 0", got)
 	}

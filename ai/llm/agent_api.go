@@ -20,6 +20,7 @@ type AgentAPI struct {
 	baseURL       string
 	model         string
 	promptCaching bool
+	effort        Effort // reasoning effort; "" omits reasoning_effort
 	client        *http.Client
 
 	mu        sync.Mutex
@@ -27,14 +28,16 @@ type AgentAPI struct {
 }
 
 // NewAgentAPI creates an AgentAPI provider with the given base URL, model,
-// authenticator, and prompt caching flag. When promptCaching is true, messages
-// are annotated with cache_control breakpoints for Anthropic-style prompt caching.
-func NewAgentAPI(baseURL, model string, auth Auth, promptCaching bool) *AgentAPI {
+// authenticator, prompt caching flag, and reasoning effort. When promptCaching
+// is true, messages are annotated with cache_control breakpoints for
+// Anthropic-style prompt caching. effort "" omits the reasoning_effort field.
+func NewAgentAPI(baseURL, model string, auth Auth, promptCaching bool, effort Effort) *AgentAPI {
 	return &AgentAPI{
 		auth:          auth,
 		baseURL:       baseURL,
 		model:         model,
 		promptCaching: promptCaching,
+		effort:        effort,
 		client: &http.Client{
 			Transport: agentTransport(),
 			// No client-level Timeout — would kill SSE streams mid-flight.
@@ -76,18 +79,22 @@ type chatRequest struct {
 	// more headroom. Uses omitempty so we only start sending the field
 	// once escalation has happened.
 	MaxTokens int `json:"max_tokens,omitempty"`
+	// ReasoningEffort selects a reasoning model's effort (low|medium|high).
+	// Omitted when empty so non-reasoning models are unaffected.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // cachingChatRequest is the JSON wire format when prompt caching is enabled.
 // Messages and tools use extended types that support cache_control annotations.
 type cachingChatRequest struct {
-	Model         string           `json:"model"`
-	Messages      []cachingMessage `json:"messages"`
-	Stream        bool             `json:"stream"`
-	Store         bool             `json:"store"`
-	Tools         []cachingToolDef `json:"tools,omitempty"`
-	StreamOptions *streamOptions   `json:"stream_options,omitempty"`
-	MaxTokens     int              `json:"max_tokens,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []cachingMessage `json:"messages"`
+	Stream          bool             `json:"stream"`
+	Store           bool             `json:"store"`
+	Tools           []cachingToolDef `json:"tools,omitempty"`
+	StreamOptions   *streamOptions   `json:"stream_options,omitempty"`
+	MaxTokens       int              `json:"max_tokens,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
 }
 
 // cachingMessage extends Message with support for content blocks.
@@ -236,24 +243,28 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 	maxTokens := a.maxTokens
 	a.mu.Unlock()
 
+	effort := openAIEffort(a.effort)
+
 	if a.promptCaching {
 		cms, cts := annotateCacheBreakpoints(messages, tools)
 		body, err = json.Marshal(cachingChatRequest{
-			Model:         a.model,
-			Messages:      cms,
-			Stream:        true,
-			Tools:         cts,
-			StreamOptions: includeUsage,
-			MaxTokens:     maxTokens,
+			Model:           a.model,
+			Messages:        cms,
+			Stream:          true,
+			Tools:           cts,
+			StreamOptions:   includeUsage,
+			MaxTokens:       maxTokens,
+			ReasoningEffort: effort,
 		})
 	} else {
 		body, err = json.Marshal(chatRequest{
-			Model:         a.model,
-			Messages:      messages,
-			Stream:        true,
-			Tools:         tools,
-			StreamOptions: includeUsage,
-			MaxTokens:     maxTokens,
+			Model:           a.model,
+			Messages:        messages,
+			Stream:          true,
+			Tools:           tools,
+			StreamOptions:   includeUsage,
+			MaxTokens:       maxTokens,
+			ReasoningEffort: effort,
 		})
 	}
 	if err != nil {

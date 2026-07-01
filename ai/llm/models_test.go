@@ -27,7 +27,7 @@ func newModelServer(t *testing.T, status int, body, wantAuth string) *AgentAPI {
 	} else {
 		auth = StaticKeyAuth("")
 	}
-	return NewAgentAPI(srv.URL, "test-model", auth, false)
+	return NewAgentAPI(srv.URL, "test-model", auth, false, "")
 }
 
 func TestListModels(t *testing.T) {

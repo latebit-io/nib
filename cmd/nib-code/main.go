@@ -222,16 +222,26 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// trust-gate plugin agents, and adapt each into an `agent_<name>`
 	// spawn tool. Children run headless against the project root,
 	// inheriting the parent's MCP + skill tools filtered by the
-	// definition's grants. A definition's model override is resolved by
-	// cloning the active profile with the requested model id.
-	var subagentProviderFor func(string) (llm.Provider, error)
-	if llmResolved != nil {
-		baseResolved := *llmResolved
-		subagentProviderFor = func(model string) (llm.Provider, error) {
-			r := baseResolved
-			r.Model = model
-			return r.NewProvider(), nil
+	// definition's grants. A definition's model/effort override is resolved
+	// by cloning the ACTIVE resolved profile — read live under switchMu so
+	// a subagent picks up a mid-session model/credential switch instead of
+	// a stale startup snapshot (the switcher reassigns llmResolved below).
+	// switchMu is declared here so both this closure and the switcher share
+	// it.
+	var switchMu sync.Mutex
+	subagentProviderFor := func(model, effort string) (llm.Provider, error) {
+		switchMu.Lock()
+		base := llmResolved
+		switchMu.Unlock()
+		if base == nil {
+			return nil, fmt.Errorf("subagent provider: no LLM profile resolved")
 		}
+		r := *base
+		if model != "" {
+			r.Model = model
+		}
+		r.Effort = effort
+		return r.NewProvider(), nil
 	}
 	// Track the live provider so subagents stay in sync with credential /
 	// model switches instead of capturing the (possibly nil) startup one.
@@ -332,7 +342,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 
 	var ag *agent.Agent
 	var tuiApp *nibTui.App
-	var switchMu sync.Mutex
 
 	// flushDirtyBuffersFn routes the agent's pre-tool-dispatch autosave
 	// step back through the TUI's Update goroutine via

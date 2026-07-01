@@ -19,8 +19,12 @@
 //     has no equivalent for map 1:1 only (Edit→edit_file; apply_patch /
 //     replace_file have no CC name, so an `Edit` grant does not admit
 //     them).
-//   - maxTurns and effort are not yet honored ([agent.NewOptions] has no
-//     such fields); TaskTokenBudget is the only run cap.
+//   - maxTurns IS honored (via [agent.NewOptions.MaxTurns]): a child that
+//     reaches its turn cap ends the run. effort IS honored by building the
+//     child's provider with the requested reasoning effort (via
+//     ProviderFor), subject to provider support — OpenAI-style providers
+//     apply it today; the Anthropic provider ignores it until
+//     extended-thinking support lands. TaskTokenBudget also caps the child.
 //   - The child shares the parent's working tree. isolation:worktree is
 //     a later vertical.
 package subagent
@@ -59,7 +63,7 @@ type worktreeFactory func(ctx context.Context, repo string) (root string, cleanu
 type Spawner struct {
 	workspace   *headless.DiskWorkspace
 	provider    func() llm.Provider
-	providerFor func(model string) (llm.Provider, error)
+	providerFor func(model, effort string) (llm.Provider, error)
 	baseTools   []agent.Tool
 	budget      int
 	onEvent     func(event.Event)
@@ -81,10 +85,12 @@ type Options struct {
 	// sync with credential/model switches rather than capturing a stale or
 	// nil startup provider. Required.
 	Provider func() llm.Provider
-	// ProviderFor resolves a provider bound to a specific model id, for a
-	// definition's model override. Optional — a definition that requests a
-	// model errors if this is nil.
-	ProviderFor func(model string) (llm.Provider, error)
+	// ProviderFor resolves a provider bound to a specific model id and
+	// reasoning effort, for a definition's model / effort override. Either
+	// argument may be empty to keep the base value (empty model keeps the
+	// parent model; empty effort keeps the provider default). Optional — a
+	// definition that requests a model or effort errors if this is nil.
+	ProviderFor func(model, effort string) (llm.Provider, error)
 	// BaseTools is the full set of extra tools a child may receive (MCP,
 	// skills). Filtered per definition by its grants.
 	BaseTools []agent.Tool
@@ -145,13 +151,16 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 	}
 
 	var prov llm.Provider
-	if def.Model != "" {
+	// A model OR effort override needs a provider built for it (both are
+	// fixed at provider construction). Empty model keeps the parent model;
+	// empty effort keeps the provider default.
+	if def.Model != "" || def.Effort != "" {
 		if s.providerFor == nil {
-			return headless.Result{}, fmt.Errorf("subagent %q requests model %q but no model resolver is configured", def.Name, def.Model)
+			return headless.Result{}, fmt.Errorf("subagent %q requests a model/effort override but no provider resolver is configured", def.Name)
 		}
-		p, err := s.providerFor(def.Model)
+		p, err := s.providerFor(def.Model, def.Effort)
 		if err != nil {
-			return headless.Result{}, fmt.Errorf("subagent %q: resolve model %q: %w", def.Name, def.Model, err)
+			return headless.Result{}, fmt.Errorf("subagent %q: resolve provider (model %q, effort %q): %w", def.Name, def.Model, def.Effort, err)
 		}
 		prov = p
 	} else if s.provider != nil {
@@ -168,6 +177,7 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 		TaskTokenBudget:     s.budget,
 		BuiltinToolGrants:   builtinGrants,
 		SystemPromptPersona: strings.TrimSpace(def.SystemPrompt),
+		MaxTurns:            def.MaxTurns,
 	}
 
 	// isolation:worktree runs the child in a throwaway git worktree so its

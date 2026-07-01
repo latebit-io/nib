@@ -65,6 +65,13 @@ type Resolved struct {
 	// uses it instead of creating a StaticKeyAuth from apiKey. This is set
 	// by the OAuth wiring layer after a successful login.
 	Auth llm.Auth
+	// Effort is the reasoning effort providers apply (low|medium|high|xhigh|
+	// max). Empty means the provider default. Set on a cloned Resolved to
+	// build a provider with a specific effort (e.g. a subagent's override),
+	// mirroring how Model is overridden. Honored by the OpenAI-style
+	// providers; the Anthropic provider ignores it until extended-thinking
+	// support lands.
+	Effort string
 }
 
 // DisplayModel returns a short display name for the model.
@@ -100,22 +107,23 @@ func (r *Resolved) SetAPIKey(key string) {
 func (r *Resolved) NewProvider() llm.Provider {
 	// Try API key first — works for both pure API-key profiles and
 	// dual-mode profiles (like anthropic) where the key takes priority.
+	effort := llm.Effort(r.Effort)
 	if r.apiKey != "" {
 		if r.isAnthropicEndpoint() {
 			return llm.NewAnthropicAPI(r.BaseURL, r.Model, llm.AnthropicKeyAuth(r.apiKey), r.PromptCaching)
 		}
-		return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching)
+		return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching, effort)
 	}
 
 	// Fall back to OAuth if configured and authenticated.
 	if r.OAuthProvider != "" && r.Auth != nil {
 		if r.OAuthProvider == "openai" {
-			return llm.NewCodexAPI(r.Model, r.Auth)
+			return llm.NewCodexAPI(r.Model, r.Auth, effort)
 		}
 		if r.OAuthProvider == "anthropic" {
 			return llm.NewAnthropicAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching)
 		}
-		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching)
+		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching, effort)
 	}
 
 	return nil

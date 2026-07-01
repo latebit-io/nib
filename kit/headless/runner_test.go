@@ -18,6 +18,12 @@ import (
 // Prompt to push events onto the supplied channel. replyCh is a
 // one-shot signal that closes on the first Reply call so runFunc can
 // deterministically wait for follow-up input without spin-waiting.
+//
+// runFunc bodies send bare (no select+ctx) — safe only because every
+// script sends fewer events than the channel buffer (16), so a send can
+// never block even if the runner stops draining. A runFunc that loops
+// or sends unboundedly must switch to the ctx-cancellable select
+// pattern (see cmd/agent/main_test.go's forwarder).
 type mockAgent struct {
 	mu sync.Mutex
 

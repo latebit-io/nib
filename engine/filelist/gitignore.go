@@ -43,7 +43,7 @@ func loadGitignore(path, relDir string) *matcher {
 		}
 		return nil
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = f.Close() }() // read-only file; close error is not actionable
 
 	var patterns []pattern
 	scanner := bufio.NewScanner(f)

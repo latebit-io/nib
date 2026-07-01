@@ -23,17 +23,17 @@ const DefaultMaxResults = 200
 
 // Result represents a single search match.
 type Result struct {
-	Path string
-	Line int
-	Text string
+	Path string // file path relative to the search root
+	Line int    // 1-indexed line number
+	Text string // matched line content
 }
 
 // Options controls search behavior.
 type Options struct {
-	CaseSensitive bool
-	Regex         bool
-	MaxResults    int
-	FileGlob      string
+	CaseSensitive bool   // match case exactly; default insensitive
+	Regex         bool   // treat pattern as a regular expression; default literal
+	MaxResults    int    // cap on returned matches; 0 means backend default
+	FileGlob      string // filter files by glob (e.g. "*.go"); empty matches all
 }
 
 // SearchFunc performs a text search under root for the given pattern.

@@ -224,9 +224,20 @@ type SubagentActivity struct {
 
 // --- Marker method implementations ---
 
-func (AgentEditProposed) Event()  {}
-func (AgentFileCreated) Event()   {}
-func (AgentNavigate) Event()      {}
-func (ReloadBuffers) Event()      {}
+// Event marks AgentEditProposed as an agent event.
+func (AgentEditProposed) Event() {}
+
+// Event marks AgentFileCreated as an agent event.
+func (AgentFileCreated) Event() {}
+
+// Event marks AgentNavigate as an agent event.
+func (AgentNavigate) Event() {}
+
+// Event marks ReloadBuffers as an agent event.
+func (ReloadBuffers) Event() {}
+
+// Event marks DiagnosticsUpdated as an agent event.
 func (DiagnosticsUpdated) Event() {}
-func (SubagentActivity) Event()   {}
+
+// Event marks SubagentActivity as an agent event.
+func (SubagentActivity) Event() {}

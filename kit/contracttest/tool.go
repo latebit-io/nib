@@ -103,6 +103,8 @@ func Tool(t *testing.T, ctor func() kit.Tool) {
 				t.Fatalf("contract: Execute panicked on empty args object: %v", r)
 			}
 		}()
+		// Result ignored: the invariant under test is "no panic",
+		// not any particular output for empty args.
 		_ = tool.Execute(context.Background(), llm.ToolCall{
 			ID:   "contracttest-empty",
 			Type: "function",
@@ -127,6 +129,8 @@ func Tool(t *testing.T, ctor func() kit.Tool) {
 						t.Errorf("contract: concurrent Execute panicked (goroutine %d): %v", i, r)
 					}
 				}()
+				// Result ignored: the invariant under test is
+				// "no panic under concurrency", not the output.
 				_ = tool.Execute(context.Background(), llm.ToolCall{
 					ID:   "contracttest-concurrent",
 					Type: "function",

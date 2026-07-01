@@ -18,6 +18,8 @@ type HelpModel struct {
 	lines     []string // pre-built help content lines (unstyled box content)
 }
 
+// Help overlay styles: title, category header, key column, description,
+// surrounding box, and footer hint line.
 var (
 	helpTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	helpCatStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))

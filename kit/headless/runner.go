@@ -388,7 +388,7 @@ func (r *Runner) status(format string, args ...any) {
 	if !r.isTTY {
 		return
 	}
-	_, _ = fmt.Fprintf(r.stderr, format, args...)
+	_, _ = fmt.Fprintf(r.stderr, format, args...) // best-effort status output; write error unactionable
 }
 
 // readInput reads a single line from the shared stdin reader,

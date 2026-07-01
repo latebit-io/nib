@@ -235,6 +235,8 @@ func (a *AgentAPI) SetMaxTokens(v int) {
 	a.mu.Unlock()
 }
 
+// Stream sends a chat completion request to the OpenAI-compatible endpoint
+// and returns a channel of streaming events.
 func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
 	var body []byte
 	var err error
@@ -287,13 +289,13 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 	}
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		_ = resp.Body.Close()
+		_ = resp.Body.Close() // body already read; close error is not actionable
 		return nil, fmt.Errorf("api error: status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	ch := make(chan StreamEvent, 16)
 	go func() {
-		defer func() { _ = resp.Body.Close() }()
+		defer func() { _ = resp.Body.Close() }() // body consumed by SSE reader; close error is not actionable
 		defer close(ch)
 		a.readSSE(ctx, resp, ch)
 	}()

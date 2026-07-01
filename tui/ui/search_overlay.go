@@ -75,6 +75,8 @@ var (
 				Foreground(lipgloss.Color("166"))
 	searchDimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240"))
+	searchErrorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("9"))
 )
 
 // Open activates the search overlay.
@@ -251,7 +253,7 @@ func (s *SearchOverlayModel) RenderOverlay(background string, width, height int)
 	if s.Searching {
 		footer = searchDimStyle.Render(" searching...")
 	} else if s.ErrorMsg != "" {
-		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(" " + s.ErrorMsg)
+		footer = searchErrorStyle.Render(" " + s.ErrorMsg)
 	} else if len(s.Results) > 0 {
 		footer = searchDimStyle.Render(fmt.Sprintf(" %d result(s) — Enter to open, Esc to close", len(s.Results)))
 	} else if s.Query != "" {

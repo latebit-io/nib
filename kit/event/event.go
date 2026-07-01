@@ -167,12 +167,29 @@ type AgentCompacted struct {
 
 // --- Marker method implementations ---
 
-func (AgentToken) Event()         {}
-func (AgentDone) Event()          {}
-func (AgentError) Event()         {}
-func (AgentToolCall) Event()      {}
-func (AgentWaiting) Event()       {}
-func (AgentStatus) Event()        {}
-func (AgentTurnUsage) Event()     {}
+// Event marks AgentToken as a kit agent event.
+func (AgentToken) Event() {}
+
+// Event marks AgentDone as a kit agent event.
+func (AgentDone) Event() {}
+
+// Event marks AgentError as a kit agent event.
+func (AgentError) Event() {}
+
+// Event marks AgentToolCall as a kit agent event.
+func (AgentToolCall) Event() {}
+
+// Event marks AgentWaiting as a kit agent event.
+func (AgentWaiting) Event() {}
+
+// Event marks AgentStatus as a kit agent event.
+func (AgentStatus) Event() {}
+
+// Event marks AgentTurnUsage as a kit agent event.
+func (AgentTurnUsage) Event() {}
+
+// Event marks AgentInputEstimate as a kit agent event.
 func (AgentInputEstimate) Event() {}
-func (AgentCompacted) Event()     {}
+
+// Event marks AgentCompacted as a kit agent event.
+func (AgentCompacted) Event() {}

@@ -38,16 +38,16 @@ linters:
         # agent loop (would be a cycle) or composition roots.
         coding-leaves:
           files:
-            - "**/budget/*.go"
+            - "**/command/*.go"
+            - "**/editflow/*.go"
             - "**/event/*.go"
             - "**/lint/*.go"
             - "**/memory/*.go"
             - "**/nudges/*.go"
+            - "**/pluginhooks/*.go"
             - "**/prompts/*.go"
             - "**/smoke/*.go"
-            - "**/style/*.go"
             - "**/tools/*.go"
-            - "**/validation/*.go"
           deny:
             - pkg: "github.com/latebit-io/nib/coding/agent"
               desc: "leaf subpackage must not import agent — agent composes leaves, not the reverse"
@@ -59,6 +59,20 @@ linters:
               desc: "leaf subpackage must not import wire"
             - pkg: "github.com/latebit-io/nib/tui"
               desc: "coding must not import tui"
+
+        # subagent is a spawn orchestrator: it legitimately composes the
+        # agent loop and the headless runner to run child agents, but it
+        # must not reach into interactive composition roots.
+        subagent-isolation:
+          files:
+            - "**/subagent/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding/session"
+              desc: "subagent must not import session — child agents run headless, never against the interactive session"
+            - pkg: "github.com/latebit-io/nib/coding/wire"
+              desc: "subagent must not import wire — wiring belongs to composition roots"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "subagent must not import tui — child agents run headless, never against the interactive TUI"
 
         # approval is a coordination primitive consumed by agent. It
         # must not import agent or composition roots.

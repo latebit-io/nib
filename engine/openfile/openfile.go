@@ -67,8 +67,8 @@ func (o *OpenFile) Save() error { return o.Buf.Save() }
 // EditLocation describes a position in the buffer (0-indexed line and
 // rune column).
 type EditLocation struct {
-	Line int
-	Col  int
+	Line int // 0-indexed line
+	Col  int // 0-indexed rune column
 }
 
 // EditOutcome reports the result of [OpenFile.ApplyEdit]. When Applied is
@@ -76,9 +76,9 @@ type EditLocation struct {
 // its cursor (the start of the inserted replacement). When Applied is
 // false, FailureReason carries the human-readable error.
 type EditOutcome struct {
-	Applied       bool
-	NewCursor     EditLocation
-	FailureReason string
+	Applied       bool         // true when the edit mutated the buffer
+	NewCursor     EditLocation // start of the replacement; meaningful only when Applied
+	FailureReason string       // human-readable reason; set only when !Applied
 }
 
 // LocateEdit finds the unique occurrence of search in the buffer.
@@ -149,9 +149,9 @@ func (o *OpenFile) ReplaceRange(line, col, length int, text string) {
 // would be removed (0-indexed, inclusive). NewLines are the full lines
 // that would replace them after the edit is applied.
 type DiffResult struct {
-	StartLine int
-	EndLine   int
-	NewLines  []string
+	StartLine int      // first buffer line removed (0-indexed)
+	EndLine   int      // last buffer line removed (inclusive)
+	NewLines  []string // full replacement lines
 }
 
 // ComputeDiff locates the search text in the buffer and computes the

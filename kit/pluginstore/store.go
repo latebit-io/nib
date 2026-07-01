@@ -192,7 +192,7 @@ func (s *Store) promoteInstall(id, name, version, stagedDir string) error {
 	cleanupConv := true
 	defer func() {
 		if cleanupConv {
-			_ = os.RemoveAll(tmpConv)
+			_ = os.RemoveAll(tmpConv) // best-effort rollback; the primary error is already being returned
 		}
 	}()
 	if err := s.convertInto(id, name, version, stagedDir, tmpConv); err != nil {

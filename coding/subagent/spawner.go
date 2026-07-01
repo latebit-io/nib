@@ -301,7 +301,14 @@ func realRun(ctx context.Context, p llm.Provider, ws *headless.DiskWorkspace, op
 			if onEvent != nil {
 				onEvent(ev)
 			}
-			events <- ev
+			// The runner may stop draining before the subscription closes
+			// (e.g. ctx cancellation); a bare send would wedge this goroutine
+			// on the bounded channel and leak it plus the subscription.
+			select {
+			case events <- ev:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 

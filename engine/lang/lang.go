@@ -99,12 +99,12 @@ type TextChange struct {
 
 // Diagnostic represents a compiler error, warning, or hint.
 type Diagnostic struct {
-	StartLine, StartCol int
-	EndLine, EndCol     int
-	Severity            Severity
-	Message             string
-	Source              string // e.g. "gopls", "eslint"
-	Code                string // e.g. "unusedvar"
+	StartLine, StartCol int      // 0-indexed, rune-based
+	EndLine, EndCol     int      // 0-indexed, rune-based (exclusive end)
+	Severity            Severity // error, warning, info, or hint
+	Message             string   // human-readable description from the backend
+	Source              string   // e.g. "gopls", "eslint"
+	Code                string   // e.g. "unusedvar"
 }
 
 // Severity classifies the importance of a diagnostic.
@@ -123,14 +123,14 @@ const (
 
 // Location represents a position in a file.
 type Location struct {
-	Path      string
-	Line, Col int // 0-indexed, rune-based
+	Path      string // absolute filesystem path
+	Line, Col int    // 0-indexed, rune-based
 }
 
 // CompletionResult holds completion items from a language server.
 type CompletionResult struct {
-	Items        []CompletionItem
-	IsIncomplete bool // server may have more items
+	Items        []CompletionItem // suggestions in server-ranked order
+	IsIncomplete bool             // server may have more items
 }
 
 // CompletionItem represents a single completion suggestion.
@@ -169,9 +169,9 @@ const (
 
 // SymbolInfo represents a workspace symbol (function, type, variable, etc.).
 type SymbolInfo struct {
-	Name string
-	Kind string // "function", "type", "variable", "constant", "method", "package"
-	Location
+	Name     string // symbol name as reported by the server
+	Kind     string // "function", "type", "variable", "constant", "method", "package"
+	Location        // definition site
 }
 
 // IsIdentChar reports whether r is a valid identifier character.

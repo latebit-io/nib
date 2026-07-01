@@ -60,8 +60,8 @@ const (
 // the leading `-`/`+`/` ` prefix stripped; the newline separator is
 // not included.
 type HunkLine struct {
-	Kind HunkKind
-	Text string
+	Kind HunkKind // context, delete, or insert
+	Text string   // line content, prefix stripped, no newline
 }
 
 // Hunk is one contiguous edit within a file. Anchor is the substring
@@ -71,21 +71,21 @@ type HunkLine struct {
 // the original ordering of context/delete/insert lines so the apply
 // step can reconstruct the post-edit content.
 type Hunk struct {
-	Anchor string
-	Lines  []HunkLine
+	Anchor string     // @@ anchor substring; empty when the marker was omitted
+	Lines  []HunkLine // context/delete/insert lines in original order
 }
 
 // FilePatch collects every hunk targeting a single file path.
 type FilePatch struct {
-	Path  string
-	Hunks []Hunk
+	Path  string // target path exactly as written in the directive
+	Hunks []Hunk // hunks in envelope order
 }
 
 // Patch is the parsed envelope. In v1 Files always has length 1 on
 // successful parse; the slice shape is preserved so v2 can add
 // multi-file patches without breaking the type.
 type Patch struct {
-	Files []FilePatch
+	Files []FilePatch // exactly one entry in v1
 }
 
 // Sentinel errors returned (wrapped in [ParseError]) for each
@@ -125,7 +125,7 @@ var (
 // the right replacement (`write_file` for Add; no replacement yet
 // for Delete).
 type UnsupportedV2Error struct {
-	Directive string
+	Directive string // "Add File" or "Delete File"
 }
 
 // Error implements the error interface.

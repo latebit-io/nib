@@ -311,6 +311,8 @@ func (c *CodexAPI) SetMaxTokens(v int) {
 	c.mu.Unlock()
 }
 
+// Stream sends a request to the Codex Responses API and returns a channel
+// of streaming events.
 func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
 	instructions, input := messagesToCodexInput(messages)
 	if instructions == "" {

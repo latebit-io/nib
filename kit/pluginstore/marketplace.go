@@ -123,14 +123,14 @@ func (s *Store) fetchMarketplaceStaged(ctx context.Context, src Source) (root, d
 	}
 	pin, err = s.fetcher.Fetch(ctx, src, root)
 	if err != nil {
-		_ = os.RemoveAll(root)
+		_ = os.RemoveAll(root) // best-effort staging cleanup; the fetch error is the real failure
 		return "", "", "", err
 	}
 	dir = root
 	if src.Subdir != "" {
 		dir = filepath.Join(root, filepath.Clean(src.Subdir))
 		if !withinDir(root, dir) {
-			_ = os.RemoveAll(root)
+			_ = os.RemoveAll(root) // best-effort staging cleanup; the subdir-escape error is the real failure
 			return "", "", "", fmt.Errorf("pluginstore: marketplace subdir %q escapes the fetched repo", src.Subdir)
 		}
 	}

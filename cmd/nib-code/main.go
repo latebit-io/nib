@@ -195,7 +195,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	lspMgr := wire.InitLSP(projectRoot, events)
 	if lspMgr != nil {
 		sess.SetLanguageService(lspMgr)
-		defer func() { _ = lspMgr.Close() }()
+		defer func() { _ = lspMgr.Close() }() // shutdown path; close error is not actionable
 	}
 
 	if err := wire.EnsureBinaries(appCtx, projectRoot); err != nil {

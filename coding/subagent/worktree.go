@@ -27,7 +27,7 @@ func gitWorktree(ctx context.Context, repo string) (root string, cleanup func(),
 	// inside the (empty) staging parent.
 	wt := filepath.Join(parent, "tree")
 	if out, gerr := runGit(ctx, repo, "worktree", "add", "--detach", wt, "HEAD"); gerr != nil {
-		_ = os.RemoveAll(parent)
+		_ = os.RemoveAll(parent) // best-effort staging cleanup; the worktree add error below is the real failure
 		return "", nil, fmt.Errorf("git worktree add: %w: %s", gerr, strings.TrimSpace(out))
 	}
 

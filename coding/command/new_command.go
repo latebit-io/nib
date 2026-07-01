@@ -146,7 +146,7 @@ func (c *NewCommandCommand) Handle(_ context.Context, sess kitcmd.Session, args 
 		return fmt.Errorf("create %s: %w", target, err)
 	}
 	if _, writeErr := f.Write([]byte(scaffoldTemplate)); writeErr != nil {
-		_ = f.Close()
+		_ = f.Close() // best-effort close; the write error below is the real failure
 		return fmt.Errorf("write %s: %w", target, writeErr)
 	}
 	if closeErr := f.Close(); closeErr != nil {

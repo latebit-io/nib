@@ -7,6 +7,27 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// Dialog styles are hoisted to package level so RenderOverlay never
+// allocates styles per frame while the dialog is active.
+var (
+	// dialogBoxStyle frames the dialog body.
+	dialogBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("62")).
+			Padding(1, 2).
+			Align(lipgloss.Center)
+	// dialogSelectedStyle highlights the focused option button.
+	dialogSelectedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("62")).
+				Padding(0, 1)
+	// dialogNormalStyle renders unfocused option buttons.
+	dialogNormalStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Padding(0, 1)
+)
+
 // DialogResultMsg is emitted when the user selects a dialog option or cancels.
 type DialogResultMsg struct {
 	// Choice is the index of the selected option, or -1 if cancelled.
@@ -67,33 +88,18 @@ func (d *DialogModel) RenderOverlay(base string, width, height int) string {
 		return base
 	}
 
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Padding(1, 2).
-		Align(lipgloss.Center)
-
-	selectedStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("230")).
-		Background(lipgloss.Color("62")).
-		Padding(0, 1)
-	normalStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Padding(0, 1)
-
 	// Build option buttons
 	var buttons []string
 	for i, opt := range d.Options {
 		if i == d.Selected {
-			buttons = append(buttons, selectedStyle.Render(opt))
+			buttons = append(buttons, dialogSelectedStyle.Render(opt))
 		} else {
-			buttons = append(buttons, normalStyle.Render(opt))
+			buttons = append(buttons, dialogNormalStyle.Render(opt))
 		}
 	}
 
 	content := d.Message + "\n\n" + strings.Join(buttons, "  ")
-	box := boxStyle.Render(content)
+	box := dialogBoxStyle.Render(content)
 
 	// Overlay the box onto the background
 	bgLines := strings.Split(base, "\n")

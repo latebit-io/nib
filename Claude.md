@@ -11,7 +11,9 @@
 
 ## demarkus-soul
 
-All project context — architecture, patterns, build commands, conventions, debugging notes, and roadmap — lives on the demarkus-soul MCP server.
+All project context — architecture, patterns, build commands, conventions, debugging notes, and roadmap — lives on the demarkus soul.
+
+**Always use the demarkus-memory plugin MCP tools** (`mcp__plugin_demarkus-memory_demarkus-memory__mark_*`) for all soul reads and writes — never the standalone `demarkus-soul` server (its write path is unauthorized; same store, wrong surface).
 
 **important**: never post sensitive information such as api keys, passwords, and anything that can be doc'd 
 

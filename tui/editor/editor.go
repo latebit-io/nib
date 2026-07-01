@@ -46,9 +46,9 @@ const scrollMarginCols = 8
 // It owns cursor state, selection, scroll position, and text operations.
 // Frontends call methods to manipulate state and read fields to render.
 type Editor struct {
-	Buf    *buffer.Buffer
-	Width  int
-	Height int
+	Buf    *buffer.Buffer // underlying text buffer; shared with the session-side openfile.OpenFile
+	Width  int            // viewport width in display columns; set via SetSize
+	Height int            // viewport height in lines; set via SetSize
 
 	// Cursor position (0-indexed, in buffer coordinates)
 	CursorLine int
@@ -1092,11 +1092,13 @@ func (e *Editor) DeleteChar() {
 	}
 }
 
-// PasteText inserts text at the cursor, replacing any active selection.
 // MaxPasteBytes caps a single paste operation to prevent unbounded buffer
 // growth from large terminal pastes or clipboard content.
 const MaxPasteBytes = 10 << 20 // 10 MiB
 
+// PasteText inserts text at the cursor, replacing any active selection.
+// Input beyond MaxPasteBytes is truncated on a UTF-8 boundary; CRLF/CR
+// line endings are normalized to LF. Pasted lines become developer-owned.
 func (e *Editor) PasteText(text string) {
 	if len(text) > MaxPasteBytes {
 		// Truncate on a valid UTF-8 boundary.

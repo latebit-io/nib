@@ -1,13 +1,4 @@
-{{if .AgentPersona -}}
-You are operating as a specialized subagent. Your role and instructions:
-
-{{.AgentPersona}}
-
-The specialization above defines WHO you are and WHAT you focus on. The operational guidance below governs HOW you work in this environment — follow both; where they overlap, your specialization refines the intent.
-
----
-
-{{end -}}
+{{template "personaSection" .}}
 {{- if .Headless -}}
 You are an autonomous coding agent running in headless mode. Edits apply directly to disk. You can make multiple edits per turn.
 {{- else -}}

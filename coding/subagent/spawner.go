@@ -22,9 +22,9 @@
 //   - maxTurns IS honored (via [agent.NewOptions.MaxTurns]): a child that
 //     reaches its turn cap ends the run. effort IS honored by building the
 //     child's provider with the requested reasoning effort (via
-//     ProviderFor), subject to provider support — OpenAI-style providers
-//     apply it today; the Anthropic provider ignores it until
-//     extended-thinking support lands. TaskTokenBudget also caps the child.
+//     ProviderFor): OpenAI-style providers map it to reasoning_effort, the
+//     Anthropic provider to an extended-thinking budget. TaskTokenBudget
+//     also caps the child.
 //   - The child shares the parent's working tree. isolation:worktree is
 //     a later vertical.
 package subagent

@@ -68,9 +68,9 @@ type Resolved struct {
 	// Effort is the reasoning effort providers apply (low|medium|high|xhigh|
 	// max). Empty means the provider default. Set on a cloned Resolved to
 	// build a provider with a specific effort (e.g. a subagent's override),
-	// mirroring how Model is overridden. Honored by the OpenAI-style
-	// providers; the Anthropic provider ignores it until extended-thinking
-	// support lands.
+	// mirroring how Model is overridden. OpenAI-style providers map it to
+	// reasoning_effort; the Anthropic provider maps it to an extended-
+	// thinking budget.
 	Effort string
 }
 
@@ -110,7 +110,7 @@ func (r *Resolved) NewProvider() llm.Provider {
 	effort := llm.Effort(r.Effort)
 	if r.apiKey != "" {
 		if r.isAnthropicEndpoint() {
-			return llm.NewAnthropicAPI(r.BaseURL, r.Model, llm.AnthropicKeyAuth(r.apiKey), r.PromptCaching)
+			return llm.NewAnthropicAPI(r.BaseURL, r.Model, llm.AnthropicKeyAuth(r.apiKey), r.PromptCaching, effort)
 		}
 		return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching, effort)
 	}
@@ -121,7 +121,7 @@ func (r *Resolved) NewProvider() llm.Provider {
 			return llm.NewCodexAPI(r.Model, r.Auth, effort)
 		}
 		if r.OAuthProvider == "anthropic" {
-			return llm.NewAnthropicAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching)
+			return llm.NewAnthropicAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching, effort)
 		}
 		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching, effort)
 	}

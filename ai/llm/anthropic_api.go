@@ -433,17 +433,24 @@ type anthropicStreamState struct {
 	truncated bool
 }
 
-// handleBlockStart processes a content_block_start event.
-// Returns false if the block index is out of bounds.
-func (s *anthropicStreamState) handleBlockStart(data string) bool {
+// handleBlockStart processes a content_block_start event. A non-nil error
+// is terminal — the caller ends the stream with it; nil continues. A
+// malformed block_start is tolerated (logged, nil) since it carries no
+// state we depend on.
+func (s *anthropicStreamState) handleBlockStart(data string) error {
 	var evt anthropicContentBlockStart
 	if err := json.Unmarshal([]byte(data), &evt); err != nil {
 		slog.Warn("anthropic: unmarshal content_block_start", "err", err, "data", data[:min(len(data), 200)])
-		return true
+		return nil
 	}
 	if evt.Index < 0 || evt.Index >= maxToolCalls {
-		slog.Warn("anthropic: block index out of bounds", "index", evt.Index, "max", maxToolCalls)
-		return false
+		return fmt.Errorf("anthropic: content block index out of bounds (max %d)", maxToolCalls)
+	}
+	// A redacted_thinking payload arrives whole here; bound it like the
+	// streamed text path so an oversized block cannot be persisted and
+	// replayed.
+	if len(evt.ContentBlock.Data) > maxThinkingBytes {
+		return fmt.Errorf("anthropic: redacted thinking exceeded %d bytes", maxThinkingBytes)
 	}
 	s.blocks[evt.Index] = &anthropicBlockState{
 		blockType: evt.ContentBlock.Type,
@@ -451,44 +458,46 @@ func (s *anthropicStreamState) handleBlockStart(data string) bool {
 		toolName:  evt.ContentBlock.Name,
 		data:      evt.ContentBlock.Data, // redacted_thinking payload (whole on start)
 	}
-	return true
+	return nil
 }
 
-// handleBlockDelta processes a content_block_delta event.
-// Returns a token string for text deltas and an abort flag if limits are exceeded.
-func (s *anthropicStreamState) handleBlockDelta(data string) (token string, abort bool) {
+// handleBlockDelta processes a content_block_delta event. It returns a
+// token string for text deltas and a non-nil error when a size limit is
+// exceeded — the caller ends the stream with it.
+func (s *anthropicStreamState) handleBlockDelta(data string) (token string, err error) {
 	var evt anthropicContentBlockDelta
 	if err := json.Unmarshal([]byte(data), &evt); err != nil {
 		slog.Warn("anthropic: unmarshal content_block_delta", "err", err, "data", data[:min(len(data), 200)])
-		return "", false
+		return "", nil
 	}
 	block, ok := s.blocks[evt.Index]
 	if !ok {
 		slog.Warn("anthropic: delta for unknown block", "index", evt.Index)
-		return "", false
+		return "", nil
 	}
 	switch evt.Delta.Type {
 	case "text_delta":
-		return evt.Delta.Text, false
+		return evt.Delta.Text, nil
 	case "input_json_delta":
 		if block.args.Len()+len(evt.Delta.PartialJSON) > maxToolArgBytes {
-			slog.Warn("anthropic: tool args exceeded limit", "index", evt.Index, "limit", maxToolArgBytes)
-			return "", true
+			return "", fmt.Errorf("anthropic: tool arguments exceeded %d bytes", maxToolArgBytes)
 		}
 		block.args.WriteString(evt.Delta.PartialJSON)
 	case "thinking_delta":
 		// Reasoning text is captured for replay, NOT surfaced as a token —
-		// it is internal reasoning, not assistant output. Bounded so a
-		// runaway stream cannot exhaust memory; the budget already caps it
-		// in practice.
-		if block.thinking.Len()+len(evt.Delta.Thinking) <= maxThinkingBytes {
-			block.thinking.WriteString(evt.Delta.Thinking)
+		// it is internal reasoning, not assistant output. Abort on overflow
+		// rather than silently truncate: a capped thinking text would no
+		// longer match the provider-issued signature, so a later replay /
+		// tool-result turn would 400 even though this turn looked clean.
+		if block.thinking.Len()+len(evt.Delta.Thinking) > maxThinkingBytes {
+			return "", fmt.Errorf("anthropic: thinking exceeded %d bytes", maxThinkingBytes)
 		}
+		block.thinking.WriteString(evt.Delta.Thinking)
 	case "signature_delta":
 		// The signature must be preserved verbatim for replay.
 		block.signature += evt.Delta.Signature
 	}
-	return "", false
+	return "", nil
 }
 
 // handleMessageDelta processes a message_delta event.
@@ -537,23 +546,20 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 		}
 		s.inputUsage = evt.Message.Usage
 	case "content_block_start":
-		if !s.handleBlockStart(data) {
-			// Index out of bounds: surface a terminal error instead of
-			// closing silently (which the caller reports as the opaque
-			// errProviderClosedEarly).
-			trySend(ctx, ch, StreamEvent{
-				Done: true,
-				Err:  fmt.Errorf("anthropic: content block index out of bounds (max %d)", maxToolCalls),
-			})
+		if err := s.handleBlockStart(data); err != nil {
+			// Terminal (index out of bounds, oversized redacted block):
+			// surface the specific error instead of closing silently (which
+			// the caller reports as the opaque errProviderClosedEarly).
+			trySend(ctx, ch, StreamEvent{Done: true, Err: err})
 			return anthropicDone
 		}
 	case "content_block_delta":
-		token, abort := s.handleBlockDelta(data)
-		if abort {
-			trySend(ctx, ch, StreamEvent{
-				Done: true,
-				Err:  fmt.Errorf("anthropic: tool arguments exceeded %d bytes", maxToolArgBytes),
-			})
+		token, err := s.handleBlockDelta(data)
+		if err != nil {
+			// Terminal (tool-arg or thinking-text overflow): surface the
+			// specific error rather than persist a signature-mismatched
+			// reasoning trace that would 400 on the next turn.
+			trySend(ctx, ch, StreamEvent{Done: true, Err: err})
 			return anthropicDone
 		}
 		if token != "" {

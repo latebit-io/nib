@@ -15,8 +15,8 @@ func TestAnthropicStream_CapturesThinking(t *testing.T) {
 
 	// A thinking block, then a tool_use block — reasoning must be captured
 	// alongside the tool call, in order.
-	if !s.handleBlockStart(`{"index":0,"content_block":{"type":"thinking"}}`) {
-		t.Fatal("handleBlockStart(thinking) returned false")
+	if err := s.handleBlockStart(`{"index":0,"content_block":{"type":"thinking"}}`); err != nil {
+		t.Fatalf("handleBlockStart(thinking): %v", err)
 	}
 	if tok, _ := s.handleBlockDelta(`{"index":0,"delta":{"type":"thinking_delta","thinking":"step one "}}`); tok != "" {
 		t.Errorf("thinking_delta surfaced a token %q; reasoning must not be streamed as output", tok)
@@ -24,9 +24,9 @@ func TestAnthropicStream_CapturesThinking(t *testing.T) {
 	if tok, _ := s.handleBlockDelta(`{"index":0,"delta":{"type":"thinking_delta","thinking":"step two"}}`); tok != "" {
 		t.Errorf("thinking_delta surfaced a token %q", tok)
 	}
-	s.handleBlockDelta(`{"index":0,"delta":{"type":"signature_delta","signature":"SIG=="}}`)
-	s.handleBlockStart(`{"index":1,"content_block":{"type":"tool_use","id":"t1","name":"bash"}}`)
-	s.handleBlockDelta(`{"index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)
+	_, _ = s.handleBlockDelta(`{"index":0,"delta":{"type":"signature_delta","signature":"SIG=="}}`)
+	_ = s.handleBlockStart(`{"index":1,"content_block":{"type":"tool_use","id":"t1","name":"bash"}}`)
+	_, _ = s.handleBlockDelta(`{"index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)
 
 	ev := s.finalEvent()
 	if ev.Reasoning == nil || len(ev.Reasoning.Blocks) != 1 {
@@ -43,7 +43,7 @@ func TestAnthropicStream_CapturesThinking(t *testing.T) {
 
 func TestAnthropicStream_CapturesRedactedThinking(t *testing.T) {
 	s := newThinkingState()
-	s.handleBlockStart(`{"index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}}`)
+	_ = s.handleBlockStart(`{"index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}}`)
 	ev := s.finalEvent()
 	if ev.Reasoning == nil || len(ev.Reasoning.Blocks) != 1 {
 		t.Fatalf("Reasoning = %+v; want one redacted block", ev.Reasoning)
@@ -54,10 +54,48 @@ func TestAnthropicStream_CapturesRedactedThinking(t *testing.T) {
 	}
 }
 
+func TestAnthropicStream_ThinkingOverflowAborts(t *testing.T) {
+	// A thinking block whose text exceeds the cap must terminate the stream,
+	// not silently truncate — a capped text would mismatch the signature and
+	// 400 on the next replay turn.
+	s := newThinkingState()
+	if err := s.handleBlockStart(`{"index":0,"content_block":{"type":"thinking"}}`); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("x", maxThinkingBytes+1)
+	payload, _ := json.Marshal(map[string]any{
+		"index": 0,
+		"delta": map[string]string{"type": "thinking_delta", "thinking": big},
+	})
+	_, err := s.handleBlockDelta(string(payload))
+	if err == nil {
+		t.Fatal("oversized thinking_delta did not abort the stream")
+	}
+	if !strings.Contains(err.Error(), "thinking") {
+		t.Errorf("abort error = %q, want it to name the thinking overflow", err)
+	}
+}
+
+func TestAnthropicStream_RedactedThinkingOverflowAborts(t *testing.T) {
+	s := newThinkingState()
+	big := strings.Repeat("x", maxThinkingBytes+1)
+	payload, _ := json.Marshal(map[string]any{
+		"index":         0,
+		"content_block": map[string]string{"type": "redacted_thinking", "data": big},
+	})
+	err := s.handleBlockStart(string(payload))
+	if err == nil {
+		t.Fatal("oversized redacted_thinking block did not abort the stream")
+	}
+	if !strings.Contains(err.Error(), "redacted") {
+		t.Errorf("abort error = %q, want it to name the redacted overflow", err)
+	}
+}
+
 func TestAnthropicStream_NoThinkingLeavesReasoningNil(t *testing.T) {
 	s := newThinkingState()
-	s.handleBlockStart(`{"index":0,"content_block":{"type":"text"}}`)
-	s.handleBlockDelta(`{"index":0,"delta":{"type":"text_delta","text":"hi"}}`)
+	_ = s.handleBlockStart(`{"index":0,"content_block":{"type":"text"}}`)
+	_, _ = s.handleBlockDelta(`{"index":0,"delta":{"type":"text_delta","text":"hi"}}`)
 	if ev := s.finalEvent(); ev.Reasoning != nil {
 		t.Errorf("Reasoning = %+v; want nil for a non-thinking response", ev.Reasoning)
 	}

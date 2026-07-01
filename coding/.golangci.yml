@@ -72,7 +72,7 @@ linters:
             - pkg: "github.com/latebit-io/nib/coding/wire"
               desc: "subagent must not import wire — wiring belongs to composition roots"
             - pkg: "github.com/latebit-io/nib/tui"
-              desc: "coding must not import tui — dependencies point inward only"
+              desc: "subagent must not import tui — child agents run headless, never against the interactive TUI"
 
         # approval is a coordination primitive consumed by agent. It
         # must not import agent or composition roots.

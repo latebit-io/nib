@@ -6,6 +6,7 @@ import (
 
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/tui/sanitize"
+	"github.com/mattn/go-runewidth"
 )
 
 // Streaming-text transcript pipeline for AgentPaneModel.
@@ -129,10 +130,35 @@ func (m *AgentPaneModel) AppendSubagentActivity(ev event.SubagentActivity) {
 			mark = "✗"
 		}
 		line = "\n  ▸ subagent " + ev.Name + " " + mark + "\n"
+		// Surface the child's summary as a compact one-line preview. The
+		// full text can be many paragraphs and already reaches the parent
+		// LLM via the spawn tool's result — the transcript line is for the
+		// human, so keep it to a truncated first line (most useful on
+		// failure, where it names what went wrong).
+		if preview := summaryPreview(ev.Detail); preview != "" {
+			line += "      " + preview + "\n"
+		}
 	default:
 		return
 	}
 	m.appendTypedMeta(BlockSubagent, line, "")
+}
+
+// subagentSummaryWidth caps the rendered one-line summary preview of a
+// finished subagent. Kept below typical pane widths so the line never
+// dominates; the full summary lives in the parent's tool result.
+const subagentSummaryWidth = 120
+
+// summaryPreview reduces a subagent's (possibly multi-paragraph) summary
+// to its first non-empty line, truncated to [subagentSummaryWidth] cells.
+// Returns "" for a blank summary so the caller skips the line entirely.
+func summaryPreview(summary string) string {
+	for _, l := range strings.Split(summary, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			return runewidth.Truncate(l, subagentSummaryWidth, "…")
+		}
+	}
+	return ""
 }
 
 // AppendMeta sanitizes and appends non-stream chrome text (tool calls, edit

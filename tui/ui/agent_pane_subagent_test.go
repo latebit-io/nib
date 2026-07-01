@@ -43,6 +43,38 @@ func TestAppendSubagentActivity_FailureGlyph(t *testing.T) {
 	}
 }
 
+func TestAppendSubagentActivity_RendersSummaryPreview(t *testing.T) {
+	m := beatPane()
+	m.AppendSubagentActivity(event.SubagentActivity{
+		Name: "rev", Phase: event.SubagentFinished, Success: false,
+		Detail: "could not apply the patch\nsecond paragraph that must not render",
+	})
+	transcript := strings.Join(m.RawLines, "\n")
+	if !strings.Contains(transcript, "could not apply the patch") {
+		t.Errorf("finished summary not rendered:\n%s", transcript)
+	}
+	if strings.Contains(transcript, "second paragraph") {
+		t.Errorf("only the first summary line should render:\n%s", transcript)
+	}
+}
+
+func TestSummaryPreview(t *testing.T) {
+	if got := summaryPreview(""); got != "" {
+		t.Errorf("blank summary → %q, want empty", got)
+	}
+	if got := summaryPreview("\n\n  hello  \nmore"); got != "hello" {
+		t.Errorf("first non-empty line = %q, want %q", got, "hello")
+	}
+	long := strings.Repeat("x", subagentSummaryWidth+40)
+	got := summaryPreview(long)
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("long summary not truncated with ellipsis: %q", got)
+	}
+	if len([]rune(got)) > subagentSummaryWidth {
+		t.Errorf("preview exceeds cap: %d runes", len([]rune(got)))
+	}
+}
+
 func TestAppendSubagentActivity_IgnoresUnknownPhase(t *testing.T) {
 	m := beatPane()
 	before := len(m.RawLines)

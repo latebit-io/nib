@@ -138,6 +138,48 @@ func TestSpawn_EmitsSubagentLifecycle(t *testing.T) {
 	}
 }
 
+func TestSpawn_EmitsFinishedFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		res  headless.Result
+		err  error
+	}{
+		{name: "run error", res: headless.Result{}, err: errors.New("boom")},
+		{name: "unsuccessful result", res: headless.Result{Success: false, Summary: "could not finish"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []event.Event
+			s := &Spawner{
+				provider: func() llm.Provider { return stubProvider{} },
+				onEvent:  func(ev event.Event) { got = append(got, ev) },
+				run: func(context.Context, llm.Provider, *headless.DiskWorkspace, *agent.NewOptions, []agent.Tool, string, func(event.Event)) (headless.Result, error) {
+					return tc.res, tc.err
+				},
+			}
+			// The Spawn error itself is exercised elsewhere; here we only
+			// care that the finished event reports the failure.
+			_, _ = s.Spawn(context.Background(), agentdef.Definition{Name: "rev"}, "t")
+
+			if len(got) == 0 {
+				t.Fatal("no events emitted")
+			}
+			last, ok := got[len(got)-1].(event.SubagentActivity)
+			if !ok || last.Phase != event.SubagentFinished {
+				t.Fatalf("last event = %+v; want a SubagentFinished activity", got[len(got)-1])
+			}
+			if last.Success {
+				t.Errorf("finished activity reports Success=true for a failed run (%+v)", last)
+			}
+			if tc.res.Summary != "" && last.Detail != tc.res.Summary {
+				t.Errorf("finished Detail = %q, want the result summary %q", last.Detail, tc.res.Summary)
+			}
+		})
+	}
+}
+
 func TestSpawn_PersonaToSystemPrompt(t *testing.T) {
 	t.Parallel()
 	var gotGoal, gotPersona string

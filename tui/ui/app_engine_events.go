@@ -44,6 +44,10 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 		// stats into the bullet line (Option B layout); subsequent tool
 		// bullets in the same turn render unadorned.
 		m.AgentPane.AppendToolCall(e.Name)
+	case event.SubagentActivity:
+		// Nested child progress, rendered indented under the parent as its
+		// own sub-pane rather than interleaved as sibling tool bullets.
+		m.AgentPane.AppendSubagentActivity(e)
 	case event.AgentStatus:
 		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(e.Status))
 	case event.AgentEditProposed:

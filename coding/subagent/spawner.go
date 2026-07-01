@@ -123,18 +123,26 @@ func New(o Options) *Spawner {
 	}
 }
 
-// progressSink returns the per-spawn child-event handler: it forwards a
-// child's tool calls to the parent display, prefixed with the subagent
-// name so they read as nested progress. Returns nil when no display sink
-// is configured (the run then discards child events). Only tool calls are
-// forwarded — token/status spam would drown the parent transcript.
+// emit forwards an event to the parent display sink when one is
+// configured (a no-op otherwise).
+func (s *Spawner) emit(ev event.Event) {
+	if s.onEvent != nil {
+		s.onEvent(ev)
+	}
+}
+
+// progressSink returns the per-spawn child-event handler: it maps a
+// child's tool calls to structured [event.SubagentActivity] so the parent
+// frontend can render them in a nested subagent pane. Returns nil when no
+// display sink is configured (the run then discards child events). Only
+// tool calls are forwarded — token/status spam would drown the parent.
 func (s *Spawner) progressSink(name string) func(event.Event) {
 	if s.onEvent == nil {
 		return nil
 	}
 	return func(ev event.Event) {
 		if tc, ok := ev.(event.AgentToolCall); ok {
-			s.onEvent(event.AgentToolCall{Name: "▸ " + name + ": " + tc.Name, Args: tc.Args})
+			s.emit(event.SubagentActivity{Name: name, Phase: event.SubagentTool, Detail: tc.Name})
 		}
 	}
 }
@@ -196,7 +204,16 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 		ws = headless.NewDiskWorkspace(root)
 	}
 
+	// Frame the run with started/finished markers so the frontend can open
+	// and close a nested subagent pane around the child's tool activity.
+	s.emit(event.SubagentActivity{Name: def.Name, Phase: event.SubagentStarted})
 	res, err := s.run(ctx, prov, ws, opts, tools, task, s.progressSink(def.Name))
+	s.emit(event.SubagentActivity{
+		Name:    def.Name,
+		Phase:   event.SubagentFinished,
+		Detail:  res.Summary,
+		Success: err == nil && res.Success,
+	})
 	// SubagentStop fires once the child has run and returned, regardless
 	// of success — the child stopped either way. Detach from ctx: a
 	// canceled child (parent cancellation) must not stop the hook from

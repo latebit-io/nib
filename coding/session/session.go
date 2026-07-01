@@ -466,7 +466,7 @@ func (s *Session) HandleEvent(ev event.Event) {
 	case event.AgentStatus:
 		// Status events are forwarded to the frontend's status chip;
 		// session state does not mutate based on chip transitions.
-	case event.AgentToken, event.AgentToolCall, event.AgentNavigate:
+	case event.AgentToken, event.AgentToolCall, event.AgentNavigate, event.SubagentActivity:
 		// No session state changes — frontend renders these directly.
 	case event.AgentTurnUsage, event.AgentInputEstimate:
 		// Telemetry — no session state changes, frontend renders these.

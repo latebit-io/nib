@@ -84,6 +84,11 @@ const (
 	// BlockTurnUsage is a standalone "◇ ↑X ↓Y" turn-cost line — emitted
 	// when a turn ended with no tool call to fold the stats into.
 	BlockTurnUsage
+	// BlockSubagent is nested progress from a spawned subagent (started /
+	// tool / finished), rendered indented under the parent so a child
+	// run's activity reads as its own sub-pane rather than a sibling of
+	// the parent's tool calls.
+	BlockSubagent
 )
 
 // blockOpen is the [Block.EndRaw] sentinel marking a block as still

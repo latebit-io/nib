@@ -192,6 +192,36 @@ type DiagnosticsUpdated struct {
 	Path string
 }
 
+// SubagentPhase marks where in a spawned subagent's lifecycle a
+// [SubagentActivity] falls.
+type SubagentPhase uint8
+
+const (
+	// SubagentStarted fires once when a child subagent begins running.
+	SubagentStarted SubagentPhase = iota
+	// SubagentTool fires for each tool the child invokes (Detail = tool name).
+	SubagentTool
+	// SubagentFinished fires once when the child completes (Success set).
+	SubagentFinished
+)
+
+// SubagentActivity reports a spawned subagent's progress, so a frontend can
+// render the child's nested activity distinctly from the parent's own
+// transcript (a subagent sub-pane) rather than interleaving it inline.
+// Emitted by the spawner; a frontend without special handling ignores it
+// via the default type-switch case.
+type SubagentActivity struct {
+	// Name is the subagent definition's name.
+	Name string
+	// Phase is the lifecycle point this activity marks.
+	Phase SubagentPhase
+	// Detail is phase-specific: the tool name for [SubagentTool]; an
+	// optional summary for [SubagentFinished]; empty otherwise.
+	Detail string
+	// Success is meaningful only for [SubagentFinished].
+	Success bool
+}
+
 // --- Marker method implementations ---
 
 func (AgentEditProposed) Event()  {}
@@ -199,3 +229,4 @@ func (AgentFileCreated) Event()   {}
 func (AgentNavigate) Event()      {}
 func (ReloadBuffers) Event()      {}
 func (DiagnosticsUpdated) Event() {}
+func (SubagentActivity) Event()   {}

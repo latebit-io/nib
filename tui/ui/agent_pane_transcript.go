@@ -111,6 +111,30 @@ func (m *AgentPaneModel) AppendToolCall(name string) {
 	m.appendTypedMeta(BlockToolCall, "\n  ● "+name+"\n", name)
 }
 
+// AppendSubagentActivity renders a spawned subagent's progress as an
+// indented, nested [BlockSubagent] chunk so a child run reads as its own
+// sub-pane: a "▸ subagent <name>" header on start/finish framing the
+// child's tool bullets, which are indented one level deeper than the
+// parent's own tool calls.
+func (m *AgentPaneModel) AppendSubagentActivity(ev event.SubagentActivity) {
+	var line string
+	switch ev.Phase {
+	case event.SubagentStarted:
+		line = "\n  ▸ subagent " + ev.Name + "…\n"
+	case event.SubagentTool:
+		line = "\n      ↳ " + ev.Detail + "\n"
+	case event.SubagentFinished:
+		mark := "✓"
+		if !ev.Success {
+			mark = "✗"
+		}
+		line = "\n  ▸ subagent " + ev.Name + " " + mark + "\n"
+	default:
+		return
+	}
+	m.appendTypedMeta(BlockSubagent, line, "")
+}
+
 // AppendMeta sanitizes and appends non-stream chrome text (tool calls, edit
 // markers, errors, bracketed status updates, awaiting-input block). Marks
 // the resulting raw lines so Render can style them dim, separating chrome

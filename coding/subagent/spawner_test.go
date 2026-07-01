@@ -78,7 +78,7 @@ func TestGrantFilter(t *testing.T) {
 	}
 }
 
-func TestProgressSink_PrefixesToolCalls(t *testing.T) {
+func TestProgressSink_MapsToolCallsToSubagentActivity(t *testing.T) {
 	t.Parallel()
 	var got []event.Event
 	s := &Spawner{onEvent: func(ev event.Event) { got = append(got, ev) }}
@@ -90,13 +90,93 @@ func TestProgressSink_PrefixesToolCalls(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected only the tool call forwarded, got %d", len(got))
 	}
-	tc, ok := got[0].(event.AgentToolCall)
-	if !ok || tc.Name != "▸ reviewer: read_file" {
-		t.Errorf("forwarded event = %+v", got[0])
+	act, ok := got[0].(event.SubagentActivity)
+	if !ok || act.Name != "reviewer" || act.Phase != event.SubagentTool || act.Detail != "read_file" {
+		t.Errorf("forwarded event = %+v; want SubagentActivity{reviewer, Tool, read_file}", got[0])
 	}
 
 	if (&Spawner{}).progressSink("x") != nil {
 		t.Errorf("no sink configured → nil progress sink")
+	}
+}
+
+func TestSpawn_EmitsSubagentLifecycle(t *testing.T) {
+	t.Parallel()
+	var got []event.Event
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{} },
+		onEvent:  func(ev event.Event) { got = append(got, ev) },
+		run: func(_ context.Context, _ llm.Provider, _ *headless.DiskWorkspace, _ *agent.NewOptions, _ []agent.Tool, _ string, sink func(event.Event)) (headless.Result, error) {
+			if sink != nil {
+				sink(event.AgentToolCall{Name: "bash"})
+			}
+			return headless.Result{Success: true, Summary: "done"}, nil
+		},
+	}
+	if _, err := s.Spawn(context.Background(), agentdef.Definition{Name: "rev"}, "t"); err != nil {
+		t.Fatal(err)
+	}
+
+	var phases []event.SubagentPhase
+	for _, ev := range got {
+		a, ok := ev.(event.SubagentActivity)
+		if !ok {
+			continue
+		}
+		if a.Name != "rev" {
+			t.Errorf("activity name = %q, want rev", a.Name)
+		}
+		phases = append(phases, a.Phase)
+	}
+	want := []event.SubagentPhase{event.SubagentStarted, event.SubagentTool, event.SubagentFinished}
+	if !slices.Equal(phases, want) {
+		t.Fatalf("phases = %v, want %v (started, tool, finished)", phases, want)
+	}
+	last := got[len(got)-1].(event.SubagentActivity)
+	if !last.Success || last.Detail != "done" {
+		t.Errorf("finished activity = %+v; want Success + summary 'done'", last)
+	}
+}
+
+func TestSpawn_EmitsFinishedFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		res  headless.Result
+		err  error
+	}{
+		{name: "run error", res: headless.Result{}, err: errors.New("boom")},
+		{name: "unsuccessful result", res: headless.Result{Success: false, Summary: "could not finish"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []event.Event
+			s := &Spawner{
+				provider: func() llm.Provider { return stubProvider{} },
+				onEvent:  func(ev event.Event) { got = append(got, ev) },
+				run: func(context.Context, llm.Provider, *headless.DiskWorkspace, *agent.NewOptions, []agent.Tool, string, func(event.Event)) (headless.Result, error) {
+					return tc.res, tc.err
+				},
+			}
+			// The Spawn error itself is exercised elsewhere; here we only
+			// care that the finished event reports the failure.
+			_, _ = s.Spawn(context.Background(), agentdef.Definition{Name: "rev"}, "t")
+
+			if len(got) == 0 {
+				t.Fatal("no events emitted")
+			}
+			last, ok := got[len(got)-1].(event.SubagentActivity)
+			if !ok || last.Phase != event.SubagentFinished {
+				t.Fatalf("last event = %+v; want a SubagentFinished activity", got[len(got)-1])
+			}
+			if last.Success {
+				t.Errorf("finished activity reports Success=true for a failed run (%+v)", last)
+			}
+			if tc.res.Summary != "" && last.Detail != tc.res.Summary {
+				t.Errorf("finished Detail = %q, want the result summary %q", last.Detail, tc.res.Summary)
+			}
+		})
 	}
 }
 

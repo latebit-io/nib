@@ -36,6 +36,13 @@ type SystemPromptData struct {
 	// `skill_*` tools; absent in the common no-skills case so the
 	// prefix is unchanged.
 	HasSkills bool
+	// AgentPersona is a subagent definition's body (its role and
+	// instructions), injected as a high-salience section at the TOP of the
+	// system prompt. Empty for the top-level agent, leaving the prompt
+	// byte-identical. It augments — does not replace — nib's operational
+	// scaffolding, so a spawned child keeps the tool/edit/task guidance a
+	// headless run needs while adopting its specialization.
+	AgentPersona string
 }
 
 // UserPromptData holds the template variables for the user message.

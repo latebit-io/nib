@@ -208,6 +208,12 @@ type Agent struct {
 	// plugin supplies hooks; the gate methods short-circuit to a proceed.
 	hooks HookDispatcher
 
+	// systemPromptPersona is a subagent's role/instructions injected into
+	// the system prompt (see [NewOptions.SystemPromptPersona]). Empty for
+	// the top-level agent. Read on every prompt (re)build so it survives
+	// the per-turn system-prompt regeneration.
+	systemPromptPersona string
+
 	// Per-run session usage lives on [providerProxy.session] —
 	// accumulated synchronously inside the Stream channel wrapper so
 	// the foundation's pre-Stream budget check ([Agent.foundationBudgetCheck])
@@ -428,6 +434,14 @@ type NewOptions struct {
 	// grants, which the spawner cannot apply itself because builtins are
 	// registered here, inside New.
 	BuiltinToolGrants *toolperm.Matcher
+
+	// SystemPromptPersona is a subagent definition's body (its role and
+	// instructions), injected as a high-salience section at the top of the
+	// system prompt — augmenting, not replacing, nib's operational
+	// scaffolding. Empty for the top-level agent. Lets a spawned child
+	// adopt its specialization while keeping the tool/edit/task guidance a
+	// headless run needs, replacing the earlier persona-in-goal stand-in.
+	SystemPromptPersona string
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -459,6 +473,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var flushDirtyBuffersFn FlushDirtyBuffersFunc
 	var hooks HookDispatcher
 	var builtinGrants *toolperm.Matcher
+	var systemPromptPersona string
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -476,6 +491,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		flushDirtyBuffersFn = opts.FlushDirtyBuffers
 		hooks = opts.HookDispatcher
 		builtinGrants = opts.BuiltinToolGrants
+		systemPromptPersona = opts.SystemPromptPersona
 	}
 	taskTokenBudget := budget.Resolve(taskTokenBudgetInput)
 
@@ -508,6 +524,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		taskTokenBudget:     taskTokenBudget,
 		flushDirtyBuffersFn: flushDirtyBuffersFn,
 		hooks:               hooks,
+		systemPromptPersona: systemPromptPersona,
 	}
 
 	a.approvalFlow = editflow.NewOrchestrator(editflow.Deps{

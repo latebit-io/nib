@@ -100,14 +100,44 @@ func TestProgressSink_PrefixesToolCalls(t *testing.T) {
 	}
 }
 
-func TestComposeGoal(t *testing.T) {
+func TestSpawn_PersonaToSystemPrompt(t *testing.T) {
 	t.Parallel()
-	withPersona := composeGoal(agentdef.Definition{SystemPrompt: "You are a reviewer."}, "check the diff")
-	if withPersona != "You are a reviewer.\n\n---\n\nTask:\ncheck the diff" {
-		t.Errorf("composeGoal persona = %q", withPersona)
+	var gotGoal, gotPersona string
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{} },
+		run: func(_ context.Context, _ llm.Provider, _ *headless.DiskWorkspace, opts *agent.NewOptions, _ []agent.Tool, goal string, _ func(event.Event)) (headless.Result, error) {
+			gotGoal, gotPersona = goal, opts.SystemPromptPersona
+			return headless.Result{Success: true}, nil
+		},
 	}
-	if got := composeGoal(agentdef.Definition{}, "just the task"); got != "just the task" {
-		t.Errorf("empty persona should pass task through, got %q", got)
+	def := agentdef.Definition{Name: "rev", SystemPrompt: "  You are a reviewer.  "}
+	if _, err := s.Spawn(context.Background(), def, "check the diff"); err != nil {
+		t.Fatal(err)
+	}
+	// The persona routes to the system prompt (trimmed), NOT the goal.
+	if gotPersona != "You are a reviewer." {
+		t.Errorf("SystemPromptPersona = %q, want trimmed persona", gotPersona)
+	}
+	if gotGoal != "check the diff" {
+		t.Errorf("goal = %q, want the bare task (persona no longer layered into the goal)", gotGoal)
+	}
+}
+
+func TestSpawn_NoPersonaWhenBodyEmpty(t *testing.T) {
+	t.Parallel()
+	gotPersona := "sentinel"
+	s := &Spawner{
+		provider: func() llm.Provider { return stubProvider{} },
+		run: func(_ context.Context, _ llm.Provider, _ *headless.DiskWorkspace, opts *agent.NewOptions, _ []agent.Tool, _ string, _ func(event.Event)) (headless.Result, error) {
+			gotPersona = opts.SystemPromptPersona
+			return headless.Result{Success: true}, nil
+		},
+	}
+	if _, err := s.Spawn(context.Background(), agentdef.Definition{Name: "x"}, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if gotPersona != "" {
+		t.Errorf("empty def.SystemPrompt should yield empty persona, got %q", gotPersona)
 	}
 }
 
@@ -141,8 +171,10 @@ func TestSpawn_Orchestration(t *testing.T) {
 	if want := []string{"Read", "Write"}; !slices.Equal(toolNames(gotTools), want) {
 		t.Errorf("tools = %v, want %v", toolNames(gotTools), want)
 	}
-	if gotGoal != "persona\n\n---\n\nTask:\ndo it" {
-		t.Errorf("goal = %q", gotGoal)
+	// The goal is now just the task; the persona rides the system prompt
+	// (see TestSpawn_PersonaToSystemPrompt).
+	if gotGoal != "do it" {
+		t.Errorf("goal = %q, want %q", gotGoal, "do it")
 	}
 }
 

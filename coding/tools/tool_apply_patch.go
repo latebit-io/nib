@@ -298,3 +298,8 @@ func findMatches(lines, expected []string, start int) []int {
 	}
 	return out
 }
+
+// PromptGuidelines contributes this tool's prompt bullets (kit.PromptContributor).
+func (t *ApplyPatchTool) PromptGuidelines() []string {
+	return []string{"`apply_patch` is the middle option between `edit_file` (one search/replace per call) and `replace_file` (whole-file rewrite): use it when several non-adjacent locations in the *same* file change together. The envelope ships only the diff lines, so it is the cheapest primitive when N>1 locations change in one file. One file per call; for new files use `write_file`."}
+}

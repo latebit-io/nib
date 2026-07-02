@@ -272,3 +272,8 @@ func (t *PackageInfoTool) runGoDoc(ctx context.Context, modDir, target string) s
 	}
 	return output
 }
+
+// PromptGuidelines contributes this tool's prompt bullets (kit.PromptContributor).
+func (t *PackageInfoTool) PromptGuidelines() []string {
+	return []string{"Call `package_info` before importing an external library; your training data may be outdated."}
+}

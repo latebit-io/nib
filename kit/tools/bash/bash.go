@@ -294,3 +294,12 @@ func (w *headTailWriter) String() string {
 	return fmt.Sprintf("%s\n\n[... %d bytes collapsed — showing first %d and last %d bytes ...]\n\n%s",
 		headStr, dropped, len(w.head), len(tailStr), tailStr)
 }
+
+// PromptGuidelines returns the usage bullets this tool contributes to a
+// consumer's system prompt (kit.PromptContributor, satisfied
+// structurally — this package cannot import kit).
+func (t *Tool) PromptGuidelines() []string {
+	return []string{
+		"`bash` is for build/test commands — not for editing files, not for searching code, not for destructive ops without explicit developer ask.",
+	}
+}

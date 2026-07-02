@@ -87,3 +87,8 @@ func (t *SmokeRunTool) Execute(ctx context.Context, _ llm.ToolCall) ToolResult {
 	res := smoke.RunSmoke(ctx, t.projectRoot, t.cfg)
 	return textResult(smoke.FormatSmokeResult(t.cfg, res))
 }
+
+// PromptGuidelines contributes this tool's prompt bullets (kit.PromptContributor).
+func (t *SmokeRunTool) PromptGuidelines() []string {
+	return []string{"`smoke_run` is the dedicated launch-verification path — use it instead of `bash` to confirm the app starts."}
+}

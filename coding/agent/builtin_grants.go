@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/latebit-io/nib/kit"
 	"log/slog"
 	"strings"
 
@@ -111,4 +112,11 @@ func (g bashGrantGate) Execute(ctx context.Context, call llm.ToolCall) upagent.T
 // quoted `;` is preferable to parsing shell grammar and risking a miss.
 func hasShellControl(cmd string) bool {
 	return strings.ContainsAny(cmd, ";|&\n`") || strings.Contains(cmd, "$(")
+}
+
+// PromptGuidelines forwards the gated tool's prompt guidance
+// (kit.PromptContributor) — the grant gate restricts execution, not
+// the tool's prompt-level self-documentation.
+func (t bashGrantGate) PromptGuidelines() []string {
+	return kit.ToolPromptGuidelines(t.inner)
 }

@@ -637,3 +637,8 @@ func fuzzyWhitespaceMatch(search, content string) string {
 	}
 	return ""
 }
+
+// PromptGuidelines contributes this tool's prompt bullets (kit.PromptContributor).
+func (t *EditFileTool) PromptGuidelines() []string {
+	return []string{"`edit_file`: keep `search` short — only the lines that actually change plus minimal anchor context. Don't rewrite an entire function when a few lines change. `replace` must match the file's indentation; do not collapse multiple lines onto one."}
+}

@@ -133,3 +133,12 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 
 	return agent.ToolResult{Content: sb.String()}
 }
+
+// PromptGuidelines returns the usage bullets this tool contributes to a
+// consumer's system prompt (kit.PromptContributor, satisfied
+// structurally — this package cannot import kit).
+func (t *Tool) PromptGuidelines() []string {
+	return []string{
+		"For code search use `search_project` (not bash with `grep`/`find`/`rg`).",
+	}
+}

@@ -84,3 +84,12 @@ func (t *GoToDefinitionTool) Execute(ctx context.Context, call llm.ToolCall) Too
 
 	return textResult(fmt.Sprintf("Definition: %s:%d:%d", relPath, loc.Line+1, loc.Col))
 }
+
+// PromptGuidelines contributes this tool's prompt bullets
+// (kit.PromptContributor). Carried by go_to_definition on behalf of the
+// whole LSP tool group, which registers together — so the bullet
+// appears exactly when the group is wired, replacing the template's old
+// "if these appear in your tool list" hedge.
+func (t *GoToDefinitionTool) PromptGuidelines() []string {
+	return []string{"Prefer `go_to_definition` / `find_references` / `workspace_symbols` over text search for symbol-level queries."}
+}

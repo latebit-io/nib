@@ -57,6 +57,27 @@ type SystemPromptData struct {
 	// scaffolding, so a spawned child keeps the tool/edit/task guidance a
 	// headless run needs while adopting its specialization.
 	AgentPersona string
+	// ToolNotes are usage-guidance bullets contributed by the registered
+	// tools (via kit.PromptContributor), rendered under `## Tool Notes` in
+	// registration order. The template owns no per-tool guidance itself —
+	// a tool that isn't registered contributes nothing, so conditional
+	// notes ("if go_to_definition appears...") are unnecessary.
+	ToolNotes []string
+	// ProjectInstructions are repo-carried context files (AGENTS.md /
+	// CLAUDE.md) loaded at startup. Rendered behind the same trust
+	// framing as memory: reference data that never overrides system or
+	// developer instructions.
+	ProjectInstructions []ContextFile
+}
+
+// ContextFile is one repo-local instruction file injected into the
+// system prompt. Mirrors kit/contextfile.File without importing it —
+// prompts stays a leaf that renders what it is handed.
+type ContextFile struct {
+	// Path labels the injected section with the file's origin.
+	Path string
+	// Content is the file body, verbatim.
+	Content string
 }
 
 // UserPromptData holds the template variables for the user message.

@@ -367,6 +367,15 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		return tuiApp.FlushDirtyBuffers(ctx)
 	}
 
+	// Repo-carried instruction files (AGENTS.md / CLAUDE.md) inject into
+	// the system prompt behind the memory-style trust framing. A missing
+	// file is the common case (nil, nil); an unreadable or oversize file
+	// degrades to no injection rather than blocking startup.
+	contextFiles, cfErr := wire.LoadContextFiles(projectRoot)
+	if cfErr != nil {
+		slog.Warn("context file skipped", "err", cfErr)
+	}
+
 	buildAgent := func(p llm.Provider) *agent.Agent {
 		// Keep subagents pointed at the provider the parent is now using.
 		setSubagentProvider(p)
@@ -374,6 +383,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			MemoryStore:       mem.Store,
 			MemorySummary:     mem.Summary,
 			DistributedMemory: distributed,
+			ContextFiles:      contextFiles,
 			Linters:           linters.PostTask,
 			Terse:             true,
 			SmokeConfig:       smokeCfg,

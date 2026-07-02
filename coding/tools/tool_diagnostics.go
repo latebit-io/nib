@@ -123,3 +123,8 @@ func FormatDiagnostics(provider lang.DiagnosticProvider, lookupPath, displayPath
 	}
 	return summary + sb.String()
 }
+
+// PromptGuidelines contributes this tool's prompt bullets (kit.PromptContributor).
+func (t *DiagnosticsTool) PromptGuidelines() []string {
+	return []string{"`diagnostics` is auto-injected after each edit — results arrive without an explicit call."}
+}

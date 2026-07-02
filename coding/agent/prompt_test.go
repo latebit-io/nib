@@ -8,6 +8,7 @@ import (
 
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/prompts"
+	codingtools "github.com/latebit-io/nib/coding/tools"
 )
 
 // promptTestWorkspace is a minimal Workspace for prompt tests.
@@ -173,21 +174,52 @@ func TestSystemPromptAutonomyRules(t *testing.T) {
 // TestSystemPromptDistinguishesProjectInitFromMemoryPublish locks the
 // cross-tool guidance that prevents the Pac-Man-eval failure where the
 // LLM used memory_publish to bootstrap /project.md, then got stuck
-// because the work tree gate did not reload. The disambiguation used
-// to live on project_init's tool description; it relocated to the
-// system prompt's Tool Notes (cross-tool guidance belongs there, not
-// inside a single tool's schema). See
-// coding/tools/tool_project_init_test.go for the in-description test
-// that became scoped to "Idempotent" after the move.
+// because the work tree gate did not reload. The disambiguation has
+// moved twice: off project_init's tool description into the template's
+// hardcoded Tool Notes (cross-tool guidance is prompt-level, not
+// schema-level), then — with tool-owned prompt snippets — onto
+// [tools.ProjectInitTool.PromptGuidelines], so it renders exactly when
+// the tool is registered. This test locks the full path: the tool
+// contributes the bullet, and the template renders it.
 func TestSystemPromptDistinguishesProjectInitFromMemoryPublish(t *testing.T) {
 	t.Parallel()
 
+	notes := (&codingtools.ProjectInitTool{}).PromptGuidelines()
 	loader := prompts.NewPromptLoader("")
-	system := loader.SystemPrompt(prompts.SystemPromptData{})
+	system := loader.SystemPrompt(prompts.SystemPromptData{ToolNotes: notes})
 	for _, want := range []string{"project_init", "memory_publish", "/project.md"} {
 		if !strings.Contains(system, want) {
 			t.Errorf("system prompt missing %q (tool-disambiguation guidance)", want)
 		}
+	}
+}
+
+// TestToolNotesCollectedFromRegisteredTools locks the tool-owned
+// prompt-snippet path at the agent level: a constructed agent's
+// toolNotes() carries the bullets its registered built-ins contribute,
+// in tool-definition order, without the template hardcoding any of
+// them. Guards the BeforePark-style failure where a surface exists but
+// the merge/collection layer silently drops it.
+func TestToolNotesCollectedFromRegisteredTools(t *testing.T) {
+	t.Parallel()
+
+	ag := New(&multiTurnProvider{}, stubWorkspace{}, nil)
+	notes := ag.toolNotes()
+	if len(notes) == 0 {
+		t.Fatal("toolNotes() returned nothing; collection layer is dropping tool guidance")
+	}
+	joined := strings.Join(notes, "\n")
+	for _, want := range []string{"edit_file", "search_project", "glob"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("toolNotes() missing guidance mentioning %q", want)
+		}
+	}
+	rendered := ag.rebuildSystemPrompt(event.ModeExecution)
+	if !strings.Contains(rendered, "## Tool Notes") {
+		t.Error("rendered system prompt missing Tool Notes section")
+	}
+	if !strings.Contains(rendered, notes[0]) {
+		t.Error("rendered system prompt missing first collected tool note")
 	}
 }
 
@@ -438,4 +470,22 @@ func mkdirAll(path string) error {
 
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// TestContextFilesFlowIntoSystemPrompt locks the NewOptions.ContextFiles
+// → rendered-prompt path: a repo-carried AGENTS.md injected at
+// construction appears in every (re)built system prompt behind the
+// trust boundary.
+func TestContextFilesFlowIntoSystemPrompt(t *testing.T) {
+	t.Parallel()
+
+	ag := New(&multiTurnProvider{}, stubWorkspace{}, &NewOptions{
+		ContextFiles: []prompts.ContextFile{{Path: "/repo/AGENTS.md", Content: "always run make lint"}},
+	})
+	system := ag.rebuildSystemPrompt(event.ModeExecution)
+	for _, want := range []string{"## Project Instructions", "/repo/AGENTS.md", "always run make lint"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system prompt missing %q", want)
+		}
+	}
 }

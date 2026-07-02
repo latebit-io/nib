@@ -226,11 +226,20 @@ func run() error {
 		slog.Info("smoke: configured", "command", smokeCfg.Command, "source", smokeCfg.Source)
 	}
 
+	// Repo-carried instruction files (AGENTS.md / CLAUDE.md); a missing
+	// file is the common case, an unreadable/oversize one degrades to no
+	// injection rather than blocking a headless run.
+	contextFiles, cfErr := wire.LoadContextFiles(projectRoot)
+	if cfErr != nil {
+		slog.Warn("context file skipped", "err", cfErr)
+	}
+
 	// Create agent in headless mode.
 	opts := &agent.NewOptions{
 		MemoryStore:       mem.Store,
 		MemorySummary:     mem.Summary,
 		Interaction:       agent.Headless,
+		ContextFiles:      contextFiles,
 		DistributedMemory: codingmemory.DetectDistributedMemory(mcpResult.ServerNames),
 		Linters:           linters.PostTask,
 		SmokeConfig:       smokeCfg,

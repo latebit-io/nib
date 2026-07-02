@@ -111,3 +111,10 @@ func (t *tracedTool) Execute(ctx context.Context, call llm.ToolCall) kit.ToolRes
 	})
 	return result
 }
+
+// PromptGuidelines forwards the wrapped tool's prompt guidance
+// (kit.PromptContributor). Tracing observes execution; it must not
+// strip the tool's optional prompt-level surfaces.
+func (t *tracedTool) PromptGuidelines() []string {
+	return kit.ToolPromptGuidelines(t.inner)
+}

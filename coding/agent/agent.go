@@ -214,6 +214,12 @@ type Agent struct {
 	// the per-turn system-prompt regeneration.
 	systemPromptPersona string
 
+	// contextFiles are repo-carried instruction files (AGENTS.md /
+	// CLAUDE.md) loaded once at composition and injected into the system
+	// prompt behind the memory-style trust framing (see
+	// [NewOptions.ContextFiles]). Read-only after New.
+	contextFiles []prompts.ContextFile
+
 	// Per-run session usage lives on [providerProxy.session] —
 	// accumulated synchronously inside the Stream channel wrapper so
 	// the foundation's pre-Stream budget check ([Agent.foundationBudgetCheck])
@@ -454,6 +460,13 @@ type NewOptions struct {
 	// bound a subagent definition's maxTurns; the top-level agent leaves
 	// it 0 and relies on TaskTokenBudget / the developer.
 	MaxTurns int
+
+	// ContextFiles are repo-carried instruction files (AGENTS.md /
+	// CLAUDE.md) the composition root loaded via kit/contextfile. They
+	// are injected into the system prompt behind the memory-style trust
+	// framing: reference data that never overrides system or developer
+	// instructions. Nil when the project carries none.
+	ContextFiles []prompts.ContextFile
 }
 
 // New creates an agent with the given provider, workspace, and tools.
@@ -487,6 +500,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var builtinGrants *toolperm.Matcher
 	var systemPromptPersona string
 	var maxTurns int
+	var contextFiles []prompts.ContextFile
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -506,6 +520,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		builtinGrants = opts.BuiltinToolGrants
 		systemPromptPersona = opts.SystemPromptPersona
 		maxTurns = opts.MaxTurns
+		contextFiles = slices.Clone(opts.ContextFiles)
 	}
 	taskTokenBudget := budget.Resolve(taskTokenBudgetInput)
 
@@ -539,6 +554,7 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		flushDirtyBuffersFn: flushDirtyBuffersFn,
 		hooks:               hooks,
 		systemPromptPersona: systemPromptPersona,
+		contextFiles:        contextFiles,
 		maxTurns:            maxTurns,
 	}
 

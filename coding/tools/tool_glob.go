@@ -131,3 +131,8 @@ func (t *GlobTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 
 	return textResult(sb.String())
 }
+
+// PromptGuidelines contributes this tool's prompt bullets (kit.PromptContributor).
+func (t *GlobTool) PromptGuidelines() []string {
+	return []string{"For file-path patterns use `glob`."}
+}

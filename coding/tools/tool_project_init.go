@@ -105,3 +105,8 @@ func (t *ProjectInitTool) Execute(_ context.Context, call llm.ToolCall) ToolResu
 		"Initialised /project.md for %q with phases: %s. Add tasks via project_task_add(phase, feature, task).",
 		name, strings.Join(args.Phases, ", ")))
 }
+
+// PromptGuidelines contributes this tool's prompt bullets (kit.PromptContributor).
+func (t *ProjectInitTool) PromptGuidelines() []string {
+	return []string{"`project_init` bootstraps the structured `/project.md` plan; `memory_publish` is for notes and design docs. Never use `memory_publish` to create `/project.md` — the work tree gate will not pick it up."}
+}

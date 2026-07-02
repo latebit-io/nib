@@ -143,3 +143,8 @@ func sliceLines(content, path string, offset, limit int) string {
 	}
 	return b.String()
 }
+
+// PromptGuidelines contributes this tool's prompt bullets (kit.PromptContributor).
+func (t *ReadFileTool) PromptGuidelines() []string {
+	return []string{"For large files pass `offset`/`limit` to `read_file`."}
+}

@@ -8,6 +8,7 @@ import (
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/prompts"
+	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/skill"
 )
 
@@ -21,6 +22,27 @@ func (a *Agent) hasSkills() bool {
 		}
 	}
 	return false
+}
+
+// toolNotes collects prompt-guidance bullets from the registered tools
+// (via [kit.ToolPromptGuidelines]) in tool-definition order, so the
+// rendered `## Tool Notes` section is stable across runs and contains
+// exactly the guidance for the tools this agent actually has. Exact
+// duplicate bullets are dropped (a decorated tool chain could otherwise
+// contribute the same bullet twice).
+func (a *Agent) toolNotes() []string {
+	var notes []string
+	seen := make(map[string]bool)
+	for _, t := range a.Tools() {
+		for _, n := range kit.ToolPromptGuidelines(t) {
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			notes = append(notes, n)
+		}
+	}
+	return notes
 }
 
 // maxMemorySummaryBytes caps the memory summary injected into the prompt.
@@ -86,11 +108,13 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, memorySummary 
 	}
 
 	sysData := prompts.SystemPromptData{
-		Headless:          a.interactionMode == Headless,
-		DistributedMemory: a.distributedMemory,
-		Terse:             a.currentTerse(),
-		HasSkills:         a.hasSkills(),
-		AgentPersona:      a.systemPromptPersona,
+		Headless:            a.interactionMode == Headless,
+		DistributedMemory:   a.distributedMemory,
+		Terse:               a.currentTerse(),
+		HasSkills:           a.hasSkills(),
+		AgentPersona:        a.systemPromptPersona,
+		ToolNotes:           a.toolNotes(),
+		ProjectInstructions: a.contextFiles,
 	}
 	systemPrompt := a.prompts.SystemPrompt(sysData)
 	if mode == event.ModePlanning {
@@ -109,11 +133,13 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, memorySummary 
 // a new RunWithMode call.
 func (a *Agent) rebuildSystemPrompt(mode event.Mode) string {
 	sysData := prompts.SystemPromptData{
-		Headless:          a.interactionMode == Headless,
-		DistributedMemory: a.distributedMemory,
-		Terse:             a.currentTerse(),
-		HasSkills:         a.hasSkills(),
-		AgentPersona:      a.systemPromptPersona,
+		Headless:            a.interactionMode == Headless,
+		DistributedMemory:   a.distributedMemory,
+		Terse:               a.currentTerse(),
+		HasSkills:           a.hasSkills(),
+		AgentPersona:        a.systemPromptPersona,
+		ToolNotes:           a.toolNotes(),
+		ProjectInstructions: a.contextFiles,
 	}
 	if mode == event.ModePlanning {
 		return a.prompts.PlanningSystemPrompt(sysData)

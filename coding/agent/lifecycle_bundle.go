@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/latebit-io/nib/kit"
 	"log/slog"
 	"strings"
 
@@ -235,4 +236,14 @@ func activeTaskTitle(activePath string) string {
 		return activePath[i+len(" > "):]
 	}
 	return activePath
+}
+
+// PromptGuidelines forwards the wrapped tool's prompt guidance
+// (kit.PromptContributor). Struct-embedding an interface exposes only
+// the interface's method set, so without this forwarder the wrapper
+// would silently hide the concrete tool's optional guidance — the
+// same shadowing failure mode the parallel-surface-triple discipline
+// guards against on Hooks.
+func (t lifecycleAwareTool) PromptGuidelines() []string {
+	return kit.ToolPromptGuidelines(t.Tool)
 }

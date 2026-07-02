@@ -117,6 +117,6 @@ func hasShellControl(cmd string) bool {
 // PromptGuidelines forwards the gated tool's prompt guidance
 // (kit.PromptContributor) — the grant gate restricts execution, not
 // the tool's prompt-level self-documentation.
-func (t bashGrantGate) PromptGuidelines() []string {
-	return kit.ToolPromptGuidelines(t.inner)
+func (g bashGrantGate) PromptGuidelines() []string {
+	return kit.ToolPromptGuidelines(g.inner)
 }

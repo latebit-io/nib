@@ -15,6 +15,9 @@ func LoadContextFiles(root string) ([]prompts.ContextFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(files) == 0 {
+		return nil, nil // keep the documented (nil, nil) no-file contract; make() would yield a non-nil empty slice.
+	}
 	out := make([]prompts.ContextFile, 0, len(files))
 	for _, f := range files {
 		out = append(out, prompts.ContextFile{Path: f.Path, Content: f.Content})

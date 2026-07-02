@@ -137,12 +137,45 @@ func (l *PromptLoader) PlanningSystemPrompt(data SystemPromptData) string {
 	return l.renderSystemTemplate("planning_system.md.tmpl", data)
 }
 
+// projectInstructionsClose is the literal that ends an injected context
+// file's section in the system prompt. Content is neutralized against
+// it before render — see [neutralizeProjectInstructions].
+const projectInstructionsClose = "</project_instructions>"
+
+// neutralizeProjectInstructions returns a copy of files with any
+// embedded section-closing tag escaped. A crafted AGENTS.md could
+// otherwise close its own `<project_instructions>` wrapper early and
+// present trailing text as if it sat OUTSIDE the trust boundary — the
+// framing prose alone is a model-judgment mitigation, not a technical
+// one. Escaping the delimiter makes the boundary robust in the render
+// path itself. The original slice is never mutated (it is caller-owned
+// agent state).
+func neutralizeProjectInstructions(files []ContextFile) []ContextFile {
+	needsFix := false
+	for _, f := range files {
+		if strings.Contains(f.Content, projectInstructionsClose) {
+			needsFix = true
+			break
+		}
+	}
+	if !needsFix {
+		return files
+	}
+	out := make([]ContextFile, len(files))
+	copy(out, files)
+	for i := range out {
+		out[i].Content = strings.ReplaceAll(out[i].Content, projectInstructionsClose, "&lt;/project_instructions&gt;")
+	}
+	return out
+}
+
 // renderSystemTemplate loads a system prompt template by name and renders it
 // with the given data. Project overrides are re-parsed on every call so edits
 // during a session take effect immediately. If a project override fails to
 // parse or execute, falls back to the embedded default template rather than
 // returning raw (potentially broken) template syntax.
 func (l *PromptLoader) renderSystemTemplate(name string, data SystemPromptData) string {
+	data.ProjectInstructions = neutralizeProjectInstructions(data.ProjectInstructions)
 	raw, source := l.load(name)
 	slog.Debug("prompt.renderSystemTemplate", "name", name, "source", source)
 

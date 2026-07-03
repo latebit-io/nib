@@ -1417,3 +1417,149 @@ func TestPromptWithMessages_RejectsConcurrentRun(t *testing.T) {
 		t.Errorf("second PromptWithMessages error = %v; want ErrRunInProgress", err)
 	}
 }
+
+// TestMaxTurns_EndsRunWhenCapReached drives a provider that requests a
+// tool call on every turn — the ping-pong MaxTurns exists to stop. With
+// MaxTurns=2 the loop takes exactly two turns (each with its tool result
+// appended), emits MaxTurnsReached{Turns: 2} instead of a third LLM call,
+// and ends the run cleanly: no event.Error, no LastError, AgentEnd fires.
+func TestMaxTurns_EndsRunWhenCapReached(t *testing.T) {
+	t.Parallel()
+
+	call := func(id string) []llm.ToolCall {
+		return []llm.ToolCall{{
+			ID:       id,
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "lookup", Arguments: "{}"},
+		}}
+	}
+	// Three scripted tool-call turns queued; the cap must stop the loop
+	// after two, leaving the third unconsumed.
+	provider := newScriptedProvider(
+		streamWithToolCalls(call("c1")),
+		streamWithToolCalls(call("c2")),
+		streamWithToolCalls(call("c3")),
+	)
+	tool := &recordingTool{
+		def:    llm.ToolDef{Type: "function", Function: llm.FunctionDef{Name: "lookup"}},
+		result: ToolResult{Content: "ok"},
+	}
+	events := make(chan event.Event, 64)
+
+	a, err := New(Options{Provider: provider, Events: events, Tools: []Tool{tool}, MaxTurns: 2})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "loop forever"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	a.WaitForIdle()
+
+	all := drainUntilEnd(events)
+	reached, ok := findEvent[event.MaxTurnsReached](all)
+	if !ok {
+		t.Fatalf("missing MaxTurnsReached; events: %#v", all)
+	}
+	if reached.Turns != 2 {
+		t.Errorf("MaxTurnsReached.Turns = %d; want 2", reached.Turns)
+	}
+	if turns := countEvents[event.TurnStart](all); turns != 2 {
+		t.Errorf("TurnStart count = %d; want 2", turns)
+	}
+	if _, ok := findEvent[event.Error](all); ok {
+		t.Errorf("unexpected event.Error — cap stop must not read as failure")
+	}
+	if _, ok := findEvent[event.AgentEnd](all); !ok {
+		t.Errorf("missing AgentEnd")
+	}
+	if provider.calls != 2 {
+		t.Errorf("provider.calls = %d; want 2", provider.calls)
+	}
+	if got := len(tool.Calls()); got != 2 {
+		t.Errorf("tool call count = %d; want 2", got)
+	}
+
+	state := a.State()
+	if state.LastError != "" {
+		t.Errorf("State.LastError = %q; want empty", state.LastError)
+	}
+	// user + 2×(assistant + tool result) — the transcript is well-formed:
+	// every dispatched tool call has its matching tool-role result.
+	if got := len(state.Messages); got != 5 {
+		t.Errorf("State.Messages length = %d; want 5", got)
+	}
+	if last := state.Messages[len(state.Messages)-1]; last.Role != "tool" || last.ToolCallID != "c2" {
+		t.Errorf("final message = %+v; want tool result for c2", last)
+	}
+}
+
+// TestMaxTurns_ResetsOnReply verifies a delivered user reply re-arms the
+// cap: with MaxTurns=1, the first turn parks, a Reply arrives, and the
+// second turn still runs — the counter bounds autonomous turns, not the
+// run's total. No MaxTurnsReached is emitted.
+func TestMaxTurns_ResetsOnReply(t *testing.T) {
+	t.Parallel()
+
+	provider := newScriptedProvider(streamDone(), streamDone())
+	events := make(chan event.Event, 64)
+
+	a, err := New(Options{Provider: provider, Events: events, MaxTurns: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "first"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	collected := make([]event.Event, 0, 16)
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			collected = append(collected, ev)
+			if _, ok := ev.(event.TurnEnd); ok {
+				goto Parked
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for first TurnEnd")
+		}
+	}
+Parked:
+
+	// Reply may need a brief moment to land if the loop is between the
+	// TurnEnd send and awaitReply read (same choreography as
+	// TestReply_DeliversBetweenTurns).
+	deadline = time.After(time.Second)
+	for !a.Reply(context.Background(), "second") {
+		select {
+		case <-time.After(5 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("Reply never accepted")
+		}
+	}
+
+	deadline = time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			collected = append(collected, ev)
+			if _, ok := ev.(event.TurnEnd); ok {
+				goto SecondDone
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for second TurnEnd")
+		}
+	}
+SecondDone:
+
+	a.Abort()
+	a.WaitForIdle()
+	all := append(collected, drainEvents(events, 8)...)
+
+	if provider.calls != 2 {
+		t.Errorf("provider.calls = %d; want 2 — reply must re-arm the cap", provider.calls)
+	}
+	if _, ok := findEvent[event.MaxTurnsReached](all); ok {
+		t.Errorf("unexpected MaxTurnsReached — cap resets on delivered reply")
+	}
+}

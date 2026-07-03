@@ -42,9 +42,24 @@ func (a *Agent) runLoop(ctx context.Context) {
 
 	// turn is the 1-indexed turn number within this run, incremented
 	// before each LLM call and threaded into the per-turn usage event.
+	// turnsSinceInput counts turns taken since the last user message —
+	// the quantity [Options.MaxTurns] caps. It tracks turn except that a
+	// delivered reply resets it, so the cap bounds autonomous tool-call
+	// ping-pong rather than the conversation's total length.
 	turn := 0
+	turnsSinceInput := 0
 	for {
 		if err := ctx.Err(); err != nil {
+			return
+		}
+
+		// The cap check sits at the loop top so it fires only between
+		// complete turns: the previous turn's tool results are already
+		// appended and the transcript is well-formed. Emitting the typed
+		// event (not event.Error) keeps limit-stop distinguishable from
+		// failure; cleanupRun's AgentEnd follows via the deferred path.
+		if a.maxTurns > 0 && turnsSinceInput >= a.maxTurns {
+			a.send(event.MaxTurnsReached{Turns: turnsSinceInput})
 			return
 		}
 
@@ -55,6 +70,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 		}
 
 		turn++
+		turnsSinceInput++
 		a.send(event.TurnStart{})
 
 		result, err := a.processTurn(ctx, msgs, turn)
@@ -138,6 +154,9 @@ func (a *Agent) runLoop(ctx context.Context) {
 			return
 		}
 		a.appendMessage(llm.Message{Role: "user", Content: input})
+		// Fresh user input re-arms the turn cap: MaxTurns bounds
+		// autonomous turns, not the run's total.
+		turnsSinceInput = 0
 	}
 }
 

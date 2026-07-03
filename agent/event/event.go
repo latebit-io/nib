@@ -147,6 +147,20 @@ type Error struct {
 	Err string
 }
 
+// MaxTurnsReached signals the run ended because it hit the configured
+// turn cap (Options.MaxTurns in the agent package) — the loop was about
+// to start another LLM turn without an intervening user message. A policy
+// outcome, not a failure: the transcript is well-formed (every dispatched
+// tool call has its result appended) and [AgentEnd] follows as usual, so
+// consumers can continue the conversation with a fresh prompt. Frontends
+// typically render this as "stopped at the turn limit" rather than as an
+// error.
+type MaxTurnsReached struct {
+	// Turns is the number of LLM turns taken since the last user input
+	// when the cap fired — always equal to the configured maximum.
+	Turns int
+}
+
 // AgentParked signals the loop has finished a turn with no further work
 // queued (no tool calls, no steering, no follow-up) and is about to park
 // on the reply channel awaiting the next user message. Emitted from
@@ -206,6 +220,9 @@ func (Compacted) agentEvent() {}
 
 // agentEvent satisfies [Event].
 func (Error) agentEvent() {}
+
+// agentEvent satisfies [Event].
+func (MaxTurnsReached) agentEvent() {}
 
 // agentEvent satisfies [Event].
 func (AgentParked) agentEvent() {}

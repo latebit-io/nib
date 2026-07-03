@@ -46,6 +46,18 @@ type Options struct {
 	// tool calls to Execute(). Tools share the agent's lifetime.
 	Tools []Tool
 
+	// MaxTurns caps the number of LLM turns the loop may take without an
+	// intervening user message — the guard against tool-call ping-pong in
+	// embedded or unattended deployments. The counter increments per turn
+	// (steering, follow-up, and truncation-retry turns all count) and
+	// resets to zero each time [Agent.Reply] delivers input. When the loop
+	// would start turn MaxTurns+1 it instead emits
+	// [event.MaxTurnsReached] and ends the run cleanly: every dispatched
+	// tool call already has its result appended, so the transcript stays
+	// well-formed and the conversation can continue on the next Prompt.
+	// Zero (the default) means unlimited; negative is rejected by [New].
+	MaxTurns int
+
 	// Hooks are the application-layer extension points. Nil disables a
 	// given hook; the agent skips it without ceremony.
 	Hooks Hooks
@@ -66,6 +78,7 @@ type Agent struct {
 	tools        map[string]Tool
 	toolDefs     []llm.ToolDef
 	hooks        Hooks
+	maxTurns     int
 
 	// mu guards the run-state fields below. It is NOT held while
 	// invoking the provider, hooks, or tool Execute calls — those
@@ -103,12 +116,16 @@ var ErrRunInProgress = errors.New("agent: a run is already in progress")
 //   - Tool names must be unique. A duplicate is a configuration error;
 //     silently overwriting would desync the tools map and toolDefs slice
 //     (the LLM would see the duplicate while only one route exists).
+//   - MaxTurns must not be negative (zero means unlimited).
 func New(opts Options) (*Agent, error) {
 	if opts.Provider == nil {
 		return nil, fmt.Errorf("%w: Provider is required", ErrInvalidOptions)
 	}
 	if opts.Events == nil {
 		return nil, fmt.Errorf("%w: Events is required", ErrInvalidOptions)
+	}
+	if opts.MaxTurns < 0 {
+		return nil, fmt.Errorf("%w: MaxTurns is negative (%d)", ErrInvalidOptions, opts.MaxTurns)
 	}
 
 	tools := make(map[string]Tool, len(opts.Tools))
@@ -136,6 +153,7 @@ func New(opts Options) (*Agent, error) {
 		tools:        tools,
 		toolDefs:     defs,
 		hooks:        opts.Hooks,
+		maxTurns:     opts.MaxTurns,
 	}, nil
 }
 

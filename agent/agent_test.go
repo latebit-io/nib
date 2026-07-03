@@ -89,6 +89,15 @@ func TestNew_Validation(t *testing.T) {
 			wantError: `duplicate tool name "read_file"`,
 		},
 		{
+			name: "negative MaxTurns rejected",
+			opts: Options{
+				Provider: provider,
+				Events:   events,
+				MaxTurns: -1,
+			},
+			wantError: "MaxTurns is negative (-1)",
+		},
+		{
 			name: "valid options succeed",
 			opts: Options{
 				Provider: provider,

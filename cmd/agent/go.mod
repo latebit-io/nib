@@ -3,7 +3,7 @@ module github.com/latebit-io/nib/cmd/agent
 go 1.26
 
 require (
-	github.com/latebit-io/nib/ai v0.0.0
+	github.com/latebit-io/nib/ai v0.1.0
 	github.com/latebit-io/nib/coding v0.0.0
 	github.com/latebit-io/nib/engine v0.0.0
 	github.com/latebit-io/nib/kit v0.0.0

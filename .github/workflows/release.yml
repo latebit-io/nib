@@ -1,0 +1,166 @@
+name: Release
+
+# Tags the consumer-facing modules (ai, agent) with module-path-prefixed
+# semver tags on every merge to main that changes them — the multi-module
+# analog of demarkus-library's release.yml. Bootstrap: the FIRST ai/v* and
+# agent/v* tags were created by hand; PaulHatch computes every later version
+# from the last agent/v* tag.
+#
+# Release discipline this workflow enforces: agent/go.mod's `require .../ai`
+# must be satisfiable by a published tag WITHOUT the monorepo-local replace
+# (dependency replaces are not inherited — the bug that made external
+# `go get` fail). The consumer-view job builds agent exactly as an external
+# consumer resolves it; if agent uses ai APIs newer than the required tag,
+# the release fails and the require must be bumped in the PR.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Serialize runs: two pushes landing before the first run tags would both
+# compute the same next version and race at tag creation.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Read-only job — don't leave the GITHUB_TOKEN in .git/config.
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26"
+      - name: Test the released modules
+        run: |
+          (cd ai && go vet ./... && go test ./...)
+          (cd agent && go vet ./... && go test ./...)
+
+  semver:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.semver.outputs.version }}
+      should_release: ${{ steps.check.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          # Read-only job — don't leave the GITHUB_TOKEN in .git/config.
+          persist-credentials: false
+      - uses: PaulHatch/semantic-version@8d3552d38408b608e90e76237a2a5ac9fe524d04 # v5.3.0
+        id: semver
+        with:
+          tag_prefix: "agent/v"
+          major_pattern: "BREAKING CHANGE:"
+          # Anchored regex (slash-wrapped): plain "feat:" is a substring
+          # match that misses scoped "feat(x):" — the demarkus-library
+          # semver bug, not repeated here.
+          minor_pattern: '/^feat(\(.+\))?:/'
+          # Only changes to the released modules cut a release — tui/coding
+          # churn does not bump agent/ai.
+          change_path: "agent ai"
+          bump_each_commit: false
+          search_commit_body: true
+      - name: Check if version changed
+        id: check
+        run: |
+          # Bootstrap guard: until the FIRST agent/v* tag exists (created by
+          # hand — see the header comment), releasing is manual. Without
+          # this, the merge that lands this workflow would race the manual
+          # bootstrap and cut a v0.0.1.
+          if [ -z "$(git tag -l 'agent/v*')" ]; then
+            echo "No agent/v* bootstrap tag yet — skipping automated release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TAG="agent/v${{ steps.semver.outputs.version }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: semver
+    # The ref guard covers workflow_dispatch: a manual run from a feature
+    # branch must not tag that branch's HEAD.
+    if: github.ref == 'refs/heads/main' && needs.semver.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26"
+
+      # ai first: agent's consumer-view build below may resolve the ai tag
+      # created here (when the require was bumped to this release's version).
+      - name: Tag ai
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/ai/v${{ needs.semver.outputs.new_version }}',
+              sha: context.sha
+            });
+
+      - name: Consumer-view build of agent (no replace)
+        # Build agent the way an external `go get` resolves it: replace
+        # dropped, ai fetched by the COMMITTED require version from git
+        # (GOPRIVATE bypasses proxy/sumdb lag for the seconds-old tag).
+        # Fails when agent uses ai APIs newer than the required tag — bump
+        # the require in agent/go.mod and re-land.
+        env:
+          GOPRIVATE: github.com/latebit-io/nib
+        run: |
+          cp -r agent /tmp/agent-consumer
+          cd /tmp/agent-consumer
+          go mod edit -dropreplace github.com/latebit-io/nib/ai
+          go mod tidy
+          go build ./...
+          go vet ./...
+
+      - name: Tag agent
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/agent/v${{ needs.semver.outputs.new_version }}',
+              sha: context.sha
+            });
+
+      # Roll back on failure so a fixed re-run can release the same version
+      # instead of skipping it at the tag-exists check.
+      - name: Rollback tags on failure
+        if: failure()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            for (const tag of ['ai/v${{ needs.semver.outputs.new_version }}',
+                               'agent/v${{ needs.semver.outputs.new_version }}']) {
+              try {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`,
+                });
+                console.log(`Rolled back ${tag}`);
+              } catch (e) {
+                console.log(`No rollback needed for ${tag}: ${e.message}`);
+              }
+            }

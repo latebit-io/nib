@@ -28,6 +28,7 @@ import (
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/budget"
+	"github.com/latebit-io/nib/kit/cmdallow"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/toolperm"
 	"github.com/latebit-io/nib/kit/tools/bash"
@@ -253,6 +254,13 @@ type Agent struct {
 	// [NewOptions.MaxTurns]. When crossed, foundationTurnCheck aborts the
 	// run before the next provider call.
 	maxTurns int
+	// bashApproval arms the per-command approval gate around the bash
+	// tool (see [NewOptions.ApproveBashCommands]). Read-only after New.
+	bashApproval bool
+	// bashAllowlist is the always-allow list the approval gate consults
+	// (see [NewOptions.BashAllowlist]). The *List is internally
+	// synchronized; the reference itself is read-only after New.
+	bashAllowlist *cmdallow.List
 	// Per-turn estimate emission and AgentTurnUsage pairing live on
 	// [providerProxy] — its Stream wrapper is the only point where
 	// the estimate (computed pre-Stream from the exact msgs+tools the
@@ -446,6 +454,21 @@ type NewOptions struct {
 	// registered here, inside New.
 	BuiltinToolGrants *toolperm.Matcher
 
+	// ApproveBashCommands routes every top-level bash command through the
+	// interactive per-command approval flow ([event.AgentCommandProposed]
+	// → frontend Approve/Reject) before it executes. Composition roots
+	// arm it via brand.BashApprovalEnabled. Ignored when
+	// BuiltinToolGrants is set — a subagent's bash access is constrained
+	// by its grants and a child must never block on an approval surface
+	// it has no frontend for.
+	ApproveBashCommands bool
+
+	// BashAllowlist is the persisted always-allow list consulted before
+	// a command is proposed (see kit/cmdallow). Nil means no allowlist:
+	// every command is proposed. Share the same *List with the frontend
+	// so its always-allow action is visible to the gate immediately.
+	BashAllowlist *cmdallow.List
+
 	// SystemPromptPersona is a subagent definition's body (its role and
 	// instructions), injected as a high-salience section at the top of the
 	// system prompt — augmenting, not replacing, nib's operational
@@ -501,6 +524,8 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 	var systemPromptPersona string
 	var maxTurns int
 	var contextFiles []prompts.ContextFile
+	var approveBash bool
+	var bashAllowlist *cmdallow.List
 	if opts != nil {
 		diagProvider = opts.DiagProvider
 		memStore = opts.MemoryStore
@@ -521,6 +546,8 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		systemPromptPersona = opts.SystemPromptPersona
 		maxTurns = opts.MaxTurns
 		contextFiles = slices.Clone(opts.ContextFiles)
+		approveBash = opts.ApproveBashCommands
+		bashAllowlist = opts.BashAllowlist
 	}
 	taskTokenBudget := budget.Resolve(taskTokenBudgetInput)
 
@@ -556,6 +583,8 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 		systemPromptPersona: systemPromptPersona,
 		contextFiles:        contextFiles,
 		maxTurns:            maxTurns,
+		bashApproval:        approveBash,
+		bashAllowlist:       bashAllowlist,
 	}
 
 	a.approvalFlow = editflow.NewOrchestrator(editflow.Deps{
@@ -719,6 +748,22 @@ func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, memStore memory.Store, extraTools []Tool, builtinGrants *toolperm.Matcher) {
 	editTool := tools.NewEditFileTool(workspace, cache, a)
 
+	// approvalManaged is true only for the top-level agent with the
+	// option armed — grants imply a subagent, which must never carry
+	// the approval gate. Computed once so the bash construction here
+	// and the gate wrap below cannot drift apart: a managed tool
+	// (guard classes relaxed) without the gate would run destructive
+	// commands unprompted.
+	approvalManaged := builtinGrants == nil && a.bashApproval
+
+	// When the approval gate wraps bash, relax the approval-eligible
+	// guard classes inside the tool: the gate proposes those commands
+	// and an approved one must not be re-blocked on execution.
+	var bashOpts []bash.Option
+	if approvalManaged {
+		bashOpts = append(bashOpts, bash.ApprovalManaged())
+	}
+
 	builtins := []Tool{
 		tools.NewReadFileTool(workspace, cache),
 		editTool,
@@ -726,7 +771,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		tools.NewReplaceFileTool(workspace, cache, a),
 		tools.NewApplyPatchTool(workspace, cache, a),
 		tools.NewListFilesTool(workspace),
-		bash.New(projectRoot),
+		bash.New(projectRoot, bashOpts...),
 	}
 
 	if diagProvider != nil {
@@ -793,6 +838,20 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	// top-level agent (nil grants).
 	if builtinGrants != nil {
 		builtins = gateBuiltins(builtins, builtinGrants)
+	}
+
+	// Per-command approval for the top-level agent's bash tool (see
+	// [NewOptions.ApproveBashCommands]). Mutually exclusive with the
+	// subagent grant gate above — grants imply a child agent, which has
+	// no frontend to answer an approval prompt. Same flag as the
+	// ApprovalManaged construction above, by design.
+	if approvalManaged {
+		for i, t := range builtins {
+			if strings.ToLower(t.Definition().Function.Name) == "bash" {
+				builtins[i] = commandApprovalGate{inner: t, allow: a.bashAllowlist, propose: a.proposeCommand}
+				break
+			}
+		}
 	}
 
 	a.tools = make(map[string]Tool, len(builtins)+len(extraTools))

@@ -290,6 +290,20 @@ func (m *Matcher) HasArgRules(tool string) bool {
 	return false
 }
 
+// HasShellControl reports whether a command contains shell operators
+// that chain, pipe, background, or substitute commands — the constructs
+// that let a second command ride along past an argument-scoped rule
+// (`Bash(git *)` matches `git status; rm -rf /`). Argument globs can
+// only be trusted against a single simple command, so callers matching
+// rules against shell commands must treat a true result as unmatched
+// (deny, or escalate to approval). The check is intentionally
+// conservative: a plain substring scan, so an operator inside quotes is
+// also flagged — for a security gate, over-rejecting a quoted `;` beats
+// parsing shell grammar and risking a miss.
+func HasShellControl(cmd string) bool {
+	return strings.ContainsAny(cmd, ";|&\n`") || strings.Contains(cmd, "$(")
+}
+
 // matches reports whether the rule applies to an invocation of tool with
 // the given argument string.
 func (r Rule) matches(tool, arg string) bool {

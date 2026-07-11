@@ -182,6 +182,73 @@ func TestRunner_EditProposed_AppliesAndApproves(t *testing.T) {
 	}
 }
 
+func TestRunner_CommandProposed_AutoApproves(t *testing.T) {
+	dir := t.TempDir()
+	ws := NewDiskWorkspace(dir)
+
+	events := make(chan event.Event, 64)
+	done := make(chan struct{}, 1)
+	mock := &mockAgent{events: events, signalDone: done}
+	mock.runFunc = func() {
+		events <- event.AgentCommandProposed{Command: event.PendingCommand{
+			ID:      "cmd-1",
+			Command: "go test ./...",
+		}}
+		<-done // wait for the auto-approve to signal
+		events <- event.AgentDone{Success: true}
+	}
+
+	var stderr bytes.Buffer
+	runner := NewRunner(mock, ws, events, &stderr, true) // TTY so the status line is observable
+
+	result := runner.Run(context.Background(), "run tests", nil)
+
+	if !result.Success {
+		t.Error("expected success")
+	}
+	if !mock.approved {
+		t.Error("expected agent.Approve() to be called for the proposed command")
+	}
+	if mock.approvedContent != "" {
+		t.Errorf("command approval carried content %q, want empty (edit-specific contract)", mock.approvedContent)
+	}
+	if !strings.Contains(stderr.String(), "go test ./...") {
+		t.Errorf("stderr = %q, want approving-command status line", stderr.String())
+	}
+}
+
+func TestRunner_CommandProposed_GuardClassifiedRejected(t *testing.T) {
+	dir := t.TempDir()
+	ws := NewDiskWorkspace(dir)
+
+	events := make(chan event.Event, 64)
+	done := make(chan struct{}, 1)
+	mock := &mockAgent{events: events, signalDone: done}
+	mock.runFunc = func() {
+		events <- event.AgentCommandProposed{Command: event.PendingCommand{
+			ID:      "cmd-2",
+			Command: "git push origin main",
+			Reason:  "destructive command",
+		}}
+		<-done // wait for the auto-reject to signal
+		events <- event.AgentDone{Success: true}
+	}
+
+	var stderr bytes.Buffer
+	runner := NewRunner(mock, ws, events, &stderr, true)
+	runner.Run(context.Background(), "push it", nil)
+
+	if mock.approved {
+		t.Fatal("guard-classified command must not be auto-approved headless — that would bypass the relaxed guards")
+	}
+	if !mock.rejected {
+		t.Fatal("expected agent.Reject() for the guard-classified command")
+	}
+	if !strings.Contains(stderr.String(), "destructive command") {
+		t.Errorf("stderr = %q, want rejection status line naming the guard reason", stderr.String())
+	}
+}
+
 func TestRunner_EditProposed_PreservesTrailingNewline(t *testing.T) {
 	dir := t.TempDir()
 	ws := NewDiskWorkspace(dir)

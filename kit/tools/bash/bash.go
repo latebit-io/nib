@@ -50,11 +50,36 @@ const maxBashTail = 4 * 1024
 // the agent at any time, and the timeout prevents runaway processes.
 type Tool struct {
 	projectRoot string
+	// approvalManaged relaxes the file-write and destructive guard
+	// classes from hard blocks to pass-through, because an external
+	// per-command approval surface already gated the command before
+	// Execute ran (see [ApprovalManaged]). The search guard stays hard
+	// regardless — it redirects to better tools, which approval cannot
+	// improve on.
+	approvalManaged bool
+}
+
+// Option configures a [Tool] at construction.
+type Option func(*Tool)
+
+// ApprovalManaged marks the tool as wrapped by a per-command approval
+// surface: the file-write and destructive guard classes no longer hard-
+// block inside Execute, because the wrapper proposes those commands to
+// the developer (with the guard's classification as the reason) and only
+// executes on explicit approval. Without this option those classes
+// hard-block as always. Do NOT set it unless every command genuinely
+// passes through an approval gate first.
+func ApprovalManaged() Option {
+	return func(t *Tool) { t.approvalManaged = true }
 }
 
 // New creates a [Tool] rooted at the given project directory.
-func New(projectRoot string) *Tool {
-	return &Tool{projectRoot: projectRoot}
+func New(projectRoot string, opts ...Option) *Tool {
+	t := &Tool{projectRoot: projectRoot}
+	for _, o := range opts {
+		o(t)
+	}
+	return t
 }
 
 // Definition returns the OpenAI-compatible tool schema for bash.
@@ -100,7 +125,12 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		return errorResult("Error: command is required")
 	}
 
-	if msg := guardCommand(args.Command); msg != "" {
+	if class, msg := Classify(args.Command); msg != "" && (class == GuardSearch || !t.approvalManaged) {
+		// Approval-managed mode passes file-write and destructive
+		// classes through — the wrapping gate already proposed them and
+		// the developer approved. The search class blocks regardless
+		// (redirect to structured tools, not a risk decision).
+		//
 		// Log the guard classification (msg) and a redacted preview
 		// instead of the full command — the verbatim command may carry
 		// secrets that should not land in slog. The LLM still sees the
@@ -299,6 +329,13 @@ func (w *headTailWriter) String() string {
 // consumer's system prompt (kit.PromptContributor, satisfied
 // structurally — this package cannot import kit).
 func (t *Tool) PromptGuidelines() []string {
+	if t.approvalManaged {
+		return []string{
+			"`bash` is for build/test commands — not for editing files, not for searching code. " +
+				"Destructive or file-writing commands are proposed to the developer for approval before they run; " +
+				"prefer the edit tools and only propose such commands when the task genuinely needs them.",
+		}
+	}
 	return []string{
 		"`bash` is for build/test commands — not for editing files, not for searching code, not for destructive ops without explicit developer ask.",
 	}

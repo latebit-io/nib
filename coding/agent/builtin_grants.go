@@ -89,7 +89,7 @@ func (g bashGrantGate) Execute(ctx context.Context, call llm.ToolCall) upagent.T
 	// arg-glob can only be trusted against one simple command, so reject
 	// shell control/substitution operators conservatively. A bare `Bash`
 	// grant imposes no arg rules and is left unrestricted.
-	if g.grants.HasArgRules("bash") && hasShellControl(args.Command) {
+	if g.grants.HasArgRules("bash") && toolperm.HasShellControl(args.Command) {
 		return upagent.ToolResult{
 			Content: "Command blocked: compound, piped, or substituted shell commands are not permitted under this subagent's argument-scoped bash grant. Run a single command.",
 			IsError: true,
@@ -102,16 +102,6 @@ func (g bashGrantGate) Execute(ctx context.Context, call llm.ToolCall) upagent.T
 		}
 	}
 	return g.inner.Execute(ctx, call)
-}
-
-// hasShellControl reports whether a command contains shell operators that
-// chain, pipe, background, or substitute commands — the constructs that
-// let a second command ride along past an argument-scoped grant. The check
-// is intentionally conservative (a plain substring scan, so an operator
-// inside quotes is also rejected): for a security gate, over-rejecting a
-// quoted `;` is preferable to parsing shell grammar and risking a miss.
-func hasShellControl(cmd string) bool {
-	return strings.ContainsAny(cmd, ";|&\n`") || strings.Contains(cmd, "$(")
 }
 
 // PromptGuidelines forwards the gated tool's prompt guidance

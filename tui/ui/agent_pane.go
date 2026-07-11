@@ -246,6 +246,13 @@ type AgentPaneModel struct {
 	// Set via SetStatus, read via StatusKind.
 	status event.StatusKind
 
+	// commandReview marks the current StatusReviewing as a bash-command
+	// review (vs an edit review) so the REVIEW chip shows the command
+	// hint set (run / always allow / reject). Set by
+	// AppendCommandProposal; cleared by SetStatus on any transition away
+	// from StatusReviewing, tying its lifetime to the status itself.
+	commandReview bool
+
 	// spinnerFrame is the index into spinnerFrames for the currently rendered
 	// glyph. Advanced by spinnerTickMsg while statusAnimates(status) holds.
 	spinnerFrame int
@@ -497,6 +504,12 @@ func NewAgentPaneModel(svc *Services, hasAgent bool) *AgentPaneModel {
 // full markdown styling.
 func (m *AgentPaneModel) SetStatus(s event.StatusKind) tea.Cmd {
 	m.status = s
+	if s != event.StatusReviewing {
+		// The command-review chip variant lives exactly as long as the
+		// reviewing status: any transition away clears it so the next
+		// edit review shows the edit hint again.
+		m.commandReview = false
+	}
 	if !statusStreaming(s) && m.streamingStartRaw >= 0 {
 		m.streamingStartRaw = -1
 		m.invalidateMdCache()
@@ -2089,7 +2102,11 @@ func (m *AgentPaneModel) chipFor() statusChipSpec {
 	case event.StatusPlanningWaiting:
 		spec = statusChipSpec{label: "PLAN", hint: ":done execute · :skip", style: chipStylePlanWait}
 	case event.StatusReviewing:
-		spec = statusChipSpec{label: "REVIEW", hint: "Ctrl+O approve · Esc reject", style: chipStyleReview}
+		if m.commandReview {
+			spec = statusChipSpec{label: "REVIEW", hint: "Ctrl+O run · Alt+A always · Esc reject", style: chipStyleReview}
+		} else {
+			spec = statusChipSpec{label: "REVIEW", hint: "Ctrl+O approve · Esc reject", style: chipStyleReview}
+		}
 	case event.StatusWaiting:
 		spec = statusChipSpec{label: "REPLY", hint: "Enter send", style: chipStyleWaiting}
 	case event.StatusFinished:

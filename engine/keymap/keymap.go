@@ -64,6 +64,9 @@ const (
 	ActionAgentApprove
 	// ActionAgentReject rejects the pending edit.
 	ActionAgentReject
+	// ActionAgentAlwaysAllow persists an always-allow rule for the
+	// pending command, then approves it.
+	ActionAgentAlwaysAllow
 	// ActionModelSelector opens the LLM model/profile selector overlay.
 	ActionModelSelector
 	// ActionTerseToggle toggles terse output mode on/off.
@@ -177,6 +180,7 @@ func DefaultBindings() []Binding {
 		{ActionAgentPlan, "Plan mode", []string{"Alt+G"}, CatAgent},
 		{ActionAgentApprove, "Approve edit", []string{"Ctrl+O"}, CatAgent},
 		{ActionAgentReject, "Reject / Cancel", []string{"Escape"}, CatAgent},
+		{ActionAgentAlwaysAllow, "Always allow command", []string{"Alt+A"}, CatAgent},
 		{ActionModelSelector, "Select model", []string{"Alt+M"}, CatAgent},
 		{ActionTerseToggle, "Toggle terse mode", []string{"Alt+T"}, CatAgent},
 

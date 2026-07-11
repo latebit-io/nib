@@ -165,6 +165,28 @@ type AgentNavigate struct {
 // gates on the buffer's modified flag for exactly this reason.
 type ReloadBuffers struct{}
 
+// AgentCommandProposed signals the agent wants to run a shell command
+// and is blocked awaiting per-command approval. Delivery is critical
+// (like [AgentEditProposed]): a frontend that receives it must answer
+// with Approve or Reject or the run stalls until cancellation.
+type AgentCommandProposed struct {
+	// Command is the proposed command awaiting approval.
+	Command PendingCommand
+}
+
+// PendingCommand is a proposed shell command from the LLM, sent to the
+// frontend for approval before the bash tool executes it.
+type PendingCommand struct {
+	// ID uniquely identifies this command proposal (the LLM tool-call ID).
+	ID string
+	// Command is the exact shell command string the agent wants to run.
+	Command string
+	// Reason is the guard classification that made the command
+	// approval-worthy (e.g. "destructive command"). Empty for a plain
+	// command that is simply not on the always-allow list.
+	Reason string
+}
+
 // PendingEdit is a proposed edit from the LLM, sent to the frontend for approval.
 type PendingEdit struct {
 	// ID uniquely identifies this edit proposal.
@@ -226,6 +248,9 @@ type SubagentActivity struct {
 
 // Event marks AgentEditProposed as an agent event.
 func (AgentEditProposed) Event() {}
+
+// Event marks AgentCommandProposed as an agent event.
+func (AgentCommandProposed) Event() {}
 
 // Event marks AgentFileCreated as an agent event.
 func (AgentFileCreated) Event() {}

@@ -36,6 +36,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/goparse"
 	"github.com/latebit-io/nib/engine/validate/treesitter"
 	"github.com/latebit-io/nib/kit/budget"
+	"github.com/latebit-io/nib/kit/cmdallow"
 )
 
 // errSetup is a sentinel wrapped into setup errors so main can distinguish
@@ -243,6 +244,13 @@ func run() error {
 		DistributedMemory: codingmemory.DetectDistributedMemory(mcpResult.ServerNames),
 		Linters:           linters.PostTask,
 		SmokeConfig:       smokeCfg,
+		// Headless defaults off: the runner auto-approves every
+		// proposal, so arming it only adds a per-command status trace.
+		// NIB_BASH_APPROVAL=1 opts in.
+		ApproveBashCommands: brand.BashApprovalEnabled(false),
+		// The allowlist still applies when opted in: allowlisted
+		// commands skip even the status trace.
+		BashAllowlist: cmdallow.Load(projectRoot),
 	}
 	// A malformed override is a hard error rather than a silent
 	// fall-through to disabled — matters most here in headless / CI mode

@@ -100,6 +100,14 @@ func (m *AppModel) handleEngineEvent(ev event.Event) tea.Cmd {
 			m.AgentPane.AppendError("edit could not be matched — auto-rejecting")
 			m.Session.RejectEdit("search-mismatch")
 		}
+	case event.AgentCommandProposed:
+		// Session.HandleEvent above already staged pendingCommand; render
+		// the bordered proposal block and flip the chip to REVIEW so its
+		// approve/reject hint shows. No overlay step — a command has no
+		// diff to review, so Ctrl+O/Esc route straight to the session in
+		// handleGlobalAction.
+		m.AgentPane.AppendCommandProposal(e.Command.Command, e.Command.Reason)
+		cmd = tea.Batch(cmd, m.AgentPane.SetStatus(event.StatusReviewing))
 	case event.AgentFileCreated:
 		m.AgentPane.AppendMeta("\n[Created: " + e.Path + "]\n")
 		// Set pendingReveal before openFile — openFile calls

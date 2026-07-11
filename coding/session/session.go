@@ -19,6 +19,7 @@ import (
 	"github.com/latebit-io/nib/engine/capture"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/openfile"
+	"github.com/latebit-io/nib/kit/cmdallow"
 )
 
 // agentLifecycle is the subset of agent operations that start, extend, or
@@ -104,6 +105,18 @@ type Session struct {
 
 	// pendingEdit is the edit currently awaiting approval (nil = none)
 	pendingEdit *event.PendingEdit
+
+	// pendingCommand is the bash command currently awaiting approval
+	// (nil = none). Same ownership rules as the rest of the
+	// approval-flow state above: TUI Update goroutine only.
+	pendingCommand *event.PendingCommand
+
+	// bashAllow is the persisted always-allow list the always-allow
+	// action appends to (see kit/cmdallow). Shared with the agent's
+	// approval gate; the *List is internally synchronized. Set once at
+	// composition via SetBashAllowlist; nil when no allowlist is
+	// configured (always-allow degrades to approve-once).
+	bashAllow *cmdallow.List
 
 	// lastEditedFile tracks the canonical path of the file most recently
 	// edited via the approval flow. Used to attribute the "modified"
@@ -272,6 +285,14 @@ func (s *Session) SetAgent(ag agentPort, events <-chan event.Event) {
 	s.mu.Unlock()
 }
 
+// SetBashAllowlist injects the always-allow list the always-allow
+// action persists to. Call once at composition, before events flow;
+// pass the same *cmdallow.List the agent's approval gate holds so an
+// added rule takes effect on the very next command.
+func (s *Session) SetBashAllowlist(l *cmdallow.List) {
+	s.bashAllow = l
+}
+
 // SetDistributedMemory records which MCP servers are classified as distributed
 // (team/shared) memory. The frontend reads this via DistributedMemory() for
 // status display. Guarded by mu for safe cross-goroutine access.
@@ -329,6 +350,12 @@ func (s *Session) Phase() Phase {
 // PendingEdit returns the edit currently awaiting approval, or nil if none.
 func (s *Session) PendingEdit() *event.PendingEdit {
 	return s.pendingEdit
+}
+
+// PendingCommand returns the bash command currently awaiting approval,
+// or nil if none.
+func (s *Session) PendingCommand() *event.PendingCommand {
+	return s.pendingCommand
 }
 
 // Intent lifecycle methods (CurrentIntent, IntentDone, IntentHistory,
@@ -440,8 +467,16 @@ func (s *Session) HandleEvent(ev event.Event) {
 				"stages":      validatorStagesPayload(e.ValidatorSummaries),
 			})
 		}
+	case event.AgentCommandProposed:
+		s.pendingCommand = &e.Command
+		s.emitCapture("command_proposal", map[string]any{
+			"id":      e.Command.ID,
+			"command": e.Command.Command,
+			"reason":  e.Command.Reason,
+		})
 	case event.AgentError:
 		s.pendingEdit = nil
+		s.pendingCommand = nil
 		s.pendingProposedReplace = ""
 		s.pendingApproval = nil
 		s.stagedEditFile = ""
@@ -449,6 +484,7 @@ func (s *Session) HandleEvent(ev event.Event) {
 		_ = e // error text is in the event for the frontend to display
 	case event.AgentDone:
 		s.pendingEdit = nil
+		s.pendingCommand = nil
 		s.pendingProposedReplace = ""
 		s.pendingApproval = nil
 		s.stagedEditFile = ""

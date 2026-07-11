@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -45,6 +46,15 @@ const (
 	// Kill switch for the cap; remove once smoke testing confirms the
 	// cap is a net win on cache rate and billable tokens.
 	EnvKeyToolOutputCapDisabled = EnvPrefix + "TOOL_OUTPUT_CAP_DISABLED"
+
+	// EnvKeyBashApproval overrides the per-command bash approval default
+	// (see [BashApprovalEnabled]): every bash command is proposed to the
+	// frontend (AgentCommandProposed) and blocks until approved or
+	// rejected. Interactive sessions default ON now that the TUI surface
+	// ships; "0", "false", or "off" is the kill switch restoring
+	// guard-only behaviour, any other non-empty value forces it on
+	// (e.g. to opt a headless run into the per-command status trace).
+	EnvKeyBashApproval = EnvPrefix + "BASH_APPROVAL"
 
 	// EnvKeyTaskTokenBudget sets the per-task token budget cap (see
 	// [coding/agent.NewOptions.TaskTokenBudget]). The cap is disabled by
@@ -94,6 +104,25 @@ const (
 	// arguments to MkdirTemp.
 	TempDirPrefix = Name + "-lint-"
 )
+
+// BashApprovalEnabled reports whether per-command bash approval is
+// armed, combining [EnvKeyBashApproval] with the binary's default.
+// Unset or empty defers to defaultOn; "0", "false", or "off"
+// (case-insensitive) disables; any other value enables. Interactive
+// binaries pass defaultOn=true (the TUI ships the approval surface);
+// headless binaries pass false (their runner auto-approves, so arming
+// only adds a per-command status trace).
+func BashApprovalEnabled(defaultOn bool) bool {
+	v := strings.TrimSpace(os.Getenv(EnvKeyBashApproval))
+	if v == "" {
+		return defaultOn
+	}
+	switch strings.ToLower(v) {
+	case "0", "false", "off":
+		return false
+	}
+	return true
+}
 
 // PluginsDir resolves the managed plugin store root:
 // <UserConfigDir>/<ConfigDirName>/plugins (e.g.

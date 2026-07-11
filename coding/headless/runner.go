@@ -99,6 +99,25 @@ func (r *Runner) handleEvent(ctx context.Context, ev event.Event) error {
 	case event.AgentEditProposed:
 		return r.applyEdit(e.Edit)
 
+	case event.AgentCommandProposed:
+		// Headless has no interactive approval surface. A guard-
+		// classified command (non-empty Reason: destructive or
+		// file-writing) is REJECTED — with approval armed, the wrapped
+		// bash tool relaxes those guard classes, so auto-approving here
+		// would rubber-stamp exactly what the guards exist to stop.
+		// Rejecting preserves parity with the unarmed hard block. Plain
+		// commands auto-approve with a visible status line (mirrors the
+		// edit auto-apply above); Approve carries no content — that
+		// contract is edit-specific.
+		if e.Command.Reason != "" {
+			r.status("[rejecting command (%s): %s]\n", e.Command.Reason, e.Command.Command)
+			r.agent.Reject()
+			return nil
+		}
+		r.status("[approving command: %s]\n", e.Command.Command)
+		r.agent.Approve("")
+		return nil
+
 	case event.AgentFileCreated:
 		canon := r.workspace.CanonPath(e.Path)
 		r.filesCreated = append(r.filesCreated, canon)

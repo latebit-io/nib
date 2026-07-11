@@ -58,7 +58,14 @@ func (m *AppModel) handleGlobalAction(action Action) (tea.Cmd, bool) {
 		return tea.Quit, true
 
 	case ActionAgentApprove:
-		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "agent", m.Session.HasAgent())
+		slog.Debug("agent approve", "pending", m.Session.PendingEdit() != nil, "pendingCommand", m.Session.PendingCommand() != nil, "agent", m.Session.HasAgent())
+		if m.Session.PendingCommand() != nil {
+			// Command approval has no overlay/diff step — signal the
+			// session and let the agent's follow-up status events drive
+			// the chrome (proposeCommand emits StatusThinking on resume).
+			m.Session.ApproveCommand()
+			return nil, true
+		}
 		if m.Session.PendingEdit() != nil && m.Editor.Overlay != nil {
 			return m.applyApproval(), true
 		}
@@ -76,12 +83,34 @@ func (m *AppModel) handleGlobalAction(action Action) (tea.Cmd, bool) {
 			m.Session.RejectEdit("user")
 			return nil, true
 		}
+		if m.Session.PendingCommand() != nil {
+			// Reject only the pending command — the run continues (the
+			// LLM sees the rejection note and adapts). Falling through
+			// to CancelAgent here would kill the whole run on a single
+			// declined command.
+			m.Session.RejectCommand("user")
+			return nil, true
+		}
 		if m.Session.CurrentIntent() != "" && m.Session.HasAgent() {
 			m.Session.CancelAgent()
 			return m.AgentPane.SetStatus(event.StatusIdle), true
 		}
 		// No overlay, no intent — fall through to focused pane.
 		return nil, false
+
+	case ActionAgentAlwaysAllow:
+		if m.Session.PendingCommand() == nil {
+			// Nothing pending — let the keystroke fall through to the
+			// focused pane (Option+A may be text input on macOS).
+			return nil, false
+		}
+		if err := m.Session.AlwaysAllowCommand(); err != nil {
+			// The command was still approved once; only the rule
+			// persistence failed. Surface why so the developer knows
+			// the next identical command will prompt again.
+			m.AgentPane.AppendError("always-allow not saved: " + err.Error())
+		}
+		return nil, true
 
 	case ActionTerseToggle:
 		m.toggleTerse()

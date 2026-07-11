@@ -242,6 +242,23 @@ func (m *AgentPaneModel) AppendProposal(reason string) {
 	m.appendTypedMeta(BlockProposal, "\nProposed: "+reason+"\n", "")
 }
 
+// AppendCommandProposal records a pending bash command as a
+// [BlockProposal] block ("Command: <cmd>") so it draws the proposal-hue
+// left border. Distinct prefix from [AppendProposal]: a command reads
+// as an action awaiting authorization, not an edit rationale. reason,
+// when non-empty, is the guard classification appended in parentheses
+// so the developer sees WHY the command warranted a prompt. Both are
+// LLM/guard-supplied and flow through the shared sanitize pipeline in
+// appendTypedMeta.
+func (m *AgentPaneModel) AppendCommandProposal(command, reason string) {
+	m.commandReview = true
+	text := "\nCommand: " + command + "\n"
+	if reason != "" {
+		text = "\nCommand: " + command + "  (" + reason + ")\n"
+	}
+	m.appendTypedMeta(BlockProposal, text, "")
+}
+
 // AppendError records an error block with [BlockError] kind so the
 // render path draws the error-hue left border. text is the error
 // message body; callers should pass the raw message without any

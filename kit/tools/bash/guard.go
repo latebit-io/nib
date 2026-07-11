@@ -204,27 +204,72 @@ func redactCommandPreview(command string) string {
 	return command[:cut] + "…"
 }
 
-// guardCommand runs every active bash guard against a command and returns
-// the first non-empty error message, or "" when the command passes them
-// all. This is the single entry point [Tool.Execute] calls before
-// invoking the shell — adding a new guard means appending one line here
-// rather than threading another check through the call site.
+// GuardClass names the guard family a command tripped, so callers can
+// apply per-class policy: search bypasses are always hard-blocked
+// (structured tools exist for a reason), while file-write and
+// destructive classes are approval-eligible — an external approval
+// surface (see [ApprovalManaged]) may propose them to the developer
+// instead of refusing outright.
+type GuardClass int
+
+const (
+	// GuardNone marks a command that passes every guard.
+	GuardNone GuardClass = iota
+	// GuardSearch marks a search-tool bypass (grep/rg/find/…). Always
+	// hard-blocked: the redirect to search_project/glob is about result
+	// quality and token economy, not risk, so approval cannot help.
+	GuardSearch
+	// GuardFileWrite marks a command that writes project files outside
+	// the edit approval flow (redirects, sed -i, tee). Approval-eligible.
+	GuardFileWrite
+	// GuardDestructive marks a command that destroys local or remote
+	// state (rm -rf, git push/checkout/reset --hard/clean -f).
+	// Approval-eligible.
+	GuardDestructive
+)
+
+// Reason returns a short human-readable label for why a command of this
+// class needs the developer's attention — suitable for an approval
+// prompt. Empty for classes that never reach a prompt (none, search).
+func (c GuardClass) Reason() string {
+	switch c {
+	case GuardFileWrite:
+		return "writes project files outside the edit flow"
+	case GuardDestructive:
+		return "destructive command"
+	default:
+		return ""
+	}
+}
+
+// Classify runs every active bash guard against a command and returns
+// the class of the first guard that fires plus its LLM-facing message,
+// or (GuardNone, "") when the command passes them all.
 //
 // Guard order is intentional: file-write checks first (highest false-
 // positive risk if a destructive command coincidentally writes a file),
 // then search redirects, then destructive-state ops. Every guard receives
 // the unmodified command string; none of them mutate it.
-func guardCommand(command string) string {
+func Classify(command string) (GuardClass, string) {
 	if msg := fileWriteGuard(command); msg != "" {
-		return msg
+		return GuardFileWrite, msg
 	}
 	if msg := searchCommandGuard(command); msg != "" {
-		return msg
+		return GuardSearch, msg
 	}
 	if msg := destructiveCommandGuard(command); msg != "" {
-		return msg
+		return GuardDestructive, msg
 	}
-	return ""
+	return GuardNone, ""
+}
+
+// guardCommand is the classic single-verdict entry point: the first
+// non-empty guard message, or "" when the command passes. Kept for the
+// default (non-approval-managed) Execute path; policy-aware callers use
+// [Classify].
+func guardCommand(command string) string {
+	_, msg := Classify(command)
+	return msg
 }
 
 // searchCommandGuard blocks code-search shell tools (grep, rg, ripgrep, ag,

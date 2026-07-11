@@ -265,3 +265,62 @@ func (s *Session) RejectEdit(source string) {
 	s.pendingApproval = nil
 	s.agent.Reject()
 }
+
+// ApproveCommand approves the pending bash command and signals the
+// agent to run it. No-op when no command is pending — the guard
+// prevents a stray approve keystroke from queueing a stale signal on
+// the coordinator. Approve carries no content: the post-apply-content
+// contract is edit-specific and commands have no buffer to seed.
+func (s *Session) ApproveCommand() {
+	if s.pendingCommand == nil || !s.HasAgent() {
+		return
+	}
+	s.emitCapture("command_accepted", map[string]any{
+		"id":      s.pendingCommand.ID,
+		"command": s.pendingCommand.Command,
+	})
+	s.pendingCommand = nil
+	s.agent.Approve("")
+}
+
+// AlwaysAllowCommand persists an always-allow rule for the pending bash
+// command, then approves it. The rule is exact (see cmdallow.List.Add);
+// subsequent identical commands auto-approve at the agent's gate without
+// a proposal. When no allowlist is configured or the persist fails, the
+// command is still approved once and the error is returned so the
+// frontend can surface why the rule did not stick. No-op returning nil
+// when nothing is pending.
+func (s *Session) AlwaysAllowCommand() error {
+	if s.pendingCommand == nil || !s.HasAgent() {
+		return nil
+	}
+	err := s.bashAllow.Add(s.pendingCommand.Command)
+	if err == nil {
+		s.emitCapture("command_always_allowed", map[string]any{
+			"id":      s.pendingCommand.ID,
+			"command": s.pendingCommand.Command,
+		})
+	}
+	s.ApproveCommand()
+	return err
+}
+
+// RejectCommand rejects the pending bash command and signals the agent.
+// The source string is captured into the session journal (mirrors
+// [Session.RejectEdit]: "user" for an Esc keypress, other values for
+// system-driven rejects). Empty source defaults to "unknown".
+func (s *Session) RejectCommand(source string) {
+	if s.pendingCommand == nil || !s.HasAgent() {
+		return
+	}
+	if source == "" {
+		source = "unknown"
+	}
+	s.emitCapture("command_rejected", map[string]any{
+		"id":      s.pendingCommand.ID,
+		"command": s.pendingCommand.Command,
+		"source":  source,
+	})
+	s.pendingCommand = nil
+	s.agent.Reject()
+}

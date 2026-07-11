@@ -35,6 +35,7 @@ import (
 	"github.com/latebit-io/nib/engine/validate/treesitter"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/budget"
+	"github.com/latebit-io/nib/kit/cmdallow"
 	kitcmd "github.com/latebit-io/nib/kit/command"
 	cmdloader "github.com/latebit-io/nib/kit/command/loader"
 	"github.com/latebit-io/nib/kit/pluginstore"
@@ -376,6 +377,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		slog.Warn("context file skipped", "err", cfErr)
 	}
 
+	// One shared always-allow list: the agent's approval gate reads it,
+	// the session's always-allow action appends to it, so a new rule
+	// takes effect on the very next command without a restart.
+	bashAllowlist := cmdallow.Load(projectRoot)
+	sess.SetBashAllowlist(bashAllowlist)
+
 	buildAgent := func(p llm.Provider) *agent.Agent {
 		// Keep subagents pointed at the provider the parent is now using.
 		setSubagentProvider(p)
@@ -389,6 +396,10 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			SmokeConfig:       smokeCfg,
 			FlushDirtyBuffers: flushDirtyBuffersFn,
 			TaskTokenBudget:   taskTokenBudgetCap,
+			// Default on for interactive sessions — the TUI ships the
+			// approval surface. NIB_BASH_APPROVAL=0 is the kill switch.
+			ApproveBashCommands: brand.BashApprovalEnabled(true),
+			BashAllowlist:       bashAllowlist,
 		}
 		if lspMgr != nil {
 			opts.DiagProvider = lspMgr

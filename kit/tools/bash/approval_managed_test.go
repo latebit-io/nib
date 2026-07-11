@@ -20,6 +20,11 @@ func TestClassify(t *testing.T) {
 		{"in-place edit", "sed -i 's/a/b/' main.go", GuardFileWrite},
 		{"recursive delete", "rm -rf build", GuardDestructive},
 		{"git push", "git push origin main", GuardDestructive},
+		// Overlap: search must win over the approval-eligible classes,
+		// or the approval flow would let a search bypass through the
+		// relaxed managed-mode guards.
+		{"search wins over file-write", "grep -r foo . > out.txt", GuardSearch},
+		{"search wins over destructive", "grep -r foo . && git push", GuardSearch},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

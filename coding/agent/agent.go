@@ -748,12 +748,19 @@ func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot string, diagProvider lang.DiagnosticProvider, memStore memory.Store, extraTools []Tool, builtinGrants *toolperm.Matcher) {
 	editTool := tools.NewEditFileTool(workspace, cache, a)
 
-	// When the approval gate wraps bash (top-level agent, option armed —
-	// the same condition as the wrap below), relax the approval-eligible
-	// guard classes inside the tool: the gate proposes those commands and
-	// an approved one must not be re-blocked on execution.
+	// approvalManaged is true only for the top-level agent with the
+	// option armed — grants imply a subagent, which must never carry
+	// the approval gate. Computed once so the bash construction here
+	// and the gate wrap below cannot drift apart: a managed tool
+	// (guard classes relaxed) without the gate would run destructive
+	// commands unprompted.
+	approvalManaged := builtinGrants == nil && a.bashApproval
+
+	// When the approval gate wraps bash, relax the approval-eligible
+	// guard classes inside the tool: the gate proposes those commands
+	// and an approved one must not be re-blocked on execution.
 	var bashOpts []bash.Option
-	if builtinGrants == nil && a.bashApproval {
+	if approvalManaged {
 		bashOpts = append(bashOpts, bash.ApprovalManaged())
 	}
 
@@ -833,11 +840,12 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		builtins = gateBuiltins(builtins, builtinGrants)
 	}
 
-	// Per-command approval for the top-level agent's bash tool (dark
-	// launch: see [NewOptions.ApproveBashCommands]). Mutually exclusive
-	// with the subagent grant gate above — grants imply a child agent,
-	// which has no frontend to answer an approval prompt.
-	if builtinGrants == nil && a.bashApproval {
+	// Per-command approval for the top-level agent's bash tool (see
+	// [NewOptions.ApproveBashCommands]). Mutually exclusive with the
+	// subagent grant gate above — grants imply a child agent, which has
+	// no frontend to answer an approval prompt. Same flag as the
+	// ApprovalManaged construction above, by design.
+	if approvalManaged {
 		for i, t := range builtins {
 			if strings.ToLower(t.Definition().Function.Name) == "bash" {
 				builtins[i] = commandApprovalGate{inner: t, allow: a.bashAllowlist, propose: a.proposeCommand}

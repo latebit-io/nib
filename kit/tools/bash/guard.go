@@ -246,16 +246,19 @@ func (c GuardClass) Reason() string {
 // the class of the first guard that fires plus its LLM-facing message,
 // or (GuardNone, "") when the command passes them all.
 //
-// Guard order is intentional: file-write checks first (highest false-
-// positive risk if a destructive command coincidentally writes a file),
-// then search redirects, then destructive-state ops. Every guard receives
-// the unmodified command string; none of them mutate it.
+// Guard order is intentional: search FIRST, because it is the one
+// absolute hard-block — a command matching both search and an
+// approval-eligible class (`grep -r foo . > out.txt`) must classify as
+// GuardSearch or the approval flow would let a search bypass through.
+// Then file-write before destructive (highest false-positive risk if a
+// destructive command coincidentally writes a file). Every guard
+// receives the unmodified command string; none of them mutate it.
 func Classify(command string) (GuardClass, string) {
-	if msg := fileWriteGuard(command); msg != "" {
-		return GuardFileWrite, msg
-	}
 	if msg := searchCommandGuard(command); msg != "" {
 		return GuardSearch, msg
+	}
+	if msg := fileWriteGuard(command); msg != "" {
+		return GuardFileWrite, msg
 	}
 	if msg := destructiveCommandGuard(command); msg != "" {
 		return GuardDestructive, msg

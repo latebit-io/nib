@@ -355,14 +355,14 @@ func TestGuardCommand(t *testing.T) {
 		{"destructive blocked", "rm -rf build/", true, "destructive"},
 
 		// Overlap rows — verify "first error wins" precedence.
-		// fileWriteGuard runs before searchCommandGuard, so a `grep …
-		// > out.txt` should surface the file-write message even though
-		// the search guard would also have fired.
-		{"file-write precedence over search", "grep TODO . > out.txt", true, "write_file"},
-		// searchCommandGuard runs before destructiveCommandGuard, so a
-		// `grep … && rm -rf …` should surface the search message even
-		// though the destructive guard would also have fired.
+		// searchCommandGuard runs FIRST: search is the one absolute
+		// hard-block, so a command that also matches an approval-
+		// eligible class must still classify (and message) as search —
+		// otherwise the approval flow could admit a search bypass.
+		{"search precedence over file-write", "grep TODO . > out.txt", true, "search_project"},
 		{"search precedence over destructive", "grep TODO . && rm -rf build/", true, "search_project"},
+		// fileWriteGuard runs before destructiveCommandGuard.
+		{"file-write precedence over destructive", "echo x > out.txt && rm -rf build/", true, "write_file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

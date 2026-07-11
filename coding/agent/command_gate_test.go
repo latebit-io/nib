@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	upagent "github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/cmdallow"
@@ -363,6 +364,47 @@ func TestProposeCommand(t *testing.T) {
 		approved, _, isError := ag.proposeCommand(ctx, "id-4", "ls", "")
 		if approved || !isError {
 			t.Fatal("canceled proposal must be fatal, not approved")
+		}
+	})
+
+	t.Run("delivery failure resets status to thinking", func(t *testing.T) {
+		// A canceled ctx makes sendCritical fail, exercising the
+		// delivery-failure early return. The frontend's status must not
+		// stay stuck on Reviewing (CodeRabbit catch on PR #209).
+		ag, _, ctx := newAgentAndCoord(t)
+		sub, err := ag.Subscribe(SubscribeOptions{BufferSize: 16})
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		t.Cleanup(sub.Close)
+
+		ctx, cancel := context.WithCancel(ctx)
+		cancel()
+		if approved, _, isError := ag.proposeCommand(ctx, "id-5", "ls", ""); approved || !isError {
+			t.Fatal("delivery failure must be fatal, not approved")
+		}
+
+		var last event.StatusKind
+		sawReviewing := false
+	drain:
+		for {
+			select {
+			case ev := <-sub.Events():
+				if s, ok := ev.(event.AgentStatus); ok {
+					last = s.Status
+					if s.Status == event.StatusReviewing {
+						sawReviewing = true
+					}
+				}
+			default:
+				break drain
+			}
+		}
+		if !sawReviewing {
+			t.Fatal("proposal never entered Reviewing — test premise broken")
+		}
+		if last != event.StatusThinking {
+			t.Fatalf("final status = %v, want StatusThinking (stuck on Reviewing after delivery failure)", last)
 		}
 	})
 }

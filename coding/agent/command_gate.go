@@ -113,6 +113,10 @@ func (a *Agent) proposeCommand(ctx context.Context, id, command, reason string) 
 	}
 
 	a.send(event.AgentStatus{Status: event.StatusReviewing})
+	// Deferred so EVERY exit resets the frontend's status — including
+	// the delivery-failure return below, which previously left the
+	// status stuck on Reviewing for the rest of the run.
+	defer a.send(event.AgentStatus{Status: event.StatusThinking})
 
 	// Critical: if the frontend never sees the proposal, the await
 	// below blocks forever with nothing for the developer to decide.
@@ -124,7 +128,6 @@ func (a *Agent) proposeCommand(ctx context.Context, id, command, reason string) 
 	}
 
 	decision, err := coord.AwaitApproval(ctx)
-	a.send(event.AgentStatus{Status: event.StatusThinking})
 	if err != nil {
 		if errors.Is(err, approval.ErrChannelClosed) {
 			return false, "Error: approval channel closed", true

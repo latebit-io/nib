@@ -32,6 +32,7 @@ import (
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/toolperm"
 	"github.com/latebit-io/nib/kit/tools/bash"
+	gittools "github.com/latebit-io/nib/kit/tools/git"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 	searchtools "github.com/latebit-io/nib/kit/tools/search"
 )
@@ -782,6 +783,18 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 	builtins = append(builtins, tools.NewGlobTool(workspace))
 	builtins = append(builtins, searchtools.New(projectRoot, adaptEngineSearch))
 	builtins = append(builtins, tools.NewPackageInfoTool(projectRoot))
+
+	// Read-only git tools — conditionally registered so a non-repo
+	// project carries no dead tools in its prompt (the diagProvider
+	// pattern). Structured git reads skip bash entirely, so they never
+	// hit the per-command approval prompt.
+	if gittools.InRepo(projectRoot) {
+		builtins = append(builtins,
+			gittools.NewStatusTool(projectRoot),
+			gittools.NewDiffTool(projectRoot),
+			gittools.NewLogTool(projectRoot),
+		)
+	}
 	builtins = a.appendSmokeTool(builtins, projectRoot)
 
 	// LSP-powered tools — conditionally registered via type assertion.

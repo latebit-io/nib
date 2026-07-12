@@ -82,9 +82,13 @@ func TestEmptyArgumentsMeanDefaults(t *testing.T) {
 }
 
 func TestTruncateRuneBoundaries(t *testing.T) {
-	// Fill the head boundary region with multibyte runes so a naive
-	// byte cut would land mid-sequence.
-	head := strings.Repeat("界", maxHeadBytes/3+10)
+	// Both cut points must land MID-rune or a naive byte slice passes:
+	// maxHeadBytes (12288) is a multiple of 3, the byte width of 界, so
+	// a pure-rune head would align the head cut exactly. The one-byte
+	// ASCII prefix shifts it to offset 12287 inside the rune region
+	// (12287 % 3 == 2, mid-sequence). The tail region is 2076 bytes of
+	// runes with the cut 28 bytes in (28 % 3 == 1, mid-sequence).
+	head := "x" + strings.Repeat("界", maxHeadBytes/3+10)
 	tail := strings.Repeat("界", maxTailBytes/3+10)
 	got := truncate(head + strings.Repeat("m", 8192) + tail)
 	if !utf8.ValidString(got) {

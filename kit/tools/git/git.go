@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
@@ -49,6 +50,12 @@ const (
 // a non-repo project should not carry dead tools in its prompt. Any
 // failure (git missing, timeout, not a repo) reports false.
 func InRepo(root string) bool {
+	if root == "" {
+		// An empty root would make exec fall back to the process cwd
+		// and probe whatever repository the binary happens to run in.
+		// Fail closed: no root, no git tools.
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
@@ -87,13 +94,23 @@ func validateArg(kind, v string) error {
 
 // truncate caps s to head+tail with a marker naming how much was cut
 // and how to narrow the query. Small outputs pass through untouched.
+// Both cut points snap to rune starts so a multibyte sequence in the
+// output (CJK path, emoji in a commit message) is never split into
+// invalid UTF-8 on its way to the LLM.
 func truncate(s string) string {
 	if len(s) <= maxHeadBytes+maxTailBytes {
 		return s
 	}
-	dropped := len(s) - maxHeadBytes - maxTailBytes
+	head := maxHeadBytes
+	for head > 0 && !utf8.RuneStart(s[head]) {
+		head--
+	}
+	tailStart := len(s) - maxTailBytes
+	for tailStart < len(s) && !utf8.RuneStart(s[tailStart]) {
+		tailStart++
+	}
 	return fmt.Sprintf("%s\n\n[... %d bytes truncated — narrow with a path or use stat/count ...]\n\n%s",
-		s[:maxHeadBytes], dropped, s[len(s)-maxTailBytes:])
+		s[:head], tailStart-head, s[tailStart:])
 }
 
 // result wraps command output as a successful ToolResult; errResult
@@ -189,8 +206,12 @@ func (t *DiffTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolRes
 		Path   string `json:"path"`
 		Stat   bool   `json:"stat"`
 	}
-	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return errResult(fmt.Errorf("invalid arguments: %w", err))
+	// A zero-argument call can arrive with empty Arguments rather than
+	// "{}"; every field is optional, so empty means all defaults.
+	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &args); err != nil {
+			return errResult(fmt.Errorf("invalid arguments: %w", err))
+		}
 	}
 	argv := []string{"diff"}
 	if args.Staged {
@@ -255,8 +276,12 @@ func (t *LogTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResu
 		Ref   string `json:"ref"`
 		Path  string `json:"path"`
 	}
-	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return errResult(fmt.Errorf("invalid arguments: %w", err))
+	// A zero-argument call can arrive with empty Arguments rather than
+	// "{}"; every field is optional, so empty means all defaults.
+	if raw := strings.TrimSpace(call.Function.Arguments); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &args); err != nil {
+			return errResult(fmt.Errorf("invalid arguments: %w", err))
+		}
 	}
 	count := args.Count
 	if count <= 0 {

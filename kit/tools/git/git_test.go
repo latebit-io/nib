@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/latebit-io/nib/ai/llm"
 )
@@ -59,6 +60,38 @@ func TestInRepo(t *testing.T) {
 	}
 	if InRepo(t.TempDir()) {
 		t.Fatal("InRepo(non-repo) = true, want false")
+	}
+	// Empty root must fail closed, NOT probe the process cwd (which in
+	// this test run is nib's own repository and would report true).
+	if InRepo("") {
+		t.Fatal("InRepo(\"\") = true; empty root probed the process cwd")
+	}
+}
+
+func TestEmptyArgumentsMeanDefaults(t *testing.T) {
+	repo := initRepo(t)
+	for _, empty := range []string{"", "   "} {
+		call := llm.ToolCall{Function: llm.FunctionCall{Arguments: empty}}
+		if res := NewDiffTool(repo).Execute(context.Background(), call); res.IsError {
+			t.Fatalf("git_diff with Arguments=%q errored: %s", empty, res.Content)
+		}
+		if res := NewLogTool(repo).Execute(context.Background(), call); res.IsError {
+			t.Fatalf("git_log with Arguments=%q errored: %s", empty, res.Content)
+		}
+	}
+}
+
+func TestTruncateRuneBoundaries(t *testing.T) {
+	// Fill the head boundary region with multibyte runes so a naive
+	// byte cut would land mid-sequence.
+	head := strings.Repeat("界", maxHeadBytes/3+10)
+	tail := strings.Repeat("界", maxTailBytes/3+10)
+	got := truncate(head + strings.Repeat("m", 8192) + tail)
+	if !utf8.ValidString(got) {
+		t.Fatal("truncate produced invalid UTF-8")
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Fatal("oversize multibyte output missing truncation marker")
 	}
 }
 

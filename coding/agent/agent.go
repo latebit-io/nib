@@ -880,6 +880,13 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 		a.toolDefs = append(a.toolDefs, def)
 	}
 
+	// Extra tools that run shell on their own (skill directives) are
+	// rebound onto THIS agent's registered bash tool — the gated,
+	// lifecycle-decorated one — so a directive passes the same approval /
+	// allowlist / subagent-grant path as a model-issued bash call. Bound
+	// per agent because the same discovered tool value is shared between
+	// a parent and its children.
+	directiveRunner := newBashToolRunner(a.tools["bash"])
 	for _, t := range extraTools {
 		def := t.Definition()
 		key := strings.ToLower(def.Function.Name)
@@ -891,6 +898,7 @@ func (a *Agent) registerTools(workspace Workspace, cache *FileCache, projectRoot
 			slog.Warn("extra tool collision, skipping duplicate", "name", def.Function.Name)
 			continue
 		}
+		t = kit.BindToolShell(t, directiveRunner)
 		t, def = applyLifecycleDecorator(key, t, def)
 		a.tools[key] = t
 		a.toolDefs = append(a.toolDefs, def)

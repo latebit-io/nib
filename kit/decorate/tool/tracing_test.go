@@ -7,6 +7,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/dyncontext"
 )
 
 // stubTool is a minimal [kit.Tool] for tests. Records call count and
@@ -90,5 +91,42 @@ func TestWithTracing_NilEmitIsNoop(t *testing.T) {
 	got := tool.Execute(context.Background(), llm.ToolCall{})
 	if got.Content != "ok" {
 		t.Fatalf("nil-emit decorator altered result: %q", got.Content)
+	}
+}
+
+// bindableTool is a stubTool that also implements kit.ShellBinder,
+// recording the runner it was bound with.
+type bindableTool struct {
+	stubTool
+	bound dyncontext.Runner
+}
+
+func (b *bindableTool) BindShell(r dyncontext.Runner) kit.Tool {
+	c := &bindableTool{stubTool: stubTool{name: b.name, result: b.result}, bound: r}
+	return c
+}
+
+type nopRunner struct{}
+
+func (nopRunner) Run(context.Context, string) (string, error) { return "", nil }
+
+// TestWithTracing_ForwardsBindShell: the tracing wrapper must not strip
+// the wrapped tool's kit.ShellBinder — otherwise an agent's rebinding
+// silently fails and directives fall back to the raw shell runner.
+func TestWithTracing_ForwardsBindShell(t *testing.T) {
+	inner := &bindableTool{stubTool: stubTool{name: "skill_x"}}
+	traced := WithTracing(func(TraceEvent) {})(inner)
+
+	rebound := kit.BindToolShell(traced, nopRunner{})
+	tt, ok := rebound.(*tracedTool)
+	if !ok {
+		t.Fatalf("rebound tool is %T, want *tracedTool (tracing must survive rebinding)", rebound)
+	}
+	bt, ok := tt.inner.(*bindableTool)
+	if !ok || bt.bound == nil {
+		t.Fatalf("inner tool not rebound: %T bound=%v", tt.inner, ok && bt.bound != nil)
+	}
+	if inner.bound != nil {
+		t.Fatal("BindShell must not mutate the original wrapped tool")
 	}
 }

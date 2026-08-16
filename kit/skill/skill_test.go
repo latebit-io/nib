@@ -207,8 +207,12 @@ func newProject(t *testing.T) (projectRoot, globalDir string) {
 	return projectRoot, globalDir
 }
 
-func TestDiscover_AdaptsPromptSkillsRefusesScriptSkills(t *testing.T) {
-	projectRoot, _ := newProject(t)
+// TestDiscover_AdaptsPromptAndShellSkills: project (and global) shell
+// skills load like prompt-only ones — the hosting agent's bash gate,
+// not the loader, decides what shell they may run. Only plugin shell
+// skills carry a load-time trust gate (plugin_discovery_test.go).
+func TestDiscover_AdaptsPromptAndShellSkills(t *testing.T) {
+	projectRoot, globalDir := newProject(t)
 	skillsDir := ProjectDir(projectRoot)
 	writeSkill(t, skillsDir, "prompt-only", `---
 description: pure prompt skill.
@@ -221,18 +225,28 @@ allowed-tools: [Bash]
 ---
 runs a script
 `)
+	writeSkill(t, globalDir, "gscripted", `---
+description: global shell skill.
+allowed-tools: [Bash(git *)]
+---
+runs git
+`)
 	res, err := Discover(projectRoot)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	if len(res.Tools) != 1 || len(res.Loaded) != 1 || res.Loaded[0].Name != "prompt-only" {
-		t.Fatalf("expected only prompt-only loaded, got Loaded=%v", res.Loaded)
+	if len(res.Tools) != 3 || len(res.Loaded) != 3 {
+		t.Fatalf("expected all three skills loaded, got Loaded=%v", res.Loaded)
 	}
-	if res.Loaded[0].Source != SourceProject {
-		t.Errorf("loaded skill source = %q, want project", res.Loaded[0].Source)
+	if len(res.Skipped) != 0 {
+		t.Fatalf("project/global shell skills must not be skipped, got Skipped=%v", res.Skipped)
 	}
-	if len(res.Skipped) != 1 || res.Skipped[0].Name != "scripted" {
-		t.Fatalf("expected scripted skipped, got Skipped=%v", res.Skipped)
+	got := map[string]Source{}
+	for _, s := range res.Loaded {
+		got[s.Name] = s.Source
+	}
+	if got["scripted"] != SourceProject || got["gscripted"] != SourceGlobal || got["prompt-only"] != SourceProject {
+		t.Fatalf("unexpected sources: %v", got)
 	}
 }
 

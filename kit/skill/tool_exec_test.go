@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/toolperm"
 )
 
@@ -75,5 +76,35 @@ func TestSkillTool_Execute_PassthroughWhenNoDirectives(t *testing.T) {
 	}
 	if len(r.ran) != 0 {
 		t.Errorf("no command should run for a directive-free body")
+	}
+}
+
+// TestSkillTool_BindShell_ReturnsReboundCopy: BindShell hands back a copy
+// running directives via the new runner and leaves the original on its
+// own runner — one discovered tool is shared between a parent agent and
+// its children, each binding its own gate.
+func TestSkillTool_BindShell_ReturnsReboundCopy(t *testing.T) {
+	t.Parallel()
+
+	orig := &recordingRunner{out: "orig"}
+	st := skillTool{
+		def:    llm.ToolDef{},
+		body:   "Status: !`git status`",
+		perm:   mustMatcher(t, "Bash(git *)"),
+		runner: orig,
+	}
+	bound := &recordingRunner{out: "bound"}
+	rebound := kit.BindToolShell(st, bound)
+
+	res := rebound.Execute(context.Background(), llm.ToolCall{})
+	if !strings.Contains(res.Content, "bound") || len(bound.ran) != 1 {
+		t.Fatalf("rebound tool must run via the bound runner: %q ran=%v", res.Content, bound.ran)
+	}
+	res = st.Execute(context.Background(), llm.ToolCall{})
+	if !strings.Contains(res.Content, "orig") || len(orig.ran) != 1 {
+		t.Fatalf("original tool must keep its runner: %q ran=%v", res.Content, orig.ran)
+	}
+	if len(bound.ran) != 1 {
+		t.Fatalf("original must not touch the bound runner, ran=%v", bound.ran)
 	}
 }

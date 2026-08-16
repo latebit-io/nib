@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/dyncontext"
 	"log/slog"
 	"strings"
 
@@ -109,4 +110,9 @@ func (g bashGrantGate) Execute(ctx context.Context, call llm.ToolCall) upagent.T
 // the tool's prompt-level self-documentation.
 func (g bashGrantGate) PromptGuidelines() []string {
 	return kit.ToolPromptGuidelines(g.inner)
+}
+
+// BindShell forwards kit.ShellBinder through the grant gate.
+func (g bashGrantGate) BindShell(r dyncontext.Runner) Tool {
+	return bashGrantGate{inner: kit.BindToolShell(g.inner, r), grants: g.grants}
 }

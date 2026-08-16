@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/dyncontext"
 	"log/slog"
 	"strings"
 
@@ -246,4 +247,10 @@ func activeTaskTitle(activePath string) string {
 // guards against on Hooks.
 func (t lifecycleAwareTool) PromptGuidelines() []string {
 	return kit.ToolPromptGuidelines(t.Tool)
+}
+
+// BindShell forwards kit.ShellBinder so a wrapped tool's shell rebinding
+// survives the lifecycle wrapper (same shadowing hazard as above).
+func (t lifecycleAwareTool) BindShell(r dyncontext.Runner) Tool {
+	return lifecycleAwareTool{Tool: kit.BindToolShell(t.Tool, r)}
 }

@@ -74,6 +74,12 @@ func (m *AppModel) handleAPIKeyEntered(msg apiKeyEnteredMsg) (tea.Model, tea.Cmd
 	m.AgentPane.AppendMeta("\n[API key saved for " + msg.profile + "]\n")
 	dm, switchErr := m.Session.SwitchModel(msg.profile, "")
 	m.applySwitchResult(msg.profile, dm, switchErr)
+	// The overlay only hands focus back to the textarea when an agent
+	// already existed; a first key builds the agent here, so refocus now
+	// that the input area is drawn.
+	if m.Session.HasAgent() {
+		m.AgentPane.SetInputActive(true)
+	}
 	return m, nil
 }
 

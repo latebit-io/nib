@@ -4,7 +4,8 @@ import "github.com/latebit-io/nib/kit"
 
 // Plugins renders a [Discover] Result into kit.Plugin entries for a
 // `--plugins` manifest: each loaded skill (tagged with its source
-// layer), each untrusted plugin skill refused, and each shadowed skill.
+// layer), each untrusted plugin shell/fork skill refused, and each
+// shadowed skill.
 // Centralized here so every composition root surfaces skills — and
 // their refusal/shadow reasons — identically; callers skip the
 // [ToolNamePrefix]-named tools in their generic tool loop and append

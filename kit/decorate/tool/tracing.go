@@ -9,6 +9,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/dyncontext"
 )
 
 // TraceEvent is one observation emitted by [WithTracing]'s emit
@@ -117,4 +118,10 @@ func (t *tracedTool) Execute(ctx context.Context, call llm.ToolCall) kit.ToolRes
 // strip the tool's optional prompt-level surfaces.
 func (t *tracedTool) PromptGuidelines() []string {
 	return kit.ToolPromptGuidelines(t.inner)
+}
+
+// BindShell forwards kit.ShellBinder: the rebound inner tool stays
+// traced. Returns a new wrapper; the receiver is unchanged.
+func (t *tracedTool) BindShell(r dyncontext.Runner) kit.Tool {
+	return &tracedTool{inner: kit.BindToolShell(t.inner, r), emit: t.emit}
 }

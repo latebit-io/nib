@@ -96,17 +96,41 @@ func (m *AgentPaneModel) apiKeyInputHeight() int {
 // number of rows the overlay reserves. Shared by the model selector and the
 // API-key prompt so both bottom overlays lay out identically in this state.
 func (m *AgentPaneModel) renderNoAgentOverlay(output []string, row *int, bottomH int, render func([]string, *int)) {
-	contentEnd := m.height - bottomH
-	for *row < contentEnd {
-		output[*row] = agentDimStyle.Render(m.padLine(""))
-		*row++
-	}
+	m.renderNoAgentTranscript(output, row, m.height-bottomH)
 	if *row < m.height-1 {
 		output[*row] = agentDimStyle.Render(m.padLine(strings.Repeat("─", m.width)))
 		*row++
 	}
 	render(output, row)
 	for *row < m.height {
+		output[*row] = agentDimStyle.Render(m.padLine(""))
+		*row++
+	}
+}
+
+// renderNoAgentTranscript fills rows [*row, contentEnd) of the "No LLM
+// configured" splash with the tail of the transcript, dimmed. Feedback
+// that lands via AppendMeta in this state (key-save failures, OAuth
+// device-code instructions, "not sent" notices, slash-command output)
+// would otherwise be invisible until an agent exists. Rows the tail
+// does not fill are blank.
+func (m *AgentPaneModel) renderNoAgentTranscript(output []string, row *int, contentEnd int) {
+	avail := contentEnd - *row
+	if avail <= 0 {
+		return
+	}
+	start := len(m.Lines) - avail
+	if start < 0 {
+		start = 0
+	}
+	for _, line := range m.Lines[start:] {
+		if *row >= contentEnd {
+			break
+		}
+		output[*row] = agentDimStyle.Render(m.padLine(line))
+		*row++
+	}
+	for *row < contentEnd {
 		output[*row] = agentDimStyle.Render(m.padLine(""))
 		*row++
 	}
@@ -585,9 +609,13 @@ func (m *AgentPaneModel) handlePaste(msg tea.PasteMsg) tea.Cmd {
 // handleAPIKeyInput processes key events during API key input, delegating to
 // the overlay sub-model. When the overlay closes (Escape or Enter), input
 // focus returns to the textarea — the parent owns input-activation state.
+// Only when an agent exists: the no-agent splash does not draw the
+// textarea, so focusing it there invites blind typing into a box that
+// cannot submit. A successful key entry refocuses via handleAPIKeyEntered
+// once the agent is built.
 func (m *AgentPaneModel) handleAPIKeyInput(msg tea.KeyPressMsg) tea.Cmd {
 	cmd := m.apiKeyInput.Update(msg, m.services.Clipboard)
-	if !m.apiKeyInput.IsActive() {
+	if !m.apiKeyInput.IsActive() && m.hasAgent {
 		m.inputActive = true
 	}
 	return cmd
@@ -2289,10 +2317,7 @@ func (m *AgentPaneModel) Render() string {
 			// model selector's generous half-pane reservation).
 			m.renderNoAgentOverlay(output, &row, m.apiKeyInputHeight()+1, m.renderAPIKeyInput)
 		default:
-			for row < m.height {
-				output[row] = agentDimStyle.Render(m.padLine(""))
-				row++
-			}
+			m.renderNoAgentTranscript(output, &row, m.height)
 		}
 		return strings.Join(output, "\n")
 	}

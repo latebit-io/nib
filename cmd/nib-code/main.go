@@ -161,9 +161,11 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 
 	// Discover model-invoked skills from project-local (.project/skills),
 	// user-global (<UserConfigDir>/nib/skills), and enabled plugins'
-	// converted skills (lowest precedence). Pure-prompt skills become
-	// tools; script-bearing skills are refused (logged) until the
-	// bash-approval surface exists.
+	// converted skills (lowest precedence). Every project/global skill
+	// becomes a tool; a plugin's shell or fork skills load only once the
+	// plugin is trusted. Shell a skill runs (directives or instructions)
+	// goes through the agent's bash gate: the agent rebinds each skill
+	// tool's runner onto its own bash tool at registration.
 	var pluginSkills []skill.PluginSkillSource
 	for _, p := range activePlugins {
 		pluginSkills = append(pluginSkills, skill.PluginSkillSource{ID: p.ID, Dir: p.SkillsDir})

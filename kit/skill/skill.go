@@ -8,11 +8,14 @@
 // (loaded on demand). This rides the existing tool port; it is a
 // bundled plug-in, not a core change.
 //
-// v1 supports pure-prompt skills only. A skill that requests shell
-// execution ([Skill.NeedsShell]) is parsed but refused at adapt time,
-// because executing third-party shell needs the per-command approval
-// surface that does not exist yet. The refusal is the seam the future
-// script-skill extension slots into — see [Discover].
+// Shell-bearing skills ([Skill.NeedsShell]) load alongside prompt-only
+// ones. The shell they request is not trusted on their say-so: the
+// hosting agent rebinds each skill tool's directive runner onto its own
+// bash gate ([kit.ShellBinder]), so per-command approval, the
+// always-allow list, and subagent grants apply to a skill's shell
+// exactly as to a model-issued bash call. Plugin-imported shell skills
+// additionally require the plugin to be trusted before they load — see
+// [DiscoverWithPlugins].
 package skill
 
 import (
@@ -129,11 +132,11 @@ func tokenize(s string) []string {
 }
 
 // NeedsShell reports whether the skill requests shell execution via its
-// allowed-tools list. Such skills are refused in v1 (no bash-approval
-// surface yet); the predicate is the single branch the future
-// script-skill adapter flips. Matching is whole-token, not substring,
-// so legitimate tool names like "publish" or "run_tests" are not
-// misclassified.
+// allowed-tools list. Plugin-imported shell skills load only when their
+// plugin is trusted ([DiscoverWithPlugins]); project and global ones
+// load and rely on the hosting agent's bash gate. Matching is
+// whole-token, not substring, so legitimate tool names like "publish"
+// or "run_tests" are not misclassified.
 func (s Skill) NeedsShell() bool {
 	for _, t := range s.AllowedTools {
 		for _, tok := range tokenize(t) {

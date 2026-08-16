@@ -28,6 +28,10 @@ import (
 // natural park boundary the foundation hits before picking up the
 // queued input).
 func (m *AppModel) handleGoalSubmitted(msg GoalSubmittedMsg) (tea.Model, tea.Cmd) {
+	if !m.Session.HasAgent() {
+		m.noteNoAgent()
+		return m, nil
+	}
 	// Reset the per-run spend counter on every submission so the budget
 	// indicator tracks the same per-run scope the agent's budget gate
 	// uses (the gate resets on both RunWithMode and Reply). The fresh
@@ -51,8 +55,24 @@ func (m *AppModel) handleGoalSubmitted(msg GoalSubmittedMsg) (tea.Model, tea.Cmd
 // and clears the agent pane. Planning goals always start fresh —
 // there's no "continued conversation" branch.
 func (m *AppModel) handlePlanningGoalSubmitted(msg PlanningGoalSubmittedMsg) (tea.Model, tea.Cmd) {
+	if !m.Session.HasAgent() {
+		m.noteNoAgent()
+		return m, nil
+	}
 	m.AgentPane.BeginRun()
 	m.Session.SubmitPlanningGoal(msg.Goal)
 	m.AgentPane.Clear()
 	return m, nil
+}
+
+// noAgentNotice is the inline feedback for a goal submitted with no LLM
+// provider configured. Session.SubmitGoal would silently no-op; surfacing
+// the reason and the recovery action keeps Enter from dropping on the floor.
+const noAgentNotice = "[not sent: no LLM configured. Alt+M to pick a provider or enter an API key, or set LLM_API_KEY]\n"
+
+// noteNoAgent surfaces noAgentNotice in the agent pane instead of handing
+// the goal to a session that has no agent. The transcript is left intact
+// (no BeginRun / Clear) so the notice stays visible in the no-agent splash.
+func (m *AppModel) noteNoAgent() {
+	m.AgentPane.AppendMeta(noAgentNotice)
 }

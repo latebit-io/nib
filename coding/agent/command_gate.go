@@ -14,6 +14,7 @@ import (
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/cmdallow"
+	"github.com/latebit-io/nib/kit/dyncontext"
 	"github.com/latebit-io/nib/kit/tools/bash"
 )
 
@@ -97,6 +98,11 @@ func (g commandApprovalGate) Execute(ctx context.Context, call llm.ToolCall) upa
 // not the tool's prompt-level self-documentation.
 func (g commandApprovalGate) PromptGuidelines() []string {
 	return kit.ToolPromptGuidelines(g.inner)
+}
+
+// BindShell forwards kit.ShellBinder through the approval gate.
+func (g commandApprovalGate) BindShell(r dyncontext.Runner) Tool {
+	return commandApprovalGate{inner: kit.BindToolShell(g.inner, r), allow: g.allow, propose: g.propose}
 }
 
 // proposeCommand runs the interactive approval flow for a bash command:

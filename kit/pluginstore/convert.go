@@ -336,11 +336,10 @@ func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport
 			report.add("skill", name, "agent: reference dropped (not yet supported)")
 		}
 		// Shell-bearing skills are converted WITH their grants preserved,
-		// but they will not execute until the trust + shell-execution layer
-		// lands: the skill loader still refuses script-bearing skills. Note
-		// it so the user knows the artifact exists but is inert for now.
+		// but the loader refuses them until the plugin is trusted. Note it
+		// so the user knows the artifact exists but is inert until then.
 		if toolperm.AnyShell(allow) {
-			report.add("skill-shell", name, "shell grant carried; runs only once the plugin is trusted (M2)")
+			report.add("skill-shell", name, "shell grant carried; runs only once the plugin is trusted")
 		}
 		skillDst := filepath.Join(dst, "skills", name)
 		if err := copyTree(skillSrc, skillDst); err != nil {

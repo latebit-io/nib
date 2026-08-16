@@ -42,8 +42,8 @@ func (t skillTool) Definition() llm.ToolDef { return t.def }
 // context (“ !`cmd` “ / fenced ` ```! `) has each directive expanded by
 // [dyncontext.Expand], which runs a command only if the skill's grants
 // permit it — so a prompt-only skill (deny-all matcher) never executes
-// shell, and a trusted plugin's shell skill runs only its declared
-// commands.
+// shell, and a shell skill runs only its declared commands, through
+// whatever runner the hosting agent bound (see [skillTool.BindShell]).
 func (t skillTool) Execute(ctx context.Context, _ llm.ToolCall) upagent.ToolResult {
 	body := t.body
 	if dyncontext.HasDirectives(body) {
@@ -52,9 +52,22 @@ func (t skillTool) Execute(ctx context.Context, _ llm.ToolCall) upagent.ToolResu
 	return upagent.ToolResult{Content: body}
 }
 
+// BindShell implements [kit.ShellBinder]: it returns a copy of the tool
+// whose dynamic-context directives execute via r instead of the default
+// [dyncontext.ShellRunner]. The coding agent binds a runner over its
+// own bash tool so directives pass the same per-command approval,
+// allowlist, and subagent grant gates as a model-issued bash call. Value
+// receiver: the receiver is left untouched, so a discovered tool shared
+// between agents binds independently for each.
+func (t skillTool) BindShell(r dyncontext.Runner) upagent.Tool {
+	t.runner = r
+	return t
+}
+
 // adaptTool builds the agent.Tool for a skill, wiring its permission
 // matcher and the default shell runner so dynamic-context directives are
-// gated by the skill's grants at invocation time.
+// gated by the skill's grants at invocation time. Agents with a shell
+// gate rebind the runner via [skillTool.BindShell].
 func adaptTool(s Skill) skillTool {
 	return skillTool{
 		def: llm.ToolDef{
@@ -106,8 +119,9 @@ type Result struct {
 	Tools []upagent.Tool
 	// Loaded are the skills adapted into Tools, parallel to Tools.
 	Loaded []Skill
-	// Skipped are the skills refused in v1 (script-bearing), with the
-	// reason logged. Surfaced so the refusal is visible, not silent.
+	// Skipped are the plugin shell/fork skills refused because their
+	// plugin is untrusted, with the reason logged. Surfaced so the
+	// refusal is visible, not silent.
 	Skipped []Skill
 	// Shadowed are the skills hidden by a higher-precedence same-name
 	// skill (a project skill shadows a global one). Surfaced so the
@@ -122,13 +136,12 @@ type Result struct {
 
 // Discover loads skills for a project from both layers — project-local
 // (<projectRoot>/.project/skills) and user-global ([GlobalDir]) — merges
-// them with project shadowing global ([Merge]), and adapts the
-// surviving pure-prompt skills into tools. Script-bearing skills
-// ([Skill.NeedsShell]) are refused with a logged warning and recorded in
-// Result.Skipped rather than adapted — executing third-party shell needs
-// the (unbuilt) bash-approval surface. Replacing that branch with a
-// script-skill adapter is the whole of the future extension; nothing
-// else here changes.
+// them with project shadowing global ([Merge]), and adapts the survivors
+// into tools. Shell-bearing skills ([Skill.NeedsShell]) load like any
+// other: the shell they request runs through the hosting agent's bash
+// gate (per-command approval / allowlist / subagent grants) once the
+// agent rebinds the tool via [kit.ShellBinder]. Only plugin-imported
+// shell skills carry an extra load-time gate; see [DiscoverWithPlugins].
 //
 // A missing directory on either layer is a no-op. A non-nil error
 // reports per-skill parse failures (see [Load]); everything that did
@@ -157,17 +170,19 @@ type TrustFunc func(pluginID string) bool
 // project or global skill shadows them, so a user's own skills always
 // win over a third-party import.
 //
-// Shell-bearing skills ([Skill.NeedsShell]) remain refused EXCEPT a
-// plugin skill whose plugin trusted reports true: trusting a plugin
-// (via `/plugin trust`) opts its shell skills in. Project and global
-// shell skills stay refused (nib has no per-skill shell surface for
-// user-authored skills yet). Nil pluginSkills + nil trusted reproduces
-// the historic [Discover] behavior.
+// A plugin's shell-bearing skill ([Skill.NeedsShell]) loads only when
+// trusted reports true for its plugin: trusting a plugin (via `/plugin
+// trust`) opts its shell skills in, because third-party provenance needs
+// a vouch before its instructions enter the prompt at all. Project and
+// global shell skills load unconditionally — the per-command bash
+// approval surface is the backstop for the shell they request. Nil
+// pluginSkills + nil trusted reproduces the [Discover] behavior.
 //
 // This gate decides whether a shell skill's instructions LOAD. Which
 // shell commands those instructions may actually run is enforced
-// per-command at invocation by the skill's [toolperm.Matcher] over its
-// dynamic-context directives (see [skillTool.Execute] / [dyncontext]).
+// per-command at invocation: the skill's [toolperm.Matcher] over its
+// dynamic-context directives (see [skillTool.Execute] / [dyncontext]),
+// then the hosting agent's bash gate once it rebinds the runner.
 func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, trusted TrustFunc) (Result, error) {
 	var errs []error
 
@@ -228,10 +243,10 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 			res.Forking = append(res.Forking, s)
 			continue
 		}
-		if s.NeedsShell() && !shellTrusted(s, trusted) {
+		if s.NeedsShell() && s.Source == SourcePlugin && !shellTrusted(s, trusted) {
 			res.Skipped = append(res.Skipped, s)
-			slog.Warn("skill: refused script-bearing skill (untrusted or no shell surface)",
-				"skill", s.Name, "source", s.Source, "plugin", s.PluginID,
+			slog.Warn("skill: refused untrusted plugin shell skill (run /plugin trust to enable)",
+				"skill", s.Name, "plugin", s.PluginID,
 				"path", s.Path, "allowed_tools", s.AllowedTools)
 			continue
 		}
@@ -245,11 +260,11 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 	return res, nil
 }
 
-// shellTrusted reports whether a shell-bearing skill may load: only a
-// plugin skill with a non-empty id whose plugin the user has trusted. The
-// empty-id guard is defense-in-depth against an unidentified plugin
-// collapsing onto trusted(""). Project/global shell skills are never
-// auto-trusted here.
+// shellTrusted reports whether a plugin's shell-bearing (or forking)
+// skill may load: the plugin id is non-empty and the user has trusted
+// it. The empty-id guard is defense-in-depth against an unidentified
+// plugin collapsing onto trusted(""). Callers gate on Source themselves;
+// project/global skills never reach this predicate.
 func shellTrusted(s Skill, trusted TrustFunc) bool {
 	return s.Source == SourcePlugin && s.PluginID != "" && trusted != nil && trusted(s.PluginID)
 }

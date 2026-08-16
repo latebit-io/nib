@@ -20,15 +20,17 @@ const maxRunOutput = 64 << 10 // 64 KiB
 
 // ShellRunner executes commands via `sh -c`, supporting real shell
 // syntax (quotes, pipes, redirects). It is only ever reached after a
-// command clears the [toolperm.Matcher] gate, and only for plugins the
-// user has explicitly trusted.
+// command clears the [toolperm.Matcher] gate. It is the default runner
+// for skill tools; an agent with a shell gate replaces it with a runner
+// over its own bash tool (kit.ShellBinder), so in nib-code directives
+// pass per-command approval as well.
 //
 // CAVEAT: matcher globs match the whole command string, so a broad grant
 // like `Bash(git *)` also matches a chained `git x; rm -rf y` because the
 // `*` spans the separator. Tighter per-command parsing (argv-level gating
-// that blocks shell chaining) is future hardening; today the trust gate
-// (the user vouched for this plugin) is the backstop. Construct via
-// [NewShellRunner].
+// that blocks shell chaining) is future hardening; today the agent's
+// bash gate (approval, or the plugin trust vouch where a consumer wires
+// no gate) is the backstop. Construct via [NewShellRunner].
 type ShellRunner struct {
 	timeout time.Duration
 }

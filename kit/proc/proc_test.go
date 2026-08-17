@@ -2,7 +2,6 @@ package proc
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,8 +212,10 @@ func TestRunWaitDelayReapsDescendants(t *testing.T) {
 	// makes the parent shell exit cleanly. WaitDelay (1s) fires
 	// because the descendant still holds the pipe → ErrWaitDelay
 	// path → must reap.
+	// Dir + relative name keeps the temp path out of the shell string.
 	res := Run(context.Background(), Request{
-		Shell:   fmt.Sprintf("( sleep 2; touch %s ) & printf done", sentinel),
+		Shell:   "( sleep 2; touch lingered.txt ) & printf done",
+		Dir:     dir,
 		Timeout: 10 * time.Second,
 	})
 	if res.StartErr != nil {

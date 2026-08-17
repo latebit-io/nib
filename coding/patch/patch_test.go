@@ -123,6 +123,31 @@ func TestParse_LeadingBlankLinesTolerated(t *testing.T) {
 	}
 }
 
+func TestParse_EndMarkerAsContextLine(t *testing.T) {
+	// A context line whose text is the terminator must not end the
+	// envelope — only an unindented "*** End Patch" does.
+	raw := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: a.go",
+		"@@",
+		" *** End Patch",
+		"-x := 1",
+		"+x := 2",
+		"*** End Patch",
+	}, "\n")
+	got, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	lines := got.Files[0].Hunks[0].Lines
+	if len(lines) != 3 {
+		t.Fatalf("want 3 lines, got %d: %+v", len(lines), lines)
+	}
+	if lines[0] != (HunkLine{Kind: HunkContext, Text: "*** End Patch"}) {
+		t.Errorf("context: got %+v", lines[0])
+	}
+}
+
 func TestParse_BlankContextLine(t *testing.T) {
 	// Empty hunk line (no prefix at all) treated as empty context.
 	raw := strings.Join([]string{

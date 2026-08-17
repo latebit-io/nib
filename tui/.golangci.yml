@@ -84,6 +84,8 @@ linters:
               desc: "sanitize is a framework-agnostic text filter — no nib imports"
             - pkg: "charm.land/"
               desc: "sanitize is framework-agnostic — no Bubble Tea / lipgloss"
+            - pkg: "github.com/charmbracelet/"
+              desc: "sanitize is framework-agnostic — no charmbracelet helpers"
         tui-keymap-leaf:
           files:
             - "**/tui/keymap/*.go"
@@ -92,6 +94,8 @@ linters:
               desc: "keymap is a framework-free action catalog — no nib imports"
             - pkg: "charm.land/"
               desc: "keymap is framework-free — frontends map their own input events to Actions"
+            - pkg: "github.com/charmbracelet/"
+              desc: "keymap is framework-free — no charmbracelet helpers"
         tui-command-leaf:
           files:
             - "**/tui/command/*.go"

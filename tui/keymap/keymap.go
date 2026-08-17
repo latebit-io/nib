@@ -1,6 +1,7 @@
 // Package keymap defines editor actions and their human-readable binding catalog.
-// This package has zero framework dependencies — frontends import it to map
-// their input events to Actions and to render help screens from the catalog.
+// It lives under tui/ but has zero framework dependencies — frontends import
+// it to map their input events to Actions and to render help screens from
+// the catalog.
 package keymap
 
 // Action represents an editor action that can be triggered by a keybinding.
@@ -85,14 +86,17 @@ const (
 	// ActionFocusAgent focuses the agent pane.
 	ActionFocusAgent
 
-	// Find actions open search interfaces.
-	ActionFind          // ActionFind opens the in-file find bar.
-	ActionFindReplace   // ActionFindReplace opens find bar with replace mode.
-	ActionFindInProject // ActionFindInProject opens project-wide search.
+	// ActionFind opens the in-file find bar.
+	ActionFind
+	// ActionFindReplace opens the find bar in replace mode.
+	ActionFindReplace
+	// ActionFindInProject opens project-wide search.
+	ActionFindInProject
 
-	// Buffer actions switch between open buffers.
-	ActionNextBuffer // ActionNextBuffer switches to the next open buffer.
-	ActionPrevBuffer // ActionPrevBuffer switches to the previous open buffer.
+	// ActionNextBuffer switches to the next open buffer.
+	ActionNextBuffer
+	// ActionPrevBuffer switches to the previous open buffer.
+	ActionPrevBuffer
 
 	// ActionGoToDefinition jumps to the definition of the symbol under the cursor.
 	ActionGoToDefinition
@@ -141,8 +145,9 @@ type Binding struct {
 	Category Category
 }
 
-// DefaultBindings returns the full keybinding catalog, ordered by category.
-// This is the single source of truth for help screens across all frontends.
+// DefaultBindings returns the full keybinding catalog, grouped by category
+// (help screens order the groups via [CategoryOrder]). This is the single
+// source of truth for help screens across all frontends.
 func DefaultBindings() []Binding {
 	return []Binding{
 		// Navigation

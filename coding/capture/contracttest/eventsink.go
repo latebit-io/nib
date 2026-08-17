@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/latebit-io/nib/engine/capture"
+	"github.com/latebit-io/nib/coding/capture"
 )
 
 // SessionEventSink runs the [capture.SessionEventSink] contract suite

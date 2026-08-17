@@ -2,12 +2,28 @@ package demarkus_test
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/kit/memory/demarkus"
 )
+
+// integrationEnvVar opts the network-touching integration tests in.
+// They download demarkus binaries, so they never run under plain
+// `go test`; set the variable to any non-empty value to enable them.
+var integrationEnvVar = brand.EnvPrefix + "INTEGRATION"
+
+// requireIntegration skips the calling test unless integration tests are
+// enabled via integrationEnvVar (and not -short).
+func requireIntegration(t *testing.T) {
+	t.Helper()
+	if testing.Short() || os.Getenv(integrationEnvVar) == "" {
+		t.Skipf("integration test disabled; set %s=1 (downloads demarkus binaries)", integrationEnvVar)
+	}
+}
 
 func TestOpen_FailsOnUninstallableRoot(t *testing.T) {
 	// /dev/null/nope cannot host a .project directory, so binary
@@ -42,9 +58,7 @@ func TestResult_CloseIsIdempotent(t *testing.T) {
 }
 
 func TestOpen_Integration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	requireIntegration(t)
 
 	// Bound the entire test — install + start + round-trip — so a
 	// stalled download or server start cannot hang CI indefinitely.

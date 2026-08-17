@@ -1,0 +1,98 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+
+  settings:
+    depguard:
+      rules:
+        # Whole-module backstop: kit is the public library layer below
+        # coding/tui/cmd and beside engine. Nothing downstream, ever.
+        kit-no-downstream:
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding"
+              desc: "kit must not import coding — coding depends on kit, not the reverse"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "kit must not import tui — frontends are downstream"
+            - pkg: "github.com/latebit-io/nib/engine"
+              desc: "kit must not import engine — kit carries no editor dependency (kit/tools/search takes a SearchFunc for this reason)"
+            - pkg: "github.com/latebit-io/nib/cmd"
+              desc: "kit must not import composition roots"
+            - pkg: "github.com/stretchr/testify"
+              desc: "stdlib testing only — no testify"
+
+        # Foundation events are translated exactly once, in kit root's
+        # translator.go. Every sub-package speaks kit/event.
+        foundation-events-root-only:
+          files:
+            - "$all"
+            - "!**/kit/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/agent/event"
+              desc: "only kit root translates foundation events; sub-packages consume kit/event"
+
+        # Pure ports and shared leaf primitives: consumers across modules
+        # import these directly, so they stay free of the agent loop and
+        # of provider/brand knowledge.
+        ports-stay-pure:
+          files:
+            - "**/kit/memory/*.go"
+            - "**/kit/event/*.go"
+            - "**/kit/toolperm/*.go"
+            - "**/kit/hookspec/*.go"
+            - "**/kit/frontmatter/*.go"
+            - "**/kit/internal/filecap/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/agent"
+              desc: "port packages must not import the agent loop"
+            - pkg: "github.com/latebit-io/nib/ai"
+              desc: "port packages must not import providers or brand"
+
+        # Process execution is confined to the enumerated packages. A new
+        # package is denied until listed here (fail-closed).
+        exec-allowlist:
+          files:
+            - "$all"
+            - "!**/kit/proc/*.go"
+            - "!**/kit/tools/bash/*.go"
+            - "!**/kit/tools/git/*.go"
+            - "!**/kit/dyncontext/*.go"
+            - "!**/kit/hookrun/*.go"
+            - "!**/kit/mcp/*.go"
+            - "!**/kit/pluginstore/*.go"
+            - "!**/kit/memory/demarkus/server/*.go"
+          deny:
+            - pkg: "os/exec"
+              desc: "process execution only in proc, tools/bash, tools/git, dyncontext, hookrun, mcp, pluginstore, memory/demarkus/server"
+
+        # Network access is confined to the demarkus binary installer.
+        http-allowlist:
+          files:
+            - "$all"
+            - "!**/kit/memory/demarkus/server/*.go"
+          deny:
+            - pkg: "net/http"
+              desc: "kit is offline except the demarkus binary installer"
+
+        # Test scaffolding never links into production code.
+        contracttest-tests-only:
+          files:
+            - "!$test"
+          deny:
+            - pkg: "github.com/latebit-io/nib/kit/contracttest"
+              desc: "contracttest is test-only; production code must not import it"
+
+        # Built-in tools are leaves.
+        tools-are-leaves:
+          files:
+            - "**/kit/tools/**/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/kit/skill"
+              desc: "tools must not import skill"
+            - pkg: "github.com/latebit-io/nib/kit/pluginstore"
+              desc: "tools must not import pluginstore"
+            - pkg: "github.com/latebit-io/nib/kit/headless"
+              desc: "tools must not import headless"
+            - pkg: "github.com/latebit-io/nib/kit/memory/demarkus"
+              desc: "tools depend on the memory port, not a concrete adapter"

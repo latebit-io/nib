@@ -14,9 +14,9 @@ import (
 
 	"github.com/latebit-io/nib/engine/search"
 
+	"github.com/latebit-io/nib/coding/capture"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/capture"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/openfile"
 	"github.com/latebit-io/nib/kit/cmdallow"

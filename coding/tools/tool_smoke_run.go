@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/runconfig"
 	"github.com/latebit-io/nib/coding/smoke"
-	"github.com/latebit-io/nib/engine/runconfig"
 )
 
 // SmokeRunTool lets the LLM execute the project's smoke-run command —

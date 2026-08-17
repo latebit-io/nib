@@ -3,7 +3,7 @@
 // Classification is driven by per-language tree-sitter highlight queries
 // (`highlights.scm`) vendored alongside this package. Capture names follow
 // the nvim-treesitter convention (e.g., `@keyword.function`, `@string.escape`)
-// and are mapped to [TokenKind] via a prefix-fallback lookup: a name with
+// and are mapped to [syntax.TokenKind] via a prefix-fallback lookup: a name with
 // no direct mapping falls back through its dotted prefixes.
 package highlight
 
@@ -31,30 +31,6 @@ var luaHighlightsSCM string
 //go:embed queries/yaml/highlights.scm
 var yamlHighlightsSCM string
 
-// Re-export the syntax types so existing references to e.g. highlight.Token
-// continue to resolve. Canonical definitions live in [engine/syntax]; this
-// package supplies a tree-sitter-backed implementation of [syntax.Highlighter].
-type (
-	// TokenKind aliases [syntax.TokenKind].
-	TokenKind = syntax.TokenKind
-	// Token aliases [syntax.Token].
-	Token = syntax.Token
-)
-
-// Token-kind constants re-exported from [engine/syntax].
-const (
-	KindKeyword  = syntax.KindKeyword
-	KindString   = syntax.KindString
-	KindComment  = syntax.KindComment
-	KindNumber   = syntax.KindNumber
-	KindType     = syntax.KindType
-	KindProperty = syntax.KindProperty
-	KindOperator = syntax.KindOperator
-	KindFunction = syntax.KindFunction
-	KindConstant = syntax.KindConstant
-	KindNone     = syntax.KindNone
-)
-
 // langSpec describes one supported language: its tree-sitter grammar and
 // the vendored highlight query.
 type langSpec struct {
@@ -72,55 +48,55 @@ var langByExt = map[string]langSpec{
 }
 
 // captureNameToKind maps tree-sitter capture names (nvim-treesitter convention)
-// to [TokenKind]. Lookup is prefix-fallback: if "keyword.function" is absent,
-// we try "keyword" before giving up. Unmapped names produce [KindNone] and
+// to [syntax.TokenKind]. Lookup is prefix-fallback: if "keyword.function" is absent,
+// we try "keyword" before giving up. Unmapped names produce [syntax.KindNone] and
 // are skipped during rendering.
-var captureNameToKind = map[string]TokenKind{
-	"keyword":     KindKeyword,
-	"conditional": KindKeyword,
-	"repeat":      KindKeyword,
-	"label":       KindKeyword,
-	"include":     KindKeyword,
-	"exception":   KindKeyword,
-	"preproc":     KindKeyword,
-	"attribute":   KindKeyword,
-	"property":    KindProperty,
-	"string":      KindString,
-	"escape":      KindString,
-	"comment":     KindComment,
-	"number":      KindNumber,
-	"boolean":     KindConstant,
-	"constant":    KindConstant,
-	"type":        KindType,
-	"constructor": KindType,
-	"operator":    KindOperator,
-	"function":    KindFunction,
-	"method":      KindFunction,
+var captureNameToKind = map[string]syntax.TokenKind{
+	"keyword":     syntax.KindKeyword,
+	"conditional": syntax.KindKeyword,
+	"repeat":      syntax.KindKeyword,
+	"label":       syntax.KindKeyword,
+	"include":     syntax.KindKeyword,
+	"exception":   syntax.KindKeyword,
+	"preproc":     syntax.KindKeyword,
+	"attribute":   syntax.KindKeyword,
+	"property":    syntax.KindProperty,
+	"string":      syntax.KindString,
+	"escape":      syntax.KindString,
+	"comment":     syntax.KindComment,
+	"number":      syntax.KindNumber,
+	"boolean":     syntax.KindConstant,
+	"constant":    syntax.KindConstant,
+	"type":        syntax.KindType,
+	"constructor": syntax.KindType,
+	"operator":    syntax.KindOperator,
+	"function":    syntax.KindFunction,
+	"method":      syntax.KindFunction,
 }
 
-// kindForCaptureName resolves a capture name to a [TokenKind] using
-// prefix-fallback: "string.escape" → "string.escape", "string", KindNone.
-func kindForCaptureName(name string) TokenKind {
+// kindForCaptureName resolves a capture name to a [syntax.TokenKind] using
+// prefix-fallback: "string.escape" → "string.escape", "string", syntax.KindNone.
+func kindForCaptureName(name string) syntax.TokenKind {
 	for n := name; n != ""; {
 		if k, ok := captureNameToKind[n]; ok {
 			return k
 		}
 		idx := strings.LastIndex(n, ".")
 		if idx < 0 {
-			return KindNone
+			return syntax.KindNone
 		}
 		n = n[:idx]
 	}
-	return KindNone
+	return syntax.KindNone
 }
 
 // Highlighter manages tree-sitter parsing and highlight queries for a file.
 type Highlighter struct {
 	parser       *sitter.Parser
 	query        *sitter.Query
-	captureKinds []TokenKind // indexed by capture id
+	captureKinds []syntax.TokenKind // indexed by capture id
 	tree         *sitter.Tree
-	cache        [][]Token // per-line tokens, computed on Parse()
+	cache        [][]syntax.Token // per-line tokens, computed on Parse()
 }
 
 // NewHighlighter is the [syntax.HighlighterFactory]-shaped constructor.
@@ -179,7 +155,7 @@ func New(filename string) *Highlighter {
 	}
 
 	names := query.CaptureNames()
-	captureKinds := make([]TokenKind, len(names))
+	captureKinds := make([]syntax.TokenKind, len(names))
 	for i, name := range names {
 		captureKinds[i] = kindForCaptureName(name)
 	}
@@ -208,7 +184,7 @@ func (h *Highlighter) Parse(source string) {
 	}
 
 	lines := strings.Split(source, "\n")
-	h.cache = make([][]Token, len(lines))
+	h.cache = make([][]syntax.Token, len(lines))
 
 	qc := sitter.NewQueryCursor()
 	defer qc.Close()
@@ -220,7 +196,7 @@ func (h *Highlighter) Parse(source string) {
 			continue
 		}
 		kind := h.captureKinds[cap.Index]
-		if kind == KindNone {
+		if kind == syntax.KindNone {
 			continue
 		}
 		h.addCaptureTokens(cap.Node, kind, lines)
@@ -232,7 +208,7 @@ func (h *Highlighter) Parse(source string) {
 	// precedence) so HighlightLine returns them left-to-right. Done once here
 	// rather than per HighlightLine call to keep that lookup O(1).
 	for i := range h.cache {
-		slices.SortStableFunc(h.cache[i], func(a, b Token) int {
+		slices.SortStableFunc(h.cache[i], func(a, b syntax.Token) int {
 			return a.Col - b.Col
 		})
 	}
@@ -251,7 +227,7 @@ func (h *Highlighter) Close() {
 
 // HighlightLine returns cached tokens for the given line, sorted by start
 // column (stable). O(1) lookup — the sort is performed once in Parse.
-func (h *Highlighter) HighlightLine(lineNum int) []Token {
+func (h *Highlighter) HighlightLine(lineNum int) []syntax.Token {
 	if lineNum < 0 || lineNum >= len(h.cache) {
 		return nil
 	}
@@ -260,7 +236,7 @@ func (h *Highlighter) HighlightLine(lineNum int) []Token {
 
 // addCaptureTokens converts a captured node's byte range into per-line
 // rune-based tokens and appends them to the cache.
-func (h *Highlighter) addCaptureTokens(node sitter.Node, kind TokenKind, lines []string) {
+func (h *Highlighter) addCaptureTokens(node sitter.Node, kind syntax.TokenKind, lines []string) {
 	startRow := int(node.StartPosition().Row)
 	endRow := int(node.EndPosition().Row)
 	startCol := int(node.StartPosition().Column)
@@ -276,8 +252,8 @@ func (h *Highlighter) addCaptureTokens(node sitter.Node, kind TokenKind, lines [
 }
 
 // byteRangeToToken converts a node's byte-offset range on a single line to
-// a rune-based Token. Returns false if the range is empty or invalid.
-func byteRangeToToken(lineText string, line, startRow, endRow, startCol, endCol int, kind TokenKind) (Token, bool) {
+// a rune-based syntax.Token. Returns false if the range is empty or invalid.
+func byteRangeToToken(lineText string, line, startRow, endRow, startCol, endCol int, kind syntax.TokenKind) (syntax.Token, bool) {
 	lineByteLen := len(lineText)
 
 	scBytes := 0
@@ -298,13 +274,13 @@ func byteRangeToToken(lineText string, line, startRow, endRow, startCol, endCol 
 
 	// Defensive: tree-sitter can return stale/out-of-range positions.
 	if scBytes < 0 || scBytes > lineByteLen || ecBytes < 0 || ecBytes > lineByteLen {
-		return Token{}, false
+		return syntax.Token{}, false
 	}
 
 	sc := utf8.RuneCountInString(lineText[:scBytes])
 	ec := utf8.RuneCountInString(lineText[:ecBytes])
 	if sc >= ec {
-		return Token{}, false
+		return syntax.Token{}, false
 	}
-	return Token{Col: sc, Len: ec - sc, Kind: kind}, true
+	return syntax.Token{Col: sc, Len: ec - sc, Kind: kind}, true
 }

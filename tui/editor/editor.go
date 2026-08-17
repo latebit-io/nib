@@ -93,8 +93,8 @@ type Editor struct {
 // New creates an editor wrapping the given buffer. The returned editor
 // has no syntax highlighter attached — callers that want highlighting
 // should call [Editor.SetHighlighter] with a concrete implementation
-// (e.g. the one from the highlight package), or configure a
-// [HighlighterFactory] on the parent [Session].
+// (e.g. the one from the highlight package); the TUI's editor pool
+// applies its [syntax.HighlighterFactory] on creation.
 func New(buf *buffer.Buffer) *Editor {
 	return &Editor{
 		Buf:    buf,

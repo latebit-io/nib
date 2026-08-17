@@ -9,11 +9,12 @@ linters:
       rules:
         # coding/agent is the application loop. It composes leaf
         # subpackages and the foundation but must not reach laterally
-        # into composition roots (session/headless/wire) — those depend
-        # on agent, so the reverse would be a cycle.
+        # into composition roots (session/headless/wire) or the spawn
+        # orchestrator (subagent) — those depend on agent, so the reverse
+        # would be a cycle.
         agent-no-composition:
           files:
-            - "**/agent/*.go"
+            - "**/coding/agent/*.go"
           deny:
             - pkg: "github.com/latebit-io/nib/coding/session"
               desc: "agent must not import session — composition root depends on agent, not the reverse"
@@ -21,12 +22,12 @@ linters:
               desc: "agent must not import headless — composition root depends on agent, not the reverse"
             - pkg: "github.com/latebit-io/nib/coding/wire"
               desc: "agent must not import wire — composition root depends on agent, not the reverse"
+            - pkg: "github.com/latebit-io/nib/coding/subagent"
+              desc: "agent must not import subagent — subagent composes agent, not the reverse"
             - pkg: "github.com/latebit-io/nib/tui"
               desc: "coding must not import tui — dependencies point inward only"
             - pkg: "github.com/latebit-io/nib/engine/buffer"
               desc: "agent must not import editor-internal engine packages"
-            - pkg: "github.com/latebit-io/nib/tui/editor"
-              desc: "agent must not import the editor controller — editor lives in tui after the editor-vs-buffer split; agent works against openfile/buffer interfaces"
             - pkg: "github.com/latebit-io/nib/engine/highlight"
               desc: "agent must not import editor-internal engine packages"
             - pkg: "github.com/latebit-io/nib/engine/filelist"
@@ -35,22 +36,31 @@ linters:
               desc: "agent must not import editor-internal engine packages"
 
         # Leaf subpackages must stay leaves. They must not import the
-        # agent loop (would be a cycle) or composition roots.
+        # agent loop (would be a cycle), the spawn orchestrator, or
+        # composition roots. Every package that is not agent, session,
+        # headless, wire, or subagent belongs in this list — add new
+        # leaves here when creating them.
         coding-leaves:
           files:
-            - "**/command/*.go"
-            - "**/editflow/*.go"
-            - "**/event/*.go"
-            - "**/lint/*.go"
-            - "**/memory/*.go"
-            - "**/nudges/*.go"
-            - "**/pluginhooks/*.go"
-            - "**/prompts/*.go"
-            - "**/smoke/*.go"
-            - "**/tools/*.go"
+            - "**/coding/capture/*.go"
+            - "**/coding/capture/**/*.go"
+            - "**/coding/command/*.go"
+            - "**/coding/editflow/*.go"
+            - "**/coding/event/*.go"
+            - "**/coding/lint/*.go"
+            - "**/coding/memory/*.go"
+            - "**/coding/nudges/*.go"
+            - "**/coding/patch/*.go"
+            - "**/coding/pluginhooks/*.go"
+            - "**/coding/prompts/*.go"
+            - "**/coding/runconfig/*.go"
+            - "**/coding/smoke/*.go"
+            - "**/coding/tools/*.go"
           deny:
             - pkg: "github.com/latebit-io/nib/coding/agent"
               desc: "leaf subpackage must not import agent — agent composes leaves, not the reverse"
+            - pkg: "github.com/latebit-io/nib/coding/subagent"
+              desc: "leaf subpackage must not import subagent"
             - pkg: "github.com/latebit-io/nib/coding/session"
               desc: "leaf subpackage must not import session"
             - pkg: "github.com/latebit-io/nib/coding/headless"
@@ -65,7 +75,7 @@ linters:
         # must not reach into interactive composition roots.
         subagent-isolation:
           files:
-            - "**/subagent/*.go"
+            - "**/coding/subagent/*.go"
           deny:
             - pkg: "github.com/latebit-io/nib/coding/session"
               desc: "subagent must not import session — child agents run headless, never against the interactive session"
@@ -74,31 +84,48 @@ linters:
             - pkg: "github.com/latebit-io/nib/tui"
               desc: "subagent must not import tui — child agents run headless, never against the interactive TUI"
 
-        # approval is a coordination primitive consumed by agent. It
-        # must not import agent or composition roots.
-        approval-isolation:
+        # session (interactive) and headless are peer runtimes over the
+        # same agent. Neither may import the other, and neither may
+        # import wire or subagent — the binary's main.go picks a runtime
+        # and wires it; a runtime that picks another runtime is a leak.
+        session-isolation:
           files:
-            - "**/approval/*.go"
+            - "**/coding/session/*.go"
           deny:
-            - pkg: "github.com/latebit-io/nib/coding/agent"
-              desc: "approval must not import agent — agent composes approval, not the reverse"
-            - pkg: "github.com/latebit-io/nib/coding/session"
-              desc: "approval must not import session"
             - pkg: "github.com/latebit-io/nib/coding/headless"
-              desc: "approval must not import headless"
+              desc: "session must not import headless — peer runtimes; the composition root chooses"
             - pkg: "github.com/latebit-io/nib/coding/wire"
-              desc: "approval must not import wire"
+              desc: "session must not import wire — wiring belongs to composition roots"
+            - pkg: "github.com/latebit-io/nib/coding/subagent"
+              desc: "session must not import subagent — the composition root wires the spawner"
             - pkg: "github.com/latebit-io/nib/tui"
-              desc: "coding must not import tui"
-
-        # Composition roots and the headless runner must not depend on
-        # the TUI — frontends are downstream consumers.
-        composition-no-tui:
+              desc: "coding must not import tui — dependencies point inward only"
+        headless-isolation:
           files:
-            - "**/session/*.go"
-            - "**/headless/*.go"
-            - "**/wire/*.go"
+            - "**/coding/headless/*.go"
           deny:
+            - pkg: "github.com/latebit-io/nib/coding/session"
+              desc: "headless must not import session — peer runtimes; the composition root chooses"
+            - pkg: "github.com/latebit-io/nib/coding/wire"
+              desc: "headless must not import wire — wiring belongs to composition roots"
+            - pkg: "github.com/latebit-io/nib/coding/subagent"
+              desc: "headless must not import subagent — subagent composes headless, not the reverse"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "coding must not import tui — dependencies point inward only"
+
+        # wire is the shared composition helper library. It names concrete
+        # adapters (LSP, MCP, memory) below cmd/ but must not pick a
+        # runtime — that is main.go's job.
+        wire-isolation:
+          files:
+            - "**/coding/wire/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding/session"
+              desc: "wire must not import session — the binary's main.go picks the runtime"
+            - pkg: "github.com/latebit-io/nib/coding/headless"
+              desc: "wire must not import headless — the binary's main.go picks the runtime"
+            - pkg: "github.com/latebit-io/nib/coding/subagent"
+              desc: "wire must not import subagent — the composition root wires the spawner"
             - pkg: "github.com/latebit-io/nib/tui"
               desc: "coding must not import tui — dependencies point inward only"
 
@@ -107,3 +134,5 @@ linters:
           deny:
             - pkg: "github.com/latebit-io/nib/tui"
               desc: "coding must not import tui — dependencies point inward only"
+            - pkg: "github.com/stretchr/testify"
+              desc: "stdlib testing only — no testify"

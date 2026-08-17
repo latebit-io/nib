@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -23,9 +21,16 @@ type AgentAPI struct {
 	effort        Effort // reasoning effort; "" omits reasoning_effort
 	client        *http.Client
 
-	mu        sync.Mutex
-	maxTokens int // 0 means "omit from request — use provider default"
+	// maxTokensState's zero value omits max_tokens so the provider
+	// default applies until the agent escalates.
+	maxTokensState
 }
+
+var _ OutputCapEscalator = (*AgentAPI)(nil)
+
+// agentAPIProviderName labels errors and [AuthError.Provider] for the
+// generic OpenAI-compatible adapter (OpenRouter, OpenAI, local servers).
+const agentAPIProviderName = "openai-compat"
 
 // NewAgentAPI creates an AgentAPI provider with the given base URL, model,
 // authenticator, prompt caching flag, and reasoning effort. When promptCaching
@@ -34,7 +39,7 @@ type AgentAPI struct {
 func NewAgentAPI(baseURL, model string, auth Auth, promptCaching bool, effort Effort) *AgentAPI {
 	return &AgentAPI{
 		auth:          auth,
-		baseURL:       baseURL,
+		baseURL:       strings.TrimRight(baseURL, "/"),
 		model:         model,
 		promptCaching: promptCaching,
 		effort:        effort,
@@ -218,33 +223,13 @@ type sseDeltaCall struct {
 	} `json:"function"`
 }
 
-// MaxTokens returns the current max_tokens value sent on requests. Zero means
-// no value is sent and the provider's default applies. Safe for concurrent use.
-func (a *AgentAPI) MaxTokens() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.maxTokens
-}
-
-// SetMaxTokens updates the max_tokens value used on subsequent requests.
-// Used by the agent loop to escalate after a truncated response. Zero disables
-// the field (falls back to the provider default). Safe for concurrent use.
-func (a *AgentAPI) SetMaxTokens(v int) {
-	a.mu.Lock()
-	a.maxTokens = v
-	a.mu.Unlock()
-}
-
 // Stream sends a chat completion request to the OpenAI-compatible endpoint
 // and returns a channel of streaming events.
 func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
 	var body []byte
 	var err error
 
-	a.mu.Lock()
-	maxTokens := a.maxTokens
-	a.mu.Unlock()
-
+	maxTokens := a.MaxTokens()
 	effort := openAIEffort(a.effort)
 
 	if a.promptCaching {
@@ -273,8 +258,7 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	base := strings.TrimRight(a.baseURL, "/")
-	req, err := http.NewRequestWithContext(ctx, "POST", base+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", a.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -283,24 +267,11 @@ func (a *AgentAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		return nil, fmt.Errorf("authenticate: %w", err)
 	}
 
-	resp, err := a.client.Do(req)
+	resp, err := openStream(a.client, req, agentAPIProviderName, a.auth)
 	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
+		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		_ = resp.Body.Close() // body already read; close error is not actionable
-		return nil, fmt.Errorf("api error: status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	ch := make(chan StreamEvent, 16)
-	go func() {
-		defer func() { _ = resp.Body.Close() }() // body consumed by SSE reader; close error is not actionable
-		defer close(ch)
-		a.readSSE(ctx, resp, ch)
-	}()
-
-	return ch, nil
+	return startSSEReader(ctx, resp, a.readSSE), nil
 }
 
 // toolCallAccumulator accumulates streamed tool call deltas.
@@ -439,50 +410,16 @@ func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<-
 	return false
 }
 
-func (a *AgentAPI) readSSE(ctx context.Context, resp *http.Response, ch chan<- StreamEvent) {
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024) // 10MB — large file content in tool results
-
-	wd := newStreamWatchdog(resp.Body)
-	defer wd.stop()
-
+// readSSE dispatches OpenAI-compatible SSE data lines through [scanSSE].
+// "[DONE]" and clean EOF both emit the terminal event built from the
+// accumulated state (finish_reason and/or usage captured on the way).
+func (a *AgentAPI) readSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent) {
 	var state sseStreamState
-
-	for scanner.Scan() {
-		wd.reset()
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	scanSSE(ctx, body, ch, agentAPIProviderName, func(_, data string) bool {
 		if data == "[DONE]" {
 			trySend(ctx, ch, state.terminalEvent())
-			return
+			return true
 		}
-		if state.handleChunk(ctx, data, ch) {
-			return
-		}
-	}
-
-	// Check for scanner errors (I/O failures, buffer overflow, watchdog tear-down).
-	if err := scanner.Err(); err != nil {
-		if wd.fired() {
-			trySend(ctx, ch, StreamEvent{Done: true, Err: errStreamStalled})
-			return
-		}
-		if ctx.Err() == nil {
-			slog.Warn("SSE scanner error", "err", err)
-		}
-		return // truncated stream — don't synthesize a successful Done event
-	}
-
-	// Clean EOF without [DONE]: emit the terminal event (finish_reason and/or
-	// usage already captured into state).
-	trySend(ctx, ch, state.terminalEvent())
+		return state.handleChunk(ctx, data, ch)
+	}, state.terminalEvent)
 }

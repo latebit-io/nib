@@ -1563,3 +1563,86 @@ SecondDone:
 		t.Errorf("unexpected MaxTurnsReached — cap resets on delivered reply")
 	}
 }
+
+// TestHookErrorMidBatch_EveryToolUseGetsResult verifies that when a
+// hook fails on the second of three tool calls, the run ends with an
+// Error event AND the transcript still carries a tool-role result for
+// every tool_use in the batch — the failed call and the never-run one
+// included. Anthropic rejects resumes with orphaned tool_use blocks.
+func TestHookErrorMidBatch_EveryToolUseGetsResult(t *testing.T) {
+	t.Parallel()
+
+	tool := &recordingTool{
+		def:    llm.ToolDef{Type: "function", Function: llm.FunctionDef{Name: "echo"}},
+		result: ToolResult{Content: "ok"},
+	}
+	calls := []llm.ToolCall{
+		{ID: "call_1", Type: "function", Function: llm.FunctionCall{Name: "echo"}},
+		{ID: "call_2", Type: "function", Function: llm.FunctionCall{Name: "echo"}},
+		{ID: "call_3", Type: "function", Function: llm.FunctionCall{Name: "echo"}},
+	}
+	provider := newScriptedProvider(streamWithToolCalls(calls))
+	events := make(chan event.Event, 64)
+
+	hookErr := errors.New("gate exploded")
+	before := func(_ context.Context, in BeforeToolCallInput) (BeforeToolCallResult, error) {
+		if in.CallID == "call_2" {
+			return BeforeToolCallResult{}, hookErr
+		}
+		return BeforeToolCallResult{}, nil
+	}
+
+	a, err := New(Options{
+		Provider: provider,
+		Events:   events,
+		Tools:    []Tool{tool},
+		Hooks:    Hooks{BeforeToolCall: before},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	all := drainUntilEnd(events)
+	a.WaitForIdle()
+
+	gotErr, ok := findEvent[event.Error](all)
+	if !ok {
+		t.Fatalf("missing Error event for hook failure")
+	}
+	if !contains(gotErr.Err, "BeforeToolCall") || !contains(gotErr.Err, hookErr.Error()) {
+		t.Errorf("Error.Err = %q; want substrings 'BeforeToolCall' and %q", gotErr.Err, hookErr.Error())
+	}
+	if got := tool.Calls(); len(got) != 1 || got[0].ID != "call_1" {
+		t.Errorf("tool.Calls() = %+v; want only call_1 executed", got)
+	}
+
+	end, ok := findEvent[event.AgentEnd](all)
+	if !ok {
+		t.Fatalf("missing AgentEnd")
+	}
+	results := make(map[string]llm.Message)
+	for _, m := range end.Messages {
+		if m.Role == "tool" {
+			results[m.ToolCallID] = m
+		}
+	}
+	for _, c := range calls {
+		if _, ok := results[c.ID]; !ok {
+			t.Errorf("tool_use %s has no tool_result in final transcript", c.ID)
+		}
+	}
+	if len(results) != len(calls) {
+		t.Errorf("tool results = %d; want %d", len(results), len(calls))
+	}
+	if r := results["call_1"]; r.Content != "ok" {
+		t.Errorf("call_1 result = %q; want executed result 'ok'", r.Content)
+	}
+	for _, id := range []string{"call_2", "call_3"} {
+		if r := results[id]; !contains(r.Content, "aborted") {
+			t.Errorf("%s result = %q; want synthesized aborted result", id, r.Content)
+		}
+	}
+}

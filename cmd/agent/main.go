@@ -28,13 +28,9 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/headless"
 	codingmemory "github.com/latebit-io/nib/coding/memory"
+	"github.com/latebit-io/nib/coding/runconfig"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/coding/wire"
-	"github.com/latebit-io/nib/engine/highlight"
-	"github.com/latebit-io/nib/engine/runconfig"
-	"github.com/latebit-io/nib/engine/validate"
-	"github.com/latebit-io/nib/engine/validate/goparse"
-	"github.com/latebit-io/nib/engine/validate/treesitter"
 	"github.com/latebit-io/nib/kit/budget"
 	"github.com/latebit-io/nib/kit/cmdallow"
 )
@@ -104,26 +100,23 @@ func run() error {
 	}
 	stdoutTTY := (stdoutStat.Mode() & os.ModeCharDevice) != 0
 
-	// Setup logging.
+	// Setup logging. Debug mode writes to the per-user cache dir (a
+	// single-user trust boundary, safe against /tmp + O_TRUNC symlink
+	// clobber). Losing the debug log is not a reason to refuse to run —
+	// headless included — so open failures warn and continue without it.
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if cfg.debug {
-		// Cache dir is a single-user trust boundary — safe against the
-		// symlink-clobber pattern that /tmp + O_TRUNC is vulnerable to.
-		logPath, err := brand.DebugLogPath("agent-debug.log")
+		logFile, err := openDebugLog("agent-debug.log")
 		if err != nil {
-			return setupErr("debug log path: %v", err)
+			fmt.Fprintf(os.Stderr, "warning: %v — proceeding without debug log\n", err)
+		} else {
+			defer func() {
+				if err := logFile.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: close debug log: %v\n", err)
+				}
+			}()
+			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		}
-		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-		if err != nil {
-			return setupErr("open debug log %s: %v", logPath, err)
-		}
-		defer func() {
-			if err := logFile.Close(); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: close debug log: %v\n", err)
-			}
-		}()
-		slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	} else {
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
 	// Resolve output format based on stdout, not stdin.
@@ -263,36 +256,14 @@ func run() error {
 	if lspMgr != nil {
 		opts.DiagProvider = lspMgr
 	}
-	if os.Getenv(brand.EnvKeyValidatorsDisabled) == "" {
-		// Headless / CI mode wires the same validator stages as the
-		// TUI. Syntax-regression checks matter MORE here, not less —
-		// there's no developer to notice a parser-breaking edit before
-		// the agent commits. The tree-sitter grammars are already a
-		// transitive dep of engine, so the binary-size delta of
-		// linking them in is small relative to the correctness win.
-		opts.ValidationPipeline = validate.NewPipeline(
-			goparse.Validator{},
-			treesitter.New(highlight.LanguageFor),
-		)
-	}
+	// nil when validators are disabled via env.
+	opts.ValidationPipeline = wire.NewValidationPipeline()
 	ag := agent.New(provider, workspace, opts, mcpResult.Tools...)
 	// Forward bus-published agent events into the shared `events` chan
-	// that LSP also writes to and the headless [Runner] reads. The
-	// forwarder exits naturally when [agent.Agent.Close] closes the
-	// bus (which closes the subscription's inbox).
-	sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
-	if err != nil {
-		return setupErr("agent.Subscribe: %v", err)
+	// the headless [Runner] reads.
+	if err := wire.ForwardEvents(ctx, ag, events); err != nil {
+		return setupErr("%v", err)
 	}
-	go func() {
-		for ev := range sub.Events() {
-			select {
-			case events <- ev:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
 
 	// Stderr writer — streams status in TTY or verbose mode.
 	stderr := io.Writer(io.Discard)
@@ -330,7 +301,21 @@ func run() error {
 		}
 		return nil
 	}
-	return writeText(result)
+	return writeText(os.Stdout, result)
+}
+
+// openDebugLog opens (truncating) the brand debug-log file named name
+// under the per-user cache dir. The caller owns the returned file.
+func openDebugLog(name string) (*os.File, error) {
+	logPath, err := brand.DebugLogPath(name)
+	if err != nil {
+		return nil, fmt.Errorf("debug log path: %w", err)
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open debug log %s: %w", logPath, err)
+	}
+	return f, nil
 }
 
 // resolveProjectRoot determines the project root from the flag, cwd, or git walk.
@@ -357,28 +342,27 @@ func resolveProjectRoot(override string) (string, error) {
 	return session.ResolveProjectRoot(cwd), nil
 }
 
-// writeText writes a human-readable summary to stdout.
-func writeText(r *headless.Result) error {
+// writeText writes a human-readable summary of r to w. Returns an
+// error when the run did not succeed so main exits non-zero.
+func writeText(w io.Writer, r *headless.Result) error {
+	var sb strings.Builder
 	if r.Summary != "" {
-		fmt.Println(r.Summary)
+		sb.WriteString(r.Summary + "\n")
 	}
-	if len(r.FilesChanged) > 0 {
-		fmt.Println("\nFiles changed:")
-		for _, f := range r.FilesChanged {
-			fmt.Printf("  %s\n", f)
+	writeList := func(title string, items []string) {
+		if len(items) == 0 {
+			return
+		}
+		sb.WriteString("\n" + title + ":\n")
+		for _, it := range items {
+			sb.WriteString("  " + it + "\n")
 		}
 	}
-	if len(r.FilesCreated) > 0 {
-		fmt.Println("\nFiles created:")
-		for _, f := range r.FilesCreated {
-			fmt.Printf("  %s\n", f)
-		}
-	}
-	if len(r.Errors) > 0 {
-		fmt.Println("\nErrors:")
-		for _, e := range r.Errors {
-			fmt.Printf("  %s\n", e)
-		}
+	writeList("Files changed", r.FilesChanged)
+	writeList("Files created", r.FilesCreated)
+	writeList("Errors", r.Errors)
+	if _, err := io.WriteString(w, sb.String()); err != nil {
+		return fmt.Errorf("write result: %w", err)
 	}
 	if !r.Success {
 		return fmt.Errorf("agent completed with errors")

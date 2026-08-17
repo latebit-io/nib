@@ -6,9 +6,12 @@ import "strings"
 // StartLine..EndLine are the buffer lines that would be removed (0-indexed, inclusive).
 // NewLines are the full lines that would replace them after the edit is applied.
 type DiffResult struct {
+	// StartLine is the first buffer line removed by the edit (0-indexed).
 	StartLine int
-	EndLine   int
-	NewLines  []string
+	// EndLine is the last buffer line removed by the edit (0-indexed, inclusive).
+	EndLine int
+	// NewLines are the full replacement lines for StartLine..EndLine.
+	NewLines []string
 }
 
 // ComputeDiff locates the search text in the buffer and computes the diff preview

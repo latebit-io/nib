@@ -1,17 +1,16 @@
 package llm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
 )
 
 // anthropicDefaultMaxTokens is the initial output-token cap for Anthropic
@@ -32,9 +31,15 @@ type AnthropicAPI struct {
 	effort        Effort // reasoning effort; "" disables extended thinking
 	client        *http.Client
 
-	mu        sync.Mutex
-	maxTokens int
+	// maxTokensState starts at anthropicDefaultMaxTokens: the Messages
+	// API requires max_tokens on every request.
+	maxTokensState
 }
+
+var _ OutputCapEscalator = (*AnthropicAPI)(nil)
+
+// anthropicProviderName labels errors and [AuthError.Provider].
+const anthropicProviderName = "anthropic"
 
 // anthropicVersion is the API version header required by the Anthropic API.
 const anthropicVersion = "2023-06-01"
@@ -43,33 +48,17 @@ const anthropicVersion = "2023-06-01"
 // extended thinking at the mapped budget ("" leaves it off).
 func NewAnthropicAPI(baseURL, model string, auth Auth, promptCaching bool, effort Effort) *AnthropicAPI {
 	return &AnthropicAPI{
-		auth:          auth,
-		baseURL:       baseURL,
-		model:         model,
-		promptCaching: promptCaching,
-		effort:        effort,
-		maxTokens:     anthropicDefaultMaxTokens,
+		auth:           auth,
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		model:          model,
+		promptCaching:  promptCaching,
+		effort:         effort,
+		maxTokensState: maxTokensState{maxTokens: anthropicDefaultMaxTokens},
 		client: &http.Client{
 			Transport: agentTransport(),
 			// No client-level Timeout — would kill SSE streams mid-flight.
 		},
 	}
-}
-
-// MaxTokens returns the current max_tokens value sent on requests.
-// Anthropic requires this field on every request, so it is always non-zero.
-func (a *AnthropicAPI) MaxTokens() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.maxTokens
-}
-
-// SetMaxTokens updates the max_tokens value used on subsequent requests.
-// Used by the agent loop to escalate after a truncated response.
-func (a *AnthropicAPI) SetMaxTokens(v int) {
-	a.mu.Lock()
-	a.maxTokens = v
-	a.mu.Unlock()
 }
 
 // AnthropicKeyAuth implements Auth by setting the x-api-key header,
@@ -346,9 +335,7 @@ func (a *AnthropicAPI) buildAnthropicRequest(messages []Message, tools []ToolDef
 		}
 	}
 
-	a.mu.Lock()
-	maxTokens := a.maxTokens
-	a.mu.Unlock()
+	maxTokens := a.MaxTokens()
 
 	req := &anthropicRequest{
 		Model:     a.model,
@@ -379,8 +366,7 @@ func (a *AnthropicAPI) Stream(ctx context.Context, messages []Message, tools []T
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	base := strings.TrimRight(a.baseURL, "/")
-	req, err := http.NewRequestWithContext(ctx, "POST", base+"/v1/messages", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", a.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -390,24 +376,11 @@ func (a *AnthropicAPI) Stream(ctx context.Context, messages []Message, tools []T
 		return nil, fmt.Errorf("authenticate: %w", err)
 	}
 
-	resp, err := a.client.Do(req)
+	resp, err := openStream(a.client, req, anthropicProviderName, a.auth)
 	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
+		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048)) // best-effort read for error message
-		_ = resp.Body.Close()                                      // body already read; close error is not actionable
-		return nil, fmt.Errorf("api error: status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	ch := make(chan StreamEvent, 16)
-	go func() {
-		defer func() { _ = resp.Body.Close() }() // body consumed by SSE reader; close error is not actionable
-		defer close(ch)
-		a.readAnthropicSSE(ctx, resp, ch)
-	}()
-
-	return ch, nil
+	return startSSEReader(ctx, resp, a.readAnthropicSSE), nil
 }
 
 // anthropicBlockState tracks the state of an in-progress content block.
@@ -591,55 +564,14 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 	return anthropicContinue
 }
 
-// readAnthropicSSE parses the Anthropic SSE stream and sends StreamEvents.
-func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, resp *http.Response, ch chan<- StreamEvent) {
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	wd := newStreamWatchdog(resp.Body)
-	defer wd.stop()
-
+// readAnthropicSSE dispatches Anthropic SSE events through [scanSSE].
+// message_stop emits the final event; clean EOF without one falls back to
+// the same accumulated state.
+func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent) {
 	state := &anthropicStreamState{blocks: make(map[int]*anthropicBlockState)}
-	var eventType string
-
-	for scanner.Scan() {
-		wd.reset()
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		line := scanner.Text()
-
-		if strings.HasPrefix(line, "event:") {
-			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-
-		if state.dispatchEvent(ctx, eventType, data, ch) == anthropicDone {
-			return
-		}
-	}
-
-	// Check for scanner errors (I/O failures, buffer overflow, watchdog tear-down).
-	if err := scanner.Err(); err != nil {
-		if wd.fired() {
-			trySend(ctx, ch, StreamEvent{Done: true, Err: errStreamStalled})
-			return
-		}
-		if ctx.Err() == nil {
-			slog.Warn("anthropic: SSE scanner error", "err", err)
-		}
-		return // truncated stream — don't synthesize a successful Done event
-	}
-
-	// Clean EOF without message_stop.
-	trySend(ctx, ch, state.finalEvent())
+	scanSSE(ctx, body, ch, anthropicProviderName, func(eventType, data string) bool {
+		return state.dispatchEvent(ctx, eventType, data, ch) == anthropicDone
+	}, state.finalEvent)
 }
 
 // mergeAnthropicUsage combines input usage (from message_start) with output
@@ -666,15 +598,9 @@ func mergeAnthropicUsage(input, output *anthropicUsage) *Usage {
 
 // finalizeAnthropicBlocks extracts completed tool calls from the block state.
 func finalizeAnthropicBlocks(blocks map[int]*anthropicBlockState) []ToolCall {
-	// Collect and sort keys for deterministic output with sparse indices.
-	indices := make([]int, 0, len(blocks))
-	for i := range blocks {
-		indices = append(indices, i)
-	}
-	slices.Sort(indices)
-
+	// Sorted keys for deterministic output with sparse indices.
 	var calls []ToolCall
-	for _, i := range indices {
+	for _, i := range slices.Sorted(maps.Keys(blocks)) {
 		block := blocks[i]
 		if block.blockType != "tool_use" {
 			continue
@@ -696,14 +622,8 @@ func finalizeAnthropicBlocks(blocks map[int]*anthropicBlockState) []ToolCall {
 // faithful. Returns nil when the response contained no reasoning, keeping
 // the common (non-thinking) path's StreamEvent.Reasoning nil.
 func finalizeReasoning(blocks map[int]*anthropicBlockState) *ReasoningTrace {
-	indices := make([]int, 0, len(blocks))
-	for i := range blocks {
-		indices = append(indices, i)
-	}
-	slices.Sort(indices)
-
 	var out []ReasoningBlock
-	for _, i := range indices {
+	for _, i := range slices.Sorted(maps.Keys(blocks)) {
 		b := blocks[i]
 		switch b.blockType {
 		case "thinking":
@@ -733,8 +653,7 @@ type anthropicModelsResponse struct {
 // ListModels queries the Anthropic /v1/models endpoint.
 // This validates auth and returns available models.
 func (a *AnthropicAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
-	base := strings.TrimRight(a.baseURL, "/")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/models", nil)
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}

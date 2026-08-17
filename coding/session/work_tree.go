@@ -306,9 +306,12 @@ func buildProjectSkeleton(name string, phases []string) string {
 
 // WorkTreeSnapshot holds the result of a background work tree fetch.
 type WorkTreeSnapshot struct {
-	Tree    *project.Tree
+	// Tree is the parsed work tree; nil when Err is set.
+	Tree *project.Tree
+	// Version is the store version the tree was read at.
 	Version int
-	Err     error
+	// Err is the fetch or parse failure, if any.
+	Err error
 }
 
 // FetchSnapshot fetches the work tree from demarkus without mutating state.

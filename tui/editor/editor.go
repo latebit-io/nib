@@ -46,13 +46,17 @@ const scrollMarginCols = 8
 // It owns cursor state, selection, scroll position, and text operations.
 // Frontends call methods to manipulate state and read fields to render.
 type Editor struct {
-	Buf    *buffer.Buffer // underlying text buffer; shared with the session-side openfile.OpenFile
-	Width  int            // viewport width in display columns; set via SetSize
-	Height int            // viewport height in lines; set via SetSize
+	// Buf is the underlying text buffer; shared with the session-side openfile.OpenFile.
+	Buf *buffer.Buffer
+	// Width is the viewport width in display columns; set via SetSize.
+	Width int
+	// Height is the viewport height in lines; set via SetSize.
+	Height int
 
-	// Cursor position (0-indexed, in buffer coordinates)
+	// CursorLine is the cursor's 0-indexed buffer line.
 	CursorLine int
-	CursorCol  int
+	// CursorCol is the cursor's 0-indexed rune column within CursorLine.
+	CursorCol int
 
 	// Viewport scroll offset (in visual-line space when extraVisualLines > 0)
 	ScrollOffset int
@@ -68,10 +72,13 @@ type Editor struct {
 	// visual content. Defaults to 0 (no overlay).
 	extraVisualLines int
 
-	// Selection
+	// SelectionActive reports whether a selection anchor is set; the
+	// selection spans from the anchor to the cursor.
 	SelectionActive bool
+	// SelectStartLine is the selection anchor's 0-indexed buffer line.
 	SelectStartLine int
-	SelectStartCol  int
+	// SelectStartCol is the selection anchor's 0-indexed rune column.
+	SelectStartCol int
 
 	// Syntax highlighting (internal — use HighlightLine to access).
 	// Nil when the editor has no highlighter wired in (e.g. headless mode,
@@ -93,8 +100,8 @@ type Editor struct {
 // New creates an editor wrapping the given buffer. The returned editor
 // has no syntax highlighter attached — callers that want highlighting
 // should call [Editor.SetHighlighter] with a concrete implementation
-// (e.g. the one from the highlight package), or configure a
-// [HighlighterFactory] on the parent [Session].
+// (e.g. the one from the highlight package); the TUI's editor pool
+// applies its [syntax.HighlighterFactory] on creation.
 func New(buf *buffer.Buffer) *Editor {
 	return &Editor{
 		Buf:    buf,
@@ -109,7 +116,7 @@ func New(buf *buffer.Buffer) *Editor {
 // HighlightLine returns meaningful tokens on the next call.
 //
 // The lock is held through Close() and Parse() to serialize with any
-// in-flight HighlightLine / ReparseIfNeeded call — closing the previous
+// in-flight HighlightLine call — closing the previous
 // tree-sitter instance while another goroutine is calling into it would
 // be a CGo use-after-free.
 func (e *Editor) SetHighlighter(h Highlighter) {
@@ -151,10 +158,6 @@ func (e *Editor) LineLen(line int) int { return e.Buf.LineLen(line) }
 
 // LineOrigin returns the provenance of the given line (developer vs agent).
 func (e *Editor) LineOrigin(line int) LineOrigin { return e.Buf.LineOrigin(line) }
-
-// ResetLineOriginToDeveloper clears agent provenance from a line after the
-// developer takes ownership (e.g., by typing on it or re-indenting).
-func (e *Editor) ResetLineOriginToDeveloper(line int) { e.Buf.ResetOriginToDeveloper(line) }
 
 // Content returns the full buffer content as a single string.
 func (e *Editor) Content() string { return e.Buf.Content() }
@@ -482,16 +485,6 @@ func (e *Editor) Home() {
 // End moves cursor to end of line.
 func (e *Editor) End() {
 	e.CursorCol = e.Buf.LineLen(e.CursorLine)
-}
-
-// PageUp moves the cursor up by a page.
-func (e *Editor) PageUp() {
-	e.MoveCursor(-e.VisibleLines(), 0)
-}
-
-// PageDown moves the cursor down by a page.
-func (e *Editor) PageDown() {
-	e.MoveCursor(e.VisibleLines(), 0)
 }
 
 // ScrollUp scrolls the viewport up by the given number of lines.
@@ -1160,8 +1153,10 @@ func (e *Editor) Save() error {
 
 // EditLocation describes where a search string was found in the buffer.
 type EditLocation struct {
-	Line int // 0-indexed line
-	Col  int // 0-indexed rune column
+	// Line is the 0-indexed buffer line where the match starts.
+	Line int
+	// Col is the 0-indexed rune column where the match starts.
+	Col int
 }
 
 // LocateEdit finds the unique occurrence of search in the buffer.
@@ -1218,38 +1213,31 @@ func (e *Editor) ApplyEdit(search, replace string, lineOrigins []*LineOrigin) (b
 
 // --- Highlight ---
 
-// MarkDirty flags the highlighter for reparse on next ReparseIfNeeded call.
+// MarkDirty flags the highlighter for reparse on the next HighlightLine call.
 func (e *Editor) MarkDirty() {
 	e.highlighterMu.Lock()
 	e.needsReparse = true
 	e.highlighterMu.Unlock()
 }
 
-// ReparseIfNeeded reparses the buffer for syntax highlighting.
-// The full operation runs under the highlighter lock so Parse cannot
-// race with a concurrent SetHighlighter or Close on the same instance.
-func (e *Editor) ReparseIfNeeded() {
-	e.highlighterMu.Lock()
-	defer e.highlighterMu.Unlock()
+// reparseLocked reparses the buffer if MarkDirty flagged it. Caller
+// must hold highlighterMu so Parse cannot race with SetHighlighter/Close.
+func (e *Editor) reparseLocked() {
 	if e.needsReparse && e.highlighter != nil {
 		e.highlighter.Parse(e.Buf.Content())
 		e.needsReparse = false
 	}
 }
 
-// HighlightLine returns syntax tokens for the given line.
-// Returns nil if no highlighter is configured.
-// Calls ReparseIfNeeded internally so the caller doesn't have to.
+// HighlightLine returns syntax tokens for the given line, reparsing
+// first if the buffer is dirty. Returns nil if no highlighter is configured.
 //
 // Holds the highlighter lock for the entire call — the method touches
 // tree-sitter internals that a concurrent Close would free.
 func (e *Editor) HighlightLine(line int) []Token {
 	e.highlighterMu.Lock()
 	defer e.highlighterMu.Unlock()
-	if e.needsReparse && e.highlighter != nil {
-		e.highlighter.Parse(e.Buf.Content())
-		e.needsReparse = false
-	}
+	e.reparseLocked()
 	if e.highlighter == nil {
 		return nil
 	}
@@ -1287,7 +1275,5 @@ func (e *Editor) DisplayColToBufferCol(line, displayCol int) int {
 
 // IsWordSeparator returns true if the rune is a word boundary character.
 func IsWordSeparator(r rune) bool {
-	return r == ' ' || r == '\t' || r == '.' || r == ',' || r == ';' ||
-		r == ':' || r == '(' || r == ')' || r == '[' || r == ']' ||
-		r == '{' || r == '}' || r == '"' || r == '\''
+	return strings.ContainsRune(" \t.,;:()[]{}\"'", r)
 }

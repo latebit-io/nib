@@ -1,0 +1,20 @@
+version: "2"
+
+# nib-agent is the headless coding agent. It links the coding engine and
+# validators (including engine/highlight for tree-sitter validators) but
+# must never pull in the TUI or its rendering framework — a headless
+# binary that links Bubble Tea has a layering leak somewhere in coding/.
+linters:
+  enable:
+    - depguard
+  settings:
+    depguard:
+      rules:
+        headless-no-tui:
+          deny:
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "nib-agent is headless; tui/ has no place here"
+            - pkg: "charm.land/bubbletea"
+              desc: "nib-agent is headless; no Bubble Tea"
+            - pkg: "charm.land/lipgloss"
+              desc: "nib-agent is headless; no lipgloss"

@@ -18,8 +18,8 @@ import (
 // proposals, etc.
 //
 // Step 0 of the agent-pane redesign introduces this structure *alongside*
-// the existing RawLines + per-line classification maps (userRawLines,
-// metaRawLines, turnSeparatorRawLines). The line buffer remains the text
+// the existing RawLines + per-line classification map (rawMarks). The
+// line buffer remains the text
 // substrate; beats become the source of truth for *grouping and type* so
 // later steps can:
 //
@@ -149,12 +149,14 @@ type Beat struct {
 	// EndedAt is the wall-clock time the beat transitioned to a terminal
 	// status. Zero while [Status] == [BeatRunning].
 	EndedAt time.Time
-	// TokensIn / TokensOut / TokensCached are aggregated from every
+	// TokensIn is the prompt-token total aggregated from every
 	// [event.AgentTurnUsage] that fired while this beat was active.
 	// Used by the collapsed-beat summary to surface "↑X ↓Y" at a glance
 	// without re-parsing rendered text.
-	TokensIn     int
-	TokensOut    int
+	TokensIn int
+	// TokensOut is the completion-token total for this beat.
+	TokensOut int
+	// TokensCached is the cached prompt-token total for this beat.
 	TokensCached int
 }
 

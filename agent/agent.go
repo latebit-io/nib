@@ -8,15 +8,17 @@
 //
 // The agent ships with zero tools. Consumers register their own tools via
 // [Tool] and extend behavior via [Hooks] (BeforeToolCall, AfterToolCall,
-// TransformContext, GetSteeringMessages, GetFollowUpMessages). Anything an
-// application needs to layer on top of the loop happens through those two
-// extension points.
+// TransformContext, SteeringMessages, FollowUpMessages, BeforePark,
+// OnTruncated). Anything an application needs to layer on top of the loop
+// happens through those two extension points.
 package agent
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/latebit-io/nib/agent/event"
@@ -32,8 +34,8 @@ type Options struct {
 	// Events is the channel the agent writes lifecycle events to.
 	// Required. The caller must drain this channel; the agent blocks
 	// briefly on control-flow events (5s) and drops high-volume
-	// streaming events ([event.MessageUpdate], [event.TurnUsage],
-	// [event.InputEstimate]) when the channel is full.
+	// streaming events ([event.MessageUpdate], [event.TurnUsage]) when
+	// the channel is full.
 	Events chan<- event.Event
 
 	// SystemPrompt is the system message prepended to every run's
@@ -199,9 +201,7 @@ func (a *Agent) PromptWithMessages(ctx context.Context, messages []llm.Message) 
 	if len(messages) == 0 {
 		return fmt.Errorf("%w: messages is empty", ErrInvalidOptions)
 	}
-	msgs := make([]llm.Message, len(messages))
-	copy(msgs, messages)
-	return a.startRun(ctx, msgs)
+	return a.startRun(ctx, slices.Clone(messages))
 }
 
 // startRun is the shared launch path for [Agent.Prompt] and
@@ -236,7 +236,7 @@ func (a *Agent) startRun(ctx context.Context, msgs []llm.Message) error {
 // when the message was accepted, false when no run is active or the
 // reply queue is full.
 //
-// 8a semantics: the queue is a buffered channel of capacity 1. A second
+// The queue is a buffered channel of capacity 1. A second
 // Reply before the loop drains the first is rejected with false; the
 // caller can retry after [Agent.WaitForIdle] reaches the next idle
 // point or after observing a [event.TurnEnd] without tool calls.
@@ -289,9 +289,7 @@ func (a *Agent) ReplaceMessages(msgs []llm.Message) error {
 		a.messages = nil
 		return nil
 	}
-	cloned := make([]llm.Message, len(msgs))
-	copy(cloned, msgs)
-	a.messages = cloned
+	a.messages = slices.Clone(msgs)
 	return nil
 }
 
@@ -302,18 +300,10 @@ func (a *Agent) State() State {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	msgs := make([]llm.Message, len(a.messages))
-	copy(msgs, a.messages)
-
-	pending := make(map[string]bool, len(a.pendingToolCalls))
-	for k, v := range a.pendingToolCalls {
-		pending[k] = v
-	}
-
 	return State{
-		Messages:         msgs,
+		Messages:         slices.Clone(a.messages),
 		Streaming:        a.streaming,
-		PendingToolCalls: pending,
+		PendingToolCalls: maps.Clone(a.pendingToolCalls),
 		LastError:        a.lastError,
 	}
 }

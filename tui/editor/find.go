@@ -29,9 +29,12 @@ func (e *Editor) ReplaceRange(line, col, length int, text string) {
 
 // FindMatch represents a single search match in the buffer.
 type FindMatch struct {
-	Line int // 0-based line index
-	Col  int // 0-based rune column
-	Len  int // match length in runes
+	// Line is the 0-based buffer line of the match.
+	Line int
+	// Col is the 0-based rune column where the match starts.
+	Col int
+	// Len is the match length in runes.
+	Len int
 }
 
 // maxFindMatches caps the number of matches FindAll returns.

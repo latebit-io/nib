@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/latebit-io/nib/engine/buffer"
@@ -49,11 +51,7 @@ func (s *Session) ActiveOpenFile() *openfile.OpenFile {
 func (s *Session) OpenFiles() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	files := make([]string, 0, len(s.openFiles))
-	for path := range s.openFiles {
-		files = append(files, path)
-	}
-	return files
+	return slices.Collect(maps.Keys(s.openFiles))
 }
 
 // OpenFileForPath returns the open file for a given path, or nil if not open.
@@ -235,7 +233,7 @@ func (s *Session) cleanupDeletedPath(canon string) []*openfile.OpenFile {
 			}
 		}
 	}
-	deleteMatching(s.modifiedFiles, matches)
+	maps.DeleteFunc(s.modifiedFiles, func(k string, _ bool) bool { return matches(k) })
 
 	// Ensure s.activeOpenFile is never nil so callers (intent.go reads
 	// activeOpenFile.Buf.Content() unconditionally) cannot panic on the
@@ -263,15 +261,6 @@ func (s *Session) cleanupDeletedPath(canon string) []*openfile.OpenFile {
 func (s *Session) isProjectMeta(canon string) bool {
 	prefix := filepath.Join(s.projectRoot, ".project") + string(filepath.Separator)
 	return strings.HasPrefix(canon, prefix)
-}
-
-// deleteMatching removes all entries from a map whose keys satisfy pred.
-func deleteMatching(m map[string]bool, pred func(string) bool) {
-	for k := range m {
-		if pred(k) {
-			delete(m, k)
-		}
-	}
 }
 
 // openFileForEdit returns the open file targeted by the current pending

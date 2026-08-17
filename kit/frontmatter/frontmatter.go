@@ -50,18 +50,22 @@ func Split(data []byte, out any) (body string, err error) {
 	}
 	rest = rest[nl+1:]
 
-	var fmText string
+	// Scan line by line for the closing fence, tracking only an offset
+	// into rest so the frontmatter is sliced once rather than rebuilt
+	// per line (O(n^2) on a huge unterminated block).
+	pos := 0
 	for {
-		eol := strings.IndexByte(rest, '\n')
-		line := rest
+		eol := strings.IndexByte(rest[pos:], '\n')
+		lineEnd := len(rest)
 		if eol >= 0 {
-			line = rest[:eol]
+			lineEnd = pos + eol
 		}
-		if strings.TrimSpace(line) == fence {
+		if strings.TrimSpace(rest[pos:lineEnd]) == fence {
 			b := ""
 			if eol >= 0 {
-				b = rest[eol+1:]
+				b = rest[lineEnd+1:]
 			}
+			fmText := rest[:pos]
 			if strings.TrimSpace(fmText) != "" {
 				if err := yaml.Unmarshal([]byte(fmText), out); err != nil {
 					return "", fmt.Errorf("frontmatter: %w", err)
@@ -69,12 +73,11 @@ func Split(data []byte, out any) (body string, err error) {
 			}
 			return b, nil
 		}
-		fmText += line + "\n"
 		if eol < 0 {
 			// EOF without a closing fence — treat the whole document as
 			// body, matching the lenient policy.
 			return text, nil
 		}
-		rest = rest[eol+1:]
+		pos = lineEnd + 1
 	}
 }

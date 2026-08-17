@@ -79,8 +79,8 @@ func TestTurn_AddUsage(t *testing.T) {
 	t.Run("accumulates across calls", func(t *testing.T) {
 		t.Parallel()
 		var tu Turn
-		tu.AddUsage(&llm.Usage{PromptTokens: 100, CompletionTokens: 50, CachedTokens: 20})
-		tu.AddUsage(&llm.Usage{PromptTokens: 30, CompletionTokens: 10, CachedTokens: 5})
+		tu.AddUsage(&llm.Usage{PromptTokens: 100, CompletionTokens: 50, CachedTokens: 20, CacheWriteTokens: 4})
+		tu.AddUsage(&llm.Usage{PromptTokens: 30, CompletionTokens: 10, CachedTokens: 5, CacheWriteTokens: 1})
 		if tu.PromptTokens != 130 {
 			t.Errorf("PromptTokens = %d, want 130", tu.PromptTokens)
 		}
@@ -90,95 +90,24 @@ func TestTurn_AddUsage(t *testing.T) {
 		if tu.CachedTokens != 25 {
 			t.Errorf("CachedTokens = %d, want 25", tu.CachedTokens)
 		}
+		if tu.CacheWriteTokens != 5 {
+			t.Errorf("CacheWriteTokens = %d, want 5", tu.CacheWriteTokens)
+		}
 	})
 }
 
-func TestWouldExceed(t *testing.T) {
+func TestSession_AddUsage(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name      string
-		committed Session
-		pending   Turn
-		limit     int
-		want      bool
-	}{
-		{
-			name:    "limit zero disables gate",
-			pending: Turn{PromptTokens: 1_000_000},
-			limit:   0,
-			want:    false,
-		},
-		{
-			name:    "negative limit disables gate",
-			pending: Turn{PromptTokens: 1_000_000},
-			limit:   -1,
-			want:    false,
-		},
-		{
-			name:      "committed alone exceeds — fires",
-			committed: Session{TotalPromptTokens: 200},
-			pending:   Turn{},
-			limit:     100,
-			want:      true,
-		},
-		{
-			name:      "committed under, pending pushes over — fires",
-			committed: Session{TotalPromptTokens: 60},
-			pending:   Turn{PromptTokens: 50}, // 60+50 = 110 > 100
-			limit:     100,
-			want:      true,
-		},
-		{
-			// Boundary: committed + pending == limit. The gate uses >=
-			// (not >) so the cap value itself is over the line. Without
-			// this row, a refactor flipping the comparator to > would
-			// silently let one extra Stream call through.
-			name:      "committed + pending exactly at cap — fires",
-			committed: Session{TotalPromptTokens: 50},
-			pending:   Turn{PromptTokens: 50}, // 50+50 = 100 == 100
-			limit:     100,
-			want:      true,
-		},
-		{
-			name:    "completion tokens count too",
-			pending: Turn{CompletionTokens: 150},
-			limit:   100,
-			want:    true,
-		},
-		{
-			name:      "under cap returns false",
-			committed: Session{TotalPromptTokens: 200},
-			pending:   Turn{PromptTokens: 200},
-			limit:     1000,
-			want:      false,
-		},
-		{
-			// Post-normalization semantic: PromptTokens is fresh-only,
-			// CachedTokens is disjoint, both count toward the limit.
-			// Previously cached was a subset of prompt and would have
-			// double-counted; now they're independent token categories
-			// that both consume context-window capacity.
-			name:      "cached tokens count toward the limit",
-			committed: Session{TotalCachedTokens: 1000},
-			limit:     100,
-			want:      true,
-		},
-		{
-			name:      "prompt + cached + completion are summed",
-			committed: Session{TotalPromptTokens: 100, TotalCachedTokens: 300, TotalCompletionTokens: 50},
-			pending:   Turn{PromptTokens: 50, CachedTokens: 0, CompletionTokens: 0},
-			limit:     500,
-			want:      true, // 100+300+50+50 = 500 >= cap
-		},
+	var s Session
+	s.AddUsage(nil)
+	if s != (Session{}) {
+		t.Errorf("Session mutated by nil usage: %+v", s)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := wouldExceed(tc.committed, tc.pending, tc.limit); got != tc.want {
-				t.Errorf("wouldExceed(%+v, %+v, %d) = %v, want %v",
-					tc.committed, tc.pending, tc.limit, got, tc.want)
-			}
-		})
+	s.AddUsage(&llm.Usage{PromptTokens: 100, CompletionTokens: 50, CachedTokens: 20, CacheWriteTokens: 7})
+	s.AddUsage(&llm.Usage{PromptTokens: 30, CompletionTokens: 10, CachedTokens: 5, CacheWriteTokens: 3})
+	want := Session{TotalPromptTokens: 130, TotalCompletionTokens: 60, TotalCachedTokens: 25, TotalCacheWriteTokens: 10}
+	if s != want {
+		t.Errorf("Session = %+v, want %+v", s, want)
 	}
 }
 
@@ -223,6 +152,15 @@ func TestExceeded(t *testing.T) {
 			limit:       1000,
 			wantMsg:     true,
 			mustContain: []string{"1100", "1000", "4 turn"},
+		},
+		{
+			// Cached and cache-write tokens are disjoint input categories
+			// that both consume context and spend; each counts.
+			name:        "cached and cache-write tokens count toward the cap",
+			committed:   Session{TotalCachedTokens: 600, TotalCacheWriteTokens: 400, Turns: 2},
+			limit:       1000,
+			wantMsg:     true,
+			mustContain: []string{"1000", "2 turn"},
 		},
 	}
 	for _, tc := range cases {

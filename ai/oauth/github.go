@@ -70,8 +70,8 @@ func (s *CopilotTokenSource) Token(ctx context.Context) (*Token, error) {
 // the device code for display to the user. Call CompleteCopilotDeviceFlow
 // to poll for authorization and store the token.
 func RequestCopilotDeviceCode(ctx context.Context) (*DeviceCode, error) {
-	cfg := copilotDeviceFlowConfig()
-	dc, _, err := RequestDeviceCode(ctx, cfg)
+	cfg := copilotdeviceFlowConfig()
+	dc, _, err := requestDeviceCode(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("request device code: %w", err)
 	}
@@ -81,9 +81,9 @@ func RequestCopilotDeviceCode(ctx context.Context) (*DeviceCode, error) {
 // CompleteCopilotDeviceFlow polls for the user to authorize the device code,
 // exchanges the token, verifies Copilot access, and stores the result.
 func CompleteCopilotDeviceFlow(ctx context.Context, store *Store, dc *DeviceCode) error {
-	cfg := copilotDeviceFlowConfig()
+	cfg := copilotdeviceFlowConfig()
 
-	tr, err := PollDeviceToken(ctx, cfg, dc)
+	tr, err := pollDeviceToken(ctx, cfg, dc)
 	if err != nil {
 		return fmt.Errorf("device code poll: %w", err)
 	}
@@ -108,32 +108,9 @@ func CompleteCopilotDeviceFlow(ctx context.Context, store *Store, dc *DeviceCode
 	return nil
 }
 
-// CopilotDeviceFlow runs the full GitHub device code flow end-to-end.
-// For TUI use, prefer RequestCopilotDeviceCode + CompleteCopilotDeviceFlow
-// to show the code to the user before polling.
-func CopilotDeviceFlow(ctx context.Context, store *Store, callbacks *FlowCallbacks) error {
-	dc, err := RequestCopilotDeviceCode(ctx)
-	if err != nil {
-		return err
-	}
-
-	if callbacks != nil && callbacks.OnDeviceCode != nil {
-		callbacks.OnDeviceCode(*dc)
-	}
-
-	if err := CompleteCopilotDeviceFlow(ctx, store, dc); err != nil {
-		return err
-	}
-
-	if callbacks != nil && callbacks.OnSuccess != nil {
-		callbacks.OnSuccess(ProviderCopilot)
-	}
-	return nil
-}
-
-// copilotDeviceFlowConfig returns the device flow config for GitHub Copilot.
-func copilotDeviceFlowConfig() DeviceFlowConfig {
-	return DeviceFlowConfig{
+// copilotdeviceFlowConfig returns the device flow config for GitHub Copilot.
+func copilotdeviceFlowConfig() deviceFlowConfig {
+	return deviceFlowConfig{
 		ClientID:      githubClientID,
 		DeviceCodeURL: githubDeviceCodeURL,
 		TokenURL:      githubTokenURL,

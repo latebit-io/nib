@@ -44,7 +44,7 @@ type providerProxy struct {
 	p  llm.Provider
 
 	// emit forwards per-turn events (AgentInputEstimate,
-	// AgentTurnUsage) to the wrapper's frontend channel. Bound at
+	// AgentTurnUsage) to the wrapper's bus. Bound at
 	// construction by [Agent.buildKitAgent] to [Agent.send]. Nil
 	// during tests that construct providerProxy directly without
 	// going through [Agent.New].
@@ -76,10 +76,10 @@ func newProviderProxy(p llm.Provider, emit func(event.Event), onTurnSettled func
 // Stream delegates to the live provider under the read lock and runs
 // the per-turn lifecycle (estimate emission, content accumulation,
 // usage recording, AgentTurnUsage emission, post-turn budget check)
-// synchronously in the wrapper goroutine. By the time drainStream
-// (foundation) observes Done, all per-turn state has been committed
-// — the foundation cannot start the next TransformContext until
-// drainStream returns.
+// synchronously in the wrapper goroutine. By the time the foundation's
+// stream consumer (agent.processTurn) observes Done, all per-turn state
+// has been committed — the foundation cannot start the next
+// TransformContext until processTurn returns.
 func (pp *providerProxy) Stream(ctx context.Context, messages []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	pp.mu.RLock()
 	p := pp.p
@@ -108,7 +108,7 @@ func (pp *providerProxy) Stream(ctx context.Context, messages []llm.Message, too
 		defer close(out)
 		var content strings.Builder
 		for {
-			// Observe ctx.Done so the wrapper exits when drainStream
+			// Observe ctx.Done so the wrapper exits when processTurn
 			// returns early (foundation cancelled mid-turn). Without
 			// this, an unread `out <- ev` would block forever — the
 			// wrapper would pin both itself AND the inner provider
@@ -124,15 +124,15 @@ func (pp *providerProxy) Stream(ctx context.Context, messages []llm.Message, too
 					content.WriteString(ev.Token)
 				}
 				if ev.Done {
-					// Record + emit BEFORE forwarding Done so drainStream's
+					// Record + emit BEFORE forwarding Done so processTurn's
 					// observation of Done synchronizes with the per-turn
 					// commit. Foundation cannot start the next TransformContext
-					// until drainStream returns, so the next pre-Stream
+					// until processTurn returns, so the next pre-Stream
 					// budget check sees the just-committed totals.
-					if ev.Usage != nil {
-						pp.recordUsage(ev.Usage)
-					}
-					turn := pp.currentTurn()
+					// recordUsage counts the turn even when the provider
+					// reports no usage — MaxTurns and turn labels must not
+					// depend on a provider populating Usage.
+					turn := pp.recordUsage(ev.Usage)
 					promptTok := usagePromptTokens(ev.Usage)
 					cachedTok := usageCachedTokens(ev.Usage)
 					completionTok := usageCompletionTokens(ev.Usage)
@@ -239,24 +239,15 @@ func (pp *providerProxy) Set(p llm.Provider) {
 	pp.mu.Unlock()
 }
 
-// recordUsage accumulates one Stream's usage into the per-run session
-// total. Called from the Stream wrapper goroutine on the inner
-// stream's Done event.
-func (pp *providerProxy) recordUsage(u *llm.Usage) {
-	pp.sessionMu.Lock()
-	pp.session.TotalPromptTokens += u.PromptTokens
-	pp.session.TotalCompletionTokens += u.CompletionTokens
-	pp.session.TotalCachedTokens += u.CachedTokens
-	pp.session.Turns++
-	pp.sessionMu.Unlock()
-}
-
-// currentTurn returns the 1-indexed turn number of the just-completed
-// Stream call. Reads under sessionMu to align with [recordUsage]'s
-// increment.
-func (pp *providerProxy) currentTurn() int {
+// recordUsage counts one completed turn and accumulates its usage (nil
+// when the provider reported none) into the per-run session total,
+// returning the 1-indexed turn number. Called from the Stream wrapper
+// goroutine on the inner stream's Done event.
+func (pp *providerProxy) recordUsage(u *llm.Usage) int {
 	pp.sessionMu.Lock()
 	defer pp.sessionMu.Unlock()
+	pp.session.AddUsage(u) // nil-safe; includes cache-write tokens
+	pp.session.Turns++
 	return pp.session.Turns
 }
 

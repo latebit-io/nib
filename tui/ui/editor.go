@@ -10,8 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/latebit-io/nib/engine/highlight"
 	"github.com/latebit-io/nib/engine/lang"
+	"github.com/latebit-io/nib/engine/syntax"
 	"github.com/latebit-io/nib/tui/editor"
 	"github.com/latebit-io/nib/tui/sanitize"
 	"github.com/mattn/go-runewidth"
@@ -80,16 +80,16 @@ var (
 )
 
 // Syntax highlight styles — one per TokenKind, map lookup avoids per-token allocation.
-var tokenKindStyles = map[highlight.TokenKind]lipgloss.Style{
-	highlight.KindKeyword:  lipgloss.NewStyle().Foreground(lipgloss.Color("5")),  // magenta
-	highlight.KindString:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")),  // green
-	highlight.KindComment:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")),  // gray
-	highlight.KindNumber:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")),  // yellow
-	highlight.KindType:     lipgloss.NewStyle().Foreground(lipgloss.Color("6")),  // cyan
-	highlight.KindProperty: lipgloss.NewStyle().Foreground(lipgloss.Color("14")), // bright cyan
-	highlight.KindOperator: lipgloss.NewStyle().Foreground(lipgloss.Color("9")),  // bright red
-	highlight.KindFunction: lipgloss.NewStyle().Foreground(lipgloss.Color("4")),  // blue
-	highlight.KindConstant: lipgloss.NewStyle().Foreground(lipgloss.Color("13")), // bright magenta
+var tokenKindStyles = map[syntax.TokenKind]lipgloss.Style{
+	syntax.KindKeyword:  lipgloss.NewStyle().Foreground(lipgloss.Color("5")),  // magenta
+	syntax.KindString:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")),  // green
+	syntax.KindComment:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")),  // gray
+	syntax.KindNumber:   lipgloss.NewStyle().Foreground(lipgloss.Color("3")),  // yellow
+	syntax.KindType:     lipgloss.NewStyle().Foreground(lipgloss.Color("6")),  // cyan
+	syntax.KindProperty: lipgloss.NewStyle().Foreground(lipgloss.Color("14")), // bright cyan
+	syntax.KindOperator: lipgloss.NewStyle().Foreground(lipgloss.Color("9")),  // bright red
+	syntax.KindFunction: lipgloss.NewStyle().Foreground(lipgloss.Color("4")),  // blue
+	syntax.KindConstant: lipgloss.NewStyle().Foreground(lipgloss.Color("13")), // bright magenta
 }
 var tokenKindDefault = lipgloss.NewStyle()
 
@@ -233,9 +233,6 @@ func (m *EditorModel) CursorPosition() (line, col int) {
 	return m.eng.CursorLine, m.eng.CursorCol
 }
 
-// ScrollOffset returns the current vertical scroll offset in visual-line space.
-func (m *EditorModel) ScrollOffset() int { return m.eng.ScrollOffset }
-
 // SetScrollOffset sets the vertical scroll offset. Callers should typically
 // follow this with ClampScroll() unless they already computed a valid target.
 func (m *EditorModel) SetScrollOffset(offset int) { m.eng.ScrollOffset = offset }
@@ -272,12 +269,6 @@ func (m *EditorModel) LineText(i int) string { return m.eng.LineText(i) }
 
 // Content returns the full buffer content.
 func (m *EditorModel) Content() string { return m.eng.Content() }
-
-// FilePath returns the absolute path of the active buffer. Empty for unsaved buffers.
-func (m *EditorModel) FilePath() string { return m.eng.FilePath() }
-
-// IsModified reports whether the active buffer has unsaved changes.
-func (m *EditorModel) IsModified() bool { return m.eng.IsModified() }
 
 // SetDiagnostics updates the diagnostic list and precomputes the per-line
 // lookup map. Use this instead of assigning diagnostics directly.
@@ -718,29 +709,11 @@ func (m *EditorModel) overlayCompletion(output []string, gutterW, contentW int) 
 // single spaces, and truncates to a safe length for the status bar.
 func sanitizeStatusText(s string) string {
 	const maxLen = 200
-	var b strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if inEscape {
-			if r >= 0x40 && r <= 0x7e {
-				inEscape = false
-			}
-			continue
-		}
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		if r == '\n' || r == '\r' || r == '\t' {
-			r = ' '
-		}
-		if b.Len() >= maxLen {
-			b.WriteString("…")
-			break
-		}
-		b.WriteRune(r)
+	s = sanitizeInline(s)
+	if runes := []rune(s); len(runes) > maxLen {
+		return string(runes[:maxLen]) + "…"
 	}
-	return b.String()
+	return s
 }
 
 // statusBarInfo holds the editor-specific data needed to render the status bar.
@@ -843,10 +816,7 @@ func (m *EditorModel) mouseEntry(x, y int) (*viewportEntry, int) {
 		return nil, 0
 	}
 	gutterW := m.eng.GutterWidth()
-	displayCol := x - gutterW + m.eng.ScrollCol
-	if displayCol < 0 {
-		displayCol = 0
-	}
+	displayCol := max(x-gutterW+m.eng.ScrollCol, 0)
 	return &m.viewportMap[y], displayCol
 }
 
@@ -962,7 +932,7 @@ func (m *EditorModel) handleMouseRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 	m.mainDragging = false
 	m.overlayDragging = false
 
-	entry, displayCol := m.mouseEntry(msg.X, msg.Y)
+	entry, _ := m.mouseEntry(msg.X, msg.Y) // release needs only the row
 	if entry == nil {
 		return nil
 	}
@@ -979,7 +949,6 @@ func (m *EditorModel) handleMouseRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 	}
 
 	// Normal release — clear selection if click (no drag).
-	_ = displayCol // unused in release
 	if m.eng.SelectionActive &&
 		m.eng.CursorLine == m.eng.SelectStartLine &&
 		m.eng.CursorCol == m.eng.SelectStartCol {
@@ -1004,10 +973,7 @@ func (m *EditorModel) normalLinePress(bufLine, displayCol int) {
 // clamping to valid bounds.
 func (m *EditorModel) resolveBufferPos(bufLine, displayCol int) (int, int) {
 	if bufLine >= m.eng.LineCount() {
-		bufLine = m.eng.LineCount() - 1
-		if bufLine < 0 {
-			bufLine = 0
-		}
+		bufLine = max(m.eng.LineCount()-1, 0)
 		return bufLine, m.eng.LineLen(bufLine)
 	}
 	return bufLine, m.eng.DisplayColToBufferCol(bufLine, displayCol)
@@ -1594,8 +1560,8 @@ func (m *EditorModel) handleEditorKeyFor(keyMsg tea.KeyPressMsg, e *editor.Edito
 	return nil
 }
 
-// styleForTokenKind maps highlight.TokenKind to a pre-allocated lipgloss.Style.
-func styleForTokenKind(kind highlight.TokenKind) lipgloss.Style {
+// styleForTokenKind maps syntax.TokenKind to a pre-allocated lipgloss.Style.
+func styleForTokenKind(kind syntax.TokenKind) lipgloss.Style {
 	if s, ok := tokenKindStyles[kind]; ok {
 		return s
 	}

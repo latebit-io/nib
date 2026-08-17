@@ -203,6 +203,25 @@ func TestRegister_AliasCollidesWithAlias(t *testing.T) {
 	}
 }
 
+// TestRegister_NameCollidesWithAlias: the alias-collision check must be
+// symmetric — a canonical name equal to an existing alias would
+// otherwise silently shadow that alias in Lookup.
+func TestRegister_NameCollidesWithAlias(t *testing.T) {
+	r := NewRegistry()
+	def1 := builtinDef("foo")
+	def1.Aliases = []string{"x"}
+	foo := &fakeHandler{def: def1}
+	if err := r.Register(foo); err != nil {
+		t.Fatalf("register foo: %v", err)
+	}
+	if err := r.Register(&fakeHandler{def: sourceDef("x", SourceProject)}); err == nil {
+		t.Fatalf("canonical name colliding with an alias should error")
+	}
+	if got, ok := r.Lookup("x"); !ok || got != foo {
+		t.Errorf("alias x must still resolve to foo after rejected registration")
+	}
+}
+
 func TestRegister_SameKindCollision(t *testing.T) {
 	r := NewRegistry()
 	if err := r.Register(&fakeHandler{def: builtinDef("foo")}); err != nil {

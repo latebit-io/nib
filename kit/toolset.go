@@ -15,9 +15,9 @@ import (
 // Construct with a struct literal; combine with [Merge]. The zero value
 // is a valid empty toolset that contributes nothing when merged.
 //
-// Toolset is the canonical plug-in registration unit. A plug-in package
-// (bundled or third-party) exposes a single Plugins() Toolset function;
-// the composition root composes them via Merge.
+// Toolset is the registration unit handed to [New]. Composition roots
+// build one as a literal from the tools, hooks and commands they wire;
+// a root that assembles several bundles combines them via Merge.
 type Toolset struct {
 	// Tools are the tool implementations in this bundle. Order is
 	// preserved through Merge for stable LLM tool-list ordering.

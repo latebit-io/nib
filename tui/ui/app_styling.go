@@ -3,7 +3,6 @@ package ui
 import tea "charm.land/bubbletea/v2"
 
 // Terse callbacks and toggle.
-// Extracted from app.go (Phase 1 of AppModel decomposition).
 
 // SetTerse sets the terse mode indicator. Use this at startup to sync
 // the UI with the agent's initial state.
@@ -30,12 +29,5 @@ func (m *AppModel) handleSetAgentCallbacks(msg setAgentCallbacksMsg) (tea.Model,
 	if msg.initialTerse {
 		m.SetTerse(true)
 	}
-	return m, nil
-}
-
-// handleSetCodingCallbacks installs coding-flavored agent callbacks
-// from inside the Update goroutine. Currently a no-op — kept for
-// future coding-flavored callbacks.
-func (m *AppModel) handleSetCodingCallbacks(_ setCodingCallbacksMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }

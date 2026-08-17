@@ -1,17 +1,16 @@
 package llm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
 )
 
 // CodexAPI implements Provider using the OpenAI Responses API format,
@@ -22,23 +21,15 @@ type CodexAPI struct {
 	effort Effort // reasoning effort; "" omits the reasoning field
 	client *http.Client
 
-	mu        sync.Mutex
-	maxTokens int // 0 means "omit max_output_tokens — use provider default"
+	// maxTokensState's zero value omits max_output_tokens so the
+	// provider default applies until the agent escalates.
+	maxTokensState
 }
 
-// authFailure handles a 401 from the Codex endpoint, shared by Stream and
-// ListModels so both self-heal identically. The token source already
-// refreshed during Authenticate, so a 401 here means a dead/revoked token:
-// discard it via the optional invalidation port (a no-op for static
-// API-key auth) so the next launch detects "no credential" and re-offers
-// connect, then return a typed, actionable [AuthError] instead of the raw
-// body.
-func (c *CodexAPI) authFailure(statusCode int, body []byte) error {
-	if inv, ok := c.auth.(CredentialInvalidator); ok {
-		inv.Invalidate()
-	}
-	return parseAuthError("chatgpt", statusCode, body)
-}
+var _ OutputCapEscalator = (*CodexAPI)(nil)
+
+// codexProviderName labels errors and [AuthError.Provider].
+const codexProviderName = "chatgpt"
 
 // NewCodexAPI creates a CodexAPI provider for the ChatGPT Codex endpoint.
 // effort sets the reasoning effort ("" for the provider default).
@@ -89,7 +80,7 @@ func (c *CodexAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 				// authoritative, so an unreadable body still self-heals.
 				body = nil
 			}
-			return nil, c.authFailure(resp.StatusCode, body)
+			return nil, authFailure(codexProviderName, c.auth, resp.StatusCode, body)
 		}
 		// Body drained by deferred Close; no need to read it.
 		return nil, fmt.Errorf("codex: list models: HTTP %d", resp.StatusCode)
@@ -294,23 +285,6 @@ func toolsToCodexTools(tools []ToolDef) []codexTool {
 
 // --- Provider implementation ---
 
-// MaxTokens returns the current max_output_tokens value sent on requests.
-// Zero means no value is sent and the provider's default applies.
-func (c *CodexAPI) MaxTokens() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.maxTokens
-}
-
-// SetMaxTokens updates the max_output_tokens value used on subsequent
-// requests. Used by the agent loop to escalate after a truncated response.
-// Zero falls back to the provider default.
-func (c *CodexAPI) SetMaxTokens(v int) {
-	c.mu.Lock()
-	c.maxTokens = v
-	c.mu.Unlock()
-}
-
 // Stream sends a request to the Codex Responses API and returns a channel
 // of streaming events.
 func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
@@ -319,17 +293,13 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		instructions = "You are a helpful coding assistant."
 	}
 	slog.Debug("codex request", "model", c.model, "instructions_len", len(instructions), "input_items", len(input), "tools", len(tools))
-	c.mu.Lock()
-	maxTokens := c.maxTokens
-	c.mu.Unlock()
-
 	reqBody := codexRequest{
 		Model:           c.model,
 		Instructions:    instructions,
 		Input:           input,
 		Tools:           toolsToCodexTools(tools),
 		Stream:          true,
-		MaxOutputTokens: maxTokens,
+		MaxOutputTokens: c.MaxTokens(),
 	}
 	if eff := openAIEffort(c.effort); eff != "" {
 		reqBody.Reasoning = &codexReasoning{Effort: eff}
@@ -349,38 +319,11 @@ func (c *CodexAPI) Stream(ctx context.Context, messages []Message, tools []ToolD
 		return nil, fmt.Errorf("authenticate: %w", err)
 	}
 
-	resp, err := c.client.Do(req)
+	resp, err := openStream(c.client, req, codexProviderName, c.auth)
 	if err != nil {
-		return nil, fmt.Errorf("codex request: %w", err)
+		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		_ = resp.Body.Close() // body drained above; close error is not actionable
-		// Check 401 before the read-error guard: the body only enriches
-		// the AuthError's Code/Message, but the 401 itself is
-		// authoritative, so an unreadable body must still self-heal
-		// (invalidate the credential) rather than fall through to a
-		// generic error that leaves the dead token in the store.
-		if resp.StatusCode == http.StatusUnauthorized {
-			if readErr != nil {
-				respBody = nil
-			}
-			return nil, c.authFailure(resp.StatusCode, respBody)
-		}
-		if readErr != nil {
-			return nil, fmt.Errorf("codex error: status %d (body unreadable: %w)", resp.StatusCode, readErr)
-		}
-		return nil, fmt.Errorf("codex error: status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	ch := make(chan StreamEvent, 16)
-	go func() {
-		defer func() { _ = resp.Body.Close() }() // SSE stream done; close error is not actionable
-		defer close(ch)
-		c.readCodexSSE(ctx, resp, ch)
-	}()
-
-	return ch, nil
+	return startSSEReader(ctx, resp, c.readCodexSSE), nil
 }
 
 // pendingCall accumulates a tool call from streamed deltas.
@@ -454,17 +397,13 @@ func (s *codexStreamState) handleItemAdded(evt codexSSEEvent, raw []byte) {
 	}
 }
 
-// maxToolArgsBytes caps accumulated tool-call arguments to prevent unbounded
-// growth from streamed model output. Matches the SSE scanner's 10MB limit.
-const maxToolArgsBytes = 10 * 1024 * 1024
-
 func (s *codexStreamState) handleCallDelta(evt codexSSEEvent, raw []byte) {
 	idx := extractOutputIndex(raw)
 	pc, ok := s.calls[idx]
 	if !ok {
 		return
 	}
-	if pc.args.Len()+len(evt.Delta) > maxToolArgsBytes {
+	if pc.args.Len()+len(evt.Delta) > maxToolArgBytes {
 		slog.Warn("codex: tool args exceeded cap, dropping call", "output_index", idx)
 		delete(s.calls, idx)
 		return
@@ -480,7 +419,7 @@ func (s *codexStreamState) handleItemDone(evt codexSSEEvent, raw []byte) {
 		if !ok {
 			return
 		}
-		if len(item.Arguments) > maxToolArgsBytes {
+		if len(item.Arguments) > maxToolArgBytes {
 			slog.Warn("codex: tool args exceeded cap, dropping call", "output_index", idx)
 			delete(s.calls, idx)
 			return
@@ -544,74 +483,31 @@ func extractOutputIndex(raw []byte) int {
 	return v.OutputIndex
 }
 
-// readCodexSSE parses the Responses API SSE stream into StreamEvents.
-func (c *CodexAPI) readCodexSSE(ctx context.Context, resp *http.Response, ch chan<- StreamEvent) {
-	// send writes an event to the channel or returns false if ctx is cancelled.
-	// Prevents blocking indefinitely if the consumer stops reading.
-	send := func(ev StreamEvent) bool {
-		select {
-		case ch <- ev:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
-
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	wd := newStreamWatchdog(resp.Body)
-	defer wd.stop()
-
+// readCodexSSE dispatches Responses API SSE events through [scanSSE].
+// response.completed/incomplete emit the terminal event; "[DONE]" and
+// clean EOF fall back to the accumulated calls and usage.
+func (c *CodexAPI) readCodexSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent) {
 	state := &codexStreamState{calls: map[int]*pendingCall{}}
-
-	for scanner.Scan() {
-		wd.reset()
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	terminal := func() StreamEvent {
+		return StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage}
+	}
+	scanSSE(ctx, body, ch, codexProviderName, func(_, data string) bool {
 		if data == "[DONE]" {
-			send(StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage})
-			return
+			trySend(ctx, ch, terminal())
+			return true
 		}
-
 		raw := []byte(data)
 		var evt codexSSEEvent
 		if err := json.Unmarshal(raw, &evt); err != nil {
 			slog.Warn("codex SSE unmarshal error", "err", err, "data", data[:min(len(data), 200)])
-			continue
+			return false
 		}
-
-		if emitted, done := state.handleEvent(evt, raw); emitted != nil {
-			if !send(*emitted) {
-				return
-			}
-			if done {
-				return
-			}
+		emitted, done := state.handleEvent(evt, raw)
+		if emitted == nil {
+			return false
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		if wd.fired() {
-			send(StreamEvent{Done: true, Err: errStreamStalled})
-			return
-		}
-		if ctx.Err() == nil {
-			slog.Warn("codex SSE scanner error", "err", err)
-		}
-	}
-	if ctx.Err() == nil {
-		send(StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage})
-	}
+		return !trySend(ctx, ch, *emitted) || done
+	}, terminal)
 }
 
 // finalizeCalls converts accumulated pending calls to ToolCall slice.
@@ -620,14 +516,8 @@ func finalizeCalls(calls map[int]*pendingCall) []ToolCall {
 	if len(calls) == 0 {
 		return nil
 	}
-	indices := make([]int, 0, len(calls))
-	for i := range calls {
-		indices = append(indices, i)
-	}
-	slices.Sort(indices)
-
-	result := make([]ToolCall, 0, len(indices))
-	for _, i := range indices {
+	result := make([]ToolCall, 0, len(calls))
+	for _, i := range slices.Sorted(maps.Keys(calls)) {
 		pc := calls[i]
 		result = append(result, ToolCall{
 			ID:   pc.id,

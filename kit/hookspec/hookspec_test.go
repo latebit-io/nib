@@ -1,6 +1,7 @@
 package hookspec
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -73,6 +74,29 @@ func TestGroup_Matches(t *testing.T) {
 	// Empty matcher matches everything.
 	if !cfg.Hooks[PostToolUse][0].Matches("anything") {
 		t.Errorf("empty matcher should match all")
+	}
+}
+
+// TestGroup_MatchesWithoutParse guards against a Group built by literal
+// or json.Unmarshal (no compiled regex) silently matching every tool.
+func TestGroup_MatchesWithoutParse(t *testing.T) {
+	t.Parallel()
+	var g Group
+	if err := json.Unmarshal([]byte(`{"matcher":"write_.*","hooks":[]}`), &g); err != nil {
+		t.Fatal(err)
+	}
+	if g.Matches("read_file") {
+		t.Errorf("unmarshalled matcher write_.* must not match read_file")
+	}
+	if !g.Matches("write_file") {
+		t.Errorf("unmarshalled matcher write_.* must match write_file")
+	}
+	lit := Group{Matcher: "^Bash$"}
+	if lit.Matches("Bash2") || !lit.Matches("Bash") {
+		t.Errorf("literal Group matcher not honored")
+	}
+	if (Group{Matcher: "("}).Matches("x") {
+		t.Errorf("invalid matcher must never match")
 	}
 }
 

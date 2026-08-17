@@ -35,8 +35,10 @@ type CachePolicy struct {
 
 // WithCaching returns a [kit.StoreDecorator] that caches
 // [memory.Store.Fetch] results in-memory. Writes (Publish/Append) on
-// the same path invalidate the cached entry so the next Fetch returns
-// the new version. [memory.Store.List] passes through uncached —
+// the same path invalidate the cached entry so the next Fetch reads
+// through — the write response is never cached, because adapters (the
+// demarkus MCP adapter, for one) return header-only documents with an
+// empty Body from writes. [memory.Store.List] passes through uncached —
 // invalidating a directory listing on every child write would either
 // require tracking which entries cover which paths (complex) or
 // invalidating the whole cache on any write (counterproductive).
@@ -71,9 +73,8 @@ type cacheEntry struct {
 
 // cachedStore implements [memory.Store] with a TTL+capacity cache in
 // front of Fetch. Publish/Append delegate to the inner store and then
-// invalidate the entry for the affected path (also updating it with
-// the fresh document the inner store returns, so a publish-then-fetch
-// is a hit rather than a re-fetch).
+// invalidate the entry for the affected path, whether or not the write
+// succeeded.
 type cachedStore struct {
 	inner  memory.Store
 	policy CachePolicy
@@ -105,27 +106,25 @@ func (c *cachedStore) Fetch(ctx context.Context, path string) (memory.Document, 
 	return doc, nil
 }
 
-// Publish delegates and refreshes the cache entry with the new
-// document (or invalidates it on error).
+// Publish delegates and invalidates the cache entry for path. The
+// returned document is not cached: write responses may be header-only.
 func (c *cachedStore) Publish(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
 	doc, err := c.inner.Publish(ctx, path, body, expectedVersion)
+	c.invalidate(path)
 	if err != nil {
-		c.invalidate(path)
 		return memory.Document{}, err
 	}
-	c.store(path, doc, c.policy.Now())
 	return doc, nil
 }
 
-// Append delegates and refreshes the cache entry with the new
-// document (or invalidates it on error).
+// Append delegates and invalidates the cache entry for path. The
+// returned document is not cached: write responses may be header-only.
 func (c *cachedStore) Append(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
 	doc, err := c.inner.Append(ctx, path, body, expectedVersion)
+	c.invalidate(path)
 	if err != nil {
-		c.invalidate(path)
 		return memory.Document{}, err
 	}
-	c.store(path, doc, c.policy.Now())
 	return doc, nil
 }
 

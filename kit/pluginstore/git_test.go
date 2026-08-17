@@ -83,3 +83,46 @@ func TestGitFetch_InstallAndResync(t *testing.T) {
 		t.Errorf("re-synced tree missing new file: %v", err)
 	}
 }
+
+// TestGitFetch_PinnedRef covers the ref path (full clone + detached
+// checkout with --end-of-options) and proves a leading-dash ref is
+// rejected before git ever runs.
+func TestGitFetch_PinnedRef(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	repo := t.TempDir()
+	runGitT(t, repo, "init")
+	runGitT(t, repo, "config", "user.email", "test@example.com")
+	runGitT(t, repo, "config", "user.name", "Test")
+	writePlugin(t, repo, "foo", "1.0.0")
+	runGitT(t, repo, "add", "-A")
+	runGitT(t, repo, "commit", "-m", "initial")
+	head1 := strings.TrimSpace(runGitT(t, repo, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(repo, "NEW.md"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitT(t, repo, "add", "-A")
+	runGitT(t, repo, "commit", "-m", "second")
+
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ent, err := st.Install(context.Background(), GitSource(repo, head1), InstallOptions{Enabled: true})
+	if err != nil {
+		t.Fatalf("Install pinned: %v", err)
+	}
+	if ent.Pin != head1 {
+		t.Fatalf("pin = %q, want %q", ent.Pin, head1)
+	}
+	if _, err := os.Stat(filepath.Join(st.SourceDir("foo"), "NEW.md")); err == nil {
+		t.Errorf("pinned checkout must not contain a later commit's file")
+	}
+
+	if _, err := st.Install(context.Background(), GitSource(repo, "--detach"), InstallOptions{}); err == nil {
+		t.Errorf("leading-dash ref must be rejected")
+	}
+}

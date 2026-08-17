@@ -204,10 +204,7 @@ func findKeepBoundary(msgs []llm.Message, keepRecent int) int {
 // content that triggered truncation (len(content) > maxBytes), so
 // re-running [capStaleToolResults] on the result is a no-op.
 func truncationMarker(content string, maxBytes int) string {
-	budget := maxBytes - truncationTailReserve
-	if budget < 0 {
-		budget = 0
-	}
+	budget := max(maxBytes-truncationTailReserve, 0)
 	preview := truncateAtRuneBoundary(content, budget)
 	return fmt.Sprintf(
 		"%s\n[truncated: %d original bytes, %d kept; re-call the tool to retrieve full content]",

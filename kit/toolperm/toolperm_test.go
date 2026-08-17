@@ -244,8 +244,12 @@ func TestGlobMatch(t *testing.T) {
 		{"git *", "git a/b/c", true}, // * crosses '/'
 	}
 	for _, tc := range cases {
-		if got := globMatch(tc.pattern, tc.s); got != tc.want {
-			t.Errorf("globMatch(%q,%q) = %t, want %t", tc.pattern, tc.s, got, tc.want)
+		re, err := globRegexp(tc.pattern)
+		if err != nil {
+			t.Fatalf("globRegexp(%q): %v", tc.pattern, err)
+		}
+		if got := re.MatchString(tc.s); got != tc.want {
+			t.Errorf("glob %q match %q = %t, want %t", tc.pattern, tc.s, got, tc.want)
 		}
 	}
 }

@@ -77,16 +77,16 @@ func normalizeScopePath(p string) string {
 func (t *GlobTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args globArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 
 	if args.Pattern == "" {
-		return textResult("Error: pattern is required")
+		return errorResult("Error: pattern is required")
 	}
 
 	files, err := t.workspace.ListFiles()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error listing files: %v", err))
+		return errorResult(fmt.Sprintf("Error listing files: %v", err))
 	}
 
 	prefix := normalizeScopePath(args.Path)

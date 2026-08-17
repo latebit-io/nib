@@ -1,8 +1,8 @@
 // Package capture defines the port for persisting session events (intents,
 // proposals, validator outcomes, accept/reject decisions) to external stores.
 //
-// The engine depends only on the SessionEventSink interface defined here.
-// Concrete adapters (e.g. engine/capture/demarkus) live in sub-packages and
+// The session depends only on the SessionEventSink interface defined here.
+// Concrete adapters (e.g. coding/capture/demarkus) live in sub-packages and
 // are wired at the composition root. A NoopSink satisfies the null-object
 // pattern so every call site dispatches unconditionally without nil checks.
 package capture
@@ -14,12 +14,12 @@ import (
 
 // Event is a single structured record of something that happened in a session.
 //
-// Payload is deliberately map[string]any so the engine never leaks internal
+// Payload is deliberately map[string]any so the session never leaks internal
 // types (event.PendingEdit, validate.Result, and so on) across the capture
 // boundary. Adapters are responsible for serialising payloads to their wire
 // format.
 type Event struct {
-	// Kind names the event category. Reserved kinds used by the engine:
+	// Kind names the event category. Reserved kinds used by the session:
 	// "intent", "proposal", "validator", "accepted", "rejected", "continue".
 	Kind string
 
@@ -51,7 +51,7 @@ type Event struct {
 // mutation races with the dispatch goroutine. The NoopSink and the
 // demarkus Sink both honour this contract.
 //
-// Implementations should pass [github.com/latebit-io/nib/engine/contracttest.SessionEventSink]
+// Implementations should pass [github.com/latebit-io/nib/coding/capture/contracttest.SessionEventSink]
 // — the fixture verifies Append over zero/populated/nil-payload events,
 // concurrent-Append safety, post-return Payload-snapshot (under -race),
 // and Append-after-Close not panicking.

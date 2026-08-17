@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,21 +20,18 @@ import (
 	"github.com/latebit-io/nib/ai/oauth"
 	"github.com/latebit-io/nib/cmd/nib-code/defaults"
 	"github.com/latebit-io/nib/coding/agent"
+	"github.com/latebit-io/nib/coding/capture/demarkus"
 	codingcmd "github.com/latebit-io/nib/coding/command"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/headless"
 	codingmemory "github.com/latebit-io/nib/coding/memory"
+	"github.com/latebit-io/nib/coding/runconfig"
 	"github.com/latebit-io/nib/coding/session"
 	"github.com/latebit-io/nib/coding/subagent"
 	"github.com/latebit-io/nib/coding/wire"
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/capture/demarkus"
 	"github.com/latebit-io/nib/engine/highlight"
 	"github.com/latebit-io/nib/engine/openfile"
-	"github.com/latebit-io/nib/engine/runconfig"
-	"github.com/latebit-io/nib/engine/validate"
-	"github.com/latebit-io/nib/engine/validate/goparse"
-	"github.com/latebit-io/nib/engine/validate/treesitter"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/budget"
 	"github.com/latebit-io/nib/kit/cmdallow"
@@ -51,37 +50,60 @@ func main() {
 	}
 }
 
+// config holds parsed command-line arguments.
+type config struct {
+	debug       bool
+	pluginsOnly bool
+	// path is the optional positional file or directory to open.
+	path string
+}
+
+// parseArgs parses flags and the optional positional file/dir argument.
+func parseArgs() config {
+	var c config
+	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/debug.log")
+	flag.BoolVar(&c.pluginsOnly, "plugins", false, "Print the wired plug-in manifest and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] [file|dir]\n\nFlags:\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	c.path = flag.Arg(0)
+	return c
+}
+
+// openDebugLog opens (truncating) the brand debug-log file named name
+// under the per-user cache dir. The caller owns the returned file.
+func openDebugLog(name string) (*os.File, error) {
+	logPath, err := brand.DebugLogPath(name)
+	if err != nil {
+		return nil, fmt.Errorf("debug log path: %w", err)
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open debug log %s: %w", logPath, err)
+	}
+	return f, nil
+}
+
 // run wires together the engine, optional agent/LSP services, and the TUI.
-func run() error { //nolint:gocognit // wiring function — inherently sequential
+func run() error {
 	// Application-level context — cancelled when run() returns (after the
 	// TUI exits) so in-flight agent goroutines shut down promptly instead
 	// of running until their next HTTP round-trip times out.
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
-	// Parse args: [--debug] [--plugins] [file]
-	args := os.Args[1:]
-	debug := false
-	pluginsOnly := false
-	var filePath string
-	for _, a := range args {
-		switch a {
-		case "--debug":
-			debug = true
-		case "--plugins":
-			pluginsOnly = true
-		default:
-			filePath = a
-		}
-	}
+	cfg := parseArgs()
+	filePath := cfg.path
 
-	if debug {
-		logPath, err := brand.DebugLogPath("debug.log")
+	// Debug mode writes to the per-user cache dir (single-user trust
+	// boundary, safe against /tmp + O_TRUNC symlink clobber). Losing the
+	// debug log is not a reason to refuse to run: warn and continue.
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if cfg.debug {
+		logFile, err := openDebugLog("debug.log")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "debug log path: %v — proceeding without debug log\n", err)
-			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-		} else if logFile, openErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); openErr != nil {
-			fmt.Fprintf(os.Stderr, "open debug log %s: %v — proceeding without debug log\n", logPath, openErr)
-			slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+			fmt.Fprintf(os.Stderr, "warning: %v — proceeding without debug log\n", err)
 		} else {
 			defer func() {
 				if err := logFile.Close(); err != nil {
@@ -90,8 +112,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			}()
 			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		}
-	} else {
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}
 
 	// Determine whether the argument is a file or a directory.
@@ -155,7 +175,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		for _, p := range activePlugins {
 			sources = append(sources, wire.MCPConfigSource{Prefix: p.ID, Path: p.MCPConfigPath})
 		}
-		mcpResult = combineMCPResults(mcpResult, wire.DiscoverMCPToolsFromSources(sources))
+		mcpResult = mcpResult.Merge(wire.DiscoverMCPToolsFromSources(sources))
 	}
 	defer mcpResult.Cleanup()
 
@@ -385,7 +405,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	bashAllowlist := cmdallow.Load(projectRoot)
 	sess.SetBashAllowlist(bashAllowlist)
 
-	buildAgent := func(p llm.Provider) *agent.Agent {
+	buildAgent := func(p llm.Provider) (*agent.Agent, error) {
 		// Keep subagents pointed at the provider the parent is now using.
 		setSubagentProvider(p)
 		opts := &agent.NewOptions{
@@ -412,40 +432,29 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		if hookDispatcher != nil {
 			opts.HookDispatcher = hookDispatcher
 		}
-		if os.Getenv(brand.EnvKeyValidatorsDisabled) == "" {
-			opts.ValidationPipeline = validate.NewPipeline(
-				goparse.Validator{},
-				treesitter.New(highlight.LanguageFor),
-			)
-		}
+		// nil when validators are disabled via env.
+		opts.ValidationPipeline = wire.NewValidationPipeline()
 		extraTools := append(append([]agent.Tool{}, mcpResult.Tools...), skillResult.Tools...)
 		extraTools = append(extraTools, subagentResult.Tools...)
 		extraTools = append(extraTools, forkSkillTools...)
 		ag := agent.New(p, sess, opts, extraTools...)
 		// Forward bus-published agent events into the shared `events`
-		// chan that LSP also writes to. The TUI reads this single
-		// merged stream via [session.Session.Events]. The forwarder
-		// goroutine exits naturally when [agent.Agent.Close] closes
-		// the bus (which closes the subscription's inbox).
-		sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
-		if err != nil {
-			panic(fmt.Sprintf("nib-code: agent.Subscribe: %v", err))
+		// chan that LSP also writes to; the TUI reads this single merged
+		// stream via [session.Session.Events]. A freshly built agent
+		// cannot be closed, so a Subscribe failure here is a real bug —
+		// surface it (and release the agent) rather than run deaf.
+		if err := wire.ForwardEvents(appCtx, ag, events); err != nil {
+			ag.Close()
+			return nil, err
 		}
-		go func() {
-			for ev := range sub.Events() {
-				select {
-				case events <- ev:
-				case <-appCtx.Done():
-					return
-				}
-			}
-		}()
-		return ag
+		return ag, nil
 	}
 
 	// Build the agent now if credentials were already available at startup.
 	if provider != nil {
-		ag = buildAgent(provider)
+		if ag, err = buildAgent(provider); err != nil {
+			return err
+		}
 		sess.SetAgent(ag, events)
 	}
 
@@ -526,14 +535,8 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			if err != nil {
 				return nil, err
 			}
-			if profile == "chatgpt" {
-				filtered := models[:0]
-				for _, m := range models {
-					if strings.Contains(m.ID, "codex") || strings.HasPrefix(m.ID, "gpt-5") {
-						filtered = append(filtered, m)
-					}
-				}
-				models = filtered
+			if profile == chatgptProfile {
+				models = slices.DeleteFunc(models, func(m llm.ModelInfo) bool { return !isCodexModelID(m.ID) })
 			}
 			return modelsToItems(models, profile, resolved.Model), nil
 		},
@@ -675,13 +678,12 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	// most of that span it sits parked waiting for the user, which
 	// IS the right moment for /clear and /compact. Restricting on
 	// IsRunning alone would gate every command behind a fresh
-	// session restart. nil ag (no LLM credentials) leaves the probe
-	// nil so /help and /quit work even before the agent is built.
-	var cmdBusy func() bool
-	if ag != nil {
-		cmdBusy = func() bool { return ag.IsRunning() && !ag.IsWaiting() }
-	}
-	app.AgentPane.SetCommandDispatch(cmdRegistry, cmdBusy, appCtx)
+	// session restart. `ag` is captured by reference: nil until the
+	// model switcher lazily builds it (no credentials at startup), so
+	// the probe must re-check on every call rather than bind once. Both
+	// the probe and the switcher run on the Update goroutine.
+	cmdBusy := func() bool { return ag != nil && ag.IsRunning() && !ag.IsWaiting() }
+	app.AgentPane.SetCommandDispatch(appCtx, cmdRegistry, cmdBusy)
 
 	// OAuth callbacks — wired post-construction because ConnectOAuth
 	// needs tuiApp.Program() which only exists after New().
@@ -718,15 +720,15 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	// wireAgentHandlers installs the UI callbacks that require a live
-	// agent through the typed nibTui.AgentCallbacks / CodingCallbacks
-	// surface. Called once — on startup (when credentials exist) or
-	// on the first successful connect via the model switcher.
+	// agent through the typed nibTui.AgentCallbacks surface. Called
+	// once — on startup (when credentials exist) or on the first
+	// successful connect via the model switcher.
 	//
-	// The two Set*Callbacks calls dispatch through tea.Program.Send,
-	// which serializes the field writes into the Bubble Tea Update
-	// goroutine and so stays race-free regardless of which caller
-	// goroutine invokes wireAgentHandlers (startup goroutine pre-Run;
-	// Update goroutine via model switcher post-Run).
+	// SetAgentCallbacks dispatches through tea.Program.Send, which
+	// serializes the field writes into the Bubble Tea Update goroutine
+	// and so stays race-free regardless of which caller goroutine
+	// invokes wireAgentHandlers (startup goroutine pre-Run; Update
+	// goroutine via model switcher post-Run).
 	wireAgentHandlers := func() {
 		tuiApp.SetAgentCallbacks(nibTui.AgentCallbacks{
 			ToggleTerse: func(enabled bool) bool {
@@ -740,8 +742,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			},
 			InitialTerse: true,
 		})
-
-		tuiApp.SetCodingCallbacks(nibTui.CodingCallbacks{})
 	}
 
 	// Model switcher — first call with valid credentials constructs the agent
@@ -766,7 +766,11 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		}
 		provider = newProvider
 		if ag == nil {
-			ag = buildAgent(provider)
+			built, err := buildAgent(provider)
+			if err != nil {
+				return "", err
+			}
+			ag = built
 			sess.SetAgent(ag, events)
 			app.AgentPane.SetHasAgent(true)
 			wireAgentHandlers()
@@ -789,7 +793,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 		wireAgentHandlers()
 	}
 
-	if pluginsOnly {
+	if cfg.pluginsOnly {
 		fmt.Print(buildPluginsManifest(ag, cmdRegistry, mem.Store, llmResolved, skillResult))
 		return nil
 	}
@@ -874,29 +878,49 @@ func connectCopilotCmd(profile string, store *oauth.Store, p *tea.Program) tea.C
 	}
 }
 
+// chatgptProfile is the built-in OAuth profile whose model list is
+// narrowed to Codex-capable models (see isCodexModelID).
+const chatgptProfile = "chatgpt"
+
+// profileToRegistry maps built-in llmconfig profile names to models.dev
+// provider IDs. Profiles absent here (or user-defined ones) skip the
+// registry and fall back to the provider's own model-list API.
 var profileToRegistry = map[string]string{
-	"chatgpt":    "openai",
-	"copilot":    "github-copilot",
-	"gemini":     "google",
-	"minimax":    "minimax",
-	"openrouter": "openrouter",
-	"anthropic":  "anthropic",
+	chatgptProfile: "openai",
+	"copilot":      "github-copilot",
+	"gemini":       "google",
+	"minimax":      "minimax",
+	"openrouter":   "openrouter",
+	"anthropic":    "anthropic",
+	"fugu":         "sakana",
 }
 
+// registryProvider returns the models.dev provider ID for a profile, or
+// "" when the profile has no registry mapping.
 func registryProvider(profile string) string {
 	return profileToRegistry[profile]
 }
 
-func registryFilter(profile string) llm.ModelFilter {
-	if profile != "chatgpt" {
-		return nil
-	}
-	return func(m llm.RegistryModel) bool {
-		return strings.Contains(m.Family, "codex") ||
-			strings.HasPrefix(m.ID, "gpt-5")
-	}
+// isCodexModelID reports whether a model ID is usable through the
+// ChatGPT/Codex backend: Codex-family models plus the gpt-5 line. Keyed
+// on ID (not registry Family) because the provider-API fallback path
+// only has [llm.ModelInfo] IDs, and every codex-family registry entry
+// carries "codex" in its ID — one predicate serves both paths.
+func isCodexModelID(id string) bool {
+	return strings.Contains(id, "codex") || strings.HasPrefix(id, "gpt-5")
 }
 
+// registryFilter returns the models.dev filter for a profile: the Codex
+// predicate for chatgpt, nil (no narrowing) otherwise.
+func registryFilter(profile string) llm.ModelFilter {
+	if profile != chatgptProfile {
+		return nil
+	}
+	return func(m llm.RegistryModel) bool { return isCodexModelID(m.ID) }
+}
+
+// modelsToItems converts provider model infos into selector items for
+// profile, moving defaultModel (the profile's current model) to the top.
 func modelsToItems(models []llm.ModelInfo, profile, defaultModel string) []nibTui.ModelSelectorItem {
 	items := make([]nibTui.ModelSelectorItem, len(models))
 	defaultIdx := -1
@@ -910,18 +934,4 @@ func modelsToItems(models []llm.ModelInfo, profile, defaultModel string) []nibTu
 		items[0], items[defaultIdx] = items[defaultIdx], items[0]
 	}
 	return items
-}
-
-// combineMCPResults merges two MCP discovery results into one, chaining
-// their cleanups so both sets of clients close on shutdown. Used to fold
-// plugin-contributed MCP servers into the project's discovery result.
-func combineMCPResults(a, b wire.MCPResult) wire.MCPResult {
-	return wire.MCPResult{
-		Tools:       append(append([]agent.Tool{}, a.Tools...), b.Tools...),
-		ServerNames: append(append([]string{}, a.ServerNames...), b.ServerNames...),
-		Cleanup: func() {
-			a.Cleanup()
-			b.Cleanup()
-		},
-	}
 }

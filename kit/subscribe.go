@@ -226,10 +226,8 @@ func (s *Subscription) deliver(ev event.Event) {
 // events. Every other event is control: lifecycle, failure, or
 // signal events whose loss would strand the subscriber.
 //
-// The list mirrors the pre-bus drop policy in the translator's
-// send function. Keep them aligned; events added to the streaming
-// class need to be added here AND in the legacy send function until
-// that function is removed in the migration commit.
+// This is the single drop policy for the bus; a new high-volume
+// event type must be added here to be droppable under back-pressure.
 func isStreamingEvent(ev event.Event) bool {
 	switch ev.(type) {
 	case event.AgentToken, event.AgentTurnUsage, event.AgentInputEstimate:

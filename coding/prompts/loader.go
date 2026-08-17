@@ -1,3 +1,6 @@
+// Package prompts owns the coding agent's prompt templates: the
+// embedded system/planning/user templates, project-level overrides,
+// and the context files and language detection they render with.
 package prompts
 
 import (
@@ -7,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -151,18 +155,13 @@ const projectInstructionsClose = "</project_instructions>"
 // path itself. The original slice is never mutated (it is caller-owned
 // agent state).
 func neutralizeProjectInstructions(files []ContextFile) []ContextFile {
-	needsFix := false
-	for _, f := range files {
-		if strings.Contains(f.Content, projectInstructionsClose) {
-			needsFix = true
-			break
-		}
-	}
+	needsFix := slices.ContainsFunc(files, func(f ContextFile) bool {
+		return strings.Contains(f.Content, projectInstructionsClose)
+	})
 	if !needsFix {
 		return files
 	}
-	out := make([]ContextFile, len(files))
-	copy(out, files)
+	out := slices.Clone(files)
 	for i := range out {
 		out[i].Content = strings.ReplaceAll(out[i].Content, projectInstructionsClose, "&lt;/project_instructions&gt;")
 	}

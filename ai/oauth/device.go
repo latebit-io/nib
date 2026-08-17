@@ -15,8 +15,8 @@ import (
 // Prevents indefinite hangs if the auth server is unresponsive.
 var oauthClient = &http.Client{Timeout: 30 * time.Second}
 
-// DeviceFlowConfig holds the endpoint configuration for a device code flow.
-type DeviceFlowConfig struct {
+// deviceFlowConfig holds the endpoint configuration for a device code flow.
+type deviceFlowConfig struct {
 	// ClientID is the OAuth client identifier.
 	ClientID string
 	// DeviceCodeURL is the endpoint to request a device code.
@@ -51,9 +51,9 @@ type tokenResponse struct {
 	ErrorDesc    string `json:"error_description"`
 }
 
-// RequestDeviceCode initiates a standard RFC 8628 device code flow.
+// requestDeviceCode initiates a standard RFC 8628 device code flow.
 // Returns the device code info that should be shown to the user.
-func RequestDeviceCode(ctx context.Context, cfg DeviceFlowConfig) (*DeviceCode, *deviceCodeResponse, error) {
+func requestDeviceCode(ctx context.Context, cfg deviceFlowConfig) (*DeviceCode, *deviceCodeResponse, error) {
 	data := url.Values{
 		"client_id": {cfg.ClientID},
 	}
@@ -112,7 +112,7 @@ const (
 )
 
 // pollOnce makes a single token request and classifies the response.
-func pollOnce(ctx context.Context, cfg DeviceFlowConfig, dc *DeviceCode) (*tokenResponse, pollResult, error) {
+func pollOnce(ctx context.Context, cfg deviceFlowConfig, dc *DeviceCode) (*tokenResponse, pollResult, error) {
 	data := url.Values{
 		"client_id":   {cfg.ClientID},
 		"device_code": {dc.DeviceCode},
@@ -162,9 +162,9 @@ func pollOnce(ctx context.Context, cfg DeviceFlowConfig, dc *DeviceCode) (*token
 	}
 }
 
-// PollDeviceToken polls the token endpoint until the user authorizes,
+// pollDeviceToken polls the token endpoint until the user authorizes,
 // the context is cancelled, or the device code expires.
-func PollDeviceToken(ctx context.Context, cfg DeviceFlowConfig, dc *DeviceCode) (*tokenResponse, error) {
+func pollDeviceToken(ctx context.Context, cfg deviceFlowConfig, dc *DeviceCode) (*tokenResponse, error) {
 	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
 	interval := time.Duration(dc.Interval) * time.Second
 	// Reuse one timer instead of time.After per iteration, which would
@@ -201,46 +201,50 @@ func PollDeviceToken(ctx context.Context, cfg DeviceFlowConfig, dc *DeviceCode) 
 	}
 }
 
-// RefreshAccessToken exchanges a refresh token for a new access token.
-func RefreshAccessToken(ctx context.Context, tokenURL, clientID, refreshToken string) (*tokenResponse, error) {
-	data := url.Values{
+// refreshAccessToken exchanges a refresh token for a new access token.
+func refreshAccessToken(ctx context.Context, tokenURL, clientID, refreshToken string) (*tokenResponse, error) {
+	return postTokenForm(ctx, tokenURL, "refresh", url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshToken},
 		"client_id":     {clientID},
-	}
+	})
+}
 
+// postTokenForm POSTs a form to an OAuth token endpoint and decodes the
+// token response, turning a non-200 status or an OAuth error field into an
+// error prefixed with label (e.g. "refresh", "token exchange").
+func postTokenForm(ctx context.Context, tokenURL, label string, data url.Values) (*tokenResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("create refresh request: %w", err)
+		return nil, fmt.Errorf("create %s request: %w", label, err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := oauthClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("refresh request: %w", err)
+		return nil, fmt.Errorf("%s request: %w", label, err)
 	}
 	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if err != nil {
-		return nil, fmt.Errorf("read refresh response: %w", err)
+		return nil, fmt.Errorf("read %s response: %w", label, err)
 	}
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("%s: HTTP %d", label, resp.StatusCode)
 	}
 
 	var tr tokenResponse
 	if err := json.Unmarshal(body, &tr); err != nil {
-		return nil, fmt.Errorf("decode refresh response: %w", err)
+		return nil, fmt.Errorf("decode %s response: %w", label, err)
 	}
 	if tr.Error != "" {
 		desc := tr.ErrorDesc
 		if desc == "" {
 			desc = tr.Error
 		}
-		return nil, fmt.Errorf("refresh error: %s", desc)
+		return nil, fmt.Errorf("%s error: %s", label, desc)
 	}
 	return &tr, nil
 }

@@ -38,18 +38,19 @@ func TestClassifyUserMessage_DeterministicStates(t *testing.T) {
 
 // TestAppendUserMessage_RecordsClassifiedGlyph verifies the wiring:
 // AppendUserMessage classifies the text and stamps the resulting kind
-// onto userGlyphForRaw at the prefix-bearing raw line. Without this
+// onto the rawLineMark of the prefix-bearing raw line. Without this
 // link, the render path's glyph-color split has nothing to look up.
 func TestAppendUserMessage_RecordsClassifiedGlyph(t *testing.T) {
 	m := beatPane()
 	m.AppendUserMessage("check @main.go")
 
-	// Find the raw line carrying the prefix — must have one entry in
-	// userGlyphForRaw and the kind must match classification.
-	if got := len(m.userGlyphForRaw); got != 1 {
-		t.Fatalf("userGlyphForRaw entries = %d; want 1", got)
+	// Find the raw line carrying the prefix — exactly one mark must carry
+	// a glyph and the kind must match classification.
+	glyphs := glyphMarks(m)
+	if got := len(glyphs); got != 1 {
+		t.Fatalf("glyph-bearing marks = %d; want 1", got)
 	}
-	for raw, glyph := range m.userGlyphForRaw {
+	for raw, glyph := range glyphs {
 		if glyph != UserGlyphAttached {
 			t.Errorf("glyph at raw %d = %d; want UserGlyphAttached", raw, glyph)
 		}
@@ -70,10 +71,11 @@ func TestAppendInterruptUserMessage_BypassesClassification(t *testing.T) {
 	m := beatPane()
 	m.AppendInterruptUserMessage("stop working on @main.go")
 
-	if got := len(m.userGlyphForRaw); got != 1 {
-		t.Fatalf("userGlyphForRaw entries = %d; want 1", got)
+	glyphs := glyphMarks(m)
+	if got := len(glyphs); got != 1 {
+		t.Fatalf("glyph-bearing marks = %d; want 1", got)
 	}
-	for _, glyph := range m.userGlyphForRaw {
+	for _, glyph := range glyphs {
 		if glyph != UserGlyphInterrupt {
 			t.Errorf("glyph = %d; want UserGlyphInterrupt (path wins over content)", glyph)
 		}
@@ -95,4 +97,16 @@ func TestRender_AttachedGlyph_UsesProposalTextHue(t *testing.T) {
 	if !strings.Contains(out, proposalTextSeq) {
 		t.Errorf("attached glyph missing ProposalText color sequence %q in render output", proposalTextSeq)
 	}
+}
+
+// glyphMarks returns raw-line index -> glyph for every mark carrying a
+// non-neutral glyph.
+func glyphMarks(m *AgentPaneModel) map[int]UserGlyph {
+	out := map[int]UserGlyph{}
+	for raw, mark := range m.rawMarks {
+		if mark.glyph != UserGlyphNeutral {
+			out[raw] = mark.glyph
+		}
+	}
+	return out
 }

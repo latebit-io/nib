@@ -7,6 +7,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/contracttest"
 	"github.com/latebit-io/nib/kit/dyncontext"
 )
 
@@ -129,4 +130,11 @@ func TestWithTracing_ForwardsBindShell(t *testing.T) {
 	if inner.bound != nil {
 		t.Fatal("BindShell must not mutate the original wrapped tool")
 	}
+}
+
+// TestWithTracing_ForwardsOptionalInterfaces runs the shared wrapper
+// contract so a new optional kit tool interface fails here if tracing
+// forgets to forward it.
+func TestWithTracing_ForwardsOptionalInterfaces(t *testing.T) {
+	contracttest.ToolWrapper(t, WithTracing(func(TraceEvent) {}))
 }

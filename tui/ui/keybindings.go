@@ -2,13 +2,15 @@ package ui
 
 import (
 	tea "charm.land/bubbletea/v2"
-	"github.com/latebit-io/nib/engine/keymap"
+	"github.com/latebit-io/nib/tui/keymap"
 )
 
 // Action is an alias for keymap.Action — keeps TUI code concise.
 type Action = keymap.Action
 
-// Re-export action constants so TUI code doesn't need to import keymap directly.
+// Re-exported action constants. The keymap catalog is the source of
+// truth; these aliases keep the many `case ActionX:` sites in ui short
+// (help.go still imports keymap for the catalog itself).
 const (
 	ActionNone             = keymap.ActionNone
 	ActionQuit             = keymap.ActionQuit

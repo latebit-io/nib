@@ -105,6 +105,12 @@ func (g commandApprovalGate) BindShell(r dyncontext.Runner) Tool {
 	return commandApprovalGate{inner: kit.BindToolShell(g.inner, r), allow: g.allow, propose: g.propose}
 }
 
+// Reset forwards [Resettable] through the approval gate.
+func (g commandApprovalGate) Reset() { resetTool(g.inner) }
+
+// Describe forwards kit.Described through the approval gate.
+func (g commandApprovalGate) Describe() kit.Plugin { return kit.DescribeTool(g.inner) }
+
 // proposeCommand runs the interactive approval flow for a bash command:
 // deliver [event.AgentCommandProposed] (critical), block on the run's
 // Coordinator, translate the decision. Mirrors the edit flow in

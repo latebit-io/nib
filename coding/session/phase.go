@@ -14,7 +14,7 @@ const (
 )
 
 // phaseName returns a stable string for capture payloads and status text.
-// Kept in-package because callers outside the engine do not need it.
+// Kept in-package because callers outside the session do not need it.
 func phaseName(p Phase) string {
 	switch p {
 	case PhaseNone:

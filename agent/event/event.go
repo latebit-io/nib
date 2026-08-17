@@ -16,7 +16,7 @@ type Event interface {
 	agentEvent()
 }
 
-// AgentStart marks the beginning of a run (one Prompt or Continue invocation).
+// AgentStart marks the beginning of a run (one Prompt invocation).
 // Frontends use this to flip a "thinking" indicator on.
 type AgentStart struct{}
 
@@ -68,16 +68,6 @@ type ToolStart struct {
 	Args string
 }
 
-// ToolUpdate carries an in-progress update from a long-running tool. Tools
-// that stream output (e.g., bash commands) emit these between Start and End.
-type ToolUpdate struct {
-	// CallID identifies the tool call this update belongs to.
-	CallID string
-	// Partial is tool-specific intermediate state. Frontends type-assert
-	// against known tool result types when they want to render progress.
-	Partial any
-}
-
 // ToolEnd reports a tool call has completed. Result is the text returned
 // to the LLM as the tool result; IsError flags whether the tool execution
 // failed (the LLM still sees Result, but frontends can highlight the error).
@@ -90,10 +80,9 @@ type ToolEnd struct {
 	IsError bool
 }
 
-// TurnUsage reports token consumption for a single turn. Combines the
-// provider-reported counts (when available) with client-side estimates
-// so the UI can show real-time cost without waiting for the provider's
-// final tally.
+// TurnUsage reports provider-reported token consumption for a single
+// turn (zero when the provider returned no usage). Client-side estimates
+// are an application concern layered on via a provider wrapper.
 type TurnUsage struct {
 	// Turn is the 1-indexed turn number within the current run.
 	Turn int
@@ -105,39 +94,6 @@ type TurnUsage struct {
 	CachedTokens int
 	// ToolCalls is the number of tool calls dispatched in this turn.
 	ToolCalls int
-	// SystemEst is the estimated system prompt tokens.
-	SystemEst int
-	// ToolsEst is the estimated tool definition tokens.
-	ToolsEst int
-	// HistoryEst is the estimated conversation history tokens.
-	HistoryEst int
-	// NewEst is the estimated new input tokens.
-	NewEst int
-	// CompletionEst is the estimated output tokens (from streamed content length).
-	CompletionEst int
-}
-
-// InputEstimate signals the estimated input token composition before an LLM
-// call starts. Sent right before the stream opens so the frontend can show
-// real-time input cost while the response streams in.
-type InputEstimate struct {
-	// System is the estimated system prompt tokens.
-	System int
-	// Tools is the estimated tool definition tokens.
-	Tools int
-	// History is the estimated conversation history tokens.
-	History int
-	// New is the estimated new input tokens.
-	New int
-}
-
-// Compacted signals conversation history was reduced to control token cost.
-// Emitted once per compaction pass, before the next LLM call.
-type Compacted struct {
-	// BeforeTokens is the estimated history tokens before compaction.
-	BeforeTokens int
-	// AfterTokens is the estimated history tokens after compaction.
-	AfterTokens int
 }
 
 // Error carries a loop-level error — anything that can't be represented as
@@ -166,8 +122,8 @@ type MaxTurnsReached struct {
 // on the reply channel awaiting the next user message. Emitted from
 // inside the loop just before [Agent.awaitReply], routed through the
 // same event pipeline as every other foundation event so consumers see
-// it in stream order relative to the trailing AgentToken/MessageEnd of
-// the parking turn.
+// it in stream order relative to the trailing MessageUpdate/MessageEnd
+// of the parking turn.
 //
 // Finished is populated by the [Hooks.BeforePark] callback (when set);
 // the foundation has no opinion on what "finished" means at the
@@ -204,19 +160,10 @@ func (MessageEnd) agentEvent() {}
 func (ToolStart) agentEvent() {}
 
 // agentEvent satisfies [Event].
-func (ToolUpdate) agentEvent() {}
-
-// agentEvent satisfies [Event].
 func (ToolEnd) agentEvent() {}
 
 // agentEvent satisfies [Event].
 func (TurnUsage) agentEvent() {}
-
-// agentEvent satisfies [Event].
-func (InputEstimate) agentEvent() {}
-
-// agentEvent satisfies [Event].
-func (Compacted) agentEvent() {}
 
 // agentEvent satisfies [Event].
 func (Error) agentEvent() {}

@@ -1,19 +1,28 @@
 #!/bin/bash
 set -e
 
-echo "Running code formatting and linting..."
-make fmt
-make vet
+MODULES="ai agent engine kit coding tui cmd/nib-code cmd/agent cmd/nibster"
 
-if ! command -v golangci-lint &>/dev/null; then
-  echo "Error: golangci-lint is not installed."
-  echo "Install it: https://golangci-lint.run/welcome/install/"
+# Formatting is checked, not rewritten: a hook that silently reformats
+# leaves the commit and the working tree out of sync.
+echo "Checking formatting..."
+unformatted=""
+for mod in $MODULES; do
+  files=$(cd "$mod" && gofmt -l .)
+  if [ -n "$files" ]; then
+    unformatted="$unformatted$(echo "$files" | sed "s|^|$mod/|")\n"
+  fi
+done
+if [ -n "$unformatted" ]; then
+  echo "Error: files not gofmt-formatted (run 'make fmt'):"
+  printf '%b' "$unformatted"
   exit 1
 fi
 
-for mod in ai agent engine kit coding tui cmd/nib-code cmd/agent cmd/nibster; do
-  echo "Linting ${mod}..."
-  (cd "$mod" && golangci-lint run ./...)
-done
+echo "Vetting..."
+make vet
+
+echo "Linting..."
+make lint
 
 echo "✓ All checks passed"

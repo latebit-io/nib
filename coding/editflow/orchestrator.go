@@ -1,3 +1,6 @@
+// Package editflow runs the edit-approval review flow (validation,
+// proposal delivery, approve/reject wait, cache update) on behalf of
+// the coding agent, which supplies its state through [Deps] callbacks.
 package editflow
 
 import (
@@ -13,8 +16,6 @@ import (
 	"github.com/latebit-io/nib/kit/approval"
 )
 
-// Edit-approval orchestration.
-//
 // [Orchestrator] runs the review flow the `edit_file` / `replace_file`
 // tools trigger via the [tools.Approver.Propose] collaborator method.
 // It threads the validation pipeline, EditProposed event delivery,

@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/latebit-io/nib/coding/capture"
 	"github.com/latebit-io/nib/coding/event"
-	"github.com/latebit-io/nib/engine/capture"
 )
 
 // Capture-sink wiring — receives session events (intent, proposal, accepted,

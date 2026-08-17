@@ -9,6 +9,7 @@
 package nudges
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/latebit-io/nib/ai/llm"
@@ -59,12 +60,7 @@ var outstandingWorkMarkers = []string{
 // outstandingWorkMarkers phrases (case-insensitive).
 func ContainsOutstandingWorkMarker(s string) bool {
 	lower := strings.ToLower(s)
-	for _, marker := range outstandingWorkMarkers {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(outstandingWorkMarkers, func(m string) bool { return strings.Contains(lower, m) })
 }
 
 // permissionSeekingMarkers are case-insensitive substrings that flag a
@@ -119,12 +115,7 @@ var permissionSeekingMarkers = []string{
 // strings.ToLower of typical assistant prose.
 func containsPermissionSeekingMarker(s string) bool {
 	lower := strings.ToLower(s)
-	for _, marker := range permissionSeekingMarkers {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(permissionSeekingMarkers, func(m string) bool { return strings.Contains(lower, m) })
 }
 
 // ShouldNudgePermissionQuestion reports whether the most recent

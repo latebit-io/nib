@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/ai/internal/atomicjson"
 )
 
 const (
@@ -331,23 +332,8 @@ func saveSelectionToPath(path, profile, modelID string) error {
 		cfg.Profiles[profile] = p
 	}
 
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	data = append(data, '\n')
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("write temp config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp) // best-effort cleanup
-		return fmt.Errorf("rename config: %w", err)
+	if err := atomicjson.Write(path, cfg, 0o755, 0o644); err != nil {
+		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
 }

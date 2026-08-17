@@ -3,8 +3,10 @@ package kit_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
+	"github.com/latebit-io/nib/agent"
 	agentevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
@@ -894,5 +896,46 @@ func TestNew_NilToolPassesToFoundationValidation(t *testing.T) {
 	})
 	if !errors.Is(err, kit.ErrInvalidOptions) {
 		t.Fatalf("want ErrInvalidOptions for nil tool, got %v", err)
+	}
+}
+
+// TestMergeHooks_CoversEveryHookField guards the agent.Hooks field ↔
+// mergeHooks ↔ chainX triple: a Toolset with every hook set must
+// survive Merge with every hook still set, and the field count must
+// match what mergeHooks handles so a new field fails here first.
+func TestMergeHooks_CoversEveryHookField(t *testing.T) {
+	const handledByMergeHooks = 7
+	hooksType := reflect.TypeOf(agent.Hooks{})
+	if n := hooksType.NumField(); n != handledByMergeHooks {
+		t.Fatalf("agent.Hooks has %d fields; mergeHooks handles %d — add the new hook to mergeHooks and its chainX, then bump this constant", n, handledByMergeHooks)
+	}
+
+	full := kit.Hooks{
+		BeforeToolCall: func(context.Context, kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
+			return kit.BeforeToolCallResult{}, nil
+		},
+		AfterToolCall: func(context.Context, kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+			return kit.AfterToolCallResult{}, nil
+		},
+		TransformContext: func(_ context.Context, m []llm.Message) ([]llm.Message, error) { return m, nil },
+		SteeringMessages: func(context.Context) ([]llm.Message, error) { return nil, nil },
+		FollowUpMessages: func(context.Context) ([]llm.Message, error) { return nil, nil },
+		BeforePark:       func(context.Context) (agentevent.AgentParked, error) { return agentevent.AgentParked{}, nil },
+		OnTruncated: func(context.Context, kit.TruncationInput) (kit.TruncationResult, error) {
+			return kit.TruncationResult{}, nil
+		},
+	}
+	fullVal := reflect.ValueOf(full)
+	for i := range hooksType.NumField() {
+		if fullVal.Field(i).IsNil() {
+			t.Fatalf("test fixture leaves %s nil; set every hook so the merge check is meaningful", hooksType.Field(i).Name)
+		}
+	}
+
+	merged := reflect.ValueOf(kit.Merge(kit.Toolset{Hooks: full}, kit.Toolset{Hooks: full}).Hooks)
+	for i := range hooksType.NumField() {
+		if merged.Field(i).IsNil() {
+			t.Errorf("Merge dropped hook %s — mergeHooks does not chain it", hooksType.Field(i).Name)
+		}
 	}
 }

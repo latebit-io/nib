@@ -7,13 +7,14 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/latebit-io/nib/tui/editor"
 	"github.com/mattn/go-runewidth"
 )
 
 // Clipboard abstracts system clipboard access for copy/cut/paste.
 type Clipboard interface {
+	// Read returns the current clipboard text ("" when empty or unavailable).
 	Read() string
+	// Write replaces the clipboard contents.
 	Write(s string) error
 }
 
@@ -352,6 +353,12 @@ func (t *TextArea) end() {
 	}
 }
 
+// wordSeparators mirrors tui/editor's separator set so word motion feels
+// identical in the prompt and the editor without importing the editor.
+const wordSeparators = " \t.,;:()[]{}\"'"
+
+func isWordSeparator(r rune) bool { return strings.ContainsRune(wordSeparators, r) }
+
 func (t *TextArea) wordLeft() {
 	// Skip separators backward.
 	for t.cursorCol > 0 || t.cursorLine > 0 {
@@ -359,7 +366,7 @@ func (t *TextArea) wordLeft() {
 			break // stop at line boundary
 		}
 		r := t.lines[t.cursorLine][t.cursorCol-1]
-		if !editor.IsWordSeparator(r) {
+		if !isWordSeparator(r) {
 			break
 		}
 		t.cursorCol--
@@ -367,7 +374,7 @@ func (t *TextArea) wordLeft() {
 	// Skip word chars backward.
 	for t.cursorCol > 0 {
 		r := t.lines[t.cursorLine][t.cursorCol-1]
-		if editor.IsWordSeparator(r) {
+		if isWordSeparator(r) {
 			break
 		}
 		t.cursorCol--
@@ -378,14 +385,14 @@ func (t *TextArea) wordRight() {
 	line := t.lines[t.cursorLine]
 	// Skip word chars forward.
 	for t.cursorCol < len(line) {
-		if editor.IsWordSeparator(line[t.cursorCol]) {
+		if isWordSeparator(line[t.cursorCol]) {
 			break
 		}
 		t.cursorCol++
 	}
 	// Skip separators forward.
 	for t.cursorCol < len(line) {
-		if !editor.IsWordSeparator(line[t.cursorCol]) {
+		if !isWordSeparator(line[t.cursorCol]) {
 			break
 		}
 		t.cursorCol++
@@ -552,11 +559,6 @@ func (t *TextArea) SelectedText() string {
 	sb.WriteString(string(last[:ec]))
 
 	return sb.String()
-}
-
-// HasSelection returns true if a selection is active.
-func (t *TextArea) HasSelection() bool {
-	return t.selActive
 }
 
 // IsSelected returns true if the given visual (row, col) is within the selection.

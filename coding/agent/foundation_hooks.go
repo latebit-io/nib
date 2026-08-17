@@ -424,16 +424,16 @@ var errMaxTurnsExceeded = errors.New("coding/agent: max turns reached")
 func (a *Agent) foundationTurnCheck() error {
 	a.mu.Lock()
 	a.turnCounter++
-	turn, max := a.turnCounter, a.maxTurns
+	turn, limit := a.turnCounter, a.maxTurns
 	a.mu.Unlock()
-	if max <= 0 || turn <= max {
+	if limit <= 0 || turn <= limit {
 		return nil
 	}
 	// The first over-limit call carries the message; a re-entrant call
-	// (turn > max+1) aborts with the bare sentinel to avoid re-emitting.
-	if turn > max+1 {
+	// (turn > limit+1) aborts with the bare sentinel to avoid re-emitting.
+	if turn > limit+1 {
 		return errMaxTurnsExceeded
 	}
-	slog.Warn("agent: max turns reached; aborting (foundation hook)", "maxTurns", max)
-	return fmt.Errorf("%w: reached the maximum of %d turns for this run", errMaxTurnsExceeded, max)
+	slog.Warn("agent: max turns reached; aborting (foundation hook)", "maxTurns", limit)
+	return fmt.Errorf("%w: reached the maximum of %d turns for this run", errMaxTurnsExceeded, limit)
 }

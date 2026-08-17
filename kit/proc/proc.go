@@ -4,25 +4,21 @@
 // period for pipe drainage, and a [HeadTailWriter] that bounds memory
 // for high-volume output.
 //
-// The package is the shared substrate for [agent.BashTool] and the
-// smoke-run validator. Both invoke external commands with timeouts and
-// must not block forever on a child that holds a stdout pipe; the
-// patterns here have been hardened against `go run .` and similar
-// fork-and-exit shells.
+// The package is the shared process-running substrate for kit consumers
+// that invoke external commands with timeouts (today: kit/dyncontext's
+// ShellRunner and the coding smoke runner) and must not block forever on
+// a child that holds a stdout pipe; the patterns here have been hardened
+// against `go run .` and similar fork-and-exit shells.
 //
 // # Shell-only by design
 //
 // [Run] always invokes the command via `sh -c <Request.Shell>` — there
-// is no argv mode. Both current callers (BashTool, smoke runner) are
-// shell-by-design: BashTool exists so the LLM can use pipes,
-// redirection, and command substitution; smoke commands frequently
-// chain build-and-launch with `&&`. Sanitisation belongs at the
-// caller's trust boundary, not in this helper — see
-// [agent.BashTool] (LLM-authored, prompt-level guard only) and
-// [agent.SmokeRunTool] (`.project/run.json`, reviewed and committed).
-// If a future caller ever needs argv-style execution, add a separate
-// API; do not add a mode flag that would let untrusted input slip
-// through this entry point with shell semantics still implied.
+// is no argv mode. Callers are shell-by-design: smoke commands
+// frequently chain build-and-launch with `&&`. Sanitisation belongs at
+// the caller's trust boundary, not in this helper. If a future caller
+// ever needs argv-style execution, add a separate API; do not add a
+// mode flag that would let untrusted input slip through this entry
+// point with shell semantics still implied.
 package proc
 
 import (

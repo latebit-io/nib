@@ -14,7 +14,6 @@ import (
 
 // engineEventMsg wraps an engine event.Event for delivery through Bubble Tea.
 type engineEventMsg struct{ event event.Event }
-type initDoneMsg struct{}
 
 // paletteFilesMsg delivers file listing results from async Walk.
 type paletteFilesMsg struct{ items []PaletteItem }
@@ -45,12 +44,6 @@ type setAgentCallbacksMsg struct {
 	initialTerse bool
 }
 
-// setCodingCallbacksMsg installs coding-flavored agent callbacks on
-// the AppModel from inside the Update goroutine. Same race-avoidance
-// rationale as [setAgentCallbacksMsg]. Currently empty — coding-
-// flavored callbacks may be re-added when needed.
-type setCodingCallbacksMsg struct{}
-
 // AppModel is the top-level Bubble Tea model.
 // It is a thin presentation layer: maps input to engine Session methods,
 // reads Session state to render, and adapts agent events to tea.Msg.
@@ -68,8 +61,6 @@ type AppModel struct {
 	// Regions manages layout zones and focus routing.
 	Regions *RegionManager
 
-	// Dialog is the modal confirmation dialog state.
-	Dialog DialogModel
 	// Palette is the command / file palette overlay state.
 	Palette PaletteModel
 	// Help is the keyboard-shortcut help overlay state.
@@ -122,8 +113,7 @@ type AppModel struct {
 	// Width is the current terminal width in columns.
 	Width int
 	// Height is the current terminal height in rows.
-	Height  int
-	program *tea.Program
+	Height int
 
 	// fileWatcher monitors open files for external changes.
 	// nil when the OS watcher is unavailable.
@@ -143,14 +133,6 @@ type AppModel struct {
 	highlighterFactory syntax.HighlighterFactory
 }
 
-// SetProgram sets the tea.Program reference.
-func (m *AppModel) SetProgram(p *tea.Program) {
-	m.program = p
-}
-
-// Program returns the tea.Program reference for sending async messages.
-func (m *AppModel) Program() *tea.Program { return m.program }
-
 // OAuthInstruction creates an oauthInstructionMsg for delivery via Program.Send.
 func OAuthInstruction(profile, instruction string) tea.Msg {
 	return oauthInstructionMsg{profile: profile, instruction: instruction}
@@ -168,14 +150,6 @@ func OAuthConnectResult(profile string, err error) tea.Msg {
 // path (or Config-time wiring) to stay race-free.
 func SetAgentCallbacksMsg(toggleTerse func(enabled bool) bool, initialTerse bool) tea.Msg {
 	return setAgentCallbacksMsg{toggleTerse: toggleTerse, initialTerse: initialTerse}
-}
-
-// SetCodingCallbacksMsg constructs a tea.Msg that installs
-// coding-flavored agent callbacks on the AppModel. Same race-avoidance
-// rationale as [SetAgentCallbacksMsg]. Currently a no-op — kept for
-// future coding-flavored callbacks.
-func SetCodingCallbacksMsg() tea.Msg {
-	return setCodingCallbacksMsg{}
 }
 
 // NewApp creates the application model.
@@ -211,7 +185,7 @@ func NewApp(sess *session.Session) AppModel {
 	rm.Add("agent", agentPane, 0.3)
 	rm.FocusByName("editor")
 
-	fw := NewFileWatcher(sess)
+	fw := NewFileWatcher(sess.CanonPath)
 	// Watch the initial file.
 	if fw != nil && sess.ActiveFile() != "" {
 		fw.Watch(sess.ActiveFile())
@@ -230,6 +204,7 @@ func NewApp(sess *session.Session) AppModel {
 	return m
 }
 
+// Init starts the engine-event and file-watcher listeners.
 func (m *AppModel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	if m.Session.Events() != nil {
@@ -237,9 +212,6 @@ func (m *AppModel) Init() tea.Cmd {
 	}
 	if m.fileWatcher != nil {
 		cmds = append(cmds, m.listenForFileChanges())
-	}
-	if len(cmds) == 0 {
-		cmds = append(cmds, func() tea.Msg { return initDoneMsg{} })
 	}
 	return tea.Batch(cmds...)
 }
@@ -257,6 +229,8 @@ func (m *AppModel) listenForEvents() tea.Cmd {
 	}
 }
 
+// Update routes a message to the active overlay, the focused pane, or the
+// matching handler and returns the resulting model and command.
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Modal overlays consume input messages first; non-input messages
 	// fall through so engine events / ticks / window resize keep flowing.
@@ -288,9 +262,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case PlanningGoalSubmittedMsg:
 		return m.handlePlanningGoalSubmitted(msg)
 
-	case DialogResultMsg:
-		return m.handleDialogResult(msg)
-
 	case reloadWorkTreeResultMsg:
 		return m.handleReloadWorkTreeResult(msg)
 
@@ -316,8 +287,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleOAuthConnectResult(msg)
 	case setAgentCallbacksMsg:
 		return m.handleSetAgentCallbacks(msg)
-	case setCodingCallbacksMsg:
-		return m.handleSetCodingCallbacks(msg)
 	case modelListMsg:
 		return m.handleModelList(msg)
 	case ModelSelectorResultMsg:
@@ -454,11 +423,6 @@ func (m *AppModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if pane := m.Regions.FocusedPane(); pane != nil {
 		return m, pane.Update(msg)
 	}
-	return m, nil
-}
-
-func (m *AppModel) handleDialogResult(_ DialogResultMsg) (tea.Model, tea.Cmd) {
-	// Placeholder — implement specific dialog responses as needed.
 	return m, nil
 }
 

@@ -14,8 +14,8 @@ These apply everywhere in this repository.
 
 The repository is multi-module. Import direction matters and is enforced by review:
 
-- `ai/`, `engine/`, `kit/` are leaf modules with no nib intra-dependencies on `coding/` or `tui/`.
-- `coding/` depends on `ai/`, `engine/`, `kit/` — but **must not** import `tui/` or any UI framework.
+- `ai/` imports nothing nib-internal. `agent/` imports only `ai/`. `kit/` imports `ai/` + `agent/`. `engine/` imports nothing nib-internal (zero nib deps) — never `agent/`, `coding/`, or `tui/`.
+- `coding/` depends on `ai/`, `agent/`, `engine/`, `kit/` — but **must not** import `tui/` or any UI framework.
 - `tui/` is the only module allowed to import `bubbletea` / `lipgloss`.
 - `cmd/` binaries are the composition root — they wire the layers together.
 

@@ -10,6 +10,7 @@ If a kit consumer needs anything `coding/` provides, the kit boundary has a leak
 nibster -m "<message>"      # run an agent on the given prompt
 nibster --list              # print the session index
 nibster --show <id>         # print a specific session's memory page
+nibster --plugins           # print the wired plug-in manifest (provider, store, tools) and exit
 ```
 
 Optional flags:
@@ -24,7 +25,7 @@ Sessions persist to demarkus under:
 - `/nibster/index.md` — running index of all sessions, one line per run
 - `/nibster/sessions/<session-id>.md` — per-session memory page authored by the agent
 
-Session ID format: `YYYY-MM-DD-HHMMSS-<slug>` (UTC; slug derived from the message, lowercase alphanumeric, ~30 chars max).
+Session ID format: `YYYY-MM-DD-HHMMSS-<slug>-<8hex>` (UTC; slug derived from the message, lowercase alphanumeric, ~30 chars max; 8 hex chars of random entropy so same-second runs never collide).
 
 The binary owns the index write (reliability — agents can run out of budget); the agent owns the session content (autonomy — that's the work product).
 

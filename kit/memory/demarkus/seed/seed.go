@@ -1,6 +1,6 @@
 // Package seed contains the canonical project-memory document templates
 // installed when a memory store is empty. Lives in its own package so the
-// composition root (engine/wire) carries wiring code only — what a project
+// composition root (coding/wire) carries wiring code only — what a project
 // memory looks like is domain content.
 package seed
 

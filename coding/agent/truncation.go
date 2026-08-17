@@ -57,25 +57,12 @@ const truncationInitialEscalation = 32768
 // cap supported by current frontier models as of this writing.
 const truncationCeiling = 65536
 
-// escalator is the optional capability LLM providers implement so
-// the agent can bump their output-token cap after a truncated turn.
-// [escalate] no-ops when the active provider does not satisfy it.
-type escalator interface {
-	MaxTokens() int
-	SetMaxTokens(int)
-}
-
-// Compile-time assertions that every shipped llm.Provider continues
-// to satisfy [escalator]. The agent dispatches via type assertion at
-// runtime; without these declarations a renamed method on any
-// implementation would silently degrade to "escalation unsupported"
-// and the agent would loop against the same truncation ceiling. The
-// assertion forces the regression to surface at build time.
-var (
-	_ escalator = (*llm.AgentAPI)(nil)
-	_ escalator = (*llm.AnthropicAPI)(nil)
-	_ escalator = (*llm.CodexAPI)(nil)
-)
+// escalator aliases [llm.OutputCapEscalator], the optional provider
+// capability that lets the agent bump the output-token cap after a
+// truncated turn. [escalate] no-ops when the active provider does not
+// satisfy it. The ai/llm package asserts its own adapters against the
+// interface; this layer names no concrete providers.
+type escalator = llm.OutputCapEscalator
 
 // escalationOutcome describes what happened when [recoverFromTruncation] tried to
 // bump the provider's max-tokens cap. The three states feed
@@ -110,14 +97,7 @@ func escalateValue(current int) int {
 	if current >= truncationCeiling {
 		return truncationCeiling
 	}
-	next := current * 2
-	if next < truncationInitialEscalation {
-		next = truncationInitialEscalation
-	}
-	if next > truncationCeiling {
-		next = truncationCeiling
-	}
-	return next
+	return min(max(current*2, truncationInitialEscalation), truncationCeiling)
 }
 
 // isNilEscalator returns true when esc holds a typed-nil pointer.

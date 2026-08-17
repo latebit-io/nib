@@ -21,7 +21,7 @@ import (
 // silently routing through [Agent.coord], which the run-handoff
 // race may have swapped to a different run's channels. The full
 // orchestration (validation, proposal delivery, await, recordEdit,
-// continue, diagnostics) lives in [approval.Orchestrator]; this
+// continue, diagnostics) lives in [editflow.Orchestrator]; this
 // method is just the agent-side bridge from the tool world to it.
 func (a *Agent) Propose(ctx context.Context, p tools.EditProposal) (string, bool) {
 	coord := coordFromCtx(ctx)

@@ -63,7 +63,7 @@ func statusStreaming(s event.StatusKind) bool {
 }
 
 // Token-usage tracking (usageState, SetStreamingInput, UpdateUsage,
-// UsageIndicator, ResetUsage, formatTokenCount, formatTurnStatsInline,
+// UsageIndicator, formatTokenCount, formatTurnStatsInline,
 // formatCompacted, formatSessionSummary) lives in agent_pane_usage.go.
 
 func (m *AgentPaneModel) inputHeight() int {
@@ -259,10 +259,6 @@ type AgentPaneModel struct {
 	Lines        []string
 	wrappedIndex []int
 
-	// userRawLines tracks which raw line indices are user messages.
-	// Stable across rewrap — translated to wrapped indices via wrappedIndex in Render().
-	userRawLines map[int]bool
-
 	// ScrollOffset is the first visible line index in the output area.
 	ScrollOffset int
 
@@ -301,20 +297,11 @@ type AgentPaneModel struct {
 	// streamingTintStyle instead of markdown.
 	streamingStartRaw int
 
-	// metaRawLines holds raw-line indices that should render as dim chrome
-	// (tool calls, bracketed status updates, proposed/applied markers,
-	// session summaries). Populated by AppendMeta.
-	metaRawLines map[int]bool
-	// plainRawLines holds raw-line indices whose content must bypass both
-	// the markdown renderer and the code-fence detector — e.g. the
-	// awaiting-input block, which carries attacker-supplied prompt text
-	// that would otherwise be able to open a fence via unmatched
-	// backticks and flip subsequent agent output into code styling.
-	plainRawLines map[int]bool
-	// turnSeparatorRawLines maps the raw-line index of a turn divider
-	// to its label (e.g. "turn 2"). Render substitutes a full-width
-	// centered rendering for these indices.
-	turnSeparatorRawLines map[int]string
+	// rawMarks classifies raw lines that are not plain agent text (user
+	// message, meta chrome, turn separator). Keyed by raw-line index so
+	// it is stable across rewrap; Render translates via wrappedIndex.
+	// Unmarked lines are agent text and take the markdown path.
+	rawMarks map[int]rawLineMark
 
 	// modelLabel is the display name of the active LLM model (e.g. "gemini-2.5-flash").
 	// Shown on the left side of the status line. Set via SetModelLabel.
@@ -452,13 +439,6 @@ type AgentPaneModel struct {
 	// steps will migrate the render path to walk beats directly.
 	beats []Beat
 
-	// userGlyphForRaw records the [UserGlyph] kind on the raw-line index
-	// that carries the glyph prefix ("◆ ", "⎙ ", or "✕ "). Set by
-	// AppendUserMessage at classify time; read by the render path so
-	// the glyph cell can be styled in its own hue while the rest of
-	// the user line keeps the uniform accent body color.
-	userGlyphForRaw map[int]UserGlyph
-
 	// nowFunc is an indirection over [time.Now] so the beat-summary
 	// elapsed/timer logic stays deterministic in tests. nil falls back
 	// to [time.Now] — production callers never touch it. Set on the
@@ -563,15 +543,6 @@ func (m *AgentPaneModel) OpenModelSelector(items []ModelSelectorItem, profile, c
 	m.ModelSel.Open(items, profile, currentModel, profiles)
 	m.inputActive = false // selector replaces input area — deactivate textarea
 	m.recomputeInputLayout()
-}
-
-// CloseModelSelector deactivates the inline model selector and restores
-// the input focus state that was active before the selector opened.
-func (m *AgentPaneModel) CloseModelSelector() {
-	m.ModelSel.Close()
-	m.inputActive = m.modelSelPrevInputActive
-	m.recomputeInputLayout()
-	m.clampScroll()
 }
 
 // IsModelSelectorActive reports whether the inline model selector is open.
@@ -704,13 +675,7 @@ func (m *AgentPaneModel) recomputeInputLayout() {
 		if lineCount > inputRows && cursorVisRow >= inputRows {
 			m.inputScrollOffset = cursorVisRow - inputRows + 1
 		}
-		maxScroll := lineCount - inputRows
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		if m.inputScrollOffset > maxScroll {
-			m.inputScrollOffset = maxScroll
-		}
+		m.inputScrollOffset = min(m.inputScrollOffset, max(lineCount-inputRows, 0))
 	}
 }
 
@@ -762,19 +727,10 @@ func (m *AgentPaneModel) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	scrollLines := 3
 	switch msg.Button {
 	case tea.MouseWheelUp:
-		m.ScrollOffset -= scrollLines
-		if m.ScrollOffset < 0 {
-			m.ScrollOffset = 0
-		}
+		m.ScrollOffset = max(m.ScrollOffset-scrollLines, 0)
 	case tea.MouseWheelDown:
-		maxScroll := len(m.projection()) - m.VisibleLines()
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		m.ScrollOffset += scrollLines
-		if m.ScrollOffset > maxScroll {
-			m.ScrollOffset = maxScroll
-		}
+		maxScroll := max(len(m.projection())-m.VisibleLines(), 0)
+		m.ScrollOffset = min(m.ScrollOffset+scrollLines, maxScroll)
 	}
 	// Cancel any pending auto-scroll ease — the user has taken
 	// direct control of the viewport. Without this, the spinner-tick
@@ -1047,16 +1003,16 @@ func (m *AgentPaneModel) handleInput(msg tea.KeyPressMsg) tea.Cmd {
 // a slash command runs through reg.Dispatch before falling back to
 // goal submission. Pass reg=nil to disable.
 //
-// busy is consulted via [kitcmd.WithBusyCheck]. nil means the busy
-// check is omitted — commands dispatch unconditionally. The binary
-// typically wires busy to coding.Agent's parked-aware probe so
-// commands cannot interleave with an in-flight LLM turn.
-//
 // ctx is threaded into [kitcmd.Registry.Dispatch] so handlers see
 // program-shutdown cancellation. Pass nil to fall back to
 // context.Background — acceptable for tests and fallback paths;
 // production binaries should pass the application context.
-func (m *AgentPaneModel) SetCommandDispatch(reg *kitcmd.Registry, busy func() bool, ctx context.Context) {
+//
+// busy is consulted via [kitcmd.WithBusyCheck]. nil means the busy
+// check is omitted — commands dispatch unconditionally. The binary
+// typically wires busy to coding.Agent's parked-aware probe so
+// commands cannot interleave with an in-flight LLM turn.
+func (m *AgentPaneModel) SetCommandDispatch(ctx context.Context, reg *kitcmd.Registry, busy func() bool) {
 	m.commandRegistry = reg
 	m.commandBusy = busy
 	m.commandCtx = ctx
@@ -1379,13 +1335,7 @@ func (m *AgentPaneModel) rewrap() {
 }
 
 func (m *AgentPaneModel) clampScroll() {
-	maxScroll := len(m.projection()) - m.VisibleLines()
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	if m.ScrollOffset > maxScroll {
-		m.ScrollOffset = maxScroll
-	}
+	m.ScrollOffset = min(m.ScrollOffset, max(len(m.projection())-m.VisibleLines(), 0))
 }
 
 // wrapLine wraps a single long line into multiple lines at word boundaries.
@@ -1451,7 +1401,7 @@ func (m *AgentPaneModel) Clear() {
 	m.RawLines = nil
 	m.Lines = nil
 	m.wrappedIndex = nil
-	m.userRawLines = nil
+	m.rawMarks = nil
 	m.inCodeAfter = nil
 	m.rawFenceAfter = nil
 	m.invalidateMdCache()
@@ -1468,9 +1418,6 @@ func (m *AgentPaneModel) Clear() {
 	m.turnCounter = 1
 	m.turnStartRaw = 0
 	m.streamingStartRaw = -1
-	m.metaRawLines = nil
-	m.plainRawLines = nil
-	m.turnSeparatorRawLines = nil
 	m.spinnerFrame = 0
 	// spinnerRunning intentionally not reset: a tick may still be in-flight
 	// from before Clear(); Update drops it on the next fire because
@@ -1482,7 +1429,6 @@ func (m *AgentPaneModel) Clear() {
 	// clean numbering and initBeats re-seeds the implicit first beat.
 	m.beats = nil
 	m.focusBeat = -1
-	m.userGlyphForRaw = nil
 	m.initBeats()
 	if m.ModelSel.IsActive() {
 		m.ModelSel.Close()
@@ -1674,17 +1620,67 @@ func (m *AgentPaneModel) rawIndexOf(wrappedIdx int) int {
 	return rawIdx
 }
 
-// isUserLine returns true if the wrapped line index corresponds to a user
-// message.
-func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
-	if len(m.userRawLines) == 0 {
-		return false
+// rawLineKind classifies a raw transcript line for the render path.
+type rawLineKind uint8
+
+const (
+	// rawKindText is the zero value: ordinary agent text (markdown path).
+	rawKindText rawLineKind = iota
+	// rawKindUser marks user-message lines (accent styling, no markdown).
+	rawKindUser
+	// rawKindMeta marks dim chrome: tool calls, bracketed status updates,
+	// proposed/applied markers, session summaries.
+	rawKindMeta
+	// rawKindTurnSeparator marks the placeholder line of a turn divider;
+	// Render substitutes a full-width centered rule.
+	rawKindTurnSeparator
+)
+
+// rawLineMark is the per-raw-line classification record.
+type rawLineMark struct {
+	kind rawLineKind
+	// label is the turn-separator caption (e.g. "♩ beat 2"). Stored
+	// rather than parsed from the rendered text so raw content stays
+	// small and stable across resizes.
+	label string
+	// glyph is the [UserGlyph] kind for the user raw line that carries
+	// the glyph prefix; neutral (zero) on every other line.
+	glyph UserGlyph
+}
+
+// markRaw records mark for the raw-line range [from, to). Existing marks
+// in the range are replaced.
+func (m *AgentPaneModel) markRaw(from, to int, mark rawLineMark) {
+	if m.rawMarks == nil {
+		m.rawMarks = make(map[int]rawLineMark)
+	}
+	for i := from; i < to; i++ {
+		m.rawMarks[i] = mark
+	}
+}
+
+// rawKind returns the classification of a raw line (rawKindText when unmarked).
+func (m *AgentPaneModel) rawKind(rawIdx int) rawLineKind {
+	return m.rawMarks[rawIdx].kind
+}
+
+// wrappedKind returns the classification of the raw line owning a wrapped
+// line, or rawKindText when the wrapped index maps to no raw line.
+func (m *AgentPaneModel) wrappedKind(wrappedIdx int) rawLineKind {
+	if len(m.rawMarks) == 0 {
+		return rawKindText
 	}
 	rawIdx := m.rawIndexOf(wrappedIdx)
 	if rawIdx < 0 {
-		return false
+		return rawKindText
 	}
-	return m.userRawLines[rawIdx]
+	return m.rawKind(rawIdx)
+}
+
+// isUserLine returns true if the wrapped line index corresponds to a user
+// message.
+func (m *AgentPaneModel) isUserLine(wrappedIdx int) bool {
+	return m.wrappedKind(wrappedIdx) == rawKindUser
 }
 
 // isDim reports whether the wrapped line belongs to a previous turn and
@@ -1712,22 +1708,7 @@ func (m *AgentPaneModel) isStreaming(wrappedIdx int) bool {
 // isMeta reports whether the wrapped line is chrome (tool calls, bracketed
 // status, edit markers, session summaries) and should render dim.
 func (m *AgentPaneModel) isMeta(wrappedIdx int) bool {
-	if len(m.metaRawLines) == 0 {
-		return false
-	}
-	rawIdx := m.rawIndexOf(wrappedIdx)
-	return rawIdx >= 0 && m.metaRawLines[rawIdx]
-}
-
-// isPlain reports whether the wrapped line must bypass markdown and streaming
-// styling. Used for agent-supplied content that could otherwise open code
-// fences or trigger inline markdown (e.g. the awaiting-input block).
-func (m *AgentPaneModel) isPlain(wrappedIdx int) bool {
-	if len(m.plainRawLines) == 0 {
-		return false
-	}
-	rawIdx := m.rawIndexOf(wrappedIdx)
-	return rawIdx >= 0 && m.plainRawLines[rawIdx]
+	return m.wrappedKind(wrappedIdx) == rawKindMeta
 }
 
 // turnSeparatorLabel returns the label for a wrapped line that represents a
@@ -1736,21 +1717,21 @@ func (m *AgentPaneModel) isPlain(wrappedIdx int) bool {
 // isTurnSeparatorContinuation so they render as dim blanks rather than
 // falling through to markdown.
 func (m *AgentPaneModel) turnSeparatorLabel(wrappedIdx int) string {
-	if len(m.turnSeparatorRawLines) == 0 {
+	if len(m.rawMarks) == 0 {
 		return ""
 	}
 	rawIdx := m.rawIndexOf(wrappedIdx)
 	if rawIdx < 0 {
 		return ""
 	}
-	label, ok := m.turnSeparatorRawLines[rawIdx]
-	if !ok {
+	mark := m.rawMarks[rawIdx]
+	if mark.kind != rawKindTurnSeparator {
 		return ""
 	}
 	if rawIdx < len(m.wrappedIndex) && m.wrappedIndex[rawIdx] != wrappedIdx {
 		return ""
 	}
-	return label
+	return mark.label
 }
 
 // isTurnSeparatorContinuation reports whether the wrapped line is a non-
@@ -1758,14 +1739,11 @@ func (m *AgentPaneModel) turnSeparatorLabel(wrappedIdx int) string {
 // widths narrow enough to wrap the placeholder text — we blank those
 // segments rather than let fragments of "── ♩ beat N ──" render as markdown.
 func (m *AgentPaneModel) isTurnSeparatorContinuation(wrappedIdx int) bool {
-	if len(m.turnSeparatorRawLines) == 0 {
+	if len(m.rawMarks) == 0 {
 		return false
 	}
 	rawIdx := m.rawIndexOf(wrappedIdx)
-	if rawIdx < 0 {
-		return false
-	}
-	if _, ok := m.turnSeparatorRawLines[rawIdx]; !ok {
+	if rawIdx < 0 || m.rawKind(rawIdx) != rawKindTurnSeparator {
 		return false
 	}
 	return rawIdx < len(m.wrappedIndex) && m.wrappedIndex[rawIdx] != wrappedIdx
@@ -2405,8 +2383,6 @@ func (m *AgentPaneModel) Render() string {
 			output[row] = agentDimStyle.Render(m.padLine(lineText))
 		} else if m.isMeta(lineIdx) {
 			output[row] = agentDimStyle.Render(m.padLine(lineText))
-		} else if m.isPlain(lineIdx) {
-			output[row] = m.padLine(lineText)
 		} else if m.isStreaming(lineIdx) {
 			output[row] = streamingTintStyle.Render(m.padLine(lineText))
 		} else {

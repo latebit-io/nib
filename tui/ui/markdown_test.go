@@ -315,7 +315,7 @@ func TestAgentPaneModel_isCodeLine_UserFenceNoBleed(t *testing.T) {
 // TestAgentPaneModel_isCodeLine_MetaFenceNoBleed verifies that an
 // unmatched fence inside a meta block (LLM-supplied reason/error text)
 // does not open a code block for subsequent agent output. Without the
-// metaRawLines skip in recomputeCodeBlock and the post-mark recompute
+// rawKindMeta skip in recomputeCodeBlock and the post-mark recompute
 // in AppendMeta, a backtick run in an edit reason or error message
 // would flip the rest of the transcript to code styling.
 func TestAgentPaneModel_isCodeLine_MetaFenceNoBleed(t *testing.T) {
@@ -355,9 +355,11 @@ func TestAgentPaneModel_TurnSeparator_NarrowWidthNoBleed(t *testing.T) {
 
 	// Locate the separator raw line and any continuation wrapped segments.
 	sepRaw := -1
-	for raw := range m.turnSeparatorRawLines {
-		sepRaw = raw
-		break
+	for raw, mark := range m.rawMarks {
+		if mark.kind == rawKindTurnSeparator {
+			sepRaw = raw
+			break
+		}
 	}
 	if sepRaw < 0 {
 		t.Fatal("expected a separator raw line after AppendUserMessage")

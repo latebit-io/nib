@@ -77,18 +77,18 @@ func (t *ProjectInitTool) Definition() llm.ToolDef {
 func (t *ProjectInitTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args projectInitArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	name := strings.TrimSpace(args.Name)
 	if name == "" {
-		return textResult("Error: name is required")
+		return errorResult("Error: name is required")
 	}
 	if t.tracker == nil {
-		return textResult("Error: task tracking not available")
+		return errorResult("Error: task tracking not available")
 	}
 
 	if err := t.tracker.InitProject(name, args.Phases); err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 
 	if len(args.Phases) == 0 {

@@ -139,6 +139,28 @@ func TestAddPersistsAndReloads(t *testing.T) {
 	}
 }
 
+// TestAddTrimsRoundTrip: Add stores the trimmed command (ParseRule
+// trims on reload), so a padded Add must be permitted before and after
+// reload for both padded and exact queries.
+func TestAddTrimsRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	l := Load(root)
+	if err := l.Add("  git status  "); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"git status", "  git status "} {
+		if !l.Permits(q) {
+			t.Errorf("Permits(%q) = false before reload", q)
+		}
+		if !Load(root).Permits(q) {
+			t.Errorf("Permits(%q) = false after reload", q)
+		}
+	}
+	if err := l.Add("   "); err == nil {
+		t.Error("Add of blank command must fail")
+	}
+}
+
 func TestAddDeduplicates(t *testing.T) {
 	root := t.TempDir()
 	l := Load(root)

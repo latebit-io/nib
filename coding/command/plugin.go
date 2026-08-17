@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -92,13 +93,17 @@ func (c *PluginCommand) handleList(sess kitcmd.Session) error {
 			trust = " trusted"
 		}
 		fmt.Fprintf(&b, "  %s  [%s%s]  %s\n", p.ID, state, trust, p.Source.String())
-		if rep, err := c.store.ImportReport(p.ID); err == nil {
-			fmt.Fprintf(&b, "      %d commands, %d skills, %d mcp", len(rep.Commands), len(rep.Skills), len(rep.MCPServers))
-			if n := len(rep.Unsupported); n > 0 {
-				fmt.Fprintf(&b, "; %d unsupported (run /plugin info %s)", n, p.ID)
-			}
-			b.WriteString("\n")
+		rep, err := c.store.ImportReport(p.ID)
+		if err != nil {
+			// Listing still succeeds without the summary line.
+			slog.Warn("plugin: import report unavailable", "id", p.ID, "err", err)
+			continue
 		}
+		fmt.Fprintf(&b, "      %d commands, %d skills, %d mcp", len(rep.Commands), len(rep.Skills), len(rep.MCPServers))
+		if n := len(rep.Unsupported); n > 0 {
+			fmt.Fprintf(&b, "; %d unsupported (run /plugin info %s)", n, p.ID)
+		}
+		b.WriteString("\n")
 	}
 	sess.Display(strings.TrimRight(b.String(), "\n"))
 	return nil
@@ -143,7 +148,10 @@ func (c *PluginCommand) handleInstall(ctx context.Context, sess kitcmd.Session, 
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Installed %s (%s).\n", ent.ID, ent.Source.String())
-	if rep, err := c.store.ImportReport(ent.ID); err == nil {
+	if rep, err := c.store.ImportReport(ent.ID); err != nil {
+		// Install succeeded; only the conversion summary is missing.
+		slog.Warn("plugin: import report unavailable", "id", ent.ID, "err", err)
+	} else {
 		fmt.Fprintf(&b, "Converted: %d commands, %d skills, %d mcp.\n", len(rep.Commands), len(rep.Skills), len(rep.MCPServers))
 		writeUnsupported(&b, rep)
 	}

@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/agent"
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/coding/headless"
+	"github.com/latebit-io/nib/coding/wire"
 )
 
 // mockProvider returns pre-configured streaming responses for each turn.
@@ -52,25 +54,15 @@ func TestEndToEnd_SimpleGoal_JSONOutput(t *testing.T) {
 	ag := agent.New(provider, ws, &agent.NewOptions{
 		Interaction: agent.Headless,
 	})
-	sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
+	t.Cleanup(ag.Close)
 	// Bound the forwarder's lifetime to the test so a failure that
 	// leaves the runner mid-drain doesn't strand a goroutine blocked
-	// on `events <- ev`. Mirrors the production forwarder in cmd/agent/
-	// main.go which uses appCtx for the same guarantee.
+	// on `events <- ev`. Same helper production uses.
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() {
-		for ev := range sub.Events() {
-			select {
-			case events <- ev:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	if err := wire.ForwardEvents(ctx, ag, events); err != nil {
+		t.Fatalf("ForwardEvents: %v", err)
+	}
 
 	runner := headless.NewRunner(ag, ws, events, &bytes.Buffer{}, false)
 	result := runner.Run(ctx, "review the code", nil)
@@ -149,25 +141,15 @@ func TestEndToEnd_EditFile_JSONOutput(t *testing.T) {
 	ag := agent.New(provider, ws, &agent.NewOptions{
 		Interaction: agent.Headless,
 	})
-	sub, err := ag.Subscribe(agent.SubscribeOptions{BufferSize: 128})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
+	t.Cleanup(ag.Close)
 	// Bound the forwarder's lifetime to the test so a failure that
 	// leaves the runner mid-drain doesn't strand a goroutine blocked
-	// on `events <- ev`. Mirrors the production forwarder in cmd/agent/
-	// main.go which uses appCtx for the same guarantee.
+	// on `events <- ev`. Same helper production uses.
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() {
-		for ev := range sub.Events() {
-			select {
-			case events <- ev:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	if err := wire.ForwardEvents(ctx, ag, events); err != nil {
+		t.Fatalf("ForwardEvents: %v", err)
+	}
 
 	runner := headless.NewRunner(ag, ws, events, &bytes.Buffer{}, false)
 	result := runner.Run(ctx, "add a print to hello", []string{"hello.go"})
@@ -212,9 +194,13 @@ func TestEndToEnd_WriteText_HumanOutput(t *testing.T) {
 		FilesCreated: []string{"/tmp/b.go"},
 	}
 
-	err := writeText(result)
-	if err != nil {
+	var out bytes.Buffer
+	if err := writeText(&out, result); err != nil {
 		t.Errorf("writeText returned error for successful result: %v", err)
+	}
+	want := "Done.\n\nFiles changed:\n  /tmp/a.go\n\nFiles created:\n  /tmp/b.go\n"
+	if out.String() != want {
+		t.Errorf("writeText output = %q, want %q", out.String(), want)
 	}
 }
 
@@ -225,9 +211,12 @@ func TestEndToEnd_WriteText_ErrorResult(t *testing.T) {
 		Errors:  []string{"something broke"},
 	}
 
-	err := writeText(result)
-	if err == nil {
+	var out bytes.Buffer
+	if err := writeText(&out, result); err == nil {
 		t.Error("writeText should return error for failed result")
+	}
+	if !strings.Contains(out.String(), "Errors:\n  something broke\n") {
+		t.Errorf("writeText output missing errors section: %q", out.String())
 	}
 }
 

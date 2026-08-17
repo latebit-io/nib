@@ -19,7 +19,9 @@ type searchResultMsg struct {
 // SearchOpenFileMsg is emitted when the user selects a search result.
 // AppModel catches this to open the file and navigate to the line.
 type SearchOpenFileMsg struct {
+	// Path is the matched file as reported by the search backend.
 	Path string
+	// Line is the 1-based line number of the match.
 	Line int
 }
 
@@ -297,15 +299,15 @@ func (s *SearchOverlayModel) RenderOverlay(background string, width, height int)
 }
 
 func (s *SearchOverlayModel) renderResult(r search.Result, selected bool, maxWidth int) string {
-	prefix := fmt.Sprintf(" %s:%d: ", r.Path, r.Line)
+	// Grep output is external text: strip escapes before any width math
+	// so a crafted file cannot inject terminal sequences into the overlay.
+	path := sanitizeInline(r.Path)
+	prefix := fmt.Sprintf(" %s:%d: ", path, r.Line)
 	prefixWidth := runewidth.StringWidth(prefix)
 
-	textWidth := maxWidth - prefixWidth
-	if textWidth < 10 {
-		textWidth = 10
-	}
+	textWidth := max(maxWidth-prefixWidth, 10)
 
-	text := strings.TrimSpace(r.Text)
+	text := strings.TrimSpace(sanitizeInline(r.Text))
 	if runewidth.StringWidth(text) > textWidth {
 		text = runewidth.Truncate(text, textWidth-1, "…")
 	}
@@ -318,7 +320,7 @@ func (s *SearchOverlayModel) renderResult(r search.Result, selected bool, maxWid
 		return searchSelectedStyle.Render(full)
 	}
 
-	return searchPathStyle.Render(fmt.Sprintf(" %s", r.Path)) +
+	return searchPathStyle.Render(" "+path) +
 		searchLineNumStyle.Render(fmt.Sprintf(":%d: ", r.Line)) +
 		searchInputStyle.Render(text)
 }

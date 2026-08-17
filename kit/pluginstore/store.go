@@ -55,8 +55,8 @@ func (s *Store) srcDir(id string) string {
 	return filepath.Join(s.root, "store", id)
 }
 
-// ConvertedDir is the nib-native output directory for a plugin. Empty
-// in M0 (the converter lands in M1); exported so loader integration can
+// ConvertedDir is the nib-native output directory for a plugin, written
+// by the converter on install; exported so loader integration can
 // locate it.
 func (s *Store) ConvertedDir(id string) string { return filepath.Join(s.root, "converted", id) }
 
@@ -102,7 +102,10 @@ func (s *Store) Install(ctx context.Context, src Source, opts InstallOptions) (I
 	}
 	defer func() { _ = os.RemoveAll(st.cleanupRoot) }() // always clear the whole staging tree
 
-	id := deriveID(opts.Marketplace, st.name)
+	id, err := deriveID(opts.Marketplace, st.name)
+	if err != nil {
+		return InstalledPlugin{}, err
+	}
 
 	entry := InstalledPlugin{
 		ID:          id,
@@ -463,11 +466,17 @@ var idSanitizer = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 // deriveID builds the stable store key. Marketplace-sourced plugins are
 // namespaced "<marketplace>__<name>" so two marketplaces can ship a
 // plugin of the same name without colliding on disk.
-func deriveID(marketplace, name string) string {
+//
+// Returns an error when the sanitized key is empty (a name made only of
+// separator characters), which would otherwise map to the store root.
+func deriveID(marketplace, name string) (string, error) {
 	raw := name
 	if marketplace != "" {
 		raw = marketplace + "__" + name
 	}
-	id := idSanitizer.ReplaceAllString(raw, "-")
-	return strings.Trim(id, "-._")
+	id := strings.Trim(idSanitizer.ReplaceAllString(raw, "-"), "-._")
+	if id == "" {
+		return "", fmt.Errorf("pluginstore: name %q yields an empty store id", raw)
+	}
+	return id, nil
 }

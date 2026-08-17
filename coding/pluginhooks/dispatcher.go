@@ -130,7 +130,10 @@ func (d *Dispatcher) fireAndForget(ctx context.Context, ev hookspec.Event) {
 		return
 	}
 	in := hookrun.Input{Event: string(ev), Cwd: d.cwd}
-	_ = d.dispatch(ctx, ev, in, "", false, false)
+	// Lifecycle events are non-vetoable in v1; a deny is logged, not acted on.
+	if dec := d.dispatch(ctx, ev, in, "", false, false); dec.Deny {
+		slog.Debug("plugin hook denied non-vetoable lifecycle event; ignored", "event", ev, "reason", dec.Reason)
+	}
 }
 
 // dispatch runs the hooks under ev across every config. When matchTool is

@@ -125,8 +125,6 @@ type DeviceCode struct {
 
 // FlowCallbacks lets callers receive progress updates from OAuth flows.
 type FlowCallbacks struct {
-	// OnDeviceCode is called when the user needs to visit a URL and enter a code.
-	OnDeviceCode func(code DeviceCode)
 	// OnBrowserOpen is called when a browser URL is about to be opened.
 	OnBrowserOpen func(url string)
 	// OnSuccess is called when authentication succeeds.

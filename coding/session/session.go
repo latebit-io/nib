@@ -9,14 +9,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 
 	"github.com/latebit-io/nib/engine/search"
 
+	"github.com/latebit-io/nib/coding/capture"
 	"github.com/latebit-io/nib/coding/event"
+	"github.com/latebit-io/nib/coding/fsroot"
 	"github.com/latebit-io/nib/engine/buffer"
-	"github.com/latebit-io/nib/engine/capture"
 	"github.com/latebit-io/nib/engine/lang"
 	"github.com/latebit-io/nib/engine/openfile"
 	"github.com/latebit-io/nib/kit/cmdallow"
@@ -71,7 +72,7 @@ type Session struct {
 	ctx context.Context
 
 	agent  agentPort
-	events <-chan event.Event // frontend reads engine events from here
+	events <-chan event.Event // frontend reads agent events from here
 
 	// mu guards openFiles and activeFile for concurrent access from the
 	// TUI goroutine and agent goroutine (via Workspace interface).
@@ -81,11 +82,11 @@ type Session struct {
 	openFiles   map[string]*openfile.OpenFile // path → open file handle
 	activeFile  string                        // path of the active open file
 	projectRoot string                        // root for file listing and path resolution
+	fs          fsroot.Root                   // root-scoped file I/O (same dir as projectRoot)
 
 	// Intent — session-level contract between developer and agent
-	currentIntent string   // the active goal
-	intentDone    bool     // true when intent was completed (not cleared)
-	intentHistory []string // resolved intents archived in order
+	currentIntent string // the active goal
+	intentDone    bool   // true when intent was completed (not cleared)
 
 	// phase tracks the current workflow phase (planning vs execution).
 	phase Phase
@@ -93,10 +94,10 @@ type Session struct {
 	// Approval-flow state (pendingEdit, stagedEditFile, editReviewed,
 	// pendingApproval, pendingProposedReplace, lastEditedFile) is owned
 	// by the single TUI Update goroutine. Every mutator and reader runs
-	// there: HandleEvent (engine-event dispatch), the Submit*/Review/
+	// there: HandleEvent (agent-event dispatch), the Submit*/Review/
 	// Prepare/Complete/Abort/Reject/Cancel approval methods, and the
 	// SwitchTo/ReloadFile/DeleteFile gate checks (all driven from the
-	// TUI's Update loop — see app_engine_events.go). NavigateAgent and
+	// TUI's Update loop — see tui/ui/app_engine_events.go). NavigateAgent and
 	// GoBack reach SwitchTo from that same Update goroutine, not from
 	// the agent goroutine. These fields are therefore NOT guarded by mu;
 	// the agent goroutine (Workspace methods) never touches them. Do not
@@ -248,6 +249,7 @@ func New(of *openfile.OpenFile, projectRoot string) *Session {
 		openFiles:      make(map[string]*openfile.OpenFile),
 		modifiedFiles:  make(map[string]bool),
 		projectRoot:    projectRoot,
+		fs:             fsroot.New(projectRoot),
 		sink:           capture.NoopSink{},
 		sessionID:      newSessionID(),
 	}
@@ -266,9 +268,8 @@ func New(of *openfile.OpenFile, projectRoot string) *Session {
 // Capture-sink wiring (SetEventSink, SessionID, validatorStagesPayload,
 // emitCapture) lives in capture.go.
 
-// LLM, model selection, and highlighter wiring (SetHighlighterFactory,
-// SetLLMInfo, LLMModel, LLMProfile, SetModelSwitcher, SwitchModel) live in
-// llm.go.
+// LLM and model selection (SetLLMInfo, LLMModel, LLMProfile,
+// SetModelSwitcher, SwitchModel) live in llm.go.
 
 // Editor lifecycle methods (newEditor, decorateEditor, ActiveEditor,
 // ActiveFile, OpenFiles, EditorForPath, SwitchTo, ReloadFile, DeleteFile,
@@ -358,8 +359,8 @@ func (s *Session) PendingCommand() *event.PendingCommand {
 	return s.pendingCommand
 }
 
-// Intent lifecycle methods (CurrentIntent, IntentDone, IntentHistory,
-// SubmitGoal, SubmitPlanningGoal, handlePlanningInput, startNewConversation,
+// Intent lifecycle methods (CurrentIntent, SubmitGoal, SubmitPlanningGoal,
+// handlePlanningInput, startNewConversation,
 // ArchiveIntent, ClearIntent, CancelAgent) live in intent.go.
 
 // LSP bridge methods (SetLanguageService, HasLanguageService,
@@ -414,7 +415,7 @@ func (s *Session) AgentModifiedFiles() []string {
 		}
 		files = append(files, rel)
 	}
-	sort.Strings(files)
+	slices.Sort(files)
 	return files
 }
 
@@ -446,7 +447,7 @@ func (s *Session) Close() {
 
 // --- Agent Event Handling ---
 
-// HandleEvent processes an engine event and updates session state.
+// HandleEvent processes an agent event and updates session state.
 func (s *Session) HandleEvent(ev event.Event) {
 	switch e := ev.(type) {
 	case event.AgentEditProposed:
@@ -475,27 +476,16 @@ func (s *Session) HandleEvent(ev event.Event) {
 			"reason":  e.Command.Reason,
 		})
 	case event.AgentError:
-		s.pendingEdit = nil
-		s.pendingCommand = nil
-		s.pendingProposedReplace = ""
-		s.pendingApproval = nil
-		s.stagedEditFile = ""
-		s.editReviewed = false
-		_ = e // error text is in the event for the frontend to display
+		// Error text rides on the event for the frontend to display.
+		s.clearApprovalState()
 	case event.AgentDone:
-		s.pendingEdit = nil
-		s.pendingCommand = nil
-		s.pendingProposedReplace = ""
-		s.pendingApproval = nil
-		s.stagedEditFile = ""
-		s.editReviewed = false
+		s.clearApprovalState()
 		if e.Success {
 			s.ArchiveIntent()
 		}
 	case event.AgentFileCreated:
 		// File is already opened by workspace.WriteFile — frontend can
 		// render it in the project view or switch to it.
-		_ = e
 	case event.AgentWaiting:
 		// Agent finished its turn, waiting for developer input.
 		// No session state changes — intent stays active.

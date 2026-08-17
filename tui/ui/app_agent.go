@@ -5,7 +5,6 @@ import (
 )
 
 // Agent-pane goal-submission handlers.
-// Extracted from app.go's Update() (Phase 7 of AppModel decomposition).
 //
 // Two pane → session paths: a normal goal (which may continue an existing
 // conversation) and a planning-mode goal (which always starts fresh). The

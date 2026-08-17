@@ -63,6 +63,10 @@ type Client struct {
 	// closed is set by Close so subsequent RPC calls short-circuit with
 	// [ErrClientClosed] instead of writing to a torn-down pipe.
 	closed atomic.Bool
+	// closeOnce makes Close idempotent: a second call returns the
+	// first call's error instead of double-closing stdin / re-Waiting.
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // jsonRPCRequest is the wire format for a JSON-RPC 2.0 request.
@@ -397,6 +401,12 @@ const closeGrace = 5 * time.Second
 // This matters because server.Manager.Stop calls this first, so an
 // unbounded wait here would stall every downstream teardown step.
 func (c *Client) Close() error {
+	c.closeOnce.Do(func() { c.closeErr = c.closeLocked() })
+	return c.closeErr
+}
+
+// closeLocked performs the one-time teardown behind [Client.Close].
+func (c *Client) closeLocked() error {
 	// Record closed state first so concurrent RPC calls short-circuit
 	// rather than enqueuing onto pending and then being orphaned.
 	c.closed.Store(true)

@@ -1,12 +1,14 @@
 // Package contracttest provides reusable test fixtures that verify a
 // concrete implementation upholds a kit port's documented contract.
 //
-// Each port has one entry-point function — [Provider], [Store], [Tool],
-// [SessionEventSink], [Highlighter] — that takes *testing.T plus a
-// constructor for the implementation under test, then runs every
-// contract claim from the port's doc comment as a named subtest. The
-// pattern mirrors [testing/fstest.TestFS] for [io/fs.FS] and the
-// database/sql driver test suite.
+// Each port has one entry-point function — [Provider], [Store], [Tool]
+// (plus [ToolWrapper] for tool decorators) — that takes *testing.T plus
+// a constructor for the implementation under test, then runs every
+// contract claim from the port's doc comment as a named subtest. Ports
+// owned by other modules ship their own fixtures in the same style
+// (engine/contracttest, coding/capture/contracttest). The pattern
+// mirrors [testing/fstest.TestFS] for [io/fs.FS] and the database/sql
+// driver test suite.
 //
 // A new third-party implementation can opt in with one import and one
 // test call:

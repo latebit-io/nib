@@ -69,7 +69,10 @@ func (m *mockStore) Publish(ctx context.Context, path string, body string, expec
 	}
 	doc := memory.Document{Path: path, Body: body, Version: cur.Version + 1, Modified: "now"}
 	m.docs[path] = doc
-	return doc, nil
+	// Write responses are header-only (empty Body), as the demarkus MCP
+	// adapter returns them — a cache that stored this would serve an
+	// empty document on the next Fetch.
+	return memory.Document{Path: path, Version: doc.Version, Modified: doc.Modified}, nil
 }
 
 func (m *mockStore) Append(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
@@ -91,7 +94,7 @@ func (m *mockStore) Append(ctx context.Context, path string, body string, expect
 	cur.Version = expectedVersion + 1
 	cur.Path = path
 	m.docs[path] = cur
-	return cur, nil
+	return memory.Document{Path: path, Version: cur.Version, Modified: cur.Modified}, nil
 }
 
 func (m *mockStore) List(ctx context.Context, dir string) ([]string, error) {

@@ -82,6 +82,7 @@ func TestAgent_MaxTurns_AbortsRun(t *testing.T) {
 	}
 
 	ag := New(provider, stubWorkspace{}, &NewOptions{MaxTurns: 2})
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())

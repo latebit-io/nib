@@ -1,7 +1,9 @@
 package toolperm
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 )
@@ -176,13 +178,38 @@ func splitRules(s string) []string {
 // Matcher evaluates a tool invocation against an allow set and a deny
 // set. The zero value denies everything; construct with [New].
 type Matcher struct {
-	allow []Rule
-	deny  []Rule
+	allow []compiledRule
+	deny  []compiledRule
 }
 
-// New builds a Matcher from allow and deny rule sets.
+// compiledRule pairs a Rule with its glob compiled once at [New] time,
+// so Allows/PermitsArg do not rebuild a regexp per invocation.
+type compiledRule struct {
+	Rule
+	re *regexp.Regexp // nil when Arg == "" (any argument) or the glob failed to compile
+}
+
+// New builds a Matcher from allow and deny rule sets. Argument globs
+// are compiled here; a glob that fails to compile never matches (the
+// glob syntax only emits QuoteMeta and .*/. so this is theoretical).
 func New(allow, deny []Rule) *Matcher {
-	return &Matcher{allow: allow, deny: deny}
+	return &Matcher{allow: compileRules(allow), deny: compileRules(deny)}
+}
+
+func compileRules(rules []Rule) []compiledRule {
+	out := make([]compiledRule, 0, len(rules))
+	for _, r := range rules {
+		cr := compiledRule{Rule: r}
+		if r.Arg != "" {
+			re, err := globRegexp(r.Arg)
+			if err != nil {
+				slog.Warn("toolperm: glob failed to compile; rule never matches", "rule", r.String(), "err", err)
+			}
+			cr.re = re
+		}
+		out = append(out, cr)
+	}
+	return out
 }
 
 // DenyAll returns a matcher that permits nothing. It is the fail-closed
@@ -280,7 +307,7 @@ func (m *Matcher) PermitsArg(tool, arg string) bool {
 // compound shell command must be rejected because the per-argument glob
 // can only be trusted against a single simple command.
 func (m *Matcher) HasArgRules(tool string) bool {
-	for _, set := range [][]Rule{m.allow, m.deny} {
+	for _, set := range [][]compiledRule{m.allow, m.deny} {
 		for _, r := range set {
 			if r.Arg != "" && strings.EqualFold(r.Tool, tool) {
 				return true
@@ -306,29 +333,20 @@ func HasShellControl(cmd string) bool {
 
 // matches reports whether the rule applies to an invocation of tool with
 // the given argument string.
-func (r Rule) matches(tool, arg string) bool {
+func (r compiledRule) matches(tool, arg string) bool {
 	if !strings.EqualFold(r.Tool, tool) {
 		return false
 	}
 	if r.Arg == "" {
 		return true
 	}
-	return globMatch(r.Arg, arg)
+	return r.re != nil && r.re.MatchString(arg)
 }
 
-// globMatch reports whether s matches the glob pattern. `*` matches any
+// globRegexp compiles a glob into an anchored regexp. `*` matches any
 // run of characters (including separators), `?` matches exactly one. All
 // other characters are literal. Unlike path.Match, `*` crosses `/` — a
 // bash command grant like `Bash(git *)` must match commands with paths.
-func globMatch(pattern, s string) bool {
-	re, err := globRegexp(pattern)
-	if err != nil {
-		return false
-	}
-	return re.MatchString(s)
-}
-
-// globRegexp compiles a glob into an anchored regexp.
 func globRegexp(pattern string) (*regexp.Regexp, error) {
 	var b strings.Builder
 	b.WriteString(`\A`)
@@ -346,13 +364,8 @@ func globRegexp(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(b.String())
 }
 
-// joinErrs joins rule-parse errors into one. A tiny local helper keeps
-// the public surface focused; errors.Join would also work but loses the
-// "N rules" framing callers find useful in logs.
+// joinErrs wraps rule-parse errors with an "N invalid rule(s)" frame
+// while keeping each cause reachable via errors.Is/As.
 func joinErrs(errs []error) error {
-	msgs := make([]string, len(errs))
-	for i, e := range errs {
-		msgs[i] = e.Error()
-	}
-	return fmt.Errorf("toolperm: %d invalid rule(s): %s", len(errs), strings.Join(msgs, "; "))
+	return fmt.Errorf("toolperm: %d invalid rule(s): %w", len(errs), errors.Join(errs...))
 }

@@ -1,5 +1,22 @@
 package ui
 
+import (
+	"strings"
+
+	"github.com/latebit-io/nib/tui/sanitize"
+)
+
+// inlineWhitespace folds the line breaks Sanitizer lets through so a
+// value renders on a single row (status bar, list entries).
+var inlineWhitespace = strings.NewReplacer("\n", " ", "\t", " ")
+
+// sanitizeInline strips ANSI escapes and control characters from external
+// text and collapses newlines/tabs to spaces for single-row rendering.
+func sanitizeInline(s string) string {
+	var san sanitize.Sanitizer
+	return inlineWhitespace.Replace(san.Sanitize(s))
+}
+
 // isLeakedMouseSequence detects SGR mouse escape sequence fragments that
 // Bubble Tea's input parser failed to consume. These arrive as KeyRunes
 // and look like: [<65;14;32M or <65;14;32M (with or without leading [).

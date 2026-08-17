@@ -16,7 +16,6 @@ import (
 )
 
 // Editor pool + file-buffer navigation.
-// Extracted from app.go (Phase 8 of AppModel decomposition).
 //
 // The editor pool keys `*editor.Editor` instances by canonical path so
 // that switching between open files preserves cursor/selection/scroll
@@ -91,8 +90,9 @@ func (m *AppModel) clampPooledEditor(path string) {
 
 // dropPooledEditors removes pool entries for a path and any children
 // (when path was a directory), closing each editor's highlighter so
-// tree-sitter grammar instances are released. Mirrors the matching
-// logic in [session.cleanupDeletedPath].
+// tree-sitter grammar instances are released, and unwatching each file
+// so the watcher's per-directory refcount does not leak. Mirrors the
+// matching logic in [session.cleanupDeletedPath].
 func (m *AppModel) dropPooledEditors(path string) {
 	canon := m.Session.CanonPath(path)
 	dirPrefix := canon + string(filepath.Separator)
@@ -100,6 +100,9 @@ func (m *AppModel) dropPooledEditors(path string) {
 		if k == canon || strings.HasPrefix(k, dirPrefix) {
 			ed.Close()
 			delete(m.editorPool, k)
+			if m.fileWatcher != nil {
+				m.fileWatcher.Unwatch(k)
+			}
 		}
 	}
 }

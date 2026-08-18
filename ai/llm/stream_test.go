@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -18,13 +19,14 @@ func errBody(data string, err error) io.ReadCloser {
 	return io.NopCloser(io.MultiReader(strings.NewReader(data), iotest.ErrReader(err)))
 }
 
-// TestCodexSSE_ScannerErrorEmitsNoDone: a read failure with ctx live must
-// close the channel WITHOUT a Done event. Synthesizing Done here would hand
-// the agent possibly partial tool calls as a clean completion.
-func TestCodexSSE_ScannerErrorEmitsNoDone(t *testing.T) {
+// TestCodexSSE_ScannerErrorEmitsTerminalErr: a read failure with ctx live
+// must end the stream with a terminal Err, never a clean Done — the agent
+// would otherwise treat possibly partial tool calls as a completion — and
+// the incomplete event pending at the failure is discarded.
+func TestCodexSSE_ScannerErrorEmitsTerminalErr(t *testing.T) {
 	c := NewCodexAPI("m", staticAuth{}, "")
 	body := errBody(
-		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n"+
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"+
 			"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"f\"}}\n",
 		errors.New("connection reset"))
 	ch := make(chan StreamEvent, 8)
@@ -32,21 +34,31 @@ func TestCodexSSE_ScannerErrorEmitsNoDone(t *testing.T) {
 	close(ch)
 
 	var tokens int
+	var last StreamEvent
 	for ev := range ch {
-		if ev.Done {
-			t.Fatalf("scanner error emitted Done event %+v; want none", ev)
+		if ev.Token != "" {
+			tokens++
 		}
-		tokens++
+		last = ev
 	}
 	if tokens != 1 {
 		t.Errorf("tokens = %d; want 1 (delta before the failure)", tokens)
+	}
+	if !last.Done || last.Err == nil || !strings.Contains(last.Err.Error(), "connection reset") {
+		t.Fatalf("last event = %+v; want Done with the read error", last)
+	}
+	if len(last.ToolCalls) != 0 {
+		t.Errorf("ToolCalls = %+v; the incomplete event after the failure must not dispatch", last.ToolCalls)
 	}
 }
 
 // TestScanSSE_CleanEOFEmitsTerminal covers the shared loop's fallback: no
 // stop from the dispatcher, body ends cleanly, terminal() is emitted once.
 func TestScanSSE_CleanEOFEmitsTerminal(t *testing.T) {
-	body := io.NopCloser(strings.NewReader("event: ping\ndata: a\n\ndata: b\n"))
+	// Three events: typed multi-line data (joined by \n), an untyped one
+	// (the type does not carry over), and a trailing one without a final
+	// blank line (dispatched at clean EOF).
+	body := io.NopCloser(strings.NewReader("event: ping\ndata: a1\ndata: a2\n\n: comment\ndata: b\n\ndata: c\n"))
 	ch := make(chan StreamEvent, 4)
 	var seen []string
 	scanSSE(context.Background(), body, ch, "test", func(eventType, data string) bool {
@@ -55,10 +67,8 @@ func TestScanSSE_CleanEOFEmitsTerminal(t *testing.T) {
 	}, func() StreamEvent { return StreamEvent{Done: true} })
 	close(ch)
 
-	// The event type applies to the data line it precedes only; the
-	// blank line (and each dispatch) resets it, per the SSE spec.
-	if strings.Join(seen, ",") != "ping/a,/b" {
-		t.Errorf("dispatched = %v; want [ping/a /b]", seen)
+	if got := strings.Join(seen, "|"); got != "ping/a1\na2|/b|/c" {
+		t.Errorf("dispatched = %q; want %q", got, "ping/a1\na2|/b|/c")
 	}
 	var dones int
 	for ev := range ch {
@@ -130,8 +140,8 @@ func TestStream_Non401ErrorIsPlain(t *testing.T) {
 }
 
 // blockingBody serves one chunk, then blocks every further Read until
-// Close, after which it reports clean EOF — a stalled connection whose
-// buffered lines are still in the scanner when the watchdog tears it down.
+// Close, after which it reports clean EOF — a connection that stalls
+// mid-stream and then closes without error.
 type blockingBody struct {
 	chunk  string
 	served bool
@@ -157,24 +167,50 @@ func (b *blockingBody) Close() error {
 	return nil
 }
 
-// TestScanSSE_WatchdogFiredNeverEmitsTerminal: once the watchdog closes a
-// stalled body, buffered lines draining to a clean EOF must surface
-// errStreamStalled, not terminal() success — and must not re-arm the timer.
-func TestScanSSE_WatchdogFiredNeverEmitsTerminal(t *testing.T) {
+// TestScanSSE_StalledReadEmitsStalledNotTerminal: a Read that never
+// returns trips the watchdog; the closed body's clean EOF must then
+// surface errStreamStalled, never terminal() success. Events served
+// before the stall still dispatch.
+func TestScanSSE_StalledReadEmitsStalledNotTerminal(t *testing.T) {
 	prev := sseIdleTimeout
 	sseIdleTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { sseIdleTimeout = prev })
 
-	body := newBlockingBody("data: a\ndata: b\n")
+	body := newBlockingBody("data: a\n\n")
 	ch := make(chan StreamEvent, 4)
 	var seen []string
 	scanSSE(context.Background(), body, ch, "test", func(_, data string) bool {
 		seen = append(seen, data)
-		if data == "a" {
-			// Stall inside the dispatcher until the watchdog fires and
-			// closes the body; "b" is still buffered in the scanner.
-			<-body.closed
-		}
+		return false
+	}, func() StreamEvent { return StreamEvent{Done: true} })
+	close(ch)
+
+	if strings.Join(seen, ",") != "a" {
+		t.Errorf("dispatched = %v; want [a]", seen)
+	}
+	var got []StreamEvent
+	for ev := range ch {
+		got = append(got, ev)
+	}
+	if len(got) != 1 || !got[0].Done || !errors.Is(got[0].Err, errStreamStalled) {
+		t.Fatalf("events = %+v; want exactly one Done carrying errStreamStalled", got)
+	}
+}
+
+// TestScanSSE_SlowConsumerIsNotAStall: idle time is measured across the
+// blocking read only, so a dispatcher that takes longer than the idle
+// timeout (downstream backpressure) does not trip the watchdog.
+func TestScanSSE_SlowConsumerIsNotAStall(t *testing.T) {
+	prev := sseIdleTimeout
+	sseIdleTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { sseIdleTimeout = prev })
+
+	body := io.NopCloser(strings.NewReader("data: a\n\ndata: b\n\n"))
+	ch := make(chan StreamEvent, 4)
+	var seen []string
+	scanSSE(context.Background(), body, ch, "test", func(_, data string) bool {
+		seen = append(seen, data)
+		time.Sleep(3 * sseIdleTimeout)
 		return false
 	}, func() StreamEvent { return StreamEvent{Done: true} })
 	close(ch)
@@ -186,8 +222,26 @@ func TestScanSSE_WatchdogFiredNeverEmitsTerminal(t *testing.T) {
 	for ev := range ch {
 		got = append(got, ev)
 	}
-	if len(got) != 1 || !got[0].Done || !errors.Is(got[0].Err, errStreamStalled) {
-		t.Fatalf("events = %+v; want exactly one Done carrying errStreamStalled", got)
+	if len(got) != 1 || !got[0].Done || got[0].Err != nil {
+		t.Fatalf("events = %+v; want exactly one clean Done", got)
+	}
+}
+
+// TestScanSSE_OversizedLineSurfacesErr: a scanner failure that is neither
+// a stall nor a cancellation reaches the consumer as a terminal Err.
+func TestScanSSE_OversizedLineSurfacesErr(t *testing.T) {
+	body := io.NopCloser(strings.NewReader("data: " + strings.Repeat("x", sseMaxLineBytes+1) + "\n\n"))
+	ch := make(chan StreamEvent, 4)
+	scanSSE(context.Background(), body, ch, "test", func(_, _ string) bool { return false },
+		func() StreamEvent { return StreamEvent{Done: true} })
+	close(ch)
+
+	var got []StreamEvent
+	for ev := range ch {
+		got = append(got, ev)
+	}
+	if len(got) != 1 || !got[0].Done || !errors.Is(got[0].Err, bufio.ErrTooLong) {
+		t.Fatalf("events = %+v; want exactly one Done carrying bufio.ErrTooLong", got)
 	}
 }
 

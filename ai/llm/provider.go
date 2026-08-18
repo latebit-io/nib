@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -132,8 +131,8 @@ type StreamEvent struct {
 	// executed — silently applying a truncated edit corrupts the file.
 	Truncated bool
 	// Err carries a provider-side stream failure as a terminal event:
-	// a streamed error block, a payload-limit breach, or a mid-stream
-	// stall. When non-nil this is the final event (Done is also set) and
+	// a streamed error block, a payload-limit breach, a mid-stream stall,
+	// or a read failure (oversized line, connection reset). When non-nil this is the final event (Done is also set) and
 	// any accumulated content, tool calls, or usage may be partial.
 	// Consumers must surface Err instead of treating the turn as a clean
 	// completion. Nil on success.
@@ -318,13 +317,16 @@ func startSSEReader(ctx context.Context, resp *http.Response, read func(ctx cont
 	return ch
 }
 
-// scanSSE drives the shared SSE read loop: it feeds every "data:" line
-// (with the preceding "event:" type, if any) to onEvent until onEvent
-// reports stop, ctx is cancelled, the body ends, or a read fails. Clean
-// EOF without a stop emits terminal(); a watchdog stall emits
-// errStreamStalled; any other read error is logged and nothing is
-// emitted, so the consumer sees a provider-side failure rather than a
-// synthesized success with possibly partial tool calls.
+// scanSSE drives the shared SSE read loop. It assembles events per the
+// SSE spec — an optional "event:" type plus one or more "data:" lines
+// joined by "\n", dispatched at the blank-line delimiter — and feeds each
+// to onEvent until onEvent reports stop, ctx is cancelled, the body ends,
+// or a read fails. A complete trailing event without a final blank line
+// is still dispatched at clean EOF (lenient toward servers that omit it).
+// Clean EOF without a stop emits terminal(); a watchdog stall emits
+// errStreamStalled; any other read error (oversized line, connection
+// reset) is emitted as a terminal Err so the consumer sees the real cause
+// rather than a bare channel close.
 func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, provider string, onEvent func(eventType, data string) (stop bool), terminal func() StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), sseMaxLineBytes)
@@ -332,42 +334,57 @@ func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, pro
 	wd := newStreamWatchdog(body)
 	defer wd.stop()
 
-	var eventType string
-	for scanner.Scan() {
-		wd.reset()
+	var (
+		eventType string
+		data      []string
+	)
+	dispatch := func() bool {
+		if len(data) == 0 {
+			eventType = ""
+			return false
+		}
+		payload := strings.Join(data, "\n")
+		typ := eventType
+		eventType, data = "", nil
+		return onEvent(typ, payload)
+	}
+
+	for {
+		wd.reset() // idle time is measured across the blocking read only
+		if !scanner.Scan() {
+			break
+		}
+		wd.stop() // dispatch (and downstream backpressure) is not a stall
 		if ctx.Err() != nil {
 			return
 		}
 		line := scanner.Text()
-		if strings.HasPrefix(line, "event:") {
+		switch {
+		case line == "":
+			if dispatch() {
+				return
+			}
+		case strings.HasPrefix(line, "event:"):
 			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			continue
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 		}
-		if line == "" {
-			eventType = "" // blank line ends the event; the type does not carry over
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		stop := onEvent(eventType, data)
-		eventType = ""
-		if stop {
-			return
-		}
+		// Comments (":"), id:, retry:, and unknown fields are ignored.
 	}
 
-	// A fired watchdog closed the body; the scanner may still have drained
-	// buffered lines to a clean EOF, which must not read as success.
+	// A fired watchdog closed the body mid-read; whatever the scanner
+	// reports afterwards must not read as success.
 	if wd.fired() {
 		trySend(ctx, ch, StreamEvent{Done: true, Err: errStreamStalled})
 		return
 	}
 	if err := scanner.Err(); err != nil {
 		if ctx.Err() == nil {
-			slog.Warn("SSE scanner error", "provider", provider, "err", err)
+			trySend(ctx, ch, StreamEvent{Done: true, Err: fmt.Errorf("%s: read stream: %w", provider, err)})
 		}
+		return
+	}
+	if dispatch() {
 		return
 	}
 	trySend(ctx, ch, terminal())

@@ -359,17 +359,24 @@ func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, pro
 			return
 		}
 		line := scanner.Text()
-		switch {
-		case line == "":
+		if line == "" {
 			if dispatch() {
 				return
 			}
-		case strings.HasPrefix(line, "event:"):
-			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		case strings.HasPrefix(line, "data:"):
-			data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			continue
 		}
-		// Comments (":"), id:, retry:, and unknown fields are ignored.
+		// Spec field split: name before the first colon, value after it
+		// with at most one leading space removed; a colon-less line is a
+		// field with an empty value. Comments (":"), id, retry, and
+		// unknown fields are ignored.
+		field, value, _ := strings.Cut(line, ":")
+		value = strings.TrimPrefix(value, " ")
+		switch field {
+		case "event":
+			eventType = value
+		case "data":
+			data = append(data, value)
+		}
 	}
 
 	// A fired watchdog closed the body mid-read; whatever the scanner

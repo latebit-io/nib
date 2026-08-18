@@ -55,10 +55,14 @@ func TestCodexSSE_ScannerErrorEmitsTerminalErr(t *testing.T) {
 // TestScanSSE_CleanEOFEmitsTerminal covers the shared loop's fallback: no
 // stop from the dispatcher, body ends cleanly, terminal() is emitted once.
 func TestScanSSE_CleanEOFEmitsTerminal(t *testing.T) {
-	// Three events: typed multi-line data (joined by \n), an untyped one
-	// (the type does not carry over), and a trailing one without a final
-	// blank line (dispatched at clean EOF).
-	body := io.NopCloser(strings.NewReader("event: ping\ndata: a1\ndata: a2\n\n: comment\ndata: b\n\ndata: c\n"))
+	// Five events: typed multi-line data (joined by \n), an untyped one
+	// (the type does not carry over), a value keeping its extra leading
+	// and trailing spaces (only one leading space is stripped), a
+	// colon-less "data" field (empty value, still an event), and a
+	// trailing one without a final blank line (dispatched at clean EOF).
+	// Comments, id, retry, and unknown fields are skipped.
+	body := io.NopCloser(strings.NewReader(
+		"event: ping\ndata: a1\ndata: a2\n\n: comment\nid: 7\ndata: b\n\ndata:  sp \n\ndata\n\ndatabase: nope\ndata: c\n"))
 	ch := make(chan StreamEvent, 4)
 	var seen []string
 	scanSSE(context.Background(), body, ch, "test", func(eventType, data string) bool {
@@ -67,8 +71,9 @@ func TestScanSSE_CleanEOFEmitsTerminal(t *testing.T) {
 	}, func() StreamEvent { return StreamEvent{Done: true} })
 	close(ch)
 
-	if got := strings.Join(seen, "|"); got != "ping/a1\na2|/b|/c" {
-		t.Errorf("dispatched = %q; want %q", got, "ping/a1\na2|/b|/c")
+	want := "ping/a1\na2|/b|/ sp |/|/c"
+	if got := strings.Join(seen, "|"); got != want {
+		t.Errorf("dispatched = %q; want %q", got, want)
 	}
 	var dones int
 	for ev := range ch {

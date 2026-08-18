@@ -5,10 +5,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,8 +17,8 @@ import (
 	"github.com/latebit-io/nib/ai/brand"
 )
 
-// BrowserFlowConfig holds the endpoint configuration for Authorization Code + PKCE.
-type BrowserFlowConfig struct {
+// browserFlowConfig holds the endpoint configuration for Authorization Code + PKCE.
+type browserFlowConfig struct {
 	// ClientID is the OAuth client identifier.
 	ClientID string
 	// AuthURL is the authorization endpoint.
@@ -69,9 +67,6 @@ func newPKCE() (*pkce, error) {
 	return &pkce{verifier: verifier, challenge: challenge}, nil
 }
 
-// BrowserFlow runs the Authorization Code + PKCE flow.
-// It starts a local HTTP server, opens the browser, waits for the callback,
-// and exchanges the auth code for tokens.
 // callbackServer manages a local HTTP server that receives the OAuth callback.
 type callbackServer struct {
 	srv         *http.Server
@@ -150,7 +145,7 @@ func startCallbackServer(host string, port int, state, callbackPath string) (*ca
 func (s *callbackServer) close() { _ = s.srv.Close() } // error not actionable during shutdown
 
 // resolvedCallback returns the callback path and redirect host with defaults applied.
-func (cfg *BrowserFlowConfig) resolvedCallback() (path, host string, err error) {
+func (cfg *browserFlowConfig) resolvedCallback() (path, host string, err error) {
 	path = cfg.CallbackPath
 	if path == "" {
 		path = "/auth/callback"
@@ -165,10 +160,10 @@ func (cfg *BrowserFlowConfig) resolvedCallback() (path, host string, err error) 
 	return path, host, nil
 }
 
-// BrowserFlow runs the Authorization Code + PKCE flow.
+// browserFlow runs the Authorization Code + PKCE flow.
 // It starts a local HTTP server, opens the browser, waits for the callback,
 // and exchanges the auth code for tokens.
-func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCallbacks) (*tokenResponse, error) {
+func browserFlow(ctx context.Context, cfg browserFlowConfig, callbacks *FlowCallbacks) (*tokenResponse, error) {
 	p, err := newPKCE()
 	if err != nil {
 		return nil, err
@@ -230,48 +225,13 @@ func BrowserFlow(ctx context.Context, cfg BrowserFlowConfig, callbacks *FlowCall
 
 // exchangeCode exchanges an authorization code for tokens.
 func exchangeCode(ctx context.Context, tokenURL, clientID, code, redirectURI, codeVerifier string) (*tokenResponse, error) {
-	data := url.Values{
+	return postTokenForm(ctx, tokenURL, "token exchange", url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"client_id":     {clientID},
 		"code_verifier": {codeVerifier},
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("create token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := oauthClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("token request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }() // body already read; close error is not actionable
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	if err != nil {
-		return nil, fmt.Errorf("read token response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange: HTTP %d", resp.StatusCode)
-	}
-
-	var tr tokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
-	}
-	if tr.Error != "" {
-		desc := tr.ErrorDesc
-		if desc == "" {
-			desc = tr.Error
-		}
-		return nil, fmt.Errorf("token error: %s", desc)
-	}
-	return &tr, nil
+	})
 }
 
 // openBrowser opens a URL in the user's default browser.

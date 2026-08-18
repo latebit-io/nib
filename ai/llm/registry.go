@@ -10,9 +10,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/latebit-io/nib/ai/internal/atomicjson"
 )
 
 //go:embed models_snapshot.json
@@ -22,6 +25,10 @@ const (
 	modelsDevURL      = "https://models.dev/api.json"
 	registryCacheFile = "models_cache.json"
 )
+
+// registryClient bounds the models.dev fetch so a hung registry cannot
+// stall startup; the response is a small JSON document, not a stream.
+var registryClient = &http.Client{Timeout: 30 * time.Second}
 
 // RegistryModel describes a model from the models.dev registry.
 type RegistryModel struct {
@@ -121,11 +128,12 @@ func (r *ModelRegistry) resolveCache(ctx context.Context) *registryCache {
 		} else {
 			r.mu.Lock()
 			r.cache = fetched
+			r.mu.Unlock()
 			cache = fetched
+			// Disk write outside the lock: readers must not stall on I/O.
 			if err := r.saveDiskCache(fetched); err != nil {
 				slog.Warn("model registry: cache write failed", "err", err)
 			}
-			r.mu.Unlock()
 		}
 	}
 
@@ -187,7 +195,7 @@ func (r *ModelRegistry) filterModels(c *registryCache, providerID string, filter
 		}
 		out = append(out, ModelInfo{ID: m.ID, Name: name})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slices.SortFunc(out, func(a, b ModelInfo) int { return strings.Compare(a.ID, b.ID) })
 	return out
 }
 
@@ -212,7 +220,7 @@ func (r *ModelRegistry) fetch(ctx context.Context) (*registryCache, error) {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := registryClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch models.dev: %w", err)
 	}
@@ -268,22 +276,7 @@ func (r *ModelRegistry) loadDiskCache() (*registryCache, error) {
 }
 
 func (r *ModelRegistry) saveDiskCache(c *registryCache) error {
-	if err := os.MkdirAll(r.cacheDir, 0o700); err != nil {
-		return fmt.Errorf("create cache dir: %w", err)
-	}
-	data, err := json.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("marshal cache: %w", err)
-	}
-	tmp := r.cachePath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write cache: %w", err)
-	}
-	if err := os.Rename(tmp, r.cachePath()); err != nil {
-		_ = os.Remove(tmp) // best-effort cleanup of orphaned temp file
-		return fmt.Errorf("rename cache: %w", err)
-	}
-	return nil
+	return atomicjson.Write(r.cachePath(), c, 0o700, 0o600)
 }
 
 // loadSnapshot parses the embedded models_snapshot.json as a registryCache.

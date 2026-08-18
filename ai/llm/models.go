@@ -19,6 +19,8 @@ type ModelInfo struct {
 // ModelLister can enumerate available models from a provider.
 // Not all providers support this — callers should type-assert.
 type ModelLister interface {
+	// ListModels returns the models the authenticated account can use.
+	// Doubles as an auth check: a rejected credential surfaces as an error.
 	ListModels(ctx context.Context) ([]ModelInfo, error)
 }
 
@@ -34,8 +36,7 @@ type listModelsResponse struct {
 // Returns an error if the endpoint is unavailable or auth fails.
 // Implements ModelLister.
 func (a *AgentAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
-	url := a.baseURL + "/models"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/models", nil)
 	if err != nil {
 		return nil, fmt.Errorf("llm: create request: %w", err)
 	}

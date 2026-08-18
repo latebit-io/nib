@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -101,10 +102,6 @@ func (a *Agent) runLoop(ctx context.Context) {
 			continue
 		}
 
-		if result.Terminate {
-			return
-		}
-
 		if len(assistant.ToolCalls) > 0 {
 			batchTerminate, err := a.executeToolCalls(ctx, assistant.ToolCalls)
 			if err != nil {
@@ -122,7 +119,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 
 		// No tool calls — turn ended cleanly. Try steering, then
 		// follow-up, then park on the reply channel.
-		steering, err := a.callGetSteering(ctx)
+		steering, err := a.callSteering(ctx)
 		if err != nil {
 			a.emitError(fmt.Errorf("SteeringMessages: %w", err))
 			return
@@ -132,7 +129,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 			continue
 		}
 
-		followup, err := a.callGetFollowUp(ctx)
+		followup, err := a.callFollowUp(ctx)
 		if err != nil {
 			a.emitError(fmt.Errorf("FollowUpMessages: %w", err))
 			return
@@ -161,10 +158,9 @@ func (a *Agent) runLoop(ctx context.Context) {
 }
 
 // turnResult bundles the per-turn outcomes [processTurn] computes.
-// Splitting truncated and terminate from the error channel lets the
-// loop dispatch them through their own paths — truncation goes to the
-// [Hooks.OnTruncated] hook, terminate ends the run cleanly, and
-// errors funnel into [Agent.emitError].
+// Splitting truncated from the error channel lets the loop dispatch it
+// through its own path — truncation goes to the [Hooks.OnTruncated]
+// hook while errors funnel into [Agent.emitError].
 type turnResult struct {
 	// Assistant is the finalized assistant message for this turn.
 	// Always populated on a non-error return — including truncated
@@ -176,15 +172,11 @@ type turnResult struct {
 	// caller invokes [Hooks.OnTruncated] before deciding whether to
 	// retry or end the run.
 	Truncated bool
-	// Terminate is reserved for future early-termination paths from
-	// inside the stream consumer itself; today only the post-tool-batch
-	// hook can terminate, so this flag is always false.
-	Terminate bool
 }
 
 // processTurn drives one Stream → drain cycle and returns the
-// finalized assistant message plus the truncation/terminate signals
-// the loop dispatches on.
+// finalized assistant message plus the truncation signal the loop
+// dispatches on.
 //
 // Streaming events ([event.MessageStart], [event.MessageUpdate],
 // [event.MessageEnd]) are emitted as the stream progresses. A truncated
@@ -310,7 +302,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 			// matching tool_result blocks, which Anthropic rejects on
 			// resume. Synthesize a cancelled result for each so the
 			// transcript stays well-formed.
-			a.appendCancelledResults(calls[i:])
+			a.appendUnfinishedResults(calls[i:], "Error: tool call cancelled before execution.")
 			return false, err
 		}
 
@@ -322,6 +314,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 
 		result, terminate, err := a.dispatchTool(ctx, call)
 		if err != nil {
+			// A hook error ends the run, but the assistant message already
+			// carries this and every later tool_use; give each a result so
+			// the transcript resumes cleanly.
+			a.appendUnfinishedResults(calls[i:], "Error: tool call aborted: "+err.Error())
 			return false, err
 		}
 		if !terminate {
@@ -344,17 +340,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 	return allTerminate, nil
 }
 
-// appendCancelledResults appends a synthesized error tool_result for each
-// tool call that never ran, keeping the transcript well-formed when the
-// batch is abandoned mid-flight (ctx cancellation). Anthropic rejects an
-// assistant turn whose tool_use blocks lack matching tool_result blocks on
-// resume, so every unfinished call must still get a result.
-func (a *Agent) appendCancelledResults(calls []llm.ToolCall) {
+// appendUnfinishedResults appends a synthesized error tool_result carrying
+// content for each tool call that never completed, keeping the transcript
+// well-formed when the batch is abandoned mid-flight (ctx cancellation,
+// hook error). Anthropic rejects an assistant turn whose tool_use blocks
+// lack matching tool_result blocks on resume, so every unfinished call
+// must still get a result.
+func (a *Agent) appendUnfinishedResults(calls []llm.ToolCall, content string) {
 	for _, call := range calls {
 		a.appendMessage(llm.Message{
 			Role:       "tool",
 			ToolCallID: call.ID,
-			Content:    "Error: tool call cancelled before execution.",
+			Content:    content,
 		})
 	}
 }
@@ -437,8 +434,7 @@ func (a *Agent) applyAfterToolCall(ctx context.Context, call llm.ToolCall, resul
 // continues to append to it.
 func (a *Agent) transformContext(ctx context.Context) ([]llm.Message, error) {
 	a.mu.Lock()
-	msgs := make([]llm.Message, len(a.messages))
-	copy(msgs, a.messages)
+	msgs := slices.Clone(a.messages)
 	a.mu.Unlock()
 
 	if a.hooks.TransformContext == nil {
@@ -454,23 +450,23 @@ func (a *Agent) transformContext(ctx context.Context) ([]llm.Message, error) {
 	return out, nil
 }
 
-// callGetSteering invokes the SteeringMessages hook (when
+// callSteering invokes the SteeringMessages hook (when
 // configured) and returns its messages. Steering messages are
 // injected after the current turn finishes with NO tool calls and
 // re-enter the loop without parking on the reply channel.
-func (a *Agent) callGetSteering(ctx context.Context) ([]llm.Message, error) {
+func (a *Agent) callSteering(ctx context.Context) ([]llm.Message, error) {
 	if a.hooks.SteeringMessages == nil {
 		return nil, nil
 	}
 	return a.hooks.SteeringMessages(ctx)
 }
 
-// callGetFollowUp invokes the FollowUpMessages hook (when
+// callFollowUp invokes the FollowUpMessages hook (when
 // configured) and returns its messages. Follow-up messages are
 // consulted only after steering returns nothing — the layered hook
 // surface lets the application distinguish "more work for this turn"
 // (steering) from "more work for the run as a whole" (follow-up).
-func (a *Agent) callGetFollowUp(ctx context.Context) ([]llm.Message, error) {
+func (a *Agent) callFollowUp(ctx context.Context) ([]llm.Message, error) {
 	if a.hooks.FollowUpMessages == nil {
 		return nil, nil
 	}
@@ -508,10 +504,15 @@ func (a *Agent) awaitReply(ctx context.Context) (string, bool) {
 	}
 }
 
-// cleanupRun resets the run-state fields under [Agent.mu] and closes
-// the done channel that [Agent.WaitForIdle] is parked on. Called from
-// the runLoop's defer so every exit path — clean completion, hook
-// error, ctx cancellation, panic — funnels through one place.
+// cleanupRun emits [event.AgentEnd], resets the run-state fields under
+// [Agent.mu], and closes the done channel [Agent.WaitForIdle] parks on.
+// Called from runLoop's defer so every return path — clean completion,
+// hook error, ctx cancellation — funnels through one place. There is no
+// recover: a panic in a hook or tool still crashes the process.
+//
+// AgentEnd is delivered while running is still true, so a consumer that
+// reacts to AgentEnd by calling Prompt must [Agent.WaitForIdle] first or
+// it may see [ErrRunInProgress].
 func (a *Agent) cleanupRun() {
 	a.send(event.AgentEnd{Messages: a.snapshotMessages()})
 
@@ -537,9 +538,7 @@ func (a *Agent) cleanupRun() {
 func (a *Agent) snapshotMessages() []llm.Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := make([]llm.Message, len(a.messages))
-	copy(out, a.messages)
-	return out
+	return slices.Clone(a.messages)
 }
 
 // appendMessage appends a single message to the run's transcript
@@ -606,12 +605,9 @@ func (a *Agent) emitError(err error) {
 }
 
 // emitTurnUsage forwards the provider-reported usage (when available)
-// through [event.TurnUsage]. The foundation populates only the
-// provider-reported fields and ToolCalls; client-side estimates
-// (System/Tools/History/New/Completion) require token estimation that
-// is application-dependent — applications can layer their own
-// estimation by emitting a richer event from a TransformContext hook
-// or wrapping the [llm.Provider].
+// through [event.TurnUsage]. The foundation reports only what the
+// provider returned plus ToolCalls; client-side token estimation is
+// application-dependent and belongs in a provider wrapper.
 func (a *Agent) emitTurnUsage(usage *llm.Usage, toolCalls, turn int) {
 	tu := event.TurnUsage{Turn: turn, ToolCalls: toolCalls}
 	if usage != nil {
@@ -623,14 +619,13 @@ func (a *Agent) emitTurnUsage(usage *llm.Usage, toolCalls, turn int) {
 }
 
 // send delivers an event to the frontend. High-volume streaming events
-// ([event.MessageUpdate], [event.TurnUsage], [event.InputEstimate]) are
-// best-effort: dropped with a warning when the channel is full.
+// ([event.MessageUpdate], [event.TurnUsage]) are best-effort: dropped with a warning when the channel is full.
 // Control-flow events block up to 5s before being dropped with an error
 // log; an undrained channel that long indicates the consumer has
 // stalled and the agent cannot make progress regardless.
 func (a *Agent) send(ev event.Event) {
 	switch ev.(type) {
-	case event.MessageUpdate, event.TurnUsage, event.InputEstimate:
+	case event.MessageUpdate, event.TurnUsage:
 		select {
 		case a.events <- ev:
 		default:

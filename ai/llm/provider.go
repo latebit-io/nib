@@ -1,9 +1,14 @@
 package llm
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -142,9 +147,13 @@ type CacheControl struct {
 	Type string `json:"type"`
 }
 
+// sseMaxLineBytes caps a single SSE line. Large file content in tool
+// results can push individual data lines into the megabytes.
+const sseMaxLineBytes = 10 * 1024 * 1024
+
 // maxToolArgBytes is the maximum cumulative size of streamed tool call
-// arguments. Matches the SSE scanner's 10MB cap to prevent unbounded growth.
-const maxToolArgBytes = 10 * 1024 * 1024
+// arguments. Matches sseMaxLineBytes to prevent unbounded growth.
+const maxToolArgBytes = sseMaxLineBytes
 
 // maxToolCalls is the maximum number of concurrent tool calls in a single
 // response. Prevents unbounded slice/map growth from malformed SSE payloads.
@@ -205,6 +214,146 @@ func trySend(ctx context.Context, ch chan<- StreamEvent, evt StreamEvent) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// openStream sends req and returns the response once the status is 200.
+// A transport failure or non-200 status becomes an error prefixed with
+// provider; see [handleErrorStatus] for the 401 self-heal.
+func openStream(client *http.Client, req *http.Request, provider string, auth Auth) (*http.Response, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: http request: %w", provider, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, handleErrorStatus(provider, auth, resp)
+	}
+	return resp, nil
+}
+
+// handleErrorStatus converts a non-200 response into an error, reading a
+// bounded prefix of the body for detail and closing it. A 401 becomes a
+// typed [AuthError] via [authFailure] regardless of body readability —
+// the status alone is authoritative for the credential self-heal.
+func handleErrorStatus(provider string, auth Auth, resp *http.Response) error {
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	_ = resp.Body.Close() // body drained above; close error is not actionable
+	if resp.StatusCode == http.StatusUnauthorized {
+		if readErr != nil {
+			body = nil
+		}
+		return authFailure(provider, auth, resp.StatusCode, body)
+	}
+	if readErr != nil {
+		return fmt.Errorf("%s: api error: status %d (body unreadable: %w)", provider, resp.StatusCode, readErr)
+	}
+	return fmt.Errorf("%s: api error: status %d: %s", provider, resp.StatusCode, body)
+}
+
+// authFailure handles a 401 from any provider. Auth already refreshed
+// during Authenticate, so a 401 means a dead/revoked credential: discard
+// it through the optional [CredentialInvalidator] port (a no-op for static
+// keys) so the next launch re-offers connect, and return a typed
+// [AuthError] instead of the raw body.
+func authFailure(provider string, auth Auth, statusCode int, body []byte) error {
+	if inv, ok := auth.(CredentialInvalidator); ok {
+		inv.Invalidate()
+	}
+	return parseAuthError(provider, statusCode, body)
+}
+
+// startSSEReader runs read over resp.Body on its own goroutine and returns
+// the event channel it feeds. Body and channel are closed when read
+// returns, so consumers can range until close.
+func startSSEReader(ctx context.Context, resp *http.Response, read func(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent)) <-chan StreamEvent {
+	ch := make(chan StreamEvent, 16)
+	go func() {
+		defer func() { _ = resp.Body.Close() }() // SSE stream done; close error is not actionable
+		defer close(ch)
+		read(ctx, resp.Body, ch)
+	}()
+	return ch
+}
+
+// scanSSE drives the shared SSE read loop: it feeds every "data:" line
+// (with the preceding "event:" type, if any) to onEvent until onEvent
+// reports stop, ctx is cancelled, the body ends, or a read fails. Clean
+// EOF without a stop emits terminal(); a watchdog stall emits
+// errStreamStalled; any other read error is logged and nothing is
+// emitted, so the consumer sees a provider-side failure rather than a
+// synthesized success with possibly partial tool calls.
+func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, provider string, onEvent func(eventType, data string) (stop bool), terminal func() StreamEvent) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), sseMaxLineBytes)
+
+	wd := newStreamWatchdog(body)
+	defer wd.stop()
+
+	var eventType string
+	for scanner.Scan() {
+		wd.reset()
+		if ctx.Err() != nil {
+			return
+		}
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event:") {
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if onEvent(eventType, data) {
+			return
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		if wd.fired() {
+			trySend(ctx, ch, StreamEvent{Done: true, Err: errStreamStalled})
+			return
+		}
+		if ctx.Err() == nil {
+			slog.Warn("SSE scanner error", "provider", provider, "err", err)
+		}
+		return
+	}
+	trySend(ctx, ch, terminal())
+}
+
+// OutputCapEscalator is an optional provider capability: the agent raises
+// the output-token cap after a truncated turn and retries. Every provider
+// in this package implements it; foreign providers may not, so callers
+// type-assert.
+type OutputCapEscalator interface {
+	// MaxTokens returns the current output-token cap. Zero means the
+	// field is omitted and the provider default applies.
+	MaxTokens() int
+	// SetMaxTokens sets the cap used on subsequent requests. Zero
+	// restores the provider default where the API allows it.
+	SetMaxTokens(int)
+}
+
+// maxTokensState is the mutex-guarded output-token cap embedded by every
+// provider adapter to satisfy [OutputCapEscalator].
+type maxTokensState struct {
+	mu        sync.Mutex
+	maxTokens int
+}
+
+// MaxTokens returns the current output-token cap. Safe for concurrent use.
+func (s *maxTokensState) MaxTokens() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxTokens
+}
+
+// SetMaxTokens updates the cap used on subsequent requests. Safe for
+// concurrent use.
+func (s *maxTokensState) SetMaxTokens(v int) {
+	s.mu.Lock()
+	s.maxTokens = v
+	s.mu.Unlock()
 }
 
 // Provider abstracts an LLM backend for streaming chat completions.

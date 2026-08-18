@@ -3,10 +3,13 @@
 package llmconfig
 
 import (
+	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/oauth"
 )
 
 // Profile holds the configuration for a single LLM provider endpoint.
@@ -108,6 +111,12 @@ func (r *Resolved) NewProvider() llm.Provider {
 	// Try API key first — works for both pure API-key profiles and
 	// dual-mode profiles (like anthropic) where the key takes priority.
 	effort := llm.Effort(r.Effort)
+	if !effort.IsValid() {
+		// A typo would otherwise silently degrade to the provider default
+		// inside the adapter; log it so the misconfiguration is visible.
+		slog.Warn("llmconfig: unknown effort, using provider default", "effort", r.Effort)
+		effort = ""
+	}
 	if r.apiKey != "" {
 		if r.isAnthropicEndpoint() {
 			return llm.NewAnthropicAPI(r.BaseURL, r.Model, llm.AnthropicKeyAuth(r.apiKey), r.PromptCaching, effort)
@@ -115,13 +124,11 @@ func (r *Resolved) NewProvider() llm.Provider {
 		return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching, effort)
 	}
 
-	// Fall back to OAuth if configured and authenticated.
+	// Fall back to OAuth if configured and authenticated. Only OpenAI
+	// (Codex) and Copilot (OpenAI-compatible) OAuth flows exist.
 	if r.OAuthProvider != "" && r.Auth != nil {
-		if r.OAuthProvider == "openai" {
+		if r.OAuthProvider == string(oauth.ProviderOpenAI) {
 			return llm.NewCodexAPI(r.Model, r.Auth, effort)
-		}
-		if r.OAuthProvider == "anthropic" {
-			return llm.NewAnthropicAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching, effort)
 		}
 		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching, effort)
 	}
@@ -141,10 +148,5 @@ func (c *Config) ProfileNames() []string {
 	if len(c.Profiles) == 0 {
 		return nil
 	}
-	names := make([]string, 0, len(c.Profiles))
-	for name := range c.Profiles {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return names
+	return slices.Sorted(maps.Keys(c.Profiles))
 }

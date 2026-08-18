@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/latebit-io/nib/ai/brand"
+	"github.com/latebit-io/nib/ai/internal/atomicjson"
 )
 
 // Store persists OAuth tokens to disk. It is safe for concurrent use.
@@ -108,24 +109,8 @@ func (s *Store) load() error {
 	return json.Unmarshal(data, &s.data)
 }
 
-// save writes the store to disk, creating parent directories as needed.
+// save writes the store to disk atomically, creating parent directories
+// as needed. Owner-only permissions: the file holds credentials.
 func (s *Store) save() error {
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create dir %s: %w", dir, err)
-	}
-	data, err := json.MarshalIndent(s.data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	// Write atomically via temp file + rename to avoid corruption on crash.
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		_ = os.Remove(tmp) // best-effort cleanup of orphaned temp file
-		return fmt.Errorf("rename %s → %s: %w", tmp, s.path, err)
-	}
-	return nil
+	return atomicjson.Write(s.path, s.data, 0o700, 0o600)
 }

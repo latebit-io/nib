@@ -21,8 +21,9 @@ import (
 //     with trailing AgentToken/AgentDone — both writers are now the
 //     translator goroutine, so a consumer's AgentWaiting can never
 //     overtake an in-flight AgentToken from the same turn.
-//   - [event.AgentTurnUsage] / [event.AgentInputEstimate] /
-//     [event.AgentCompacted] passthrough with field-for-field copy
+//   - [event.AgentTurnUsage] passthrough of the provider-reported
+//     counts; the estimate fields stay zero here (coding's provider
+//     proxy emits the estimating variant directly)
 //
 // Foundation events that have no kit equivalent fall through silently:
 //
@@ -31,7 +32,7 @@ import (
 //   - MessageStart / MessageEnd: streaming brackets; AgentToken carries
 //     the deltas, MessageEnd's full assistant message is available via
 //     [Agent.State] for applications that snapshot at run-end.
-//   - ToolStart / ToolUpdate / ToolEnd: tool dispatch surface. Kit
+//   - ToolStart / ToolEnd: tool dispatch surface. Kit
 //     does not translate these because the translation policy is
 //     application-specific — coding suppresses [event.AgentToolCall]
 //     for blocked-by-gate calls and emits from its BeforeToolCall
@@ -100,23 +101,6 @@ func (a *Agent) translate(ev agentevent.Event) {
 			CompletionTokens: e.CompletionTokens,
 			CachedTokens:     e.CachedTokens,
 			ToolCalls:        e.ToolCalls,
-			SystemEst:        e.SystemEst,
-			ToolsEst:         e.ToolsEst,
-			HistoryEst:       e.HistoryEst,
-			NewEst:           e.NewEst,
-			CompletionEst:    e.CompletionEst,
-		})
-	case agentevent.InputEstimate:
-		a.bus.publish(event.AgentInputEstimate{
-			System:  e.System,
-			Tools:   e.Tools,
-			History: e.History,
-			New:     e.New,
-		})
-	case agentevent.Compacted:
-		a.bus.publish(event.AgentCompacted{
-			BeforeTokens: e.BeforeTokens,
-			AfterTokens:  e.AfterTokens,
 		})
 	case agentevent.Error:
 		a.markCurrentUnsuccess()

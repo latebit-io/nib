@@ -231,20 +231,30 @@ func postTokenForm(ctx context.Context, tokenURL, label string, data url.Values)
 	if err != nil {
 		return nil, fmt.Errorf("read %s response: %w", label, err)
 	}
+	var tr tokenResponse
+	decodeErr := json.Unmarshal(body, &tr)
 	if resp.StatusCode != http.StatusOK {
+		// OAuth servers put the reason (invalid_grant, ...) in the body;
+		// surface it when it parses, never the raw payload.
+		if decodeErr == nil && tr.Error != "" {
+			return nil, fmt.Errorf("%s: HTTP %d: %s", label, resp.StatusCode, tr.errorDetail())
+		}
 		return nil, fmt.Errorf("%s: HTTP %d", label, resp.StatusCode)
 	}
-
-	var tr tokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return nil, fmt.Errorf("decode %s response: %w", label, err)
+	if decodeErr != nil {
+		return nil, fmt.Errorf("decode %s response: %w", label, decodeErr)
 	}
 	if tr.Error != "" {
-		desc := tr.ErrorDesc
-		if desc == "" {
-			desc = tr.Error
-		}
-		return nil, fmt.Errorf("%s error: %s", label, desc)
+		return nil, fmt.Errorf("%s error: %s", label, tr.errorDetail())
 	}
 	return &tr, nil
+}
+
+// errorDetail returns the OAuth error description, falling back to the
+// error code when the server sent none.
+func (tr *tokenResponse) errorDetail() string {
+	if tr.ErrorDesc != "" {
+		return tr.ErrorDesc
+	}
+	return tr.Error
 }

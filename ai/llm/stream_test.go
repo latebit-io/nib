@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 // errBody yields data, then fails the read — a connection drop mid-stream.
@@ -53,8 +55,10 @@ func TestScanSSE_CleanEOFEmitsTerminal(t *testing.T) {
 	}, func() StreamEvent { return StreamEvent{Done: true} })
 	close(ch)
 
-	if strings.Join(seen, ",") != "ping/a,ping/b" {
-		t.Errorf("dispatched = %v; want [ping/a ping/b]", seen)
+	// The event type applies to the data line it precedes only; the
+	// blank line (and each dispatch) resets it, per the SSE spec.
+	if strings.Join(seen, ",") != "ping/a,/b" {
+		t.Errorf("dispatched = %v; want [ping/a /b]", seen)
 	}
 	var dones int
 	for ev := range ch {
@@ -122,5 +126,86 @@ func TestStream_Non401ErrorIsPlain(t *testing.T) {
 	}
 	if auth.invalidated {
 		t.Error("500 must not invalidate the credential")
+	}
+}
+
+// blockingBody serves one chunk, then blocks every further Read until
+// Close, after which it reports clean EOF — a stalled connection whose
+// buffered lines are still in the scanner when the watchdog tears it down.
+type blockingBody struct {
+	chunk  string
+	served bool
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newBlockingBody(chunk string) *blockingBody {
+	return &blockingBody{chunk: chunk, closed: make(chan struct{})}
+}
+
+func (b *blockingBody) Read(p []byte) (int, error) {
+	if !b.served {
+		b.served = true
+		return copy(p, b.chunk), nil
+	}
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *blockingBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+// TestScanSSE_WatchdogFiredNeverEmitsTerminal: once the watchdog closes a
+// stalled body, buffered lines draining to a clean EOF must surface
+// errStreamStalled, not terminal() success — and must not re-arm the timer.
+func TestScanSSE_WatchdogFiredNeverEmitsTerminal(t *testing.T) {
+	prev := sseIdleTimeout
+	sseIdleTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { sseIdleTimeout = prev })
+
+	body := newBlockingBody("data: a\ndata: b\n")
+	ch := make(chan StreamEvent, 4)
+	var seen []string
+	scanSSE(context.Background(), body, ch, "test", func(_, data string) bool {
+		seen = append(seen, data)
+		if data == "a" {
+			// Stall inside the dispatcher until the watchdog fires and
+			// closes the body; "b" is still buffered in the scanner.
+			<-body.closed
+		}
+		return false
+	}, func() StreamEvent { return StreamEvent{Done: true} })
+	close(ch)
+
+	if strings.Join(seen, ",") != "a,b" {
+		t.Errorf("dispatched = %v; want [a b]", seen)
+	}
+	var got []StreamEvent
+	for ev := range ch {
+		got = append(got, ev)
+	}
+	if len(got) != 1 || !got[0].Done || !errors.Is(got[0].Err, errStreamStalled) {
+		t.Fatalf("events = %+v; want exactly one Done carrying errStreamStalled", got)
+	}
+}
+
+// TestErrorDetail: JSON error envelopes surface only their message field
+// (providers may echo request details in the raw payload); anything else
+// is a bounded one-line snippet.
+func TestErrorDetail(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{`{"error":{"message":"rate limited","type":"rate_limit"},"request_id":"secret-req"}`, "rate limited"},
+		{`{"error":"bad thing"}`, "bad thing"},
+		{`{"error":{"type":"x"}}`, "(json error body without message)"},
+		{"boom\n  more", "boom more"},
+		{"", "(empty body)"},
+		{strings.Repeat("x", 300), strings.Repeat("x", maxErrorDetailBytes) + "…"},
+	}
+	for _, tc := range cases {
+		if got := errorDetail([]byte(tc.body)); got != tc.want {
+			t.Errorf("errorDetail(%q) = %q; want %q", tc.body, got, tc.want)
+		}
 	}
 }

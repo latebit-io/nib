@@ -316,8 +316,9 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 		if err != nil {
 			// A hook error ends the run, but the assistant message already
 			// carries this and every later tool_use; give each a result so
-			// the transcript resumes cleanly.
-			a.appendUnfinishedResults(calls[i:], "Error: tool call aborted: "+err.Error())
+			// the transcript resumes cleanly. The raw error travels in
+			// event.Error only: the transcript may be replayed to the provider.
+			a.appendUnfinishedResults(calls[i:], "Error: tool call aborted before execution.")
 			return false, err
 		}
 		if !terminate {

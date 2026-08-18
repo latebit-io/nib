@@ -3,6 +3,7 @@ package llm
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -168,8 +169,8 @@ const maxThinkingBytes = 2 * 1024 * 1024
 // generation streams tokens well within this window; a longer gap means the
 // connection has stalled mid-stream, so the watchdog tears the body down to
 // fail the turn instead of hanging it forever. Generous enough not to kill a
-// model that pauses to think between tokens.
-const sseIdleTimeout = 60 * time.Second
+// model that pauses to think between tokens. A var so tests can shorten it.
+var sseIdleTimeout = 60 * time.Second
 
 // streamWatchdog closes the response body when no SSE chunk has arrived
 // within sseIdleTimeout, converting a silent mid-stream stall into a prompt
@@ -191,8 +192,15 @@ func newStreamWatchdog(body io.Closer) *streamWatchdog {
 	return w
 }
 
-// reset restarts the idle countdown after a chunk is read.
-func (w *streamWatchdog) reset() { w.timer.Reset(sseIdleTimeout) }
+// reset restarts the idle countdown after a chunk is read. Once the
+// watchdog has fired the body is closed; re-arming would only schedule a
+// second Close, so buffered lines drain without touching the timer.
+func (w *streamWatchdog) reset() {
+	if w.stalled.Load() {
+		return
+	}
+	w.timer.Reset(sseIdleTimeout)
+}
 
 // stop halts the watchdog. Safe to call after it has fired.
 func (w *streamWatchdog) stop() { w.timer.Stop() }
@@ -246,7 +254,43 @@ func handleErrorStatus(provider string, auth Auth, resp *http.Response) error {
 	if readErr != nil {
 		return fmt.Errorf("%s: api error: status %d (body unreadable: %w)", provider, resp.StatusCode, readErr)
 	}
-	return fmt.Errorf("%s: api error: status %d: %s", provider, resp.StatusCode, body)
+	return fmt.Errorf("%s: api error: status %d: %s", provider, resp.StatusCode, errorDetail(body))
+}
+
+// maxErrorDetailBytes bounds the free-text detail surfaced from a non-JSON
+// provider error body.
+const maxErrorDetailBytes = 256
+
+// errorDetail extracts the human-readable message from a provider error
+// body. JSON envelopes ({"error":{"message":..}} or {"error":".."}) yield
+// only their message field, never the raw payload, since some providers
+// echo request details there. Anything else is surfaced as a bounded
+// single-line snippet.
+func errorDetail(body []byte) string {
+	var env struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(body, &env) == nil && len(env.Error) > 0 {
+		var obj struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(env.Error, &obj) == nil && obj.Message != "" {
+			return obj.Message
+		}
+		var msg string
+		if json.Unmarshal(env.Error, &msg) == nil && msg != "" {
+			return msg
+		}
+		return "(json error body without message)"
+	}
+	s := strings.Join(strings.Fields(string(body)), " ")
+	if len(s) > maxErrorDetailBytes {
+		s = s[:maxErrorDetailBytes] + "…"
+	}
+	if s == "" {
+		return "(empty body)"
+	}
+	return s
 }
 
 // authFailure handles a 401 from any provider. Auth already refreshed
@@ -299,20 +343,28 @@ func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, pro
 			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 			continue
 		}
+		if line == "" {
+			eventType = "" // blank line ends the event; the type does not carry over
+			continue
+		}
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if onEvent(eventType, data) {
+		stop := onEvent(eventType, data)
+		eventType = ""
+		if stop {
 			return
 		}
 	}
 
+	// A fired watchdog closed the body; the scanner may still have drained
+	// buffered lines to a clean EOF, which must not read as success.
+	if wd.fired() {
+		trySend(ctx, ch, StreamEvent{Done: true, Err: errStreamStalled})
+		return
+	}
 	if err := scanner.Err(); err != nil {
-		if wd.fired() {
-			trySend(ctx, ch, StreamEvent{Done: true, Err: errStreamStalled})
-			return
-		}
 		if ctx.Err() == nil {
 			slog.Warn("SSE scanner error", "provider", provider, "err", err)
 		}

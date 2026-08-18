@@ -1641,8 +1641,12 @@ func TestHookErrorMidBatch_EveryToolUseGetsResult(t *testing.T) {
 		t.Errorf("call_1 result = %q; want executed result 'ok'", r.Content)
 	}
 	for _, id := range []string{"call_2", "call_3"} {
-		if r := results[id]; !contains(r.Content, "aborted") {
+		r := results[id]
+		if !contains(r.Content, "aborted") {
 			t.Errorf("%s result = %q; want synthesized aborted result", id, r.Content)
+		}
+		if contains(r.Content, hookErr.Error()) {
+			t.Errorf("%s result = %q; raw hook error must not enter the transcript", id, r.Content)
 		}
 	}
 }

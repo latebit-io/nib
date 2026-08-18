@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/latebit-io/nib/engine/capture"
-	"github.com/latebit-io/nib/engine/contracttest"
+	"github.com/latebit-io/nib/coding/capture"
+	"github.com/latebit-io/nib/coding/capture/contracttest"
 	"github.com/latebit-io/nib/kit/memory"
 )
 

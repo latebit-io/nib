@@ -6,21 +6,21 @@ linters:
 
   settings:
     # --- Layering: tui must never import application code ---
+    # depguard `files` globs match against absolute paths, so every glob
+    # below is anchored with `**/tui/...`. A bare relative glob such as
+    # `editor/*.go` matches nothing and passes vacuously.
     depguard:
       rules:
         # tui/editor is the TUI's editor controller. It depends on
         # buffer + syntax (the abstract highlighter interface) only —
         # never on the concrete tree-sitter highlight package, never on
-        # llm, file-walking, or fuzzy-matching utilities. The editor
-        # used to live under engine/ and these rules guarded it there;
-        # they ride along now that the package moved to tui/editor.
+        # llm, file-walking, or fuzzy-matching utilities.
         editor-isolation:
           files:
-            - "**/editor/*.go"
-            - "editor/*.go"
+            - "**/tui/editor/*.go"
           deny:
-            - pkg: "github.com/latebit-io/nib/ai/llm"
-              desc: "editor must not import llm"
+            - pkg: "github.com/latebit-io/nib/ai"
+              desc: "editor must not import ai — the controller has no provider or brand knowledge"
             - pkg: "github.com/latebit-io/nib/engine/highlight"
               desc: "editor must not import the concrete highlight package — highlighting is injected via the syntax.Highlighter interface so the dependency stays open to substitution"
             - pkg: "github.com/latebit-io/nib/engine/filelist"
@@ -31,6 +31,8 @@ linters:
               desc: "editor must not import openfile — the editor wraps a *buffer.Buffer directly; openfile is the session-side handle and pulling it in would couple frontend rendering to the workspace surface"
             - pkg: "github.com/latebit-io/nib/coding"
               desc: "editor must not import coding — application logic flows through AppModel, not the controller"
+            - pkg: "github.com/latebit-io/nib/kit"
+              desc: "editor must not import kit — the controller is a pure text/cursor model"
             - pkg: "github.com/latebit-io/nib/tui/ui"
               desc: "editor must not import tui/ui — the controller is consumed by ui, not the reverse"
 
@@ -47,16 +49,72 @@ linters:
           deny:
             - pkg: "github.com/latebit-io/nib/coding/agent"
               desc: "tui must not import coding/agent — frontends consume an agent through kit.AgentLifecycle (in tui/tui.go) and consumer-defined interfaces (HistoryResetter in tui/command, kit.Compactor wired at the composition root). See /nib/engineering-values.md."
+            - pkg: "github.com/stretchr/testify"
+              desc: "stdlib testing only — no testify"
 
-        # tui/ui (the inner UI packages) must not reach into other
-        # composition surfaces beyond the agent ban above.
+        # The tui facade (tui/*.go) and inner UI packages must not reach
+        # into other composition surfaces, and must not link the concrete
+        # tree-sitter highlighter — the composition root injects it via
+        # Config.HighlighterFactory (syntax.HighlighterFactory).
         tui-ui-no-composition:
           files:
-            - "**/ui/*.go"
-            - "**/ui/textarea/*.go"
-            - "**/editor/*.go"
+            - "**/tui/*.go"
+            - "**/tui/ui/*.go"
+            - "**/tui/ui/textarea/*.go"
           deny:
             - pkg: "github.com/latebit-io/nib/coding/wire"
-              desc: "tui/ui must not import coding/wire — wire is a composition root, not a dependency"
+              desc: "tui must not import coding/wire — wire is a composition root, not a dependency"
             - pkg: "github.com/latebit-io/nib/coding/headless"
-              desc: "tui/ui must not import coding/headless — headless is a separate frontend"
+              desc: "tui must not import coding/headless — headless is a separate frontend"
+            - pkg: "github.com/latebit-io/nib/engine/highlight"
+              desc: "tui must not import the concrete highlight package — use engine/syntax types; the composition root injects the factory"
+
+        # Leaf packages: framework-agnostic and free of nib imports.
+        tui-theme-leaf:
+          files:
+            - "**/tui/ui/theme/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/"
+              desc: "theme is a pure palette — no nib imports"
+        tui-sanitize-leaf:
+          files:
+            - "**/tui/sanitize/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/"
+              desc: "sanitize is a framework-agnostic text filter — no nib imports"
+            - pkg: "charm.land/"
+              desc: "sanitize is framework-agnostic — no Bubble Tea / lipgloss"
+            - pkg: "github.com/charmbracelet/"
+              desc: "sanitize is framework-agnostic — no charmbracelet helpers"
+        tui-keymap-leaf:
+          files:
+            - "**/tui/keymap/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/"
+              desc: "keymap is a framework-free action catalog — no nib imports"
+            - pkg: "charm.land/"
+              desc: "keymap is framework-free — frontends map their own input events to Actions"
+            - pkg: "github.com/charmbracelet/"
+              desc: "keymap is framework-free — no charmbracelet helpers"
+        tui-command-leaf:
+          files:
+            - "**/tui/command/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/tui/ui"
+              desc: "tui/command is consumed by ui, not the reverse"
+            - pkg: "github.com/latebit-io/nib/coding"
+              desc: "tui/command adapts kit/command only — no coding imports"
+            - pkg: "github.com/latebit-io/nib/engine"
+              desc: "tui/command has no editor dependency"
+            - pkg: "charm.land/bubbletea"
+              desc: "tui/command is framework-free"
+        tui-textarea-leaf:
+          files:
+            - "**/tui/ui/textarea/*.go"
+          deny:
+            - pkg: "github.com/latebit-io/nib/coding"
+              desc: "textarea is a leaf text widget"
+            - pkg: "github.com/latebit-io/nib/engine"
+              desc: "textarea is a leaf text widget"
+            - pkg: "github.com/latebit-io/nib/kit"
+              desc: "textarea is a leaf text widget"

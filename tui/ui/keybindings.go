@@ -2,7 +2,7 @@ package ui
 
 import (
 	tea "charm.land/bubbletea/v2"
-	"github.com/latebit-io/nib/engine/keymap"
+	"github.com/latebit-io/nib/tui/keymap"
 )
 
 // Action is an alias for keymap.Action — keeps TUI code concise.

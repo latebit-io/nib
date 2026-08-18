@@ -269,7 +269,9 @@ func (p *parser) expectBegin() error {
 // terminator was consumed; the caller then validates trailing input.
 func (p *parser) step(line string, lineNo int) (done bool, err error) {
 	switch {
-	case strings.TrimSpace(line) == "*** End Patch":
+	// Trailing whitespace is tolerated (as for Begin) but leading is
+	// not: " *** End Patch" is a context line whose text is the marker.
+	case strings.TrimRight(line, " \t") == "*** End Patch":
 		return true, p.finishFile(lineNo)
 	case strings.HasPrefix(line, "*** "):
 		return false, p.handleDirective(line, lineNo)

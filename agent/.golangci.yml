@@ -1,0 +1,26 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+
+  settings:
+    depguard:
+      rules:
+        # agent/ is the generic loop core. It may import only ai/* and its
+        # own agent/event sub-package. Every other nib module sits above it;
+        # importing any of them would give the core application knowledge.
+        agent-core:
+          deny:
+            - pkg: "github.com/latebit-io/nib/kit"
+              desc: "agent must not import kit — kit composes agent, not the reverse"
+            - pkg: "github.com/latebit-io/nib/engine"
+              desc: "agent must not import engine — the core knows nothing about the editor"
+            - pkg: "github.com/latebit-io/nib/coding"
+              desc: "agent must not import coding — the application layer sits above the core"
+            - pkg: "github.com/latebit-io/nib/tui"
+              desc: "agent must not import tui — the core has no UI knowledge"
+            - pkg: "github.com/latebit-io/nib/cmd"
+              desc: "agent must not import cmd — composition roots depend on agent"
+            - pkg: "github.com/stretchr/testify"
+              desc: "stdlib testing only — no testify"

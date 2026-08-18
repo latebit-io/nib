@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/latebit-io/nib/engine/run/proc"
-	"github.com/latebit-io/nib/engine/runconfig"
+	"github.com/latebit-io/nib/coding/runconfig"
+	"github.com/latebit-io/nib/kit/proc"
 )
 
 // RunSmoke invokes the configured smoke command via [proc.Run]. The

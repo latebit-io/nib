@@ -4,7 +4,7 @@
 //
 // Trust boundary: the file is the developer's stated intent for "what
 // should we run to smoke-test this project?". Commands defined here
-// bypass the agent's [agent.fileWriteGuard] because legitimate smoke
+// bypass the agent's file-write guard because legitimate smoke
 // targets (`make build && ./bin/foo`, `go run ./cmd/...`) frequently
 // touch the filesystem. Reviewers must treat `.project/run.json` like
 // any other build script — it is committed to the repo and goes

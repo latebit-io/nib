@@ -9,12 +9,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/kit/contracttest"
 	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/memory/demarkus/mcpadapter"
 	"github.com/latebit-io/nib/kit/memory/demarkus/server"
 )
+
+// integrationEnvVar opts the network-touching integration tests in.
+// They download demarkus binaries, so they never run under plain
+// `go test`; set the variable to any non-empty value to enable them.
+var integrationEnvVar = brand.EnvPrefix + "INTEGRATION"
+
+// requireIntegration skips the calling test unless integration tests are
+// enabled via integrationEnvVar (and not -short).
+func requireIntegration(t *testing.T) {
+	t.Helper()
+	if testing.Short() || os.Getenv(integrationEnvVar) == "" {
+		t.Skipf("integration test disabled; set %s=1 (downloads demarkus binaries)", integrationEnvVar)
+	}
+}
 
 // integrationEnv holds the shared state for integration tests.
 type integrationEnv struct {
@@ -24,12 +39,10 @@ type integrationEnv struct {
 }
 
 // setupIntegration downloads demarkus, starts the server, and returns a ready-to-use env.
-// Skips the calling test if -short is set.
+// Skips the calling test unless integration tests are enabled (see requireIntegration).
 func setupIntegration(t *testing.T) *integrationEnv {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	requireIntegration(t)
 
 	root := t.TempDir()
 	mgr := server.New(root)
@@ -88,9 +101,7 @@ func newAuxStore(t *testing.T, binDir, serverAddress, token string) memory.Store
 
 // TestIntegrationInstall verifies binary download, version pinning, and idempotency.
 func TestIntegrationInstall(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	requireIntegration(t)
 
 	root := t.TempDir()
 	mgr := server.New(root)
@@ -126,9 +137,7 @@ func TestIntegrationInstall(t *testing.T) {
 
 // TestIntegrationTokenIdempotent verifies token bootstrap returns the same token on re-run.
 func TestIntegrationTokenIdempotent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	requireIntegration(t)
 
 	root := t.TempDir()
 	mgr := server.New(root)

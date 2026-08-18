@@ -10,7 +10,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/coding/event"
-	"github.com/latebit-io/nib/engine/patch"
+	"github.com/latebit-io/nib/coding/patch"
 )
 
 // ApplyPatchTool applies a Codex-style multi-hunk patch envelope to
@@ -20,7 +20,7 @@ import (
 // which is substantially cheaper in tool-call argument bytes than
 // either of the existing primitives.
 //
-// The tool parses the patch via [github.com/latebit-io/nib/engine/patch],
+// The tool parses the patch via [github.com/latebit-io/nib/coding/patch],
 // resolves each hunk against the current file content (with optional
 // `@@` anchor disambiguation), produces the post-edit content, and
 // then routes through the existing [Approver] path with an

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/ai/llm"
-	"github.com/latebit-io/nib/engine/runconfig"
+	"github.com/latebit-io/nib/coding/runconfig"
 )
 
 // TestSmokeToolDefinitionAdvertisesSource verifies the tool definition

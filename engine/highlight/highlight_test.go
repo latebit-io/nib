@@ -10,8 +10,8 @@ import (
 )
 
 // collectKinds flattens every line's tokens into the set of TokenKinds seen.
-func collectKinds(h *Highlighter, lineCount int) map[TokenKind]int {
-	counts := map[TokenKind]int{}
+func collectKinds(h *Highlighter, lineCount int) map[syntax.TokenKind]int {
+	counts := map[syntax.TokenKind]int{}
 	for i := range lineCount {
 		for _, tok := range h.HighlightLine(i) {
 			counts[tok.Kind]++
@@ -93,7 +93,7 @@ func Greet(name string) {
 	lineCount := strings.Count(src, "\n") + 1
 	kinds := collectKinds(h, lineCount)
 
-	for _, want := range []TokenKind{KindKeyword, KindString, KindComment, KindNumber, KindFunction} {
+	for _, want := range []syntax.TokenKind{syntax.KindKeyword, syntax.KindString, syntax.KindComment, syntax.KindNumber, syntax.KindFunction} {
 		if kinds[want] == 0 {
 			t.Errorf("expected at least one %s token in Go source, got kinds=%v", want, kinds)
 		}
@@ -121,7 +121,7 @@ return M
 	lineCount := strings.Count(src, "\n") + 1
 	kinds := collectKinds(h, lineCount)
 
-	for _, want := range []TokenKind{KindKeyword, KindString, KindComment, KindNumber, KindFunction, KindConstant} {
+	for _, want := range []syntax.TokenKind{syntax.KindKeyword, syntax.KindString, syntax.KindComment, syntax.KindNumber, syntax.KindFunction, syntax.KindConstant} {
 		if kinds[want] == 0 {
 			t.Errorf("expected at least one %s token in Lua source, got kinds=%v", want, kinds)
 		}
@@ -151,7 +151,7 @@ alias: *base
 	lineCount := strings.Count(src, "\n") + 1
 	kinds := collectKinds(h, lineCount)
 
-	for _, want := range []TokenKind{KindKeyword, KindString, KindNumber, KindConstant, KindProperty} {
+	for _, want := range []syntax.TokenKind{syntax.KindKeyword, syntax.KindString, syntax.KindNumber, syntax.KindConstant, syntax.KindProperty} {
 		if kinds[want] == 0 {
 			t.Errorf("expected at least one %s token in YAML source, got kinds=%v", want, kinds)
 		}
@@ -161,24 +161,24 @@ alias: *base
 func TestKindForCaptureName(t *testing.T) {
 	cases := []struct {
 		name string
-		want TokenKind
+		want syntax.TokenKind
 	}{
-		{"keyword", KindKeyword},
-		{"keyword.function", KindKeyword},
-		{"keyword.return", KindKeyword},
-		{"string", KindString},
-		{"string.escape", KindString},
-		{"function", KindFunction},
-		{"function.call", KindFunction},
-		{"function.builtin", KindFunction},
-		{"method.call", KindFunction},
-		{"constant.builtin", KindConstant},
-		{"boolean", KindConstant},
-		{"variable", KindNone},
-		{"variable.builtin", KindNone},
-		{"punctuation.bracket", KindNone},
-		{"totally_made_up", KindNone},
-		{"", KindNone},
+		{"keyword", syntax.KindKeyword},
+		{"keyword.function", syntax.KindKeyword},
+		{"keyword.return", syntax.KindKeyword},
+		{"string", syntax.KindString},
+		{"string.escape", syntax.KindString},
+		{"function", syntax.KindFunction},
+		{"function.call", syntax.KindFunction},
+		{"function.builtin", syntax.KindFunction},
+		{"method.call", syntax.KindFunction},
+		{"constant.builtin", syntax.KindConstant},
+		{"boolean", syntax.KindConstant},
+		{"variable", syntax.KindNone},
+		{"variable.builtin", syntax.KindNone},
+		{"punctuation.bracket", syntax.KindNone},
+		{"totally_made_up", syntax.KindNone},
+		{"", syntax.KindNone},
 	}
 	for _, tc := range cases {
 		if got := kindForCaptureName(tc.name); got != tc.want {

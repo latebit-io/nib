@@ -8,7 +8,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/coding/event"
-	"github.com/latebit-io/nib/engine/runconfig"
+	"github.com/latebit-io/nib/coding/runconfig"
 )
 
 // TestAgent_SmokeRunUnregisteredWhenDisabled verifies the

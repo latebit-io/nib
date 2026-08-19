@@ -124,3 +124,37 @@ func TestCanonPath(t *testing.T) {
 		t.Errorf("CanonPath abs = %q", got)
 	}
 }
+
+// TestResolve_FilesystemRoot: a root of "/" must accept every absolute
+// path (a prefix test against "/"+Separator would reject them all).
+func TestResolve_FilesystemRoot(t *testing.T) {
+	r := New(string(filepath.Separator))
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "f.txt"), "x\n")
+	if _, err := r.Resolve(filepath.Join(dir, "f.txt")); err != nil {
+		t.Fatalf("Resolve under / root: %v", err)
+	}
+	if got, err := r.ReadFile(filepath.Join(dir, "f.txt")); err != nil || got != "x" {
+		t.Fatalf("ReadFile under / root = %q, %v", got, err)
+	}
+}
+
+// TestIO_RealPathThroughSymlinkedRoot: when the root itself is reached
+// through a symlink (macOS temp dirs), a caller passing the resolved
+// real path still addresses the same file.
+func TestIO_RealPathThroughSymlinkedRoot(t *testing.T) {
+	r, _ := setup(t)
+	realRoot, err := filepath.EvalSymlinks(r.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realRoot == r.Dir() {
+		t.Skip("temp root is not behind a symlink")
+	}
+	if _, err := r.WriteFile(filepath.Join(realRoot, "real.go"), "package real\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.ReadFile("real.go"); err != nil || got != "package real" {
+		t.Fatalf("ReadFile = %q, %v", got, err)
+	}
+}

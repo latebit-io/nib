@@ -100,7 +100,8 @@ func (a *Agent) disarmRunDone(ch chan struct{}) {
 }
 
 // resetRunState clears every per-run field shared by RunWithMode and
-// Reply and returns the new run's context, cancel, and coordinator.
+// Reply (taskEdits excepted: it spans a Reply resume) and returns the
+// new run's context, cancel, and coordinator.
 // Caller holds a.mu. A fresh coordinator is allocated (never reused):
 // the previous goroutine may still be parked in Coordinator.Await* on
 // the old channels, so swapping isolates the frontend's next signals.
@@ -111,7 +112,6 @@ func (a *Agent) resetRunState(ctx context.Context) (context.Context, context.Can
 	a.running = true
 	a.waiting = false
 	a.pendingLint = ""
-	a.taskEdits = nil
 	clear(a.validatorRetries)
 	a.providerProxy.ResetSession()
 	a.turnCounter = 0
@@ -170,6 +170,9 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 
 	a.mu.Lock()
 	runCtx, cancel, coord := a.resetRunState(ctx)
+	// taskEdits is task-scoped, not run-scoped: a Reply resume must keep
+	// the edits made before the pause so end-of-task review sees them all.
+	a.taskEdits = nil
 	a.activeFile = fileName
 	a.cache.Reset(fileName, fileContent)
 	a.intent = goal

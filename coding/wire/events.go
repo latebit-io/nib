@@ -16,7 +16,9 @@ const forwarderBufferSize = 128
 // copies every event onto events — the single merged stream LSP also
 // writes to and the frontend (TUI or headless runner) reads. The
 // goroutine exits when the subscription's inbox closes (on
-// [agent.Agent.Close]) or ctx is cancelled, whichever first.
+// [agent.Agent.Close]) or ctx is cancelled, whichever first, and closes
+// the subscription on the way out so a cancelled forwarder does not
+// leave a full inbox registered on the bus, blocking control events.
 //
 // Returns the Subscribe error (e.g. [agent.ErrAgentClosed]) instead of
 // panicking so the caller can surface it — in nib-code the model
@@ -27,6 +29,7 @@ func ForwardEvents(ctx context.Context, ag *agent.Agent, events chan<- event.Eve
 		return fmt.Errorf("agent.Subscribe: %w", err)
 	}
 	go func() {
+		defer sub.Close()
 		for ev := range sub.Events() {
 			select {
 			case events <- ev:

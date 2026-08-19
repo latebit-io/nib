@@ -125,3 +125,9 @@ func (t *tracedTool) PromptGuidelines() []string {
 func (t *tracedTool) BindShell(r dyncontext.Runner) kit.Tool {
 	return &tracedTool{inner: kit.BindToolShell(t.inner, r), emit: t.emit}
 }
+
+// Describe forwards kit.Described so introspection reports the wrapped
+// tool's metadata (version, source), not the tracing shell.
+func (t *tracedTool) Describe() kit.Plugin {
+	return kit.DescribeTool(t.inner)
+}

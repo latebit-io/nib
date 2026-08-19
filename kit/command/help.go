@@ -79,16 +79,8 @@ func (h *helpCommand) Handle(_ context.Context, sess Session, _ string) error {
 // non-builtin commands. Builtins render with no tag — they are
 // the implicit baseline.
 func sourceLabel(k SourceKind) string {
-	switch k {
-	case SourceBuiltin:
+	if k == SourceBuiltin {
 		return ""
-	case SourceMCP:
-		return "mcp"
-	case SourceGlobal:
-		return "global"
-	case SourceProject:
-		return "project"
-	default:
-		return "?"
 	}
+	return k.String()
 }

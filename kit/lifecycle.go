@@ -9,9 +9,9 @@ package kit
 // This is the named seam between a frontend and an agent. Today the
 // surface is small (Close only) because that is the entire literal
 // surface the reference TUI consumes — every other agent-shaped
-// interaction routes through a session, [Compactor], or
-// consumer-defined interfaces (HistoryResetter, etc.). Growing the
-// surface requires either (a) a frontend that needs more than Close,
+// interaction routes through a session or a consumer-defined
+// interface (the TUI's command package declares its own, e.g. a
+// history resetter). Growing the surface requires either (a) a frontend that needs more than Close,
 // or (b) a non-coding agent that needs to share the TUI's session
 // wiring. Neither has materialized; the port is honest at one method.
 type AgentLifecycle interface {

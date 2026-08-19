@@ -73,9 +73,32 @@ func WithRetry(policy RetryPolicy) kit.ProviderDecorator {
 		panic(err)
 	}
 	return func(inner llm.Provider) llm.Provider {
-		return &retryProvider{inner: inner, policy: policy}
+		rp := &retryProvider{inner: inner, policy: policy}
+		// Forward the optional output-cap capability only when the inner
+		// provider has it, so a type-assert on the decorated provider
+		// still reflects the truth about the wrapped one.
+		if esc, ok := inner.(llm.OutputCapEscalator); ok {
+			return &escalatingRetryProvider{retryProvider: rp, esc: esc}
+		}
+		return rp
 	}
 }
+
+// escalatingRetryProvider is a retryProvider whose inner provider also
+// implements [llm.OutputCapEscalator]; it forwards that capability.
+type escalatingRetryProvider struct {
+	*retryProvider
+	esc llm.OutputCapEscalator
+}
+
+// Compile-time assertion that the escalating variant forwards the port.
+var _ llm.OutputCapEscalator = (*escalatingRetryProvider)(nil)
+
+// MaxTokens forwards [llm.OutputCapEscalator.MaxTokens].
+func (r *escalatingRetryProvider) MaxTokens() int { return r.esc.MaxTokens() }
+
+// SetMaxTokens forwards [llm.OutputCapEscalator.SetMaxTokens].
+func (r *escalatingRetryProvider) SetMaxTokens(v int) { r.esc.SetMaxTokens(v) }
 
 // retryProvider implements [llm.Provider] by re-calling the inner
 // provider's Stream on retryable errors. Bound to a single inner
@@ -122,15 +145,11 @@ func (r *retryProvider) Stream(ctx context.Context, messages []llm.Message, tool
 				return nil, ctx.Err()
 			}
 		}
-		// Exponential backoff with optional cap.
-		if delay == 0 {
-			// First iteration with BaseDelay=0 stays at 0 — caller asked
-			// for immediate retries.
-		} else {
-			delay *= 2
-			if r.policy.MaxDelay > 0 && delay > r.policy.MaxDelay {
-				delay = r.policy.MaxDelay
-			}
+		// Exponential backoff with optional cap. BaseDelay=0 stays 0:
+		// the caller asked for immediate retries.
+		delay *= 2
+		if r.policy.MaxDelay > 0 && delay > r.policy.MaxDelay {
+			delay = r.policy.MaxDelay
 		}
 	}
 	return nil, lastErr

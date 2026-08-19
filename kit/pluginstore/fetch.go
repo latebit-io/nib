@@ -61,14 +61,14 @@ func gitFetch(ctx context.Context, src Source, dest string) (string, error) {
 	}
 
 	if src.Ref == "" {
-		if out, err := runGit(ctx, "", "clone", "--depth", "1", url, dest); err != nil {
+		if out, err := runGit(ctx, "", "clone", "--depth", "1", "--", url, dest); err != nil {
 			return "", fmt.Errorf("pluginstore: git clone %s: %w: %s", url, err, out)
 		}
 	} else {
-		if out, err := runGit(ctx, "", "clone", url, dest); err != nil {
+		if out, err := runGit(ctx, "", "clone", "--", url, dest); err != nil {
 			return "", fmt.Errorf("pluginstore: git clone %s: %w: %s", url, err, out)
 		}
-		if out, err := runGit(ctx, dest, "checkout", "--detach", src.Ref); err != nil {
+		if out, err := runGit(ctx, dest, "checkout", "--detach", "--end-of-options", src.Ref); err != nil {
 			return "", fmt.Errorf("pluginstore: git checkout %s: %w: %s", src.Ref, err, out)
 		}
 	}

@@ -21,6 +21,9 @@ func TestSourceValidate(t *testing.T) {
 		{"npm ok", Source{Type: SourceNPM, Package: "@x/y"}, false},
 		{"unknown type", Source{Type: "weird"}, true},
 		{"empty type", Source{}, true},
+		{"git url leading dash", GitSource("--upload-pack=evil", ""), true},
+		{"git ref leading dash", GitSource("https://h/r.git", "--foo"), true},
+		{"github ref leading dash", GitHubSource("owner/repo", "-x"), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,6 +43,9 @@ func TestParseManifest(t *testing.T) {
 	}
 	if m.Name != "foo" || m.Version != "1.2.0" || m.Description != "d" {
 		t.Errorf("got %+v", m)
+	}
+	if _, err := ParseManifest([]byte(`{"name":"-._"}`)); err == nil {
+		t.Errorf("expected error on name that sanitizes to empty id")
 	}
 	if _, err := ParseManifest([]byte(`{"version":"1.0.0"}`)); err == nil {
 		t.Errorf("expected error on missing name")
@@ -82,6 +88,9 @@ func TestParseMarketplace_SourceForms(t *testing.T) {
 	if _, err := ParseMarketplace([]byte(`{"plugins":[]}`)); err == nil {
 		t.Errorf("expected error on missing marketplace name")
 	}
+	if _, err := ParseMarketplace([]byte(`{"name":"...","plugins":[]}`)); err == nil {
+		t.Errorf("expected error on marketplace name that sanitizes to empty id")
+	}
 	// A structurally-broken entry is rejected at parse time, not at install.
 	if _, err := ParseMarketplace([]byte(`{"name":"mp","plugins":[{"name":"","source":"./x"}]}`)); err == nil {
 		t.Errorf("expected error on empty entry name")
@@ -102,8 +111,23 @@ func TestDeriveID(t *testing.T) {
 		{"my mp", "foo", "my-mp__foo"},
 	}
 	for _, tc := range cases {
-		if got := deriveID(tc.mkt, tc.name); got != tc.want {
+		got, err := deriveID(tc.mkt, tc.name)
+		if err != nil {
+			t.Errorf("deriveID(%q,%q): %v", tc.mkt, tc.name, err)
+		}
+		if got != tc.want {
 			t.Errorf("deriveID(%q,%q) = %q, want %q", tc.mkt, tc.name, got, tc.want)
 		}
+	}
+	for _, bad := range []string{"-._", "...", "---", "-"} {
+		if id, err := deriveID("", bad); err == nil {
+			t.Errorf("deriveID(%q) = %q, want error", bad, id)
+		}
+	}
+	// A separator-only marketplace still yields a non-empty key thanks
+	// to the "__" join, but a separator-only name with no marketplace
+	// must not.
+	if _, err := deriveID("", "  "); err == nil {
+		t.Errorf("whitespace-only name must be rejected")
 	}
 }

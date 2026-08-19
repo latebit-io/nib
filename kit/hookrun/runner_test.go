@@ -93,6 +93,21 @@ func TestRun_TimeoutFailsOpen(t *testing.T) {
 	}
 }
 
+// TestRun_TimeoutKillsBackgroundChild: a hook that backgrounds a child
+// holding stdout must still return at the timeout (process-group kill +
+// WaitDelay), not block until the child exits.
+func TestRun_TimeoutKillsBackgroundChild(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	res := Runner{Timeout: 100 * time.Millisecond}.Run(context.Background(), cmdHook(`sleep 5 & sleep 5`), Input{})
+	if res.Decision != Proceed || res.Err == nil {
+		t.Errorf("timed-out hook should fail open with an error, got %+v", res)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("Run took %v; background child defeated the timeout", d)
+	}
+}
+
 func TestCapBuffer(t *testing.T) {
 	t.Parallel()
 	w := &capBuffer{limit: 8}

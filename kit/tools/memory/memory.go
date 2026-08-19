@@ -57,11 +57,11 @@ func applyOptions(opts []Option) options {
 func validateMemoryPath(raw string) (string, *agent.ToolResult) {
 	p := strings.TrimSpace(raw)
 	if p == "" {
-		r := textResult("Error: path is required")
+		r := errorResult("Error: path is required")
 		return "", &r
 	}
 	if p[0] != '/' {
-		r := textResult("Error: path must be absolute (start with /)")
+		r := errorResult("Error: path must be absolute (start with /)")
 		return "", &r
 	}
 	return p, nil
@@ -71,6 +71,12 @@ func validateMemoryPath(raw string) (string, *agent.ToolResult) {
 // string. Local helper so the package depends only on agent.ToolResult.
 func textResult(content string) agent.ToolResult {
 	return agent.ToolResult{Content: content}
+}
+
+// errorResult builds a failed tool result so the agent loop can tell a
+// refused or failed call from a normal reply (matches bash/git/search).
+func errorResult(content string) agent.ToolResult {
+	return agent.ToolResult{Content: content, IsError: true}
 }
 
 // --- memory_fetch ---
@@ -125,11 +131,11 @@ func (t *FetchTool) Definition() llm.ToolDef {
 // Execute fetches a memory document and returns its content.
 func (t *FetchTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	if ctx.Err() != nil {
-		return textResult("Error: agent canceled")
+		return errorResult("Error: agent canceled")
 	}
 	var args memoryFetchArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	path, errResult := validateMemoryPath(args.Path)
 	if errResult != nil {
@@ -138,7 +144,7 @@ func (t *FetchTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolRe
 
 	doc, err := t.store.Fetch(ctx, path)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 
 	body := doc.Body
@@ -289,32 +295,32 @@ func (t *PublishTool) Definition() llm.ToolDef {
 // Execute publishes a memory document and returns the result.
 func (t *PublishTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	if ctx.Err() != nil {
-		return textResult("Error: agent canceled")
+		return errorResult("Error: agent canceled")
 	}
 	var args memoryWriteArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	path, errResult := validateMemoryPath(args.Path)
 	if errResult != nil {
 		return *errResult
 	}
 	if args.Body == "" {
-		return textResult("Error: body is required")
+		return errorResult("Error: body is required")
 	}
 	if args.ExpectedVersion < 0 {
-		return textResult("Error: expected_version must be >= 0 (0 = create, >0 = update)")
+		return errorResult("Error: expected_version must be >= 0 (0 = create, >0 = update)")
 	}
 
 	if t.validator != nil {
 		if err := t.validator(path, args.Body); err != nil {
-			return textResult(err.Error())
+			return errorResult(err.Error())
 		}
 	}
 
 	doc, err := t.store.Publish(ctx, path, args.Body, args.ExpectedVersion)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 	return textResult(fmt.Sprintf("Published %s (version=%d)", doc.Path, doc.Version))
 }
@@ -370,32 +376,32 @@ func (t *AppendTool) Definition() llm.ToolDef {
 // Execute appends content to a memory document and returns the result.
 func (t *AppendTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	if ctx.Err() != nil {
-		return textResult("Error: agent canceled")
+		return errorResult("Error: agent canceled")
 	}
 	var args memoryWriteArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	path, errResult := validateMemoryPath(args.Path)
 	if errResult != nil {
 		return *errResult
 	}
 	if args.Body == "" {
-		return textResult("Error: body is required")
+		return errorResult("Error: body is required")
 	}
 	if args.ExpectedVersion < 1 {
-		return textResult("Error: expected_version must be >= 1 (document must exist)")
+		return errorResult("Error: expected_version must be >= 1 (document must exist)")
 	}
 
 	if t.validator != nil {
 		if err := t.validator(path, args.Body); err != nil {
-			return textResult(err.Error())
+			return errorResult(err.Error())
 		}
 	}
 
 	doc, err := t.store.Append(ctx, path, args.Body, args.ExpectedVersion)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 	return textResult(fmt.Sprintf("Appended to %s (version=%d)", doc.Path, doc.Version))
 }
@@ -441,11 +447,11 @@ func (t *ListTool) Definition() llm.ToolDef {
 // Execute lists memory documents and returns their paths.
 func (t *ListTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult {
 	if ctx.Err() != nil {
-		return textResult("Error: agent canceled")
+		return errorResult("Error: agent canceled")
 	}
 	var args memoryListArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	path, errResult := validateMemoryPath(args.Path)
 	if errResult != nil {
@@ -454,7 +460,7 @@ func (t *ListTool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolRes
 
 	paths, err := t.store.List(ctx, path)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 	if len(paths) == 0 {
 		return textResult("No documents found.")

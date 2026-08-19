@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -61,7 +62,11 @@ func InRepo(root string) bool {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
 	cmd.Dir = root
 	out, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(out)) == "true"
+	if err != nil {
+		slog.Debug("git: rev-parse --is-inside-work-tree failed; git tools disabled", "root", root, "err", err)
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "true"
 }
 
 // run execs git with the given argv under root and returns the

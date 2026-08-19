@@ -1,10 +1,10 @@
 // Package budget holds the pure token-accounting types and helpers
-// used by the agent's per-task budget enforcement. The Agent owns the
-// runtime concerns (mutex, runID, latching, event emission); this
-// package owns the data shapes (Session, Turn) and the math
-// (Resolve, wouldExceed, Exceeded). Splitting the math out lets it be
-// table-driven tested without an Agent and keeps the Agent's budget
-// methods focused on coordination rather than arithmetic.
+// used by an agent's per-task budget enforcement. The consuming agent
+// owns the runtime concerns (mutex, run identity, latching, event
+// emission); this package owns the data shapes (Session, Turn) and the
+// math (Resolve, Exceeded). Splitting the math out lets it be
+// table-driven tested without an agent and keeps the consumer's budget
+// code focused on coordination rather than arithmetic.
 package budget
 
 import (
@@ -35,8 +35,31 @@ type Session struct {
 	TotalCompletionTokens int
 	// TotalCachedTokens is the sum of provider-reported cached input tokens.
 	TotalCachedTokens int
+	// TotalCacheWriteTokens is the sum of provider-reported cache-write
+	// input tokens (disjoint from prompt and cached).
+	TotalCacheWriteTokens int
 	// Turns is the number of completed turns.
 	Turns int
+}
+
+// AddUsage folds one LLM call's provider-reported usage into the
+// session totals. A nil usage is a no-op. Turns is not touched — the
+// caller decides what constitutes a turn.
+func (s *Session) AddUsage(usage *llm.Usage) {
+	if usage == nil {
+		return
+	}
+	s.TotalPromptTokens += usage.PromptTokens
+	s.TotalCompletionTokens += usage.CompletionTokens
+	s.TotalCachedTokens += usage.CachedTokens
+	s.TotalCacheWriteTokens += usage.CacheWriteTokens
+}
+
+// totalTokens returns every input-side token category summed with the
+// output: prompt, cached and cache-write are documented disjoint in
+// [llm.Usage], so adding all three counts the input footprint once.
+func (s Session) totalTokens() int {
+	return s.TotalPromptTokens + s.TotalCachedTokens + s.TotalCacheWriteTokens + s.TotalCompletionTokens
 }
 
 // Turn accumulates token consumption across multiple LLM calls within
@@ -53,6 +76,9 @@ type Turn struct {
 	CompletionTokens int
 	// CachedTokens is the cumulative cached-input-token count across this turn.
 	CachedTokens int
+	// CacheWriteTokens is the cumulative cache-write-input-token count
+	// across this turn (disjoint from PromptTokens and CachedTokens).
+	CacheWriteTokens int
 	// CompletionEst is the client-side output-token estimate, summed across calls.
 	CompletionEst int
 	// ToolCalls is the count of tool-call dispatches in this turn.
@@ -71,6 +97,7 @@ func (t *Turn) AddUsage(usage *llm.Usage) {
 	t.PromptTokens += usage.PromptTokens
 	t.CompletionTokens += usage.CompletionTokens
 	t.CachedTokens += usage.CachedTokens
+	t.CacheWriteTokens += usage.CacheWriteTokens
 }
 
 // Resolve maps the user-facing NewOptions.TaskTokenBudget value to
@@ -116,44 +143,23 @@ func ParseEnvCap(raw string) (limit int, err error) {
 	return Resolve(n), nil
 }
 
-// wouldExceed reports whether committed + pending usage crosses the
-// cap. Pure projection of the math used by the Agent's inner-loop
-// gate (between provider Stream calls within a single turn). Returns
-// false when the cap is disabled (cap <= 0).
+// Exceeded reports whether committed usage has crossed the cap and
+// returns the formatted abort message on a hit. Returns ("", false)
+// when the cap is disabled or not yet exceeded.
 //
-// Sums prompt + cached + completion tokens. Per the normalized
-// [llm.Usage] convention, PromptTokens and CachedTokens are disjoint
-// (prompt is fresh-only, cached is the discounted subset), so
-// adding both counts the full input footprint exactly once. Cached
-// tokens are still real tokens that count toward the model's
-// context-window quota and toward the developer's spend; under-
-// counting them would let runaway sessions slip past the budget gate.
+// Sums prompt + cached + cache-write + completion tokens. Per the
+// [llm.Usage] convention the three input categories are disjoint, so
+// the input footprint is counted exactly once; cached tokens are still
+// real tokens against the context window and the developer's spend.
 //
 // Comparator is `>=` (not `>`) so the cap value itself is over the
-// line — a turn whose accounting lands exactly at the budget triggers
-// the abort rather than letting one more Stream call slip through.
-func wouldExceed(committed Session, pending Turn, limit int) bool {
-	if limit <= 0 {
-		return false
-	}
-	used := committed.TotalPromptTokens + committed.TotalCachedTokens + committed.TotalCompletionTokens
-	add := pending.PromptTokens + pending.CachedTokens + pending.CompletionTokens
-	return used+add >= limit
-}
-
-// Exceeded reports whether committed usage alone has crossed the cap
-// and returns the formatted abort message on a hit. Pure projection
-// of the math used by the Agent's outer-loop gate (after a turn's
-// usage has been recorded). Returns ("", false) when the cap is
-// disabled or not yet exceeded.
-//
-// The Agent layer is responsible for latching budgetExceeded after
-// the first hit; this helper does no state mutation.
+// line. The consuming agent latches the first hit; this helper does
+// no state mutation.
 func Exceeded(committed Session, limit int) (msg string, exceeded bool) {
 	if limit <= 0 {
 		return "", false
 	}
-	used := committed.TotalPromptTokens + committed.TotalCachedTokens + committed.TotalCompletionTokens
+	used := committed.totalTokens()
 	if used < limit {
 		return "", false
 	}

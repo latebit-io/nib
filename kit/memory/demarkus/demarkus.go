@@ -36,8 +36,9 @@ type Result struct {
 }
 
 // Close stops the demarkus-server and the MCP client subprocess. Safe
-// to call exactly once. Returns the underlying [server.Manager.Stop]
-// error if the server fails to shut down cleanly.
+// to call more than once (later calls are no-ops). Returns the
+// [server.Manager.Stop] error — the joined failures of any teardown
+// step — when the server does not shut down cleanly.
 func (r *Result) Close() error {
 	if r == nil || r.close == nil {
 		return nil

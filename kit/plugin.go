@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/latebit-io/nib/kit/command"
 )
@@ -123,19 +124,18 @@ func DescribeTool(t Tool) Plugin {
 // LLM-facing instructions; this surface produces the summary alone
 // for human-readable listings.
 func firstSentence(s string) string {
-	for i := 0; i < len(s); i++ {
-		if s[i] != '.' {
-			continue
+	rest := s
+	for {
+		i := strings.IndexByte(rest, '.')
+		if i < 0 {
+			return s
 		}
-		if i == len(s)-1 {
-			return s[:i+1]
+		end := len(s) - len(rest) + i + 1
+		if end == len(s) || strings.IndexByte(" \n\t", s[end]) >= 0 {
+			return s[:end]
 		}
-		next := s[i+1]
-		if next == ' ' || next == '\n' || next == '\t' {
-			return s[:i+1]
-		}
+		rest = rest[i+1:]
 	}
-	return s
 }
 
 // DescribeCommand returns the [Plugin] metadata for a slash
@@ -162,28 +162,11 @@ func DescribeCommand(c command.Command) Plugin {
 // string used in Plugin output. Kind is the broad category; Path is
 // included when present.
 func commandSource(s command.Source) string {
-	kind := sourceKindLabel(s.Kind)
+	kind := s.Kind.String()
 	if s.Path == "" {
 		return kind
 	}
 	return kind + ":" + s.Path
-}
-
-// sourceKindLabel maps a [command.SourceKind] to the human-readable
-// label used in Plugin output.
-func sourceKindLabel(k command.SourceKind) string {
-	switch k {
-	case command.SourceBuiltin:
-		return "builtin"
-	case command.SourceMCP:
-		return "mcp"
-	case command.SourceGlobal:
-		return "global"
-	case command.SourceProject:
-		return "project"
-	default:
-		return "unknown"
-	}
 }
 
 // RenderPlugins returns a grouped, human-readable summary of plugins.
@@ -272,10 +255,8 @@ func groupNameWidth(group []Plugin) int {
 	const maxNameWidth = 24
 	width := 0
 	for _, p := range group {
-		w := len(displayName(p))
-		if w > width {
-			width = w
-		}
+		// Rune count, matching how fmt's %-*s pads.
+		width = max(width, utf8.RuneCountInString(displayName(p)))
 	}
 	if width > maxNameWidth {
 		return maxNameWidth

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Event is a lifecycle point at which hooks fire. The constants are the
@@ -139,17 +140,35 @@ type Group struct {
 	// Hooks run when the event fires and Matcher matches.
 	Hooks []Hook `json:"hooks"`
 
-	re *regexp.Regexp // compiled Matcher; nil ⇒ match all
+	re *regexp.Regexp // compiled Matcher; nil ⇒ compile lazily
 }
+
+// matcherCache memoizes lazily compiled matchers for Groups built by
+// literal or json.Unmarshal (which bypass [Parse]), so Matches stays
+// cheap without a shared mutable Group.
+var matcherCache sync.Map // pattern → *regexp.Regexp
 
 // Matches reports whether the group applies to a call of the named tool.
 // An empty matcher always matches; otherwise the matcher regex is tested
-// (unanchored) against the tool name.
+// (unanchored) against the tool name. A Group not produced by [Parse]
+// compiles its matcher on first use; an invalid pattern never matches.
 func (g Group) Matches(tool string) bool {
-	if g.re == nil {
+	if g.Matcher == "" {
 		return true
 	}
-	return g.re.MatchString(tool)
+	re := g.re
+	if re == nil {
+		if cached, ok := matcherCache.Load(g.Matcher); ok {
+			re = cached.(*regexp.Regexp)
+		} else {
+			var err error
+			if re, err = regexp.Compile(g.Matcher); err != nil {
+				return false
+			}
+			matcherCache.Store(g.Matcher, re)
+		}
+	}
+	return re.MatchString(tool)
 }
 
 // compile builds the matcher regex. A blank matcher leaves re nil

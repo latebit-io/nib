@@ -13,8 +13,12 @@ import (
 // from plugin source trees under the store root.
 const marketplacesSubdir = ".marketplaces"
 
-func (s *Store) marketplaceDir(name string) string {
-	return filepath.Join(s.root, marketplacesSubdir, deriveID("", name))
+func (s *Store) marketplaceDir(name string) (string, error) {
+	id, err := deriveID("", name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(s.root, marketplacesSubdir, id), nil
 }
 
 // AddMarketplace fetches a marketplace repository from src, parses its
@@ -41,7 +45,11 @@ func (s *Store) AddMarketplace(ctx context.Context, src Source) (Marketplace, er
 	// swapDir keeps the existing marketplace until the replacement lands,
 	// so a failed promotion never leaves the registry pointing at a
 	// directory we already deleted.
-	if err := swapDir(dir, s.marketplaceDir(mkt.Name)); err != nil {
+	mktDir, err := s.marketplaceDir(mkt.Name)
+	if err != nil {
+		return Marketplace{}, err
+	}
+	if err := swapDir(dir, mktDir); err != nil {
 		return Marketplace{}, err
 	}
 
@@ -76,8 +84,11 @@ func (s *Store) InstallFromMarketplace(ctx context.Context, marketplaceName, plu
 		s.mu.Unlock()
 		return InstalledPlugin{}, fmt.Errorf("pluginstore: marketplace %q not added", marketplaceName)
 	}
-	mktDir := s.marketplaceDir(marketplaceName)
+	mktDir, err := s.marketplaceDir(marketplaceName)
 	s.mu.Unlock()
+	if err != nil {
+		return InstalledPlugin{}, err
+	}
 
 	mkt, err := ReadMarketplace(mktDir)
 	if err != nil {

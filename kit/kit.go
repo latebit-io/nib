@@ -5,14 +5,15 @@
 // loop-lifecycle events into the consumer-facing
 // [github.com/latebit-io/nib/kit/event] vocabulary.
 //
-// The intended consumer pattern: each plug-in package exposes a
-// Plugins() [Toolset] function; the composition root merges them.
-// Events flow through a fan-out bus — register a [Subscription] via
-// [Agent.Subscribe] to observe them.
+// The consumer pattern: the composition root builds a [Toolset]
+// literal from the tools, hooks and commands it wants (see
+// cmd/nibster and coding/agent) — [Merge] combines several bundles
+// when a root assembles more than one. Events flow through a fan-out
+// bus — register a [Subscription] via [Agent.Subscribe] to observe them.
 //
 //	a, err := kit.New(kit.Config{
 //	    Provider: provider,
-//	    Toolset:  kit.Merge(builtin.Plugins(), coding.Plugins(opts)),
+//	    Toolset:  kit.Toolset{Tools: tools, Hooks: hooks},
 //	})
 //	if err != nil { ... }
 //	sub, err := a.Subscribe(kit.SubscribeOptions{})

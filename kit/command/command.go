@@ -126,6 +126,26 @@ const (
 	SourcePlugin
 )
 
+// String returns the short lowercase label for the kind ("builtin",
+// "mcp", "global", "project", "plugin"); unknown values render as
+// "unknown". Shared by /help tags and plugin introspection.
+func (k SourceKind) String() string {
+	switch k {
+	case SourceBuiltin:
+		return "builtin"
+	case SourceMCP:
+		return "mcp"
+	case SourceGlobal:
+		return "global"
+	case SourceProject:
+		return "project"
+	case SourcePlugin:
+		return "plugin"
+	default:
+		return "unknown"
+	}
+}
+
 // Command is the marker every registered command implements.
 // Concrete commands implement [HandlerCommand] (Go code) or
 // [PromptCommand] (text template). The dispatcher type-switches on

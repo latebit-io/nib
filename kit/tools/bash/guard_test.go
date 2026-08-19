@@ -366,7 +366,7 @@ func TestGuardCommand(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := guardCommand(tt.command)
+			_, result := Classify(tt.command)
 			if tt.blocked && result == "" {
 				t.Errorf("expected blocked: %s", tt.command)
 			}

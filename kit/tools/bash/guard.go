@@ -157,7 +157,7 @@ var envAssignmentRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)=(\S+)`)
 // (env-var assignments, inline tokens, paths leaking workspace identity)
 // that should not land in slog. We mask, trim to [redactPreviewBytes],
 // and add an ellipsis when the command was longer; the guard's class
-// string (the `msg` returned by guardCommand) carries the *why* without
+// string (the `msg` returned by [Classify]) carries the *why* without
 // needing the full command text. The preview exists purely so triage
 // can grep logs for a recognisable shape ("rm -rf …") without exposing
 // the rest.
@@ -264,15 +264,6 @@ func Classify(command string) (GuardClass, string) {
 		return GuardDestructive, msg
 	}
 	return GuardNone, ""
-}
-
-// guardCommand is the classic single-verdict entry point: the first
-// non-empty guard message, or "" when the command passes. Kept for the
-// default (non-approval-managed) Execute path; policy-aware callers use
-// [Classify].
-func guardCommand(command string) string {
-	_, msg := Classify(command)
-	return msg
 }
 
 // searchCommandGuard blocks code-search shell tools (grep, rg, ripgrep, ag,

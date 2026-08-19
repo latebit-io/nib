@@ -150,7 +150,7 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		}
 	}
 
-	slog.Debug("bash: executing", "command", args.Command, "timeout", timeout)
+	slog.Debug("bash: executing", "preview", redactCommandPreview(args.Command), "timeout", timeout)
 
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -205,7 +205,7 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		}
 	}
 
-	slog.Debug("bash: completed", "command", args.Command, "exit_code", exitCode, "output_len", len(output))
+	slog.Debug("bash: completed", "preview", redactCommandPreview(args.Command), "exit_code", exitCode, "output_len", len(output))
 
 	if exitCode != 0 {
 		return errorResult(fmt.Sprintf("Exit code: %d\n\n%s", exitCode, output))

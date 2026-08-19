@@ -215,6 +215,27 @@ func TestRunner_AgentWaiting_SingleShot_CancelsAndExits(t *testing.T) {
 	}
 }
 
+// TestRunner_AgentWaiting_SingleShot_ErrorsMeanFailure: an agent that
+// errors and then yields must not report Success.
+func TestRunner_AgentWaiting_SingleShot_ErrorsMeanFailure(t *testing.T) {
+	events := make(chan event.Event, 16)
+	mock := newMockAgent(events)
+	mock.runFunc = func() {
+		events <- event.AgentError{Err: "tool exploded"}
+		events <- event.AgentWaiting{}
+	}
+
+	r := New(mock, events)
+	result := r.Run(context.Background(), "one shot")
+
+	if result.Success {
+		t.Errorf("Success = true, want false when Errors is non-empty")
+	}
+	if len(result.Errors) != 1 {
+		t.Errorf("Errors = %v, want one entry", result.Errors)
+	}
+}
+
 func TestRunner_AgentWaiting_TTY_RepliesFromStdin(t *testing.T) {
 	events := make(chan event.Event, 16)
 	mock := newMockAgent(events)

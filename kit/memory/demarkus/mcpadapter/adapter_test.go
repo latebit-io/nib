@@ -171,6 +171,33 @@ func TestListHandlerError(t *testing.T) {
 	}
 }
 
+// TestListStatusHeader proves List honors the status header the same
+// way document calls do, instead of parsing a not-found body as links.
+func TestListStatusHeader(t *testing.T) {
+	cases := []struct {
+		status string
+		want   error
+	}{
+		{"not-found", memory.ErrNotFound},
+		{"unauthorized", memory.ErrAuth},
+		{"", memory.ErrServer},
+		{"weird", memory.ErrServer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.status, func(t *testing.T) {
+			text := "status: " + tc.status + "\n\n- [x.md](x.md)\n"
+			if tc.status == "" {
+				text = "- [x.md](x.md)\n"
+			}
+			stub := &stubCaller{responses: map[string]mcp.ToolResult{"mark_list": {Text: text}}}
+			_, err := newAdapter(stub).List(context.Background(), "/docs/")
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("status %q: err = %v, want %v", tc.status, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestTransportError(t *testing.T) {
 	wantErr := errors.New("mcp: connection closed")
 	stub := &stubCaller{errs: map[string]error{"mark_fetch": wantErr}}

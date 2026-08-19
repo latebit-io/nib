@@ -10,7 +10,7 @@
 // artifact may use only the tools it explicitly lists).
 //
 // The package is pure: parsing and matching, no I/O and no execution. It
-// is the shared evaluator the M2 trust/shell layer builds on, so the
-// permission semantics live in one table-tested place rather than being
-// re-derived at each call site.
+// is the shared evaluator the trust/shell gates build on (skill loader,
+// dyncontext, cmdallow), so the permission semantics live in one
+// table-tested place rather than being re-derived at each call site.
 package toolperm

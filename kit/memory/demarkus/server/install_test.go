@@ -4,11 +4,15 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -192,5 +196,78 @@ func TestResolveVersionEnvOverride(t *testing.T) {
 	}
 	if version != "9.9.9" {
 		t.Errorf("got %q, want %q", version, "9.9.9")
+	}
+}
+
+// stubTransport serves canned bodies by URL suffix; unknown paths 404.
+type stubTransport struct {
+	bodies map[string][]byte
+}
+
+func (s stubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	for suffix, body := range s.bodies {
+		if strings.HasSuffix(req.URL.Path, suffix) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(body)),
+				Request:    req,
+			}, nil
+		}
+	}
+	return &http.Response{
+		StatusCode: http.StatusNotFound,
+		Body:       io.NopCloser(strings.NewReader("not found")),
+		Request:    req,
+	}, nil
+}
+
+func tarGz(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for name, content := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0755, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestDownloadReleaseFailsClosedWithoutChecksums proves a missing
+// checksums asset aborts the install instead of extracting unverified.
+func TestDownloadReleaseFailsClosedWithoutChecksums(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	archive := tarGz(t, map[string]string{"bin1": "content"})
+	sum := sha256.Sum256(archive)
+	checksums := hex.EncodeToString(sum[:]) + "  a.tar.gz\n"
+
+	orig := httpClient.Transport
+	t.Cleanup(func() { httpClient.Transport = orig })
+
+	httpClient.Transport = stubTransport{bodies: map[string][]byte{"/a.tar.gz": archive}}
+	binDir := t.TempDir()
+	if err := downloadRelease(context.Background(), "server/v1", "a.tar.gz", "checksums.txt", binDir, []string{"bin1"}); err == nil {
+		t.Fatal("expected error when checksums asset is unavailable")
+	}
+	if _, err := os.Stat(filepath.Join(binDir, "bin1")); err == nil {
+		t.Error("binary must not be extracted without checksum verification")
+	}
+
+	httpClient.Transport = stubTransport{bodies: map[string][]byte{"/a.tar.gz": archive, "/checksums.txt": []byte(checksums)}}
+	if err := downloadRelease(context.Background(), "server/v1", "a.tar.gz", "checksums.txt", binDir, []string{"bin1"}); err != nil {
+		t.Fatalf("downloadRelease with valid checksums: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, "bin1")); err != nil {
+		t.Errorf("binary not extracted after verification: %v", err)
 	}
 }

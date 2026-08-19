@@ -11,15 +11,15 @@
 // fetch/track/re-sync lifecycle, marketplace add/install, and the CC→nib
 // converter.
 //
-// What the converter handles today: slash commands, prompt-only skills,
-// and stdio MCP servers, with import-time variables frozen. Components it
-// recognizes but cannot yet run — agents, hooks, shell-bearing skills,
-// non-stdio MCP transports — are recorded in the conversion report
-// ([ConvertReport.Unsupported]) rather than dropped silently; the runtime
-// layers that execute them (permission/trust enforcement, hooks engine,
-// subagent engine) land in later milestones. Per-plugin trust is recorded
-// here ([InstalledPlugin.Trusted]) but not yet enforced. See the soul plan
-// /nib/plans/cc-plugin-compat.md.
+// What the converter handles today: slash commands, skills (shell-bearing
+// ones keep their grants and run only once the plugin is trusted), agent
+// definitions, command hooks, and stdio MCP servers, with import-time
+// variables frozen. Anything it recognizes but cannot honor — non-stdio
+// MCP transports, non-command hook types, unknown hook events, runtime
+// variables — is recorded in the conversion report
+// ([ConvertReport.Unsupported]) rather than dropped silently. Per-plugin
+// trust ([InstalledPlugin.Trusted]) gates shell-bearing artifacts at load
+// time in the consuming agent.
 //
 // Layout under the store root (see [Store]):
 //

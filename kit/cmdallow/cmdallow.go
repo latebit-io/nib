@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/latebit-io/nib/kit/toolperm"
@@ -91,6 +92,9 @@ func (l *List) Permits(command string) bool {
 	if l == nil {
 		return false
 	}
+	// ParseRule trims stored rules; trim here too so an Add/Permits
+	// round-trip survives reload with padded input.
+	command = strings.TrimSpace(command)
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if toolperm.HasShellControl(command) {
@@ -109,6 +113,10 @@ func (l *List) Permits(command string) bool {
 func (l *List) Add(command string) error {
 	if l == nil {
 		return errors.New("cmdallow: no allowlist configured")
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return errors.New("cmdallow: empty command")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

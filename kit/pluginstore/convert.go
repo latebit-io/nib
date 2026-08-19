@@ -269,10 +269,10 @@ type nibSkillMeta struct {
 }
 
 // convertSkills translates <src>/skills/<n>/SKILL.md into nib skills
-// under <dst>/skills/<ns>/. Shell-bearing skills are recorded as
-// deferred (nib refuses script skills until the M2 trust+shell layer)
-// and not copied; prompt-only skills are copied whole (reference files
-// included) with a namespaced, var-frozen SKILL.md.
+// under <dst>/skills/<ns>/. Every skill is copied whole (reference files
+// included) with a namespaced, var-frozen SKILL.md; shell-bearing skills
+// keep their grants and are noted in the report because the loader
+// refuses them until the plugin is trusted.
 func convertSkills(src, dst, pluginName string, vars Vars, report *ConvertReport) error {
 	dir := filepath.Join(src, "skills")
 	entries, err := os.ReadDir(dir)
@@ -432,13 +432,10 @@ func convertAgents(src, dst, pluginName string, vars Vars, report *ConvertReport
 			return err
 		}
 		report.Agents = append(report.Agents, name)
-		report.add("agent", name, "converted; runs once the subagent engine lands (M4)")
 	}
 	return nil
 }
 
-// noteDeferredComponents records components present in the plugin but not
-// yet runnable, pointing at the milestone that will handle them.
 // convertHooks parses <src>/hooks/hooks.json, freezes import-time vars in
 // each command/env, and writes the managed copy to <dst>/hooks/hooks.json.
 // Unknown events and non-command hook types are reported (not silently

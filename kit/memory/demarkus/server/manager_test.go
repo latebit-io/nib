@@ -313,11 +313,11 @@ func TestFindDemarkusServerPIDs_NoMatches(t *testing.T) {
 }
 
 func TestTerminatePID_AlreadyGone(t *testing.T) {
-	// A PID unlikely to exist. terminatePID should return an error from
-	// the initial SIGTERM (ESRCH) — surfacing is the documented contract.
-	err := terminatePID(2147483647, 100*time.Millisecond)
-	if err == nil {
-		t.Fatal("expected error for nonexistent PID")
+	// A PID unlikely to exist. An already-gone process is the desired
+	// end state, so terminatePID reports success rather than an ESRCH
+	// error that Stop would otherwise surface to every caller.
+	if err := terminatePID(2147483647, 100*time.Millisecond); err != nil {
+		t.Fatalf("expected nil for nonexistent PID, got %v", err)
 	}
 }
 

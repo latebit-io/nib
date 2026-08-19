@@ -69,6 +69,17 @@ func assertContains(t *testing.T, got, want string) {
 	}
 }
 
+// assertResult checks the content substring and that IsError tracks the
+// "Error:" convention: every refused/failed call must be flagged so the
+// agent loop can distinguish it from a normal reply.
+func assertResult(t *testing.T, r agent.ToolResult, want string) {
+	t.Helper()
+	assertContains(t, r.Content, want)
+	if wantErr := strings.HasPrefix(want, "Error"); r.IsError != wantErr {
+		t.Errorf("IsError = %v for %q, want %v", r.IsError, r.Content, wantErr)
+	}
+}
+
 func toolCall(name, args string) llm.ToolCall {
 	return llm.ToolCall{
 		ID: "test-id",
@@ -103,7 +114,7 @@ func TestFetchTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewFetchTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_fetch", tt.args))
-			assertContains(t, result.Content, tt.wantSubstr)
+			assertResult(t, result, tt.wantSubstr)
 		})
 	}
 }
@@ -210,7 +221,7 @@ func TestPublishTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewPublishTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_publish", tt.args))
-			assertContains(t, result.Content, tt.wantSubstr)
+			assertResult(t, result, tt.wantSubstr)
 		})
 	}
 }
@@ -239,6 +250,9 @@ func TestPublishTool_Validator(t *testing.T) {
 		result := tool.Execute(context.Background(), toolCall("memory_publish",
 			`{"path": "/x.md", "body": "content", "expected_version": 0}`))
 		assertContains(t, result.Content, "schema violation: detail line")
+		if !result.IsError {
+			t.Errorf("validator rejection must set IsError")
+		}
 		if s.lastPublishPath != "" {
 			t.Errorf("validator error must block store call; last publish path = %q", s.lastPublishPath)
 		}
@@ -312,7 +326,7 @@ func TestAppendTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewAppendTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_append", tt.args))
-			assertContains(t, result.Content, tt.wantSubstr)
+			assertResult(t, result, tt.wantSubstr)
 		})
 	}
 }
@@ -328,6 +342,9 @@ func TestAppendTool_Validator(t *testing.T) {
 		result := tool.Execute(context.Background(), toolCall("memory_append",
 			`{"path": "/x.md", "body": "extra", "expected_version": 1}`))
 		assertContains(t, result.Content, "path is read-only")
+		if !result.IsError {
+			t.Errorf("validator rejection must set IsError")
+		}
 		if s.lastAppendPath != "" {
 			t.Errorf("validator error must block store call; last append path = %q", s.lastAppendPath)
 		}
@@ -379,7 +396,7 @@ func TestListTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewListTool(&tt.store)
 			result := tool.Execute(context.Background(), toolCall("memory_list", tt.args))
-			assertContains(t, result.Content, tt.wantSubstr)
+			assertResult(t, result, tt.wantSubstr)
 		})
 	}
 }
@@ -404,7 +421,7 @@ func TestToolsCanceled(t *testing.T) {
 		def := tc.tool.Definition()
 		t.Run(def.Function.Name, func(t *testing.T) {
 			result := tc.tool.Execute(ctx, toolCall(def.Function.Name, tc.args))
-			assertContains(t, result.Content, "Error: agent canceled")
+			assertResult(t, result, "Error: agent canceled")
 		})
 	}
 }

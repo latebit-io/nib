@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/latebit-io/nib/kit/hookspec"
@@ -90,6 +91,16 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 		}
 	}
 	cmd.Stdin = bytes.NewReader(payload)
+	// Own process group + SIGKILL on cancel + drain grace: a hook that
+	// backgrounds a child holding stdout must not defeat the timeout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = time.Second
 	// Keep stdout and stderr SEPARATE: the decision is parsed from stdout
 	// only, so a hook may write diagnostics to stderr without corrupting
 	// its JSON decision. Output keeps both for display.

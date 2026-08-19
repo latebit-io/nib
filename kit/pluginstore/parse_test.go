@@ -124,10 +124,16 @@ func TestDeriveID(t *testing.T) {
 			t.Errorf("deriveID(%q) = %q, want error", bad, id)
 		}
 	}
-	// A separator-only marketplace still yields a non-empty key thanks
-	// to the "__" join, but a separator-only name with no marketplace
-	// must not.
 	if _, err := deriveID("", "  "); err == nil {
 		t.Errorf("whitespace-only name must be rejected")
+	}
+	// A separator-only component must be rejected even when the other
+	// side would keep the joined key non-empty: "mp"+"---" trimming to
+	// "mp" would collide with a direct plugin named "mp".
+	if id, err := deriveID("marketplace", "---"); err == nil {
+		t.Errorf("deriveID(marketplace, ---) = %q, want error", id)
+	}
+	if id, err := deriveID("---", "foo"); err == nil {
+		t.Errorf("deriveID(---, foo) = %q, want error", id)
 	}
 }

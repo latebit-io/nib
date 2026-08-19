@@ -81,6 +81,13 @@ type cachedStore struct {
 
 	mu      sync.Mutex
 	entries map[string]cacheEntry
+	// writeGen counts writes through this decorator. A Fetch fill is
+	// discarded when a write started after the fill's inner read began,
+	// so an in-flight Fetch can never re-cache a document a concurrent
+	// Publish/Append just replaced. Single counter (not per-path): a
+	// spurious drop on an unrelated write is one extra miss, and the
+	// map stays bounded.
+	writeGen uint64
 }
 
 // Compile-time assertion that cachedStore satisfies the port.
@@ -94,6 +101,7 @@ func (c *cachedStore) Fetch(ctx context.Context, path string) (memory.Document, 
 		c.mu.Unlock()
 		return ent.doc, nil
 	}
+	gen := c.writeGen
 	c.mu.Unlock()
 
 	doc, err := c.inner.Fetch(ctx, path)
@@ -102,13 +110,14 @@ func (c *cachedStore) Fetch(ctx context.Context, path string) (memory.Document, 
 	}
 	// Stamp cachedAt with a fresh Now() AFTER the inner Fetch completes,
 	// so a slow inner call doesn't burn TTL it never spent serving.
-	c.store(path, doc, c.policy.Now())
+	c.store(path, doc, c.policy.Now(), gen)
 	return doc, nil
 }
 
 // Publish delegates and invalidates the cache entry for path. The
 // returned document is not cached: write responses may be header-only.
 func (c *cachedStore) Publish(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
+	c.beginWrite()
 	doc, err := c.inner.Publish(ctx, path, body, expectedVersion)
 	c.invalidate(path)
 	if err != nil {
@@ -120,6 +129,7 @@ func (c *cachedStore) Publish(ctx context.Context, path string, body string, exp
 // Append delegates and invalidates the cache entry for path. The
 // returned document is not cached: write responses may be header-only.
 func (c *cachedStore) Append(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
+	c.beginWrite()
 	doc, err := c.inner.Append(ctx, path, body, expectedVersion)
 	c.invalidate(path)
 	if err != nil {
@@ -142,11 +152,23 @@ func (c *cachedStore) expired(ent cacheEntry, now time.Time) bool {
 	return now.Sub(ent.cachedAt) >= c.policy.TTL
 }
 
+// beginWrite bumps the write generation. Must run BEFORE the delegated
+// write so a Fetch that read the old document cannot be cached after it.
+func (c *cachedStore) beginWrite() {
+	c.mu.Lock()
+	c.writeGen++
+	c.mu.Unlock()
+}
+
 // store inserts or refreshes the cache entry for path. Enforces
-// MaxEntries by evicting the oldest entry on capacity overflow.
-func (c *cachedStore) store(path string, doc memory.Document, now time.Time) {
+// MaxEntries by evicting the oldest entry on capacity overflow. The
+// fill is dropped when a write began after gen was captured (stale read).
+func (c *cachedStore) store(path string, doc memory.Document, now time.Time, gen uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if gen != c.writeGen {
+		return
+	}
 	ent, exists := c.entries[path]
 	if !exists {
 		ent = cacheEntry{insertedAt: now}

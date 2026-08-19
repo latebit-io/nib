@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -110,6 +112,7 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 	cmd.Stderr = stderr
 
 	runErr := cmd.Run()
+	reapGroup(cmd)
 	out, errOut := stdout.String(), stderr.String()
 	combined := joinStreams(out, errOut)
 
@@ -140,6 +143,19 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 		return Result{Decision: Deny, Reason: reason, Output: combined, ExitCode: exit}
 	}
 	return Result{Decision: Proceed, Output: combined, ExitCode: exit}
+}
+
+// reapGroup kills whatever is left of the hook's process group once Run
+// returns. cmd.Cancel fires only on ctx cancellation; a hook that exits
+// cleanly after backgrounding a child (`sleep 5 & exit 0`) leaves that
+// child alive on the WaitDelay/ErrWaitDelay path. ESRCH = already gone.
+func reapGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		slog.Warn("hookrun: failed to reap lingering hook descendants", "err", err)
+	}
 }
 
 // joinStreams renders captured stdout+stderr for display, dropping an

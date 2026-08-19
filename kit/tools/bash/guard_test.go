@@ -346,27 +346,31 @@ func TestGuardCommand(t *testing.T) {
 		name         string
 		command      string
 		blocked      bool
+		wantClass    GuardClass
 		wantContains string
 	}{
 		// Single-guard rows — each command triggers exactly one guard.
-		{"allowed build", "go build ./...", false, ""},
-		{"file write blocked", "echo x > out.txt", true, "write_file"},
-		{"search blocked", "grep TODO .", true, "search_project"},
-		{"destructive blocked", "rm -rf build/", true, "destructive"},
+		{"allowed build", "go build ./...", false, GuardNone, ""},
+		{"file write blocked", "echo x > out.txt", true, GuardFileWrite, "write_file"},
+		{"search blocked", "grep TODO .", true, GuardSearch, "search_project"},
+		{"destructive blocked", "rm -rf build/", true, GuardDestructive, "destructive"},
 
 		// Overlap rows — verify "first error wins" precedence.
 		// searchCommandGuard runs FIRST: search is the one absolute
 		// hard-block, so a command that also matches an approval-
 		// eligible class must still classify (and message) as search —
 		// otherwise the approval flow could admit a search bypass.
-		{"search precedence over file-write", "grep TODO . > out.txt", true, "search_project"},
-		{"search precedence over destructive", "grep TODO . && rm -rf build/", true, "search_project"},
+		{"search precedence over file-write", "grep TODO . > out.txt", true, GuardSearch, "search_project"},
+		{"search precedence over destructive", "grep TODO . && rm -rf build/", true, GuardSearch, "search_project"},
 		// fileWriteGuard runs before destructiveCommandGuard.
-		{"file-write precedence over destructive", "echo x > out.txt && rm -rf build/", true, "write_file"},
+		{"file-write precedence over destructive", "echo x > out.txt && rm -rf build/", true, GuardFileWrite, "write_file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, result := Classify(tt.command)
+			class, result := Classify(tt.command)
+			if class != tt.wantClass {
+				t.Errorf("Classify(%q) class = %v, want %v", tt.command, class, tt.wantClass)
+			}
 			if tt.blocked && result == "" {
 				t.Errorf("expected blocked: %s", tt.command)
 			}

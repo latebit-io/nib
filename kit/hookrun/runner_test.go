@@ -2,7 +2,10 @@ package hookrun
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -106,6 +109,29 @@ func TestRun_TimeoutKillsBackgroundChild(t *testing.T) {
 	if d := time.Since(start); d > 3*time.Second {
 		t.Fatalf("Run took %v; background child defeated the timeout", d)
 	}
+}
+
+// TestRun_CleanExitReapsBackgroundChild: a hook that exits 0 after
+// backgrounding a child holding stdout returns Proceed (ErrWaitDelay is
+// not a failure) AND the child must not outlive Run.
+func TestRun_CleanExitReapsBackgroundChild(t *testing.T) {
+	t.Parallel()
+	res := Runner{}.Run(context.Background(), cmdHook(`sleep 30 & echo $!`), Input{})
+	if res.Decision != Proceed || res.Err != nil || res.ExitCode != 0 {
+		t.Fatalf("clean exit with lingering child should Proceed, got %+v", res)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(res.Output))
+	if err != nil {
+		t.Fatalf("hook stdout should be the child pid, got %q: %v", res.Output, err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("background child %d still alive after Run returned", pid)
 }
 
 func TestCapBuffer(t *testing.T) {

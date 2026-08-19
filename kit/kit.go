@@ -105,10 +105,10 @@ type Config struct {
 	// and drive runs through [Agent.PromptWithMessages] instead.
 	SystemPrompt string
 
-	// Toolset is the merged plug-in bundle: tools, hooks, and slash
-	// commands. Compose with [Merge]: each plug-in package exposes a
-	// Plugins() [Toolset] function; the composition root merges them
-	// in priority order. Tools registered earlier in the merged
+	// Toolset is the bundle of tools, hooks, and slash commands the
+	// composition root selected. Build it as a [Toolset] literal (see the
+	// package doc); [Merge] combines several bundles in priority order
+	// when a root assembles more than one. Tools earlier in the merged
 	// [Toolset.Tools] slice win on name collision (first-wins; later
 	// duplicates are logged and dropped at [New] time). Hooks chain
 	// across the merge per each field's documented semantics.

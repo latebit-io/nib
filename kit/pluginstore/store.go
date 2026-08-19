@@ -467,16 +467,31 @@ var idSanitizer = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 // namespaced "<marketplace>__<name>" so two marketplaces can ship a
 // plugin of the same name without colliding on disk.
 //
-// Returns an error when the sanitized key is empty (a name made only of
-// separator characters), which would otherwise map to the store root.
+// Each component is sanitized and validated on its own: a name (or
+// marketplace) made only of separator characters would otherwise vanish
+// from the joined key and collide with another plugin's directory
+// ("mp" + "---" must not become "mp").
 func deriveID(marketplace, name string) (string, error) {
-	raw := name
-	if marketplace != "" {
-		raw = marketplace + "__" + name
+	nameID, err := sanitizeIDComponent("name", name)
+	if err != nil {
+		return "", err
 	}
+	if marketplace == "" {
+		return nameID, nil
+	}
+	mktID, err := sanitizeIDComponent("marketplace", marketplace)
+	if err != nil {
+		return "", err
+	}
+	return mktID + "__" + nameID, nil
+}
+
+// sanitizeIDComponent maps one id component to filesystem-safe form and
+// rejects it when nothing survives.
+func sanitizeIDComponent(kind, raw string) (string, error) {
 	id := strings.Trim(idSanitizer.ReplaceAllString(raw, "-"), "-._")
 	if id == "" {
-		return "", fmt.Errorf("pluginstore: name %q yields an empty store id", raw)
+		return "", fmt.Errorf("pluginstore: %s %q yields an empty store id", kind, raw)
 	}
 	return id, nil
 }

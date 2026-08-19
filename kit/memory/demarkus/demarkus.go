@@ -13,6 +13,7 @@ package demarkus
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
@@ -32,20 +33,22 @@ type Result struct {
 	// for diagnostics, integration tests, and capture sinks.
 	Port int
 
-	close func() error
+	close     func() error
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Close stops the demarkus-server and the MCP client subprocess. Safe
-// to call more than once (later calls are no-ops). Returns the
-// [server.Manager.Stop] error — the joined failures of any teardown
-// step — when the server does not shut down cleanly.
+// to call more than once, concurrently included: teardown runs once and
+// every call returns its error. That error is the [server.Manager.Stop]
+// error — the joined failures of any teardown step — when the server
+// does not shut down cleanly.
 func (r *Result) Close() error {
 	if r == nil || r.close == nil {
 		return nil
 	}
-	closeFn := r.close
-	r.close = nil
-	return closeFn()
+	r.closeOnce.Do(func() { r.closeErr = r.close() })
+	return r.closeErr
 }
 
 // Open boots a demarkus-server for projectRoot and returns a connected

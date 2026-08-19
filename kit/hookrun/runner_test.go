@@ -2,10 +2,9 @@ package hookrun
 
 import (
 	"context"
-	"errors"
-	"strconv"
+	"os"
+	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -113,25 +112,27 @@ func TestRun_TimeoutKillsBackgroundChild(t *testing.T) {
 
 // TestRun_CleanExitReapsBackgroundChild: a hook that exits 0 after
 // backgrounding a child holding stdout returns Proceed (ErrWaitDelay is
-// not a failure) AND the child must not outlive Run.
+// not a failure) AND the child must not outlive Run. The descendant
+// would touch a sentinel after 2s; if reaping worked it never does.
+// (A pid probe can't tell a zombie from a live process, so the sentinel
+// is the observable.) The dir travels via Env, not the shell string.
 func TestRun_CleanExitReapsBackgroundChild(t *testing.T) {
 	t.Parallel()
-	res := Runner{}.Run(context.Background(), cmdHook(`sleep 30 & echo $!`), Input{})
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "lingered.txt")
+	h := cmdHook(`( sleep 2; touch "$NIB_HOOK_TEST_DIR/lingered.txt" ) & printf done`)
+	h.Env = map[string]string{"NIB_HOOK_TEST_DIR": dir}
+	res := Runner{}.Run(context.Background(), h, Input{})
 	if res.Decision != Proceed || res.Err != nil || res.ExitCode != 0 {
 		t.Fatalf("clean exit with lingering child should Proceed, got %+v", res)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(res.Output))
-	if err != nil {
-		t.Fatalf("hook stdout should be the child pid, got %q: %v", res.Output, err)
+	// Long enough for the would-be sleep to elapse + filesystem flush.
+	time.Sleep(3 * time.Second)
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatalf("sentinel %q exists: background child survived Run", sentinel)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat sentinel: %v", err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("background child %d still alive after Run returned", pid)
 }
 
 func TestCapBuffer(t *testing.T) {

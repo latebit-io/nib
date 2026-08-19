@@ -114,6 +114,7 @@ func TestDeriveID(t *testing.T) {
 		got, err := deriveID(tc.mkt, tc.name)
 		if err != nil {
 			t.Errorf("deriveID(%q,%q): %v", tc.mkt, tc.name, err)
+			continue
 		}
 		if got != tc.want {
 			t.Errorf("deriveID(%q,%q) = %q, want %q", tc.mkt, tc.name, got, tc.want)
@@ -135,5 +136,19 @@ func TestDeriveID(t *testing.T) {
 	}
 	if id, err := deriveID("---", "foo"); err == nil {
 		t.Errorf("deriveID(---, foo) = %q, want error", id)
+	}
+	// "__" is the reserved namespace separator: a component containing
+	// it could alias a marketplace-qualified id ("mp__foo" direct vs
+	// "mp"/"foo") or let two pairs meet on one id ("a"/"b__c" vs
+	// "a__b"/"c").
+	for _, bad := range [][2]string{{"", "mp__foo"}, {"a", "b__c"}, {"a__b", "c"}} {
+		if id, err := deriveID(bad[0], bad[1]); err == nil {
+			t.Errorf("deriveID(%q,%q) = %q, want reserved-separator error", bad[0], bad[1], id)
+		}
+	}
+	// Single underscores inside a component stay legal and unambiguous:
+	// Trim strips edge underscores, so the joined id has one "__".
+	if got, err := deriveID("a_b", "c_d"); err != nil || got != "a_b__c_d" {
+		t.Errorf("deriveID(a_b, c_d) = %q, %v; want a_b__c_d", got, err)
 	}
 }

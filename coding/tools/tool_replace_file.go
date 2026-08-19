@@ -87,6 +87,9 @@ type replaceArgs struct {
 // search/replace pair) sees a uniformly-shaped edit and produces a
 // meaningful "every-line changed" diff overlay for review.
 func (t *ReplaceFileTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
+	if len(call.Function.Arguments) > maxToolArgsBytes {
+		return errorResult(fmt.Sprintf("Error: arguments too large (%d bytes, max %d).", len(call.Function.Arguments), maxToolArgsBytes))
+	}
 	var args replaceArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))

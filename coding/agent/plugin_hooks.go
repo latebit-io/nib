@@ -20,9 +20,11 @@ import (
 // "no plugin hooks": the gate methods below short-circuit to a proceed,
 // so the agent never has to nil-check at the call sites.
 //
-// All emit points are wired: PreToolUse / PostToolUse through the gate
-// methods below, and the prompt, run, compaction, and subagent lifecycle
-// events through their respective helpers.
+// All agent-side emit points are wired: PreToolUse / PostToolUse through
+// the gate methods below, and the prompt, run, and compaction lifecycle
+// events through their respective helpers. SubagentStop is a parent
+// session event fired by the spawner (wired by the binary), so it is
+// deliberately not part of this interface.
 type HookDispatcher interface {
 	// PreToolUse returns a deny to block a pending tool call.
 	PreToolUse(ctx context.Context, toolName, argsJSON string) pluginhooks.Decision
@@ -37,8 +39,6 @@ type HookDispatcher interface {
 	Stop(ctx context.Context)
 	// PreCompact fires before conversation history is compacted.
 	PreCompact(ctx context.Context)
-	// SubagentStop fires when a spawned subagent finishes.
-	SubagentStop(ctx context.Context)
 }
 
 // pluginPreToolUseGate runs the trusted plugins' PreToolUse hooks as the

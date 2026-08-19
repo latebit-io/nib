@@ -10,10 +10,10 @@ import (
 
 // Edit-approval flow for Session.
 //
-// The engine enforces a three-step review contract:
+// The session enforces a three-step review contract:
 //
 //  1. ReviewEdit       — frontend computes and presents the diff to the developer.
-//  2. PrepareApproval  — engine validates the (possibly modified) replacement
+//  2. PrepareApproval  — session validates the (possibly modified) replacement
 //     and returns an ApprovalPlan the frontend applies to its buffer.
 //  3. CompleteApproval — frontend signals the apply landed; the agent advances.
 //     AbortApproval is the counterpart when the apply fails.
@@ -230,6 +230,18 @@ func (s *Session) AbortApproval() {
 	s.agent.Reject()
 }
 
+// clearApprovalState resets every approval-flow field (edit and command)
+// so a run boundary — done, error, cancel — never leaves stagedEditFile /
+// pendingApproval latched, which would lock SwitchTo/ReloadFile/DeleteFile.
+func (s *Session) clearApprovalState() {
+	s.pendingEdit = nil
+	s.pendingCommand = nil
+	s.pendingProposedReplace = ""
+	s.pendingApproval = nil
+	s.stagedEditFile = ""
+	s.editReviewed = false
+}
+
 // RejectEdit rejects the pending edit and signals the agent. The
 // source string is captured into the session journal so post-mortem
 // analysis can distinguish a developer-driven reject (Esc keypress)
@@ -238,7 +250,7 @@ func (s *Session) AbortApproval() {
 // caller, which made auto-reject silent failures appear as if the
 // developer had intervened — a meaningful UX-debugging hazard.
 //
-// Callers in the engine and TUI:
+// Callers in the session and TUI:
 //   - ActionAgentReject (Esc keypress)              → source "user"
 //   - EditProposed search-mismatch path             → source "search-mismatch"
 //   - PrepareApproval "file not open"               → source "file-not-open"

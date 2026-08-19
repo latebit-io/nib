@@ -1,10 +1,14 @@
 package nudges
 
-import "maps"
+import (
+	"maps"
+
+	"github.com/latebit-io/nib/coding/tools"
+)
 
 // planningBlocklistDefaults contains the tool names disabled during
-// planning mode. These are write-side tools that modify code or run
-// commands.
+// planning mode: every mutating tool ([tools.MutatingToolNames]) plus
+// update_task, which is not mutating but drives execution.
 //
 // smoke_run is here because it executes the project's smoke command
 // (typically `make smoke` / `lua main.lua` / etc.) via `sh -c`. That
@@ -19,14 +23,11 @@ import "maps"
 // planning enforcement globally for every Agent constructed after.
 // Callers go through [DefaultPlanningBlocklist] which returns a fresh
 // clone they can mutate freely.
-var planningBlocklistDefaults = map[string]bool{
-	"edit_file":    true,
-	"write_file":   true,
-	"replace_file": true,
-	"bash":         true,
-	"smoke_run":    true,
-	"update_task":  true,
-}
+var planningBlocklistDefaults = func() map[string]bool {
+	m := tools.MutatingToolNames()
+	m["update_task"] = true
+	return m
+}()
 
 // DefaultPlanningBlocklist returns a fresh copy of the built-in
 // planning blocklist. Callers may mutate the returned map (e.g. to

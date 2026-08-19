@@ -34,7 +34,6 @@ type fakeHookDispatcher struct {
 	sessionStarts int
 	stops         int
 	preCompacts   int
-	subagentStops int
 }
 
 func (f *fakeHookDispatcher) PreToolUse(_ context.Context, tool, args string) pluginhooks.Decision {
@@ -67,7 +66,6 @@ func (f *fakeHookDispatcher) UserPromptSubmit(_ context.Context, prompt string) 
 func (f *fakeHookDispatcher) SessionStart(context.Context) { f.sessionStarts++ }
 func (f *fakeHookDispatcher) Stop(context.Context)         { f.stops++ }
 func (f *fakeHookDispatcher) PreCompact(context.Context)   { f.preCompacts++ }
-func (f *fakeHookDispatcher) SubagentStop(context.Context) { f.subagentStops++ }
 
 func TestPluginPreToolUseGate_DenyBlocks(t *testing.T) {
 	fake := &fakeHookDispatcher{preDeny: true, preReason: "plugin says no"}

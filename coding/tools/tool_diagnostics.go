@@ -52,7 +52,7 @@ func (t *DiagnosticsTool) Execute(_ context.Context, call llm.ToolCall) ToolResu
 	}
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		slog.Debug("diagnostics: bad arguments", "err", err)
-		return textResult("Error: invalid arguments")
+		return errorResult("Error: invalid arguments")
 	}
 
 	path := args.Path

@@ -51,10 +51,10 @@ type symbolArgs struct {
 func (t *WorkspaceSymbolsTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	var args symbolArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Query == "" {
-		return textResult("Error: query is required")
+		return errorResult("Error: query is required")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, lspTimeout)
@@ -62,7 +62,7 @@ func (t *WorkspaceSymbolsTool) Execute(ctx context.Context, call llm.ToolCall) T
 
 	symbols, err := t.provider.WorkspaceSymbols(ctx, args.Query)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 	if len(symbols) == 0 {
 		return textResult("No symbols found.")

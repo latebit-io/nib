@@ -47,6 +47,7 @@ linters:
             - "**/coding/command/*.go"
             - "**/coding/editflow/*.go"
             - "**/coding/event/*.go"
+            - "**/coding/fsroot/*.go"
             - "**/coding/lint/*.go"
             - "**/coding/memory/*.go"
             - "**/coding/nudges/*.go"
@@ -59,6 +60,8 @@ linters:
           deny:
             - pkg: "github.com/latebit-io/nib/coding/agent"
               desc: "leaf subpackage must not import agent — agent composes leaves, not the reverse"
+            - pkg: "github.com/latebit-io/nib/agent"
+              desc: "leaf subpackage must not import the core agent loop — use the kit ports (kit.Tool, kit.ToolResult)"
             - pkg: "github.com/latebit-io/nib/coding/subagent"
               desc: "leaf subpackage must not import subagent"
             - pkg: "github.com/latebit-io/nib/coding/session"

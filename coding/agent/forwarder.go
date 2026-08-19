@@ -9,8 +9,8 @@ import (
 // Kit-event forwarder.
 //
 // [Agent.forwardKitEvents] drains the kit agent's translated event
-// stream from [Agent.kitEvents] and re-emits each event to the
-// frontend channel. Two events get coding-specific treatment:
+// stream from [Agent.kitSub] and re-publishes each event on the agent's
+// bus. Two events get coding-specific treatment:
 //
 //   - [event.AgentTurnUsage] is filtered out. [providerProxy] emits
 //     the authoritative AgentTurnUsage (with per-turn estimates and
@@ -37,11 +37,11 @@ import (
 
 // forwardKitEvents drains [Agent.kitSub]'s inbox and forwards each
 // event (after coding-specific augmentation or filtering) to the
-// frontend events channel via [Agent.send].
+// agent's bus via [Agent.send].
 //
 // Closes [Agent.forwardDone] on return so [Agent.Close] can block on
 // it after kit.Close closes the subscription inbox — providing
-// callers a synchronous "no further writes to the frontend channel"
+// callers a synchronous "no further publishes to the bus"
 // guarantee symmetric to kit.Agent.Close's translatorDone wait.
 func (a *Agent) forwardKitEvents() {
 	defer close(a.forwardDone)

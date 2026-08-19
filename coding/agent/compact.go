@@ -10,6 +10,11 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 )
 
+// sender is the agent's event emitter shape. The compaction and
+// truncation helpers surface status events through it. A func type so
+// callers can pass a method value (`a.send`) without an adapter.
+type sender func(event.Event)
+
 // ErrNothingToCompact is returned by [Agent.Compact] when the saved
 // transcript is empty or compaction would not change it (no prunable
 // tool results in the older turns). The caller should treat this as a

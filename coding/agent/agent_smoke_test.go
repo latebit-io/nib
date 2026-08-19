@@ -27,6 +27,7 @@ func TestAgent_SmokeRunUnregisteredWhenDisabled(t *testing.T) {
 			Source:  "test",
 			Timeout: 5 * time.Second,
 		}})
+	t.Cleanup(ag.Close)
 
 	if _, ok := ag.tools["smoke_run"]; ok {
 		t.Errorf("smoke_run registered with %s set; want absent", brand.EnvKeySmokeDisabled)
@@ -52,6 +53,7 @@ func TestAgent_SmokeRunRegisteredWhenEnabled(t *testing.T) {
 			Source:  "test",
 			Timeout: 5 * time.Second,
 		}})
+	t.Cleanup(ag.Close)
 
 	if _, ok := ag.tools["smoke_run"]; !ok {
 		t.Errorf("smoke_run not registered without kill-switch; want present")

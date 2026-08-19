@@ -84,6 +84,7 @@ func TestAgent_RequestInputUnregisteredAcrossModes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ag := New(&multiTurnProvider{}, stubWorkspace{},
 				&NewOptions{Interaction: tc.mode})
+			t.Cleanup(ag.Close)
 
 			if _, ok := ag.tools["request_input"]; ok {
 				t.Errorf("request_input registered in %s mode; want absent", tc.name)
@@ -133,6 +134,7 @@ func TestAgent_TruncatedOutput_EscalatesMaxTokens(t *testing.T) {
 	provider := &escalatingProvider{multiTurnProvider: inner}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -177,6 +179,7 @@ func TestAgent_TruncatedOutput_AbortsAfterRetryLimit(t *testing.T) {
 	provider := &multiTurnProvider{turns: turns}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -245,6 +248,7 @@ func TestAgent_StreamClosedBeforeDone_SurfacesError(t *testing.T) {
 	}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -300,6 +304,7 @@ func TestAgent_TruncatedOutput_RejectsToolCalls(t *testing.T) {
 	}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -365,6 +370,7 @@ func TestAgent_TruncationRetries_ResetAcrossRuns(t *testing.T) {
 	provider := &escalatingProvider{multiTurnProvider: inner}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -420,6 +426,7 @@ func TestReply_NoActiveRunDoesNotMutateWaiting(t *testing.T) {
 	t.Parallel()
 
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	_ = subscribeForTest(t, ag)
 
 	// Pre-condition: simulate a prior session where the agent was

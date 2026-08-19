@@ -123,7 +123,7 @@ func (c *NewCommandCommand) Handle(_ context.Context, sess kitcmd.Session, args 
 	}
 	if existing, ok := c.lookup.Lookup(name); ok {
 		def := existing.Definition()
-		return fmt.Errorf("command %q is already registered (%s, %s)", name, sourceKindLabel(def.Source.Kind), def.Source.Path)
+		return fmt.Errorf("command %q is already registered (%s, %s)", name, def.Source.Kind, def.Source.Path)
 	}
 
 	// Create the directory if missing — first-time use of
@@ -158,24 +158,6 @@ func (c *NewCommandCommand) Handle(_ context.Context, sess kitcmd.Session, args 
 		target, name,
 	))
 	return nil
-}
-
-// sourceKindLabel renders a [kit/command.SourceKind] as a short
-// human-readable label for diagnostic messages. Kept local to this
-// file; if a second caller emerges, promote to kit/command.
-func sourceKindLabel(k kitcmd.SourceKind) string {
-	switch k {
-	case kitcmd.SourceProject:
-		return "project"
-	case kitcmd.SourceGlobal:
-		return "global"
-	case kitcmd.SourceMCP:
-		return "mcp"
-	case kitcmd.SourceBuiltin:
-		return "builtin"
-	default:
-		return "unknown"
-	}
 }
 
 // Compile-time check that NewCommandCommand satisfies HandlerCommand.

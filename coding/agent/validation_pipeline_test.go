@@ -47,6 +47,7 @@ func newPipelineTestAgent(t *testing.T, pipe validate.Pipeline) (*Agent, <-chan 
 		files: map[string]string{"main.go": "package main\n\nfunc main() {}\n"},
 	}
 	ag := New(stubProv{}, ws, &NewOptions{ValidationPipeline: pipe})
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 	return ag, events
 }

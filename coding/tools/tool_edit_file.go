@@ -170,10 +170,6 @@ func stripLineNumberPrefixes(s string) string {
 // sent back to the LLM. Prevents unbounded message sizes for large files.
 const maxContentPreview = 8 * 1024
 
-// maxDiffPreview is the max bytes of diff output included in recalibration
-// messages. Caps the SimpleDiff output to avoid blowing token budgets.
-const maxDiffPreview = 4 * 1024
-
 // TruncateForPreview returns content truncated for LLM context windows.
 // The suffix hints the LLM how to retrieve the full content.
 func TruncateForPreview(content string) string {
@@ -188,8 +184,8 @@ func TruncateWithHint(content, hint string) string {
 	return content[:maxContentPreview] + "\n\n[... truncated — " + hint + "]"
 }
 
-// maxDiffInputBytes caps the combined input size to SimpleDiff.
-// Files beyond this threshold get a placeholder instead of a line-level diff.
+// maxDiffInputBytes caps the size of a single search/replace/content
+// field so the approval pipeline never diffs pathological payloads.
 const maxDiffInputBytes = 10 * 1024 * 1024
 
 // maxToolArgsBytes caps the raw JSON payload of a single tool call's
@@ -200,106 +196,6 @@ const maxDiffInputBytes = 10 * 1024 * 1024
 // during decode. Per-field caps still apply after unmarshal — this is
 // the early bouncer.
 const maxToolArgsBytes = 32 * 1024 * 1024
-
-// SimpleDiff produces a unified-diff-like comparison between expected and actual
-// content, showing only the lines that differ. Output is capped at maxDiffPreview
-// bytes to avoid blowing token budgets on large file changes.
-func SimpleDiff(expected, actual string) string {
-	if len(expected)+len(actual) > maxDiffInputBytes {
-		return "(diff omitted: content too large)"
-	}
-	expectedLines := strings.Split(expected, "\n")
-	actualLines := strings.Split(actual, "\n")
-
-	var b diffBuilder
-	ei, ai := 0, 0
-	for ei < len(expectedLines) || ai < len(actualLines) {
-		if ei < len(expectedLines) && ai < len(actualLines) && expectedLines[ei] == actualLines[ai] {
-			ei++
-			ai++
-			continue
-		}
-		matchAhead := findMatch(expectedLines, actualLines, ei, ai)
-		if matchAhead.found {
-			ei, ai = b.writeHunk(expectedLines, actualLines, ei, matchAhead.ei, ai, matchAhead.ai)
-		} else {
-			ei, ai = b.writeHunk(expectedLines, actualLines, ei, len(expectedLines), ai, len(actualLines))
-		}
-		if b.truncated {
-			break
-		}
-	}
-
-	result := b.buf.String()
-	if b.truncated && result == "" {
-		return "[... diff truncated]"
-	}
-	if result == "" {
-		return "(whitespace-only changes)"
-	}
-	if b.truncated {
-		result += "\n[... diff truncated]"
-	}
-	return result
-}
-
-// diffBuilder accumulates diff lines with a size cap.
-type diffBuilder struct {
-	buf       strings.Builder
-	truncated bool
-}
-
-// writeLine appends a diff line if under the cap. Returns false if truncated.
-func (d *diffBuilder) writeLine(prefix, line string) bool {
-	entry := prefix + " " + line + "\n"
-	if d.buf.Len()+len(entry) > maxDiffPreview {
-		d.truncated = true
-		return false
-	}
-	d.buf.WriteString(entry)
-	return true
-}
-
-// writeHunk writes removed lines [ei:endE) and added lines [ai:endA).
-// Returns the new ei, ai positions.
-func (d *diffBuilder) writeHunk(expected, actual []string, ei, endE, ai, endA int) (int, int) {
-	for ; ei < endE; ei++ {
-		if !d.writeLine("-", expected[ei]) {
-			return ei, ai
-		}
-	}
-	for ; ai < endA; ai++ {
-		if !d.writeLine("+", actual[ai]) {
-			return ei, ai
-		}
-	}
-	return ei, ai
-}
-
-type matchResult struct {
-	found  bool
-	ei, ai int
-}
-
-// findMatch scans ahead to find the next line where expected and actual re-sync.
-// Limited lookahead to avoid O(n²) on large files.
-func findMatch(expected, actual []string, ei, ai int) matchResult {
-	const maxLookahead = 20
-	limitE := min(ei+maxLookahead, len(expected))
-	limitA := min(ai+maxLookahead, len(actual))
-
-	for de := 0; de < limitE-ei; de++ {
-		for da := 0; da < limitA-ai; da++ {
-			if de == 0 && da == 0 {
-				continue // skip current position
-			}
-			if expected[ei+de] == actual[ai+da] {
-				return matchResult{found: true, ei: ei + de, ai: ai + da}
-			}
-		}
-	}
-	return matchResult{}
-}
 
 // EditFileTool lets the LLM propose search-and-replace edits to files.
 // It validates the search text and submits the proposal through

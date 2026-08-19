@@ -3,7 +3,7 @@ package headless
 import (
 	"encoding/json"
 	"io"
-	"sort"
+	"slices"
 )
 
 // Result captures the outcome of a headless agent run.
@@ -23,8 +23,8 @@ type Result struct {
 // WriteJSON encodes the result as indented JSON to w.
 func (r *Result) WriteJSON(w io.Writer) error {
 	// Sort for deterministic output.
-	sort.Strings(r.FilesChanged)
-	sort.Strings(r.FilesCreated)
+	slices.Sort(r.FilesChanged)
+	slices.Sort(r.FilesCreated)
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

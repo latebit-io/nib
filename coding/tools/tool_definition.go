@@ -54,15 +54,15 @@ func (t *GoToDefinitionTool) Definition() llm.ToolDef {
 func (t *GoToDefinitionTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	var args posArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if errMsg := validatePosArgs(args); errMsg != "" {
-		return textResult(errMsg)
+		return errorResult(errMsg)
 	}
 
 	canon := t.workspace.CanonPath(args.Path)
 	if !inProject(t.workspace, canon) {
-		return textResult("Error: path is outside the project root")
+		return errorResult("Error: path is outside the project root")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, lspTimeout)
@@ -70,7 +70,7 @@ func (t *GoToDefinitionTool) Execute(ctx context.Context, call llm.ToolCall) Too
 
 	loc, err := t.provider.Definition(ctx, canon, args.Line-1, args.Col)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 	if loc.Path == "" {
 		return textResult("No definition found.")

@@ -27,10 +27,11 @@ func GroupPathsByDir(paths []string) (files, dirs []string, byDir map[string][]s
 	seenDir := make(map[string]bool)
 	byDir = make(map[string][]string)
 	for _, p := range paths {
-		if !seenFile[p] {
-			seenFile[p] = true
-			files = append(files, p)
+		if seenFile[p] {
+			continue
 		}
+		seenFile[p] = true
+		files = append(files, p)
 		dir := filepath.Dir(p)
 		if !seenDir[dir] {
 			seenDir[dir] = true

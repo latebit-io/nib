@@ -143,3 +143,20 @@ func decodeLastLog(t *testing.T, buf *bytes.Buffer) map[string]any {
 	}
 	return got
 }
+
+// TestProviderProxy_RecordUsage_CountsTurnWithoutUsage: a provider that
+// omits Usage on Done must still advance the turn counter — MaxTurns and
+// per-turn labels depend on it.
+func TestProviderProxy_RecordUsage_CountsTurnWithoutUsage(t *testing.T) {
+	pp := &providerProxy{}
+	if got := pp.recordUsage(nil); got != 1 {
+		t.Fatalf("recordUsage(nil) turn = %d, want 1", got)
+	}
+	if got := pp.recordUsage(&llm.Usage{PromptTokens: 5}); got != 2 {
+		t.Fatalf("second recordUsage turn = %d, want 2", got)
+	}
+	snap := pp.Snapshot()
+	if snap.Turns != 2 || snap.TotalPromptTokens != 5 {
+		t.Fatalf("snapshot = %+v, want Turns=2 PromptTokens=5", snap)
+	}
+}

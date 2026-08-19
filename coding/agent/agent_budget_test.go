@@ -47,6 +47,7 @@ func TestCheckTaskBudget_Disabled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ag := New(&multiTurnProvider{}, stubWorkspace{}, tc.opts)
+			t.Cleanup(ag.Close)
 			_ = subscribeForTest(t, ag)
 			tc.mutate(ag)
 			if msg := ag.checkTaskBudget(); msg != "" {
@@ -64,6 +65,7 @@ func TestCheckTaskBudget_FiresAndLatches(t *testing.T) {
 	t.Parallel()
 	ag := New(&multiTurnProvider{}, stubWorkspace{},
 		&NewOptions{TaskTokenBudget: 1000})
+	t.Cleanup(ag.Close)
 	_ = subscribeForTest(t, ag)
 
 	ag.providerProxy.recordUsage(&llm.Usage{PromptTokens: 800, CompletionTokens: 300}) // 1100 > 1000
@@ -127,6 +129,7 @@ func TestAgent_TokenBudget_AbortsRun(t *testing.T) {
 	ag := New(provider, stubWorkspace{}, &NewOptions{
 		TaskTokenBudget: 500,
 	})
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -236,6 +239,7 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 	ag := New(provider, stubWorkspace{}, &NewOptions{
 		TaskTokenBudget: 500,
 	})
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -266,6 +270,7 @@ func TestAgent_TokenBudget_AbortsBetweenInnerStreams(t *testing.T) {
 func TestAgent_TokenBudget_DisabledByDefault(t *testing.T) {
 	t.Parallel()
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	if ag.taskTokenBudget != 0 {
 		t.Errorf("taskTokenBudget = %d, want 0 (disabled by default)",
 			ag.taskTokenBudget)
@@ -278,6 +283,7 @@ func TestAgent_TokenBudget_RecommendedOptIn(t *testing.T) {
 	t.Parallel()
 	ag := New(&multiTurnProvider{}, stubWorkspace{},
 		&NewOptions{TaskTokenBudget: budget.RecommendedTaskTokens})
+	t.Cleanup(ag.Close)
 	if ag.taskTokenBudget != budget.RecommendedTaskTokens {
 		t.Errorf("taskTokenBudget = %d, want %d",
 			ag.taskTokenBudget, budget.RecommendedTaskTokens)
@@ -292,6 +298,7 @@ func TestAgent_TokenBudget_NegativeMeansUnlimited(t *testing.T) {
 	t.Parallel()
 	ag := New(&multiTurnProvider{}, stubWorkspace{},
 		&NewOptions{TaskTokenBudget: -1})
+	t.Cleanup(ag.Close)
 	if ag.taskTokenBudget != 0 {
 		t.Errorf("taskTokenBudget = %d, want 0 (unlimited)", ag.taskTokenBudget)
 	}

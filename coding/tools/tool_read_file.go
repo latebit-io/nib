@@ -65,18 +65,18 @@ type readArgs struct {
 func (t *ReadFileTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args readArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Path == "" {
-		return textResult("Error: path is required")
+		return errorResult("Error: path is required")
 	}
 	if args.Offset < 0 || args.Limit < 0 {
-		return textResult("Error: offset and limit must be non-negative")
+		return errorResult("Error: offset and limit must be non-negative")
 	}
 
 	content, err := t.loadContent(args.Path)
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 
 	if args.Offset > 0 || args.Limit > 0 {
@@ -126,10 +126,7 @@ func sliceLines(content, path string, offset, limit int) string {
 
 	endIdx := total
 	if limit > 0 {
-		endIdx = startIdx + limit
-		if endIdx > total {
-			endIdx = total
-		}
+		endIdx = min(startIdx+limit, total)
 	}
 
 	var b strings.Builder

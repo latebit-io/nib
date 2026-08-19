@@ -46,6 +46,7 @@ func TestAgent_NarrativeGate_FiresWhenTreeEmptyAndOutstandingLanguage(t *testing
 	}
 
 	ag := New(provider, taskTreeWorkspace{next: ""}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -86,6 +87,7 @@ func TestAgent_NarrativeGate_DoesNotFireWhenTreeHasPendingWork(t *testing.T) {
 	}
 
 	ag := New(provider, taskTreeWorkspace{next: "Implement collisions"}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -130,6 +132,7 @@ func TestAgent_NarrativeGate_FiresOncePerDeveloperTurn(t *testing.T) {
 	}
 
 	ag := New(provider, taskTreeWorkspace{next: ""}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -167,6 +170,7 @@ func TestAgent_AgentWaiting_FinishedWhenTreeEmpty(t *testing.T) {
 	}
 
 	ag := New(provider, taskTreeWorkspace{next: ""}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -201,6 +205,7 @@ func TestAgent_AgentWaiting_NotFinishedWhenTreeHasPendingWork(t *testing.T) {
 	}
 
 	ag := New(provider, taskTreeWorkspace{next: "Implement HUD"}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -237,6 +242,7 @@ func TestAgent_NarrativeGate_UnloadedTree_NoFire(t *testing.T) {
 	}
 
 	ag := New(provider, taskTreeWorkspace{unloaded: true}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -279,6 +285,7 @@ func TestAgent_NarrativeGate_ActiveTaskInProgress_NoFire(t *testing.T) {
 	}
 
 	ag := New(provider, taskTreeWorkspace{active: "Implement collisions"}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -327,6 +334,7 @@ func TestAgent_StreamError_EndsRunUnsuccessfully(t *testing.T) {
 	}
 
 	ag := New(provider, taskTreeWorkspace{next: ""}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -385,6 +393,7 @@ func TestAgent_NarrativeGate_NoTaskReader_NoFire(t *testing.T) {
 
 	// stubWorkspace is NOT a TaskReader.
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 
 	ctx, cancel := context.WithCancel(context.Background())

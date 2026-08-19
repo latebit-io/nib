@@ -164,6 +164,7 @@ func TestRunWithMode_ConcurrentStartsSerialize(t *testing.T) {
 	}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	sub, err := ag.Subscribe(SubscribeOptions{BufferSize: 256})
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
@@ -284,6 +285,7 @@ func TestRunWithMode_FenceIsolatesSessionUsageFromPrevRun(t *testing.T) {
 	}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	sub, err := ag.Subscribe(SubscribeOptions{BufferSize: 64})
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
@@ -348,6 +350,7 @@ func TestRunWithMode_FenceWaitsForBackedUpForwarder(t *testing.T) {
 	// Small subscriber inbox — backpressure builds when the consumer
 	// pauses, exercising the fence on the consumer-slow path.
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	sub, err := ag.Subscribe(SubscribeOptions{BufferSize: 4})
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)

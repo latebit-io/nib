@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"strings"
+
 	upagent "github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/coding/tools"
 )
@@ -22,6 +24,14 @@ type ToolResult = upagent.ToolResult
 // each new run so tools that carry per-run state (silent retry
 // counters, last-edit memos) can clear it.
 type Resettable = tools.Resettable
+
+// resetTool calls Reset on t when it implements [Resettable]. Wrappers
+// forward through this so the reset reaches the innermost tool.
+func resetTool(t Tool) {
+	if r, ok := t.(Resettable); ok {
+		r.Reset()
+	}
+}
 
 // FileReader aliases the workspace read surface tools depend on.
 type FileReader = tools.FileReader
@@ -66,7 +76,9 @@ func NewFileCache() *FileCache { return tools.NewFileCache() }
 func (a *Agent) Tools() []Tool {
 	out := make([]Tool, 0, len(a.toolDefs))
 	for _, def := range a.toolDefs {
-		if t, ok := a.tools[def.Function.Name]; ok {
+		// a.tools is keyed by lower-cased name (registerTools); MCP/skill
+		// tools may advertise mixed case.
+		if t, ok := a.tools[strings.ToLower(def.Function.Name)]; ok {
 			out = append(out, t)
 		}
 	}

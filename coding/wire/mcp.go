@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -101,7 +103,10 @@ func connectMCPServers(configs map[string]mcpServerConfig) MCPResult {
 		return MCPResult{Cleanup: cleanup}
 	}
 
-	for name, cfg := range configs {
+	// Sorted so tool registration order — and thus the cached prompt
+	// prefix — is deterministic across runs.
+	for _, name := range slices.Sorted(maps.Keys(configs)) {
+		cfg := configs[name]
 		// Split command into program + args if needed.
 		cmdParts := strings.Fields(cfg.Command)
 		if len(cmdParts) == 0 {

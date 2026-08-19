@@ -30,11 +30,22 @@ func ForwardEvents(ctx context.Context, ag *agent.Agent, events chan<- event.Eve
 	}
 	go func() {
 		defer sub.Close()
-		for ev := range sub.Events() {
+		inbox := sub.Events()
+		for {
+			// Select on ctx here too: a range over inbox would park past
+			// cancellation until the next event arrives (or never).
 			select {
-			case events <- ev:
 			case <-ctx.Done():
 				return
+			case ev, ok := <-inbox:
+				if !ok {
+					return
+				}
+				select {
+				case events <- ev:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()

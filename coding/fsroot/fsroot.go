@@ -9,11 +9,20 @@ package fsroot
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// MaxFileSize bounds a single [Root.ReadFile]/[Root.ReadFileRaw]. File
+// content flows into LLM context and workspace caches, so an unbounded
+// read is both a memory and a prompt hazard. Matches the read_file tool cap.
+const MaxFileSize = 10 << 20 // 10 MiB
+
+// ErrFileTooLarge is returned (wrapped) when a file exceeds [MaxFileSize].
+var ErrFileTooLarge = errors.New("file too large")
 
 // Root is a cleaned absolute project root. The zero value is unusable;
 // construct with [New].
@@ -135,15 +144,32 @@ func (r Root) ReadFile(path string) (string, error) {
 }
 
 // ReadFileRaw returns the raw bytes and the validated absolute path.
+// Files larger than [MaxFileSize] fail with [ErrFileTooLarge].
 func (r Root) ReadFileRaw(path string) ([]byte, string, error) {
 	root, abs, rel, err := r.open(path)
 	if err != nil {
 		return nil, "", err
 	}
 	defer closeRoot(root)
-	data, err := root.ReadFile(rel)
+	f, err := root.Open(rel)
 	if err != nil {
 		return nil, "", fmt.Errorf("read %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }() // read-only handle; nothing to flush
+	st, err := f.Stat()
+	if err != nil {
+		return nil, "", fmt.Errorf("read %s: %w", path, err)
+	}
+	if st.Size() > MaxFileSize {
+		return nil, "", fmt.Errorf("read %s: %w (%d bytes, max %d)", path, ErrFileTooLarge, st.Size(), MaxFileSize)
+	}
+	// Re-check after the read: the file may grow between Stat and ReadAll.
+	data, err := io.ReadAll(io.LimitReader(f, MaxFileSize+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("read %s: %w", path, err)
+	}
+	if len(data) > MaxFileSize {
+		return nil, "", fmt.Errorf("read %s: %w (max %d bytes)", path, ErrFileTooLarge, MaxFileSize)
 	}
 	return data, abs, nil
 }

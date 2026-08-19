@@ -1,6 +1,7 @@
 package fsroot
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,18 +144,45 @@ func TestResolve_FilesystemRoot(t *testing.T) {
 // through a symlink (macOS temp dirs), a caller passing the resolved
 // real path still addresses the same file.
 func TestIO_RealPathThroughSymlinkedRoot(t *testing.T) {
-	r, _ := setup(t)
-	realRoot, err := filepath.EvalSymlinks(r.Dir())
-	if err != nil {
+	parent := t.TempDir()
+	realRoot := filepath.Join(parent, "real")
+	linkRoot := filepath.Join(parent, "link")
+	if err := os.Mkdir(realRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if realRoot == r.Dir() {
-		t.Skip("temp root is not behind a symlink")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
 	}
+	r := New(linkRoot)
 	if _, err := r.WriteFile(filepath.Join(realRoot, "real.go"), "package real\n"); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := r.ReadFile("real.go"); err != nil || got != "package real" {
 		t.Fatalf("ReadFile = %q, %v", got, err)
+	}
+}
+
+// TestReadFile_TooLarge: reads are bounded by MaxFileSize so a huge
+// workspace file cannot balloon memory or the prompt.
+func TestReadFile_TooLarge(t *testing.T) {
+	r, _ := setup(t)
+	big := filepath.Join(r.Dir(), "big.bin")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sparse file: cheap to create, Stat reports the full size.
+	if err := f.Truncate(MaxFileSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ReadFile("big.bin"); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("ReadFile(big) = %v, want ErrFileTooLarge", err)
+	}
+	mustWrite(t, filepath.Join(r.Dir(), "small.txt"), "ok\n")
+	if got, err := r.ReadFile("small.txt"); err != nil || got != "ok" {
+		t.Fatalf("ReadFile(small) = %q, %v", got, err)
 	}
 }

@@ -95,6 +95,14 @@ func (s Source) Validate() error {
 	default:
 		return fmt.Errorf("pluginstore: unknown source type %q", s.Type)
 	}
+	// A leading dash would be parsed as a git option even behind "--"
+	// for some subcommands; reject up front rather than trust argv order.
+	if strings.HasPrefix(s.URL, "-") {
+		return fmt.Errorf("pluginstore: source url %q must not start with '-'", s.URL)
+	}
+	if strings.HasPrefix(s.Ref, "-") {
+		return fmt.Errorf("pluginstore: source ref %q must not start with '-'", s.Ref)
+	}
 	return nil
 }
 

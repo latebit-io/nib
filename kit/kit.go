@@ -5,14 +5,15 @@
 // loop-lifecycle events into the consumer-facing
 // [github.com/latebit-io/nib/kit/event] vocabulary.
 //
-// The intended consumer pattern: each plug-in package exposes a
-// Plugins() [Toolset] function; the composition root merges them.
-// Events flow through a fan-out bus — register a [Subscription] via
-// [Agent.Subscribe] to observe them.
+// The consumer pattern: the composition root builds a [Toolset]
+// literal from the tools, hooks and commands it wants (see
+// cmd/nibster and coding/agent) — [Merge] combines several bundles
+// when a root assembles more than one. Events flow through a fan-out
+// bus — register a [Subscription] via [Agent.Subscribe] to observe them.
 //
 //	a, err := kit.New(kit.Config{
 //	    Provider: provider,
-//	    Toolset:  kit.Merge(builtin.Plugins(), coding.Plugins(opts)),
+//	    Toolset:  kit.Toolset{Tools: tools, Hooks: hooks},
 //	})
 //	if err != nil { ... }
 //	sub, err := a.Subscribe(kit.SubscribeOptions{})
@@ -104,10 +105,10 @@ type Config struct {
 	// and drive runs through [Agent.PromptWithMessages] instead.
 	SystemPrompt string
 
-	// Toolset is the merged plug-in bundle: tools, hooks, and slash
-	// commands. Compose with [Merge]: each plug-in package exposes a
-	// Plugins() [Toolset] function; the composition root merges them
-	// in priority order. Tools registered earlier in the merged
+	// Toolset is the bundle of tools, hooks, and slash commands the
+	// composition root selected. Build it as a [Toolset] literal (see the
+	// package doc); [Merge] combines several bundles in priority order
+	// when a root assembles more than one. Tools earlier in the merged
 	// [Toolset.Tools] slice win on name collision (first-wins; later
 	// duplicates are logged and dropped at [New] time). Hooks chain
 	// across the merge per each field's documented semantics.

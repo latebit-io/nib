@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/nib/kit/toolperm"
 )
@@ -135,20 +136,26 @@ func TestExpand_BlocksShellChaining(t *testing.T) {
 	}
 }
 
-func TestCapWriter_Truncates(t *testing.T) {
+// TestShellRunner_TimeoutKillsChildren proves a backgrounded child that
+// holds stdout cannot defeat the timeout, and that a zero-value runner
+// does not fire instantly.
+func TestShellRunner_TimeoutKillsChildren(t *testing.T) {
 	t.Parallel()
-	w := &capWriter{limit: 10}
-	n, _ := w.Write([]byte("0123456789ABCDEF"))
-	if n != 16 {
-		t.Errorf("Write should report full len, got %d", n)
+	start := time.Now()
+	_, err := NewShellRunner(100*time.Millisecond).Run(context.Background(), "sleep 5 & sleep 5")
+	if err == nil {
+		t.Fatal("expected timeout error")
 	}
-	if w.b.Len() != 10 || !w.truncated {
-		t.Errorf("expected 10 bytes kept + truncated, got %d trunc=%t", w.b.Len(), w.truncated)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("Run took %v; timeout did not kill the process group", d)
 	}
-	// Further writes stay truncated and keep nothing.
-	_, _ = w.Write([]byte("more"))
-	if w.b.Len() != 10 {
-		t.Errorf("over-cap writes must be dropped, got %d", w.b.Len())
+
+	out, err := (ShellRunner{}).Run(context.Background(), "printf ok")
+	if err != nil || out != "ok" {
+		t.Fatalf("zero-value ShellRunner: out=%q err=%v", out, err)
+	}
+	if _, err := NewShellRunner(time.Second).Run(context.Background(), "exit 3"); err == nil {
+		t.Fatal("non-zero exit must surface as an error")
 	}
 }
 

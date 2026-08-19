@@ -3,9 +3,9 @@ package dyncontext
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"strings"
 	"time"
+
+	"github.com/latebit-io/nib/kit/proc"
 )
 
 // defaultRunTimeout bounds a single dynamic-context command so a hung
@@ -15,8 +15,13 @@ const defaultRunTimeout = 30 * time.Second
 // maxRunOutput caps how much command output is inlined into the prompt.
 // Dynamic-context output is fed straight into the LLM context, so it must
 // have an explicit upper bound — a noisy command would otherwise exhaust
-// memory or blow up the prompt long before the timeout helps.
-const maxRunOutput = 64 << 10 // 64 KiB
+// memory or blow up the prompt long before the timeout helps. The cap is
+// split into a head and tail so a long command still shows its ending
+// (errors, summaries) rather than only its start.
+const (
+	maxRunOutput = 64 << 10 // 64 KiB
+	maxRunTail   = 8 << 10  // last 8 KiB kept when output exceeds the cap
+)
 
 // ShellRunner executes commands via `sh -c`, supporting real shell
 // syntax (quotes, pipes, redirects). It is only ever reached after a
@@ -24,6 +29,10 @@ const maxRunOutput = 64 << 10 // 64 KiB
 // for skill tools; an agent with a shell gate replaces it with a runner
 // over its own bash tool (kit.ShellBinder), so in nib-code directives
 // pass per-command approval as well.
+//
+// Execution goes through [proc.Run], which runs the command in its own
+// process group with a SIGKILL cancel and pipe-drain grace so a child
+// holding stdout cannot defeat the timeout.
 //
 // CAVEAT: matcher globs match the whole command string, so a broad grant
 // like `Bash(git *)` also matches a chained `git x; rm -rf y` because the
@@ -46,47 +55,28 @@ func NewShellRunner(timeout time.Duration) ShellRunner {
 
 // Run implements [Runner], executing command under a timeout and
 // returning its combined stdout+stderr, capped at [maxRunOutput].
+// A zero-value ShellRunner (not built via [NewShellRunner]) still gets
+// [defaultRunTimeout] rather than an instantly-firing deadline.
 func (r ShellRunner) Run(ctx context.Context, command string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	// Sharing one capWriter for both streams makes os/exec serialize the
-	// writes (documented when Stdout == Stderr and the type is
-	// comparable), so the cap is applied without a data race.
-	w := &capWriter{limit: maxRunOutput}
-	cmd.Stdout = w
-	cmd.Stderr = w
-	err := cmd.Run()
-	out := w.b.String()
-	if w.truncated {
-		out += fmt.Sprintf("\n[output truncated at %d bytes]", maxRunOutput)
+	timeout := r.timeout
+	if timeout <= 0 {
+		timeout = defaultRunTimeout
 	}
-	return out, err
-}
-
-// capWriter accumulates up to limit bytes and discards the rest, so a
-// runaway command cannot exhaust memory or the prompt budget.
-type capWriter struct {
-	b         strings.Builder
-	limit     int
-	n         int
-	truncated bool
-}
-
-// Write records up to the cap and reports len(p) so the process is not
-// blocked on a short write once the cap is reached.
-func (w *capWriter) Write(p []byte) (int, error) {
-	if rem := w.limit - w.n; rem > 0 {
-		if len(p) <= rem {
-			w.b.Write(p)
-			w.n += len(p)
-		} else {
-			w.b.Write(p[:rem])
-			w.n = w.limit
-			w.truncated = true
-		}
-	} else if len(p) > 0 {
-		w.truncated = true
+	res := proc.Run(ctx, proc.Request{
+		Shell:   command,
+		Timeout: timeout,
+		HeadCap: maxRunOutput - maxRunTail,
+		TailCap: maxRunTail,
+	})
+	switch {
+	case res.StartErr != nil:
+		return res.Output, res.StartErr
+	case res.Cancelled:
+		return res.Output, ctx.Err()
+	case res.TimedOut:
+		return res.Output, fmt.Errorf("timed out after %s", timeout)
+	case res.ExitCode != 0:
+		return res.Output, fmt.Errorf("exit status %d", res.ExitCode)
 	}
-	return len(p), nil
+	return res.Output, nil
 }

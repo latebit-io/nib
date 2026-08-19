@@ -85,6 +85,9 @@ func TestHelp_RendersSourceTags(t *testing.T) {
 	if err := r.Register(&fakeHandler{def: sourceDef("charlie", SourceProject)}); err != nil {
 		t.Fatalf("register charlie: %v", err)
 	}
+	if err := r.Register(&fakeHandler{def: sourceDef("delta", SourcePlugin)}); err != nil {
+		t.Fatalf("register delta: %v", err)
+	}
 	// /help isn't registered in this test — call Handle directly to
 	// exercise the source-tag rendering without depending on dispatch.
 	h := NewHelp(r).(*helpCommand)
@@ -105,6 +108,9 @@ func TestHelp_RendersSourceTags(t *testing.T) {
 	}
 	if !strings.Contains(charlieLine, "[project]") {
 		t.Errorf("project charlie line missing tag: %q", charlieLine)
+	}
+	if deltaLine := lineWith(out, "/delta"); !strings.Contains(deltaLine, "[plugin]") {
+		t.Errorf("plugin delta line missing tag: %q", deltaLine)
 	}
 }
 

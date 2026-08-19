@@ -2,6 +2,8 @@ package hookrun
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +92,46 @@ func TestRun_TimeoutFailsOpen(t *testing.T) {
 	res := Runner{Timeout: 50 * time.Millisecond}.Run(context.Background(), cmdHook(`sleep 5`), Input{})
 	if res.Decision != Proceed || res.Err == nil {
 		t.Errorf("timed-out hook should fail open with an error, got %+v", res)
+	}
+}
+
+// TestRun_TimeoutKillsBackgroundChild: a hook that backgrounds a child
+// holding stdout must still return at the timeout (process-group kill +
+// WaitDelay), not block until the child exits.
+func TestRun_TimeoutKillsBackgroundChild(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	res := Runner{Timeout: 100 * time.Millisecond}.Run(context.Background(), cmdHook(`sleep 5 & sleep 5`), Input{})
+	if res.Decision != Proceed || res.Err == nil {
+		t.Errorf("timed-out hook should fail open with an error, got %+v", res)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("Run took %v; background child defeated the timeout", d)
+	}
+}
+
+// TestRun_CleanExitReapsBackgroundChild: a hook that exits 0 after
+// backgrounding a child holding stdout returns Proceed (ErrWaitDelay is
+// not a failure) AND the child must not outlive Run. The descendant
+// would touch a sentinel after 2s; if reaping worked it never does.
+// (A pid probe can't tell a zombie from a live process, so the sentinel
+// is the observable.) The dir travels via Env, not the shell string.
+func TestRun_CleanExitReapsBackgroundChild(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "lingered.txt")
+	h := cmdHook(`( sleep 2; touch "$NIB_HOOK_TEST_DIR/lingered.txt" ) & printf done`)
+	h.Env = map[string]string{"NIB_HOOK_TEST_DIR": dir}
+	res := Runner{}.Run(context.Background(), h, Input{})
+	if res.Decision != Proceed || res.Err != nil || res.ExitCode != 0 {
+		t.Fatalf("clean exit with lingering child should Proceed, got %+v", res)
+	}
+	// Long enough for the would-be sleep to elapse + filesystem flush.
+	time.Sleep(3 * time.Second)
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatalf("sentinel %q exists: background child survived Run", sentinel)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat sentinel: %v", err)
 	}
 }
 

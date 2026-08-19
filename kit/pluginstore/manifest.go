@@ -43,6 +43,9 @@ func ParseManifest(data []byte) (Manifest, error) {
 	if m.Name == "" {
 		return Manifest{}, fmt.Errorf("pluginstore: plugin manifest missing required \"name\"")
 	}
+	if _, err := deriveID("", m.Name); err != nil {
+		return Manifest{}, fmt.Errorf("pluginstore: plugin manifest: %w", err)
+	}
 	return m, nil
 }
 
@@ -183,6 +186,9 @@ func ParseMarketplace(data []byte) (Marketplace, error) {
 	}
 	if m.Name == "" {
 		return Marketplace{}, fmt.Errorf("pluginstore: marketplace missing required \"name\"")
+	}
+	if _, err := deriveID("", m.Name); err != nil {
+		return Marketplace{}, fmt.Errorf("pluginstore: marketplace: %w", err)
 	}
 	return m, nil
 }

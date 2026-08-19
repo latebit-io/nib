@@ -55,8 +55,8 @@ func (s *Store) srcDir(id string) string {
 	return filepath.Join(s.root, "store", id)
 }
 
-// ConvertedDir is the nib-native output directory for a plugin. Empty
-// in M0 (the converter lands in M1); exported so loader integration can
+// ConvertedDir is the nib-native output directory for a plugin, written
+// by the converter on install; exported so loader integration can
 // locate it.
 func (s *Store) ConvertedDir(id string) string { return filepath.Join(s.root, "converted", id) }
 
@@ -102,7 +102,10 @@ func (s *Store) Install(ctx context.Context, src Source, opts InstallOptions) (I
 	}
 	defer func() { _ = os.RemoveAll(st.cleanupRoot) }() // always clear the whole staging tree
 
-	id := deriveID(opts.Marketplace, st.name)
+	id, err := deriveID(opts.Marketplace, st.name)
+	if err != nil {
+		return InstalledPlugin{}, err
+	}
 
 	entry := InstalledPlugin{
 		ID:          id,
@@ -460,14 +463,47 @@ func resolveIdentity(dir, nameOverride string) (name, version string, err error)
 // idSanitizer strips characters unsafe for a filesystem directory name.
 var idSanitizer = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
+// idSeparator joins marketplace and plugin name in a store id. It is
+// reserved: no component may contain it, and Trim strips leading/trailing
+// "_" from components, so "<mkt>__<name>" has exactly one occurrence and
+// the id decomposes unambiguously (no direct plugin can spell a
+// marketplace-qualified id, and no two pairs can meet on one id).
+const idSeparator = "__"
+
 // deriveID builds the stable store key. Marketplace-sourced plugins are
 // namespaced "<marketplace>__<name>" so two marketplaces can ship a
 // plugin of the same name without colliding on disk.
-func deriveID(marketplace, name string) string {
-	raw := name
-	if marketplace != "" {
-		raw = marketplace + "__" + name
+//
+// Each component is sanitized and validated on its own: a name (or
+// marketplace) made only of separator characters would otherwise vanish
+// from the joined key and collide with another plugin's directory
+// ("mp" + "---" must not become "mp"), and neither may contain the
+// reserved [idSeparator] (a direct plugin "mp__foo" must not alias the
+// marketplace plugin "mp"/"foo").
+func deriveID(marketplace, name string) (string, error) {
+	nameID, err := sanitizeIDComponent("name", name)
+	if err != nil {
+		return "", err
 	}
-	id := idSanitizer.ReplaceAllString(raw, "-")
-	return strings.Trim(id, "-._")
+	if marketplace == "" {
+		return nameID, nil
+	}
+	mktID, err := sanitizeIDComponent("marketplace", marketplace)
+	if err != nil {
+		return "", err
+	}
+	return mktID + idSeparator + nameID, nil
+}
+
+// sanitizeIDComponent maps one id component to filesystem-safe form and
+// rejects it when nothing survives or it contains the reserved separator.
+func sanitizeIDComponent(kind, raw string) (string, error) {
+	id := strings.Trim(idSanitizer.ReplaceAllString(raw, "-"), "-._")
+	if id == "" {
+		return "", fmt.Errorf("pluginstore: %s %q yields an empty store id", kind, raw)
+	}
+	if strings.Contains(id, idSeparator) {
+		return "", fmt.Errorf("pluginstore: %s %q contains reserved separator %q", kind, raw, idSeparator)
+	}
+	return id, nil
 }

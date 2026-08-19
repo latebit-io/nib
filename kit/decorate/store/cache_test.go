@@ -69,7 +69,10 @@ func (m *mockStore) Publish(ctx context.Context, path string, body string, expec
 	}
 	doc := memory.Document{Path: path, Body: body, Version: cur.Version + 1, Modified: "now"}
 	m.docs[path] = doc
-	return doc, nil
+	// Write responses are header-only (empty Body), as the demarkus MCP
+	// adapter returns them — a cache that stored this would serve an
+	// empty document on the next Fetch.
+	return memory.Document{Path: path, Version: doc.Version, Modified: doc.Modified}, nil
 }
 
 func (m *mockStore) Append(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {
@@ -91,7 +94,7 @@ func (m *mockStore) Append(ctx context.Context, path string, body string, expect
 	cur.Version = expectedVersion + 1
 	cur.Path = path
 	m.docs[path] = cur
-	return cur, nil
+	return memory.Document{Path: path, Version: cur.Version, Modified: cur.Modified}, nil
 }
 
 func (m *mockStore) List(ctx context.Context, dir string) ([]string, error) {
@@ -197,6 +200,44 @@ func TestWithCaching_TTLStartsFromFetchCompletion(t *testing.T) {
 	}
 	if got := inner.fetchCalls.Load(); got != 1 {
 		t.Fatalf("expected TTL measured from fetch completion (1 inner call), got %d", got)
+	}
+}
+
+func TestWithCaching_InFlightFetchDoesNotCacheStaleDoc(t *testing.T) {
+	// A Fetch reads v1, then a Publish (v2) lands and invalidates before
+	// the Fetch stores its result. The stale v1 must not be cached: the
+	// next Fetch has to read through and observe v2.
+	inner := newMockStore()
+	inner.docs["/doc.md"] = memory.Document{Path: "/doc.md", Body: "v1", Version: 1}
+	racing := &delayingFetchStore{inner: inner}
+	s := kit.DecorateStore(racing, WithCaching(CachePolicy{}))
+	var once bool
+	racing.onFetch = func() {
+		if once {
+			return
+		}
+		once = true
+		if _, err := s.Publish(context.Background(), "/doc.md", "v2", 1); err != nil {
+			t.Errorf("racing Publish: %v", err)
+		}
+	}
+
+	first, err := s.Fetch(context.Background(), "/doc.md")
+	if err != nil {
+		t.Fatalf("first Fetch: %v", err)
+	}
+	if first.Body != "v1" {
+		t.Fatalf("first Fetch read %q before the write; want v1", first.Body)
+	}
+	second, err := s.Fetch(context.Background(), "/doc.md")
+	if err != nil {
+		t.Fatalf("second Fetch: %v", err)
+	}
+	if second.Body != "v2" {
+		t.Fatalf("second Fetch = %q; stale v1 was cached past the write", second.Body)
+	}
+	if got := inner.fetchCalls.Load(); got != 2 {
+		t.Fatalf("inner fetch calls = %d, want 2 (stale fill discarded)", got)
 	}
 }
 
@@ -329,20 +370,20 @@ func pathN(i int) string {
 	return "/foo" + string(rune('0'+i)) + ".md"
 }
 
-// delayingFetchStore wraps a mockStore and runs onFetch before each
-// inner Fetch returns. Used to simulate slow upstream stores in TTL
-// tests that need to distinguish "elapsed during fetch" from
-// "elapsed after fetch."
+// delayingFetchStore wraps a mockStore and runs onFetch after the inner
+// read but before Fetch returns. Used to simulate slow upstream stores
+// (TTL tests) and writes that race an in-flight read (staleness tests).
 type delayingFetchStore struct {
 	inner   *mockStore
 	onFetch func()
 }
 
 func (d *delayingFetchStore) Fetch(ctx context.Context, path string) (memory.Document, error) {
+	doc, err := d.inner.Fetch(ctx, path)
 	if d.onFetch != nil {
 		d.onFetch()
 	}
-	return d.inner.Fetch(ctx, path)
+	return doc, err
 }
 
 func (d *delayingFetchStore) Publish(ctx context.Context, path string, body string, expectedVersion int) (memory.Document, error) {

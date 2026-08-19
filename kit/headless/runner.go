@@ -76,7 +76,8 @@ type EventHandler func(ctx context.Context, ev event.Event) error
 // domain-specific fields (files changed, edits applied, etc.).
 type Result struct {
 	// Success is true when the run reached AgentDone with Success=true,
-	// or when the user ended a TTY session cleanly via stdin EOF.
+	// or when the agent yielded (AgentWaiting) / the user ended a TTY
+	// session cleanly via stdin EOF with no errors collected.
 	Success bool `json:"success"`
 	// Summary is the agent's accumulated streamed text from the final
 	// turn. In REPL mode prior turns are streamed to stderr and not
@@ -342,7 +343,8 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 	result.Summary = summary.String()
 	if !r.isTTY {
 		r.agent.Cancel()
-		result.Success = true
+		// A yield after an AgentError is not a clean run.
+		result.Success = len(result.Errors) == 0
 		return true
 	}
 	for {
@@ -351,8 +353,8 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 			r.agent.Cancel()
 			if errors.Is(err, io.EOF) {
 				// Clean end-of-stream: standard "user pressed
-				// Ctrl+D" exit. Success stays true.
-				result.Success = true
+				// Ctrl+D" exit; successful unless errors were seen.
+				result.Success = len(result.Errors) == 0
 				return true
 			}
 			// Scanner failure or context cancellation: the run
@@ -374,7 +376,7 @@ func (r *Runner) handleWaiting(ctx context.Context, result *Result, summary *str
 		*truncated = false
 		if !r.agent.Reply(ctx, input) {
 			slog.Warn("agent not accepting input, ending conversation")
-			result.Success = true
+			result.Success = len(result.Errors) == 0
 			return true
 		}
 		return false

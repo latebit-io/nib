@@ -1,9 +1,8 @@
 package kit
 
-// The three Decorate* functions in this file generalize the
-// cross-cutting-concern pattern visible in
-// `coding/agent/provider_proxy.go` (hot-swap + per-turn lifecycle
-// accounting wrapping `llm.Provider`) to all kit-side ports. Bundled
+// The three Decorate* functions in this file apply the
+// cross-cutting-concern pattern (a wrapper that implements the port and
+// delegates to an inner value) uniformly to all kit-side ports. Bundled
 // decorator implementations live in `kit/decorate/{provider,store,tool}`.
 
 import (
@@ -22,10 +21,9 @@ import (
 // is a plain function so chains compose by function application.
 //
 // Decorators are the canonical pattern for cross-cutting concerns in
-// the nib codebase. The bundled precedent is
-// `coding/agent.providerProxy` — wraps an underlying provider with
-// hot-swap and per-turn lifecycle accounting. Bundled reusable
-// decorators live under `kit/decorate/provider`.
+// the nib codebase: consumers wrap a provider with hot-swap or usage
+// accounting the same way. Bundled reusable decorators live under
+// `kit/decorate/provider`.
 type ProviderDecorator func(llm.Provider) llm.Provider
 
 // StoreDecorator wraps a [memory.Store] with a cross-cutting concern

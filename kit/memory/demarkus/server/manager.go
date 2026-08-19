@@ -268,11 +268,13 @@ func (m *Manager) releaseLock() {
 // Stop kills the server process and cleans up PID and port files. Also
 // closes the demarkus-mcp subprocess if one was started via NewStore — we
 // shut down the MCP client before the server it depends on. Releases the
-// single-instance lock on the way out.
+// single-instance lock on the way out. Every step runs regardless of
+// earlier failures; the failures are joined into the returned error.
 func (m *Manager) Stop() error {
+	var errs []error
 	if m.mcpClient != nil {
 		if err := m.mcpClient.Close(); err != nil {
-			slog.Debug("memory: mcp client close", "err", err)
+			errs = append(errs, fmt.Errorf("mcp client close: %w", err))
 		}
 		m.mcpClient = nil
 	}
@@ -280,7 +282,7 @@ func (m *Manager) Stop() error {
 	pid := m.processPID()
 	if pid == 0 {
 		m.releaseLock()
-		return nil
+		return errors.Join(errs...)
 	}
 
 	// Spawned child vs. adopted non-child need different exit detection.
@@ -290,11 +292,11 @@ func (m *Manager) Stop() error {
 	//   polling since we have no Wait() channel for non-children.
 	if m.cmd != nil && m.waitDone != nil {
 		if err := terminateOwnedChild(m.cmd.Process, m.waitDone, 5*time.Second); err != nil {
-			slog.Debug("memory server: terminate child", "pid", pid, "err", err)
+			errs = append(errs, fmt.Errorf("terminate child pid %d: %w", pid, err))
 		}
 	} else {
 		if err := terminatePID(pid, 5*time.Second); err != nil {
-			slog.Debug("memory server: terminate", "pid", pid, "err", err)
+			errs = append(errs, fmt.Errorf("terminate pid %d: %w", pid, err))
 		}
 	}
 	m.cleanupFiles()
@@ -303,21 +305,25 @@ func (m *Manager) Stop() error {
 	m.cmd = nil
 	m.waitDone = nil
 	m.releaseLock()
-	return nil
+	return errors.Join(errs...)
 }
 
 // terminatePID sends SIGTERM to a non-child pid, polls up to graceful for
 // it to exit, then escalates to SIGKILL. Used when we do not own the
 // process (reuseExisting adoption and orphan sweep) and therefore have
 // no Wait channel. Relies on init reaping reparented children for
-// signal(0) → ESRCH to work correctly. Returns an error only if the PID
-// was already gone when the first signal was sent.
+// signal(0) → ESRCH to work correctly. A PID that is already gone is
+// the desired end state, not an error.
 func terminatePID(pid int, graceful time.Duration) error {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("find process %d: %w", pid, err)
 	}
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			slog.Debug("memory server: already gone", "pid", pid)
+			return nil
+		}
 		return fmt.Errorf("SIGTERM %d: %w", pid, err)
 	}
 	deadline := time.Now().Add(graceful)
@@ -347,6 +353,10 @@ func terminateOwnedChild(proc *os.Process, done <-chan struct{}, graceful time.D
 	}
 	pid := proc.Pid
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			slog.Debug("memory server: child already exited", "pid", pid)
+			return nil
+		}
 		return fmt.Errorf("SIGTERM %d: %w", pid, err)
 	}
 	select {
@@ -374,9 +384,8 @@ func terminateOwnedChild(proc *os.Process, done <-chan struct{}, graceful time.D
 // reapOrphans kills any demarkus-server processes bound to this manager's
 // content directory, except sparePID. sparePID=0 means kill all matches.
 //
-// This exists because demarkus-server, combined with SysProcAttr.Setpgid
-// and Process.Release() at launch, deliberately survives an unclean host
-// exit. That only works if the next host launch reliably adopts (via PID
+// This exists because demarkus-server, launched in its own process group
+// (SysProcAttr.Setpgid), deliberately survives an unclean host exit. That only works if the next host launch reliably adopts (via PID
 // file) or reaps (via this sweep) the survivor. The PID file is fragile:
 // reuseExisting deletes it whenever the live PID can't be probed, so a
 // subsequent launch sees no PID reference and would otherwise spawn a
@@ -766,6 +775,8 @@ func (m *Manager) processPID() int {
 	if err != nil {
 		return 0
 	}
+	// A malformed PID file parses to 0, which callers already treat as
+	// "unknown" — no separate error path needed.
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
 	return pid
 }

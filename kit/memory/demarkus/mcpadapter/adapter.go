@@ -1,6 +1,6 @@
 // Package mcpadapter implements memory.Store by calling the demarkus-mcp
-// MCP server over stdio. It replaces the per-operation CLI subprocess
-// adapter (engine/memory/demarkus) with a single long-lived MCP client.
+// MCP server over stdio through a single long-lived MCP client; the
+// server process itself is managed by kit/memory/demarkus/server.
 package mcpadapter
 
 import (
@@ -77,8 +77,11 @@ func (a *Adapter) List(ctx context.Context, dir string) ([]string, error) {
 	if r.IsError {
 		return nil, fmt.Errorf("%w: %s", memory.ErrServer, strings.TrimSpace(r.Text))
 	}
-	_, body, err := parseResult(r.Text)
+	meta, body, err := parseResult(r.Text)
 	if err != nil {
+		return nil, err
+	}
+	if err := statusError(dir, meta); err != nil {
 		return nil, err
 	}
 	return extractLinks(dir, body), nil
@@ -95,38 +98,45 @@ func parseDocument(p string, r mcp.ToolResult) (memory.Document, error) {
 	if err != nil {
 		return memory.Document{}, err
 	}
+	if err := statusError(p, meta); err != nil {
+		return memory.Document{}, err
+	}
+	version, verr := parseVersion(meta["version"])
+	if verr != nil {
+		return memory.Document{}, fmt.Errorf("memory: malformed response: %w", verr)
+	}
+	return memory.Document{
+		Path:     p,
+		Body:     body,
+		Version:  version,
+		Modified: meta["modified"],
+	}, nil
+}
+
+// statusError maps the response "status:" header to a [memory] sentinel
+// error. "ok" and "created" yield nil; every other value (including a
+// missing header) is an error so no caller treats a failure body as data.
+func statusError(p string, meta map[string]string) error {
 	switch meta["status"] {
 	case "ok", "created":
-		version, verr := parseVersion(meta["version"])
-		if verr != nil {
-			return memory.Document{}, fmt.Errorf("memory: malformed response: %w", verr)
-		}
-		return memory.Document{
-			Path:     p,
-			Body:     body,
-			Version:  version,
-			Modified: meta["modified"],
-		}, nil
+		return nil
 	case "not-found":
-		return memory.Document{}, fmt.Errorf("%w: %s", memory.ErrNotFound, p)
+		return fmt.Errorf("%w: %s", memory.ErrNotFound, p)
 	case "conflict", "merge-candidate":
-		// "merge-candidate" was added in demarkus-server 0.17.x for the
-		// stale-publish path under nested directories: the server
-		// indicates the document could be 3-way merged from the caller's
-		// version, but the version mismatch is still a write conflict
-		// from the [memory.Store] contract's perspective. Both statuses
-		// surface as [memory.ErrConflict] so consumers see one sentinel.
-		return memory.Document{}, fmt.Errorf("%w: %s (server-status=%s server-version=%s)", memory.ErrConflict, p, meta["status"], meta["server-version"])
+		// "merge-candidate" (demarkus-server 0.17.x) means the server could
+		// 3-way merge, but it is still a version mismatch under the
+		// [memory.Store] contract, so both surface as ErrConflict.
+		return fmt.Errorf("%w: %s (server-status=%s server-version=%s)", memory.ErrConflict, p, meta["status"], meta["server-version"])
 	case "unauthorized":
-		return memory.Document{}, fmt.Errorf("%w: %s", memory.ErrAuth, p)
+		return fmt.Errorf("%w: %s", memory.ErrAuth, p)
 	case "archived":
-		// Archived documents return their last version but the caller can't
-		// distinguish from a live document without this error.
-		return memory.Document{}, fmt.Errorf("%w: %s is archived", memory.ErrNotFound, p)
+		// Archived documents return their last version; without this the
+		// caller could not tell them from live documents.
+		return fmt.Errorf("%w: %s is archived", memory.ErrNotFound, p)
 	case "":
-		return memory.Document{}, fmt.Errorf("%w: missing status line in response", memory.ErrServer)
+		return fmt.Errorf("%w: missing status line in response", memory.ErrServer)
 	default:
-		return memory.Document{}, fmt.Errorf("%w: status=%s", memory.ErrServer, meta["status"])
+		return fmt.Errorf("%w: status=%s", memory.ErrServer, meta["status"])
 	}
 }
 

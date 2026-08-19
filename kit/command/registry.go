@@ -144,8 +144,8 @@ func NewRegistry() *Registry {
 //
 // Validates the Definition: the canonical name must match
 // [a-z0-9_-]+, aliases must follow the same rule, no alias may
-// collide with another command's canonical name, and no two
-// aliases may collide.
+// collide with another command's canonical name (nor a canonical
+// name with an existing alias), and no two aliases may collide.
 //
 // Registration is the only public mutation path on the registry.
 // Once registered, commands are not removed during a process
@@ -187,6 +187,12 @@ func (r *Registry) Register(c Command) error {
 			return nil
 		}
 		replacing = existing
+	}
+	// Symmetric with the alias checks below: a canonical name that is
+	// already some other command's alias would silently shadow that
+	// alias in Lookup (canonical names win), so reject it.
+	if owner, exists := r.aliases[canon]; exists && owner != canon {
+		return fmt.Errorf("command %q: name collides with alias on %q", canon, owner)
 	}
 
 	canonAliases := make([]string, 0, len(def.Aliases))

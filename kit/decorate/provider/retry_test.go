@@ -235,3 +235,38 @@ func TestRetryProvider_SatisfiesContract(t *testing.T) {
 		}))
 	})
 }
+
+// escalatingProvider is a flakyProvider that also carries an output cap.
+type escalatingProvider struct {
+	flakyProvider
+	cap int
+}
+
+func (e *escalatingProvider) MaxTokens() int     { return e.cap }
+func (e *escalatingProvider) SetMaxTokens(v int) { e.cap = v }
+
+// TestWithRetry_ForwardsOutputCapEscalator: the retry wrapper must not
+// hide the inner provider's llm.OutputCapEscalator, and must not claim
+// it when the inner provider lacks it.
+func TestWithRetry_ForwardsOutputCapEscalator(t *testing.T) {
+	policy := RetryPolicy{MaxAttempts: 1, IsRetryable: func(error) bool { return false }}
+
+	inner := &escalatingProvider{cap: 10}
+	p := kit.DecorateProvider(inner, WithRetry(policy))
+	esc, ok := p.(llm.OutputCapEscalator)
+	if !ok {
+		t.Fatalf("decorated provider %T does not forward llm.OutputCapEscalator", p)
+	}
+	if esc.MaxTokens() != 10 {
+		t.Fatalf("MaxTokens = %d, want 10", esc.MaxTokens())
+	}
+	esc.SetMaxTokens(20)
+	if inner.cap != 20 {
+		t.Fatalf("SetMaxTokens not forwarded: inner cap = %d", inner.cap)
+	}
+
+	plain := kit.DecorateProvider(&flakyProvider{}, WithRetry(policy))
+	if _, ok := plain.(llm.OutputCapEscalator); ok {
+		t.Fatalf("decorated plain provider %T must not claim llm.OutputCapEscalator", plain)
+	}
+}

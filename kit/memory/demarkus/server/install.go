@@ -203,14 +203,14 @@ func downloadRelease(ctx context.Context, tag, archiveName, checksumsName, binDi
 		return fmt.Errorf("download %s: %w", archiveName, err)
 	}
 
-	// Download and verify checksums.
+	// Download and verify checksums. Fail closed: an unverifiable
+	// archive is never installed.
 	checksumsData, err := downloadAsset(ctx, tag, checksumsName)
 	if err != nil {
-		slog.Warn("memory install: checksums unavailable, skipping verification", "err", err)
-	} else {
-		if err := verifyChecksum(archiveData, archiveName, checksumsData); err != nil {
-			return err
-		}
+		return fmt.Errorf("download %s: %w", checksumsName, err)
+	}
+	if err := verifyChecksum(archiveData, archiveName, checksumsData); err != nil {
+		return err
 	}
 
 	// Extract wanted binaries from the archive.

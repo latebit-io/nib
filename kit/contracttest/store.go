@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -217,6 +217,5 @@ func uniquePath(t *testing.T, kind string) string {
 // "/contracttest/list-123/doc.md") since that would let a backend
 // returning wrong-but-overlapping paths pass the assertion.
 func containsPath(entries []string, want string) bool {
-	base := want[strings.LastIndex(want, "/")+1:]
-	return slices.Contains(entries, want) || slices.Contains(entries, base)
+	return slices.Contains(entries, want) || slices.Contains(entries, path.Base(want))
 }

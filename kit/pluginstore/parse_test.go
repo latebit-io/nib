@@ -21,6 +21,9 @@ func TestSourceValidate(t *testing.T) {
 		{"npm ok", Source{Type: SourceNPM, Package: "@x/y"}, false},
 		{"unknown type", Source{Type: "weird"}, true},
 		{"empty type", Source{}, true},
+		{"git url leading dash", GitSource("--upload-pack=evil", ""), true},
+		{"git ref leading dash", GitSource("https://h/r.git", "--foo"), true},
+		{"github ref leading dash", GitHubSource("owner/repo", "-x"), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,6 +43,9 @@ func TestParseManifest(t *testing.T) {
 	}
 	if m.Name != "foo" || m.Version != "1.2.0" || m.Description != "d" {
 		t.Errorf("got %+v", m)
+	}
+	if _, err := ParseManifest([]byte(`{"name":"-._"}`)); err == nil {
+		t.Errorf("expected error on name that sanitizes to empty id")
 	}
 	if _, err := ParseManifest([]byte(`{"version":"1.0.0"}`)); err == nil {
 		t.Errorf("expected error on missing name")
@@ -82,6 +88,9 @@ func TestParseMarketplace_SourceForms(t *testing.T) {
 	if _, err := ParseMarketplace([]byte(`{"plugins":[]}`)); err == nil {
 		t.Errorf("expected error on missing marketplace name")
 	}
+	if _, err := ParseMarketplace([]byte(`{"name":"...","plugins":[]}`)); err == nil {
+		t.Errorf("expected error on marketplace name that sanitizes to empty id")
+	}
 	// A structurally-broken entry is rejected at parse time, not at install.
 	if _, err := ParseMarketplace([]byte(`{"name":"mp","plugins":[{"name":"","source":"./x"}]}`)); err == nil {
 		t.Errorf("expected error on empty entry name")
@@ -102,8 +111,44 @@ func TestDeriveID(t *testing.T) {
 		{"my mp", "foo", "my-mp__foo"},
 	}
 	for _, tc := range cases {
-		if got := deriveID(tc.mkt, tc.name); got != tc.want {
+		got, err := deriveID(tc.mkt, tc.name)
+		if err != nil {
+			t.Errorf("deriveID(%q,%q): %v", tc.mkt, tc.name, err)
+			continue
+		}
+		if got != tc.want {
 			t.Errorf("deriveID(%q,%q) = %q, want %q", tc.mkt, tc.name, got, tc.want)
 		}
+	}
+	for _, bad := range []string{"-._", "...", "---", "-"} {
+		if id, err := deriveID("", bad); err == nil {
+			t.Errorf("deriveID(%q) = %q, want error", bad, id)
+		}
+	}
+	if _, err := deriveID("", "  "); err == nil {
+		t.Errorf("whitespace-only name must be rejected")
+	}
+	// A separator-only component must be rejected even when the other
+	// side would keep the joined key non-empty: "mp"+"---" trimming to
+	// "mp" would collide with a direct plugin named "mp".
+	if id, err := deriveID("marketplace", "---"); err == nil {
+		t.Errorf("deriveID(marketplace, ---) = %q, want error", id)
+	}
+	if id, err := deriveID("---", "foo"); err == nil {
+		t.Errorf("deriveID(---, foo) = %q, want error", id)
+	}
+	// "__" is the reserved namespace separator: a component containing
+	// it could alias a marketplace-qualified id ("mp__foo" direct vs
+	// "mp"/"foo") or let two pairs meet on one id ("a"/"b__c" vs
+	// "a__b"/"c").
+	for _, bad := range [][2]string{{"", "mp__foo"}, {"a", "b__c"}, {"a__b", "c"}} {
+		if id, err := deriveID(bad[0], bad[1]); err == nil {
+			t.Errorf("deriveID(%q,%q) = %q, want reserved-separator error", bad[0], bad[1], id)
+		}
+	}
+	// Single underscores inside a component stay legal and unambiguous:
+	// Trim strips edge underscores, so the joined id has one "__".
+	if got, err := deriveID("a_b", "c_d"); err != nil || got != "a_b__c_d" {
+		t.Errorf("deriveID(a_b, c_d) = %q, %v; want a_b__c_d", got, err)
 	}
 }

@@ -3,7 +3,6 @@ package wire
 import (
 	"context"
 	"errors"
-	"runtime"
 	"testing"
 	"time"
 
@@ -27,26 +26,31 @@ func (stubWorkspace) WriteFile(_, _ string) error     { return nil }
 func (stubWorkspace) CanonPath(p string) string       { return p }
 func (stubWorkspace) ProjectRoot() string             { return "" }
 
-// TestForwardEvents_IdleCancelReleasesGoroutine: cancelling ctx while no
-// event is in flight must still stop the forwarder (and so close its
-// subscription); a plain range over the inbox would park forever.
-func TestForwardEvents_IdleCancelReleasesGoroutine(t *testing.T) {
+// TestForwardEvents_IdleCancelClosesSubscription: cancelling ctx while
+// no event is in flight must still stop the forwarder and close its
+// subscription; a plain range over the inbox would park forever, leaving
+// the subscription registered. The agent's subscriber count is the
+// observable — it drops to zero only once sub.Close() has run.
+func TestForwardEvents_IdleCancelClosesSubscription(t *testing.T) {
 	ag := agent.New(stubProvider{}, stubWorkspace{}, nil)
 	t.Cleanup(ag.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	before := runtime.NumGoroutine()
 	if err := ForwardEvents(ctx, ag, make(chan event.Event)); err != nil {
 		t.Fatal(err)
 	}
+	if got := ag.SubscriberCount(); got != 1 {
+		t.Fatalf("SubscriberCount after ForwardEvents = %d, want 1", got)
+	}
 	cancel()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for runtime.NumGoroutine() > before {
+	const timeout = 2 * time.Second
+	deadline := time.Now().Add(timeout)
+	for ag.SubscriberCount() != 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("forwarder goroutine still alive %v after idle cancel", 2*time.Second)
+			t.Fatalf("subscription still registered %v after idle cancel", timeout)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

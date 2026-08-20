@@ -718,6 +718,13 @@ func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 	return a.bus.subscribe(opts)
 }
 
+// SubscriberCount returns the number of live subscriptions. Diagnostic
+// only: a consumer that forgets [Subscription.Close] leaves an inbox
+// registered, and a full inbox blocks control-event publication.
+func (a *Agent) SubscriberCount() int {
+	return a.bus.count()
+}
+
 // registerTools builds the tool registry. Built-in tools are registered first
 // and cannot be overridden by extraTools (e.g. MCP).
 //

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -160,7 +161,7 @@ func TestCompletion_SelectWraps(t *testing.T) {
 func TestAcceptCommandCompletion_SetsInput(t *testing.T) {
 	m := dispatchTestPane()
 	reg := completionRegistry(t, "capabilities", "compact")
-	m.SetCommandDispatch(reg, nil, nil)
+	m.SetCommandDispatch(context.Background(), reg, nil)
 
 	m.cmdComplete.refresh("/cap", reg)
 	if !m.cmdComplete.active {
@@ -186,7 +187,7 @@ func TestCompletion_PaintsIntoView(t *testing.T) {
 	m.SetSize(80, 30)
 	m.SetInputActive(true)
 	reg := completionRegistry(t, "capabilities", "compact", "clear")
-	m.SetCommandDispatch(reg, nil, nil)
+	m.SetCommandDispatch(context.Background(), reg, nil)
 
 	m.input.SetContent("/c")
 	m.recomputeInputLayout()

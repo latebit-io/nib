@@ -7,10 +7,9 @@ import (
 )
 
 // Modal-overlay input gating.
-// Extracted from app.go's Update() (Phase 7 of AppModel decomposition).
 //
-// Five overlays can be modal — Help, ModelSelector, Palette, SearchOverlay,
-// Dialog. While any is active, input messages (key + mouse) are consumed
+// Four overlays can be modal — Help, ModelSelector, Palette, SearchOverlay.
+// While any is active, input messages (key + mouse) are consumed
 // by the overlay and never reach the main switch. Non-input messages
 // (engine events, ticks, window resize, file watcher, async results) must
 // still flow through, so this gate only intercepts input — not all
@@ -91,17 +90,6 @@ func (m *AppModel) handleModalInput(msg tea.Msg) (tea.Cmd, bool) {
 			return cmd, true
 		case tea.MouseMsg:
 			return nil, true
-		}
-	}
-
-	// Dialog is modal — captures all input when active.
-	if m.Dialog.Active {
-		switch typed := msg.(type) {
-		case tea.KeyPressMsg:
-			cmd := m.Dialog.Update(typed)
-			return cmd, true
-		case tea.MouseMsg:
-			return nil, true // swallow mouse while dialog is visible
 		}
 	}
 

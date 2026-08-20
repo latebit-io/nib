@@ -9,7 +9,6 @@ import (
 )
 
 // Engine → TUI event bridge.
-// Extracted from app.go (Phase 8 of AppModel decomposition).
 //
 // Pipeline placement: this is the consumer end of the foundation→kit→
 // coding→TUI event channel chain (see /nib/architecture.md). Session

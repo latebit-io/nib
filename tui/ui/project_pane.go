@@ -18,19 +18,28 @@ import (
 
 // ProjectOpenFileMsg is sent when the user selects a file in the project pane.
 // AppModel catches this and opens the file in the editor.
-type ProjectOpenFileMsg struct{ Path string }
+type ProjectOpenFileMsg struct {
+	// Path is the selected file, relative to the project root.
+	Path string
+}
 
 // ProjectCreateFileMsg is sent when the user creates a new file via inline input.
-// Path is relative to the project root.
-type ProjectCreateFileMsg struct{ Path string }
+type ProjectCreateFileMsg struct {
+	// Path is the new file, relative to the project root.
+	Path string
+}
 
 // ProjectCreateDirMsg is sent when the user creates a new directory via inline input.
-// Path is relative to the project root.
-type ProjectCreateDirMsg struct{ Path string }
+type ProjectCreateDirMsg struct {
+	// Path is the new directory, relative to the project root.
+	Path string
+}
 
 // ProjectDeleteFileMsg is sent when the user requests file deletion.
-// Path is relative to the project root.
-type ProjectDeleteFileMsg struct{ Path string }
+type ProjectDeleteFileMsg struct {
+	// Path is the file to delete, relative to the project root.
+	Path string
+}
 
 // Package-level styles — allocated once, never in render paths.
 var (
@@ -727,16 +736,8 @@ func (p *ProjectPaneModel) ensureVisible() {
 
 // clampScroll ensures scroll offset is within valid range.
 func (p *ProjectPaneModel) clampScroll() {
-	maxScroll := len(p.items) - p.height
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	if p.scrollOffset > maxScroll {
-		p.scrollOffset = maxScroll
-	}
-	if p.scrollOffset < 0 {
-		p.scrollOffset = 0
-	}
+	maxScroll := max(len(p.items)-p.height, 0)
+	p.scrollOffset = min(max(p.scrollOffset, 0), maxScroll)
 }
 
 // renderItem renders a single display row.

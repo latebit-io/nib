@@ -114,20 +114,14 @@ func (c *CompletionPopup) Render(width int) string {
 		return ""
 	}
 
-	maxWidth := width
-	if maxWidth > 50 {
-		maxWidth = 50
-	}
+	maxWidth := min(width, 50)
 	if maxWidth < 15 {
 		return ""
 	}
 	// Content width inside border (2 chars).
 	contentW := maxWidth - 2
 
-	visCount := len(c.Items) - c.ScrollOffset
-	if visCount > maxCompletionVisible {
-		visCount = maxCompletionVisible
-	}
+	visCount := min(len(c.Items)-c.ScrollOffset, maxCompletionVisible)
 
 	lines := make([]string, visCount)
 	for i := range visCount {

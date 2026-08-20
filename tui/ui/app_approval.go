@@ -9,7 +9,6 @@ import (
 )
 
 // Edit-approval pipeline.
-// Extracted from app.go (Phase 4 of AppModel decomposition).
 
 // applyApproval runs the prepare → apply pipeline and signals the agent
 // via CompleteApproval. The session's PrepareApproval validates the

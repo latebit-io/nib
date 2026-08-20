@@ -9,7 +9,6 @@ import (
 )
 
 // LSP-backed async flows: go-to-definition, go-back, hover, autocomplete.
-// Extracted from app.go (Phase 5 of AppModel decomposition).
 //
 // Pattern: each user action dispatches a tea.Cmd that runs the LSP request
 // off the TUI goroutine, then a result message lands back on the TUI

@@ -122,11 +122,6 @@ func (m *AgentPaneModel) UsageIndicator() string {
 	return "context window: " + bar
 }
 
-// ResetUsage clears accumulated usage for a new agent run.
-func (m *AgentPaneModel) ResetUsage() {
-	m.usage = usageState{}
-}
-
 // BeginRun zeroes the per-run spend counters that back the budget
 // indicator. Called at each run boundary (every goal submission,
 // including a follow-up that continues an existing conversation) so

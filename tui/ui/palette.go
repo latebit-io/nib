@@ -208,13 +208,7 @@ func (p *PaletteModel) ensureSelectedVisible() {
 func (p *PaletteModel) maxVisible() int {
 	// Calculate from available height minus input and footer.
 	available := p.Height - paletteInputHeight - paletteFooterHeight - 2 // borders
-	if available > paletteMaxVisible {
-		available = paletteMaxVisible
-	}
-	if available < 1 {
-		available = 1
-	}
-	return available
+	return min(max(available, 1), paletteMaxVisible)
 }
 
 // RenderOverlay draws the palette as a floating overlay on top of the
@@ -226,11 +220,8 @@ func (p *PaletteModel) RenderOverlay(background string, width, height int) strin
 	// Near-full-width palette with 1-char margin on each side.
 	boxWidth := width - 2
 	boxWidth = max(boxWidth, paletteMinWidth)
-	boxWidth = min(boxWidth, width) // never exceed terminal width
-	innerWidth := boxWidth - 2      // border only
-	if innerWidth < 1 {
-		innerWidth = 1
-	}
+	boxWidth = min(boxWidth, width)  // never exceed terminal width
+	innerWidth := max(boxWidth-2, 1) // border only
 
 	// Input line with cursor — all operations in rune space.
 	qRunes := []rune(p.Query)

@@ -5,10 +5,9 @@ import (
 )
 
 // Top-level View rendering.
-// Extracted from app.go (Phase 8 of AppModel decomposition).
 //
 // Layout: intent bar (1 row) + region-managed pane area + status bar.
-// Modal overlays (Dialog, Help, Palette, SearchOverlay) render on top
+// Modal overlays (Help, Palette, SearchOverlay) render on top
 // of the base layout via their own RenderOverlay implementations. The
 // modal precedence here mirrors the input-gating order in
 // `app_modal.go.handleModalInput`.
@@ -36,9 +35,7 @@ func (m *AppModel) View() tea.View {
 			indicators = append(indicators, seg)
 		}
 		base := m.renderIntentBar() + "\n" + m.Regions.Render() + "\n" + renderStatusBar(m.Editor.statusInfo(), m.Width, indicators...)
-		if m.Dialog.Active {
-			content = m.Dialog.RenderOverlay(base, m.Width, m.Height)
-		} else if m.Help.Active {
+		if m.Help.Active {
 			content = m.Help.RenderOverlay(base, m.Width, m.Height)
 		} else if m.Palette.Active {
 			content = m.Palette.RenderOverlay(base, m.Width, m.Height)

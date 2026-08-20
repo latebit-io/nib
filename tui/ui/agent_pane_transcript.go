@@ -17,8 +17,7 @@ import (
 // a code fence so they bypass markdown rendering.
 //
 // State (RawLines, Lines, wrappedIndex, rawFenceAfter, inCodeAfter,
-// metaRawLines, plainRawLines, turnSeparatorRawLines, userRawLines,
-// streamingStartRaw, sanitizer) lives on AgentPaneModel — these
+// rawMarks, streamingStartRaw, sanitizer) lives on AgentPaneModel — these
 // methods are the focused mutation surface that owns it.
 
 // AppendToken sanitizes and appends streaming text from the agent.
@@ -207,16 +206,11 @@ func (m *AgentPaneModel) appendTypedMeta(kind BlockKind, text, toolName string) 
 	if endRaw > firstRaw && m.RawLines[endRaw-1] == "" {
 		endRaw--
 	}
-	if m.metaRawLines == nil {
-		m.metaRawLines = make(map[int]bool)
-	}
-	for i := firstRaw; i < endRaw; i++ {
-		m.metaRawLines[i] = true
-	}
+	m.markRaw(firstRaw, endRaw, rawLineMark{kind: rawKindMeta})
 	// AppendText already ran recomputeCodeBlock, but it saw these lines
 	// as untagged so a stray fence in LLM-supplied reason/error text
 	// may have flipped rawFenceAfter. Recompute from firstRaw now that
-	// metaRawLines is populated — the skip branch resets fence state.
+	// the meta marks are set — the skip branch resets fence state.
 	m.recomputeCodeBlock(firstRaw)
 	m.invalidateMdCache()
 
@@ -337,15 +331,10 @@ func (m *AgentPaneModel) appendUserMessage(text string, glyph UserGlyph) {
 	m.turnCounter++
 	label := fmt.Sprintf("♩ beat %d", m.turnCounter)
 	// Emit a compact placeholder — Render substitutes the full-width rule
-	// using the label from turnSeparatorRawLines. Storing the label (not
-	// parsing the rendered text) keeps the raw content small and stable
-	// across resizes.
+	// using the label stored on the raw-line mark.
 	m.AppendText("\n\n── " + label + " ──")
 	sepRaw := len(m.RawLines) - 1
-	if m.turnSeparatorRawLines == nil {
-		m.turnSeparatorRawLines = make(map[int]string)
-	}
-	m.turnSeparatorRawLines[sepRaw] = label
+	m.markRaw(sepRaw, sepRaw+1, rawLineMark{kind: rawKindTurnSeparator, label: label})
 
 	// Close the prior beat (Done unless already terminal) and open a new
 	// one anchored at the separator. The user-message block on the new
@@ -356,7 +345,7 @@ func (m *AgentPaneModel) appendUserMessage(text string, glyph UserGlyph) {
 	// index so the separator lines are NOT marked as user content.
 	// The glyph + space prefix replaces the legacy "You: " label —
 	// the prefix is part of the raw text so wrapping math sees it,
-	// while userGlyphForRaw records the kind so the renderer can
+	// while the raw-line mark records the kind so the renderer can
 	// color the glyph cell in its own hue.
 	userStart := len(m.RawLines)
 	prefix := userGlyphPrefix(glyph)
@@ -364,21 +353,16 @@ func (m *AgentPaneModel) appendUserMessage(text string, glyph UserGlyph) {
 	// Exclude the trailing empty raw line — AppendText reuses the last
 	// raw line for the first chunk of the next append, so marking it
 	// would misclassify the first agent token as a user message.
-	if m.userRawLines == nil {
-		m.userRawLines = make(map[int]bool)
-	}
 	endRaw := len(m.RawLines)
 	if endRaw > userStart && m.RawLines[endRaw-1] == "" {
 		endRaw--
 	}
-	for i := userStart; i < endRaw; i++ {
-		m.userRawLines[i] = true
-	}
+	m.markRaw(userStart, endRaw, rawLineMark{kind: rawKindUser})
 
 	// AppendText ran recomputeCodeBlock before user lines were marked, so
 	// fence state may have advanced through user content (e.g. an unmatched
 	// "```" in the message). Recompute from the turn start now that
-	// userRawLines is populated — this skips user lines and resets fence
+	// the user marks are set — this skips user lines and resets fence
 	// state correctly.
 	m.recomputeCodeBlock(turnStart)
 	m.turnStartRaw = turnStart
@@ -394,12 +378,9 @@ func (m *AgentPaneModel) appendUserMessage(text string, glyph UserGlyph) {
 	// emits leading/trailing empty raws around the content; only the
 	// content line carries the visible prefix and needs the glyph
 	// override at render time.
-	if m.userGlyphForRaw == nil {
-		m.userGlyphForRaw = make(map[int]UserGlyph)
-	}
 	for i := userStart; i < endRaw; i++ {
 		if m.RawLines[i] != "" {
-			m.userGlyphForRaw[i] = glyph
+			m.markRaw(i, i+1, rawLineMark{kind: rawKindUser, glyph: glyph})
 			break
 		}
 	}
@@ -439,10 +420,10 @@ func (m *AgentPaneModel) recomputeCodeBlock(fromRaw int) {
 		// User messages are rendered with userMessageStyle, not markdown.
 		// Skip them so an unmatched fence in user input doesn't bleed into
 		// subsequent agent output.
-		if m.userRawLines[ri] || m.plainRawLines[ri] || m.metaRawLines[ri] {
-			// All three classes bypass fence detection: user messages,
-			// awaiting-input blocks, and meta chrome (tool calls, edit
-			// proposals, errors) may carry LLM-supplied text with
+		if k := m.rawKind(ri); k == rawKindUser || k == rawKindMeta {
+			// Both classes bypass fence detection: user messages and
+			// meta chrome (tool calls, edit proposals, errors) may
+			// carry LLM-supplied text with
 			// unmatched backticks that must not flip the state of
 			// subsequent agent output.
 			m.rawFenceAfter = append(m.rawFenceAfter, fence)

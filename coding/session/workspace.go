@@ -4,9 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/latebit-io/nib/engine/buffer"
 	"github.com/latebit-io/nib/engine/filelist"
@@ -15,8 +12,9 @@ import (
 
 // Workspace methods — the agent.Workspace interface implementation that
 // gives tools access to the project filesystem and open buffers. Grouped
-// here so the contract is visible at one glance. State (openFiles,
-// projectRoot, mu, langSyncer) lives on Session.
+// here so the contract is visible at one glance. Root-scoped file I/O is
+// delegated to [fsroot.Root]; state (openFiles, fs, mu, langSyncer) lives
+// on Session.
 
 // SaveDirtyBuffers writes all modified (unsaved) buffers to disk and
 // notifies the language service of each save. Returns the canonical
@@ -78,17 +76,7 @@ func (s *Session) SaveDirtyBuffers(ctx context.Context) ([]string, error) {
 // in-flight content (seeded by Run, updated after each approved edit).
 // This method is only called for files not yet in the cache.
 func (s *Session) ReadFile(path string) (string, error) {
-	absPath, err := s.resolvePath(path)
-	if err != nil {
-		return "", err
-	}
-	data, err := os.ReadFile(absPath)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
-	}
-	// Normalize to match buffer.NewFromFile: trim a single trailing newline.
-	content := strings.TrimSuffix(string(data), "\n")
-	return content, nil
+	return s.fs.ReadFile(path)
 }
 
 // ListFiles returns all project files (respects .gitignore).
@@ -103,38 +91,12 @@ func (s *Session) ListFilesAndDirs() (files []string, dirs []string, err error) 
 }
 
 // WriteFile creates a new file on disk and opens it in the session.
-// Called from the agent goroutine via Workspace — uses mu for map access
-// and O_CREATE|O_EXCL for atomic existence check + create.
+// Called from the agent goroutine via Workspace — the create itself is
+// [fsroot.Root.WriteFile] (root-scoped, O_EXCL); mu guards the map.
 func (s *Session) WriteFile(path, content string) error {
-	absPath, err := s.resolvePath(path)
+	absPath, err := s.fs.WriteFile(path, content)
 	if err != nil {
 		return err
-	}
-
-	// Create parent directories
-	dir := filepath.Dir(absPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create directory %s: %w", dir, err)
-	}
-
-	// Atomic create — O_EXCL fails if the file already exists, avoiding
-	// the TOCTOU race between Stat and WriteFile.
-	f, err := os.OpenFile(absPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		if os.IsExist(err) {
-			return fmt.Errorf("file already exists: %s", path)
-		}
-		return fmt.Errorf("create %s: %w", path, err)
-	}
-	_, writeErr := f.WriteString(content)
-	closeErr := f.Close()
-	if writeErr != nil {
-		_ = os.Remove(absPath) // best-effort rollback so retry doesn't hit "already exists"
-		return fmt.Errorf("write %s: %w", path, writeErr)
-	}
-	if closeErr != nil {
-		_ = os.Remove(absPath) // best-effort rollback
-		return fmt.Errorf("close %s: %w", path, closeErr)
 	}
 
 	// Open it in the session.
@@ -157,53 +119,13 @@ func (s *Session) WriteFile(path, content string) error {
 // CreateDir creates a directory (and parents) within the project root.
 // The path is validated via resolvePath to prevent traversal outside the root.
 func (s *Session) CreateDir(path string) error {
-	absPath, err := s.resolvePath(path)
-	if err != nil {
-		return err
-	}
-	return os.MkdirAll(absPath, 0o755)
+	return s.fs.MkdirAll(path)
 }
 
 // resolvePath converts a path to a cleaned absolute path within the project
-// root. Accepts both relative paths (resolved against root) and absolute paths
-// (validated to be within root). Returns an error if the resolved path
-// escapes the project root via lexical traversal ("../") or symlinks.
+// root, rejecting lexical ("../") and symlink escapes. See [fsroot.Root.Resolve].
 func (s *Session) resolvePath(path string) (string, error) {
-	abs := s.CanonPath(path)
-	root := filepath.Clean(s.projectRoot)
-
-	// Lexical check first (catches "../" before touching the filesystem).
-	if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q escapes project root", path)
-	}
-
-	// Resolve symlinks to catch links that point outside the root.
-	// For new files that don't exist yet, evaluate the parent directory.
-	realRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", fmt.Errorf("resolve project root: %w", err)
-	}
-	realAbs, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		// File may not exist yet (write_file). Check the parent instead.
-		parentDir := filepath.Dir(abs)
-		realParent, dirErr := filepath.EvalSymlinks(parentDir)
-		if dirErr != nil {
-			// Parent doesn't exist either — will fail at create time, allow it.
-			return abs, nil
-		}
-		realParent = filepath.Clean(realParent)
-		if realParent != realRoot && !strings.HasPrefix(realParent, realRoot+string(filepath.Separator)) {
-			return "", fmt.Errorf("path %q resolves outside project root via symlink", path)
-		}
-		return abs, nil
-	}
-	realAbs = filepath.Clean(realAbs)
-	realRoot = filepath.Clean(realRoot)
-	if realAbs != realRoot && !strings.HasPrefix(realAbs, realRoot+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q resolves outside project root via symlink", path)
-	}
-	return abs, nil
+	return s.fs.Resolve(path)
 }
 
 // CanonPath returns the cleaned absolute form of a path. Relative paths are
@@ -211,8 +133,5 @@ func (s *Session) resolvePath(path string) (string, error) {
 // editors map and agent FileCache — ensures the same file is never stored
 // under two keys. Satisfies agent.Workspace.
 func (s *Session) CanonPath(path string) string {
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
-	}
-	return filepath.Clean(filepath.Join(s.projectRoot, path))
+	return s.fs.CanonPath(path)
 }

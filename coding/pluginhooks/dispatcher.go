@@ -130,6 +130,8 @@ func (d *Dispatcher) fireAndForget(ctx context.Context, ev hookspec.Event) {
 		return
 	}
 	in := hookrun.Input{Event: string(ev), Cwd: d.cwd}
+	// stopOnDeny=false: dispatch logs each deny itself and always returns
+	// the zero Decision, so there is nothing to act on here.
 	_ = d.dispatch(ctx, ev, in, "", false, false)
 }
 
@@ -142,8 +144,9 @@ func (d *Dispatcher) fireAndForget(ctx context.Context, ev hookspec.Event) {
 // (Pre/PostToolUse, UserPromptSubmit) pass true: the first Deny short-
 // circuits and is returned ("first deny wins", deterministic over the
 // wiring layer's plugin-ID-sorted config slice). Non-vetoable lifecycle
-// events pass false: a deny is ignored and the remaining hooks still run
-// for their side effects, so the returned zero Decision is meaningless.
+// events pass false: a deny is logged (every one, not just the first)
+// and the remaining hooks still run for their side effects, so the
+// returned zero Decision is meaningless.
 //
 // Hooks run in config order, then group order, then hook order.
 func (d *Dispatcher) dispatch(ctx context.Context, ev hookspec.Event, in hookrun.Input, toolName string, matchTool, stopOnDeny bool) Decision {
@@ -164,8 +167,12 @@ func (d *Dispatcher) dispatch(ctx context.Context, ev hookspec.Event, in hookrun
 					slog.Warn("pluginhooks: hook execution failed; proceeding",
 						"event", ev, "tool", toolName, "err", res.Err)
 				}
-				if res.Decision == hookrun.Deny && stopOnDeny {
-					return Decision{Deny: true, Reason: res.Reason}
+				if res.Decision == hookrun.Deny {
+					if stopOnDeny {
+						return Decision{Deny: true, Reason: res.Reason}
+					}
+					slog.Debug("pluginhooks: hook denied non-vetoable lifecycle event; ignored",
+						"event", ev, "reason", res.Reason)
 				}
 			}
 		}

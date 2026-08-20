@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 
@@ -101,9 +102,9 @@ func (a *Agent) buildMessages(fileName, fileContent, goal string, memorySummary 
 		ActiveTaskPath: activeTaskPath,
 	})
 	if err != nil {
-		// Template execution failed — fall back to a minimal message.
-		// This should not happen with the embedded default template,
-		// but a broken project override could trigger it.
+		// Template execution failed (a broken project override) — fall
+		// back to a minimal message so the run still starts.
+		slog.Warn("user prompt template failed; using minimal fallback", "err", err)
 		userContent = fmt.Sprintf("## File: %s\n\n## Task\n\n%s", fileName, goal)
 	}
 

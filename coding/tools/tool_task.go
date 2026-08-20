@@ -105,32 +105,20 @@ func (t *TaskTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	if t.reviewer != nil {
 		msg = t.reviewer.OnComplete(ctx, msg)
 	}
-	return textResult(msg + t.autoActivateNext())
+	return textResult(msg + AutoActivateNext(t.tracker))
 }
 
-// autoActivateNext finds the next pending task and activates it,
-// returning the suffix to append to the complete-result message. Splits
-// the bookkeeping off Execute so the happy path stays linear and each
-// failure mode has its own branch:
-//
-//   - No more pending tasks → an explicit "all complete" message so the
-//     LLM stops instead of looping looking for work.
-//   - Activation fails (e.g. demarkus write rejected) → surface the
-//     reason and instruct the LLM to retry manually. The complete
-//     itself already persisted, so this is recoverable.
-//   - Success → name the activated task so the LLM can proceed to its
-//     work immediately without a separate activate call.
-//
-// The activation is best-effort: a failure here never undoes the
-// complete that succeeded. The system prompt's old "always call
-// activate after complete" instruction is now redundant — the tool
-// handles the round-trip itself.
-func (t *TaskTool) autoActivateNext() string {
-	next := t.tracker.NextPendingTask()
+// AutoActivateNext finds the next pending task, activates it, and
+// returns the suffix to append to a complete-result message. Shared by
+// update_task(complete) and the agent's lifecycle complete_task bundle
+// so both paths report identically. Best-effort: activation failure is
+// surfaced inline for the LLM to retry; the complete already persisted.
+func AutoActivateNext(tracker TaskTracker) string {
+	next := tracker.NextPendingTask()
 	if next == "" {
 		return "\n\nAll tasks complete."
 	}
-	if err := t.tracker.ActivateTask(next); err != nil {
+	if err := tracker.ActivateTask(next); err != nil {
 		slog.Warn("auto-activate next task failed", "title", next, "err", err)
 		return fmt.Sprintf("\n\nNext pending task: %q (auto-activate failed: %v — call update_task with action=\"activate\" to retry).", next, err)
 	}

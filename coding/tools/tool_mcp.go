@@ -21,17 +21,20 @@ const maxMCPResult = 32 * 1024
 const maxMCPArgs = 64 * 1024
 
 // MCPCaller is the interface the adapter needs from an MCP client.
-// Defined here so the agent package has no dependency on engine/mcp.
+// Defined here so this package has no dependency on kit/mcp.
 type MCPCaller interface {
 	CallTool(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
-// MCPToolInfo describes an MCP tool's schema. This is the agent package's
+// MCPToolInfo describes an MCP tool's schema. This is the tools package's
 // own representation — the caller maps from the transport-specific type
 // (e.g. mcp.ToolInfo) during wiring.
 type MCPToolInfo struct {
-	Name        string
+	// Name is the tool name as advertised by the MCP server.
+	Name string
+	// Description is the server-supplied tool description.
 	Description string
+	// InputSchema is the raw JSON Schema for the tool's arguments.
 	InputSchema json.RawMessage
 }
 
@@ -74,11 +77,11 @@ func (t *MCPToolAdapter) Definition() llm.ToolDef {
 // Execute calls the MCP tool and returns the result string.
 func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	if len(call.Function.Arguments) > maxMCPArgs {
-		return textResult("Error: arguments too large")
+		return errorResult("Error: arguments too large")
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 
 	slog.Debug("mcp tool call", "tool", t.toolName, "args", args)
@@ -86,7 +89,7 @@ func (t *MCPToolAdapter) Execute(ctx context.Context, call llm.ToolCall) ToolRes
 	result, err := t.client.CallTool(ctx, t.toolName, args)
 	if err != nil {
 		slog.Error("mcp tool error", "tool", t.toolName, "err", err)
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 	if len(result) > maxMCPResult {
 		// Truncate at valid UTF-8 boundary to avoid garbled output.

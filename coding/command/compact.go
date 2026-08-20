@@ -6,9 +6,10 @@
 // the layering.
 //
 // Layering: coding/command depends on kit/command (for the interfaces
-// and Session types it implements) and on coding/agent (for the
-// Compactor surface this command consumes). It must not import tui/
-// — frontend-shaped commands live in tui/command.
+// and Session types it implements) and defines the narrow [Compactor]
+// surface it consumes; the composition root passes coding/agent's Agent
+// and sentinel errors in. It must not import tui/ — frontend-shaped
+// commands live in tui/command.
 package command
 
 import (

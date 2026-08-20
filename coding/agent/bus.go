@@ -183,6 +183,13 @@ func (b *bus) unsubscribe(sub *Subscription) {
 	}
 }
 
+// count returns the number of live subscriptions.
+func (b *bus) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subscribers)
+}
+
 // close shuts the bus down. After close returns, every subscriber's
 // inbox channel is closed and no further [bus.publish] call will
 // deliver events.

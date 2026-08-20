@@ -83,14 +83,9 @@ func coordFromCtx(ctx context.Context) *approval.Coordinator {
 // mutatingTools contains tool names that modify filesystem or shell state.
 // In execution mode these require an active `[>]` task in /project.md —
 // the gate enforces "all agent work is tracked in the project tree."
-var mutatingTools = map[string]bool{
-	"edit_file":    true,
-	"write_file":   true,
-	"replace_file": true,
-	"apply_patch":  true,
-	"bash":         true,
-	"smoke_run":    true,
-}
+// Sourced from [tools.MutatingToolNames] so the planning blocklist and
+// this gate share one canonical list.
+var mutatingTools = tools.MutatingToolNames()
 
 // Agent drives the multi-turn LLM loop.
 type Agent struct {
@@ -100,8 +95,7 @@ type Agent struct {
 	// publishes through [bus.publishContext] for ctx-bounded delivery.
 	// Consumers register via [Agent.Subscribe]; the bus fans every
 	// publication out to each subscriber's inbox per its configured
-	// [DropPolicy]. The pre-bus single-frontend-channel design was
-	// retired in commit 4 of the kit-event-bus arc.
+	// [DropPolicy].
 	bus      *bus
 	tools    map[string]Tool
 	toolDefs []llm.ToolDef
@@ -287,8 +281,8 @@ type Agent struct {
 	providerProxy *providerProxy
 
 	// kit is the embeddable [kit.Agent] that drives the run loop.
-	// Built in [New] with [providerProxy], [kitEvents], and the
-	// hooks composed by [Agent.FoundationHooks].
+	// Built in [New] with [providerProxy] and the hooks composed by
+	// [Agent.FoundationHooks]; its events reach the bus via [Agent.kitSub].
 	kit *kit.Agent
 
 	// kitSub is the kit subscription [Agent.forwardKitEvents] drains.
@@ -296,7 +290,7 @@ type Agent struct {
 	// default policy (drop-streaming, block-control). The forwarder
 	// is the application boundary where the generic agent events get
 	// augmented with coding-specific per-turn budget accounting and
-	// forwarded to the frontend channel. [Agent.Close] closes the
+	// published on [Agent.bus]. [Agent.Close] closes the
 	// kit agent, which closes every subscription's inbox; the
 	// forwarder's range exits naturally on the closed inbox.
 	kitSub *kit.Subscription
@@ -304,11 +298,10 @@ type Agent struct {
 	// forwardDone is closed by [Agent.forwardKitEvents] (via defer)
 	// when the forwarder goroutine returns. [Agent.Close] blocks on
 	// it after [kit.Agent.Close] closes the subscription's inbox so
-	// the wrapper provides a synchronous "no further writes to the
-	// consumer channel" guarantee — without this wait, a consumer
-	// that closes the frontend events channel right after Close
-	// returns can race a forwarder still draining the last buffered
-	// AgentDone from the subscription inbox.
+	// the wrapper provides a synchronous "no further publishes to the
+	// bus" guarantee — without this wait, bus.close could race a
+	// forwarder still draining the last buffered AgentDone from the
+	// subscription inbox.
 	forwardDone chan struct{}
 
 	// closeOnce guards [Agent.Close] so concurrent or repeated Close
@@ -368,11 +361,6 @@ type taskEdit struct {
 // A nil callback means the agent has no buffer-flushing responsibility
 // (the headless case — no in-memory buffers exist) and the flush step
 // becomes a no-op.
-//
-// Before commit 4 of the kit-event-bus arc this contract was carried by
-// the [event.FlushBuffers] request-response event; the callback shape
-// removes the per-event Result-channel coupling that did not fit a
-// fan-out delivery model.
 type FlushDirtyBuffersFunc func(ctx context.Context) ([]string, error)
 
 // NewOptions holds optional dependencies for agent construction.
@@ -607,8 +595,8 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 
 // buildKitAgent constructs [Agent.kit], the [kit.Agent] that drives the
 // run loop. Wires the [providerProxy] (so SetProvider survives the
-// foundation's frozen provider field), an intercept events channel
-// drained by [Agent.forwardKitEvents], and the hooks composed by
+// foundation's frozen provider field), a kit subscription drained by
+// [Agent.forwardKitEvents], and the hooks composed by
 // [Agent.FoundationHooks].
 //
 // The Tool slice is iterated in [Agent.toolDefs] order so the kit/
@@ -617,10 +605,10 @@ func New(provider llm.Provider, workspace Workspace, opts *NewOptions, extraTool
 // across runs.
 //
 // Validation failures from [kit.New] panic: inputs are statically known
-// at this composition root (proxy never nil, events channel allocated,
-// tool definitions vetted by [registerTools] which drops duplicates),
-// so a non-nil error indicates a programming error caught at startup
-// rather than a runtime condition.
+// at this composition root (proxy never nil, tool definitions vetted
+// by [registerTools] which drops duplicates), so a non-nil error
+// indicates a programming error caught at startup rather than a
+// runtime condition.
 func (a *Agent) buildKitAgent() {
 	// Fail fast on nil provider. kit.New only sees the providerProxy
 	// (always non-nil) so its own provider-validation cannot catch a
@@ -685,16 +673,13 @@ func (a *Agent) buildKitAgent() {
 //     [Agent.kitSub]'s inbox is closed and the forwarder's range
 //     drains the buffered tail and exits.
 //  2. <-forwardDone blocks until the forwarder exits, providing the
-//     symmetric "no further writes to the frontend events channel"
-//     guarantee. A consumer that closes the frontend channel
-//     immediately after Close returns is safe.
+//     symmetric "no further publishes to the bus" guarantee before
+//     bus.close closes every subscriber inbox.
 //
 // After Close, calls into [Agent.RunWithMode], [Agent.Run], and
 // [Agent.Reply] will fail to start a new run (kit returns ErrClosed).
-// The frontend events channel passed to [New] is NOT closed — that
-// belongs to the caller.
 //
-// Close hangs if the consumer of the frontend events channel has
+// Close hangs if a subscriber with a blocking control-event policy has
 // stopped draining — same hard contract as steady-state operation.
 func (a *Agent) Close() {
 	a.closeOnce.Do(func() {
@@ -727,15 +712,17 @@ func (a *Agent) Close() {
 //
 // Subscribe returns [ErrAgentClosed] if the agent has been closed.
 // Late subscribers receive only events published after their subscribe
-// call; the bus does not journal.
-//
-// The legacy events channel passed to [New] remains the canonical
-// frontend path through commit 3 — a subscriber attached here observes
-// the same stream the channel reader sees, with independent buffer and
-// drop accounting. Commit 4 removes the channel and Subscribe becomes
-// the only consumption path.
+// call; the bus does not journal. Subscribe is the only consumption
+// path — there is no frontend channel.
 func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 	return a.bus.subscribe(opts)
+}
+
+// SubscriberCount returns the number of live subscriptions. Diagnostic
+// only: a consumer that forgets [Subscription.Close] leaves an inbox
+// registered, and a full inbox blocks control-event publication.
+func (a *Agent) SubscriberCount() int {
+	return a.bus.count()
 }
 
 // registerTools builds the tool registry. Built-in tools are registered first
@@ -938,43 +925,19 @@ func adaptEngineSearch(_ context.Context, root, pattern string, opts searchtools
 	return out, nil
 }
 
-// Public lifecycle and signal API (Run, RunWithMode, Reply, Cancel,
-// IsWaiting, IsRunning, SetProvider / Terse, Approve, Reject,
-// activeCoord, drainPendingLint, hasLintPending, currentTerse /
-// Provider / Mode, Usage, emitOpening, send, sendCritical) lives in
-// lifecycle.go.
-
-// Per-run budget integration (checkTaskBudget, evaluateBudgetLatch)
-// lives in budget.go. Per-run usage accumulation lives in
-// [providerProxy.recordUsage] (provider_proxy.go); the pure budget math
-// + types live in [kit/budget].
-
-// Kit event forwarding (forwardKitEvents) lives in forwarder.go. The
-// forwarder drains the [kit.Agent]'s event stream, DROPS
-// [event.AgentTurnUsage] (providerProxy emits the authoritative one
-// directly), overrides AgentDone's Success flag from
-// [Agent.runUnsuccessful], and forwards every other event to the
-// frontend channel.
-
-// Foundation hook bridge (FoundationHooks + every gate it composes)
-// lives in foundation_hooks.go. The kit/foundation captures these
-// once at construction; closure-scoped per-turn state stays out of
-// the [Agent] struct.
-
-// Wrapper-side I/O helpers (planningToolDefs, flushDirtyBuffers) live
-// in io.go — wrapper-private utilities the foundation hooks call
-// into.
-
-// Post-turn nudge math (shouldNudgeOutstanding, tasksAllComplete)
-// lives in nudges.go. The string-pattern detectors themselves live in
-// [coding/nudges]; nudges.go is the agent-side glue.
-
-// Streaming + compaction primitives live in [coding/streaming];
-// truncation recovery in [coding/truncation].
-
-// Task-review pipeline (runTaskReview, nextTaskHint, groupEditsByDir,
-// runLinters, infraError, runSmokeReview, formatFindings,
-// evaluateTurn) lives in task_review.go.
+// File map for the rest of this package (agent.go holds construction
+// and tool registration only):
+//
+//	lifecycle.go        Run/RunWithMode/Reply/Cancel, per-run reset, send/sendCritical
+//	forwarder.go        forwardKitEvents — kit event stream → frontend bus
+//	foundation_hooks.go FoundationHooks + gates captured by kit at construction
+//	budget.go           per-run budget checks; usage lives in provider_proxy.go
+//	task_review.go      runTaskReview / runLinters / runSmokeReview
+//	gates.go            recordEdit, fetchMemorySummary, enforceActiveTaskGate
+//	nudges.go           post-turn nudge glue over [coding/nudges]
+//	io.go               planningToolDefs, flushDirtyBuffers
+//	compact.go          history compaction; truncation.go: output-cap recovery
+//	collab_impl.go      Propose → [editflow.Orchestrator]
 
 // appendSmokeTool registers the smoke_run tool when the project's
 // smokeConfig is non-Skipped and resolves to a real command. Extracted
@@ -1002,12 +965,3 @@ func (a *Agent) appendSmokeTool(builtins []Tool, projectRoot string) []Tool {
 	}
 	return append(builtins, tools.NewSmokeRunTool(projectRoot, a.smokeConfig))
 }
-
-// Edit-approval orchestration (handleEditProposal, waitForApproval,
-// waitForContinue, fatalProposalMarkers) lives in
-// [coding/editflow.Orchestrator]. The agent constructs one in New
-// with [editflow.Deps] callbacks bound to its own state and routes
-// proposals through it via [Agent.Propose] in collab_impl.go.
-
-// Agent-internal gates + bookkeeping (recordEdit, maxValidatorRetries,
-// fetchMemorySummary, enforceActiveTaskGate) lives in gates.go.

@@ -25,8 +25,8 @@
 //     ProviderFor): OpenAI-style providers map it to reasoning_effort, the
 //     Anthropic provider to an extended-thinking budget. TaskTokenBudget
 //     also caps the child.
-//   - The child shares the parent's working tree. isolation:worktree is
-//     a later vertical.
+//   - The child shares the parent's working tree unless the definition
+//     sets isolation:worktree, which runs it in a throwaway git worktree.
 package subagent
 
 import (

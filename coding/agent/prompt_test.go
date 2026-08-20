@@ -204,6 +204,7 @@ func TestToolNotesCollectedFromRegisteredTools(t *testing.T) {
 	t.Parallel()
 
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	notes := ag.toolNotes()
 	if len(notes) == 0 {
 		t.Fatal("toolNotes() returned nothing; collection layer is dropping tool guidance")
@@ -482,6 +483,7 @@ func TestContextFilesFlowIntoSystemPrompt(t *testing.T) {
 	ag := New(&multiTurnProvider{}, stubWorkspace{}, &NewOptions{
 		ContextFiles: []prompts.ContextFile{{Path: "/repo/AGENTS.md", Content: "always run make lint"}},
 	})
+	t.Cleanup(ag.Close)
 	system := ag.rebuildSystemPrompt(event.ModeExecution)
 	for _, want := range []string{"## Project Instructions", "/repo/AGENTS.md", "always run make lint"} {
 		if !strings.Contains(system, want) {

@@ -9,22 +9,12 @@ import (
 
 // Intent lifecycle — the session-level contract between developer and agent.
 // Submission, planning-phase transitions, archiving, cancellation. State
-// (currentIntent, intentDone, intentHistory, phase, pendingEdit, etc.) lives
+// (currentIntent, intentDone, phase, pendingEdit, etc.) lives
 // on Session in session.go.
 
 // CurrentIntent returns the active goal string.
 func (s *Session) CurrentIntent() string {
 	return s.currentIntent
-}
-
-// IntentDone reports whether the current intent was completed.
-func (s *Session) IntentDone() bool {
-	return s.intentDone
-}
-
-// IntentHistory returns the resolved intents archived in order.
-func (s *Session) IntentHistory() []string {
-	return s.intentHistory
 }
 
 // SubmitGoal sends a message to the agent. If the agent is waiting for input
@@ -141,7 +131,6 @@ func (s *Session) startNewConversation(goal string, mode event.Mode) {
 func (s *Session) ArchiveIntent() {
 	if s.currentIntent != "" {
 		s.intentDone = true
-		s.intentHistory = append(s.intentHistory, s.currentIntent)
 	}
 }
 
@@ -161,10 +150,6 @@ func (s *Session) CancelAgent() {
 	if s.HasAgent() {
 		s.ClearIntent()
 		s.agent.Cancel()
-		s.pendingEdit = nil
-		s.pendingProposedReplace = ""
-		s.pendingApproval = nil
-		s.stagedEditFile = ""
-		s.editReviewed = false
+		s.clearApprovalState()
 	}
 }

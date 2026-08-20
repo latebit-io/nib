@@ -74,13 +74,13 @@ func (t *ProjectPhaseAddTool) Definition() llm.ToolDef {
 func (t *ProjectPhaseAddTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args projectPhaseAddArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if len(args.Phases) == 0 {
-		return textResult("Error: phases array is required and must not be empty")
+		return errorResult("Error: phases array is required and must not be empty")
 	}
 	if t.tracker == nil {
-		return textResult("Error: task tracking not available")
+		return errorResult("Error: task tracking not available")
 	}
 
 	seen := make(map[string]int, len(args.Phases))

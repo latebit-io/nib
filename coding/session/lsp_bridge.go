@@ -202,7 +202,7 @@ func (s *Session) RequestCompletionInContext(path, tempContent, originalContent 
 	// Update goroutine where the buffer's OnChange→DidChange fires.
 	// completionMu serializes overlay completions against each other but
 	// NOT against that Update-goroutine DidChange. This is safe because
-	// the engine lsp Manager.DidChange holds its mutex across the
+	// engine/lsp Manager.DidChange holds its mutex across the
 	// version-increment + send, so concurrent DidChange calls are
 	// version-safe (no torn version sequence). The temp/original content
 	// pair below brackets the request so the LSP's view is restored even

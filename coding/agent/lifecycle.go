@@ -99,6 +99,31 @@ func (a *Agent) disarmRunDone(ch chan struct{}) {
 	a.runDoneMu.Unlock()
 }
 
+// resetRunState clears every per-run field shared by RunWithMode and
+// Reply (taskEdits excepted: it spans a Reply resume) and returns the
+// new run's context, cancel, and coordinator.
+// Caller holds a.mu. A fresh coordinator is allocated (never reused):
+// the previous goroutine may still be parked in Coordinator.Await* on
+// the old channels, so swapping isolates the frontend's next signals.
+func (a *Agent) resetRunState(ctx context.Context) (context.Context, context.CancelFunc, *approval.Coordinator) {
+	a.coord = approval.New()
+	runCtx, cancel := context.WithCancel(ctx)
+	a.cancel = cancel
+	a.running = true
+	a.waiting = false
+	a.pendingLint = ""
+	clear(a.validatorRetries)
+	a.providerProxy.ResetSession()
+	a.turnCounter = 0
+	a.budgetExceeded = false
+	a.runUnsuccessful = false
+	a.truncationRetries = 0
+	for _, t := range a.tools {
+		resetTool(t)
+	}
+	return runCtx, cancel, a.coord
+}
+
 // Run starts a new conversation in execution mode. See RunWithMode for details.
 func (a *Agent) Run(ctx context.Context, fileName, fileContent, goal string) {
 	a.RunWithMode(ctx, fileName, fileContent, goal, event.ModeExecution)
@@ -144,36 +169,14 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 	a.fenceForwarder()
 
 	a.mu.Lock()
-	// Allocate a fresh coordinator for the new run instead of reusing
-	// the existing one. The previous goroutine may still be parked
-	// inside a Coordinator.Await* call on the old channels; swapping
-	// isolates the channels so the frontend's subsequent signals go to
-	// the new coordinator.
-	a.coord = approval.New()
-	coord := a.coord
-
-	runCtx, cancel := context.WithCancel(ctx)
-	a.cancel = cancel
+	runCtx, cancel, coord := a.resetRunState(ctx)
+	// taskEdits is task-scoped, not run-scoped: a Reply resume must keep
+	// the edits made before the pause so end-of-task review sees them all.
+	a.taskEdits = nil
 	a.activeFile = fileName
 	a.cache.Reset(fileName, fileContent)
 	a.intent = goal
 	a.mode = mode
-	a.running = true
-	a.waiting = false
-	a.pendingLint = ""
-	a.taskEdits = nil
-	clear(a.validatorRetries)
-	a.providerProxy.ResetSession()
-	a.turnCounter = 0
-	a.budgetExceeded = false
-	a.runUnsuccessful = false
-	a.truncationRetries = 0
-
-	for _, t := range a.tools {
-		if r, ok := t.(Resettable); ok {
-			r.Reset()
-		}
-	}
 	a.mu.Unlock()
 
 	if goal == "" {
@@ -334,29 +337,8 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 
 	a.mu.Lock()
 	mode := a.mode
-
-	a.coord = approval.New()
-	coord := a.coord
-
-	runCtx, cancel := context.WithCancel(ctx)
-	a.cancel = cancel
-	a.running = true
-	a.waiting = false
-	a.pendingLint = ""
-	a.taskEdits = nil
-	clear(a.validatorRetries)
-	a.providerProxy.ResetSession()
-	a.turnCounter = 0
-	a.budgetExceeded = false
-	a.runUnsuccessful = false
-	a.truncationRetries = 0
+	runCtx, _, coord := a.resetRunState(ctx) // cancel stays on a.cancel for the next run to release
 	a.intent = input
-
-	for _, t := range a.tools {
-		if r, ok := t.(Resettable); ok {
-			r.Reset()
-		}
-	}
 	a.mu.Unlock()
 
 	// Refresh the system prompt so a runtime terse toggle since the

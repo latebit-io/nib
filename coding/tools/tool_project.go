@@ -99,13 +99,13 @@ func (t *ProjectTaskAddTool) Definition() llm.ToolDef {
 func (t *ProjectTaskAddTool) Execute(_ context.Context, call llm.ToolCall) ToolResult {
 	var args projectTaskAddArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if len(args.Tasks) == 0 {
-		return textResult("Error: tasks array is required and must not be empty")
+		return errorResult("Error: tasks array is required and must not be empty")
 	}
 	if t.tracker == nil {
-		return textResult("Error: task tracking not available")
+		return errorResult("Error: task tracking not available")
 	}
 
 	// Track first-occurrence index of each (phase, feature, task) triple

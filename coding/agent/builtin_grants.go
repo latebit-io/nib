@@ -116,3 +116,9 @@ func (g bashGrantGate) PromptGuidelines() []string {
 func (g bashGrantGate) BindShell(r dyncontext.Runner) Tool {
 	return bashGrantGate{inner: kit.BindToolShell(g.inner, r), grants: g.grants}
 }
+
+// Reset forwards [Resettable] through the grant gate.
+func (g bashGrantGate) Reset() { resetTool(g.inner) }
+
+// Describe forwards kit.Described through the grant gate.
+func (g bashGrantGate) Describe() kit.Plugin { return kit.DescribeTool(g.inner) }

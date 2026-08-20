@@ -1,6 +1,10 @@
 package nudges
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/latebit-io/nib/coding/tools"
+)
 
 // TestDefaultPlanningBlocklistContents locks the planning-mode
 // blocklist against silent expansion or contraction. Adding a new
@@ -18,6 +22,7 @@ func TestDefaultPlanningBlocklistContents(t *testing.T) {
 		"edit_file":    true,
 		"write_file":   true,
 		"replace_file": true,
+		"apply_patch":  true,
 		"bash":         true,
 		"smoke_run":    true,
 		"update_task":  true,
@@ -36,6 +41,25 @@ func TestDefaultPlanningBlocklistContents(t *testing.T) {
 	for name := range got {
 		if !want[name] {
 			t.Errorf("DefaultPlanningBlocklist contains unexpected entry %q — add to test or revert", name)
+		}
+	}
+}
+
+// TestDefaultPlanningBlocklistCoversMutatingTools guards the derivation:
+// every mutating tool must be blocked in planning mode, and the only
+// non-mutating entry is update_task.
+func TestDefaultPlanningBlocklistCoversMutatingTools(t *testing.T) {
+	t.Parallel()
+
+	got := DefaultPlanningBlocklist()
+	for name := range tools.MutatingToolNames() {
+		if !got[name] {
+			t.Errorf("mutating tool %q missing from planning blocklist", name)
+		}
+	}
+	for name := range got {
+		if !tools.IsMutatingTool(name) && name != "update_task" {
+			t.Errorf("planning blocklist entry %q is neither mutating nor update_task", name)
 		}
 	}
 }

@@ -158,7 +158,7 @@ func (a *Agent) runLinters(ctx context.Context, linters []enginelint.Linter, edi
 			a.send(event.AgentToken{Text: "[Style lint: " + siblingNote + "]\n"})
 		}
 		a.mu.Lock()
-		a.pendingLint = formatFindings(editedFindings)
+		a.pendingLint = lint.FormatFindings(editedFindings)
 		a.mu.Unlock()
 		return
 	}
@@ -211,7 +211,7 @@ func (a *Agent) writeSiblingLintReport(projectRoot string, findings []enginelint
 	var b strings.Builder
 	b.WriteString("Style lint — pre-existing findings in sibling files (not blocking)\n")
 	fmt.Fprintf(&b, "%d finding(s); regenerated on each task completion.\n\n", len(findings))
-	b.WriteString(formatFindings(findings))
+	b.WriteString(lint.FormatFindings(findings))
 	b.WriteByte('\n')
 
 	if err := os.WriteFile(filepath.Join(dir, siblingLintReportName), []byte(b.String()), 0o644); err != nil {
@@ -259,11 +259,4 @@ func (a *Agent) runSmokeReview(ctx context.Context) string {
 	a.send(event.AgentToken{Text: fmt.Sprintf("\n[Smoke run: %s]\n", cfg.Source)})
 	res := smoke.RunSmoke(ctx, a.workspace.ProjectRoot(), cfg)
 	return smoke.FormatSmokeResult(cfg, res)
-}
-
-// formatFindings is a shim around [lint.FormatFindings] for the
-// runLinters call site. The actual rendering lives in `coding/lint`
-// so it can be unit-tested without standing up an Agent.
-func formatFindings(findings []enginelint.Finding) string {
-	return lint.FormatFindings(findings)
 }

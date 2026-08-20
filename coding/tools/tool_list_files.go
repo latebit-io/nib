@@ -38,7 +38,7 @@ func (t *ListFilesTool) Definition() llm.ToolDef {
 func (t *ListFilesTool) Execute(_ context.Context, _ llm.ToolCall) ToolResult {
 	files, err := t.workspace.ListFiles()
 	if err != nil {
-		return textResult(fmt.Sprintf("Error: %v", err))
+		return errorResult(fmt.Sprintf("Error: %v", err))
 	}
 	// Filter out .project/ — project metadata, not source files.
 	filtered := files[:0]

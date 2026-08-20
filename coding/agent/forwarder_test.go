@@ -48,6 +48,7 @@ func TestAgent_MultiTurnEstimatesBindToOriginatingTurn(t *testing.T) {
 	}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -128,6 +129,7 @@ func TestAgent_TurnUsageSurvivesKitChannelPressure(t *testing.T) {
 	}
 
 	ag := New(provider, stubWorkspace{}, nil)
+	t.Cleanup(ag.Close)
 	events := subscribeForTest(t, ag)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

@@ -877,3 +877,30 @@ func TestDeleteFile_ProjectMeta(t *testing.T) {
 		t.Errorf(".project dir should still exist after rejected delete: %v", err)
 	}
 }
+
+// TestResolvePath_SymlinkEscapeMissingTail: a path through an in-root
+// symlink pointing outside the root must be rejected even when neither
+// the target nor its parent exists yet (write_file into a new subdir).
+func TestResolvePath_SymlinkEscapeMissingTail(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "project")
+	secret := filepath.Join(parent, "secret")
+	for _, d := range []string{root, secret} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	s := newTestSessionWithRoot("content", root)
+	if _, err := s.resolvePath("link/newdir/f.go"); err == nil {
+		t.Fatal("resolvePath(link/newdir/f.go) = nil, want outside-root error")
+	}
+	if err := s.WriteFile("link/newdir/f.go", "x"); err == nil {
+		t.Fatal("WriteFile through escaping symlink succeeded")
+	}
+	if entries, _ := os.ReadDir(secret); len(entries) != 0 {
+		t.Fatalf("secret dir polluted: %v", entries)
+	}
+}

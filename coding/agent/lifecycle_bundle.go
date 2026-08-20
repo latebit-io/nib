@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/latebit-io/nib/kit"
-	"github.com/latebit-io/nib/kit/dyncontext"
 	"log/slog"
+	"maps"
 	"strings"
 
 	upagent "github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/coding/tools"
+	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/dyncontext"
 )
 
 // lifecycleActivateDescription is the schema-side prose handed to the
@@ -61,9 +63,7 @@ func augmentWithLifecycleFields(def llm.ToolDef) llm.ToolDef {
 		}
 	}
 	props := make(map[string]llm.FunctionParam, len(def.Function.Parameters.Properties)+2)
-	for k, v := range def.Function.Parameters.Properties {
-		props[k] = v
-	}
+	maps.Copy(props, def.Function.Parameters.Properties)
 	props["activate_task"] = llm.FunctionParam{
 		Type:        "string",
 		Description: lifecycleActivateDescription,
@@ -201,26 +201,8 @@ func (a *Agent) runLifecycleComplete(ctx context.Context, b lifecycleBundle, res
 func (a *Agent) lifecycleCompleteTrailer(ctx context.Context, tt TaskTracker, completedTitle string) string {
 	base := "\nTask completed: " + completedTitle
 	base = a.OnComplete(ctx, base)
-	base += autoActivateNextTrailer(tt)
+	base += tools.AutoActivateNext(tt)
 	return base
-}
-
-// autoActivateNextTrailer mirrors [tools.TaskTool] autoActivateNext.
-// Extracted as a free function so the lifecycle bundle can share the
-// same "complete → auto-activate next" semantics as standalone
-// update_task(complete) calls. Failures are surfaced inline so the
-// LLM can retry the activate manually; the complete itself is never
-// rolled back (already persisted by [TaskTracker.CompleteTask]).
-func autoActivateNextTrailer(tt TaskTracker) string {
-	next := tt.NextPendingTask()
-	if next == "" {
-		return "\n\nAll tasks complete."
-	}
-	if err := tt.ActivateTask(next); err != nil {
-		slog.Warn("lifecycle: auto-activate-next failed", "title", next, "err", err)
-		return fmt.Sprintf("\n\nNext pending task: %q (auto-activate failed: %v — call update_task with action=\"activate\" to retry).", next, err)
-	}
-	return "\n\nNext task auto-activated: " + next
 }
 
 // activeTaskTitle extracts the leaf title from a " > "-joined
@@ -254,3 +236,12 @@ func (t lifecycleAwareTool) PromptGuidelines() []string {
 func (t lifecycleAwareTool) BindShell(r dyncontext.Runner) Tool {
 	return lifecycleAwareTool{Tool: kit.BindToolShell(t.Tool, r)}
 }
+
+// Reset forwards [Resettable] so the per-run reset reaches the wrapped
+// tool (edit_file's silent-retry counter) instead of stopping at the
+// wrapper's method set.
+func (t lifecycleAwareTool) Reset() { resetTool(t.Tool) }
+
+// Describe forwards kit.Described so introspection reports the wrapped
+// tool's metadata rather than the wrapper's derived default.
+func (t lifecycleAwareTool) Describe() kit.Plugin { return kit.DescribeTool(t.Tool) }

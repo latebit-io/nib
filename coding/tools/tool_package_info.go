@@ -66,10 +66,10 @@ type packageInfoArgs struct {
 func (t *PackageInfoTool) Execute(ctx context.Context, call llm.ToolCall) ToolResult {
 	var args packageInfoArgs
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-		return textResult(fmt.Sprintf("Error: invalid arguments: %v", err))
+		return errorResult(fmt.Sprintf("Error: invalid arguments: %v", err))
 	}
 	if args.Name == "" {
-		return textResult("Error: name is required")
+		return errorResult("Error: name is required")
 	}
 
 	lang := t.detectLanguage()
@@ -77,7 +77,7 @@ func (t *PackageInfoTool) Execute(ctx context.Context, call llm.ToolCall) ToolRe
 	case "go":
 		return t.goPackageInfo(ctx, args)
 	default:
-		return textResult("Error: no supported package manager detected. " +
+		return errorResult("Error: no supported package manager detected. " +
 			"Looked for go.mod in project root and immediate subdirectories.")
 	}
 }
@@ -194,9 +194,7 @@ func (t *PackageInfoTool) searchGoMod(modFile, pkg string) (modDir, version stri
 // Matches if the entry's module path equals pkg or pkg is a subpackage.
 func matchRequireLine(line, pkg string) (mod, version string) {
 	// Strip inline comments.
-	if idx := strings.Index(line, "//"); idx >= 0 {
-		line = line[:idx]
-	}
+	line, _, _ = strings.Cut(line, "//")
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
 		return "", ""

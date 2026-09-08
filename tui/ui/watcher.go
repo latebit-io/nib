@@ -135,6 +135,10 @@ func (fw *FileWatcher) Unwatch(path string) {
 	dir := filepath.Dir(canon)
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
+	if timer, ok := fw.timers[canon]; ok {
+		timer.Stop()
+		delete(fw.timers, canon)
+	}
 	if !fw.watchingFiles[canon] {
 		return
 	}

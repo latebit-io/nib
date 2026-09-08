@@ -11,7 +11,6 @@ import (
 )
 
 // Keypress dispatch helpers.
-// Extracted from app.go's handleKey() (Phase 7 of AppModel decomposition).
 //
 // `handleKey` itself stays in app.go as the top-level router (mouse-leak
 // guard → input-mode short-circuits → action router → focused-pane

@@ -7,7 +7,6 @@ import (
 )
 
 // AppModel ↔ FileWatcher bridge.
-// Extracted from app.go (Phase 6 of AppModel decomposition).
 //
 // The pure FileWatcher component (fsnotify-driven, ref-counted dir watching,
 // debounced delivery) lives in `watcher.go`. This file is the application-side

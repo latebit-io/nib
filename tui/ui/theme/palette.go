@@ -1,6 +1,6 @@
-// Package theme is the single source of truth for the agent-pane redesign
-// palette. Every color used by agent-pane rendering must come from this
-// package — no inline lipgloss.Color("…") at callsites.
+// Package theme is the shared palette for the agent-pane redesign. New
+// agent-pane colors belong here so hues stay consistent across panes;
+// legacy inline lipgloss.Color("…") callsites are migrated as touched.
 //
 // The palette has three layers:
 //
@@ -105,16 +105,6 @@ var (
 var (
 	// PaneBg is the agent pane background.
 	PaneBg = lipgloss.Color("#0a0a0a")
-	// TitleBar is the top-of-pane title bar background.
-	TitleBar = lipgloss.Color("#111")
-	// UserBubbleBg is the user-message bubble fill.
-	UserBubbleBg = lipgloss.Color("#161616")
-	// UserBubbleBorder is the user-message bubble border.
-	UserBubbleBorder = lipgloss.Color("#2a2a2a")
-	// ErrorBlockBg is the faint red wash inside an error block.
-	ErrorBlockBg = lipgloss.Color("#1a0808")
-	// LockedInputBg is the input box background while the agent is running.
-	LockedInputBg = lipgloss.Color("#0d0d0d")
 	// DividerActive is the active-beat hairline divider color.
 	DividerActive = lipgloss.Color("#333")
 	// DividerDim is the past-beat hairline divider color.

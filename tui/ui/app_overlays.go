@@ -8,7 +8,6 @@ import (
 )
 
 // Overlay-message handlers (palette + search overlay).
-// Extracted from app.go's Update() (Phase 7 of AppModel decomposition).
 //
 // The pure overlay components live in `palette.go` / `search_overlay.go`.
 // This file is the AppModel-side bridge — turning palette/search

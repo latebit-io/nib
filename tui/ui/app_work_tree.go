@@ -8,7 +8,6 @@ import (
 )
 
 // Work-tree refresh handler.
-// Extracted from app.go's Update() (Phase 3 of AppModel decomposition).
 //
 // The work tree is the project's plan/goal/task graph fetched from the
 // demarkus memory server. It is loaded asynchronously to keep the TUI

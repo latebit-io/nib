@@ -5,7 +5,6 @@ import (
 )
 
 // Model selector + OAuth + API-key flows.
-// Extracted from app.go's Update() (Phase 2 of AppModel decomposition).
 //
 // Pipeline overview:
 //

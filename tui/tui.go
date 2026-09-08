@@ -67,10 +67,6 @@ type Config struct {
 	// kit-level agent can supply. Wired only when Agent is non-nil.
 	AgentCallbacks AgentCallbacks
 
-	// CodingCallbacks holds coding-flavored callbacks that depend on
-	// coding-agent concepts. Wired only when Agent is non-nil.
-	CodingCallbacks CodingCallbacks
-
 	// LLM holds LLM-related callbacks (model listing, profiles).
 	// Optional — nil disables model switching UI.
 	LLM *LLMCallbacks
@@ -81,10 +77,6 @@ type Config struct {
 	// displayed percentage matches the gate that aborts the run.
 	TaskTokenBudget int
 
-	// OAuth holds OAuth connection callbacks.
-	// Optional — nil disables OAuth UI flows.
-	OAuth *OAuthCallbacks
-
 	// HighlighterFactory builds a syntax highlighter for a given file
 	// path. The TUI installs the returned highlighter on each editor it
 	// constructs in its per-file pool. Pass nil to disable highlighting
@@ -93,11 +85,7 @@ type Config struct {
 }
 
 // AgentCallbacks groups generic frontend callbacks that any kit-level
-// agent can supply. A non-coding kit consumer (research agent, refactor
-// agent) populates these without touching CodingCallbacks. Today the
-// surface is small (output verbosity); promote a CodingCallbacks field
-// up to AgentCallbacks when its parameter types and semantics no
-// longer reference coding-only state.
+// agent can supply — nothing here may reference coding-only state.
 type AgentCallbacks struct {
 	// ToggleTerse enables/disables terse output mode. Returns the
 	// new state.
@@ -106,11 +94,6 @@ type AgentCallbacks struct {
 	// InitialTerse is the terse mode state at startup.
 	InitialTerse bool
 }
-
-// CodingCallbacks groups frontend callbacks that depend on coding-agent
-// concepts. Currently empty — kept as a wiring seam for future coding-
-// flavored callbacks (the per-PR diff stays small when one returns).
-type CodingCallbacks struct{}
 
 // LLMCallbacks groups LLM-related UI callbacks.
 type LLMCallbacks struct {
@@ -133,22 +116,12 @@ type LLMCallbacks struct {
 	IsOAuthProfile func(profile string) string
 }
 
-// OAuthCallbacks groups OAuth-specific UI callbacks.
-type OAuthCallbacks struct {
-	// ConnectOAuth starts an OAuth flow for the given profile.
-	ConnectOAuth func(profile string) tea.Cmd
-
-	// HasOAuthToken reports whether a valid token exists for a profile.
-	HasOAuthToken func(profile string) bool
-}
-
 // App is a fully-wired TUI application ready to run.
 type App struct {
 	model   *ui.AppModel
 	program *tea.Program
 	agent   AgentResolver
 	events  chan event.Event
-	session *session.Session
 }
 
 // New constructs the TUI from the given config. The returned App is
@@ -178,15 +151,7 @@ func New(cfg Config) *App {
 	// status-bar budget indicator tracks the same number the gate enforces.
 	appPtr.AgentPane.SetTaskTokenBudget(cfg.TaskTokenBudget)
 
-	// Wire OAuth callbacks.
-	if cfg.OAuth != nil {
-		appPtr.ConnectOAuth = cfg.OAuth.ConnectOAuth
-		appPtr.HasOAuthToken = cfg.OAuth.HasOAuthToken
-	}
-
-	// Wire agent callbacks. Generic and coding-flavored bundles are
-	// populated independently — a non-coding consumer wires
-	// AgentCallbacks alone and leaves CodingCallbacks zero.
+	// Wire agent callbacks.
 	if cfg.Agent != nil {
 		// Reflect whether an agent actually exists at construction.
 		// It may be built lazily after startup (no LLM credentials
@@ -204,14 +169,12 @@ func New(cfg Config) *App {
 	}
 
 	p := tea.NewProgram(appPtr, tea.WithoutSignalHandler())
-	appPtr.SetProgram(p)
 
 	return &App{
 		model:   appPtr,
 		program: p,
 		agent:   cfg.Agent,
 		events:  cfg.Events,
-		session: cfg.Session,
 	}
 }
 
@@ -280,17 +243,6 @@ func (a *App) Program() *tea.Program { return a.program }
 func (a *App) SetAgentCallbacks(cb AgentCallbacks) {
 	msg := ui.SetAgentCallbacksMsg(cb.ToggleTerse, cb.InitialTerse)
 	go a.program.Send(msg)
-}
-
-// SetCodingCallbacks installs coding-flavored agent callbacks.
-// Same any-time semantics, race-avoidance rationale, and async
-// caveat as [App.SetAgentCallbacks] — including the never-Run
-// goroutine-leak caveat documented there. Currently a no-op — the
-// callback set is empty after the autonomy-dial removal but the
-// wiring seam is kept so future coding-flavored callbacks land
-// with a tiny diff.
-func (a *App) SetCodingCallbacks(_ CodingCallbacks) {
-	go a.program.Send(ui.SetCodingCallbacksMsg())
 }
 
 // Run starts the Bubble Tea event loop and blocks until the user

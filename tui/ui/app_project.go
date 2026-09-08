@@ -9,7 +9,6 @@ import (
 )
 
 // Project-pane file-system message handlers.
-// Extracted from app.go's Update() (Phase 7 of AppModel decomposition).
 //
 // All session writes go through AppModel — the project pane component
 // emits intent messages (ProjectCreate*, ProjectDelete*, etc.) and

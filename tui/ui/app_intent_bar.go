@@ -8,7 +8,6 @@ import (
 )
 
 // Intent bar rendering.
-// Extracted from app.go (Phase 8 of AppModel decomposition).
 //
 // The intent bar is the single-row strip at the top of the TUI that
 // names what the agent is currently doing. Three states:

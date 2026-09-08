@@ -9,7 +9,6 @@ import (
 )
 
 // Edit-approval pipeline.
-// Extracted from app.go (Phase 4 of AppModel decomposition).
 
 // applyApproval runs the prepare → apply pipeline and signals the agent
 // via CompleteApproval. The session's PrepareApproval validates the
@@ -27,7 +26,7 @@ func (m *AppModel) applyApproval() tea.Cmd {
 	plan, err := m.Session.PrepareApproval(search, replace)
 	if err != nil {
 		slog.Warn("agent approve: preparation failed", "err", err)
-		m.AgentPane.AppendText("\n[" + err.Error() + "]\n")
+		m.AgentPane.AppendMeta("\n[" + err.Error() + "]\n")
 		// Only clear the overlay if the session gave up on the edit
 		// (PendingEdit cleared, agent rejected). If PendingEdit is still
 		// set (e.g. "not reviewed"), keep the overlay so the user can retry.
@@ -46,7 +45,7 @@ func (m *AppModel) applyApproval() tea.Cmd {
 	ok, reason := m.Editor.ApplyEdit(plan.Search, plan.Replace, plan.LineOrigins)
 	if !ok {
 		slog.Warn("apply failed", "reason", reason)
-		m.AgentPane.AppendText("\n[apply failed: " + reason + "]\n")
+		m.AgentPane.AppendMeta("\n[apply failed: " + reason + "]\n")
 		m.Session.AbortApproval()
 		m.clearEditorOverlay(false)
 		return nil

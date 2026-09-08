@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/latebit-io/nib/coding/session"
 )
 
 // fileChangedMsg is sent when a watched file changes on disk.
@@ -22,7 +21,7 @@ type fileChangedMsg struct{ Path string }
 // file in a directory is unwatched, the directory watch is removed.
 type FileWatcher struct {
 	watcher *fsnotify.Watcher
-	session *session.Session
+	canon   func(string) string
 	ch      chan fileChangedMsg
 
 	mu            sync.Mutex
@@ -33,8 +32,10 @@ type FileWatcher struct {
 }
 
 // NewFileWatcher creates a watcher that monitors open editor files.
+// canon normalizes paths (symlinks, case) so fsnotify event names and
+// Watch/Unwatch arguments compare equal; typically session.CanonPath.
 // Returns nil if the underlying OS watcher cannot be created.
-func NewFileWatcher(sess *session.Session) *FileWatcher {
+func NewFileWatcher(canon func(string) string) *FileWatcher {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		slog.Warn("file watcher unavailable", "err", err)
@@ -42,7 +43,7 @@ func NewFileWatcher(sess *session.Session) *FileWatcher {
 	}
 	fw := &FileWatcher{
 		watcher:       w,
-		session:       sess,
+		canon:         canon,
 		ch:            make(chan fileChangedMsg, 16),
 		watchingFiles: make(map[string]bool),
 		dirRefCount:   make(map[string]int),
@@ -68,7 +69,7 @@ func (fw *FileWatcher) loop() {
 			if !ev.Has(fsnotify.Write) && !ev.Has(fsnotify.Create) {
 				continue
 			}
-			canon := fw.session.CanonPath(ev.Name)
+			canon := fw.canon(ev.Name)
 
 			fw.mu.Lock()
 			// Only emit for files we're explicitly tracking.
@@ -109,7 +110,7 @@ func (fw *FileWatcher) loop() {
 // (write temp + rename) are detected correctly.
 // Safe to call multiple times with the same path.
 func (fw *FileWatcher) Watch(path string) {
-	canon := fw.session.CanonPath(path)
+	canon := fw.canon(path)
 	dir := filepath.Dir(canon)
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
@@ -130,10 +131,14 @@ func (fw *FileWatcher) Watch(path string) {
 // in a directory is removed, the directory watch is also removed.
 // Safe to call for paths that were never watched.
 func (fw *FileWatcher) Unwatch(path string) {
-	canon := fw.session.CanonPath(path)
+	canon := fw.canon(path)
 	dir := filepath.Dir(canon)
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
+	if timer, ok := fw.timers[canon]; ok {
+		timer.Stop()
+		delete(fw.timers, canon)
+	}
 	if !fw.watchingFiles[canon] {
 		return
 	}

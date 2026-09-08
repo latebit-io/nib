@@ -10,14 +10,18 @@ import tea "charm.land/bubbletea/v2"
 // To add a new pane: implement this interface, register it with the
 // RegionManager, and add cross-pane routing in AppModel if needed.
 type Pane interface {
+	// Update handles a message routed to this pane and returns any follow-up command.
 	Update(msg tea.Msg) tea.Cmd
+	// Render returns the pane's content for the current size.
 	Render() string
+	// SetSize informs the pane of its allotted width and height in cells.
 	SetSize(width, height int)
 }
 
 // Titled is an optional interface a Pane can implement to display a title
 // embedded in its border. RegionManager checks for this via type assertion.
 type Titled interface {
+	// Title returns the text embedded in the pane's border.
 	Title() string
 }
 

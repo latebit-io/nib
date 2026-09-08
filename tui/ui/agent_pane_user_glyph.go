@@ -117,7 +117,7 @@ func classifyUserMessage(text string) UserGlyph {
 
 // renderUserLine produces the styled row for a wrapped line that's
 // part of a user message. When the wrapped line is the FIRST wrapped
-// row of a raw line carrying a glyph (recorded in userGlyphForRaw),
+// row of a raw line carrying a glyph (recorded on its rawLineMark),
 // the leading 2 cells render in the glyph's hue and the rest renders
 // in the uniform user body color (Accent or AccentDim). Continuation
 // wrapped rows and the legacy no-glyph path render uniform.
@@ -134,14 +134,13 @@ func (m *AgentPaneModel) renderUserLine(lineText string, wrappedIdx int, dim boo
 	}
 
 	rawIdx := m.rawIndexOf(wrappedIdx)
-	glyph, hasGlyph := m.userGlyphForRaw[rawIdx]
+	glyph := m.rawMarks[rawIdx].glyph
 	firstWrapped := rawIdx >= 0 && rawIdx < len(m.wrappedIndex) && m.wrappedIndex[rawIdx] == wrappedIdx
 
-	// Neutral matches the body color exactly — there's no visible
-	// difference between split and uniform rendering, so skip the
-	// split work. Same for continuation rows and lines outside the
-	// glyph-bearing first wrapped row.
-	if !hasGlyph || !firstWrapped || glyph == UserGlyphNeutral {
+	// Neutral (also the zero value on non-glyph lines) matches the body
+	// color exactly — no visible difference between split and uniform
+	// rendering, so skip the split work. Same for continuation rows.
+	if !firstWrapped || glyph == UserGlyphNeutral {
 		return bodyStyle.Render(m.padLine(lineText))
 	}
 

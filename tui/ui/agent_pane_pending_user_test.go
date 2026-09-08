@@ -114,8 +114,8 @@ func TestAgentTurnUsage_ToolCallsZero_IsFlushBoundary(t *testing.T) {
 
 // hasUserLine reports whether any raw line is marked as user content.
 func hasUserLine(m *AgentPaneModel) bool {
-	for _, v := range m.userRawLines {
-		if v {
+	for _, mark := range m.rawMarks {
+		if mark.kind == rawKindUser {
 			return true
 		}
 	}

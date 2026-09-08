@@ -681,7 +681,7 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	if ag != nil {
 		cmdBusy = func() bool { return ag.IsRunning() && !ag.IsWaiting() }
 	}
-	app.AgentPane.SetCommandDispatch(cmdRegistry, cmdBusy, appCtx)
+	app.AgentPane.SetCommandDispatch(appCtx, cmdRegistry, cmdBusy)
 
 	// OAuth callbacks — wired post-construction because ConnectOAuth
 	// needs tuiApp.Program() which only exists after New().
@@ -718,15 +718,15 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 	}
 
 	// wireAgentHandlers installs the UI callbacks that require a live
-	// agent through the typed nibTui.AgentCallbacks / CodingCallbacks
-	// surface. Called once — on startup (when credentials exist) or
-	// on the first successful connect via the model switcher.
+	// agent through the typed nibTui.AgentCallbacks surface. Called
+	// once — on startup (when credentials exist) or on the first
+	// successful connect via the model switcher.
 	//
-	// The two Set*Callbacks calls dispatch through tea.Program.Send,
-	// which serializes the field writes into the Bubble Tea Update
-	// goroutine and so stays race-free regardless of which caller
-	// goroutine invokes wireAgentHandlers (startup goroutine pre-Run;
-	// Update goroutine via model switcher post-Run).
+	// SetAgentCallbacks dispatches through tea.Program.Send, which
+	// serializes the field writes into the Bubble Tea Update goroutine
+	// and so stays race-free regardless of which caller goroutine
+	// invokes wireAgentHandlers (startup goroutine pre-Run; Update
+	// goroutine via model switcher post-Run).
 	wireAgentHandlers := func() {
 		tuiApp.SetAgentCallbacks(nibTui.AgentCallbacks{
 			ToggleTerse: func(enabled bool) bool {
@@ -740,8 +740,6 @@ func run() error { //nolint:gocognit // wiring function — inherently sequentia
 			},
 			InitialTerse: true,
 		})
-
-		tuiApp.SetCodingCallbacks(nibTui.CodingCallbacks{})
 	}
 
 	// Model switcher — first call with valid credentials constructs the agent

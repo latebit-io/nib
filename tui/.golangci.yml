@@ -118,3 +118,5 @@ linters:
               desc: "textarea is a leaf text widget"
             - pkg: "github.com/latebit-io/nib/kit"
               desc: "textarea is a leaf text widget"
+            - pkg: "github.com/latebit-io/nib/tui/editor"
+              desc: "textarea is a leaf text widget — it must not depend on the editor controller"

@@ -118,26 +118,35 @@ func run() error {
 
 // setupLogging configures slog. Debug mode writes to a per-user cache
 // file (single-user trust boundary, safe against /tmp + O_TRUNC symlink
-// clobber). The file handle is intentionally not closed: process
-// lifetime is the only meaningful scope for a single-shot CLI.
+// clobber). Losing the debug log is not a reason to refuse to run: open
+// failures warn and continue. The file handle is intentionally not
+// closed: process lifetime is the only meaningful scope for a
+// single-shot CLI.
 func setupLogging(debug bool) {
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if !debug {
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		return
 	}
-	logPath, err := brand.DebugLogPath("nibster-debug.log")
+	f, err := openDebugLog("nibster-debug.log")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: debug log path: %v — proceeding without debug log\n", err)
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-		return
-	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: open debug log %s: %v — proceeding without debug log\n", logPath, err)
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+		fmt.Fprintf(os.Stderr, "warning: %v — proceeding without debug log\n", err)
 		return
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})))
+}
+
+// openDebugLog opens (truncating) the brand debug-log file named name
+// under the per-user cache dir. The caller owns the returned file.
+func openDebugLog(name string) (*os.File, error) {
+	logPath, err := brand.DebugLogPath(name)
+	if err != nil {
+		return nil, fmt.Errorf("debug log path: %w", err)
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open debug log %s: %w", logPath, err)
+	}
+	return f, nil
 }
 
 // resolveRoot returns the working directory for bash and demarkus. The
@@ -191,10 +200,7 @@ func listSessions(ctx context.Context, store memory.Store) error {
 	if err != nil {
 		return fmt.Errorf("read index: %w", err)
 	}
-	fmt.Print(doc.Body)
-	if !strings.HasSuffix(doc.Body, "\n") {
-		fmt.Println()
-	}
+	printDoc(doc.Body)
 	return nil
 }
 
@@ -214,9 +220,15 @@ func showSession(ctx context.Context, store memory.Store, id string) error {
 	if err != nil {
 		return fmt.Errorf("read session: %w", err)
 	}
-	fmt.Print(doc.Body)
-	if !strings.HasSuffix(doc.Body, "\n") {
+	printDoc(doc.Body)
+	return nil
+}
+
+// printDoc writes a memory document body to stdout, ensuring it ends
+// with a newline so the shell prompt never lands mid-line.
+func printDoc(body string) {
+	fmt.Print(body)
+	if !strings.HasSuffix(body, "\n") {
 		fmt.Println()
 	}
-	return nil
 }

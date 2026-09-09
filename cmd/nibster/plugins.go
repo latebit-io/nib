@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/skill"
@@ -49,23 +48,16 @@ func nibsterToolset(root string, store memory.Store) (kit.Toolset, skill.Result)
 // has no slash-command registry — the kit-boundary smoke test
 // deliberately ships zero commands.
 //
-// Provider resolution mirrors [runAgent]: profile from local config,
-// OAuth wiring if the profile is OAuth-backed, falling back to
-// "(no LLM credentials)" when nothing resolves. Failure to wire
-// OAuth surfaces as a manifest line, not a hard error — `--plugins`
-// is diagnostic and must produce something useful even when the
-// auth path is broken.
+// Provider resolution shares [resolveProvider] with [runAgent]; a
+// broken OAuth store degrades to "(no LLM credentials)" rather than a
+// hard error — `--plugins` is diagnostic and must produce something
+// useful even when the auth path is broken.
 func printPlugins(root string, store memory.Store) error {
 	var plugins []kit.Plugin
 
-	_, resolved := llmconfig.Resolve(root)
-	if resolved.OAuthProvider != "" {
-		oauthStore, err := openOAuthStore()
-		if err != nil {
-			slog.Debug("plugins: oauth store unavailable", "err", err)
-		} else {
-			llmconfig.WireOAuth(resolved, oauthStore)
-		}
+	resolved, err := resolveProvider(root)
+	if err != nil {
+		slog.Debug("plugins: oauth store unavailable", "err", err)
 	}
 	if resolved.HasProvider() {
 		plugins = append(plugins, kit.Plugin{

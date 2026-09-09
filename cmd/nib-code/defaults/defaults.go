@@ -80,19 +80,3 @@ func Seed(dir string) error {
 	}
 	return nil
 }
-
-// CommandFiles returns the names of bundled command files. Used by
-// startup logging and tests; not used in the seed path itself.
-func CommandFiles() []string {
-	entries, err := fs.ReadDir(commandsFS, "commands")
-	if err != nil {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
-	return names
-}

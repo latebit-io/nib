@@ -14,9 +14,9 @@ These apply everywhere in this repository.
 
 The repository is multi-module. Import direction matters and is enforced by review:
 
-- `ai/`, `engine/`, `kit/` are leaf modules with no nib intra-dependencies on `coding/` or `tui/`.
-- `coding/` depends on `ai/`, `engine/`, `kit/` — but **must not** import `tui/` or any UI framework.
-- `tui/` is the only module allowed to import `bubbletea` / `lipgloss`.
+- `ai/` imports nothing nib-internal. `agent/` imports only `ai/`. `kit/` imports `ai/` + `agent/`. `engine/` imports nothing nib-internal (zero nib deps) — never `agent/`, `coding/`, or `tui/`.
+- `coding/` depends on `ai/`, `agent/`, `engine/`, `kit/` — but **must not** import `tui/` or any UI framework.
+- UI framework imports stay in `tui/`; `cmd/nib-code` may import Bubble Tea only for composition-root lifecycle wiring.
 - `cmd/` binaries are the composition root — they wire the layers together.
 
 Flag any import that violates these directions.
@@ -28,7 +28,7 @@ The TUI entry point's bootstrap is order-sensitive:
 1. Resolve config + project root
 2. Build editor + initial buffer
 3. Construct Session (editor-only mode)
-4. Construct Agent (via `coding/wire`) with Session as Workspace
+4. Construct Agent with Session as Workspace, using `coding/wire` helpers
 5. Attach agent to session via `SetAgent()`
 
 Session must exist before Agent — that breaks the circular Session-needs-agentPort vs Agent-needs-Workspace dependency. The auto-approval gate lives in `tui/ui/app_engine_events.go` (validator-pass → auto-apply, non-pass → surface overlay).

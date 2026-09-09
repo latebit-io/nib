@@ -1,18 +1,36 @@
 package defaults
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
+// commandFiles returns the names of bundled command files straight
+// from the embed FS so tests can cross-check what Seed materialized.
+func commandFiles(t *testing.T) []string {
+	t.Helper()
+	entries, err := fs.ReadDir(commandsFS, "commands")
+	if err != nil {
+		t.Fatalf("read embedded commands: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
 func TestSeed_ColdStartCreatesFiles(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "commands")
 	if err := Seed(dir); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	for _, name := range CommandFiles() {
+	for _, name := range commandFiles(t) {
 		path := filepath.Join(dir, name)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("expected %s to exist; got %v", path, err)
@@ -44,7 +62,7 @@ func TestSeed_ExistingDirIsLeftUntouched(t *testing.T) {
 		t.Errorf("Seed should have left existing dir alone; sentinel = %q", got)
 	}
 	// And no embedded defaults should have been added.
-	for _, name := range CommandFiles() {
+	for _, name := range commandFiles(t) {
 		path := filepath.Join(dir, name)
 		if _, err := os.Stat(path); err == nil {
 			t.Errorf("Seed wrote default %s into a pre-existing dir", path)
@@ -61,7 +79,7 @@ func TestSeed_ContentsMatchEmbed(t *testing.T) {
 	if err := Seed(dir); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	for _, name := range CommandFiles() {
+	for _, name := range commandFiles(t) {
 		got, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -84,7 +102,7 @@ func TestSeed_ParentsCreated(t *testing.T) {
 	if err := Seed(dir); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	for _, name := range CommandFiles() {
+	for _, name := range commandFiles(t) {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("expected %s under nested path; got %v", name, err)
 		}
@@ -95,13 +113,13 @@ func TestCommandFiles_NotEmpty(t *testing.T) {
 	// Sanity: the embed actually bundles something. A misconfigured
 	// //go:embed directive (e.g. no .md files matched) would silently
 	// produce an empty FS; this test catches that.
-	files := CommandFiles()
+	files := commandFiles(t)
 	if len(files) == 0 {
-		t.Errorf("CommandFiles is empty — embed directive likely broken")
+		t.Errorf("commandFiles is empty — embed directive likely broken")
 	}
 	for _, f := range files {
 		if !strings.HasSuffix(f, ".md") {
-			t.Errorf("CommandFiles entry %q is not a .md file", f)
+			t.Errorf("commandFiles entry %q is not a .md file", f)
 		}
 	}
 }

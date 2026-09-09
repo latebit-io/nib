@@ -31,20 +31,9 @@ const indexWriteTimeout = 5 * time.Second
 // The binary owns the index write — not the agent — so the index stays
 // consistent even when the agent runs out of budget mid-update.
 func runAgent(ctx context.Context, root string, store memory.Store, message string) error {
-	_, resolved := llmconfig.Resolve(root)
-	// OAuth-only profiles (e.g. chatgpt, copilot) need the auth store
-	// attached before HasProvider can succeed. Stored-key wiring is
-	// nib-code-only (TUI-entered keys), so it's intentionally omitted.
-	// Gate on OAuthProvider so API-key users never touch the auth file
-	// — and so a corrupt store surfaces as a real setup error here
-	// (not a misleading "no credentials") only when OAuth is actually
-	// the configured auth path.
-	if resolved.OAuthProvider != "" {
-		oauthStore, err := openOAuthStore()
-		if err != nil {
-			return setupErr("oauth store: %v", err)
-		}
-		llmconfig.WireOAuth(resolved, oauthStore)
+	resolved, err := resolveProvider(root)
+	if err != nil {
+		return setupErr("oauth store: %v", err)
 	}
 	if !resolved.HasProvider() {
 		return setupErr("no LLM credentials — %s", credentialHint(resolved))
@@ -134,6 +123,26 @@ func closeAgent(ag *kit.Agent, events <-chan event.Event) {
 	}()
 	ag.Close()
 	close(drainDone)
+}
+
+// resolveProvider resolves the LLM profile for root and, for OAuth-only
+// profiles (chatgpt, copilot), attaches the auth store so HasProvider
+// can succeed. Stored-key wiring is nib-code-only (TUI-entered keys), so
+// it's intentionally omitted. Gated on OAuthProvider so API-key users
+// never touch the auth file — a corrupt store is only reported when
+// OAuth is actually the configured auth path. The Resolved is returned
+// even on error so callers can still render a credential hint.
+func resolveProvider(root string) (*llmconfig.Resolved, error) {
+	_, resolved := llmconfig.Resolve(root)
+	if resolved.OAuthProvider == "" {
+		return resolved, nil
+	}
+	oauthStore, err := openOAuthStore()
+	if err != nil {
+		return resolved, err
+	}
+	llmconfig.WireOAuth(resolved, oauthStore)
+	return resolved, nil
 }
 
 // openOAuthStore opens the default OAuth token store. A missing

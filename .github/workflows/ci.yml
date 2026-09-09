@@ -1,0 +1,80 @@
+name: CI
+
+# Build, test (-race), and lint every module on each PR and push to main.
+# Mirrors pre-commit.sh so a green local hook predicts a green CI run.
+# release.yml (tags ai/agent on main) stays separate.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26"
+          # setup-go's cache keys on go.sum; a multi-module repo needs
+          # every module's go.sum listed or the cache misses each run.
+          cache-dependency-path: |
+            ai/go.sum
+            agent/go.sum
+            engine/go.sum
+            kit/go.sum
+            coding/go.sum
+            tui/go.sum
+            cmd/nib-code/go.sum
+            cmd/agent/go.sum
+            cmd/nibster/go.sum
+      - name: gofmt
+        run: make fmt-check
+      - name: Module tidy
+        run: make mod-tidy-check
+      - name: Build
+        run: make build
+      - name: Vet
+        run: make vet
+      - name: Test (-race)
+        run: make test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: |
+            ai/go.sum
+            agent/go.sum
+            engine/go.sum
+            kit/go.sum
+            coding/go.sum
+            tui/go.sum
+            cmd/nib-code/go.sum
+            cmd/agent/go.sum
+            cmd/nibster/go.sum
+      # Install the binary once; the golangci-lint-action only lints a
+      # single working directory per invocation and would need nine
+      # steps. `make lint` loops over every module (same as pre-commit).
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.9.0/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.9.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Lint
+        run: make lint

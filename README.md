@@ -4,7 +4,7 @@
 
 A coding agent that develops projects end-to-end — for developers who want agentic speed without losing craftsman control. The agent writes the code, respects the architecture, follows the language's idioms, plans against a work tree, and remembers across sessions. **The agent is the product** — embeddable, extensible, frontend-agnostic. Everything else is built on top of it.
 
-This repo also ships an opinionated reference **TUI** — a polished add-on that turns the agent into a daily-driver experience. Three panes — project, editor, agent — give you live observability and high-leverage intervention. Edits stream into a real editor with real syntax highlighting, not a wall of streaming chat. An autonomy dial controls how often you're asked: **Trusted** (default; agent runs, routine edits land), **Guided** (drop here for more control; every edit waits for approval), or **Yolo** (just do it). A headless mode ships today for CI and scripting; the long-term direction is a stable surface and a custom-tool registry so others can build their own frontends, plug in their own tools, or use the agent as the foundation of a different product.
+This repo also ships an opinionated reference **TUI** — a polished add-on that turns the agent into a daily-driver experience. Three panes — project, editor, agent — give you live observability and high-leverage intervention. Edits stream into a real editor with real syntax highlighting, not a wall of streaming chat. Proposed edits pass through validator review gates (Go parse, tree-sitter syntax) before they land: a passing edit auto-applies, a failing one surfaces for approval; bash commands go through a per-command approval gate with an always-allow list. A headless mode ships today for CI and scripting; the long-term direction is a stable surface and a custom-tool registry so others can build their own frontends, plug in their own tools, or use the agent as the foundation of a different product.
 
 This isn't pair programming. The agent doesn't co-type alongside you, and you don't take turns at the keyboard. The editor (in the reference TUI) is your read view and intervention surface — you watch edits stream in, approve them, and steer the run when it drifts off-course.
 
@@ -242,19 +242,65 @@ p := tea.NewProgram(app)
 p.Run()
 ```
 
+## Module map
+
+Nine Go modules, each with its own `go.mod`. Dependency direction (no reverse edges):
+
+```
+ai → agent → kit → coding → tui
+                      │
+            engine ───┘   (engine has zero nib deps; coding + tui import it)
+```
+
+| Module | Role |
+|--------|------|
+| `ai/` | LLM providers, OAuth, `llmconfig` profiles, `brand` (names, `NIB_*` env catalog) |
+| `agent/` | Core multi-turn LLM loop, tool dispatch, hooks — knows nothing about coding, memory, UI |
+| `kit/` | Ports and shared adapters: `kit.Tool`, `kit/memory`, `kit/command`, `kit/skill`, `kit/proc`, MCP |
+| `engine/` | Editor engine: buffer, syntax highlighting, validators, LSP, lint |
+| `coding/` | Coding agent: `agent`, `session`, `headless`, `wire`, `runconfig`, `patch`, `capture`, tools |
+| `tui/` | Bubble Tea reference frontend, `keymap`, `/clear` `/quit` commands |
+| `cmd/nib-code` | Interactive TUI binary (composition root) |
+| `cmd/agent` | `nib-agent` — headless CI/scripting binary |
+| `cmd/nibster` | Kit-boundary smoke test: general-purpose CLI agent on `kit/` + `ai/` only |
+
+## Building
+
+```bash
+make build      # compile every module and produce the three binaries under cmd/*/bin
+make install    # symlink nib-code, nib-agent, nibster into ~/.local/bin
+make test       # go test -race across every module
+bash pre-commit.sh   # gofmt, module tidy, vet, and golangci-lint checks per module
+```
+
 ## Running
 
 ```bash
 # Editor only
 cmd/nib-code/bin/nib-code /path/to/file.go
 
-# With AI agent
+# With AI agent (or configure <user-config-dir>/nib/llm.json; see ai/llmconfig)
 LLM_API_KEY=<key> cmd/nib-code/bin/nib-code /path/to/file.go
 
-# Debug mode
+# Open a project directory
+cmd/nib-code/bin/nib-code /path/to/project
+
+# Debug log (<user-cache-dir>/nib/debug.log)
 cmd/nib-code/bin/nib-code --debug /path/to/file.go
+
+# Print the wired plug-in manifest (provider, tools, commands) and exit
+cmd/nib-code/bin/nib-code --plugins
+
+# Headless agent — CI and scripting
+cmd/agent/bin/nib-agent "fix the failing test" internal/foo.go
+echo "fix lint" | cmd/agent/bin/nib-agent --output json
+
+# nibster — kit-only CLI agent (see cmd/nibster/README.md)
+cmd/nibster/bin/nibster -m "summarize this repo"
 ```
+
+Runtime knobs are `NIB_*` environment variables (e.g. `NIB_BASH_APPROVAL`, `NIB_VALIDATORS_DISABLED`, `NIB_TASK_TOKEN_BUDGET`, `NIB_MCP`); the catalog with doc comments lives in `ai/brand/brand.go`.
 
 ## License
 
-MIT
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).

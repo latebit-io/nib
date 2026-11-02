@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -146,5 +147,35 @@ func TestStoreDeleteIf(t *testing.T) {
 	}
 	if err := store.DeleteIf(ProviderCopilot, func(Token) bool { return true }); err != nil {
 		t.Errorf("DeleteIf on missing token: %v", err)
+	}
+}
+
+// TestOpenAITokenSource_UsesTokenAnotherProcessRefreshed: a source whose
+// cache is expired must pick up a token another process already rotated
+// instead of spending its stale refresh token.
+func TestOpenAITokenSource_UsesTokenAnotherProcessRefreshed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	stale := openStore(t, path)
+	if err := stale.Put(ProviderOpenAI, expiredOpenAIToken()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	other := openStore(t, path)
+	if err := other.Put(ProviderOpenAI, &Token{AccessToken: "fresh", RefreshToken: "rotated", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("other process refresh: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("refresh endpoint called; the rotated token on disk should have been used")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	src := NewOpenAITokenSource(stale)
+	src.tokenURL = srv.URL
+
+	tok, err := src.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if tok.AccessToken != "fresh" {
+		t.Errorf("token = %q, want the other process's", tok.AccessToken)
 	}
 }

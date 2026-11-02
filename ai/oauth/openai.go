@@ -54,19 +54,23 @@ func (s *OpenAITokenSource) Token(ctx context.Context) (*Token, error) {
 	if tok.Valid() {
 		return tok, nil
 	}
+	// Another process may already have refreshed (and rotated) the token;
+	// reusing our stale refresh token would get it rejected.
+	if err := s.store.Reload(); err != nil {
+		slog.Warn("oauth: reload token store", "err", err)
+	} else if tok = s.store.Get(ProviderOpenAI); tok.Valid() {
+		return tok, nil
+	}
 
 	// Token expired or missing — try refresh.
 	if tok != nil && tok.RefreshToken != "" {
 		refreshed, err := refreshAccessToken(ctx, s.tokenURL, openAIClientID, tok.RefreshToken)
 		if err != nil {
 			slog.Warn("oauth: OpenAI token refresh failed", "err", err)
-			// Each WireOAuth builds its own source, so another one may have
-			// rotated the refresh token first; its fresh token is good.
-			if cur := s.store.Get(ProviderOpenAI); cur.Valid() {
-				return cur, nil
-			}
 			// A rejected refresh token is dead; drop it (only it, never a token
 			// a concurrent refresh stored) so the UI offers a fresh sign-in.
+			// DeleteIf reloads under the file lock, so Get below sees any
+			// token another source or process stored meanwhile.
 			if te, ok := errors.AsType[*tokenEndpointError](err); ok && te.grantRejected() {
 				rejected := tok.RefreshToken
 				if delErr := s.store.DeleteIf(ProviderOpenAI, func(cur Token) bool {
@@ -74,6 +78,11 @@ func (s *OpenAITokenSource) Token(ctx context.Context) (*Token, error) {
 				}); delErr != nil {
 					slog.Warn("oauth: failed to drop rejected OpenAI token", "err", delErr)
 				}
+			}
+			// Each WireOAuth builds its own source, so another one may have
+			// rotated the refresh token first; its fresh token is good.
+			if cur := s.store.Get(ProviderOpenAI); cur.Valid() {
+				return cur, nil
 			}
 			return nil, fmt.Errorf("token refresh failed: %w (re-authenticate with 'connect to chatgpt')", err)
 		}

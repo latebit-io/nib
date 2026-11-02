@@ -165,7 +165,7 @@ type anthropicContent struct {
 	ToolUseID    string        `json:"tool_use_id,omitempty"` // tool_result only
 	Content      any           `json:"content,omitempty"`     // tool_result content (string or []anthropicContent)
 	IsError      bool          `json:"is_error,omitempty"`    // tool_result only
-	Thinking     string        `json:"thinking,omitempty"`    // "thinking" block text
+	Thinking     *string       `json:"thinking,omitempty"`    // "thinking" block text; non-nil keeps "" (omitted display)
 	Signature    string        `json:"signature,omitempty"`   // "thinking" block signature
 	Data         string        `json:"data,omitempty"`        // "redacted_thinking" opaque payload
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
@@ -260,7 +260,9 @@ func convertAssistantMessage(m Message) anthropicMessage {
 		for _, rb := range m.Reasoning.Blocks {
 			switch rb.Type {
 			case "thinking":
-				blocks = append(blocks, anthropicContent{Type: "thinking", Thinking: rb.Text, Signature: rb.Signature})
+				// Replay verbatim: with display omitted the text is "", and the
+				// API still requires the thinking key, so it must not be dropped.
+				blocks = append(blocks, anthropicContent{Type: "thinking", Thinking: &rb.Text, Signature: rb.Signature})
 			case "redacted_thinking":
 				blocks = append(blocks, anthropicContent{Type: "redacted_thinking", Data: rb.Data})
 			}

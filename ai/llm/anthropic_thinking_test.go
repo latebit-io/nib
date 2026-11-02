@@ -120,7 +120,7 @@ func TestConvertAssistantMessage_ReplaysReasoningFirst(t *testing.T) {
 	if len(blocks) != 4 {
 		t.Fatalf("blocks = %d, want 4: %+v", len(blocks), blocks)
 	}
-	if blocks[0].Type != "thinking" || blocks[0].Thinking != "reasoned" || blocks[0].Signature != "S1" {
+	if blocks[0].Type != "thinking" || blocks[0].Thinking == nil || *blocks[0].Thinking != "reasoned" || blocks[0].Signature != "S1" {
 		t.Errorf("block[0] = %+v; want thinking/reasoned/S1", blocks[0])
 	}
 	if blocks[1].Type != "redacted_thinking" || blocks[1].Data != "R1" {
@@ -134,6 +134,27 @@ func TestConvertAssistantMessage_ReplaysReasoningFirst(t *testing.T) {
 	data, _ := json.Marshal(am)
 	if strings.Index(string(data), `"thinking"`) > strings.Index(string(data), `"text"`) {
 		t.Errorf("thinking block must serialize before text; got %s", data)
+	}
+}
+
+// Adaptive thinking with the default display returns thinking blocks with
+// empty text; the replay must still carry "thinking":"" next to the signature.
+func TestConvertAssistantMessage_ReplaysEmptyThinkingText(t *testing.T) {
+	am := convertAssistantMessage(Message{
+		Role:      "assistant",
+		Content:   "done",
+		Reasoning: &ReasoningTrace{Blocks: []ReasoningBlock{{Type: "thinking", Text: "", Signature: "S1"}}},
+	})
+	data, err := json.Marshal(am)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"thinking":""`) {
+		t.Errorf("replayed thinking block dropped its empty thinking key: %s", data)
+	}
+	// Non-thinking blocks must not grow a thinking key.
+	if n := strings.Count(string(data), `"thinking":`); n != 1 {
+		t.Errorf("thinking key count = %d, want 1 (thinking block only): %s", n, data)
 	}
 }
 

@@ -28,7 +28,7 @@ type AnthropicAPI struct {
 	baseURL       string
 	model         string
 	promptCaching bool
-	effort        Effort // reasoning effort; "" disables extended thinking
+	effort        Effort // reasoning effort; "" sends no thinking config
 	client        *http.Client
 
 	// maxTokensState starts at anthropicDefaultMaxTokens: the Messages
@@ -45,7 +45,8 @@ const anthropicProviderName = "anthropic"
 const anthropicVersion = "2023-06-01"
 
 // NewAnthropicAPI creates an AnthropicAPI provider. effort enables
-// extended thinking at the mapped budget ("" leaves it off).
+// extended thinking: adaptive at that effort on current models, a mapped
+// budget on pre-4.6 ones ("" sends no thinking config).
 func NewAnthropicAPI(baseURL, model string, auth Auth, promptCaching bool, effort Effort) *AnthropicAPI {
 	return &AnthropicAPI{
 		auth:           auth,
@@ -78,25 +79,59 @@ func (k AnthropicKeyAuth) Authenticate(_ context.Context, req *http.Request) err
 
 // anthropicRequest is the JSON wire format for POST /v1/messages.
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    []anthropicContent `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
-	Tools     []anthropicToolDef `json:"tools,omitempty"`
-	Stream    bool               `json:"stream"`
-	Metadata  *anthropicMetadata `json:"metadata,omitempty"`
-	Thinking  *anthropicThinking `json:"thinking,omitempty"`
+	Model        string                 `json:"model"`
+	MaxTokens    int                    `json:"max_tokens"`
+	System       []anthropicContent     `json:"system,omitempty"`
+	Messages     []anthropicMessage     `json:"messages"`
+	Tools        []anthropicToolDef     `json:"tools,omitempty"`
+	Stream       bool                   `json:"stream"`
+	Metadata     *anthropicMetadata     `json:"metadata,omitempty"`
+	Thinking     *anthropicThinking     `json:"thinking,omitempty"`
+	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
 }
 
-// anthropicThinking enables extended thinking with a token budget.
+// anthropicThinking configures extended thinking: "adaptive" (depth set by
+// output_config.effort) on Claude 4.6+, or "enabled" with a fixed budget on
+// older models. Current models reject budget_tokens with a 400.
 type anthropicThinking struct {
-	Type         string `json:"type"` // "enabled"
-	BudgetTokens int    `json:"budget_tokens"`
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
+// anthropicOutputConfig carries the effort level for adaptive thinking.
+type anthropicOutputConfig struct {
+	Effort string `json:"effort"`
+}
+
+// anthropicBudgetModels are the model-ID prefixes that predate adaptive
+// thinking (before Claude 4.6) and so take a fixed budget_tokens. Anything
+// else, including models newer than this list, gets adaptive thinking.
+var anthropicBudgetModels = []string{
+	"claude-3",
+	"claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-2025", "claude-opus-4-5",
+	"claude-sonnet-4-0", "claude-sonnet-4-2025", "claude-sonnet-4-5",
+	"claude-haiku-4-5",
+}
+
+// anthropicBudgetThinking reports whether model takes budget_tokens.
+func anthropicBudgetThinking(model string) bool {
+	m := strings.ToLower(model)
+	return slices.ContainsFunc(anthropicBudgetModels, func(p string) bool { return strings.HasPrefix(m, p) })
+}
+
+// anthropicEffort maps an effort to the API level. Claude 4.6 predates
+// xhigh (added with Opus 4.7), so it steps down to high there.
+func anthropicEffort(model string, e Effort) string {
+	m := strings.ToLower(model)
+	if e == EffortXHigh && (strings.HasPrefix(m, "claude-opus-4-6") || strings.HasPrefix(m, "claude-sonnet-4-6")) {
+		return string(EffortHigh)
+	}
+	return string(e)
 }
 
 // anthropicThinkingBudget maps an effort level to an extended-thinking
-// token budget. Returns 0 for an unset/unrecognized effort, which leaves
-// thinking disabled.
+// token budget (also the max_tokens headroom for adaptive thinking).
+// Returns 0 for an unset/unrecognized effort, which sends no thinking config.
 func anthropicThinkingBudget(e Effort) int {
 	switch e {
 	case EffortLow:
@@ -345,12 +380,17 @@ func (a *AnthropicAPI) buildAnthropicRequest(messages []Message, tools []ToolDef
 		Tools:     convertToolDefs(tools, a.promptCaching),
 		Stream:    true,
 	}
-	// Extended thinking: enable when effort maps to a budget. Anthropic
-	// requires max_tokens > budget_tokens (max_tokens covers thinking AND
-	// output), so give the configured output cap ON TOP of the budget.
+	// Extended thinking when effort is set. max_tokens covers thinking AND
+	// output, so the mapped budget goes on top of the output cap either way:
+	// as the fixed budget on pre-4.6 models, as headroom for adaptive.
 	if budget := anthropicThinkingBudget(a.effort); budget > 0 {
-		req.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: budget}
 		req.MaxTokens = budget + maxTokens
+		if anthropicBudgetThinking(a.model) {
+			req.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: budget}
+		} else {
+			req.Thinking = &anthropicThinking{Type: "adaptive"}
+			req.OutputConfig = &anthropicOutputConfig{Effort: anthropicEffort(a.model, a.effort)}
+		}
 	}
 	return req
 }

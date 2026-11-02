@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/latebit-io/nib/ai/brand"
@@ -105,17 +106,11 @@ func startCallbackServer(host string, port int, state, callbackPath string) (*ca
 	errCh := make(chan error, 1)
 	resultCh := make(chan error, 1)
 
-	// trySendCode and trySendErr are non-blocking sends that drop duplicates.
-	// The channels are buffered at 1; a second callback (browser retry) or
-	// a server error racing with a successful callback must not block.
-	trySendCode := func(code string) bool {
-		select {
-		case codeCh <- code:
-			return true
-		default:
-			return false
-		}
-	}
+	// claimed admits exactly one code per flow: the channel alone would take
+	// a retried callback again once the flow drained it for the exchange.
+	var claimed atomic.Bool
+	// trySendErr is a non-blocking send that drops duplicates: a server
+	// error racing a successful callback must not block.
 	trySendErr := func(err error) {
 		select {
 		case errCh <- err:
@@ -143,10 +138,11 @@ func startCallbackServer(host string, port int, state, callbackPath string) (*ca
 			writePage(w, "Authentication failed", errMsg+" You can close this tab.")
 			return
 		}
-		if !trySendCode(code) {
+		if !claimed.CompareAndSwap(false, true) {
 			writePage(w, "Already received", "You can close this tab.")
 			return
 		}
+		codeCh <- code // buffered 1 and claimed once, so this never blocks
 		// Hold the response until the code exchange finishes so the page
 		// never claims success for a sign-in that failed.
 		var exchangeErr error

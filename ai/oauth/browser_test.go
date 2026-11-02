@@ -185,3 +185,44 @@ func TestCallbackServer_StateMismatchKeepsWaiting(t *testing.T) {
 	}
 	cb.resultCh <- nil // release the waiting handler
 }
+
+// A retried callback after the flow drained the first code (exchange in
+// progress) must be refused, not accepted as a second code.
+func TestCallbackServer_AcceptsOneCodePerFlow(t *testing.T) {
+	cb, err := startCallbackServer("127.0.0.1", 0, "st", "/auth/callback")
+	if err != nil {
+		t.Fatalf("startCallbackServer: %v", err)
+	}
+	defer cb.close()
+
+	go func() {
+		if resp, err := http.Get(cb.redirectURI + "?state=st&code=first"); err == nil {
+			_ = resp.Body.Close() // test cleanup
+		}
+	}()
+	select {
+	case <-cb.codeCh: // drained, as browserFlow does before exchanging
+	case <-time.After(5 * time.Second):
+		t.Fatal("first callback never delivered its code")
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second} // an accepted retry would block on the exchange
+	resp, err := client.Get(cb.redirectURI + "?state=st&code=retry")
+	if err != nil {
+		t.Fatalf("GET retry: %v (accepted as a second code?)", err)
+	}
+	b, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close() // test cleanup
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(b), "Already received") {
+		t.Errorf("retry page = %q, want Already received", b)
+	}
+	select {
+	case code := <-cb.codeCh:
+		t.Errorf("retried callback was accepted as code %q", code)
+	default:
+	}
+	cb.resultCh <- nil // release the first handler
+}

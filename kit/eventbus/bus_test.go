@@ -351,6 +351,44 @@ func TestSubscriptionCloseDoesNotWaitForAnotherSubscription(t *testing.T) {
 	}
 }
 
+// TestCloseDoesNotWaitForEarlierBlockedSubscriber covers the registry-order
+// case: the blocked subscriber is first, so sequential delivery would never
+// reach the later one and its Close would wait on the blocked consumer.
+func TestCloseDoesNotWaitForEarlierBlockedSubscriber(t *testing.T) {
+	b := newTestBus()
+	t.Cleanup(b.Close)
+	slow := mustSubscribe(t, b, SubscribeOptions{BufferSize: 1})
+	fast := mustSubscribe(t, b, SubscribeOptions{BufferSize: 2})
+	b.Publish(controlEvent{sequence: 1}) // fills slow's only slot
+	<-fast.Events()
+
+	published := make(chan struct{})
+	go func() {
+		b.Publish(controlEvent{sequence: 2})
+		close(published)
+	}()
+	if got := receive(t, fast); got != (controlEvent{sequence: 2}) {
+		t.Fatalf("fast subscriber event = %#v; blocked earlier subscriber stalled fan-out", got)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		fast.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for an earlier blocked subscriber")
+	}
+	<-slow.Events()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("publication did not resume after slow subscriber drained")
+	}
+}
+
 // TestPublishContextDoesNotLetBlockedSubscriberStarveHealthySubscriber covers parallel fan-out.
 func TestPublishContextDoesNotLetBlockedSubscriberStarveHealthySubscriber(t *testing.T) {
 	b := newTestBus()

@@ -60,10 +60,18 @@ func (s *OpenAITokenSource) Token(ctx context.Context) (*Token, error) {
 		refreshed, err := refreshAccessToken(ctx, s.tokenURL, openAIClientID, tok.RefreshToken)
 		if err != nil {
 			slog.Warn("oauth: OpenAI token refresh failed", "err", err)
-			// A rejected refresh token is dead; dropping it makes the stored
-			// token unusable so the UI offers a fresh sign-in.
+			// Each WireOAuth builds its own source, so another one may have
+			// rotated the refresh token first; its fresh token is good.
+			if cur := s.store.Get(ProviderOpenAI); cur.Valid() {
+				return cur, nil
+			}
+			// A rejected refresh token is dead; drop it (only it, never a token
+			// a concurrent refresh stored) so the UI offers a fresh sign-in.
 			if te, ok := errors.AsType[*tokenEndpointError](err); ok && te.grantRejected() {
-				if delErr := s.store.Delete(ProviderOpenAI); delErr != nil {
+				rejected := tok.RefreshToken
+				if delErr := s.store.DeleteIf(ProviderOpenAI, func(cur Token) bool {
+					return cur.RefreshToken == rejected && !cur.Valid()
+				}); delErr != nil {
 					slog.Warn("oauth: failed to drop rejected OpenAI token", "err", delErr)
 				}
 			}

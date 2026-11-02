@@ -76,23 +76,18 @@ func (b *Bus) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 	return sub, nil
 }
 
-// Publish delivers ev to every current subscriber according to its policy.
-// It returns without delivery after the bus closes.
+// Publish delivers ev to every current subscriber according to its policy
+// and returns once every delivery finishes, preserving per-publisher order.
+// Subscribers are attempted concurrently so a blocked inbox never delays
+// another subscriber's delivery or Close. It returns without delivery after
+// the bus closes.
 func (b *Bus) Publish(ev event.Event) {
-	streaming, closed := b.classify(ev)
-	if closed {
-		return
-	}
-	subs, _ := b.snapshot() // closed after classify: subs is nil, nothing to deliver
-	for _, sub := range subs {
-		sub.deliver(ev, streaming)
-	}
+	_ = b.PublishContext(context.Background(), ev) // only ErrClosed is possible; Publish ignores a closed bus
 }
 
-// PublishContext delivers ev to every current subscriber with ctx-bounded
-// Block policy sends. Subscribers are attempted concurrently so one blocked
-// inbox cannot consume another subscriber's deadline. Drop policy remains
-// non-blocking. It returns [ErrClosed] after the bus closes.
+// PublishContext is [Bus.Publish] with ctx-bounded Block policy sends, so one
+// blocked inbox cannot consume another subscriber's deadline. Drop policy
+// remains non-blocking. It returns [ErrClosed] after the bus closes.
 func (b *Bus) PublishContext(ctx context.Context, ev event.Event) error {
 	streaming, closed := b.classify(ev)
 	if closed {
@@ -103,6 +98,11 @@ func (b *Bus) PublishContext(ctx context.Context, ev event.Event) error {
 		return ErrClosed
 	}
 
+	if len(subs) == 1 {
+		// A lone subscriber cannot stall another; skip the goroutine on the
+		// common single-consumer hot path.
+		return subs[0].deliverContext(ctx, ev, streaming)
+	}
 	// deliverContext can only fail with ctx.Err(), so one flag suffices.
 	var (
 		wg       sync.WaitGroup

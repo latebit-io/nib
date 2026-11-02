@@ -82,12 +82,6 @@ func (s *Subscription) policy(streaming bool) DropPolicy {
 	return s.controlPolicy
 }
 
-// deliver is deliverContext without a deadline: Background never cancels,
-// so the error is always nil.
-func (s *Subscription) deliver(ev event.Event, streaming bool) {
-	_ = s.deliverContext(context.Background(), ev, streaming) // nil by construction
-}
-
 func (s *Subscription) deliverContext(ctx context.Context, ev event.Event, streaming bool) error {
 	defer s.deliverWG.Done()
 	if s.policy(streaming) == Block {

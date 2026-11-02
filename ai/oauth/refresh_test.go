@@ -100,3 +100,51 @@ func TestOpenAITokenSource_RefreshesExpiredToken(t *testing.T) {
 		t.Error("refreshed token not persisted")
 	}
 }
+
+// TestOpenAITokenSource_RejectedRefreshKeepsConcurrentWinner covers two
+// sources refreshing the same token: the loser's refresh is rejected as
+// reused, but the winner's freshly stored token must survive and be used.
+func TestOpenAITokenSource_RejectedRefreshKeepsConcurrentWinner(t *testing.T) {
+	store := seedOpenAIStore(t, expiredOpenAIToken())
+	winner := &Token{AccessToken: "won", RefreshToken: "rotated", ExpiresAt: time.Now().Add(time.Hour)}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := store.Put(ProviderOpenAI, winner); err != nil { // the concurrent winner lands first
+			t.Errorf("Put winner: %v", err)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"refresh_token_reused"}`)) // test server; client sees a short body on failure
+	}))
+	t.Cleanup(srv.Close)
+	src := NewOpenAITokenSource(store)
+	src.tokenURL = srv.URL
+
+	tok, err := src.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token: %v; want the concurrent winner's token", err)
+	}
+	if tok.AccessToken != "won" {
+		t.Errorf("token = %q, want winner's", tok.AccessToken)
+	}
+	if got := store.Get(ProviderOpenAI); got == nil || got.RefreshToken != "rotated" {
+		t.Errorf("stored token = %+v; winner's token was deleted", got)
+	}
+}
+
+func TestStoreDeleteIf(t *testing.T) {
+	store := seedOpenAIStore(t, &Token{AccessToken: "a", RefreshToken: "r1"})
+	if err := store.DeleteIf(ProviderOpenAI, func(cur Token) bool { return cur.RefreshToken == "other" }); err != nil {
+		t.Fatalf("DeleteIf mismatch: %v", err)
+	}
+	if store.Get(ProviderOpenAI) == nil {
+		t.Fatal("DeleteIf removed a token its predicate rejected")
+	}
+	if err := store.DeleteIf(ProviderOpenAI, func(cur Token) bool { return cur.RefreshToken == "r1" }); err != nil {
+		t.Fatalf("DeleteIf match: %v", err)
+	}
+	if store.Get(ProviderOpenAI) != nil {
+		t.Error("DeleteIf kept a token its predicate accepted")
+	}
+	if err := store.DeleteIf(ProviderCopilot, func(Token) bool { return true }); err != nil {
+		t.Errorf("DeleteIf on missing token: %v", err)
+	}
+}

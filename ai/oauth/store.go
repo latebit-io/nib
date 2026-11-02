@@ -77,10 +77,17 @@ func (s *Store) Put(id ProviderID, tok *Token) error {
 // Delete removes a token for a provider and persists to disk.
 // The in-memory map is only updated after the write succeeds.
 func (s *Store) Delete(id ProviderID) error {
+	return s.DeleteIf(id, func(Token) bool { return true })
+}
+
+// DeleteIf removes the provider's token only when match accepts a copy of
+// it. Check and delete share one lock, so a token Put concurrently by
+// another caller is never removed by mistake.
+func (s *Store) DeleteIf(id ProviderID, match func(Token) bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, existed := s.data[id]
-	if !existed {
+	if !existed || !match(*prev) {
 		return nil
 	}
 	delete(s.data, id)

@@ -1,6 +1,6 @@
 module github.com/latebit-io/nib/cmd/nibster
 
-go 1.26
+go 1.27
 
 require (
 	github.com/latebit-io/nib/ai v0.1.0

@@ -5,14 +5,18 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"html"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/latebit-io/nib/ai/brand"
 )
@@ -67,36 +71,49 @@ func newPKCE() (*pkce, error) {
 	return &pkce{verifier: verifier, challenge: challenge}, nil
 }
 
+// callbackShutdownTimeout bounds how long close waits for the callback
+// handler to finish rendering the exchange result to the browser.
+const callbackShutdownTimeout = 5 * time.Second
+
+// errSignInEnded is shown to a callback still waiting when the flow ends
+// without exchanging its code.
+var errSignInEnded = errors.New("sign-in ended before the code was exchanged")
+
 // callbackServer manages a local HTTP server that receives the OAuth callback.
 type callbackServer struct {
 	srv         *http.Server
 	redirectURI string
 	codeCh      chan string
 	errCh       chan error
+	// resultCh carries the token-exchange outcome back to the handler that
+	// delivered the code, so the browser page reports what actually happened.
+	resultCh chan error
 }
 
 // startCallbackServer binds a local listener and starts serving the callback handler.
 // Returns the server (for shutdown) and the redirect URI with the actual bound port.
+// A non-zero port is never swapped for another: providers match redirect_uri
+// exactly, so a fallback port only fails later at the provider.
 func startCallbackServer(host string, port int, state, callbackPath string) (*callbackServer, error) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
-		listener, err = net.Listen("tcp", host+":0")
-		if err != nil {
-			return nil, fmt.Errorf("listen for OAuth callback: %w", err)
-		}
+		return nil, fmt.Errorf("listen for OAuth callback on port %d (another sign-in may be in progress): %w", port, err)
 	}
 	actualPort := listener.Addr().(*net.TCPAddr).Port
 
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
+	resultCh := make(chan error, 1)
 
 	// trySendCode and trySendErr are non-blocking sends that drop duplicates.
 	// The channels are buffered at 1; a second callback (browser retry) or
 	// a server error racing with a successful callback must not block.
-	trySendCode := func(code string) {
+	trySendCode := func(code string) bool {
 		select {
 		case codeCh <- code:
+			return true
 		default:
+			return false
 		}
 	}
 	trySendErr := func(err error) {
@@ -108,9 +125,11 @@ func startCallbackServer(host string, port int, state, callbackPath string) (*ca
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
+		slog.Debug("oauth: callback received", "has_code", r.URL.Query().Has("code"), "error", r.URL.Query().Get("error"))
 		if r.URL.Query().Get("state") != state {
+			slog.Warn("oauth: callback state mismatch")
 			trySendErr(fmt.Errorf("oauth callback: state mismatch (possible CSRF)"))
-			_, _ = fmt.Fprint(w, "<html><body><h1>Authentication failed</h1><p>State mismatch.</p></body></html>") // client may have disconnected; not actionable
+			writePage(w, "Authentication failed", "State mismatch.")
 			return
 		}
 		code := r.URL.Query().Get("code")
@@ -120,11 +139,26 @@ func startCallbackServer(host string, port int, state, callbackPath string) (*ca
 				errMsg = "no code in callback"
 			}
 			trySendErr(fmt.Errorf("oauth callback: %s", errMsg))
-			_, _ = fmt.Fprintf(w, "<html><body><h1>Authentication failed</h1><p>%s</p><p>You can close this tab.</p></body></html>", html.EscapeString(errMsg)) // client may have disconnected; not actionable
+			writePage(w, "Authentication failed", errMsg+" You can close this tab.")
 			return
 		}
-		trySendCode(code)
-		_, _ = fmt.Fprintf(w, "<html><body><h1>Authentication successful!</h1><p>You can close this tab and return to %s.</p></body></html>", html.EscapeString(brand.Name)) // client may have disconnected; not actionable
+		if !trySendCode(code) {
+			writePage(w, "Already received", "You can close this tab.")
+			return
+		}
+		// Hold the response until the code exchange finishes so the page
+		// never claims success for a sign-in that failed.
+		var exchangeErr error
+		select {
+		case exchangeErr = <-resultCh:
+		case <-r.Context().Done():
+			return
+		}
+		if exchangeErr != nil {
+			writePage(w, "Authentication failed", exchangeErr.Error()+" You can close this tab.")
+			return
+		}
+		writePage(w, "Authentication successful!", "You can close this tab and return to "+brand.Name+".")
 	})
 
 	srv := &http.Server{Handler: mux}
@@ -134,15 +168,38 @@ func startCallbackServer(host string, port int, state, callbackPath string) (*ca
 		}
 	}()
 
+	redirectURI := fmt.Sprintf("http://%s%s", net.JoinHostPort(host, strconv.Itoa(actualPort)), callbackPath)
+	slog.Debug("oauth: callback server listening", "addr", listener.Addr().String(), "redirect_uri", redirectURI)
 	return &callbackServer{
 		srv:         srv,
-		redirectURI: fmt.Sprintf("http://%s:%d%s", host, actualPort, callbackPath),
+		redirectURI: redirectURI,
 		codeCh:      codeCh,
 		errCh:       errCh,
+		resultCh:    resultCh,
 	}, nil
 }
 
-func (s *callbackServer) close() { _ = s.srv.Close() } // error not actionable during shutdown
+// writePage renders a minimal result page; both strings are escaped.
+func writePage(w http.ResponseWriter, title, msg string) {
+	_, _ = fmt.Fprintf(w, "<html><body><h1>%s</h1><p>%s</p></body></html>", html.EscapeString(title), html.EscapeString(msg)) // client may have disconnected; not actionable
+}
+
+// close shuts the server down gracefully so a handler still writing the
+// result page finishes, then force-closes anything left.
+func (s *callbackServer) close() {
+	// A handler can be waiting for an exchange that never ran (flow ended
+	// on error or cancel); feed it so Shutdown does not wait out the timeout.
+	select {
+	case s.resultCh <- errSignInEnded:
+	default:
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), callbackShutdownTimeout)
+	defer cancel()
+	if err := s.srv.Shutdown(ctx); err != nil {
+		slog.Debug("oauth: callback server shutdown", "err", err)
+		_ = s.srv.Close() // already logged above; nothing further to do
+	}
+}
 
 // resolvedCallback returns the callback path and redirect host with defaults applied.
 func (cfg *browserFlowConfig) resolvedCallback() (path, host string, err error) {
@@ -219,8 +276,16 @@ func browserFlow(ctx context.Context, cfg browserFlowConfig, callbacks *FlowCall
 		return nil, ctx.Err()
 	}
 
-	// Exchange auth code for tokens.
-	return exchangeCode(ctx, cfg.TokenURL, cfg.ClientID, code, cb.redirectURI, p.verifier)
+	// Exchange auth code for tokens; the waiting callback handler renders
+	// the outcome (resultCh is buffered, so this never blocks).
+	tr, err := exchangeCode(ctx, cfg.TokenURL, cfg.ClientID, code, cb.redirectURI, p.verifier)
+	cb.resultCh <- err
+	if err != nil {
+		slog.Warn("oauth: code exchange failed", "err", err)
+		return nil, err
+	}
+	slog.Debug("oauth: code exchange succeeded")
+	return tr, nil
 }
 
 // exchangeCode exchanges an authorization code for tokens.

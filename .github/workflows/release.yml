@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26"
+          go-version: "1.27"
       - name: Test the released modules
         run: |
           (cd ai && go vet ./... && go test ./...)
@@ -102,7 +102,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26"
+          go-version: "1.27"
 
       # ai first: agent's consumer-view build below may resolve the ai tag
       # created here (when the require was bumped to this release's version).

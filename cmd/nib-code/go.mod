@@ -1,6 +1,6 @@
 module github.com/latebit-io/nib/cmd/nib-code
 
-go 1.26
+go 1.27
 
 require (
 	charm.land/bubbletea/v2 v2.0.2

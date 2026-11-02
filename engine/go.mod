@@ -1,6 +1,6 @@
 module github.com/latebit-io/nib/engine
 
-go 1.26
+go 1.27
 
 require (
 	github.com/tree-sitter-grammars/tree-sitter-lua v0.5.0

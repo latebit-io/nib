@@ -50,6 +50,12 @@ func (t *Token) Valid() bool {
 	return time.Now().Add(30 * time.Second).Before(t.ExpiresAt)
 }
 
+// Usable reports whether the token is valid now or carries a refresh
+// token a [TokenSource] can exchange after expiry. Nil-safe.
+func (t *Token) Usable() bool {
+	return t.Valid() || (t != nil && t.RefreshToken != "")
+}
+
 // TokenSource provides access tokens, refreshing as needed.
 type TokenSource interface {
 	// Token returns a valid token, refreshing if the current one is expired.
@@ -81,6 +87,14 @@ func (a *Authenticator) Authenticate(ctx context.Context, req *http.Request) err
 		req.Header.Set("ChatGPT-Account-Id", tok.AccountID)
 	}
 	return nil
+}
+
+// Ready reports whether the token source can produce a token now,
+// refreshing if needed, so callers surface dead credentials up front
+// instead of on the first model request.
+func (a *Authenticator) Ready(ctx context.Context) error {
+	_, err := a.source.Token(ctx)
+	return err
 }
 
 // invalidatableSource is the optional capability a [TokenSource] exposes

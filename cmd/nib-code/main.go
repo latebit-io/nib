@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -513,6 +514,12 @@ func run() error {
 			ctx, cancel := context.WithTimeout(appCtx, 10*time.Second)
 			defer cancel()
 
+			// The registry needs no auth, so check OAuth credentials first:
+			// a dead token must surface here to trigger the Connect offer.
+			if err := resolved.CheckAuth(ctx); err != nil {
+				return nil, err
+			}
+
 			if regID := registryProvider(profile); regID != "" {
 				filter := registryFilter(profile)
 				models, err := modelRegistry.Models(ctx, regID, filter)
@@ -699,6 +706,7 @@ func run() error {
 			return pr.OAuthStore.HasToken(oauth.ProviderID(resolved.OAuthProvider))
 		}
 
+		var openAIFlight oauthFlight
 		app.ConnectOAuth = func(profile string) tea.Cmd {
 			resolved := llmconfig.ResolveProfile(llmCfg, profile)
 			if resolved == nil {
@@ -708,7 +716,7 @@ func run() error {
 			}
 			switch oauth.ProviderID(resolved.OAuthProvider) {
 			case oauth.ProviderOpenAI:
-				return connectOpenAICmd(profile, pr.OAuthStore)
+				return connectOpenAICmd(appCtx, profile, pr.OAuthStore, tuiApp.Program(), &openAIFlight)
 			case oauth.ProviderCopilot:
 				return connectCopilotCmd(profile, pr.OAuthStore, tuiApp.Program())
 			default:
@@ -847,11 +855,21 @@ func (r agentResetter) ResetHistory(ctx context.Context) error {
 }
 
 // connectOpenAICmd returns a tea.Cmd that runs the OpenAI browser OAuth flow.
-func connectOpenAICmd(profile string, store *oauth.Store) tea.Cmd {
+// A newer connect supersedes it through flight; the superseded flow returns
+// no message so its cancellation never shows as a failure.
+func connectOpenAICmd(parent context.Context, profile string, store *oauth.Store, p *tea.Program, flight *oauthFlight) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
-		err := oauth.OpenAIBrowserFlow(ctx, store, nil)
+		ctx, finish := flight.start(parent, 15*time.Minute)
+		defer finish()
+		err := oauth.OpenAIBrowserFlow(ctx, store, &oauth.FlowCallbacks{
+			OnBrowserOpen: func(u string) {
+				p.Send(nibTui.OAuthInstruction(profile, "If the browser did not open, visit: "+u))
+			},
+		})
+		if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+			slog.Debug("oauth: OpenAI sign-in superseded or cancelled", "profile", profile)
+			return nil
+		}
 		return nibTui.OAuthConnectResult(profile, err)
 	}
 }

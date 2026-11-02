@@ -15,6 +15,28 @@ import (
 // Prevents indefinite hangs if the auth server is unresponsive.
 var oauthClient = &http.Client{Timeout: 30 * time.Second}
 
+// tokenEndpointError is a non-200 response from an OAuth token endpoint.
+type tokenEndpointError struct {
+	label  string
+	status int
+	code   string // OAuth error code (e.g. invalid_grant); empty when the body did not parse
+	detail string // error description, falling back to code
+}
+
+func (e *tokenEndpointError) Error() string {
+	if e.detail == "" {
+		return fmt.Sprintf("%s: HTTP %d", e.label, e.status)
+	}
+	return fmt.Sprintf("%s: HTTP %d: %s", e.label, e.status, e.detail)
+}
+
+// grantRejected reports the server refusing the grant itself (RFC 6749
+// invalid_grant, or a 401 as OpenAI sends for expired/reused refresh
+// tokens), so only a fresh sign-in recovers.
+func (e *tokenEndpointError) grantRejected() bool {
+	return e.code == "invalid_grant" || e.status == http.StatusUnauthorized
+}
+
 // deviceFlowConfig holds the endpoint configuration for a device code flow.
 type deviceFlowConfig struct {
 	// ClientID is the OAuth client identifier.
@@ -236,10 +258,11 @@ func postTokenForm(ctx context.Context, tokenURL, label string, data url.Values)
 	if resp.StatusCode != http.StatusOK {
 		// OAuth servers put the reason (invalid_grant, ...) in the body;
 		// surface it when it parses, never the raw payload.
+		e := &tokenEndpointError{label: label, status: resp.StatusCode}
 		if decodeErr == nil && tr.Error != "" {
-			return nil, fmt.Errorf("%s: HTTP %d: %s", label, resp.StatusCode, tr.errorDetail())
+			e.code, e.detail = tr.Error, tr.errorDetail()
 		}
-		return nil, fmt.Errorf("%s: HTTP %d", label, resp.StatusCode)
+		return nil, e
 	}
 	if decodeErr != nil {
 		return nil, fmt.Errorf("decode %s response: %w", label, decodeErr)

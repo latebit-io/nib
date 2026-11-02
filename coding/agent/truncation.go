@@ -110,7 +110,7 @@ func escalateValue(current int) int {
 // future value-type escalator (uncommon but legal) is not misflagged.
 func isNilEscalator(esc escalator) bool {
 	v := reflect.ValueOf(esc)
-	return v.Kind() == reflect.Ptr && v.IsNil()
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // escalate doubles the provider's max-tokens cap (best effort). The

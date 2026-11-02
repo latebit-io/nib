@@ -221,6 +221,10 @@ func (cfg *browserFlowConfig) resolvedCallback() (path, host string, err error) 
 // It starts a local HTTP server, opens the browser, waits for the callback,
 // and exchanges the auth code for tokens.
 func browserFlow(ctx context.Context, cfg browserFlowConfig, callbacks *FlowCallbacks) (*tokenResponse, error) {
+	// A flow superseded before it starts must not bind the port or open a tab.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	p, err := newPKCE()
 	if err != nil {
 		return nil, err
@@ -299,8 +303,9 @@ func exchangeCode(ctx context.Context, tokenURL, clientID, code, redirectURI, co
 	})
 }
 
-// openBrowser opens a URL in the user's default browser.
-func openBrowser(u string) error {
+// openBrowser opens a URL in the user's default browser. A var so tests
+// can assert a flow never reaches it.
+var openBrowser = func(u string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", u).Start()

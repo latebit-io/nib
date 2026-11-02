@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -56,13 +57,17 @@ func (s *Store) Get(id ProviderID) *Token {
 	return &cp
 }
 
-// Put stores a token for a provider and persists to disk.
+// Put stores a copy of tok for a provider and persists to disk.
 // The in-memory map is only updated after the write succeeds.
 func (s *Store) Put(id ProviderID, tok *Token) error {
+	if tok == nil {
+		return fmt.Errorf("oauth store: nil token for %s", id)
+	}
+	cp := *tok
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, existed := s.data[id]
-	s.data[id] = tok
+	s.data[id] = &cp
 	if err := s.save(); err != nil {
 		if existed {
 			s.data[id] = prev
@@ -87,7 +92,7 @@ func (s *Store) DeleteIf(id ProviderID, match func(Token) bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, existed := s.data[id]
-	if !existed || !match(*prev) {
+	if !existed || (prev != nil && !match(*prev)) { // a nil entry is always dropped
 		return nil
 	}
 	delete(s.data, id)
@@ -113,7 +118,12 @@ func (s *Store) load() error {
 		}
 		return err
 	}
-	return json.Unmarshal(data, &s.data)
+	if err := json.Unmarshal(data, &s.data); err != nil {
+		return err
+	}
+	// A hand-edited {"openai": null} must not survive as a nil entry.
+	maps.DeleteFunc(s.data, func(_ ProviderID, t *Token) bool { return t == nil })
+	return nil
 }
 
 // save writes the store to disk atomically, creating parent directories

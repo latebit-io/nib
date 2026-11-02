@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -119,5 +120,23 @@ func TestCallbackServer_CloseReleasesWaitingHandler(t *testing.T) {
 	}
 	if got := <-body; !strings.Contains(got, "Authentication failed") {
 		t.Errorf("page = %q, want failure page", got)
+	}
+}
+
+func TestBrowserFlow_CanceledContextOpensNothing(t *testing.T) {
+	orig := openBrowser
+	t.Cleanup(func() { openBrowser = orig })
+	openBrowser = func(string) error {
+		t.Error("canceled flow opened the browser")
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := browserFlow(ctx, browserFlowConfig{AuthURL: "http://127.0.0.1/unused", RedirectHost: "127.0.0.1"}, &FlowCallbacks{
+		OnBrowserOpen: func(string) { t.Error("canceled flow announced a browser URL") },
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("browserFlow err = %v, want context.Canceled", err)
 	}
 }

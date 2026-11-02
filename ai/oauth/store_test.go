@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -108,5 +109,40 @@ func TestStoreMissingFile(t *testing.T) {
 	tok := &Token{AccessToken: "test"}
 	if err := store.Put(ProviderCopilot, tok); err != nil {
 		t.Fatalf("Put: %v", err)
+	}
+}
+
+func TestStoreDropsNullTokensOnLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte(`{"openai":null}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if store.Get(ProviderOpenAI) != nil {
+		t.Error("null entry loaded as a token")
+	}
+	if err := store.Delete(ProviderOpenAI); err != nil { // must not panic on the dropped entry
+		t.Errorf("Delete: %v", err)
+	}
+}
+
+func TestStorePutRejectsNilAndCopies(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "auth.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Put(ProviderOpenAI, nil); err == nil {
+		t.Error("Put(nil) succeeded; want error")
+	}
+	tok := &Token{AccessToken: "a"}
+	if err := store.Put(ProviderOpenAI, tok); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	tok.AccessToken = "mutated"
+	if got := store.Get(ProviderOpenAI).AccessToken; got != "a" {
+		t.Errorf("stored token = %q; Put kept the caller's pointer", got)
 	}
 }

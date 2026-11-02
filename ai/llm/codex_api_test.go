@@ -3,7 +3,10 @@ package llm
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +50,35 @@ func TestCodexAPI_AuthFailureNoInvalidatorStillTypesError(t *testing.T) {
 	}
 	if ae.StatusCode != http.StatusUnauthorized {
 		t.Errorf("AuthError.StatusCode = %d, want 401", ae.StatusCode)
+	}
+}
+
+// roundTripFunc adapts a function to http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestCodexAPI_ListModelsSkipsHiddenAndSendsClientVersion(t *testing.T) {
+	c := NewCodexAPI("", staticAuth{}, "")
+	var gotVersion string
+	c.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotVersion = r.URL.Query().Get("client_version")
+		body := `{"models":[
+			{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list"},
+			{"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide"},
+			{"slug":"gpt-6-luna","visibility":"list"}]}`
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})}
+
+	models, err := c.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if gotVersion != codexClientVersion {
+		t.Errorf("client_version = %q, want %q; the endpoint lists nothing without a current one", gotVersion, codexClientVersion)
+	}
+	want := []ModelInfo{{ID: "gpt-6.1-sol", Name: "GPT-6.1-Sol"}, {ID: "gpt-6-luna", Name: "gpt-6-luna"}}
+	if !slices.Equal(models, want) {
+		t.Errorf("models = %+v, want %+v", models, want)
 	}
 }

@@ -9,8 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -520,9 +518,8 @@ func run() error {
 				return nil, err
 			}
 
-			if regID := registryProvider(profile); regID != "" {
-				filter := registryFilter(profile)
-				models, err := modelRegistry.Models(ctx, regID, filter)
+			if regID := profileToRegistry[profile]; regID != "" {
+				models, err := modelRegistry.Models(ctx, regID)
 				if err != nil {
 					slog.Debug("llm: registry lookup failed, trying provider API", "profile", profile, "err", err)
 				} else {
@@ -541,9 +538,6 @@ func run() error {
 			models, err := lister.ListModels(ctx)
 			if err != nil {
 				return nil, err
-			}
-			if profile == chatgptProfile {
-				models = slices.DeleteFunc(models, func(m llm.ModelInfo) bool { return !isCodexModelID(m.ID) })
 			}
 			return modelsToItems(models, profile, resolved.Model), nil
 		},
@@ -855,19 +849,30 @@ func (r agentResetter) ResetHistory(ctx context.Context) error {
 }
 
 // connectOpenAICmd returns a tea.Cmd that runs the OpenAI browser OAuth flow.
-// A newer connect supersedes it through flight; the superseded flow returns
-// no message so its cancellation never shows as a failure.
+// A connect while a flow runs joins it: it re-opens the running flow's URL
+// and returns only an instruction; the running flow reports the result.
 func connectOpenAICmd(parent context.Context, profile string, store *oauth.Store, p *tea.Program, flight *oauthFlight) tea.Cmd {
 	return func() tea.Msg {
-		ctx, finish := flight.start(parent, 15*time.Minute)
-		defer finish()
+		if u, ok := flight.begin(); !ok {
+			if u != "" {
+				if err := oauth.OpenBrowser(u); err != nil {
+					slog.Warn("oauth: reopen sign-in URL", "err", err)
+				}
+				return nibTui.OAuthInstruction(profile, "Sign-in already in progress; finish it in the browser, or visit: "+u)
+			}
+			return nil
+		}
+		defer flight.end()
+		ctx, cancel := context.WithTimeout(parent, 15*time.Minute)
+		defer cancel()
 		err := oauth.OpenAIBrowserFlow(ctx, store, &oauth.FlowCallbacks{
 			OnBrowserOpen: func(u string) {
+				flight.setURL(u)
 				p.Send(nibTui.OAuthInstruction(profile, "If the browser did not open, visit: "+u))
 			},
 		})
 		if err != nil && errors.Is(ctx.Err(), context.Canceled) {
-			slog.Debug("oauth: OpenAI sign-in superseded or cancelled", "profile", profile)
+			slog.Debug("oauth: OpenAI sign-in cancelled by shutdown", "profile", profile)
 			return nil
 		}
 		return nibTui.OAuthConnectResult(profile, err)
@@ -896,45 +901,18 @@ func connectCopilotCmd(profile string, store *oauth.Store, p *tea.Program) tea.C
 	}
 }
 
-// chatgptProfile is the built-in OAuth profile whose model list is
-// narrowed to Codex-capable models (see isCodexModelID).
-const chatgptProfile = "chatgpt"
-
 // profileToRegistry maps built-in llmconfig profile names to models.dev
 // provider IDs. Profiles absent here (or user-defined ones) skip the
-// registry and fall back to the provider's own model-list API.
+// registry and fall back to the provider's own model-list API. chatgpt is
+// absent on purpose: the Codex endpoint lists exactly what the account can
+// use, while models.dev's OpenAI catalog is the API's, not ChatGPT's.
 var profileToRegistry = map[string]string{
-	chatgptProfile: "openai",
-	"copilot":      "github-copilot",
-	"gemini":       "google",
-	"minimax":      "minimax",
-	"openrouter":   "openrouter",
-	"anthropic":    "anthropic",
-	"fugu":         "sakana",
-}
-
-// registryProvider returns the models.dev provider ID for a profile, or
-// "" when the profile has no registry mapping.
-func registryProvider(profile string) string {
-	return profileToRegistry[profile]
-}
-
-// isCodexModelID reports whether a model ID is usable through the
-// ChatGPT/Codex backend: Codex-family models plus the gpt-5 line. Keyed
-// on ID (not registry Family) because the provider-API fallback path
-// only has [llm.ModelInfo] IDs, and every codex-family registry entry
-// carries "codex" in its ID — one predicate serves both paths.
-func isCodexModelID(id string) bool {
-	return strings.Contains(id, "codex") || strings.HasPrefix(id, "gpt-5")
-}
-
-// registryFilter returns the models.dev filter for a profile: the Codex
-// predicate for chatgpt, nil (no narrowing) otherwise.
-func registryFilter(profile string) llm.ModelFilter {
-	if profile != chatgptProfile {
-		return nil
-	}
-	return func(m llm.RegistryModel) bool { return isCodexModelID(m.ID) }
+	"copilot":    "github-copilot",
+	"gemini":     "google",
+	"minimax":    "minimax",
+	"openrouter": "openrouter",
+	"anthropic":  "anthropic",
+	"fugu":       "sakana",
 }
 
 // modelsToItems converts provider model infos into selector items for

@@ -120,7 +120,7 @@ func TestConvertAssistantMessage_ReplaysReasoningFirst(t *testing.T) {
 	if len(blocks) != 4 {
 		t.Fatalf("blocks = %d, want 4: %+v", len(blocks), blocks)
 	}
-	if blocks[0].Type != "thinking" || blocks[0].Thinking != "reasoned" || blocks[0].Signature != "S1" {
+	if blocks[0].Type != "thinking" || blocks[0].Thinking == nil || *blocks[0].Thinking != "reasoned" || blocks[0].Signature != "S1" {
 		t.Errorf("block[0] = %+v; want thinking/reasoned/S1", blocks[0])
 	}
 	if blocks[1].Type != "redacted_thinking" || blocks[1].Data != "R1" {
@@ -134,6 +134,27 @@ func TestConvertAssistantMessage_ReplaysReasoningFirst(t *testing.T) {
 	data, _ := json.Marshal(am)
 	if strings.Index(string(data), `"thinking"`) > strings.Index(string(data), `"text"`) {
 		t.Errorf("thinking block must serialize before text; got %s", data)
+	}
+}
+
+// Adaptive thinking with the default display returns thinking blocks with
+// empty text; the replay must still carry "thinking":"" next to the signature.
+func TestConvertAssistantMessage_ReplaysEmptyThinkingText(t *testing.T) {
+	am := convertAssistantMessage(Message{
+		Role:      "assistant",
+		Content:   "done",
+		Reasoning: &ReasoningTrace{Blocks: []ReasoningBlock{{Type: "thinking", Text: "", Signature: "S1"}}},
+	})
+	data, err := json.Marshal(am)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"thinking":""`) {
+		t.Errorf("replayed thinking block dropped its empty thinking key: %s", data)
+	}
+	// Non-thinking blocks must not grow a thinking key.
+	if n := strings.Count(string(data), `"thinking":`); n != 1 {
+		t.Errorf("thinking key count = %d, want 1 (thinking block only): %s", n, data)
 	}
 }
 
@@ -157,25 +178,81 @@ func TestAnthropicThinkingBudget(t *testing.T) {
 	}
 }
 
-func TestAnthropicRequest_ThinkingEnabled(t *testing.T) {
-	a := NewAnthropicAPI("https://x", "claude", AnthropicKeyAuth("k"), false, EffortHigh)
+func TestAnthropicRequest_BudgetThinkingOnPre46Models(t *testing.T) {
+	a := NewAnthropicAPI("https://x", "claude-sonnet-4-5", AnthropicKeyAuth("k"), false, EffortHigh)
 	req := a.buildAnthropicRequest([]Message{{Role: "user", Content: "hi"}}, nil)
 
 	if req.Thinking == nil || req.Thinking.Type != "enabled" || req.Thinking.BudgetTokens != 8192 {
 		t.Fatalf("Thinking = %+v, want enabled/8192", req.Thinking)
 	}
+	if req.OutputConfig != nil {
+		t.Errorf("OutputConfig = %+v, want nil on the budget path", req.OutputConfig)
+	}
 	// max_tokens must exceed the budget (it covers thinking + output).
 	if req.MaxTokens != 8192+anthropicDefaultMaxTokens {
 		t.Errorf("MaxTokens = %d, want budget+default %d", req.MaxTokens, 8192+anthropicDefaultMaxTokens)
 	}
-	if req.MaxTokens <= req.Thinking.BudgetTokens {
-		t.Errorf("max_tokens (%d) must be > budget_tokens (%d) or Anthropic 400s", req.MaxTokens, req.Thinking.BudgetTokens)
-	}
 
 	// The max tier's budget still leaves max_tokens > budget.
-	am := NewAnthropicAPI("https://x", "claude", AnthropicKeyAuth("k"), false, EffortMax)
+	am := NewAnthropicAPI("https://x", "claude-haiku-4-5", AnthropicKeyAuth("k"), false, EffortMax)
 	if r := am.buildAnthropicRequest(nil, nil); r.MaxTokens <= r.Thinking.BudgetTokens {
 		t.Errorf("max tier: max_tokens (%d) <= budget (%d)", r.MaxTokens, r.Thinking.BudgetTokens)
+	}
+}
+
+// Current models reject budget_tokens with a 400; effort must go through
+// adaptive thinking and output_config.effort.
+func TestAnthropicRequest_AdaptiveThinkingOnCurrentModels(t *testing.T) {
+	a := NewAnthropicAPI("https://x", "claude-sonnet-5-5", AnthropicKeyAuth("k"), false, EffortHigh)
+	req := a.buildAnthropicRequest([]Message{{Role: "user", Content: "hi"}}, nil)
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{`"thinking":{"type":"adaptive"}`, `"output_config":{"effort":"high"}`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("request JSON missing %s; got %s", want, body)
+		}
+	}
+	if strings.Contains(body, "budget_tokens") {
+		t.Errorf("request JSON must not send budget_tokens to a current model; got %s", body)
+	}
+	if req.MaxTokens != 8192+anthropicDefaultMaxTokens {
+		t.Errorf("MaxTokens = %d, want headroom+default %d", req.MaxTokens, 8192+anthropicDefaultMaxTokens)
+	}
+}
+
+func TestAnthropicBudgetThinking(t *testing.T) {
+	cases := map[string]bool{
+		"claude-3-7-sonnet-20250219": true, "claude-sonnet-4-20250514": true, "claude-opus-4-1-20250805": true,
+		"claude-sonnet-4-5": true, "claude-haiku-4-5-20251001": true, "claude-opus-4-5": true,
+		"claude-opus-4-6": false, "claude-sonnet-4-6": false, "claude-opus-4-8": false,
+		"claude-sonnet-5-5": false, "claude-opus-5-5": false, "claude-haiku-5-5": false, "claude-fable-5-1": false,
+	}
+	for model, want := range cases {
+		if got := anthropicBudgetThinking(model); got != want {
+			t.Errorf("anthropicBudgetThinking(%q) = %v, want %v", model, got, want)
+		}
+	}
+}
+
+func TestAnthropicEffortStepsDownXHighOn46(t *testing.T) {
+	cases := []struct {
+		model string
+		e     Effort
+		want  string
+	}{
+		{"claude-opus-4-6", EffortXHigh, "high"},
+		{"claude-sonnet-4-6", EffortXHigh, "high"},
+		{"claude-opus-4-7", EffortXHigh, "xhigh"},
+		{"claude-sonnet-5-5", EffortMax, "max"},
+	}
+	for _, tc := range cases {
+		if got := anthropicEffort(tc.model, tc.e); got != tc.want {
+			t.Errorf("anthropicEffort(%q, %q) = %q, want %q", tc.model, tc.e, got, tc.want)
+		}
 	}
 }
 
@@ -192,7 +269,7 @@ func TestAnthropicRequest_ThinkingDisabledByDefault(t *testing.T) {
 	// The thinking field must be omitted entirely so existing runs are
 	// byte-identical.
 	data, _ := json.Marshal(req)
-	if strings.Contains(string(data), "thinking") {
-		t.Errorf("request JSON must omit thinking when disabled; got %s", data)
+	if strings.Contains(string(data), "thinking") || strings.Contains(string(data), "output_config") {
+		t.Errorf("request JSON must omit thinking and output_config when effort is unset; got %s", data)
 	}
 }

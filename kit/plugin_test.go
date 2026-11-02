@@ -200,7 +200,7 @@ func TestRenderPlugins_GroupsAndOrders(t *testing.T) {
 	plugins := []kit.Plugin{
 		{Kind: kit.KindCommand, Name: "help", Description: "Show available commands", Source: "builtin"},
 		{Kind: kit.KindTool, Name: "search", Description: "Project search", Source: "builtin"},
-		{Kind: kit.KindProvider, Name: "openrouter", Description: "google/gemini-2.5-flash"},
+		{Kind: kit.KindProvider, Name: "openrouter", Description: "google/gemini-3.8-flash"},
 		{Kind: kit.KindStore, Name: "demarkus", Description: "Mark Protocol versioned memory"},
 		{Kind: kit.KindTool, Name: "bash", Description: "Run a shell command", Source: "builtin"},
 		{Kind: kit.KindCommand, Name: "clear", Description: "Reset agent history", Source: "builtin"},

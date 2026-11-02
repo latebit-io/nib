@@ -132,24 +132,6 @@ func TestModelRegistry_FetchAndFilter(t *testing.T) {
 	}
 }
 
-func TestModelRegistry_CustomFilter(t *testing.T) {
-	srv := startFakeModelsDev(t)
-	defer srv.Close()
-
-	r := newTestRegistry(t, srv.URL, time.Hour)
-
-	filter := func(m RegistryModel) bool {
-		return m.ID == "gpt-5.4"
-	}
-	models, err := r.Models(context.Background(), "openai", filter)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(models) != 1 || models[0].ID != "gpt-5.4" {
-		t.Errorf("got %v, want [gpt-5.4]", models)
-	}
-}
-
 func TestModelRegistry_DiskCachePersistence(t *testing.T) {
 	srv := startFakeModelsDev(t)
 	defer srv.Close()

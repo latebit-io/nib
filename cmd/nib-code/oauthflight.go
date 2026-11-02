@@ -1,38 +1,38 @@
 package main
 
-import (
-	"context"
-	"sync"
-	"time"
-)
+import "sync"
 
-// oauthFlight serializes interactive sign-ins that bind a fixed callback
-// port: a new connect cancels the in-flight one and waits for it to exit
-// (releasing the port) before starting.
+// oauthFlight makes interactive sign-in idempotent: while a flow runs, a new
+// connect reuses it instead of starting a second flow whose fresh state
+// would invalidate every browser tab the first one opened.
 type oauthFlight struct {
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu      sync.Mutex
+	active  bool
+	authURL string
 }
 
-// start cancels and awaits any previous flight, then returns a context for
-// the new one plus a finish func the caller must invoke when it returns.
-// Blocks while the previous flight unwinds; call off the UI goroutine.
-func (f *oauthFlight) start(parent context.Context, timeout time.Duration) (context.Context, func()) {
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	done := make(chan struct{})
-
+// begin claims the flight. ok is false when a flow is already running;
+// authURL is then its sign-in URL, or "" before its browser step.
+func (f *oauthFlight) begin() (authURL string, ok bool) {
 	f.mu.Lock()
-	prevCancel, prevDone := f.cancel, f.done
-	f.cancel, f.done = cancel, done
-	f.mu.Unlock()
+	defer f.mu.Unlock()
+	if f.active {
+		return f.authURL, false
+	}
+	f.active = true
+	return "", true
+}
 
-	if prevCancel != nil {
-		prevCancel()
-		<-prevDone
-	}
-	return ctx, func() {
-		cancel()
-		close(done)
-	}
+// setURL records the running flow's sign-in URL for connects that join it.
+func (f *oauthFlight) setURL(u string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.authURL = u
+}
+
+// end releases the flight so the next connect starts a fresh flow.
+func (f *oauthFlight) end() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.active, f.authURL = false, ""
 }

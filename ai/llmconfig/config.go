@@ -16,7 +16,7 @@ import (
 type Profile struct {
 	// BaseURL is the provider's API base URL (e.g., "https://api.minimax.io/v1").
 	BaseURL string `json:"base_url,omitempty"`
-	// Model is the model identifier (e.g., "gemini-2.5-flash").
+	// Model is the model identifier (e.g., "gemini-3.8-flash").
 	Model string `json:"model,omitempty"`
 	// APIKeyEnv is the environment variable name holding the API key.
 	// Never stores the key itself — only the variable name.
@@ -78,7 +78,7 @@ type Resolved struct {
 }
 
 // DisplayModel returns a short display name for the model.
-// Strips any provider prefix: "google/gemini-2.5-flash" → "gemini-2.5-flash".
+// Strips any provider prefix: "google/gemini-3.8-flash" → "gemini-3.8-flash".
 func (r *Resolved) DisplayModel() string {
 	if i := strings.LastIndex(r.Model, "/"); i >= 0 {
 		return r.Model[i+1:]

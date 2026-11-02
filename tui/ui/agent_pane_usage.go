@@ -227,7 +227,9 @@ func modelContextWindow(label string) int {
 		{"claude-3-5-sonnet", 200_000},
 		{"claude-3-5-haiku", 200_000},
 		{"claude-3-opus", 200_000},
-		// OpenAI / Codex
+		// OpenAI / Codex (windows as reported by the Codex models endpoint)
+		{"gpt-6.1", 500_000},
+		{"gpt-6", 272_000},
 		{"gpt-5", 272_000}, // matches pi's reported window
 		{"gpt-4o", 128_000},
 		{"o1", 200_000},

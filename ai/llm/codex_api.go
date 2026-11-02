@@ -44,10 +44,16 @@ func NewCodexAPI(model string, auth Auth, effort Effort) *CodexAPI {
 	}
 }
 
+// codexClientVersion is the Codex client version this adapter speaks; the
+// models endpoint lists only models whose minimal_client_version is at or
+// below it (0.1.0 lists nothing). Bump only alongside protocol support for
+// that client, or Stream may meet models it cannot drive.
+const codexClientVersion = "0.200.0"
+
 // Codex API endpoints.
 const (
 	codexEndpoint       = "https://chatgpt.com/backend-api/codex/responses"
-	codexModelsEndpoint = "https://chatgpt.com/backend-api/codex/models?client_version=0.1.0"
+	codexModelsEndpoint = "https://chatgpt.com/backend-api/codex/models?client_version=" + codexClientVersion
 )
 
 // ListModels queries the Codex models endpoint for available models.
@@ -90,19 +96,24 @@ func (c *CodexAPI) ListModels(ctx context.Context) ([]ModelInfo, error) {
 		Models []struct {
 			Slug        string `json:"slug"`
 			DisplayName string `json:"display_name"`
+			Visibility  string `json:"visibility"`
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("codex: decode models: %w", err)
 	}
 
-	models := make([]ModelInfo, len(result.Models))
-	for i, m := range result.Models {
+	// The endpoint already returns the account's models in priority order.
+	models := make([]ModelInfo, 0, len(result.Models))
+	for _, m := range result.Models {
+		if m.Visibility == "hide" { // internal models (auto-review, reserve)
+			continue
+		}
 		name := m.DisplayName
 		if name == "" {
 			name = m.Slug
 		}
-		models[i] = ModelInfo{ID: m.Slug, Name: name}
+		models = append(models, ModelInfo{ID: m.Slug, Name: name})
 	}
 	return models, nil
 }

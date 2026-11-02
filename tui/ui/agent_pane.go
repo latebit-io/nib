@@ -303,7 +303,7 @@ type AgentPaneModel struct {
 	// Unmarked lines are agent text and take the markdown path.
 	rawMarks map[int]rawLineMark
 
-	// modelLabel is the display name of the active LLM model (e.g. "gemini-2.5-flash").
+	// modelLabel is the display name of the active LLM model (e.g. "gemini-3.8-flash").
 	// Shown on the left side of the status line. Set via SetModelLabel.
 	modelLabel string
 

@@ -16,7 +16,7 @@ const (
 	// DefaultBaseURL is the LLM provider base URL when nothing else is configured.
 	DefaultBaseURL = "https://openrouter.ai/api/v1"
 	// DefaultModel is the LLM model when nothing else is configured.
-	DefaultModel = "google/gemini-2.5-flash"
+	DefaultModel = "google/gemini-3.8-flash"
 	// DefaultKeyEnv is the environment variable checked for the API key
 	// when no api_key_env is set in any config file.
 	DefaultKeyEnv = "LLM_API_KEY"
@@ -26,18 +26,18 @@ const (
 var builtinProfiles = map[string]Profile{
 	"openrouter": {
 		BaseURL:       "https://openrouter.ai/api/v1",
-		Model:         "google/gemini-2.5-flash",
+		Model:         "google/gemini-3.8-flash",
 		APIKeyEnv:     "OPENROUTER_API_KEY",
 		PromptCaching: ptrBool(true),
 	},
 	"gemini": {
 		BaseURL:   "https://generativelanguage.googleapis.com/v1beta/openai",
-		Model:     "gemini-2.5-flash",
+		Model:     "gemini-3.8-flash",
 		APIKeyEnv: "GEMINI_API_KEY",
 	},
 	"minimax": {
 		BaseURL:   "https://api.minimax.io/v1",
-		Model:     "MiniMax-M2.7",
+		Model:     "MiniMax-M3",
 		APIKeyEnv: "MINIMAX_API_KEY",
 	},
 	"fugu": {
@@ -50,17 +50,17 @@ var builtinProfiles = map[string]Profile{
 	},
 	"chatgpt": {
 		BaseURL:       "https://chatgpt.com/backend-api/codex",
-		Model:         "gpt-5.1-codex",
+		Model:         "gpt-6.1-sol",
 		OAuthProvider: "openai",
 	},
 	"copilot": {
 		BaseURL:       "https://api.githubcopilot.com/v1",
-		Model:         "gpt-4.1",
+		Model:         "gpt-6.1-sol",
 		OAuthProvider: "copilot",
 	},
 	"anthropic": {
 		BaseURL:       "https://api.anthropic.com",
-		Model:         "claude-sonnet-4-20250514",
+		Model:         "claude-sonnet-5-5",
 		APIKeyEnv:     "ANTHROPIC_API_KEY",
 		PromptCaching: ptrBool(true),
 	},

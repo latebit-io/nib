@@ -1,15 +1,17 @@
 package llmconfig
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 
+	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/ai/oauth"
 )
 
 // WireOAuth attaches an OAuth authenticator to a resolved profile when
-// the profile uses subscription-based auth and the store holds a token
-// for the provider. Returns true if Auth was set.
+// the profile uses subscription-based auth and the store holds a valid or
+// refreshable token for the provider. Returns true if Auth was set.
 //
 // This is the canonical OAuth-attach for any binary that resolves an
 // LLM profile. Each binary owns its own store creation (default path or
@@ -36,11 +38,26 @@ func WireOAuth(resolved *Resolved, store *oauth.Store) bool {
 		slog.Warn("llmconfig: unknown OAuth provider", "provider", resolved.OAuthProvider)
 		return false
 	}
-	if !store.HasToken(providerID) {
+	// An expired token with a refresh token stays wired: the TokenSource
+	// refreshes on first use instead of forcing a fresh browser sign-in.
+	if !store.Get(providerID).Usable() {
 		return false
 	}
 	resolved.Auth = oauth.NewAuthenticator(tokenSource)
 	return true
+}
+
+// CheckAuth verifies the wired authenticator can mint credentials now,
+// refreshing an expired OAuth token. Returns nil when no authenticator is
+// wired or it cannot check itself.
+func (r *Resolved) CheckAuth(ctx context.Context) error {
+	if r == nil || r.Auth == nil {
+		return nil
+	}
+	if cc, ok := r.Auth.(llm.CredentialChecker); ok {
+		return cc.Ready(ctx)
+	}
+	return nil
 }
 
 // WireStoredKey applies an API key from the key store to a resolved

@@ -49,7 +49,7 @@ import (
 // while a run was unwinding would miss the final lifecycle event.
 func (a *Agent) translateEvents() {
 	// Signal Close that the translator has fully exited and will not
-	// publish to the bus again, so Close can safely call bus.close
+	// publish to the bus again, so Close can safely call Bus.Close
 	// without racing a still-running drain.
 	defer close(a.translatorDone)
 	for {
@@ -93,9 +93,9 @@ func (a *Agent) translate(ev agentevent.Event) {
 	case agentevent.AgentStart:
 		a.bindOutcome()
 	case agentevent.MessageUpdate:
-		a.bus.publish(event.AgentToken{Text: e.Delta})
+		a.bus.Publish(event.AgentToken{Text: e.Delta})
 	case agentevent.TurnUsage:
-		a.bus.publish(event.AgentTurnUsage{
+		a.bus.Publish(event.AgentTurnUsage{
 			Turn:             e.Turn,
 			PromptTokens:     e.PromptTokens,
 			CompletionTokens: e.CompletionTokens,
@@ -104,11 +104,11 @@ func (a *Agent) translate(ev agentevent.Event) {
 		})
 	case agentevent.Error:
 		a.markCurrentUnsuccess()
-		a.bus.publish(event.AgentError{Err: e.Err})
+		a.bus.Publish(event.AgentError{Err: e.Err})
 	case agentevent.AgentParked:
-		a.bus.publish(event.AgentWaiting{Finished: e.Finished})
+		a.bus.Publish(event.AgentWaiting{Finished: e.Finished})
 	case agentevent.AgentEnd:
-		a.bus.publish(event.AgentDone{Success: !a.consumeCurrentUnsuccess()})
+		a.bus.Publish(event.AgentDone{Success: !a.consumeCurrentUnsuccess()})
 	}
 }
 

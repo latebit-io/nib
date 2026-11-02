@@ -760,7 +760,7 @@ func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 	// fully exited, the bus has closed every subscription's inbox,
 	// and reader loops exit naturally. The range below sees a closed
 	// channel and returns immediately; if Close had returned early
-	// (before bus.close finished) the channel would still be open
+	// (before Bus.Close finished) the channel would still be open
 	// and the range would block until a 200ms watchdog fired.
 	closedSeen := make(chan struct{})
 	go func() {
@@ -771,7 +771,7 @@ func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 	select {
 	case <-closedSeen:
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("subscription inbox not closed after Close — bus.close did not run or Close returned early")
+		t.Fatal("subscription inbox not closed after Close — Bus.Close did not run or Close returned early")
 	}
 }
 

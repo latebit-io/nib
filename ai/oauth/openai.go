@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,6 +20,8 @@ const (
 	openAIAuthURL      = "https://auth.openai.com/oauth/authorize"
 	openAITokenURL     = "https://auth.openai.com/oauth/token"
 	openAICallbackPort = 1455
+	// openAIAuthClaim is the JWT claim object holding ChatGPT account fields.
+	openAIAuthClaim = "https://api.openai.com/auth"
 )
 
 // openAIScopes are the OAuth scopes requested for ChatGPT access.
@@ -32,13 +35,14 @@ const refreshDefaultTTL = 5 * time.Minute
 // OpenAITokenSource provides tokens for the ChatGPT/Codex API.
 // It handles automatic refresh of expired tokens.
 type OpenAITokenSource struct {
-	store *Store
-	mu    sync.Mutex
+	store    *Store
+	tokenURL string // overridable in tests
+	mu       sync.Mutex
 }
 
 // NewOpenAITokenSource creates a token source backed by the given store.
 func NewOpenAITokenSource(store *Store) *OpenAITokenSource {
-	return &OpenAITokenSource{store: store}
+	return &OpenAITokenSource{store: store, tokenURL: openAITokenURL}
 }
 
 // Token returns a valid access token, refreshing if expired.
@@ -50,12 +54,36 @@ func (s *OpenAITokenSource) Token(ctx context.Context) (*Token, error) {
 	if tok.Valid() {
 		return tok, nil
 	}
+	// Another process may already have refreshed (and rotated) the token;
+	// reusing our stale refresh token would get it rejected.
+	if err := s.store.Reload(); err != nil {
+		slog.Warn("oauth: reload token store", "err", err)
+	} else if tok = s.store.Get(ProviderOpenAI); tok.Valid() {
+		return tok, nil
+	}
 
 	// Token expired or missing — try refresh.
 	if tok != nil && tok.RefreshToken != "" {
-		refreshed, err := refreshAccessToken(ctx, openAITokenURL, openAIClientID, tok.RefreshToken)
+		refreshed, err := refreshAccessToken(ctx, s.tokenURL, openAIClientID, tok.RefreshToken)
 		if err != nil {
 			slog.Warn("oauth: OpenAI token refresh failed", "err", err)
+			// A rejected refresh token is dead; drop it (only it, never a token
+			// a concurrent refresh stored) so the UI offers a fresh sign-in.
+			// DeleteIf reloads under the file lock, so Get below sees any
+			// token another source or process stored meanwhile.
+			if te, ok := errors.AsType[*tokenEndpointError](err); ok && te.grantRejected() {
+				rejected := tok.RefreshToken
+				if delErr := s.store.DeleteIf(ProviderOpenAI, func(cur Token) bool {
+					return cur.RefreshToken == rejected && !cur.Valid()
+				}); delErr != nil {
+					slog.Warn("oauth: failed to drop rejected OpenAI token", "err", delErr)
+				}
+			}
+			// Each WireOAuth builds its own source, so another one may have
+			// rotated the refresh token first; its fresh token is good.
+			if cur := s.store.Get(ProviderOpenAI); cur.Valid() {
+				return cur, nil
+			}
 			return nil, fmt.Errorf("token refresh failed: %w (re-authenticate with 'connect to chatgpt')", err)
 		}
 		newTok := &Token{
@@ -173,12 +201,12 @@ func extractAccountIDFromJWT(token string) string {
 		return ""
 	}
 
-	// Try known claim locations.
-	for _, key := range []string{
-		"chatgpt_account_id",
-		"https://api.openai.com/auth.chatgpt_account_id",
-	} {
-		if id, ok := claims[key].(string); ok && id != "" {
+	if id, ok := claims["chatgpt_account_id"].(string); ok && id != "" {
+		return id
+	}
+	// OpenAI nests account claims under a namespaced object, not a dotted key.
+	if auth, ok := claims[openAIAuthClaim].(map[string]any); ok {
+		if id, ok := auth["chatgpt_account_id"].(string); ok && id != "" {
 			return id
 		}
 	}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/budget"
+	"github.com/latebit-io/nib/kit/eventbus"
 )
 
 // Public lifecycle and signal API for Agent.
@@ -523,11 +525,11 @@ func (a *Agent) activeCoord() *approval.Coordinator {
 	return a.coord
 }
 
-// send delivers an event to the frontend. High-volume display events
-// (tokens, status) are best-effort: dropped with a warning if the
-// channel is full. Control-flow events (edit proposed, done, error)
-// use a timeout to prevent indefinite blocking if the frontend stops
-// draining.
+// send publishes an event to every subscriber. Under default options,
+// streaming events (tokens, status) drop silently on a full inbox and
+// count in [Subscription.Drops]; control events (done, error) block
+// until the inbox accepts, with no timeout. Events that must not wedge
+// the agent go through [Agent.sendCritical] instead.
 //
 // Side effect: every [event.AgentError] flowing through this method
 // flips [Agent.runUnsuccessful] under the lock. [Agent.forwardKitEvents]
@@ -544,7 +546,7 @@ func (a *Agent) send(ev event.Event) {
 		a.runUnsuccessful = true
 		a.mu.Unlock()
 	}
-	a.bus.publish(ev)
+	a.bus.Publish(ev)
 }
 
 // sendCritical delivers an event that must reach the frontend for the
@@ -554,7 +556,7 @@ func (a *Agent) send(ev event.Event) {
 // (e.g. edit proposals via the orchestrator) — dropping these silently
 // would deadlock the agent.
 //
-// Delivery routes through [bus.publishContext]: each Block-policy
+// Delivery routes through [eventbus.Bus.PublishContext]: each Block-policy
 // subscriber's inbox attempt is bounded by ctx, so a wedged Block-
 // policy subscriber cannot extend sendCritical past its deadline
 // (the failure shape Greptile caught on PR #153). Drop-policy
@@ -570,5 +572,9 @@ func (a *Agent) send(ev event.Event) {
 func (a *Agent) sendCritical(ctx context.Context, ev event.Event) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	return a.bus.publishContext(ctx, ev)
+	err := a.bus.PublishContext(ctx, ev)
+	if errors.Is(err, eventbus.ErrClosed) {
+		return ErrAgentClosed
+	}
+	return err
 }

@@ -29,6 +29,27 @@ func TestTokenValid(t *testing.T) {
 	}
 }
 
+func TestTokenUsable(t *testing.T) {
+	expired := time.Now().Add(-time.Hour)
+	tests := []struct {
+		name  string
+		token *Token
+		want  bool
+	}{
+		{"nil token", nil, false},
+		{"valid", &Token{AccessToken: "a"}, true},
+		{"expired without refresh", &Token{AccessToken: "a", ExpiresAt: expired}, false},
+		{"expired with refresh", &Token{AccessToken: "a", RefreshToken: "r", ExpiresAt: expired}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.token.Usable(); got != tt.want {
+				t.Errorf("Usable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExtractAccountIDFromJWT(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -40,8 +61,10 @@ func TestExtractAccountIDFromJWT(t *testing.T) {
 		{"invalid base64", "header.!!!invalid!!!.sig", ""},
 		// chatgpt_account_id (direct claim)
 		{"direct claim", "header.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0LTEyMyJ9.sig", "acct-123"},
-		// https://api.openai.com/auth.chatgpt_account_id (URI-form claim)
-		{"uri claim", "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGguY2hhdGdwdF9hY2NvdW50X2lkIjogImFjY3QtNDU2In0.sig", "acct-456"},
+		// {"https://api.openai.com/auth": {"chatgpt_account_id": "acct-456"}} (real OpenAI shape)
+		{"nested auth claim", "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC00NTYifX0.sig", "acct-456"},
+		// a dotted key is not how OpenAI encodes the claim
+		{"dotted key ignored", "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGguY2hhdGdwdF9hY2NvdW50X2lkIjogImFjY3QtNDU2In0.sig", ""},
 		// organizations[0].id (fallback)
 		{"orgs claim", "header.eyJvcmdhbml6YXRpb25zIjogW3siaWQiOiAib3JnLTc4OSJ9XX0.sig", "org-789"},
 	}

@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 )
@@ -60,6 +61,14 @@ type CredentialInvalidator interface {
 	// Invalidate discards the current credential. Implementations log
 	// their own failures; the caller treats the call as best-effort.
 	Invalidate()
+}
+
+// CredentialChecker is an optional capability of an [Auth] that can
+// confirm it will produce a credential now (e.g. refreshing an expired
+// OAuth token), so callers surface dead credentials before the first
+// request.
+type CredentialChecker interface {
+	Ready(ctx context.Context) error
 }
 
 // parseAuthError builds an [AuthError] from a provider's 401 response

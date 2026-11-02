@@ -38,6 +38,7 @@ import (
 	"github.com/latebit-io/nib/agent"
 	agentevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/kit/eventbus"
 )
 
 // Tool is the foundation [agent.Tool] re-exported under kit. Consumers
@@ -144,11 +145,11 @@ type Agent struct {
 
 	// bus fans every translated [event.Event] out to its registered
 	// [Subscription]s. Created by [New], populated by the translator
-	// goroutine via [bus.publish], drained by each subscriber's
+	// goroutine via [eventbus.Bus.Publish], drained by each subscriber's
 	// reader. The bus is the single writer to each subscription's
 	// inbox channel; the [Agent] never writes to a consumer-facing
 	// channel directly.
-	bus *bus
+	bus *eventbus.Bus
 
 	// outcomeMu guards [Agent.pendingOutcome] and [Agent.currentOutcome].
 	// The two pointers carry per-run failure state across goroutines:
@@ -186,7 +187,7 @@ type Agent struct {
 	// translatorDone is closed by [Agent.translateEvents] (via defer)
 	// when the translator goroutine returns. [Agent.Close] blocks on
 	// it after closing [Agent.done] so the sequencing
-	// "translator stopped publishing → safe to bus.close" holds
+	// "translator stopped publishing, then close the bus" holds
 	// without races.
 	translatorDone chan struct{}
 
@@ -244,7 +245,7 @@ func New(cfg Config) (*Agent, error) {
 	a := &Agent{
 		foundation:       f,
 		foundationEvents: foundationEvents,
-		bus:              newBus(),
+		bus:              eventbus.New(isStreamingEvent),
 		done:             make(chan struct{}),
 		translatorDone:   make(chan struct{}),
 	}
@@ -255,7 +256,7 @@ func New(cfg Config) (*Agent, error) {
 
 // Subscribe registers a new subscriber for this agent's event stream
 // and returns a [Subscription] whose inbox receives events from the
-// next [bus.publish] onward.
+// next [eventbus.Bus.Publish] onward.
 //
 // Default [SubscribeOptions] (zero value) preserve the legacy
 // single-consumer channel semantics: streaming events drop on a full
@@ -264,7 +265,8 @@ func New(cfg Config) (*Agent, error) {
 // that can tolerate event loss on every class; a recorder that needs
 // strict streaming-event delivery).
 //
-// Subscribe returns [ErrClosed] if the agent has been closed. Late
+// Subscribe returns [ErrClosed] if the agent has been closed and
+// [eventbus.ErrInvalidPolicy] for unsupported policy values. Late
 // subscribers (registered after some events were already published)
 // receive only events published after their subscribe call; the bus
 // does not journal.
@@ -272,7 +274,14 @@ func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 	if atomic.LoadUint32(&a.closed) == 1 {
 		return nil, ErrClosed
 	}
-	return a.bus.subscribe(opts)
+	sub, err := a.bus.Subscribe(toEventBusOptions(opts))
+	if errors.Is(err, eventbus.ErrClosed) {
+		return nil, ErrClosed
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &Subscription{inner: sub}, nil
 }
 
 // Prompt starts a new run with the given user message. Returns
@@ -460,8 +469,8 @@ func (a *Agent) Close() {
 		<-a.translatorDone
 		// Close the bus. Signals every subscription's done channel,
 		// waits for in-flight deliveries to drain, then closes every
-		// inbox so reader loops exit. After bus.close returns, no
+		// inbox so reader loops exit. After Bus.Close returns, no
 		// further writes happen to any subscription channel.
-		a.bus.close()
+		a.bus.Close()
 	})
 }

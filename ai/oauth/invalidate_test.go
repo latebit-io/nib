@@ -11,22 +11,29 @@ import (
 	"time"
 )
 
-// newStoreWithOpenAIToken returns a store seeded with a valid (unexpired)
-// OpenAI token, mirroring the revoked-but-locally-valid state that the
-// self-heal path must clear.
-func newStoreWithOpenAIToken(t *testing.T) *Store {
+// seedOpenAIStore returns a temp-file store holding tok for OpenAI.
+func seedOpenAIStore(t *testing.T, tok *Token) *Store {
 	t.Helper()
 	store, err := NewStore(filepath.Join(t.TempDir(), "auth.json"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	if err := store.Put(ProviderOpenAI, &Token{
+	if err := store.Put(ProviderOpenAI, tok); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	return store
+}
+
+// newStoreWithOpenAIToken returns a store seeded with a valid (unexpired)
+// OpenAI token, mirroring the revoked-but-locally-valid state that the
+// self-heal path must clear.
+func newStoreWithOpenAIToken(t *testing.T) *Store {
+	t.Helper()
+	store := seedOpenAIStore(t, &Token{
 		AccessToken:  "access",
 		RefreshToken: "refresh",
 		ExpiresAt:    time.Now().Add(time.Hour),
-	}); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+	})
 	if !store.HasToken(ProviderOpenAI) {
 		t.Fatal("precondition: seeded token should be valid")
 	}

@@ -391,8 +391,12 @@ func (m *EditorModel) renderNormalLine(
 			colTags[j] = tagFindCurrent
 		case findHL[j] == 1:
 			colTags[j] = tagFindMatch
-		case charStyles[j].GetForeground() != nil:
-			fg := charStyles[j].GetForeground()
+		default:
+			fg := syntaxForeground(charStyles[j])
+			if fg == nil {
+				colTags[j] = tagPlain
+				break
+			}
 			tag, ok := syntaxTagMap[fg]
 			if !ok {
 				tag = nextTag
@@ -400,8 +404,6 @@ func (m *EditorModel) renderNormalLine(
 				nextTag++
 			}
 			colTags[j] = tag
-		default:
-			colTags[j] = tagPlain
 		}
 	}
 
@@ -537,21 +539,22 @@ func (m *EditorModel) renderRemovedLine(
 		clear(rSyntaxMap)
 		rNextTag := 1
 		for j := range contentW {
-			switch {
-			case j == displayCursorCol:
+			if j == displayCursorCol {
 				rColTags[j] = rTagCursor
-			case charStyles[j].GetForeground() != nil:
-				fg := charStyles[j].GetForeground()
-				tag, ok := rSyntaxMap[fg]
-				if !ok {
-					tag = rNextTag
-					rSyntaxMap[fg] = tag
-					rNextTag++
-				}
-				rColTags[j] = tag
-			default:
-				rColTags[j] = rTagBg
+				continue
 			}
+			fg := syntaxForeground(charStyles[j])
+			if fg == nil {
+				rColTags[j] = rTagBg
+				continue
+			}
+			tag, ok := rSyntaxMap[fg]
+			if !ok {
+				tag = rNextTag
+				rSyntaxMap[fg] = tag
+				rNextTag++
+			}
+			rColTags[j] = tag
 		}
 		rFlush := func(start, end int) {
 			text := spanText(displayed, start, end)
@@ -669,4 +672,14 @@ func (m *EditorModel) renderAddedLine(
 	}
 
 	return line.String()
+}
+
+// syntaxForeground returns the style's foreground, or nil when unset.
+// Lipgloss v2 reports an unset foreground as NoColor{}, never nil.
+func syntaxForeground(s lipgloss.Style) color.Color {
+	fg := s.GetForeground()
+	if _, unset := fg.(lipgloss.NoColor); unset {
+		return nil
+	}
+	return fg
 }

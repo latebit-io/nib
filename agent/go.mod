@@ -1,6 +1,6 @@
 module github.com/latebit-io/nib/agent
 
-go 1.26
+go 1.27
 
 // A real, tagged version so external consumers can resolve this module —
 // dependency `replace` directives are not inherited, so a v0.0.0 require

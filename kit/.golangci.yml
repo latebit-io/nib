@@ -49,6 +49,15 @@ linters:
             - pkg: "github.com/latebit-io/nib/ai"
               desc: "port packages must not import providers or brand"
 
+        # Shared event fan-out is a pure leaf over the event vocabulary.
+        eventbus-isolation:
+          list-mode: strict
+          files:
+            - "**/kit/eventbus/*.go"
+          allow:
+            - $gostd
+            - "github.com/latebit-io/nib/kit/event"
+
         # Process execution is confined to the enumerated packages. A new
         # package is denied until listed here (fail-closed).
         exec-allowlist:

@@ -11,7 +11,7 @@ import (
 
 // TestClose_NoSendOnClosedChannelPanic locks the contract the
 // reviewer flagged: kit.Close must synchronously wait for kit's
-// translator to exit before coding.Close calls bus.close, otherwise
+// translator to exit before coding.Close calls Bus.Close, otherwise
 // the translator's drain loop races the close and panics on
 // send-on-closed-channel. The failure mode of a missing wait is an
 // immediate runtime panic that fails the test outright.
@@ -126,10 +126,9 @@ func TestClose_BlocksUntilForwarderExits(t *testing.T) {
 	<-drainerDone
 }
 
-// TestClose_Idempotent verifies repeated Close calls are safe.
-// closeOnce guards both the kit close-once and the bus close;
-// without that guard the second bus.close would panic on a
-// previously-closed inbox.
+// TestClose_Idempotent verifies repeated Close calls are safe:
+// closeOnce guards the kit close and the bus close so shutdown runs
+// once.
 func TestClose_Idempotent(t *testing.T) {
 	t.Parallel()
 

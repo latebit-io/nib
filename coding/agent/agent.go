@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/latebit-io/nib/kit/approval"
 	"github.com/latebit-io/nib/kit/budget"
 	"github.com/latebit-io/nib/kit/cmdallow"
+	"github.com/latebit-io/nib/kit/eventbus"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/toolperm"
 	"github.com/latebit-io/nib/kit/tools/bash"
@@ -91,12 +93,13 @@ var mutatingTools = tools.MutatingToolNames()
 type Agent struct {
 	provider llm.Provider
 	// bus is the sole delivery path for events emitted by the agent.
-	// [Agent.send] publishes through [bus.publish]; [Agent.sendCritical]
-	// publishes through [bus.publishContext] for ctx-bounded delivery.
+	// [Agent.send] publishes through [eventbus.Bus.Publish];
+	// [Agent.sendCritical] publishes through [eventbus.Bus.PublishContext]
+	// for ctx-bounded delivery.
 	// Consumers register via [Agent.Subscribe]; the bus fans every
 	// publication out to each subscriber's inbox per its configured
 	// [DropPolicy].
-	bus      *bus
+	bus      *eventbus.Bus
 	tools    map[string]Tool
 	toolDefs []llm.ToolDef
 	cache    *FileCache
@@ -299,7 +302,7 @@ type Agent struct {
 	// when the forwarder goroutine returns. [Agent.Close] blocks on
 	// it after [kit.Agent.Close] closes the subscription's inbox so
 	// the wrapper provides a synchronous "no further publishes to the
-	// bus" guarantee — without this wait, bus.close could race a
+	// bus" guarantee — without this wait, Bus.Close could race a
 	// forwarder still draining the last buffered AgentDone from the
 	// subscription inbox.
 	forwardDone chan struct{}
@@ -669,12 +672,12 @@ func (a *Agent) buildKitAgent() {
 //
 //  1. [kit.Agent.Close] blocks until the kit translator has fully
 //     exited (no more publishes to the bus) and then closes every
-//     subscription's inbox via bus.close. After kit.Close returns,
+//     subscription's inbox via Bus.Close. After kit.Close returns,
 //     [Agent.kitSub]'s inbox is closed and the forwarder's range
 //     drains the buffered tail and exits.
 //  2. <-forwardDone blocks until the forwarder exits, providing the
 //     symmetric "no further publishes to the bus" guarantee before
-//     bus.close closes every subscriber inbox.
+//     Bus.Close closes every subscriber inbox.
 //
 // After Close, calls into [Agent.RunWithMode], [Agent.Run], and
 // [Agent.Reply] will fail to start a new run (kit returns ErrClosed).
@@ -690,12 +693,12 @@ func (a *Agent) Close() {
 			<-a.forwardDone
 		}
 		// After the forwarder exits, no goroutine publishes to the
-		// bus anymore — safe to close. bus.close drains in-flight
+		// bus anymore — safe to close. Bus.Close drains in-flight
 		// deliveries per-subscription and closes every subscriber
 		// inbox so `for ev := range sub.Events()` loops exit
 		// naturally. Idempotent.
 		if a.bus != nil {
-			a.bus.close()
+			a.bus.Close()
 		}
 	})
 }
@@ -710,19 +713,27 @@ func (a *Agent) Close() {
 // [event.AgentCompacted]) drop on a full inbox; control events block
 // the publisher until the inbox accepts.
 //
-// Subscribe returns [ErrAgentClosed] if the agent has been closed.
-// Late subscribers receive only events published after their subscribe
+// Subscribe returns [ErrAgentClosed] if the agent has been closed and
+// [eventbus.ErrInvalidPolicy] for unsupported policy values. Late
+// subscribers receive only events published after their subscribe
 // call; the bus does not journal. Subscribe is the only consumption
 // path — there is no frontend channel.
 func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
-	return a.bus.subscribe(opts)
+	sub, err := a.bus.Subscribe(toEventBusOptions(opts))
+	if errors.Is(err, eventbus.ErrClosed) {
+		return nil, ErrAgentClosed
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &Subscription{inner: sub}, nil
 }
 
 // SubscriberCount returns the number of live subscriptions. Diagnostic
 // only: a consumer that forgets [Subscription.Close] leaves an inbox
 // registered, and a full inbox blocks control-event publication.
 func (a *Agent) SubscriberCount() int {
-	return a.bus.count()
+	return a.bus.SubscriberCount()
 }
 
 // registerTools builds the tool registry. Built-in tools are registered first

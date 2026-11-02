@@ -1,6 +1,8 @@
 package llmconfig
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,6 +18,9 @@ import (
 // if that type ever stops satisfying the invalidation port.
 var _ llm.CredentialInvalidator = (*oauth.Authenticator)(nil)
 
+// CheckAuth relies on the wired Auth satisfying [llm.CredentialChecker].
+var _ llm.CredentialChecker = (*oauth.Authenticator)(nil)
+
 func TestWireOAuth(t *testing.T) {
 	dir := t.TempDir()
 	store, err := oauth.NewStore(filepath.Join(dir, "auth.json"))
@@ -25,6 +30,17 @@ func TestWireOAuth(t *testing.T) {
 	tok := &oauth.Token{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour)}
 	if err := store.Put(oauth.ProviderOpenAI, tok); err != nil {
 		t.Fatalf("seed token: %v", err)
+	}
+	expiredStore := func(refresh string) *oauth.Store {
+		s, err := oauth.NewStore(filepath.Join(t.TempDir(), "auth.json"))
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		old := &oauth.Token{AccessToken: "old", RefreshToken: refresh, ExpiresAt: time.Now().Add(-time.Hour)}
+		if err := s.Put(oauth.ProviderOpenAI, old); err != nil {
+			t.Fatalf("seed expired token: %v", err)
+		}
+		return s
 	}
 
 	tests := []struct {
@@ -40,6 +56,20 @@ func TestWireOAuth(t *testing.T) {
 			store:    store,
 			want:     true,
 			wantAuth: true,
+		},
+		{
+			name:     "expired token with refresh token stays wired",
+			resolved: &Resolved{OAuthProvider: "openai"},
+			store:    expiredStore("refresh"),
+			want:     true,
+			wantAuth: true,
+		},
+		{
+			name:     "expired token without refresh token is not wired",
+			resolved: &Resolved{OAuthProvider: "openai"},
+			store:    expiredStore(""),
+			want:     false,
+			wantAuth: false,
 		},
 		{
 			name:     "non-oauth profile is no-op",
@@ -85,6 +115,32 @@ func TestWireOAuth(t *testing.T) {
 			}
 			if tc.resolved != nil && (tc.resolved.Auth != nil) != tc.wantAuth {
 				t.Errorf("Auth set = %v, want %v", tc.resolved.Auth != nil, tc.wantAuth)
+			}
+		})
+	}
+}
+
+// failingSource is a TokenSource that never yields a token.
+type failingSource struct{ err error }
+
+func (f failingSource) Token(context.Context) (*oauth.Token, error) { return nil, f.err }
+
+func TestCheckAuth(t *testing.T) {
+	errDead := errors.New("refresh rejected")
+	tests := []struct {
+		name     string
+		resolved *Resolved
+		want     error
+	}{
+		{"nil resolved", nil, nil},
+		{"no authenticator", &Resolved{}, nil},
+		{"static key auth cannot self-check", &Resolved{Auth: llm.StaticKeyAuth("k")}, nil},
+		{"dead oauth source surfaces error", &Resolved{Auth: oauth.NewAuthenticator(failingSource{errDead})}, errDead},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.resolved.CheckAuth(context.Background()); !errors.Is(got, tc.want) {
+				t.Errorf("CheckAuth = %v, want %v", got, tc.want)
 			}
 		})
 	}

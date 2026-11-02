@@ -72,40 +72,15 @@ func NewModelRegistry(cacheDir string, ttl time.Duration) *ModelRegistry {
 	}
 }
 
-// ModelFilter is an optional predicate applied after the tool_call check.
-// Return true to include the model in results.
-type ModelFilter func(m RegistryModel) bool
-
-// composeFilters combines variadic filters into a single predicate.
-func composeFilters(filters []ModelFilter) ModelFilter {
-	switch len(filters) {
-	case 0:
-		return nil
-	case 1:
-		return filters[0]
-	default:
-		return func(m RegistryModel) bool {
-			for _, f := range filters {
-				if f != nil && !f(m) {
-					return false
-				}
-			}
-			return true
-		}
-	}
-}
-
 // Models returns the cached models for a provider, refreshing if the cache
 // is stale or missing. Only models with tool_call support are returned.
-// An optional filter further narrows results (e.g. codex-family only).
-func (r *ModelRegistry) Models(ctx context.Context, providerID string, filters ...ModelFilter) ([]ModelInfo, error) {
-	filter := composeFilters(filters)
+func (r *ModelRegistry) Models(ctx context.Context, providerID string) ([]ModelInfo, error) {
 	cache := r.resolveCache(ctx)
 	if cache == nil {
 		return nil, fmt.Errorf("model registry: no cache available (network, disk, and snapshot all failed)")
 	}
 
-	models := r.filterModels(cache, providerID, filter)
+	models := r.filterModels(cache, providerID)
 	if len(models) == 0 {
 		return nil, fmt.Errorf("model registry: no models for provider %q", providerID)
 	}
@@ -179,14 +154,11 @@ func (r *ModelRegistry) isStale(c *registryCache) bool {
 	return time.Since(c.FetchedAt) > r.ttl
 }
 
-func (r *ModelRegistry) filterModels(c *registryCache, providerID string, filter ModelFilter) []ModelInfo {
+func (r *ModelRegistry) filterModels(c *registryCache, providerID string) []ModelInfo {
 	raw := c.Providers[providerID]
 	var out []ModelInfo
 	for _, m := range raw {
 		if !m.ToolCall {
-			continue
-		}
-		if filter != nil && !filter(m) {
 			continue
 		}
 		name := m.Name

@@ -21,7 +21,7 @@ func (s *Session) SetLLMInfo(modelID, profile string) {
 	s.mu.Unlock()
 }
 
-// LLMModel returns the full model ID (e.g. "google/gemini-2.5-flash").
+// LLMModel returns the full model ID (e.g. "google/gemini-3.8-flash").
 func (s *Session) LLMModel() string {
 	s.mu.RLock()
 	m := s.llmModel

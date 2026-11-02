@@ -180,7 +180,7 @@ func commandSource(s command.Source) string {
 // Format example:
 //
 //	PROVIDER (1)
-//	  openrouter           google/gemini-2.5-flash
+//	  openrouter           google/gemini-3.8-flash
 //
 //	TOOL (3)
 //	  bash                 Run shell commands with output cap + timeout

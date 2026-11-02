@@ -254,6 +254,20 @@ func TestFormatContextChip(t *testing.T) {
 			wantNonEmpty:  true,
 		},
 		{
+			name:          "gpt-6.1 → 500k window",
+			lastTurnTotal: 50_000, // 10% of 500k
+			model:         "gpt-6.1-sol",
+			wantContains:  "10%/500.0k",
+			wantNonEmpty:  true,
+		},
+		{
+			name:          "gpt-6 → 272k window",
+			lastTurnTotal: 27_200, // 10% of 272k
+			model:         "gpt-6-sol",
+			wantContains:  "10%/272.0k",
+			wantNonEmpty:  true,
+		},
+		{
 			name:          "unknown model → defaultContextWindow",
 			lastTurnTotal: 20_000, // 10% of 200k default
 			model:         "some-future-model-not-listed",

@@ -126,10 +126,11 @@ func startCallbackServer(host string, port int, state, callbackPath string) (*ca
 	mux := http.NewServeMux()
 	mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("oauth: callback received", "has_code", r.URL.Query().Has("code"), "error", r.URL.Query().Get("error"))
+		// A wrong state is a stale tab (or forgery): reject this request but
+		// keep waiting for the real callback rather than ending the flow.
 		if r.URL.Query().Get("state") != state {
-			slog.Warn("oauth: callback state mismatch")
-			trySendErr(fmt.Errorf("oauth callback: state mismatch (possible CSRF)"))
-			writePage(w, "Authentication failed", "State mismatch.")
+			slog.Warn("oauth: callback state mismatch; ignored")
+			writePage(w, "Sign-in link out of date", "Finish sign-in in the newest tab, or reconnect from "+brand.Name+".")
 			return
 		}
 		code := r.URL.Query().Get("code")
@@ -221,7 +222,7 @@ func (cfg *browserFlowConfig) resolvedCallback() (path, host string, err error) 
 // It starts a local HTTP server, opens the browser, waits for the callback,
 // and exchanges the auth code for tokens.
 func browserFlow(ctx context.Context, cfg browserFlowConfig, callbacks *FlowCallbacks) (*tokenResponse, error) {
-	// A flow superseded before it starts must not bind the port or open a tab.
+	// A flow cancelled before it starts must not bind the port or open a tab.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -303,9 +304,12 @@ func exchangeCode(ctx context.Context, tokenURL, clientID, code, redirectURI, co
 	})
 }
 
-// openBrowser opens a URL in the user's default browser. A var so tests
-// can assert a flow never reaches it.
-var openBrowser = func(u string) error {
+// openBrowser is the flow's browser opener; a var so tests can assert a
+// flow never reaches it.
+var openBrowser = OpenBrowser
+
+// OpenBrowser opens u in the user's default browser.
+func OpenBrowser(u string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", u).Start()

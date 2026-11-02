@@ -140,3 +140,48 @@ func TestBrowserFlow_CanceledContextOpensNothing(t *testing.T) {
 		t.Errorf("browserFlow err = %v, want context.Canceled", err)
 	}
 }
+
+// A stale tab's callback (wrong state) must be rejected without ending the
+// flow, so the real callback can still complete it.
+func TestCallbackServer_StateMismatchKeepsWaiting(t *testing.T) {
+	cb, err := startCallbackServer("127.0.0.1", 0, "st", "/auth/callback")
+	if err != nil {
+		t.Fatalf("startCallbackServer: %v", err)
+	}
+	defer cb.close()
+
+	resp, err := http.Get(cb.redirectURI + "?state=stale&code=old")
+	if err != nil {
+		t.Fatalf("GET stale callback: %v", err)
+	}
+	b, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close() // test cleanup
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(b), "out of date") {
+		t.Errorf("stale page = %q", b)
+	}
+	select {
+	case err := <-cb.errCh:
+		t.Fatalf("stale callback ended the flow: %v", err)
+	case code := <-cb.codeCh:
+		t.Fatalf("stale callback delivered code %q", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	go func() {
+		if resp, err := http.Get(cb.redirectURI + "?state=st&code=real"); err == nil {
+			_ = resp.Body.Close() // test cleanup
+		}
+	}()
+	select {
+	case code := <-cb.codeCh:
+		if code != "real" {
+			t.Errorf("code = %q, want real", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("real callback after a stale one was not delivered")
+	}
+	cb.resultCh <- nil // release the waiting handler
+}

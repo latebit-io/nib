@@ -189,7 +189,7 @@ type Session struct {
 	// Set once during startup, read by frontends for status display.
 	distributedMemory []string
 
-	// llmModel is the full model ID (e.g. "google/gemini-2.5-flash").
+	// llmModel is the full model ID (e.g. "google/gemini-3.8-flash").
 	// Set during startup and updated on model switch.
 	llmModel string
 

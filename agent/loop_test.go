@@ -970,6 +970,47 @@ func TestProviderClosedEarly_EmitsErrorEvent(t *testing.T) {
 	}
 }
 
+// TestStreamEventErr_EmitsErrorEvent covers a provider failure reported
+// inside the stream (e.g. a Codex "error" event): the terminal Err ends
+// the run through [event.Error], without a MessageEnd or tool dispatch for
+// the partial turn.
+func TestStreamEventErr_EmitsErrorEvent(t *testing.T) {
+	t.Parallel()
+
+	tool := &recordingTool{def: llm.ToolDef{Function: llm.FunctionDef{Name: "echo"}}}
+	provider := newScriptedProvider([]llm.StreamEvent{
+		{Token: "partial"},
+		{Done: true, Err: errors.New("chatgpt: stream error: bad_schema: invalid"),
+			ToolCalls: []llm.ToolCall{{ID: "c1", Function: llm.FunctionCall{Name: "echo"}}}},
+	})
+	events := make(chan event.Event, 32)
+
+	a, err := New(Options{Provider: provider, Tools: []Tool{tool}, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	all := drainUntilEnd(events)
+	a.WaitForIdle()
+
+	errEv, ok := findEvent[event.Error](all)
+	if !ok || errEv.Err != "chatgpt: stream error: bad_schema: invalid" {
+		t.Fatalf("Error event = %+v (found %v); want the provider's stream error", errEv, ok)
+	}
+	if _, ok := findEvent[event.MessageEnd](all); ok {
+		t.Error("MessageEnd fired for a failed turn")
+	}
+	if calls := tool.Calls(); len(calls) != 0 {
+		t.Errorf("tool dispatched %d calls from a failed turn", len(calls))
+	}
+	if _, ok := findEvent[event.AgentEnd](all); !ok {
+		t.Error("missing AgentEnd")
+	}
+}
+
 // TestTruncated_EndsRunWithError confirms a Truncated terminal event
 // is treated as an error — the foundation does not retry.
 func TestTruncated_EndsRunWithError(t *testing.T) {

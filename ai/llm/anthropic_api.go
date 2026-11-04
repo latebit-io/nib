@@ -233,10 +233,7 @@ type anthropicMessageDelta struct {
 
 // anthropicErrorEvent is the payload of a streamed `event: error`.
 type anthropicErrorEvent struct {
-	Error struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"error"`
+	Error *apiError `json:"error"`
 }
 
 // anthropicUsage holds token consumption data from the Anthropic API.
@@ -459,13 +456,13 @@ func (s *anthropicStreamState) handleBlockStart(data string) error {
 		return nil
 	}
 	if evt.Index < 0 || evt.Index >= maxToolCalls {
-		return fmt.Errorf("anthropic: content block index out of bounds (max %d)", maxToolCalls)
+		return fmt.Errorf("content block index out of bounds (max %d)", maxToolCalls)
 	}
 	// A redacted_thinking payload arrives whole here; bound it like the
 	// streamed text path so an oversized block cannot be persisted and
 	// replayed.
 	if len(evt.ContentBlock.Data) > maxThinkingBytes {
-		return fmt.Errorf("anthropic: redacted thinking exceeded %d bytes", maxThinkingBytes)
+		return fmt.Errorf("redacted thinking exceeded %d bytes", maxThinkingBytes)
 	}
 	s.blocks[evt.Index] = &anthropicBlockState{
 		blockType: evt.ContentBlock.Type,
@@ -495,7 +492,7 @@ func (s *anthropicStreamState) handleBlockDelta(data string) (token string, err 
 		return evt.Delta.Text, nil
 	case "input_json_delta":
 		if block.args.Len()+len(evt.Delta.PartialJSON) > maxToolArgBytes {
-			return "", fmt.Errorf("anthropic: tool arguments exceeded %d bytes", maxToolArgBytes)
+			return "", fmt.Errorf("tool arguments exceeded %d bytes", maxToolArgBytes)
 		}
 		block.args.WriteString(evt.Delta.PartialJSON)
 	case "thinking_delta":
@@ -505,7 +502,7 @@ func (s *anthropicStreamState) handleBlockDelta(data string) (token string, err 
 		// longer match the provider-issued signature, so a later replay /
 		// tool-result turn would 400 even though this turn looked clean.
 		if block.thinking.Len()+len(evt.Delta.Thinking) > maxThinkingBytes {
-			return "", fmt.Errorf("anthropic: thinking exceeded %d bytes", maxThinkingBytes)
+			return "", fmt.Errorf("thinking exceeded %d bytes", maxThinkingBytes)
 		}
 		block.thinking.WriteString(evt.Delta.Thinking)
 	case "signature_delta":
@@ -540,70 +537,42 @@ func (s *anthropicStreamState) finalEvent() StreamEvent {
 	}
 }
 
-// anthropicEventResult signals the outcome of processing one SSE event.
-type anthropicEventResult int
-
-const (
-	anthropicContinue anthropicEventResult = iota
-	anthropicDone
-)
-
-// dispatchEvent processes a single SSE event, returning whether the stream
-// should continue or is done. Sends text tokens to ch as they arrive.
-// Returns anthropicDone if the stream is complete or ctx is cancelled.
-func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, data string, ch chan<- StreamEvent) anthropicEventResult {
+// dispatchEvent processes a single SSE event, sending text tokens and the
+// final event to ch. Returns stop once the stream is complete or ctx is
+// cancelled, or a terminal error for [scanSSE] to surface.
+func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, data string, ch chan<- StreamEvent) (stop bool, err error) {
 	switch eventType {
 	case "message_start":
 		var evt anthropicMessageStart
 		if err := json.Unmarshal([]byte(data), &evt); err != nil {
 			slog.Warn("anthropic: unmarshal message_start", "err", err, "data", data[:min(len(data), 200)])
-			return anthropicContinue
+			return false, nil
 		}
 		s.inputUsage = evt.Message.Usage
 	case "content_block_start":
-		if err := s.handleBlockStart(data); err != nil {
-			// Terminal (index out of bounds, oversized redacted block):
-			// surface the specific error instead of closing silently (which
-			// the caller reports as the opaque errProviderClosedEarly).
-			trySend(ctx, ch, StreamEvent{Done: true, Err: err})
-			return anthropicDone
-		}
+		// Terminal errors: index out of bounds, oversized redacted block.
+		return false, s.handleBlockStart(data)
 	case "content_block_delta":
+		// Terminal on tool-arg or thinking-text overflow, rather than
+		// persist a signature-mismatched trace that 400s on the next turn.
 		token, err := s.handleBlockDelta(data)
-		if err != nil {
-			// Terminal (tool-arg or thinking-text overflow): surface the
-			// specific error rather than persist a signature-mismatched
-			// reasoning trace that would 400 on the next turn.
-			trySend(ctx, ch, StreamEvent{Done: true, Err: err})
-			return anthropicDone
+		if err != nil || token == "" {
+			return false, err
 		}
-		if token != "" {
-			if !trySend(ctx, ch, StreamEvent{Token: token}) {
-				return anthropicDone
-			}
-		}
+		return !trySend(ctx, ch, StreamEvent{Token: token}), nil
 	case "message_delta":
 		s.handleMessageDelta(data)
 	case "message_stop":
 		trySend(ctx, ch, s.finalEvent())
-		return anthropicDone
+		return true, nil
 	case "error":
-		// Propagate the real cause: parse the error block and surface its
-		// message as a terminal error event. Without this the consumer only
-		// sees the generic errProviderClosedEarly.
 		var evt anthropicErrorEvent
-		msg := data
-		if err := json.Unmarshal([]byte(data), &evt); err == nil && evt.Error.Message != "" {
-			msg = evt.Error.Message
+		if err := json.Unmarshal([]byte(data), &evt); err != nil || evt.Error == nil {
+			return false, fmt.Errorf("stream error: %s", oneLine(data)) // unparseable: bounded raw snippet
 		}
-		slog.Warn("anthropic: stream error event", "type", evt.Error.Type, "message", msg)
-		trySend(ctx, ch, StreamEvent{
-			Done: true,
-			Err:  fmt.Errorf("anthropic stream error: %s", msg),
-		})
-		return anthropicDone
+		return false, fmt.Errorf("stream error: %s", evt.Error.detail())
 	}
-	return anthropicContinue
+	return false, nil
 }
 
 // readAnthropicSSE dispatches Anthropic SSE events through [scanSSE].
@@ -611,8 +580,8 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 // the same accumulated state.
 func (a *AnthropicAPI) readAnthropicSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent) {
 	state := &anthropicStreamState{blocks: make(map[int]*anthropicBlockState)}
-	scanSSE(ctx, body, ch, anthropicProviderName, func(eventType, data string) bool {
-		return state.dispatchEvent(ctx, eventType, data, ch) == anthropicDone
+	scanSSE(ctx, body, ch, anthropicProviderName, func(eventType, data string) (bool, error) {
+		return state.dispatchEvent(ctx, eventType, data, ch)
 	}, state.finalEvent)
 }
 

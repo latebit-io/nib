@@ -2,8 +2,10 @@ package llm
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // Message represents a single message in a conversation.
@@ -256,8 +259,8 @@ func handleErrorStatus(provider string, auth Auth, resp *http.Response) error {
 	return fmt.Errorf("%s: api error: status %d: %s", provider, resp.StatusCode, errorDetail(body))
 }
 
-// maxErrorDetailBytes bounds the free-text detail surfaced from a non-JSON
-// provider error body.
+// maxErrorDetailBytes bounds each piece of provider-supplied text (a
+// non-JSON error body, a streamed error's code or message) in an error.
 const maxErrorDetailBytes = 256
 
 // errorDetail extracts the human-readable message from a provider error
@@ -270,11 +273,9 @@ func errorDetail(body []byte) string {
 		Error json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(body, &env) == nil && len(env.Error) > 0 {
-		var obj struct {
-			Message string `json:"message"`
-		}
+		var obj apiError
 		if json.Unmarshal(env.Error, &obj) == nil && obj.Message != "" {
-			return obj.Message
+			return oneLine(obj.Message)
 		}
 		var msg string
 		if json.Unmarshal(env.Error, &msg) == nil && msg != "" {
@@ -282,14 +283,66 @@ func errorDetail(body []byte) string {
 		}
 		return "(json error body without message)"
 	}
-	s := strings.Join(strings.Fields(string(body)), " ")
-	if len(s) > maxErrorDetailBytes {
-		s = s[:maxErrorDetailBytes] + "…"
+	return cmp.Or(oneLine(string(body)), "(empty body)")
+}
+
+// oneLine collapses whitespace runs in provider-supplied text to single
+// spaces and bounds it to maxErrorDetailBytes, cutting on a rune boundary.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= maxErrorDetailBytes {
+		return s
 	}
-	if s == "" {
-		return "(empty body)"
+	cut := maxErrorDetailBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return s
+	return s[:cut] + "…"
+}
+
+// apiError is the OpenAI-style error object providers stream inside an
+// HTTP-200 response: Responses API "error" events and response.error,
+// and mid-stream chat-completion chunks.
+type apiError struct {
+	Type    string    `json:"type,omitempty"`
+	Code    errorCode `json:"code,omitempty"`
+	Param   string    `json:"param,omitempty"`
+	Message string    `json:"message,omitempty"`
+}
+
+// detail renders e for a terminal [StreamEvent.Err]: the code (or type)
+// and param identify the failure, the message explains it. Every field is
+// bounded so a hostile or echoing payload cannot bloat the error.
+func (e apiError) detail() string {
+	msg := cmp.Or(oneLine(e.Message), "(no message)")
+	code := oneLine(cmp.Or(string(e.Code), e.Type))
+	switch {
+	case code == "":
+		return msg
+	case e.Param != "":
+		return fmt.Sprintf("%s (param %s): %s", code, oneLine(e.Param), msg)
+	default:
+		return code + ": " + msg
+	}
+}
+
+// errorCode is an error code that providers send as a JSON string or a
+// number (OpenRouter streams HTTP status codes); both decode to text.
+type errorCode string
+
+// UnmarshalJSON accepts a JSON string or number.
+func (c *errorCode) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*c = errorCode(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("error code: want string or number, got %s", oneLine(string(b)))
+	}
+	*c = errorCode(n)
+	return nil
 }
 
 // authFailure handles a 401 from any provider. Auth already refreshed
@@ -317,23 +370,36 @@ func startSSEReader(ctx context.Context, resp *http.Response, read func(ctx cont
 	return ch
 }
 
+// errStreamEnded reports a stream whose body ended (EOF or "[DONE]")
+// before the protocol's terminal event, so its output may be partial.
+var errStreamEnded = errors.New("stream ended before completion")
+
 // scanSSE drives the shared SSE read loop. It assembles events per the
 // SSE spec — an optional "event:" type plus one or more "data:" lines
 // joined by "\n", dispatched at the blank-line delimiter — and feeds each
-// to onEvent until onEvent reports stop, ctx is cancelled, the body ends,
-// or a read fails. A complete trailing event without a final blank line
-// is still dispatched at clean EOF (lenient toward servers that omit it).
-// Clean EOF without a stop emits terminal(); a watchdog stall emits
-// errStreamStalled; any other read error (oversized line, connection
-// reset) is emitted as a terminal Err so the consumer sees the real cause
-// rather than a bare channel close.
-func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, provider string, onEvent func(eventType, data string) (stop bool), terminal func() StreamEvent) {
+// to onEvent until onEvent reports stop (having sent its own terminal
+// event) or an error, ctx is cancelled, the body ends, or a read fails.
+// An onEvent error becomes the terminal Err, prefixed with provider.
+// A complete trailing event without a final blank line is still
+// dispatched at clean EOF (lenient toward servers that omit it).
+//
+// Clean EOF or an OpenAI-style "[DONE]" payload emits terminal(); a nil
+// terminal means the protocol has its own terminal event, so ending
+// without one is errStreamEnded. A watchdog stall emits errStreamStalled;
+// any other read error (oversized line, connection reset) is emitted as a
+// terminal Err so the consumer sees the real cause, not a bare close.
+func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, provider string, onEvent func(eventType, data string) (stop bool, err error), terminal func() StreamEvent) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), sseMaxLineBytes)
 
 	wd := newStreamWatchdog(body)
 	defer wd.stop()
 
+	if terminal == nil {
+		terminal = func() StreamEvent {
+			return StreamEvent{Done: true, Err: fmt.Errorf("%s: %w", provider, errStreamEnded)}
+		}
+	}
 	var (
 		eventType string
 		data      []string
@@ -346,7 +412,16 @@ func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, pro
 		payload := strings.Join(data, "\n")
 		typ := eventType
 		eventType, data = "", nil
-		return onEvent(typ, payload)
+		if payload == "[DONE]" {
+			trySend(ctx, ch, terminal())
+			return true
+		}
+		stop, err := onEvent(typ, payload)
+		if err != nil {
+			trySend(ctx, ch, StreamEvent{Done: true, Err: fmt.Errorf("%s: %w", provider, err)})
+			return true
+		}
+		return stop
 	}
 
 	for {

@@ -3,6 +3,7 @@ package llm
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+	"unicode/utf8"
 )
 
 // errBody yields data, then fails the read — a connection drop mid-stream.
@@ -33,18 +35,11 @@ func TestCodexSSE_ScannerErrorEmitsTerminalErr(t *testing.T) {
 	c.readCodexSSE(context.Background(), body, ch)
 	close(ch)
 
-	var tokens int
-	var last StreamEvent
-	for ev := range ch {
-		if ev.Token != "" {
-			tokens++
-		}
-		last = ev
-	}
+	last, tokens := terminalOf(t, collectStream(ch))
 	if tokens != 1 {
 		t.Errorf("tokens = %d; want 1 (delta before the failure)", tokens)
 	}
-	if !last.Done || last.Err == nil || !strings.Contains(last.Err.Error(), "connection reset") {
+	if last.Err == nil || !strings.Contains(last.Err.Error(), "connection reset") {
 		t.Fatalf("last event = %+v; want Done with the read error", last)
 	}
 	if len(last.ToolCalls) != 0 {
@@ -65,9 +60,9 @@ func TestScanSSE_CleanEOFEmitsTerminal(t *testing.T) {
 		"event: ping\ndata: a1\ndata: a2\n\n: comment\nid: 7\ndata: b\n\ndata:  sp \n\ndata\n\ndatabase: nope\ndata: c\n"))
 	ch := make(chan StreamEvent, 4)
 	var seen []string
-	scanSSE(context.Background(), body, ch, "test", func(eventType, data string) bool {
+	scanSSE(context.Background(), body, ch, "test", func(eventType, data string) (bool, error) {
 		seen = append(seen, eventType+"/"+data)
-		return false
+		return false, nil
 	}, func() StreamEvent { return StreamEvent{Done: true} })
 	close(ch)
 
@@ -83,6 +78,54 @@ func TestScanSSE_CleanEOFEmitsTerminal(t *testing.T) {
 	}
 	if dones != 1 {
 		t.Errorf("Done events = %d; want 1", dones)
+	}
+}
+
+// TestScanSSE_EndOfStreamPolicy: "[DONE]" ends the stream like clean EOF
+// (later events never dispatch), a nil terminal turns that end into
+// errStreamEnded, and an onEvent error becomes the provider-prefixed
+// terminal Err.
+func TestScanSSE_EndOfStreamPolicy(t *testing.T) {
+	boom := errors.New("boom")
+	cases := []struct {
+		name     string
+		body     string
+		terminal func() StreamEvent
+		wantSeen string
+		wantErr  error // nil: clean Done
+	}{
+		{"[DONE] emits terminal", "data: a\n\ndata: [DONE]\n\ndata: b\n\n", func() StreamEvent { return StreamEvent{Done: true} }, "a", nil},
+		{"nil terminal fails at [DONE]", "data: a\n\ndata: [DONE]\n\n", nil, "a", errStreamEnded},
+		{"nil terminal fails at EOF", "data: a\n\n", nil, "a", errStreamEnded},
+		{"onEvent error", "data: fail\n\ndata: b\n\n", nil, "fail", boom},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := make(chan StreamEvent, 4)
+			var seen []string
+			scanSSE(context.Background(), io.NopCloser(strings.NewReader(tc.body)), ch, "test", func(_, data string) (bool, error) {
+				seen = append(seen, data)
+				if data == "fail" {
+					return false, boom
+				}
+				return false, nil
+			}, tc.terminal)
+			close(ch)
+
+			if got := strings.Join(seen, ","); got != tc.wantSeen {
+				t.Errorf("dispatched = %q; want %q", got, tc.wantSeen)
+			}
+			last, _ := terminalOf(t, collectStream(ch))
+			if tc.wantErr == nil {
+				if last.Err != nil {
+					t.Fatalf("terminal Err = %v; want clean Done", last.Err)
+				}
+				return
+			}
+			if !errors.Is(last.Err, tc.wantErr) || !strings.HasPrefix(last.Err.Error(), "test: ") {
+				t.Fatalf("terminal Err = %v; want %v prefixed with the provider", last.Err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -184,9 +227,9 @@ func TestScanSSE_StalledReadEmitsStalledNotTerminal(t *testing.T) {
 	body := newBlockingBody("data: a\n\n")
 	ch := make(chan StreamEvent, 4)
 	var seen []string
-	scanSSE(context.Background(), body, ch, "test", func(_, data string) bool {
+	scanSSE(context.Background(), body, ch, "test", func(_, data string) (bool, error) {
 		seen = append(seen, data)
-		return false
+		return false, nil
 	}, func() StreamEvent { return StreamEvent{Done: true} })
 	close(ch)
 
@@ -213,10 +256,10 @@ func TestScanSSE_SlowConsumerIsNotAStall(t *testing.T) {
 	body := io.NopCloser(strings.NewReader("data: a\n\ndata: b\n\n"))
 	ch := make(chan StreamEvent, 4)
 	var seen []string
-	scanSSE(context.Background(), body, ch, "test", func(_, data string) bool {
+	scanSSE(context.Background(), body, ch, "test", func(_, data string) (bool, error) {
 		seen = append(seen, data)
 		time.Sleep(3 * sseIdleTimeout)
-		return false
+		return false, nil
 	}, func() StreamEvent { return StreamEvent{Done: true} })
 	close(ch)
 
@@ -237,7 +280,7 @@ func TestScanSSE_SlowConsumerIsNotAStall(t *testing.T) {
 func TestScanSSE_OversizedLineSurfacesErr(t *testing.T) {
 	body := io.NopCloser(strings.NewReader("data: " + strings.Repeat("x", sseMaxLineBytes+1) + "\n\n"))
 	ch := make(chan StreamEvent, 4)
-	scanSSE(context.Background(), body, ch, "test", func(_, _ string) bool { return false },
+	scanSSE(context.Background(), body, ch, "test", func(_, _ string) (bool, error) { return false, nil },
 		func() StreamEvent { return StreamEvent{Done: true} })
 	close(ch)
 
@@ -265,6 +308,105 @@ func TestErrorDetail(t *testing.T) {
 	for _, tc := range cases {
 		if got := errorDetail([]byte(tc.body)); got != tc.want {
 			t.Errorf("errorDetail(%q) = %q; want %q", tc.body, got, tc.want)
+		}
+	}
+}
+
+// TestAPIErrorDetail: a streamed error renders as "code (param p): message",
+// falling back to its type for the code and bounding every field.
+func TestAPIErrorDetail(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	cases := []struct {
+		err  apiError
+		want string
+	}{
+		{apiError{Type: "invalid_request_error", Code: "bad_schema", Param: "tools", Message: "no"}, "bad_schema (param tools): no"},
+		{apiError{Type: "overloaded_error", Message: "Overloaded"}, "overloaded_error: Overloaded"},
+		{apiError{Message: "line one\n  line two"}, "line one line two"},
+		{apiError{}, "(no message)"},
+		{apiError{Code: errorCode(long), Message: long}, long[:maxErrorDetailBytes] + "…: " + long[:maxErrorDetailBytes] + "…"},
+	}
+	for _, tc := range cases {
+		if got := tc.err.detail(); got != tc.want {
+			t.Errorf("detail(%+v) = %q; want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestErrorCode_UnmarshalJSON: codes arrive as strings or numbers.
+func TestErrorCode_UnmarshalJSON(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"code":"server_error"}`, "server_error"},
+		{`{"code":502}`, "502"},
+		{`{"code":null}`, ""},
+		{`{}`, ""},
+	}
+	for _, tc := range cases {
+		var e apiError
+		if err := json.Unmarshal([]byte(tc.in), &e); err != nil {
+			t.Errorf("Unmarshal(%s): %v", tc.in, err)
+			continue
+		}
+		if string(e.Code) != tc.want {
+			t.Errorf("Unmarshal(%s).Code = %q; want %q", tc.in, e.Code, tc.want)
+		}
+	}
+	var e apiError
+	if err := json.Unmarshal([]byte(`{"code":{"nested":1}}`), &e); err == nil {
+		t.Error("object code decoded without error")
+	}
+}
+
+// TestOneLine_CutsOnRuneBoundary: bounding multi-byte text must not split
+// a rune and emit invalid UTF-8.
+func TestOneLine_CutsOnRuneBoundary(t *testing.T) {
+	// The ASCII prefix puts 2-byte runes at odd offsets, so the byte cap
+	// lands mid-rune and the cut must back off one byte.
+	got := oneLine("x" + strings.Repeat("é", maxErrorDetailBytes))
+	if !utf8.ValidString(got) {
+		t.Fatalf("oneLine produced invalid UTF-8: %q", got)
+	}
+	if body, ok := strings.CutSuffix(got, "…"); !ok || len(body) != maxErrorDetailBytes-1 {
+		t.Errorf("oneLine = %d bytes; want %d plus an ellipsis", len(got), maxErrorDetailBytes-1)
+	}
+}
+
+// TestAgentAPI_StreamedErrorEndsStream: an OpenAI-compatible error chunk
+// inside an HTTP-200 stream (OpenRouter streams numeric codes) ends the
+// stream with a terminal Err, not a successful empty completion.
+func TestAgentAPI_StreamedErrorEndsStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, // test server; write error irrelevant
+			"data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n"+
+				"data: {\"error\":{\"code\":502,\"message\":\"Provider disconnected unexpectedly\"},\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}\n\n"+
+				"data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	ch, err := NewAgentAPI(srv.URL+"/", "m", staticAuth{}, false, "").Stream(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	last, tokens := terminalOf(t, collectStream(ch))
+	const want = "openai-compat: stream error: 502: Provider disconnected unexpectedly"
+	if last.Err == nil || last.Err.Error() != want || tokens != 1 {
+		t.Fatalf("terminal Err = %v after %d tokens; want %q after 1", last.Err, tokens, want)
+	}
+}
+
+// TestAnthropicStream_ErrorEventDetail: a streamed error event surfaces its
+// type and message; an unparseable one a bounded snippet, never the raw
+// payload.
+func TestAnthropicStream_ErrorEventDetail(t *testing.T) {
+	cases := []struct{ data, want string }{
+		{`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`, "stream error: overloaded_error: Overloaded"},
+		{"not json " + strings.Repeat("x", 300), "stream error: " + ("not json " + strings.Repeat("x", 300))[:maxErrorDetailBytes] + "…"},
+	}
+	for _, tc := range cases {
+		_, err := newAnthropicState().dispatchEvent(context.Background(), "error", tc.data, nil)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("dispatchEvent err = %v; want %q", err, tc.want)
 		}
 	}
 }

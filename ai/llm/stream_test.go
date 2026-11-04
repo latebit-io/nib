@@ -360,12 +360,14 @@ func TestErrorCode_UnmarshalJSON(t *testing.T) {
 // TestOneLine_CutsOnRuneBoundary: bounding multi-byte text must not split
 // a rune and emit invalid UTF-8.
 func TestOneLine_CutsOnRuneBoundary(t *testing.T) {
-	got := oneLine(strings.Repeat("é", maxErrorDetailBytes)) // 2 bytes per rune; 255 is mid-rune
+	// The ASCII prefix puts 2-byte runes at odd offsets, so the byte cap
+	// lands mid-rune and the cut must back off one byte.
+	got := oneLine("x" + strings.Repeat("é", maxErrorDetailBytes))
 	if !utf8.ValidString(got) {
 		t.Fatalf("oneLine produced invalid UTF-8: %q", got)
 	}
-	if body, ok := strings.CutSuffix(got, "…"); !ok || len(body) > maxErrorDetailBytes {
-		t.Errorf("oneLine = %d bytes; want at most %d plus an ellipsis", len(got), maxErrorDetailBytes)
+	if body, ok := strings.CutSuffix(got, "…"); !ok || len(body) != maxErrorDetailBytes-1 {
+		t.Errorf("oneLine = %d bytes; want %d plus an ellipsis", len(got), maxErrorDetailBytes-1)
 	}
 }
 

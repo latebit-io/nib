@@ -470,8 +470,8 @@ func collectFinalEvent(t *testing.T, chunks []string) StreamEvent {
 	ch := make(chan StreamEvent, len(chunks)+1)
 	state := &sseStreamState{}
 	for _, c := range chunks {
-		if state.handleChunk(context.Background(), c, ch) {
-			break
+		if stop, err := state.handleChunk(context.Background(), c, ch); stop || err != nil {
+			t.Fatalf("handleChunk(%s) = stop %v, err %v; want the stream to continue", c, stop, err)
 		}
 	}
 	close(ch)
@@ -635,9 +635,9 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 					},
 				},
 			}
-			out, done := s.handleCompleted(evt)
-			if !done {
-				t.Fatal("handleCompleted: done=false on response.completed")
+			out, err := s.handleCompleted(evt)
+			if err != nil || out == nil || !out.Done {
+				t.Fatalf("handleCompleted = %+v, %v; want a Done event on response.completed", out, err)
 			}
 			if out == nil || out.Usage == nil {
 				t.Fatalf("handleCompleted: nil Usage; out=%+v", out)
@@ -731,27 +731,13 @@ func TestSSE_UsageFromTrailingChunk(t *testing.T) {
 }
 
 // TestSSE_ToolArgOverflowEmitsError verifies a tool-argument payload-limit
-// breach surfaces a terminal error event (not a silent close).
+// breach returns a terminal error (scanSSE surfaces it, not a silent close).
 func TestSSE_ToolArgOverflowEmitsError(t *testing.T) {
 	ch := make(chan StreamEvent, 4)
 	state := &sseStreamState{}
 	big := strings.Repeat("a", maxToolArgBytes+1)
 	chunk := `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":"` + big + `"}}]}}]}`
-	stop := state.handleChunk(context.Background(), chunk, ch)
-	if !stop {
-		t.Fatal("handleChunk should stop the stream on overflow")
-	}
-	close(ch)
-	var gotErr StreamEvent
-	for ev := range ch {
-		if ev.Err != nil {
-			gotErr = ev
-		}
-	}
-	if gotErr.Err == nil {
-		t.Fatal("expected a terminal error event on tool-arg overflow")
-	}
-	if !gotErr.Done {
-		t.Error("error event should have Done=true")
+	if _, err := state.handleChunk(context.Background(), chunk, ch); err == nil || !strings.Contains(err.Error(), "exceeded limits") {
+		t.Fatalf("handleChunk err = %v; want the tool-call limit error", err)
 	}
 }

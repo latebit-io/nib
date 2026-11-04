@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -183,12 +184,19 @@ type codexSSEEvent struct {
 	Item     json.RawMessage `json:"item,omitempty"`
 	Delta    string          `json:"delta,omitempty"`
 	ItemID   string          `json:"item_id,omitempty"`
+	// OutputIndex keys a tool call across its added/delta/done events.
+	OutputIndex int `json:"output_index"`
+	// Error is the nested payload of an "error" event as the ChatGPT
+	// backend sends it; see [codexEventError] for the flat shape.
+	Error *apiError `json:"error,omitempty"`
 }
 
 type codexResponse struct {
 	Usage             *codexUsage             `json:"usage,omitempty"`
 	Status            string                  `json:"status,omitempty"`
 	IncompleteDetails *codexIncompleteDetails `json:"incomplete_details,omitempty"`
+	// Error explains a response.failed event.
+	Error *apiError `json:"error,omitempty"`
 }
 
 // codexIncompleteDetails is populated on a response.incomplete event when
@@ -347,69 +355,73 @@ type pendingCall struct {
 // codexStreamState accumulates state across a Codex SSE stream.
 type codexStreamState struct {
 	calls map[int]*pendingCall
-	usage *Usage
 }
 
-// handleEvent processes a single Codex SSE event. Returns a StreamEvent
-// to emit (if any) and whether the stream is complete.
-func (s *codexStreamState) handleEvent(evt codexSSEEvent, raw []byte) (emitted *StreamEvent, done bool) {
+// handleEvent processes a single Codex SSE event. Returns a StreamEvent to
+// emit (if any; Done marks the end of the stream) or a terminal error.
+func (s *codexStreamState) handleEvent(evt codexSSEEvent, raw []byte) (*StreamEvent, error) {
 	switch evt.Type {
 	case "response.output_text.delta":
 		if evt.Delta != "" {
-			return &StreamEvent{Token: evt.Delta}, false
+			return &StreamEvent{Token: evt.Delta}, nil
 		}
 	case "response.output_item.added":
-		s.handleItemAdded(evt, raw)
+		s.handleItemAdded(evt)
 	case "response.function_call_arguments.delta":
-		s.handleCallDelta(evt, raw)
+		s.handleCallDelta(evt)
 	case "response.output_item.done":
-		s.handleItemDone(evt, raw)
+		s.handleItemDone(evt)
 	case "response.completed", "response.incomplete":
 		return s.handleCompleted(evt)
+	case "error":
+		return nil, fmt.Errorf("stream error: %s", codexEventError(evt, raw).detail())
+	case "response.failed":
+		var cause apiError
+		if evt.Response != nil && evt.Response.Error != nil {
+			cause = *evt.Response.Error
+		}
+		return nil, fmt.Errorf("response failed: %s", cause.detail())
 	}
-	return nil, false
+	return nil, nil
 }
 
-// isTruncatedCompletion reports whether a response.completed/response.incomplete
-// event indicates the model specifically hit the output token cap. Requires
-// positive confirmation via incomplete_details.reason == "max_output_tokens";
-// other incomplete reasons (e.g. "content_filter") are not token truncation
-// and must not trigger max_tokens escalation — bumping the cap would not help
-// a content-filter refusal and would waste tokens on retries.
-//
-// Anomalous incomplete events (no incomplete_details, or a non-truncation
-// reason) are logged so we retain observability without silently discarding
-// the signal.
-func isTruncatedCompletion(evt codexSSEEvent) bool {
-	incomplete := evt.Type == "response.incomplete" ||
+// codexEventError extracts the payload of an "error" event. The ChatGPT
+// backend nests it under "error"; the public Responses API flattens
+// code/message/param onto the event itself.
+func codexEventError(evt codexSSEEvent, raw []byte) apiError {
+	if evt.Error != nil {
+		return *evt.Error
+	}
+	var flat apiError
+	if err := json.Unmarshal(raw, &flat); err != nil {
+		// A field of unexpected type; whatever decoded is kept and the
+		// event still ends the stream as an error.
+		slog.Warn("codex: decode flat error event", "err", err)
+	}
+	flat.Type = "" // the event's own type ("error"), not an error class
+	return flat
+}
+
+// incompleteReason reports whether a response.completed/incomplete event
+// marks the response incomplete, with the provider's reason ("" if absent).
+func incompleteReason(evt codexSSEEvent) (reason string, incomplete bool) {
+	incomplete = evt.Type == "response.incomplete" ||
 		(evt.Response != nil && evt.Response.Status == "incomplete")
-	if !incomplete {
-		return false
+	if incomplete && evt.Response != nil && evt.Response.IncompleteDetails != nil {
+		reason = evt.Response.IncompleteDetails.Reason
 	}
-	if evt.Response == nil || evt.Response.IncompleteDetails == nil {
-		slog.Warn("codex: incomplete response without incomplete_details — cannot classify",
-			"type", evt.Type)
-		return false
-	}
-	reason := evt.Response.IncompleteDetails.Reason
-	if reason == "max_output_tokens" {
-		return true
-	}
-	slog.Warn("codex: incomplete response with non-truncation reason — not escalating",
-		"reason", reason)
-	return false
+	return reason, incomplete
 }
 
-func (s *codexStreamState) handleItemAdded(evt codexSSEEvent, raw []byte) {
+func (s *codexStreamState) handleItemAdded(evt codexSSEEvent) {
 	var item codexOutputItem
 	if err := json.Unmarshal(evt.Item, &item); err == nil && item.Type == "function_call" {
-		idx := extractOutputIndex(raw)
-		s.calls[idx] = &pendingCall{id: item.CallID, name: item.Name}
+		s.calls[evt.OutputIndex] = &pendingCall{id: item.CallID, name: item.Name}
 	}
 }
 
-func (s *codexStreamState) handleCallDelta(evt codexSSEEvent, raw []byte) {
-	idx := extractOutputIndex(raw)
+func (s *codexStreamState) handleCallDelta(evt codexSSEEvent) {
+	idx := evt.OutputIndex
 	pc, ok := s.calls[idx]
 	if !ok {
 		return
@@ -422,10 +434,10 @@ func (s *codexStreamState) handleCallDelta(evt codexSSEEvent, raw []byte) {
 	pc.args.WriteString(evt.Delta)
 }
 
-func (s *codexStreamState) handleItemDone(evt codexSSEEvent, raw []byte) {
+func (s *codexStreamState) handleItemDone(evt codexSSEEvent) {
 	var item codexOutputItem
 	if err := json.Unmarshal(evt.Item, &item); err == nil && item.Type == "function_call" && item.Arguments != "" {
-		idx := extractOutputIndex(raw)
+		idx := evt.OutputIndex
 		pc, ok := s.calls[idx]
 		if !ok {
 			return
@@ -440,85 +452,79 @@ func (s *codexStreamState) handleItemDone(evt codexSSEEvent, raw []byte) {
 	}
 }
 
-func (s *codexStreamState) handleCompleted(evt codexSSEEvent) (*StreamEvent, bool) {
-	if evt.Response != nil && evt.Response.Usage != nil {
-		// Normalize so PromptTokens means "fresh uncached input" — the
-		// Responses API returns input_tokens as the GROSS total
-		// (including cached); subtract the cached subset so the field
-		// has the same semantics as the Anthropic adapter's
-		// PromptTokens. Downstream consumers (TUI display, kit/budget,
-		// billing logs) then compute total_input = Prompt + Cached
-		// without provider branching. Matches opencode's
-		// `adjustedInputTokens` (session.ts::getUsage).
-		gross := evt.Response.Usage.InputTokens
-		cached := 0
-		if d := evt.Response.Usage.InputTokensDetails; d != nil {
-			cached = d.CachedTokens
-		}
-		fresh := gross - cached
-		if fresh < 0 {
-			// Provider mis-report (cached > gross). Clamp + drop to a
-			// safe split that preserves the gross total downstream.
-			slog.Warn("codex: cached_tokens > input_tokens — clamping",
-				"input_tokens", gross, "cached_tokens", cached)
-			fresh = gross
-			cached = 0
-		}
-		s.usage = &Usage{
-			PromptTokens:     fresh,
-			CachedTokens:     cached,
-			CompletionTokens: evt.Response.Usage.OutputTokens,
-		}
+func (s *codexStreamState) handleCompleted(evt codexSSEEvent) (*StreamEvent, error) {
+	// Only max_output_tokens has a recovery path (cap escalation through
+	// Truncated). Any other stop, e.g. content_filter, is a failure: its
+	// partial text and tool calls must not read as a completed turn.
+	reason, incomplete := incompleteReason(evt)
+	if incomplete && reason != "max_output_tokens" {
+		return nil, fmt.Errorf("response incomplete: %s", cmp.Or(oneLine(reason), "no reason given"))
 	}
-	truncated := isTruncatedCompletion(evt)
-	if truncated {
-		slog.Warn("codex: output truncated (response.incomplete / max_output_tokens)")
+	if incomplete {
+		slog.Warn("codex: output truncated (max_output_tokens)")
 	}
-	final := StreamEvent{
+	return &StreamEvent{
 		Done:      true,
 		ToolCalls: finalizeCalls(s.calls),
-		Usage:     s.usage,
-		Truncated: truncated,
-	}
-	return &final, true
+		Usage:     codexUsageOf(evt),
+		Truncated: incomplete,
+	}, nil
 }
 
-// extractOutputIndex parses the output_index field from raw SSE JSON.
-func extractOutputIndex(raw []byte) int {
-	var v struct {
-		OutputIndex int `json:"output_index"`
+// codexUsageOf converts a terminal event's usage; nil when unreported.
+func codexUsageOf(evt codexSSEEvent) *Usage {
+	if evt.Response == nil || evt.Response.Usage == nil {
+		return nil
 	}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		slog.Debug("codex: extractOutputIndex unmarshal failed", "err", err)
+	// Normalize so PromptTokens means "fresh uncached input" — the
+	// Responses API returns input_tokens as the GROSS total
+	// (including cached); subtract the cached subset so the field
+	// has the same semantics as the Anthropic adapter's
+	// PromptTokens. Downstream consumers (TUI display, kit/budget,
+	// billing logs) then compute total_input = Prompt + Cached
+	// without provider branching. Matches opencode's
+	// `adjustedInputTokens` (session.ts::getUsage).
+	gross := evt.Response.Usage.InputTokens
+	cached := 0
+	if d := evt.Response.Usage.InputTokensDetails; d != nil {
+		cached = d.CachedTokens
 	}
-	return v.OutputIndex
+	fresh := gross - cached
+	if fresh < 0 {
+		// Provider mis-report (cached > gross). Clamp + drop to a
+		// safe split that preserves the gross total downstream.
+		slog.Warn("codex: cached_tokens > input_tokens — clamping",
+			"input_tokens", gross, "cached_tokens", cached)
+		fresh = gross
+		cached = 0
+	}
+	return &Usage{
+		PromptTokens:     fresh,
+		CachedTokens:     cached,
+		CompletionTokens: evt.Response.Usage.OutputTokens,
+	}
 }
 
 // readCodexSSE dispatches Responses API SSE events through [scanSSE].
-// response.completed/incomplete emit the terminal event; "[DONE]" and
-// clean EOF fall back to the accumulated calls and usage.
+// response.completed/incomplete emit the terminal event; "error" and
+// response.failed end the stream with an Err. The protocol always ends
+// with one of those, so EOF or "[DONE]" before it is a failure (nil
+// terminal): the accumulated output may be cut.
 func (c *CodexAPI) readCodexSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent) {
 	state := &codexStreamState{calls: map[int]*pendingCall{}}
-	terminal := func() StreamEvent {
-		return StreamEvent{Done: true, ToolCalls: finalizeCalls(state.calls), Usage: state.usage}
-	}
-	scanSSE(ctx, body, ch, codexProviderName, func(_, data string) bool {
-		if data == "[DONE]" {
-			trySend(ctx, ch, terminal())
-			return true
-		}
+	scanSSE(ctx, body, ch, codexProviderName, func(_, data string) (bool, error) {
 		raw := []byte(data)
 		var evt codexSSEEvent
 		if err := json.Unmarshal(raw, &evt); err != nil {
 			slog.Warn("codex SSE unmarshal error", "err", err, "data", data[:min(len(data), 200)])
-			return false
+			return false, nil
 		}
-		emitted, done := state.handleEvent(evt, raw)
-		if emitted == nil {
-			return false
+		emitted, err := state.handleEvent(evt, raw)
+		if err != nil || emitted == nil {
+			return false, err
 		}
-		return !trySend(ctx, ch, *emitted) || done
-	}, terminal)
+		return !trySend(ctx, ch, *emitted) || emitted.Done, nil
+	}, nil)
 }
 
 // finalizeCalls converts accumulated pending calls to ToolCall slice.

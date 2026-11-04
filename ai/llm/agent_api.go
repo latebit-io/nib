@@ -199,6 +199,9 @@ type sseChunk struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *sseUsage `json:"usage,omitempty"`
+	// Error is a failure streamed inside an HTTP-200 response (OpenAI,
+	// OpenRouter); it ends the stream.
+	Error *apiError `json:"error,omitempty"`
 }
 
 // sseUsage is the token consumption data from the provider.
@@ -364,50 +367,43 @@ func (s *sseStreamState) terminalEvent() StreamEvent {
 	}
 }
 
-// handleChunk processes one SSE data line. Returns true to stop the stream.
-func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<- StreamEvent) bool {
+// handleChunk processes one SSE data line. Returns stop when the consumer
+// is gone, or a terminal error (streamed provider error, payload-limit
+// breach) for [scanSSE] to surface instead of a silent close.
+func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<- StreamEvent) (stop bool, err error) {
 	var chunk sseChunk
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 		slog.Warn("SSE unmarshal error", "err", err, "data", data[:min(len(data), 200)])
-		return false
+		return false, nil
 	}
 
+	if chunk.Error != nil {
+		return false, fmt.Errorf("stream error: %s", chunk.Error.detail())
+	}
 	if parsed := parseUsage(chunk.Usage); parsed != nil {
 		s.usage = parsed
 	}
 	if len(chunk.Choices) == 0 {
-		return false
+		return false, nil
 	}
 
 	choice := chunk.Choices[0]
 	if delta := choice.Delta.Content; delta != "" {
 		if !trySend(ctx, ch, StreamEvent{Token: delta}) {
-			return true
+			return true, nil
 		}
 	}
-	if len(choice.Delta.ToolCalls) > 0 {
-		if !s.tc.merge(choice.Delta.ToolCalls) {
-			// Payload-limit breach: surface a terminal error rather than
-			// closing silently, so the caller sees the real cause instead
-			// of the opaque errProviderClosedEarly.
-			trySend(ctx, ch, StreamEvent{
-				Done: true,
-				Err:  fmt.Errorf("llm: tool call stream exceeded limits (max %d calls, %d arg bytes)", maxToolCalls, maxToolArgBytes),
-			})
-			return true
-		}
+	if len(choice.Delta.ToolCalls) > 0 && !s.tc.merge(choice.Delta.ToolCalls) {
+		return false, fmt.Errorf("tool call stream exceeded limits (max %d calls, %d arg bytes)", maxToolCalls, maxToolArgBytes)
 	}
-	if choice.FinishReason != nil {
-		if *choice.FinishReason == "length" {
-			s.truncated = true
-			slog.Warn("openai-compat: output truncated (finish_reason=length)")
-		}
-		// Do NOT emit Done here: usage arrives in a separate trailing
-		// chunk after this one. Keep reading; the terminal event is built
-		// from the [DONE]/EOF path once that chunk (if any) is consumed.
-		return false
+	if choice.FinishReason != nil && *choice.FinishReason == "length" {
+		s.truncated = true
+		slog.Warn("openai-compat: output truncated (finish_reason=length)")
 	}
-	return false
+	// Never emit Done on the finish_reason chunk: usage arrives in a
+	// separate trailing chunk. The terminal event is built from the
+	// [DONE]/EOF path once that chunk (if any) is consumed.
+	return false, nil
 }
 
 // readSSE dispatches OpenAI-compatible SSE data lines through [scanSSE].
@@ -415,11 +411,7 @@ func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<-
 // accumulated state (finish_reason and/or usage captured on the way).
 func (a *AgentAPI) readSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent) {
 	var state sseStreamState
-	scanSSE(ctx, body, ch, agentAPIProviderName, func(_, data string) bool {
-		if data == "[DONE]" {
-			trySend(ctx, ch, state.terminalEvent())
-			return true
-		}
+	scanSSE(ctx, body, ch, agentAPIProviderName, func(_, data string) (bool, error) {
 		return state.handleChunk(ctx, data, ch)
 	}, state.terminalEvent)
 }

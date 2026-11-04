@@ -80,13 +80,10 @@ type CredentialChecker interface {
 func parseAuthError(provider string, statusCode int, body []byte) *AuthError {
 	e := &AuthError{Provider: provider, StatusCode: statusCode}
 	var envelope struct {
-		Error struct {
-			Message string `json:"message"`
-			Code    string `json:"code"`
-		} `json:"error"`
+		Error apiError `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err == nil {
-		e.Code = envelope.Error.Code
+		e.Code = string(envelope.Error.Code)
 		e.Message = envelope.Error.Message
 	}
 	return e

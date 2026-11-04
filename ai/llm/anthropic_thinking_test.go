@@ -6,12 +6,13 @@ import (
 	"testing"
 )
 
-func newThinkingState() *anthropicStreamState {
+// newAnthropicState returns an empty Anthropic stream state.
+func newAnthropicState() *anthropicStreamState {
 	return &anthropicStreamState{blocks: make(map[int]*anthropicBlockState)}
 }
 
 func TestAnthropicStream_CapturesThinking(t *testing.T) {
-	s := newThinkingState()
+	s := newAnthropicState()
 
 	// A thinking block, then a tool_use block — reasoning must be captured
 	// alongside the tool call, in order.
@@ -42,7 +43,7 @@ func TestAnthropicStream_CapturesThinking(t *testing.T) {
 }
 
 func TestAnthropicStream_CapturesRedactedThinking(t *testing.T) {
-	s := newThinkingState()
+	s := newAnthropicState()
 	_ = s.handleBlockStart(`{"index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}}`)
 	ev := s.finalEvent()
 	if ev.Reasoning == nil || len(ev.Reasoning.Blocks) != 1 {
@@ -58,7 +59,7 @@ func TestAnthropicStream_ThinkingOverflowAborts(t *testing.T) {
 	// A thinking block whose text exceeds the cap must terminate the stream,
 	// not silently truncate — a capped text would mismatch the signature and
 	// 400 on the next replay turn.
-	s := newThinkingState()
+	s := newAnthropicState()
 	if err := s.handleBlockStart(`{"index":0,"content_block":{"type":"thinking"}}`); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestAnthropicStream_ThinkingOverflowAborts(t *testing.T) {
 }
 
 func TestAnthropicStream_RedactedThinkingOverflowAborts(t *testing.T) {
-	s := newThinkingState()
+	s := newAnthropicState()
 	big := strings.Repeat("x", maxThinkingBytes+1)
 	payload, _ := json.Marshal(map[string]any{
 		"index":         0,
@@ -93,7 +94,7 @@ func TestAnthropicStream_RedactedThinkingOverflowAborts(t *testing.T) {
 }
 
 func TestAnthropicStream_NoThinkingLeavesReasoningNil(t *testing.T) {
-	s := newThinkingState()
+	s := newAnthropicState()
 	_ = s.handleBlockStart(`{"index":0,"content_block":{"type":"text"}}`)
 	_, _ = s.handleBlockDelta(`{"index":0,"delta":{"type":"text_delta","text":"hi"}}`)
 	if ev := s.finalEvent(); ev.Reasoning != nil {

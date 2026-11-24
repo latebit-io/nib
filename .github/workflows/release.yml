@@ -3,7 +3,8 @@ name: Release
 # Tags the consumer-facing modules (ai, agent, kit) in lockstep, one version
 # number, on every merge to main that changes them. PaulHatch computes the
 # version from the last agent/v* tag reachable from main. A release is the
-# set of all three tags on one commit; an interrupted run is resumed.
+# set of all three tags on one commit. An interrupted run is resumed; a
+# manual run with `abandon` skips a version whose tags cannot be completed.
 #
 # Sibling requires in agent/go.mod and kit/go.mod must resolve to published
 # tags without the monorepo replace (consumers do not inherit it). The
@@ -13,6 +14,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      abandon:
+        description: "Skip the computed version (its tags stay) and release HEAD under the next version that has no tags"
+        type: boolean
+        default: false
 
 # Serialize runs: two pushes landing before the first run tags would both
 # compute the same next version and race at tag creation.
@@ -45,7 +51,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     outputs:
-      new_version: ${{ steps.semver.outputs.version }}
+      new_version: ${{ steps.check.outputs.version }}
       should_release: ${{ steps.check.outputs.should_release }}
       missing: ${{ steps.check.outputs.missing }}
       target_sha: ${{ steps.check.outputs.target_sha }}
@@ -73,6 +79,7 @@ jobs:
         id: check
         env:
           VERSION: ${{ steps.semver.outputs.version }}
+          ABANDON: ${{ inputs.abandon }}
         run: |
           # Bootstrap guard: until the FIRST agent/v* tag exists (created by
           # hand), releasing is manual. Without this, the merge that lands
@@ -82,12 +89,22 @@ jobs:
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          version=$VERSION
+          # Manual recovery: the version's tags cannot be completed (their
+          # commit fails the consumer-view build, or is off this branch).
+          # Leave them and release HEAD under the next unused version.
+          if [ "$ABANDON" = "true" ]; then
+            while [ -n "$(git tag -l "ai/v$version" "agent/v$version" "kit/v$version")" ]; do
+              echo "::notice::Abandoning v$version: its tags stay."
+              version="${version%.*}.$((${version##*.} + 1))"
+            done
+          fi
           # One tag existing does not mean the release finished: a run
           # cancelled between tag steps leaves a partial set. Release what
           # is missing, at the commit the existing tags already name.
           anchor="" missing=""
           for mod in ai agent kit; do
-            tag="$mod/v$VERSION"
+            tag="$mod/v$version"
             if ! sha=$(git rev-parse -q --verify "refs/tags/$tag^{commit}"); then
               missing="$missing $mod"
               continue
@@ -96,11 +113,11 @@ jobs:
             # makes every run recompute the same version. Fail instead:
             # silent skipping froze releases for months.
             if ! git merge-base --is-ancestor "$sha" HEAD; then
-              echo "::error::$tag exists but is not an ancestor of HEAD, so no release can be cut. After 'make consumer-smoke' passes, tag ai, agent and kit at one higher version on a single commit of this branch."
+              echo "::error::$tag exists but is not an ancestor of HEAD, so no release can be cut. Run this workflow manually on main with 'abandon' set to release HEAD under the next unused version."
               exit 1
             fi
             if [ -n "$anchor" ] && [ "$sha" != "$anchor" ]; then
-              echo "::error::tags for v$VERSION name different commits ($anchor and $sha). One version is one commit; fix the tags by hand."
+              echo "::error::tags for v$version name different commits ($anchor and $sha). One version is one commit. Run this workflow manually on main with 'abandon' set to release HEAD under the next unused version."
               exit 1
             fi
             anchor=$sha
@@ -109,8 +126,12 @@ jobs:
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if [ -n "$anchor" ]; then
+            echo "::notice::Resuming v$version at $anchor (still missing:$missing). If that commit cannot pass the consumer-view build, run this workflow manually on main with 'abandon' set."
+          fi
           {
             echo "should_release=true"
+            echo "version=$version"
             echo "missing=$missing"
             echo "target_sha=${anchor:-$GITHUB_SHA}"
           } >> "$GITHUB_OUTPUT"

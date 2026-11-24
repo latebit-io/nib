@@ -28,31 +28,45 @@ var errProviderClosedEarly = errors.New("agent: provider closed stream before co
 // the hook; without it the foundation defaults to ending the run.
 var errProviderTruncated = errors.New("agent: provider truncated response")
 
-// runLoop is the per-run goroutine driver. Owns the multi-turn cycle:
-// invoke TransformContext → Stream → drain → emit lifecycle events →
-// dispatch tools → repeat. Between turns with no tool calls it consults
-// SteeringMessages and FollowUpMessages before parking on the
-// reply channel (a one-shot agent ends the run instead); ctx
-// cancellation unwinds the loop.
-//
-// The deferred cleanup is the only path that resets the run-state
-// fields and closes the done channel — every early return funnels
-// through it.
+// errLoopExited is surfaced when the run goroutine unwinds without the
+// loop returning, so AgentEnd still carries a documented reason.
+var errLoopExited = errors.New("agent: run goroutine exited before the loop returned")
+
+// runLoop is the per-run goroutine: it brackets [Agent.loop] with
+// AgentStart and the cleanup that emits AgentEnd. The cleanup is the
+// only path that resets the run state; deferred so a Goexit runs it too.
 func (a *Agent) runLoop(ctx context.Context) {
 	a.send(event.AgentStart{})
-	defer a.cleanupRun()
+	var end event.AgentEnd
+	defer func() {
+		// No reason means loop never returned: a hook, tool or provider
+		// ended the goroutine (runtime.Goexit) or panicked.
+		if end.Reason == "" {
+			end.Reason = a.endOn(ctx, errLoopExited)
+		}
+		a.cleanupRun(end)
+	}()
+	end.Reason = a.loop(ctx, &end)
+}
 
-	// turn is the 1-indexed turn number within this run, incremented
-	// before each LLM call and threaded into the per-turn usage event.
+// loop owns the multi-turn cycle: invoke TransformContext → Stream →
+// drain → emit lifecycle events → dispatch tools → repeat. Between turns
+// with no tool calls it consults SteeringMessages and FollowUpMessages
+// before parking on the reply channel (a one-shot agent ends the run
+// instead); ctx cancellation unwinds it.
+//
+// It returns why the run ended and records the run's usage and final
+// text on end as turns finish; end.Usage.Turns also numbers the next turn.
+func (a *Agent) loop(ctx context.Context, end *event.AgentEnd) event.EndReason {
+	usage := &end.Usage
 	// turnsSinceInput counts turns taken since the last user message —
-	// the quantity [Options.MaxTurns] caps. It tracks turn except that a
-	// delivered reply resets it, so the cap bounds autonomous tool-call
-	// ping-pong rather than the conversation's total length.
-	turn := 0
+	// the quantity [Options.MaxTurns] caps. A delivered reply resets it,
+	// so the cap bounds autonomous tool-call ping-pong rather than the
+	// conversation's total length.
 	turnsSinceInput := 0
 	for {
-		if err := ctx.Err(); err != nil {
-			return
+		if ctx.Err() != nil {
+			return event.EndAborted
 		}
 
 		// The cap check sits at the loop top so it fires only between
@@ -62,43 +76,46 @@ func (a *Agent) runLoop(ctx context.Context) {
 		// failure; cleanupRun's AgentEnd follows via the deferred path.
 		if a.maxTurns > 0 && turnsSinceInput >= a.maxTurns {
 			a.send(event.MaxTurnsReached{Turns: turnsSinceInput})
-			return
+			return event.EndMaxTurns
 		}
 
 		msgs, err := a.transformContext(ctx)
 		if err != nil {
-			a.emitError(fmt.Errorf("TransformContext: %w", err))
-			return
+			return a.endOn(ctx, fmt.Errorf("TransformContext: %w", err))
 		}
 
-		turn++
 		turnsSinceInput++
 		a.send(event.TurnStart{})
 
-		result, err := a.processTurn(ctx, msgs, turn)
+		result, err := a.processTurn(ctx, msgs, usage.Turns+1)
+		assistant := result.Assistant
+		// Before the error check: a turn that broke off mid-stream still
+		// returns the text it had written.
+		if assistant.Content != "" {
+			end.FinalText = assistant.Content
+		}
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return
-			}
-			a.emitError(err)
-			return
+			return a.endOn(ctx, err)
 		}
 
-		assistant := result.Assistant
+		usage.Turns++
+		usage.ToolCalls += len(assistant.ToolCalls)
+		if u := result.Usage; u != nil {
+			usage.PromptTokens += u.PromptTokens
+			usage.CompletionTokens += u.CompletionTokens
+			usage.CachedTokens += u.CachedTokens
+			usage.CacheWriteTokens += u.CacheWriteTokens
+		}
 		a.appendMessage(assistant)
 		a.send(event.TurnEnd{Message: assistant})
 
 		if result.Truncated {
 			retry, err := a.handleTruncation(ctx, assistant)
 			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return
-				}
-				a.emitError(err)
-				return
+				return a.endOn(ctx, err)
 			}
 			if !retry {
-				return
+				return event.EndTruncated
 			}
 			continue
 		}
@@ -106,14 +123,10 @@ func (a *Agent) runLoop(ctx context.Context) {
 		if len(assistant.ToolCalls) > 0 {
 			batchTerminate, err := a.executeToolCalls(ctx, assistant.ToolCalls)
 			if err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return
-				}
-				a.emitError(err)
-				return
+				return a.endOn(ctx, err)
 			}
 			if batchTerminate {
-				return
+				return event.EndTerminated
 			}
 			continue
 		}
@@ -122,8 +135,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 		// follow-up, then park on the reply channel.
 		steering, err := a.callSteering(ctx)
 		if err != nil {
-			a.emitError(fmt.Errorf("SteeringMessages: %w", err))
-			return
+			return a.endOn(ctx, fmt.Errorf("SteeringMessages: %w", err))
 		}
 		if len(steering) > 0 {
 			a.appendMessages(steering)
@@ -132,8 +144,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 
 		followup, err := a.callFollowUp(ctx)
 		if err != nil {
-			a.emitError(fmt.Errorf("FollowUpMessages: %w", err))
-			return
+			return a.endOn(ctx, fmt.Errorf("FollowUpMessages: %w", err))
 		}
 		if len(followup) > 0 {
 			a.appendMessages(followup)
@@ -143,24 +154,29 @@ func (a *Agent) runLoop(ctx context.Context) {
 		// One-shot: nothing is queued and no reply can arrive, so the
 		// run is complete. The deferred AgentEnd is the signal.
 		if a.oneShot {
-			return
+			// As for a parked run: a ctx cancelled by now is an abort.
+			if ctx.Err() != nil {
+				return event.EndAborted
+			}
+			return event.EndCompleted
 		}
 
 		parked, err := a.callBeforePark(ctx)
 		if err != nil {
-			a.emitError(fmt.Errorf("BeforePark: %w", err))
-			return
+			return a.endOn(ctx, fmt.Errorf("BeforePark: %w", err))
 		}
 		a.send(parked)
 
 		input, ok := a.awaitReply(ctx)
 		if !ok {
-			return
+			return event.EndAborted
 		}
 		a.appendMessage(llm.Message{Role: "user", Content: input})
 		// Fresh user input re-arms the turn cap: MaxTurns bounds
-		// autonomous turns, not the run's total.
+		// autonomous turns, not the run's total. It also starts a new
+		// exchange, so the earlier answer is no longer the final text.
 		turnsSinceInput = 0
+		end.FinalText = ""
 	}
 }
 
@@ -172,13 +188,27 @@ type turnResult struct {
 	// Assistant is the finalized assistant message for this turn.
 	// Always populated on a non-error return — including truncated
 	// turns, where the hook needs the assistant message and its
-	// (possibly partial) tool calls to build rejection replies.
+	// (possibly partial) tool calls to build rejection replies. On an
+	// error return it holds only the text streamed before the turn broke.
 	Assistant llm.Message
 	// Truncated mirrors the provider's terminal-event Truncated flag.
 	// True means the LLM ran out of output budget mid-generation; the
 	// caller invokes [Hooks.OnTruncated] before deciding whether to
 	// retry or end the run.
 	Truncated bool
+	// Usage is the provider-reported usage; nil when it reported none.
+	Usage *llm.Usage
+}
+
+// endOn ends the run on err. Once the run ctx is cancelled the run is an
+// abort and err a consequence of it, so it stays silent. The ctx decides,
+// not err: a provider's own timeout also reads as DeadlineExceeded.
+func (a *Agent) endOn(ctx context.Context, err error) event.EndReason {
+	if ctx.Err() != nil {
+		return event.EndAborted
+	}
+	a.emitError(err)
+	return event.EndError
 }
 
 // processTurn drives one Stream → drain cycle and returns the
@@ -205,26 +235,29 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (
 		usage     *llm.Usage
 		truncated bool
 	)
+	// broken ends the turn on err, keeping the text streamed so far so
+	// the run's final text does not lose it.
+	broken := func(err error) (turnResult, error) {
+		a.setStreaming(false)
+		return turnResult{Assistant: llm.Message{Role: "assistant", Content: content.String()}}, err
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			a.setStreaming(false)
-			return turnResult{}, ctx.Err()
+			return broken(ctx.Err())
 		case ev, ok := <-ch:
 			if !ok {
-				a.setStreaming(false)
 				if err := ctx.Err(); err != nil {
-					return turnResult{}, err
+					return broken(err)
 				}
-				return turnResult{}, errProviderClosedEarly
+				return broken(errProviderClosedEarly)
 			}
 			if ev.Err != nil {
 				// Terminal provider-side failure (streamed error block,
 				// payload-limit breach, mid-stream stall): surface the
 				// real cause instead of the opaque errProviderClosedEarly.
-				a.setStreaming(false)
-				return turnResult{}, ev.Err
+				return broken(ev.Err)
 			}
 			if ev.Token != "" {
 				content.WriteString(ev.Token)
@@ -250,7 +283,7 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (
 			a.send(event.MessageEnd{Message: assistant})
 			a.emitTurnUsage(usage, len(toolCalls), turn)
 
-			return turnResult{Assistant: assistant, Truncated: truncated}, nil
+			return turnResult{Assistant: assistant, Truncated: truncated, Usage: usage}, nil
 		}
 	}
 }
@@ -521,8 +554,9 @@ func (a *Agent) awaitReply(ctx context.Context) (string, bool) {
 // AgentEnd is delivered while running is still true, so a consumer that
 // reacts to AgentEnd by calling Prompt must [Agent.WaitForIdle] first or
 // it may see [ErrRunInProgress].
-func (a *Agent) cleanupRun() {
-	a.send(event.AgentEnd{Messages: a.snapshotMessages()})
+func (a *Agent) cleanupRun(end event.AgentEnd) {
+	end.Messages = a.snapshotMessages()
+	a.send(end)
 
 	a.mu.Lock()
 	// A run that ends on its own must still release its ctx, or it stays

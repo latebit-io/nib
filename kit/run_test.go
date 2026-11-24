@@ -3,6 +3,7 @@ package kit_test
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
@@ -132,5 +133,45 @@ func TestRun_ReturnsResultAndPublishesDone(t *testing.T) {
 	}
 	if done, ok := lastDone(drainUntil(events, untilDone)); !ok || done != want {
 		t.Errorf("published AgentDone = %+v (found %v); want %+v", done, ok, want)
+	}
+}
+
+// lateProvider records a turn requested after the test marked the agent
+// closed.
+type lateProvider struct{ closed, late atomic.Bool }
+
+func (p *lateProvider) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	if p.closed.Load() {
+		p.late.Store(true)
+	}
+	ch := make(chan llm.StreamEvent, 1)
+	ch <- llm.StreamEvent{Done: true}
+	close(ch)
+	return ch, nil
+}
+
+// TestClose_NoRunStartsBehindIt races Run against Close. Whichever wins,
+// no turn may be requested once Close has returned.
+func TestClose_NoRunStartsBehindIt(t *testing.T) {
+	t.Parallel()
+
+	for range 300 {
+		provider := &lateProvider{}
+		a, err := kit.New(kit.Config{Provider: provider})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ran := make(chan struct{})
+		go func() {
+			defer close(ran)
+			// Either outcome is fine: a finished run or ErrClosed.
+			_, _ = a.Run(context.Background(), []llm.Message{{Role: "user", Content: "go"}})
+		}()
+		a.Close()
+		provider.closed.Store(true)
+		<-ran
+		if provider.late.Load() {
+			t.Fatal("a turn was requested after Close returned")
+		}
 	}
 }

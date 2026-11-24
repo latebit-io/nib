@@ -33,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/latebit-io/nib/agent"
 	agentevent "github.com/latebit-io/nib/agent/event"
@@ -95,10 +94,10 @@ var ErrInvalidOptions = agent.ErrInvalidOptions
 // ErrRunInProgress wraps the foundation's [agent.ErrRunInProgress].
 var ErrRunInProgress = agent.ErrRunInProgress
 
-// ErrClosed is returned by [Agent.Prompt], [Agent.PromptWithMessages] and
-// [Agent.Run] after [Agent.Close]. Reply, Cancel, State and WaitForIdle
-// stay safe to call: they reach a foundation that is idle by then.
-var ErrClosed = errors.New("kit: agent is closed")
+// ErrClosed is the foundation's [agent.ErrClosed]: returned by
+// [Agent.Prompt], [Agent.PromptWithMessages], [Agent.Run] and
+// [Agent.Subscribe] after [Agent.Close]. Other methods stay safe to call.
+var ErrClosed = agent.ErrClosed
 
 // Config bundles the construction-time inputs for [New]. Provider is
 // required; everything else is optional. Observe events via
@@ -145,10 +144,6 @@ type Agent struct {
 	// inbox channel; the [Agent] never writes to a consumer-facing
 	// channel directly.
 	bus *eventbus.Bus
-
-	// closed is set by [Agent.Close] before shutdown begins; Prompt and
-	// Run read it to refuse new runs. Atomic, so the check takes no lock.
-	closed uint32
 
 	// done is closed by [Agent.Close] to signal the translator
 	// goroutine to drain its remaining events and exit. The
@@ -245,9 +240,6 @@ func New(cfg Config) (*Agent, error) {
 // receive only events published after their subscribe call; the bus
 // does not journal.
 func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
-	if atomic.LoadUint32(&a.closed) == 1 {
-		return nil, ErrClosed
-	}
 	sub, err := a.bus.Subscribe(toEventBusOptions(opts))
 	if errors.Is(err, eventbus.ErrClosed) {
 		return nil, ErrClosed
@@ -262,19 +254,13 @@ func (a *Agent) Subscribe(opts SubscribeOptions) (*Subscription, error) {
 // [ErrRunInProgress] when a run is active and [ErrClosed] after Close.
 // Progress flows to subscribers; [Agent.WaitForIdle] blocks until the end.
 func (a *Agent) Prompt(ctx context.Context, content string) error {
-	if atomic.LoadUint32(&a.closed) == 1 {
-		return ErrClosed
-	}
 	return a.foundation.Prompt(ctx, content)
 }
 
 // PromptWithMessages starts a new run from a caller-supplied transcript
 // instead of the [system?, user] slice [Agent.Prompt] builds. Same
-// lifecycle and close-check as [Agent.Prompt].
+// lifecycle and errors as [Agent.Prompt].
 func (a *Agent) PromptWithMessages(ctx context.Context, messages []llm.Message) error {
-	if atomic.LoadUint32(&a.closed) == 1 {
-		return ErrClosed
-	}
 	return a.foundation.PromptWithMessages(ctx, messages)
 }
 
@@ -282,9 +268,6 @@ func (a *Agent) PromptWithMessages(ctx context.Context, messages []llm.Message) 
 // [agent.Agent.Run] for the result and error contract. Subscribers still
 // receive the run's events. Returns [ErrClosed] on a closed agent.
 func (a *Agent) Run(ctx context.Context, messages []llm.Message) (RunResult, error) {
-	if atomic.LoadUint32(&a.closed) == 1 {
-		return RunResult{}, ErrClosed
-	}
 	end, err := a.foundation.Run(ctx, messages)
 	return RunResult{Done: doneFrom(end), Messages: end.Messages}, err
 }
@@ -368,9 +351,10 @@ func (a *Agent) WaitForIdle() {
 // publish racing the channel close.
 func (a *Agent) Close() {
 	a.closeOnce.Do(func() {
-		atomic.StoreUint32(&a.closed, 1)
-		// An in-flight run ends aborted, so its AgentDone reports failure.
-		a.Cancel()
+		// The foundation refuses new runs and aborts the current one under
+		// one lock, so no run can start behind the shutdown. The aborted
+		// run's AgentDone reports failure.
+		a.foundation.Close()
 		a.foundation.WaitForIdle()
 		close(a.done)
 		// Wait for translateEvents to drain remaining foundation

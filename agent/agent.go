@@ -94,6 +94,7 @@ type Agent struct {
 	messages         []llm.Message
 	pendingToolCalls map[string]bool
 	lastErr          error
+	closed           bool
 }
 
 // runResult is what a finished run hands back to [Agent.Run].
@@ -111,6 +112,10 @@ var ErrInvalidOptions = errors.New("agent: invalid options")
 // is already active. Callers must Abort the existing run (and optionally
 // WaitForIdle) before starting a new one.
 var ErrRunInProgress = errors.New("agent: a run is already in progress")
+
+// ErrClosed is returned by [Agent.Prompt], [Agent.PromptWithMessages] and
+// [Agent.Run] once [Agent.Close] has been called.
+var ErrClosed = errors.New("agent: agent is closed")
 
 // New constructs an Agent from Options. Returns ErrInvalidOptions wrapped
 // with a specific reason when validation fails.
@@ -226,6 +231,10 @@ func (a *Agent) Run(ctx context.Context, messages []llm.Message) (event.AgentEnd
 // result receives the run's outcome when it ends.
 func (a *Agent) startRun(ctx context.Context, msgs []llm.Message, oneShot bool, result chan<- runResult) error {
 	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return ErrClosed
+	}
 	if a.running {
 		a.mu.Unlock()
 		return ErrRunInProgress
@@ -279,6 +288,19 @@ func (a *Agent) Reply(_ context.Context, content string) bool {
 // block until that happens.
 func (a *Agent) Abort() {
 	a.mu.Lock()
+	cancel := a.cancel
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// Close aborts the active run, if any, and makes the agent refuse new
+// ones for good. Both happen under the lock that admits runs, so none can
+// start behind it. It does not wait: follow with [Agent.WaitForIdle].
+func (a *Agent) Close() {
+	a.mu.Lock()
+	a.closed = true
 	cancel := a.cancel
 	a.mu.Unlock()
 	if cancel != nil {

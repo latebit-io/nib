@@ -75,14 +75,9 @@ func (a *Agent) evaluateBudgetLatch() (msg string, exceeded bool) {
 	return msg, true
 }
 
-// onTurnSettled is the callback providerProxy invokes after emitting
-// AgentTurnUsage on a Stream's Done event. Runs the post-turn budget
-// check and aborts the run if the cap was crossed. Synchronous in
-// the providerProxy Stream wrapper goroutine; abort marks kit's
-// per-run outcome unsuccess so the eventual AgentDone surfaces with
-// Success=false. Lives on Agent (rather than as a closure inside
-// buildKitAgent) so the bound function value is stable across
-// providerProxy reads of [providerProxy.onTurnSettled].
+// onTurnSettled runs the post-turn budget check after a turn's usage is
+// emitted and aborts the run when the cap was crossed. The abort lands
+// mid-turn, so the run ends aborted and AgentDone reports failure.
 func (a *Agent) onTurnSettled() {
 	msg := a.checkTaskBudget()
 	if msg == "" {

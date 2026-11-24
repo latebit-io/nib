@@ -3,13 +3,13 @@ module github.com/latebit-io/nib/cmd/agent
 go 1.27
 
 require (
-	github.com/latebit-io/nib/ai v0.3.0
+	github.com/latebit-io/nib/ai v0.6.0
 	github.com/latebit-io/nib/coding v0.0.0
 	github.com/latebit-io/nib/kit v0.0.0
 )
 
 require (
-	github.com/latebit-io/nib/agent v0.3.0 // indirect
+	github.com/latebit-io/nib/agent v0.6.0 // indirect
 	github.com/latebit-io/nib/engine v0.0.0 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/tree-sitter-grammars/tree-sitter-lua v0.5.0 // indirect

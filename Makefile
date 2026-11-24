@@ -4,6 +4,10 @@ BIN_DIR := $(HOME)/.local/bin
 # first, binaries last. Per-module targets below loop over this list.
 MODULES := ai agent engine kit coding tui cmd/nib-code cmd/agent cmd/nibster
 
+# Modules published for external consumers, in dependency order.
+# release.yml tags exactly these, in lockstep.
+RELEASED_MODULES := ai agent kit
+
 # Tree-sitter grammars whose highlights.scm we vendor into engine/highlight/queries/<lang>/.
 # Format: <lang>:<module-path>. Add a new language by appending one line.
 QUERY_LANGS := \
@@ -11,7 +15,7 @@ QUERY_LANGS := \
 	lua:github.com/tree-sitter-grammars/tree-sitter-lua \
 	yaml:github.com/tree-sitter-grammars/tree-sitter-yaml
 
-.PHONY: all build clean install uninstall test fmt fmt-check mod-tidy-check vet lint sync-queries run-nibster
+.PHONY: all build clean install uninstall test fmt fmt-check mod-tidy-check vet lint consumer-smoke sync-queries run-nibster
 
 all: build
 
@@ -59,6 +63,11 @@ lint:
 	@command -v golangci-lint >/dev/null 2>&1 || { \
 		echo "Error: golangci-lint is not installed. See https://golangci-lint.run/welcome/install/" >&2; exit 1; }
 	@set -e; for mod in $(MODULES); do echo "lint $$mod"; (cd $$mod && golangci-lint run ./...); done
+
+# Build the released modules as an external consumer resolves them (no
+# replace). Needs network; run by CI, not by pre-commit.sh.
+consumer-smoke:
+	@bash consumer-smoke.sh $(RELEASED_MODULES)
 
 clean:
 	rm -f cmd/nib-code/bin/*

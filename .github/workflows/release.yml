@@ -1,22 +1,24 @@
 name: Release
 
-# Tags the consumer-facing modules (ai, agent) with module-path-prefixed
-# semver tags on every merge to main that changes them — the multi-module
-# analog of demarkus-library's release.yml. Bootstrap: the FIRST ai/v* and
-# agent/v* tags were created by hand; PaulHatch computes every later version
-# from the last agent/v* tag.
+# Tags the consumer-facing modules (ai, agent, kit) in lockstep, one version
+# number, on every merge to main that changes them. PaulHatch computes the
+# version from the last agent/v* tag reachable from main. A release is the
+# set of all three tags on one commit. An interrupted run is resumed; a
+# manual run with `abandon` skips a version whose tags cannot be completed.
 #
-# Release discipline this workflow enforces: agent/go.mod's `require .../ai`
-# must be satisfiable by a published tag WITHOUT the monorepo-local replace
-# (dependency replaces are not inherited — the bug that made external
-# `go get` fail). The consumer-view job builds agent exactly as an external
-# consumer resolves it; if agent uses ai APIs newer than the required tag,
-# the release fails and the require must be bumped in the PR.
+# Sibling requires in agent/go.mod and kit/go.mod must resolve to published
+# tags without the monorepo replace (consumers do not inherit it). The
+# consumer-view steps enforce that here; `make consumer-smoke` covers PRs.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      abandon:
+        description: "Skip the computed version (its tags stay) and release HEAD under the next version that has no tags"
+        type: boolean
+        default: false
 
 # Serialize runs: two pushes landing before the first run tags would both
 # compute the same next version and race at tag creation.
@@ -38,17 +40,21 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
+          cache-dependency-path: kit/go.sum
       - name: Test the released modules
         run: |
-          (cd ai && go vet ./... && go test ./...)
-          (cd agent && go vet ./... && go test ./...)
+          for mod in ai agent kit; do
+            (cd "$mod" && go vet ./... && go test ./...)
+          done
 
   semver:
     needs: test
     runs-on: ubuntu-latest
     outputs:
-      new_version: ${{ steps.semver.outputs.version }}
+      new_version: ${{ steps.check.outputs.version }}
       should_release: ${{ steps.check.outputs.should_release }}
+      missing: ${{ steps.check.outputs.missing }}
+      target_sha: ${{ steps.check.outputs.target_sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -65,28 +71,70 @@ jobs:
           # semver bug, not repeated here.
           minor_pattern: '/^feat(\(.+\))?:/'
           # Only changes to the released modules cut a release — tui/coding
-          # churn does not bump agent/ai.
-          change_path: "agent ai"
+          # churn does not bump them.
+          change_path: "agent ai kit"
           bump_each_commit: false
           search_commit_body: true
-      - name: Check if version changed
+      - name: Check which tags the version still needs
         id: check
+        env:
+          VERSION: ${{ steps.semver.outputs.version }}
+          ABANDON: ${{ inputs.abandon }}
         run: |
           # Bootstrap guard: until the FIRST agent/v* tag exists (created by
-          # hand — see the header comment), releasing is manual. Without
-          # this, the merge that lands this workflow would race the manual
-          # bootstrap and cut a v0.0.1.
+          # hand), releasing is manual. Without this, the merge that lands
+          # this workflow would race the manual bootstrap and cut a v0.0.1.
           if [ -z "$(git tag -l 'agent/v*')" ]; then
             echo "No agent/v* bootstrap tag yet — skipping automated release."
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          TAG="agent/v${{ steps.semver.outputs.version }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          version=$VERSION
+          # Manual recovery: the version's tags cannot be completed (their
+          # commit fails the consumer-view build, or is off this branch).
+          # Leave them and release HEAD under the next unused version.
+          if [ "$ABANDON" = "true" ]; then
+            while [ -n "$(git tag -l "ai/v$version" "agent/v$version" "kit/v$version")" ]; do
+              echo "::notice::Abandoning v$version: its tags stay."
+              version="${version%.*}.$((${version##*.} + 1))"
+            done
           fi
+          # One tag existing does not mean the release finished: a run
+          # cancelled between tag steps leaves a partial set. Release what
+          # is missing, at the commit the existing tags already name.
+          anchor="" missing=""
+          for mod in ai agent kit; do
+            tag="$mod/v$version"
+            if ! sha=$(git rev-parse -q --verify "refs/tags/$tag^{commit}"); then
+              missing="$missing $mod"
+              continue
+            fi
+            # A tag off this branch (history rewritten after it was cut)
+            # makes every run recompute the same version. Fail instead:
+            # silent skipping froze releases for months.
+            if ! git merge-base --is-ancestor "$sha" HEAD; then
+              echo "::error::$tag exists but is not an ancestor of HEAD, so no release can be cut. Run this workflow manually on main with 'abandon' set to release HEAD under the next unused version."
+              exit 1
+            fi
+            if [ -n "$anchor" ] && [ "$sha" != "$anchor" ]; then
+              echo "::error::tags for v$version name different commits ($anchor and $sha). One version is one commit. Run this workflow manually on main with 'abandon' set to release HEAD under the next unused version."
+              exit 1
+            fi
+            anchor=$sha
+          done
+          if [ -z "$missing" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$anchor" ]; then
+            echo "::notice::Resuming v$version at $anchor (still missing:$missing). If that commit cannot pass the consumer-view build, run this workflow manually on main with 'abandon' set."
+          fi
+          {
+            echo "should_release=true"
+            echo "version=$version"
+            echo "missing=$missing"
+            echo "target_sha=${anchor:-$GITHUB_SHA}"
+          } >> "$GITHUB_OUTPUT"
 
   release:
     needs: semver
@@ -96,25 +144,37 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.semver.outputs.new_version }}
+      # The commit the release is cut from: HEAD, or the commit an
+      # interrupted run already tagged.
+      TARGET_SHA: ${{ needs.semver.outputs.target_sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ needs.semver.outputs.target_sha }}
           fetch-depth: 0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
+          cache-dependency-path: kit/go.sum
 
+      # Each module's steps run only while its tag is missing, so a resumed
+      # release picks up where the interrupted one stopped.
+      #
       # ai first: agent's consumer-view build below may resolve the ai tag
       # created here (when the require was bumped to this release's version).
       - name: Tag ai
+        id: tag_ai
+        if: contains(needs.semver.outputs.missing, 'ai')
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              ref: 'refs/tags/ai/v${{ needs.semver.outputs.new_version }}',
-              sha: context.sha
+              ref: `refs/tags/ai/v${process.env.VERSION}`,
+              sha: process.env.TARGET_SHA,
             });
 
       - name: Consumer-view build of agent (no replace)
@@ -123,6 +183,7 @@ jobs:
         # (GOPRIVATE bypasses proxy/sumdb lag for the seconds-old tag).
         # Fails when agent uses ai APIs newer than the required tag — bump
         # the require in agent/go.mod and re-land.
+        if: contains(needs.semver.outputs.missing, 'agent')
         env:
           GOPRIVATE: github.com/latebit-io/nib
         run: |
@@ -134,33 +195,68 @@ jobs:
           go vet ./...
 
       - name: Tag agent
+        id: tag_agent
+        if: contains(needs.semver.outputs.missing, 'agent')
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              ref: 'refs/tags/agent/v${{ needs.semver.outputs.new_version }}',
-              sha: context.sha
+              ref: `refs/tags/agent/v${process.env.VERSION}`,
+              sha: process.env.TARGET_SHA,
             });
 
-      # Roll back on failure so a fixed re-run can release the same version
-      # instead of skipping it at the tag-exists check.
-      - name: Rollback tags on failure
-        if: failure()
+      - name: Consumer-view build of kit (no replace)
+        # Same check for kit, against the ai and agent tags above.
+        if: contains(needs.semver.outputs.missing, 'kit')
+        env:
+          GOPRIVATE: github.com/latebit-io/nib
+        run: |
+          cp -r kit /tmp/kit-consumer
+          cd /tmp/kit-consumer
+          go mod edit -dropreplace github.com/latebit-io/nib/ai \
+            -dropreplace github.com/latebit-io/nib/agent
+          go mod tidy
+          go build ./...
+          go vet ./...
+
+      - name: Tag kit
+        id: tag_kit
+        if: contains(needs.semver.outputs.missing, 'kit')
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
-            for (const tag of ['ai/v${{ needs.semver.outputs.new_version }}',
-                               'agent/v${{ needs.semver.outputs.new_version }}']) {
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/kit/v${process.env.VERSION}`,
+              sha: process.env.TARGET_SHA,
+            });
+
+      # Roll back on failure so a fixed re-land can release the same version.
+      # Only tags this run created: one that was already there belongs to an
+      # earlier run or a human. A cancelled run keeps its tags and is resumed.
+      - name: Rollback tags on failure
+        if: failure()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          CREATED: >-
+            ${{ steps.tag_ai.outcome == 'success' && 'ai' || '' }}
+            ${{ steps.tag_agent.outcome == 'success' && 'agent' || '' }}
+            ${{ steps.tag_kit.outcome == 'success' && 'kit' || '' }}
+        with:
+          script: |
+            for (const mod of process.env.CREATED.split(/\s+/).filter(Boolean)) {
+              const tag = `${mod}/v${process.env.VERSION}`;
               try {
                 await github.rest.git.deleteRef({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   ref: `tags/${tag}`,
                 });
-                console.log(`Rolled back ${tag}`);
+                core.info(`Rolled back ${tag}`);
               } catch (e) {
-                console.log(`No rollback needed for ${tag}: ${e.message}`);
+                core.error(`Could not roll back ${tag}: ${e.message}. Delete it by hand before re-landing.`);
               }
             }

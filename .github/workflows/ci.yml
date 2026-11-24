@@ -2,7 +2,7 @@ name: CI
 
 # Build, test (-race), and lint every module on each PR and push to main.
 # Mirrors pre-commit.sh so a green local hook predicts a green CI run.
-# release.yml (tags ai/agent on main) stays separate.
+# release.yml (tags ai/agent/kit on main) stays separate.
 
 on:
   pull_request:
@@ -26,18 +26,9 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
-          # setup-go's cache keys on go.sum; a multi-module repo needs
-          # every module's go.sum listed or the cache misses each run.
-          cache-dependency-path: |
-            ai/go.sum
-            agent/go.sum
-            engine/go.sum
-            kit/go.sum
-            coding/go.sum
-            tui/go.sum
-            cmd/nib-code/go.sum
-            cmd/agent/go.sum
-            cmd/nibster/go.sum
+          # setup-go's cache keys on go.sum; a multi-module repo has no
+          # root one, so match every module's or the cache misses each run.
+          cache-dependency-path: "**/go.sum"
       - name: gofmt
         run: make fmt-check
       - name: Module tidy
@@ -49,6 +40,21 @@ jobs:
       - name: Test (-race)
         run: make test
 
+  # In-repo builds resolve siblings through replace; this is the only check
+  # that sees ai/agent/kit the way an external consumer does.
+  consumer-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: "**/go.sum"
+      - name: Consumer smoke (no replace)
+        run: make consumer-smoke
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -58,16 +64,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
-          cache-dependency-path: |
-            ai/go.sum
-            agent/go.sum
-            engine/go.sum
-            kit/go.sum
-            coding/go.sum
-            tui/go.sum
-            cmd/nib-code/go.sum
-            cmd/agent/go.sum
-            cmd/nibster/go.sum
+          cache-dependency-path: "**/go.sum"
       # Install the binary once; the golangci-lint-action only lints a
       # single working directory per invocation and would need nine
       # steps. `make lint` loops over every module (same as pre-commit).

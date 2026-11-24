@@ -163,15 +163,15 @@ func TestSendCriticalHonorsDeadlineWithBlockedSubscriber(t *testing.T) {
 
 // TestSubscribeMultipleSubscribersObserveSameStream is the post-channel
 // P10 verification at the coding layer: two independent Subscriptions
-// against the same [Agent] each observe the same event-type sequence in
-// the same per-subscriber order. Mirrors P9 at the kit layer
+// against the same [Agent] each observe the same events, in the same
+// order per publisher. Mirrors P9 at the kit layer
 // (`kit/kit_test.go::TestSubscribeProbeObservesAlongsideConsumer`).
 //
 // Concrete use case: a developer attaches a probe Subscription to an
 // already-running coding agent — for observability, metrics, or a
 // secondary frontend — alongside the primary consumer Subscription that
 // the flagship binary's bus→events forwarder reads. The probe must see
-// the same event types in the same order as the primary consumer.
+// the same event types as the primary consumer, each publisher's in order.
 //
 // Before commit 4 of the kit-event-bus arc this test compared the
 // legacy [Agent.events] channel with a probe; commit 4 removed the
@@ -223,8 +223,18 @@ func TestSubscribeMultipleSubscribersObserveSameStream(t *testing.T) {
 	got := eventTypeSeqCoding(primarySeq)
 	want := eventTypeSeqCoding(probeSeq)
 
-	if !slices.Equal(got, want) {
+	// AgentTurnUsage is published by the provider-proxy goroutine while the
+	// last tokens are still in flight through the kit translator. The bus
+	// orders per publisher, so the usage may land on either side of a token.
+	usage := fmt.Sprintf("%T", event.AgentTurnUsage{})
+	withoutUsage := func(seq []string) []string {
+		return slices.DeleteFunc(slices.Clone(seq), func(name string) bool { return name == usage })
+	}
+	if !slices.Equal(withoutUsage(got), withoutUsage(want)) {
 		t.Errorf("primary and probe sequences diverged\n  primary: %v\n    probe: %v", got, want)
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want))) {
+		t.Errorf("primary and probe saw different events\n  primary: %v\n    probe: %v", got, want)
 	}
 	if len(want) == 0 {
 		t.Fatal("probe observed no events at all — Subscribe not wired into a.send")

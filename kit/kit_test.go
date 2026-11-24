@@ -173,6 +173,46 @@ func TestNew_PropagatesFoundationValidation(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsNegativeMaxTurns(t *testing.T) {
+	t.Parallel()
+	_, err := kit.New(kit.Config{Provider: newScriptedProvider(), MaxTurns: -1})
+	if !errors.Is(err, kit.ErrInvalidOptions) {
+		t.Fatalf("want ErrInvalidOptions, got %v", err)
+	}
+}
+
+func TestMaxTurns_PublishesAgentMaxTurnsThenSuccessfulDone(t *testing.T) {
+	t.Parallel()
+
+	// Three tool-call turns scripted; the cap must stop the run after two.
+	provider := newScriptedProvider(
+		streamWithToolCall("c1", "nop", "{}"),
+		streamWithToolCall("c2", "nop", "{}"),
+		streamWithToolCall("c3", "nop", "{}"),
+	)
+	a, err := kit.New(kit.Config{
+		Provider: provider,
+		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "nop"}}},
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer a.Close()
+	events := subscribeEvents(t, a)
+
+	if err := a.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	got := drainUntil(events, untilDone)
+
+	// A turn-cap stop is a policy outcome, not a failure: Success stays true.
+	want := []event.Event{event.AgentMaxTurns{Turns: 2}, event.AgentDone{Success: true}}
+	if n := len(got); n < 2 || !slices.Equal(got[n-2:], want) {
+		t.Fatalf("events = %v; want tail %v", eventTypeSeq(got), want)
+	}
+}
+
 func TestPrompt_StreamsTokensAndEndsSuccess(t *testing.T) {
 	t.Parallel()
 
@@ -720,7 +760,8 @@ func TestFoundationObservability_NotInConsumerStream(t *testing.T) {
 		switch ev.(type) {
 		case event.AgentToken, event.AgentTurnUsage, event.AgentInputEstimate,
 			event.AgentCompacted, event.AgentError, event.AgentDone,
-			event.AgentToolCall, event.AgentWaiting, event.AgentStatus:
+			event.AgentToolCall, event.AgentWaiting, event.AgentStatus,
+			event.AgentMaxTurns:
 			// allowed — every kit/event type a Phase 2 facade can produce
 			// or that an application hook may have emitted directly.
 		default:

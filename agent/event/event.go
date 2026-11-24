@@ -25,6 +25,55 @@ type AgentStart struct{}
 type AgentEnd struct {
 	// Messages is the full conversation transcript at run-end.
 	Messages []llm.Message
+	// Reason says why the run ended.
+	Reason EndReason
+	// Usage totals the run's turns.
+	Usage RunUsage
+	// FinalText is the last non-empty text the model wrote in this run
+	// since the last reply: the answer, with earlier tool-use narration
+	// superseded. Empty when it wrote none.
+	FinalText string
+}
+
+// EndReason says why a run ended; see [AgentEnd.Reason].
+type EndReason string
+
+const (
+	// EndCompleted: a one-shot run (Options.OneShot in the agent package)
+	// finished with nothing left to do. A parking agent never completes;
+	// its runs end by one of the other reasons.
+	EndCompleted EndReason = "completed"
+	// EndAborted: the run's context was cancelled, by Agent.Abort or by
+	// the caller's context. Errors that follow the cancel are not emitted.
+	EndAborted EndReason = "aborted"
+	// EndError: the run failed; an [Error] event carries the cause.
+	EndError EndReason = "error"
+	// EndMaxTurns: the turn cap was reached; [MaxTurnsReached] precedes.
+	EndMaxTurns EndReason = "max_turns"
+	// EndTerminated: every tool result of a batch asked the run to stop
+	// (AfterToolCallResult.Terminate in the agent package).
+	EndTerminated EndReason = "terminated"
+	// EndTruncated: the provider ran out of output budget and the turn
+	// was not retried. An [Error] precedes unless a truncation hook ran.
+	EndTruncated EndReason = "truncated"
+)
+
+// RunUsage totals the provider-reported usage of every turn in a run.
+// Unlike [TurnUsage] events, which are dropped when the consumer lags,
+// the total is always complete. Token fields sum those of [llm.Usage].
+type RunUsage struct {
+	// Turns is the number of LLM turns that ran to their end.
+	Turns int
+	// ToolCalls is the number of tool calls the model requested.
+	ToolCalls int
+	// PromptTokens is the fresh (uncached) input tokens.
+	PromptTokens int
+	// CompletionTokens is the output tokens.
+	CompletionTokens int
+	// CachedTokens is the input tokens served from cache.
+	CachedTokens int
+	// CacheWriteTokens is the input tokens written to the cache.
+	CacheWriteTokens int
 }
 
 // TurnStart marks the start of a single turn (one assistant response,

@@ -16,7 +16,6 @@ import (
 func TestOneShot_EndsRunInsteadOfParking(t *testing.T) {
 	t.Parallel()
 
-	call := llm.ToolCall{ID: "c1", Type: "function", Function: llm.FunctionCall{Name: "echo", Arguments: "{}"}}
 	// once returns a hook that yields one user message on its first call.
 	once := func(text string) func(context.Context) ([]llm.Message, error) {
 		fired := false
@@ -42,7 +41,7 @@ func TestOneShot_EndsRunInsteadOfParking(t *testing.T) {
 		},
 		{
 			name:      "tool call then text",
-			turns:     [][]llm.StreamEvent{streamWithToolCalls([]llm.ToolCall{call}), streamText([]string{"done"}, nil)},
+			turns:     [][]llm.StreamEvent{streamWithToolCalls([]llm.ToolCall{echoCall}), streamText([]string{"done"}, nil)},
 			wantRoles: []string{"user", "assistant", "tool", "assistant"},
 		},
 		{

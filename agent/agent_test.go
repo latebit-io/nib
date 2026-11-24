@@ -54,9 +54,8 @@ func TestNew_Validation(t *testing.T) {
 			wantError: "Provider is required",
 		},
 		{
-			name:      "nil events rejected",
-			opts:      Options{Provider: provider},
-			wantError: "Events is required",
+			name: "nil events accepted",
+			opts: Options{Provider: provider},
 		},
 		{
 			name: "nil tool entry rejected",

@@ -26,16 +26,14 @@ import (
 )
 
 // Options bundles the construction-time inputs for [New]. Every field
-// other than Provider and Events is optional.
+// other than Provider is optional.
 type Options struct {
 	// Provider is the LLM provider used for every turn. Required.
 	Provider llm.Provider
 
-	// Events is the channel the agent writes lifecycle events to.
-	// Required. The caller must drain this channel; the agent blocks
-	// briefly on control-flow events (5s) and drops high-volume
-	// streaming events ([event.MessageUpdate], [event.TurnUsage]) when
-	// the channel is full.
+	// Events receives lifecycle events; nil discards them (enough for a
+	// host that only uses [Agent.Run]). A non-nil channel must be drained:
+	// control events block up to 5s, streaming events drop when it is full.
 	Events chan<- event.Event
 
 	// SystemPrompt is the system message prepended to every run's
@@ -70,14 +68,9 @@ type Options struct {
 	Hooks Hooks
 }
 
-// Agent runs the multi-turn LLM loop. Construct with [New]; drive with
-// [Agent.Prompt] / [Agent.Reply]; observe via the events channel from
-// [Options].
-//
-// Concurrency: Agent serializes its loop on a single goroutine.
-// [Agent.Prompt], [Agent.Reply], [Agent.Abort], [Agent.State], and
-// [Agent.WaitForIdle] are safe to call from any goroutine. Hooks run on
-// the loop goroutine and must not block indefinitely.
+// Agent runs the multi-turn LLM loop on one goroutine. Drive it with
+// [Agent.Prompt] / [Agent.Reply] and the events channel, or call
+// [Agent.Run]. Methods are goroutine-safe; hooks must not block forever.
 type Agent struct {
 	provider     llm.Provider
 	events       chan<- event.Event
@@ -100,7 +93,13 @@ type Agent struct {
 	inputCh          chan string
 	messages         []llm.Message
 	pendingToolCalls map[string]bool
-	lastError        string
+	lastErr          error
+}
+
+// runResult is what a finished run hands back to [Agent.Run].
+type runResult struct {
+	end event.AgentEnd
+	err error
 }
 
 // ErrInvalidOptions is returned by [New] when Options is missing a required
@@ -118,7 +117,6 @@ var ErrRunInProgress = errors.New("agent: a run is already in progress")
 //
 // Validation rules:
 //   - Provider must be non-nil.
-//   - Events must be non-nil.
 //   - Each entry in Tools must be non-nil.
 //   - Each tool's Definition().Function.Name must be non-empty.
 //   - Tool names must be unique. A duplicate is a configuration error;
@@ -128,9 +126,6 @@ var ErrRunInProgress = errors.New("agent: a run is already in progress")
 func New(opts Options) (*Agent, error) {
 	if opts.Provider == nil {
 		return nil, fmt.Errorf("%w: Provider is required", ErrInvalidOptions)
-	}
-	if opts.Events == nil {
-		return nil, fmt.Errorf("%w: Events is required", ErrInvalidOptions)
 	}
 	if opts.MaxTurns < 0 {
 		return nil, fmt.Errorf("%w: MaxTurns is negative (%d)", ErrInvalidOptions, opts.MaxTurns)
@@ -182,7 +177,7 @@ func (a *Agent) Prompt(ctx context.Context, content string) error {
 		msgs = append(msgs, llm.Message{Role: "system", Content: a.systemPrompt})
 	}
 	msgs = append(msgs, llm.Message{Role: "user", Content: content})
-	return a.startRun(ctx, msgs)
+	return a.startRun(ctx, msgs, a.oneShot, nil)
 }
 
 // PromptWithMessages starts a new run with a caller-supplied initial
@@ -208,13 +203,28 @@ func (a *Agent) PromptWithMessages(ctx context.Context, messages []llm.Message) 
 	if len(messages) == 0 {
 		return fmt.Errorf("%w: messages is empty", ErrInvalidOptions)
 	}
-	return a.startRun(ctx, slices.Clone(messages))
+	return a.startRun(ctx, slices.Clone(messages), a.oneShot, nil)
 }
 
-// startRun is the shared launch path for [Agent.Prompt] and
-// [Agent.PromptWithMessages]. msgs is taken as-is — callers must clone
-// before passing if they intend to mutate after the call returns.
-func (a *Agent) startRun(ctx context.Context, msgs []llm.Message) error {
+// Run starts a one-shot run from messages and blocks until it ends. The
+// [event.AgentEnd] is filled in even when err is non-nil: err is the
+// failure cause, the ctx error on abort, or why the run never started.
+func (a *Agent) Run(ctx context.Context, messages []llm.Message) (event.AgentEnd, error) {
+	if len(messages) == 0 {
+		return event.AgentEnd{}, fmt.Errorf("%w: messages is empty", ErrInvalidOptions)
+	}
+	result := make(chan runResult, 1)
+	if err := a.startRun(ctx, slices.Clone(messages), true, result); err != nil {
+		return event.AgentEnd{}, err
+	}
+	res := <-result
+	return res.end, res.err
+}
+
+// startRun launches a run for [Agent.Prompt], [Agent.PromptWithMessages]
+// and [Agent.Run]. It keeps msgs as passed (callers clone); a non-nil
+// result receives the run's outcome when it ends.
+func (a *Agent) startRun(ctx context.Context, msgs []llm.Message, oneShot bool, result chan<- runResult) error {
 	a.mu.Lock()
 	if a.running {
 		a.mu.Unlock()
@@ -226,7 +236,7 @@ func (a *Agent) startRun(ctx context.Context, msgs []llm.Message) error {
 	// A one-shot run never reads a reply; a nil channel makes Reply
 	// refuse instead of queueing input the loop would drop.
 	var inputCh chan string
-	if !a.oneShot {
+	if !oneShot {
 		inputCh = make(chan string, 1)
 	}
 
@@ -237,21 +247,16 @@ func (a *Agent) startRun(ctx context.Context, msgs []llm.Message) error {
 	a.inputCh = inputCh
 	a.messages = msgs
 	a.pendingToolCalls = nil
-	a.lastError = ""
+	a.lastErr = nil
 	a.mu.Unlock()
 
-	go a.runLoop(runCtx)
+	go a.runLoop(runCtx, oneShot, result)
 	return nil
 }
 
-// Reply queues a developer follow-up for the active run. Returns true
-// when the message was accepted, false when no run is active, the
-// reply queue is full, or the agent is one-shot ([Options.OneShot]).
-//
-// The queue is a buffered channel of capacity 1. A second
-// Reply before the loop drains the first is rejected with false; the
-// caller can retry after [Agent.WaitForIdle] reaches the next idle
-// point or after observing a [event.TurnEnd] without tool calls.
+// Reply queues a follow-up for the active run and reports whether it was
+// accepted. It is refused when no run is active, the run is one-shot, or
+// an earlier reply is still queued (the queue holds one).
 func (a *Agent) Reply(_ context.Context, content string) bool {
 	a.mu.Lock()
 	ch := a.inputCh
@@ -312,11 +317,15 @@ func (a *Agent) State() State {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	var lastError string
+	if a.lastErr != nil {
+		lastError = a.lastErr.Error()
+	}
 	return State{
 		Messages:         slices.Clone(a.messages),
 		Streaming:        a.streaming,
 		PendingToolCalls: maps.Clone(a.pendingToolCalls),
-		LastError:        a.lastError,
+		LastError:        lastError,
 	}
 }
 

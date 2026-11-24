@@ -35,7 +35,7 @@ var errLoopExited = errors.New("agent: run goroutine exited before the loop retu
 // runLoop is the per-run goroutine: it brackets [Agent.loop] with
 // AgentStart and the cleanup that emits AgentEnd. The cleanup is the
 // only path that resets the run state; deferred so a Goexit runs it too.
-func (a *Agent) runLoop(ctx context.Context) {
+func (a *Agent) runLoop(ctx context.Context, oneShot bool, result chan<- runResult) {
 	a.send(event.AgentStart{})
 	var end event.AgentEnd
 	defer func() {
@@ -44,9 +44,9 @@ func (a *Agent) runLoop(ctx context.Context) {
 		if end.Reason == "" {
 			end.Reason = a.endOn(ctx, errLoopExited)
 		}
-		a.cleanupRun(end)
+		a.cleanupRun(ctx, end, result)
 	}()
-	end.Reason = a.loop(ctx, &end)
+	end.Reason = a.loop(ctx, &end, oneShot)
 }
 
 // loop owns the multi-turn cycle: invoke TransformContext → Stream →
@@ -57,7 +57,7 @@ func (a *Agent) runLoop(ctx context.Context) {
 //
 // It returns why the run ended and records the run's usage and final
 // text on end as turns finish; end.Usage.Turns also numbers the next turn.
-func (a *Agent) loop(ctx context.Context, end *event.AgentEnd) event.EndReason {
+func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) event.EndReason {
 	usage := &end.Usage
 	// turnsSinceInput counts turns taken since the last user message —
 	// the quantity [Options.MaxTurns] caps. A delivered reply resets it,
@@ -153,7 +153,7 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd) event.EndReason {
 
 		// One-shot: nothing is queued and no reply can arrive, so the
 		// run is complete. The deferred AgentEnd is the signal.
-		if a.oneShot {
+		if oneShot {
 			// As for a parked run: a ctx cancelled by now is an abort.
 			if ctx.Err() != nil {
 				return event.EndAborted
@@ -554,11 +554,17 @@ func (a *Agent) awaitReply(ctx context.Context) (string, bool) {
 // AgentEnd is delivered while running is still true, so a consumer that
 // reacts to AgentEnd by calling Prompt must [Agent.WaitForIdle] first or
 // it may see [ErrRunInProgress].
-func (a *Agent) cleanupRun(end event.AgentEnd) {
+func (a *Agent) cleanupRun(ctx context.Context, end event.AgentEnd, result chan<- runResult) {
 	end.Messages = a.snapshotMessages()
 	a.send(end)
 
 	a.mu.Lock()
+	// The error [Agent.Run] returns: what failed the run, or the ctx
+	// error when it was aborted (no Error is emitted for an abort).
+	err := a.lastErr
+	if end.Reason == event.EndAborted {
+		err = ctx.Err()
+	}
 	// A run that ends on its own must still release its ctx, or it stays
 	// registered with the caller's ctx. Under the lock so the ctx is done
 	// before the agent reads as idle; cancel neither blocks nor calls out.
@@ -574,6 +580,10 @@ func (a *Agent) cleanupRun(end event.AgentEnd) {
 	a.pendingToolCalls = nil
 	a.mu.Unlock()
 
+	// After the reset, so a caller holding the result can start a new run.
+	if result != nil {
+		result <- runResult{end: end, err: err}
+	}
 	if doneCh != nil {
 		close(doneCh)
 	}
@@ -639,17 +649,13 @@ func (a *Agent) clearPendingToolCalls() {
 	a.mu.Unlock()
 }
 
-// emitError records err on Agent.lastError (visible via State) and
-// emits an [event.Error] for the frontend. The loop unwinds after
-// calling this — error events are terminal at the foundation layer;
-// applications that want recoverable errors must filter at their own
-// boundary.
+// emitError records err (visible via State, returned by Run) and emits
+// an [event.Error]. Terminal at this layer: the loop unwinds after it.
 func (a *Agent) emitError(err error) {
-	msg := err.Error()
 	a.mu.Lock()
-	a.lastError = msg
+	a.lastErr = err
 	a.mu.Unlock()
-	a.send(event.Error{Err: msg})
+	a.send(event.Error{Err: err.Error()})
 }
 
 // emitTurnUsage forwards the provider-reported usage (when available)
@@ -672,6 +678,9 @@ func (a *Agent) emitTurnUsage(usage *llm.Usage, toolCalls, turn int) {
 // log; an undrained channel that long indicates the consumer has
 // stalled and the agent cannot make progress regardless.
 func (a *Agent) send(ev event.Event) {
+	if a.events == nil {
+		return
+	}
 	switch ev.(type) {
 	case event.MessageUpdate, event.TurnUsage:
 		select {

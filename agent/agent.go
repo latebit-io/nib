@@ -60,6 +60,11 @@ type Options struct {
 	// Zero (the default) means unlimited; negative is rejected by [New].
 	MaxTurns int
 
+	// OneShot ends the run once a turn has no tool calls and no steering
+	// or follow-up is queued, instead of parking. [Hooks.BeforePark] and
+	// [event.AgentParked] are skipped and [Agent.Reply] returns false.
+	OneShot bool
+
 	// Hooks are the application-layer extension points. Nil disables a
 	// given hook; the agent skips it without ceremony.
 	Hooks Hooks
@@ -81,6 +86,7 @@ type Agent struct {
 	toolDefs     []llm.ToolDef
 	hooks        Hooks
 	maxTurns     int
+	oneShot      bool
 
 	// mu guards the run-state fields below. It is NOT held while
 	// invoking the provider, hooks, or tool Execute calls — those
@@ -156,6 +162,7 @@ func New(opts Options) (*Agent, error) {
 		toolDefs:     defs,
 		hooks:        opts.Hooks,
 		maxTurns:     opts.MaxTurns,
+		oneShot:      opts.OneShot,
 	}, nil
 }
 
@@ -216,7 +223,12 @@ func (a *Agent) startRun(ctx context.Context, msgs []llm.Message) error {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	doneCh := make(chan struct{})
-	inputCh := make(chan string, 1)
+	// A one-shot run never reads a reply; a nil channel makes Reply
+	// refuse instead of queueing input the loop would drop.
+	var inputCh chan string
+	if !a.oneShot {
+		inputCh = make(chan string, 1)
+	}
 
 	a.running = true
 	a.streaming = false
@@ -233,8 +245,8 @@ func (a *Agent) startRun(ctx context.Context, msgs []llm.Message) error {
 }
 
 // Reply queues a developer follow-up for the active run. Returns true
-// when the message was accepted, false when no run is active or the
-// reply queue is full.
+// when the message was accepted, false when no run is active, the
+// reply queue is full, or the agent is one-shot ([Options.OneShot]).
 //
 // The queue is a buffered channel of capacity 1. A second
 // Reply before the loop drains the first is rejected with false; the

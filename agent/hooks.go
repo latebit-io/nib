@@ -48,7 +48,8 @@ type Hooks struct {
 	// payload the foundation includes in [event.AgentParked]; the
 	// foundation has no opinion on what Finished means — the hook owns
 	// the application-level "all work done" signal. A nil hook causes
-	// the foundation to emit a zero-value AgentParked.
+	// the foundation to emit a zero-value AgentParked. Never called on
+	// a one-shot agent ([Options.OneShot]), which ends the run instead.
 	//
 	// BeforePark exists so that the application's "we're parked" signal
 	// flows through the same event pipeline as every other foundation

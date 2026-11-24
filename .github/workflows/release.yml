@@ -1,17 +1,12 @@
 name: Release
 
-# Tags the consumer-facing modules (ai, agent) with module-path-prefixed
-# semver tags on every merge to main that changes them — the multi-module
-# analog of demarkus-library's release.yml. Bootstrap: the FIRST ai/v* and
-# agent/v* tags were created by hand; PaulHatch computes every later version
-# from the last agent/v* tag.
+# Tags the consumer-facing modules (ai, agent, kit) in lockstep, one version
+# number, on every merge to main that changes them. PaulHatch computes the
+# version from the last agent/v* tag reachable from main.
 #
-# Release discipline this workflow enforces: agent/go.mod's `require .../ai`
-# must be satisfiable by a published tag WITHOUT the monorepo-local replace
-# (dependency replaces are not inherited — the bug that made external
-# `go get` fail). The consumer-view job builds agent exactly as an external
-# consumer resolves it; if agent uses ai APIs newer than the required tag,
-# the release fails and the require must be bumped in the PR.
+# Sibling requires in agent/go.mod and kit/go.mod must resolve to published
+# tags without the monorepo replace (consumers do not inherit it). The
+# consumer-view steps enforce that here; `make consumer-smoke` covers PRs.
 
 on:
   push:
@@ -38,10 +33,12 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
+          cache-dependency-path: kit/go.sum
       - name: Test the released modules
         run: |
-          (cd ai && go vet ./... && go test ./...)
-          (cd agent && go vet ./... && go test ./...)
+          for mod in ai agent kit; do
+            (cd "$mod" && go vet ./... && go test ./...)
+          done
 
   semver:
     needs: test
@@ -65,8 +62,8 @@ jobs:
           # semver bug, not repeated here.
           minor_pattern: '/^feat(\(.+\))?:/'
           # Only changes to the released modules cut a release — tui/coding
-          # churn does not bump agent/ai.
-          change_path: "agent ai"
+          # churn does not bump them.
+          change_path: "agent ai kit"
           bump_each_commit: false
           search_commit_body: true
       - name: Check if version changed
@@ -82,11 +79,18 @@ jobs:
             exit 0
           fi
           TAG="agent/v${{ steps.semver.outputs.version }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          else
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # A tag off this branch (history rewritten after it was cut) makes
+          # every run recompute the same version and skip. Fail instead:
+          # silent skipping froze releases for months.
+          if ! git merge-base --is-ancestor "$TAG" HEAD; then
+            echo "::error::$TAG exists but is not an ancestor of HEAD, so no release can be cut. After 'make consumer-smoke' passes, tag ai, agent and kit at one higher version on a single commit of this branch."
+            exit 1
+          fi
+          echo "should_release=false" >> "$GITHUB_OUTPUT"
 
   release:
     needs: semver
@@ -103,6 +107,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.27"
+          cache-dependency-path: kit/go.sum
 
       # ai first: agent's consumer-view build below may resolve the ai tag
       # created here (when the require was bumped to this release's version).
@@ -144,6 +149,30 @@ jobs:
               sha: context.sha
             });
 
+      - name: Consumer-view build of kit (no replace)
+        # Same check for kit, against the ai and agent tags above.
+        env:
+          GOPRIVATE: github.com/latebit-io/nib
+        run: |
+          cp -r kit /tmp/kit-consumer
+          cd /tmp/kit-consumer
+          go mod edit -dropreplace github.com/latebit-io/nib/ai \
+            -dropreplace github.com/latebit-io/nib/agent
+          go mod tidy
+          go build ./...
+          go vet ./...
+
+      - name: Tag kit
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/kit/v${{ needs.semver.outputs.new_version }}',
+              sha: context.sha
+            });
+
       # Roll back on failure so a fixed re-run can release the same version
       # instead of skipping it at the tag-exists check.
       - name: Rollback tags on failure
@@ -152,7 +181,8 @@ jobs:
         with:
           script: |
             for (const tag of ['ai/v${{ needs.semver.outputs.new_version }}',
-                               'agent/v${{ needs.semver.outputs.new_version }}']) {
+                               'agent/v${{ needs.semver.outputs.new_version }}',
+                               'kit/v${{ needs.semver.outputs.new_version }}']) {
               try {
                 await github.rest.git.deleteRef({
                   owner: context.repo.owner,

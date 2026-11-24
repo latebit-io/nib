@@ -24,6 +24,8 @@ import (
 //   - [event.AgentTurnUsage] passthrough of the provider-reported
 //     counts; the estimate fields stay zero here (coding's provider
 //     proxy emits the estimating variant directly)
+//   - [event.AgentMaxTurns] dispatch on foundation
+//     [agentevent.MaxTurnsReached]; the outcome is left successful
 //
 // Foundation events that have no kit equivalent fall through silently:
 //
@@ -107,6 +109,8 @@ func (a *Agent) translate(ev agentevent.Event) {
 		a.bus.Publish(event.AgentError{Err: e.Err})
 	case agentevent.AgentParked:
 		a.bus.Publish(event.AgentWaiting{Finished: e.Finished})
+	case agentevent.MaxTurnsReached:
+		a.bus.Publish(event.AgentMaxTurns{Turns: e.Turns})
 	case agentevent.AgentEnd:
 		a.bus.Publish(event.AgentDone{Success: !a.consumeCurrentUnsuccess()})
 	}

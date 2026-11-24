@@ -45,9 +45,10 @@ type AgentToken struct {
 }
 
 // AgentDone signals the agent loop has finished.
-// Success is true when the loop completed normally (not cancelled or errored).
+// Success is true unless the run was cancelled or errored; a turn-cap stop
+// ([AgentMaxTurns]) still counts as success.
 type AgentDone struct {
-	// Success is true when the loop completed normally.
+	// Success is false when the run was cancelled or errored.
 	Success bool
 }
 
@@ -75,6 +76,14 @@ type AgentWaiting struct {
 	// Frontends can use this to distinguish "your turn to reply" from
 	// "I'm done with the planned work" without changing the input flow.
 	Finished bool
+}
+
+// AgentMaxTurns signals the run stopped at the configured turn cap. A
+// policy stop, not a failure: [AgentDone] follows with Success true unless
+// the run also errored.
+type AgentMaxTurns struct {
+	// Turns is the number of LLM turns taken since the last user input.
+	Turns int
 }
 
 // --- Status ---
@@ -181,6 +190,9 @@ func (AgentToolCall) Event() {}
 
 // Event marks AgentWaiting as a kit agent event.
 func (AgentWaiting) Event() {}
+
+// Event marks AgentMaxTurns as a kit agent event.
+func (AgentMaxTurns) Event() {}
 
 // Event marks AgentStatus as a kit agent event.
 func (AgentStatus) Event() {}

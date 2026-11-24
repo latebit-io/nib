@@ -116,6 +116,11 @@ type Config struct {
 	// Commands are concatenated; precedence-based dedup happens at
 	// [command.Registry] registration time, not here.
 	Toolset Toolset
+
+	// MaxTurns caps LLM turns taken without an intervening user message
+	// (see [agent.Options.MaxTurns]); hitting it publishes
+	// [event.AgentMaxTurns]. Zero means unlimited; negative is rejected.
+	MaxTurns int
 }
 
 // runOutcome carries the failure bit for a single run from
@@ -237,6 +242,7 @@ func New(cfg Config) (*Agent, error) {
 		SystemPrompt: cfg.SystemPrompt,
 		Tools:        tools,
 		Hooks:        cfg.Toolset.Hooks,
+		MaxTurns:     cfg.MaxTurns,
 	})
 	if err != nil {
 		return nil, err

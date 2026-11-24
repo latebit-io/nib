@@ -36,7 +36,8 @@ func TestRun(t *testing.T) {
 	failing := errors.New("boom")
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	// expired is live when Run starts and times out mid-turn.
+	// expired times out during the run, or before it under load: the
+	// row must hold either way.
 	expired := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(context.Background(), 20*time.Millisecond)
 	}
@@ -81,12 +82,11 @@ func TestRun(t *testing.T) {
 			wantErr: context.Canceled,
 		},
 		{
-			name:     "ctx deadline returns DeadlineExceeded and the partial text",
-			opts:     Options{Provider: hangingProvider{"partial"}},
-			ctx:      expired,
-			want:     event.EndAborted,
-			wantErr:  context.DeadlineExceeded,
-			wantText: "partial",
+			name:    "ctx deadline returns DeadlineExceeded",
+			opts:    Options{Provider: hangingProvider{}},
+			ctx:     expired,
+			want:    event.EndAborted,
+			wantErr: context.DeadlineExceeded,
 		},
 	}
 	for _, tc := range tests {
@@ -120,6 +120,39 @@ func TestRun(t *testing.T) {
 				t.Error("Messages is empty; want the run's transcript")
 			}
 		})
+	}
+}
+
+// TestRun_AbortKeepsPartialText cancels only once the first token has
+// been streamed, so the partial text is there whatever the scheduling.
+func TestRun_AbortKeepsPartialText(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := make(chan event.Event, 64)
+	a, err := New(Options{Provider: hangingProvider{"partial"}, Events: events})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	go func() {
+		for ev := range events {
+			switch ev.(type) {
+			case event.MessageUpdate:
+				cancel()
+			case event.AgentEnd:
+				return
+			}
+		}
+	}()
+
+	end, err := runBounded(ctx, t, a, question)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run error = %v; want context.Canceled", err)
+	}
+	if end.Reason != event.EndAborted || end.FinalText != "partial" {
+		t.Errorf("Reason = %q, FinalText = %q; want aborted, %q", end.Reason, end.FinalText, "partial")
 	}
 }
 

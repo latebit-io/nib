@@ -32,7 +32,8 @@ var errProviderTruncated = errors.New("agent: provider truncated response")
 // invoke TransformContext → Stream → drain → emit lifecycle events →
 // dispatch tools → repeat. Between turns with no tool calls it consults
 // SteeringMessages and FollowUpMessages before parking on the
-// reply channel; ctx cancellation unwinds the loop.
+// reply channel (a one-shot agent ends the run instead); ctx
+// cancellation unwinds the loop.
 //
 // The deferred cleanup is the only path that resets the run-state
 // fields and closes the done channel — every early return funnels
@@ -137,6 +138,12 @@ func (a *Agent) runLoop(ctx context.Context) {
 		if len(followup) > 0 {
 			a.appendMessages(followup)
 			continue
+		}
+
+		// One-shot: nothing is queued and no reply can arrive, so the
+		// run is complete. The deferred AgentEnd is the signal.
+		if a.oneShot {
+			return
 		}
 
 		parked, err := a.callBeforePark(ctx)
@@ -518,6 +525,12 @@ func (a *Agent) cleanupRun() {
 	a.send(event.AgentEnd{Messages: a.snapshotMessages()})
 
 	a.mu.Lock()
+	// A run that ends on its own must still release its ctx, or it stays
+	// registered with the caller's ctx. Under the lock so the ctx is done
+	// before the agent reads as idle; cancel neither blocks nor calls out.
+	if a.cancel != nil {
+		a.cancel()
+	}
 	doneCh := a.doneCh
 	a.running = false
 	a.streaming = false

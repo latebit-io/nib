@@ -31,7 +31,8 @@ type AgentEnd struct {
 	Usage RunUsage
 	// FinalText is the last non-empty text the model wrote in this run
 	// since the last reply: the answer, with earlier tool-use narration
-	// superseded. Empty when it wrote none.
+	// superseded. Empty when it wrote none. A turn that broke off
+	// mid-stream counts with the text it had streamed, which Messages lacks.
 	FinalText string
 }
 
@@ -135,7 +136,7 @@ type ToolEnd struct {
 type TurnUsage struct {
 	// Turn is the 1-indexed turn number within the current run.
 	Turn int
-	// PromptTokens is the provider-reported total input tokens (0 if unavailable).
+	// PromptTokens is the provider-reported fresh (uncached) input tokens (0 if unavailable).
 	PromptTokens int
 	// CompletionTokens is the provider-reported output tokens (0 if unavailable).
 	CompletionTokens int

@@ -353,44 +353,56 @@ func TestNonCachingRequestOmitsCacheControl(t *testing.T) {
 }
 
 func TestParseUsage(t *testing.T) {
-	t.Run("nil input", func(t *testing.T) {
-		if got := parseUsage(nil); got != nil {
-			t.Errorf("parseUsage(nil) = %+v, want nil", got)
-		}
-	})
-
-	t.Run("basic usage", func(t *testing.T) {
-		u := &sseUsage{PromptTokens: 100, CompletionTokens: 50}
-		got := parseUsage(u)
-		if got == nil {
-			t.Fatal("parseUsage returned nil")
-		}
-		if got.PromptTokens != 100 {
-			t.Errorf("PromptTokens = %d, want 100", got.PromptTokens)
-		}
-		if got.CompletionTokens != 50 {
-			t.Errorf("CompletionTokens = %d, want 50", got.CompletionTokens)
-		}
-		if got.CachedTokens != 0 {
-			t.Errorf("CachedTokens = %d, want 0", got.CachedTokens)
-		}
-	})
-
-	t.Run("with cached tokens", func(t *testing.T) {
-		// Parse from JSON to correctly populate the anonymous struct with JSON tags.
-		raw := `{"prompt_tokens":1000,"completion_tokens":200,"prompt_tokens_details":{"cached_tokens":800}}`
-		var u sseUsage
-		if err := json.Unmarshal([]byte(raw), &u); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		got := parseUsage(&u)
-		if got == nil {
-			t.Fatal("parseUsage returned nil")
-		}
-		if got.CachedTokens != 800 {
-			t.Errorf("CachedTokens = %d, want 800", got.CachedTokens)
-		}
-	})
+	tests := []struct {
+		name string
+		raw  string // "" passes a nil usage
+		want *Usage
+	}{
+		{name: "provider reported none"},
+		{
+			name: "no cache details",
+			raw:  `{"prompt_tokens":100,"completion_tokens":50}`,
+			want: &Usage{PromptTokens: 100, CompletionTokens: 50},
+		},
+		{
+			// prompt_tokens is gross: the cached subset is split out.
+			name: "cached subset of the prompt",
+			raw:  `{"prompt_tokens":1000,"completion_tokens":200,"prompt_tokens_details":{"cached_tokens":800}}`,
+			want: &Usage{PromptTokens: 200, CompletionTokens: 200, CachedTokens: 800},
+		},
+		{
+			name: "whole prompt cached",
+			raw:  `{"prompt_tokens":1000,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":1000}}`,
+			want: &Usage{CompletionTokens: 1, CachedTokens: 1000},
+		},
+		{
+			// A mis-report keeps the gross total instead of going negative.
+			name: "cached above the prompt is dropped",
+			raw:  `{"prompt_tokens":100,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":800}}`,
+			want: &Usage{PromptTokens: 100, CompletionTokens: 1},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var in *sseUsage
+			if tc.raw != "" {
+				in = new(sseUsage)
+				if err := json.Unmarshal([]byte(tc.raw), in); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+			}
+			got := parseUsage(in)
+			if got == nil || tc.want == nil {
+				if got != tc.want {
+					t.Errorf("parseUsage = %+v, want %+v", got, tc.want)
+				}
+				return
+			}
+			if *got != *tc.want {
+				t.Errorf("parseUsage = %+v, want %+v", *got, *tc.want)
+			}
+		})
+	}
 }
 
 func TestStreamOptionsInRequest(t *testing.T) {
@@ -719,8 +731,9 @@ func TestSSE_UsageFromTrailingChunk(t *testing.T) {
 	if ev.Usage == nil {
 		t.Fatal("usage from trailing chunk should be captured, got nil")
 	}
-	if ev.Usage.PromptTokens != 1234 || ev.Usage.CompletionTokens != 567 {
-		t.Errorf("Usage = %+v, want PromptTokens=1234 CompletionTokens=567", ev.Usage)
+	// 1234 gross prompt tokens, 1000 of them cached: 234 fresh.
+	if ev.Usage.PromptTokens != 234 || ev.Usage.CompletionTokens != 567 {
+		t.Errorf("Usage = %+v, want PromptTokens=234 CompletionTokens=567", ev.Usage)
 	}
 	if ev.Usage.CachedTokens != 1000 {
 		t.Errorf("CachedTokens = %d, want 1000", ev.Usage.CachedTokens)

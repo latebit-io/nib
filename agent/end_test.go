@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -12,12 +13,16 @@ import (
 
 var echoCall = llm.ToolCall{ID: "c1", Type: "function", Function: llm.FunctionCall{Name: "echo", Arguments: "{}"}}
 
-// hangingProvider opens a stream that never yields, so a run stays
-// mid-turn until its ctx ends.
-type hangingProvider struct{}
+// hangingProvider streams its tokens and then never finishes the turn,
+// so a run stays mid-turn until its ctx ends.
+type hangingProvider []string
 
-func (hangingProvider) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	return make(chan llm.StreamEvent), nil
+func (p hangingProvider) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent, len(p))
+	for _, tok := range p {
+		ch <- llm.StreamEvent{Token: tok}
+	}
+	return ch, nil
 }
 
 // reaction lets a test act on a run from its event stream.
@@ -93,6 +98,20 @@ func TestAgentEnd_Reason(t *testing.T) {
 			want: event.EndCompleted,
 		},
 		{
+			// The work is done but the run was cancelled: as when parked.
+			name: "one-shot run aborted at its last step",
+			opts: Options{
+				Provider: newScriptedProvider(streamDone()),
+				Hooks: Hooks{SteeringMessages: func(ctx context.Context) ([]llm.Message, error) {
+					<-ctx.Done()
+					return nil, nil
+				}},
+				OneShot: true,
+			},
+			react: on[event.TurnEnd](abort),
+			want:  event.EndAborted,
+		},
+		{
 			name:  "Abort while parked",
 			opts:  Options{Provider: newScriptedProvider(streamDone())},
 			react: on[event.AgentParked](abort),
@@ -143,6 +162,19 @@ func TestAgentEnd_Reason(t *testing.T) {
 				Provider: newScriptedProvider(streamDone()),
 				Hooks: Hooks{TransformContext: func(context.Context, []llm.Message) ([]llm.Message, error) {
 					return nil, failing
+				}},
+			},
+			want:      event.EndError,
+			wantError: true,
+		},
+		{
+			// The loop never returns, yet AgentEnd must carry a reason.
+			name: "hook exits the goroutine",
+			opts: Options{
+				Provider: newScriptedProvider(streamDone()),
+				Hooks: Hooks{TransformContext: func(context.Context, []llm.Message) ([]llm.Message, error) {
+					runtime.Goexit()
+					return nil, nil
 				}},
 			},
 			want:      event.EndError,
@@ -249,6 +281,26 @@ func TestAgentEnd_FinalText(t *testing.T) {
 		{
 			name: "empty last turn keeps the narration",
 			opts: Options{Provider: newScriptedProvider(narrate, streamDone()), OneShot: true},
+			seed: question,
+			want: "Looking.",
+		},
+		{
+			name: "text of a turn that failed mid-stream is kept",
+			opts: Options{Provider: newScriptedProvider([]llm.StreamEvent{{Token: "partial"}, {Err: errors.New("boom")}})},
+			seed: question,
+			want: "partial",
+		},
+		{
+			name:  "text of a turn aborted mid-stream is kept",
+			opts:  Options{Provider: hangingProvider{"partial"}},
+			seed:  question,
+			react: on[event.MessageUpdate](func(a *Agent, _ context.CancelFunc) { a.Abort() }),
+			want:  "partial",
+		},
+		{
+			// The second turn fails before writing anything.
+			name: "earlier text survives a turn that broke off empty",
+			opts: Options{Provider: newScriptedProvider(narrate)},
 			seed: question,
 			want: "Looking.",
 		},

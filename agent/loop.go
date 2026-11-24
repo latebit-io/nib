@@ -28,13 +28,24 @@ var errProviderClosedEarly = errors.New("agent: provider closed stream before co
 // the hook; without it the foundation defaults to ending the run.
 var errProviderTruncated = errors.New("agent: provider truncated response")
 
+// errLoopExited is surfaced when the run goroutine unwinds without the
+// loop returning, so AgentEnd still carries a documented reason.
+var errLoopExited = errors.New("agent: run goroutine exited before the loop returned")
+
 // runLoop is the per-run goroutine: it brackets [Agent.loop] with
 // AgentStart and the cleanup that emits AgentEnd. The cleanup is the
 // only path that resets the run state; deferred so a Goexit runs it too.
 func (a *Agent) runLoop(ctx context.Context) {
 	a.send(event.AgentStart{})
 	var end event.AgentEnd
-	defer func() { a.cleanupRun(end) }()
+	defer func() {
+		// No reason means loop never returned: a hook, tool or provider
+		// ended the goroutine (runtime.Goexit) or panicked.
+		if end.Reason == "" {
+			end.Reason = a.endOn(ctx, errLoopExited)
+		}
+		a.cleanupRun(end)
+	}()
 	end.Reason = a.loop(ctx, &end)
 }
 
@@ -77,11 +88,16 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd) event.EndReason {
 		a.send(event.TurnStart{})
 
 		result, err := a.processTurn(ctx, msgs, usage.Turns+1)
+		assistant := result.Assistant
+		// Before the error check: a turn that broke off mid-stream still
+		// returns the text it had written.
+		if assistant.Content != "" {
+			end.FinalText = assistant.Content
+		}
 		if err != nil {
 			return a.endOn(ctx, err)
 		}
 
-		assistant := result.Assistant
 		usage.Turns++
 		usage.ToolCalls += len(assistant.ToolCalls)
 		if u := result.Usage; u != nil {
@@ -89,9 +105,6 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd) event.EndReason {
 			usage.CompletionTokens += u.CompletionTokens
 			usage.CachedTokens += u.CachedTokens
 			usage.CacheWriteTokens += u.CacheWriteTokens
-		}
-		if assistant.Content != "" {
-			end.FinalText = assistant.Content
 		}
 		a.appendMessage(assistant)
 		a.send(event.TurnEnd{Message: assistant})
@@ -141,6 +154,10 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd) event.EndReason {
 		// One-shot: nothing is queued and no reply can arrive, so the
 		// run is complete. The deferred AgentEnd is the signal.
 		if a.oneShot {
+			// As for a parked run: a ctx cancelled by now is an abort.
+			if ctx.Err() != nil {
+				return event.EndAborted
+			}
 			return event.EndCompleted
 		}
 
@@ -171,7 +188,8 @@ type turnResult struct {
 	// Assistant is the finalized assistant message for this turn.
 	// Always populated on a non-error return — including truncated
 	// turns, where the hook needs the assistant message and its
-	// (possibly partial) tool calls to build rejection replies.
+	// (possibly partial) tool calls to build rejection replies. On an
+	// error return it holds only the text streamed before the turn broke.
 	Assistant llm.Message
 	// Truncated mirrors the provider's terminal-event Truncated flag.
 	// True means the LLM ran out of output budget mid-generation; the
@@ -217,26 +235,29 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (
 		usage     *llm.Usage
 		truncated bool
 	)
+	// broken ends the turn on err, keeping the text streamed so far so
+	// the run's final text does not lose it.
+	broken := func(err error) (turnResult, error) {
+		a.setStreaming(false)
+		return turnResult{Assistant: llm.Message{Role: "assistant", Content: content.String()}}, err
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			a.setStreaming(false)
-			return turnResult{}, ctx.Err()
+			return broken(ctx.Err())
 		case ev, ok := <-ch:
 			if !ok {
-				a.setStreaming(false)
 				if err := ctx.Err(); err != nil {
-					return turnResult{}, err
+					return broken(err)
 				}
-				return turnResult{}, errProviderClosedEarly
+				return broken(errProviderClosedEarly)
 			}
 			if ev.Err != nil {
 				// Terminal provider-side failure (streamed error block,
 				// payload-limit breach, mid-stream stall): surface the
 				// real cause instead of the opaque errProviderClosedEarly.
-				a.setStreaming(false)
-				return turnResult{}, ev.Err
+				return broken(ev.Err)
 			}
 			if ev.Token != "" {
 				content.WriteString(ev.Token)

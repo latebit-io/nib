@@ -336,7 +336,16 @@ func parseUsage(u *sseUsage) *Usage {
 		CompletionTokens: u.CompletionTokens,
 	}
 	if u.PromptDetails != nil {
-		usage.CachedTokens = u.PromptDetails.CachedTokens
+		// prompt_tokens is the gross input and cached_tokens a subset of
+		// it. Split them so PromptTokens is fresh input, as [Usage] promises.
+		cached := u.PromptDetails.CachedTokens
+		if cached > usage.PromptTokens {
+			slog.Warn("openai: cached_tokens > prompt_tokens — clamping",
+				"prompt_tokens", usage.PromptTokens, "cached_tokens", cached)
+			cached = 0
+		}
+		usage.PromptTokens -= cached
+		usage.CachedTokens = cached
 	}
 	return usage
 }

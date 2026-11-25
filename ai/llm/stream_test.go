@@ -165,9 +165,9 @@ func TestStream_401ReturnsAuthErrorAndInvalidates(t *testing.T) {
 	}
 }
 
-// TestStream_Non401ErrorIsPlain: a 500 stays a plain error carrying the
-// body, and never touches the credential.
-func TestStream_Non401ErrorIsPlain(t *testing.T) {
+// TestStream_Non401ErrorIsStatusError: a 500 is a typed status error
+// carrying the body, and never touches the credential.
+func TestStream_Non401ErrorIsStatusError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	}))
@@ -175,8 +175,8 @@ func TestStream_Non401ErrorIsPlain(t *testing.T) {
 
 	auth := &fakeInvalidatableAuth{}
 	_, err := NewAgentAPI(srv.URL+"/", "m", auth, false, "").Stream(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
-	if err == nil || !strings.Contains(err.Error(), "status 500") || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("Stream error = %v; want status 500 with body", err)
+	if status, ok := errors.AsType[*StatusError](err); !ok || status.StatusCode != 500 || status.Detail != "boom" {
+		t.Fatalf("Stream error = %v; want a StatusError with status 500 and the body", err)
 	}
 	var ae *AuthError
 	if errors.As(err, &ae) {

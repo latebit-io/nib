@@ -8,6 +8,7 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
 
 // runBounded calls Run and fails the test, instead of hanging it, when
@@ -53,37 +54,37 @@ func TestRun(t *testing.T) {
 	}{
 		{
 			name:     "completes instead of parking",
-			opts:     Options{Provider: newScriptedProvider(streamText([]string{"answer"}, nil))},
+			opts:     Options{Provider: llmtest.NewScripted(llmtest.Text("answer"))},
 			want:     event.EndCompleted,
 			wantText: "answer",
 		},
 		{
 			name: "policy stop is not an error",
-			opts: Options{Provider: newScriptedProvider(streamWithToolCalls([]llm.ToolCall{echoCall})), MaxTurns: 1},
+			opts: Options{Provider: llmtest.NewScripted(llmtest.ToolCalls(echoCall)), MaxTurns: 1},
 			want: event.EndMaxTurns,
 		},
 		{
 			name:    "failure returns its cause",
-			opts:    Options{Provider: errorProvider{err: failing}},
+			opts:    Options{Provider: llmtest.Failing(failing)},
 			want:    event.EndError,
 			wantErr: failing,
 		},
 		{
 			name:    "truncation without a hook is a failure",
-			opts:    Options{Provider: newScriptedProvider([]llm.StreamEvent{{Done: true, Truncated: true}})},
+			opts:    Options{Provider: llmtest.NewScripted([]llm.StreamEvent{{Done: true, Truncated: true}})},
 			want:    event.EndTruncated,
 			wantErr: errProviderTruncated,
 		},
 		{
 			name:    "cancelled ctx returns Canceled",
-			opts:    Options{Provider: hangingProvider{}},
+			opts:    Options{Provider: llmtest.Blocking()},
 			ctx:     func() (context.Context, context.CancelFunc) { return cancelled, func() {} },
 			want:    event.EndAborted,
 			wantErr: context.Canceled,
 		},
 		{
 			name:    "ctx deadline returns DeadlineExceeded",
-			opts:    Options{Provider: hangingProvider{}},
+			opts:    Options{Provider: llmtest.Blocking()},
 			ctx:     expired,
 			want:    event.EndAborted,
 			wantErr: context.DeadlineExceeded,
@@ -131,7 +132,7 @@ func TestRun_AbortKeepsPartialText(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events := make(chan event.Event, 64)
-	a, err := New(Options{Provider: hangingProvider{"partial"}, Events: events})
+	a, err := New(Options{Provider: llmtest.Blocking("partial"), Events: events})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -161,7 +162,7 @@ func TestRun_AbortKeepsPartialText(t *testing.T) {
 func TestRun_NeverStarted(t *testing.T) {
 	t.Parallel()
 
-	a, err := New(Options{Provider: hangingProvider{}})
+	a, err := New(Options{Provider: llmtest.Blocking()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestClose_RefusesNewRuns(t *testing.T) {
 
 			// A provider that finishes: a wrongly admitted run fails the
 			// test instead of hanging it.
-			a, err := New(Options{Provider: newScriptedProvider(streamDone())})
+			a, err := New(Options{Provider: llmtest.NewScripted(llmtest.Done())})
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
@@ -216,9 +217,9 @@ func TestRun_BackToBack(t *testing.T) {
 	const runs = 50
 	turns := make([][]llm.StreamEvent, runs)
 	for i := range turns {
-		turns[i] = streamDone()
+		turns[i] = llmtest.Done()
 	}
-	a, err := New(Options{Provider: newScriptedProvider(turns...)})
+	a, err := New(Options{Provider: llmtest.NewScripted(turns...)})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
 )
@@ -28,7 +29,7 @@ func TestAgentDone_SuccessFollowsReason(t *testing.T) {
 	}{
 		{
 			name:     "tool batch terminates",
-			provider: newScriptedProvider(streamWithToolCall("c1", "nop", "{}")),
+			provider: llmtest.NewScripted(llmtest.ToolCalls(llmtest.Call("c1", "nop", "{}"))),
 			hooks: kit.Hooks{AfterToolCall: func(context.Context, kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
 				return kit.AfterToolCallResult{Terminate: true}, nil
 			}},
@@ -37,26 +38,26 @@ func TestAgentDone_SuccessFollowsReason(t *testing.T) {
 		},
 		{
 			name:     "Cancel while waiting",
-			provider: newScriptedProvider(streamText([]string{"hi"}, nil)),
+			provider: llmtest.NewScripted(llmtest.Text("hi")),
 			atWait:   func(a *kit.Agent, _ context.CancelFunc) { a.Cancel() },
 			want:     event.EndAborted,
 		},
 		{
 			// No kit.Cancel involved: the foundation still knows it was aborted.
 			name:     "caller ctx cancelled while waiting",
-			provider: newScriptedProvider(streamText([]string{"hi"}, nil)),
+			provider: llmtest.NewScripted(llmtest.Text("hi")),
 			atWait:   func(_ *kit.Agent, cancelCaller context.CancelFunc) { cancelCaller() },
 			want:     event.EndAborted,
 		},
 		{
 			name:     "provider fails",
-			provider: errorProvider{err: errors.New("boom")},
+			provider: llmtest.Failing(errors.New("boom")),
 			want:     event.EndError,
 		},
 		{
 			// No AgentError is published here, yet the run did not succeed.
 			name:     "truncated, hook declines retry",
-			provider: newScriptedProvider([]llm.StreamEvent{{Done: true, Truncated: true}}),
+			provider: llmtest.NewScripted([]llm.StreamEvent{{Done: true, Truncated: true}}),
 			hooks: kit.Hooks{OnTruncated: func(context.Context, kit.TruncationInput) (kit.TruncationResult, error) {
 				return kit.TruncationResult{}, nil
 			}},
@@ -107,7 +108,7 @@ func TestRun_ReturnsResultAndPublishesDone(t *testing.T) {
 	t.Parallel()
 
 	usage := &llm.Usage{PromptTokens: 7, CompletionTokens: 3}
-	a, err := kit.New(kit.Config{Provider: newScriptedProvider(streamText([]string{"The ", "answer."}, usage))})
+	a, err := kit.New(kit.Config{Provider: llmtest.NewScripted(llmtest.TextUsage(usage, "The ", "answer."))})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

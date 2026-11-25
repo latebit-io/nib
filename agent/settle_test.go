@@ -6,6 +6,7 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
 
 // TestSettle: every tool call of the last assistant message ends up with a
@@ -70,7 +71,7 @@ func TestSettle_TruncatedTurnWithToolCalls(t *testing.T) {
 	t.Parallel()
 
 	truncated := []llm.StreamEvent{{Done: true, Truncated: true, ToolCalls: callsOf("echo", 2)}}
-	end, _ := runToEnd(t, Options{Provider: newScriptedProvider(truncated)}, question, nil)
+	end, _ := runToEnd(t, Options{Provider: llmtest.NewScripted(truncated)}, question, nil)
 
 	if end.Reason != event.EndTruncated {
 		t.Errorf("Reason = %q; want truncated", end.Reason)

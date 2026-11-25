@@ -3,42 +3,16 @@ package main
 import (
 	"context"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
 	"github.com/latebit-io/nib/kit/headless"
 	"github.com/latebit-io/nib/kit/tools/bash"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 )
-
-// scriptedProvider serves up a queue of pre-built stream responses, one
-// per Stream call. Mirrors the kit_test.go helper — copied here so the
-// test stays self-contained without exporting a kit testutil package.
-type scriptedProvider struct {
-	mu    sync.Mutex
-	turns [][]llm.StreamEvent
-}
-
-func (p *scriptedProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	p.mu.Lock()
-	var events []llm.StreamEvent
-	if len(p.turns) > 0 {
-		events = p.turns[0]
-		p.turns = p.turns[1:]
-	}
-	p.mu.Unlock()
-
-	ch := make(chan llm.StreamEvent, len(events)+1)
-	for _, ev := range events {
-		ch <- ev
-	}
-	close(ch)
-	return ch, nil
-}
 
 // TestKitWiring_ToolCallAndPark exercises the kit primitives nibster
 // relies on: bash + memory tools registered through [kit.New], driven
@@ -63,25 +37,13 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 
 	publishArgs := `{"path":"` + sessionPath + `","body":"` + strings.ReplaceAll(body, "\n", `\n`) + `","expected_version":0}`
 
-	provider := &scriptedProvider{
-		turns: [][]llm.StreamEvent{
-			// Turn 1: tool call to write the session page.
-			{{
-				Done: true,
-				ToolCalls: []llm.ToolCall{{
-					ID:       "tc-1",
-					Function: llm.FunctionCall{Name: "memory_publish", Arguments: publishArgs},
-				}},
-			}},
-			// Turn 2: final assistant text. No tool calls — the foundation
-			// emits AgentParked, the translator forwards AgentWaiting,
-			// and the Runner cancels and exits with Success=true.
-			{
-				{Token: "wrote findings"},
-				{Done: true},
-			},
-		},
-	}
+	provider := llmtest.NewScripted(
+		// Turn 1: tool call to write the session page.
+		llmtest.ToolCalls(llmtest.Call("tc-1", "memory_publish", publishArgs)),
+		// Turn 2: final text. With no tool calls the agent waits, and the
+		// Runner cancels and exits with Success=true.
+		llmtest.Text("wrote findings"),
+	)
 
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,
@@ -142,16 +104,7 @@ func TestKitWiring_ToolCallAndPark(t *testing.T) {
 func TestKitWiring_AgentTokenBeforeAgentWaiting(t *testing.T) {
 	t.Parallel()
 
-	provider := &scriptedProvider{
-		turns: [][]llm.StreamEvent{
-			{
-				{Token: "first"},
-				{Token: " second"},
-				{Token: " third"},
-				{Done: true},
-			},
-		},
-	}
+	provider := llmtest.NewScripted(llmtest.Text("first", " second", " third"))
 
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,

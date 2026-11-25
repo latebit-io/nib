@@ -9,6 +9,7 @@ import (
 	"github.com/latebit-io/nib/agent"
 	agentevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
 )
@@ -743,8 +744,8 @@ func TestNew_DeduplicatesToolsFirstWins(t *testing.T) {
 	directTool := &resultTool{name: "echo", result: "direct-echo"}
 	toolsetTool := &resultTool{name: "Echo", result: "toolset-echo"}
 
-	provider := newScriptedProvider(
-		streamWithToolCall("call-1", "echo", `{}`),
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(llmtest.Call("call-1", "echo", `{}`)),
 	)
 	hooks := kit.Hooks{
 		AfterToolCall: func(_ context.Context, c kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
@@ -782,8 +783,8 @@ func TestNew_ToolsetsHooksChainWithDirectHooks(t *testing.T) {
 	t.Parallel()
 
 	var order []string
-	provider := newScriptedProvider(
-		streamWithToolCall("call-1", "echo", `{}`),
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(llmtest.Call("call-1", "echo", `{}`)),
 	)
 	hooks := kit.Hooks{
 		BeforeToolCall: func(_ context.Context, _ kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
@@ -853,7 +854,7 @@ func TestPluginsConvention_MergesIntoToolsetAndDispatches(t *testing.T) {
 	t.Parallel()
 
 	pkg := &fakePluginPackage{}
-	provider := newScriptedProvider(streamWithToolCall("call-1", "fake-tool", `{}`))
+	provider := llmtest.NewScripted(llmtest.ToolCalls(llmtest.Call("call-1", "fake-tool", `{}`)))
 
 	terminator := kit.Toolset{Hooks: kit.Hooks{
 		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
@@ -891,7 +892,7 @@ func TestPluginsConvention_MergesIntoToolsetAndDispatches(t *testing.T) {
 func TestNew_NilToolPassesToFoundationValidation(t *testing.T) {
 	t.Parallel()
 	_, err := kit.New(kit.Config{
-		Provider: newScriptedProvider(),
+		Provider: llmtest.NewScripted(),
 		Toolset:  kit.Toolset{Tools: []kit.Tool{nil}},
 	})
 	if !errors.Is(err, kit.ErrInvalidOptions) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
 
 // funcTool is a tool whose Execute is a function.
@@ -30,7 +31,7 @@ func boom(context.Context, llm.ToolCall) ToolResult { panic("tool bug") }
 func callsOf(tool string, n int) []llm.ToolCall {
 	calls := make([]llm.ToolCall, n)
 	for i := range calls {
-		calls[i] = llm.ToolCall{ID: fmt.Sprintf("c%d", i), Type: "function", Function: llm.FunctionCall{Name: tool, Arguments: "{}"}}
+		calls[i] = llmtest.Call(fmt.Sprintf("c%d", i), tool, "{}")
 	}
 	return calls
 }
@@ -83,7 +84,7 @@ func TestParallelTools_RunTogetherResultsInOrder(t *testing.T) {
 	}}
 
 	end, before := runToEnd(t, Options{
-		Provider:      newScriptedProvider(streamWithToolCalls(calls), streamDone()),
+		Provider:      llmtest.NewScripted(llmtest.ToolCalls(calls...), llmtest.Done()),
 		Tools:         []Tool{tool},
 		ParallelTools: admit("echo"),
 		OneShot:       true,
@@ -132,9 +133,7 @@ func TestParallelTools_Batches(t *testing.T) {
 		return AfterToolCallResult{Terminate: true}, nil
 	}
 	// call builds one call; the driver registers tools "echo" and "other".
-	call := func(id, tool string) llm.ToolCall {
-		return llm.ToolCall{ID: id, Type: "function", Function: llm.FunctionCall{Name: tool, Arguments: "{}"}}
-	}
+	call := func(id, tool string) llm.ToolCall { return llmtest.Call(id, tool, "{}") }
 	oneByOne := []string{"start c0", "end c0", "start c1", "end c1"}
 	together := []string{"start c0", "start c1", "end c0", "end c1"}
 
@@ -213,7 +212,7 @@ func TestParallelTools_Batches(t *testing.T) {
 			t.Parallel()
 
 			end, before := runToEnd(t, Options{
-				Provider: newScriptedProvider(streamWithToolCalls(tc.calls), streamDone()),
+				Provider: llmtest.NewScripted(llmtest.ToolCalls(tc.calls...), llmtest.Done()),
 				Tools: []Tool{
 					funcTool{namedTool{name: "echo"}, tc.fn},
 					funcTool{namedTool{name: "other"}, tc.fn},
@@ -258,7 +257,7 @@ func TestParallelTools_Bounded(t *testing.T) {
 	}}
 
 	end, _ := runToEnd(t, Options{
-		Provider:      newScriptedProvider(streamWithToolCalls(callsOf("echo", 4*maxParallelTools)), streamDone()),
+		Provider:      llmtest.NewScripted(llmtest.ToolCalls(callsOf("echo", 4*maxParallelTools)...), llmtest.Done()),
 		Tools:         []Tool{tool},
 		ParallelTools: admit("echo"),
 		OneShot:       true,
@@ -290,7 +289,7 @@ func TestParallelTools_CancelWhileSlotsAreFull(t *testing.T) {
 	}}
 
 	end, _ := runToEnd(t, Options{
-		Provider:      newScriptedProvider(streamWithToolCalls(callsOf("echo", n))),
+		Provider:      llmtest.NewScripted(llmtest.ToolCalls(callsOf("echo", n)...)),
 		Tools:         []Tool{tool},
 		ParallelTools: admit("echo"),
 	}, question, on[event.AgentStart](func(a *Agent, _ context.CancelFunc) {
@@ -336,7 +335,7 @@ func TestTools_NotStartedAfterCancel(t *testing.T) {
 	}}
 
 	end, _ := runToEnd(t, Options{
-		Provider: newScriptedProvider(streamWithToolCalls([]llm.ToolCall{echoCall})),
+		Provider: llmtest.NewScripted(llmtest.ToolCalls(echoCall)),
 		Tools:    []Tool{tool},
 		Hooks:    hooks,
 	}, question, on[event.ToolStart](func(a *Agent, _ context.CancelFunc) { a.Abort() }))

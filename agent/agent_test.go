@@ -8,16 +8,8 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
-
-// stubProvider is the minimum llm.Provider stand-in for construction tests.
-type stubProvider struct{}
-
-func (stubProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	close(ch)
-	return ch, nil
-}
 
 // namedTool is a Tool stub that reports a configurable Definition.
 // Used to drive table-driven New validation cases without each row
@@ -40,7 +32,7 @@ func (t namedTool) Execute(_ context.Context, _ llm.ToolCall) ToolResult {
 func TestNew_Validation(t *testing.T) {
 	t.Parallel()
 
-	provider := stubProvider{}
+	provider := llmtest.NewScripted()
 	events := make(chan event.Event, 1)
 
 	cases := []struct {

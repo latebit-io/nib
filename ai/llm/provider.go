@@ -240,10 +240,9 @@ func openStream(client *http.Client, req *http.Request, provider string, auth Au
 	return resp, nil
 }
 
-// handleErrorStatus converts a non-200 response into an error, reading a
-// bounded prefix of the body for detail and closing it. A 401 becomes a
-// typed [AuthError] via [authFailure] regardless of body readability —
-// the status alone is authoritative for the credential self-heal.
+// handleErrorStatus converts a non-200 response into a typed error and
+// closes the body after reading a bounded prefix for detail. A 401 is an
+// [AuthError] whatever the body: the status alone drives the self-heal.
 func handleErrorStatus(provider string, auth Auth, resp *http.Response) error {
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	_ = resp.Body.Close() // body drained above; close error is not actionable
@@ -253,10 +252,17 @@ func handleErrorStatus(provider string, auth Auth, resp *http.Response) error {
 		}
 		return authFailure(provider, auth, resp.StatusCode, body)
 	}
+	detail := errorDetail(body)
 	if readErr != nil {
-		return fmt.Errorf("%s: api error: status %d (body unreadable: %w)", provider, resp.StatusCode, readErr)
+		detail = fmt.Sprintf("body unreadable: %v", readErr)
 	}
-	return fmt.Errorf("%s: api error: status %d: %s", provider, resp.StatusCode, errorDetail(body))
+	return &StatusError{
+		Provider:   provider,
+		StatusCode: resp.StatusCode,
+		Code:       codeOf(body),
+		Detail:     detail,
+		RetryAfter: retryAfter(resp.Header.Get("Retry-After"), time.Now()),
+	}
 }
 
 // maxErrorDetailBytes bounds each piece of provider-supplied text (a

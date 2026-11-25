@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/agent/event"
-	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
 
 // TestSend_SlowConsumerLosesNoControlEvent: with no buffer and a reader
@@ -22,7 +22,7 @@ func TestSend_SlowConsumerLosesNoControlEvent(t *testing.T) {
 	t.Cleanup(cancel)                // frees the run if the test fails mid-stream
 	events := make(chan event.Event) // unbuffered: every send meets the reader
 	a, err := New(Options{
-		Provider: newScriptedProvider(streamWithToolCalls([]llm.ToolCall{echoCall}), streamText([]string{"done"}, nil)),
+		Provider: llmtest.NewScripted(llmtest.ToolCalls(echoCall), llmtest.Text("done")),
 		Events:   events,
 		Tools:    []Tool{namedTool{name: "echo"}},
 		OneShot:  true,
@@ -80,7 +80,7 @@ func TestSend_ClosedAgentAndAgentEnd(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				events := make(chan event.Event) // nobody reads until readAfter
-				a, err := New(Options{Provider: hangingProvider{}, Events: events})
+				a, err := New(Options{Provider: llmtest.Blocking(), Events: events})
 				if err != nil {
 					t.Fatalf("New: %v", err)
 				}

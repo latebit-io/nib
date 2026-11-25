@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,15 +22,18 @@ type scriptedProvider struct {
 	mu    sync.Mutex
 	turns [][]llm.StreamEvent
 	calls int
+	// offered is the number of tools each Stream call was given.
+	offered []int
 }
 
 func newScriptedProvider(turns ...[]llm.StreamEvent) *scriptedProvider {
 	return &scriptedProvider{turns: turns}
 }
 
-func (p *scriptedProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+func (p *scriptedProvider) Stream(_ context.Context, _ []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	p.mu.Lock()
 	p.calls++
+	p.offered = append(p.offered, len(tools))
 	var events []llm.StreamEvent
 	if len(p.turns) > 0 {
 		events = p.turns[0]
@@ -1224,23 +1228,9 @@ func TestOnTruncated_HookErrorIsTerminal(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing Error event for hook failure")
 	}
-	if !contains(gotErr.Err, "OnTruncated") || !contains(gotErr.Err, hookErr.Error()) {
+	if !strings.Contains(gotErr.Err, "OnTruncated") || !strings.Contains(gotErr.Err, hookErr.Error()) {
 		t.Errorf("Error.Err = %q; want substrings 'OnTruncated' and %q", gotErr.Err, hookErr.Error())
 	}
-}
-
-// contains is a tiny helper so the test does not pull strings just for
-// substring assertions in error messages.
-func contains(s, sub string) bool {
-	if sub == "" {
-		return true
-	}
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 // TestSystemPrompt_PrependedToTranscript confirms that a non-empty
@@ -1653,7 +1643,7 @@ func TestHookErrorMidBatch_EveryToolUseGetsResult(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing Error event for hook failure")
 	}
-	if !contains(gotErr.Err, "BeforeToolCall") || !contains(gotErr.Err, hookErr.Error()) {
+	if !strings.Contains(gotErr.Err, "BeforeToolCall") || !strings.Contains(gotErr.Err, hookErr.Error()) {
 		t.Errorf("Error.Err = %q; want substrings 'BeforeToolCall' and %q", gotErr.Err, hookErr.Error())
 	}
 	if got := tool.Calls(); len(got) != 1 || got[0].ID != "call_1" {
@@ -1683,10 +1673,10 @@ func TestHookErrorMidBatch_EveryToolUseGetsResult(t *testing.T) {
 	}
 	for _, id := range []string{"call_2", "call_3"} {
 		r := results[id]
-		if !contains(r.Content, "aborted") {
-			t.Errorf("%s result = %q; want synthesized aborted result", id, r.Content)
+		if r.Content != unfinishedToolResult {
+			t.Errorf("%s result = %q; want the synthesized unfinished result", id, r.Content)
 		}
-		if contains(r.Content, hookErr.Error()) {
+		if strings.Contains(r.Content, hookErr.Error()) {
 			t.Errorf("%s result = %q; raw hook error must not enter the transcript", id, r.Content)
 		}
 	}

@@ -86,6 +86,17 @@ func runToEnd(t *testing.T, opts Options, seed []llm.Message, react reaction) (e
 
 var question = []llm.Message{{Role: "user", Content: "go"}}
 
+// toolResults returns the transcript's tool messages as "id=content".
+func toolResults(msgs []llm.Message) []string {
+	var out []string
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			out = append(out, m.ToolCallID+"="+m.Content)
+		}
+	}
+	return out
+}
+
 // TestAgentEnd_Reason drives one run down each exit path of the loop and
 // checks the reason AgentEnd reports, and whether an Error event came with it.
 func TestAgentEnd_Reason(t *testing.T) {

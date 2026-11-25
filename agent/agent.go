@@ -1,16 +1,6 @@
-// Package agent implements a generic, application-agnostic LLM agent loop.
-//
-// This is a bare-bones, embeddable foundation for building any agent. It
-// owns the multi-turn conversation, dispatches tool calls, and emits
-// lifecycle events on a typed channel. It does NOT know about file edits,
-// validation, lint, memory, approval flow, prompts, or any other
-// application concept — those live in the consuming application.
-//
-// The agent ships with zero tools. Consumers register their own tools via
-// [Tool] and extend behavior via [Hooks] (BeforeToolCall, AfterToolCall,
-// TransformContext, SteeringMessages, FollowUpMessages, BeforePark,
-// OnTruncated). Anything an application needs to layer on top of the loop
-// happens through those two extension points.
+// Package agent implements a generic, embeddable LLM agent loop: it owns
+// the conversation, dispatches tool calls and emits lifecycle events.
+// Applications add their tools via [Tool] and their behavior via [Hooks].
 package agent
 
 import (
@@ -32,8 +22,8 @@ type Options struct {
 	Provider llm.Provider
 
 	// Events receives lifecycle events; nil discards them (enough for a
-	// host that only uses [Agent.Run]). A non-nil channel must be drained:
-	// control events block up to 5s, streaming events drop when it is full.
+	// host that only uses [Agent.Run]). A non-nil channel must be drained
+	// until AgentEnd: control events wait for the reader, streaming ones drop.
 	Events chan<- event.Event
 
 	// SystemPrompt is the system message prepended to every run's
@@ -46,22 +36,20 @@ type Options struct {
 	// tool calls to Execute(). Tools share the agent's lifetime.
 	Tools []Tool
 
-	// MaxTurns caps the number of LLM turns the loop may take without an
-	// intervening user message — the guard against tool-call ping-pong in
-	// embedded or unattended deployments. The counter increments per turn
-	// (steering, follow-up, and truncation-retry turns all count) and
-	// resets to zero each time [Agent.Reply] delivers input. When the loop
-	// would start turn MaxTurns+1 it instead emits
-	// [event.MaxTurnsReached] and ends the run cleanly: every dispatched
-	// tool call already has its result appended, so the transcript stays
-	// well-formed and the conversation can continue on the next Prompt.
-	// Zero (the default) means unlimited; negative is rejected by [New].
+	// MaxTurns caps LLM turns taken without an intervening reply; zero means
+	// unlimited. At the cap the run emits [event.MaxTurnsReached] and ends
+	// with a well-formed transcript, after [Hooks.OnMaxTurns] had its say.
 	MaxTurns int
 
 	// OneShot ends the run once a turn has no tool calls and no steering
 	// or follow-up is queued, instead of parking. [Hooks.BeforePark] and
 	// [event.AgentParked] are skipped and [Agent.Reply] returns false.
 	OneShot bool
+
+	// ParallelTools admits tools, by name, to run together when the model
+	// calls several in a row. Hooks stay serial and in call order, so admit
+	// only tools whose hooks need no earlier call of the batch to have finished.
+	ParallelTools func(name string) bool
 
 	// Hooks are the application-layer extension points. Nil disables a
 	// given hook; the agent skips it without ceremony.
@@ -77,9 +65,15 @@ type Agent struct {
 	systemPrompt string
 	tools        map[string]Tool
 	toolDefs     []llm.ToolDef
-	hooks        Hooks
-	maxTurns     int
-	oneShot      bool
+	// parallel holds the tools [Options.ParallelTools] admitted, asked once
+	// at construction so no host code runs while a batch is being decided.
+	parallel map[string]bool
+	hooks    Hooks
+	maxTurns int
+	oneShot  bool
+	// closing is closed by [Agent.Close]; it releases a run waiting to
+	// deliver its AgentEnd to a consumer that is gone.
+	closing chan struct{}
 
 	// mu guards the run-state fields below. It is NOT held while
 	// invoking the provider, hooks, or tool Execute calls — those
@@ -138,6 +132,7 @@ func New(opts Options) (*Agent, error) {
 
 	tools := make(map[string]Tool, len(opts.Tools))
 	defs := make([]llm.ToolDef, 0, len(opts.Tools))
+	parallel := make(map[string]bool)
 	for i, t := range opts.Tools {
 		if t == nil {
 			return nil, fmt.Errorf("%w: Tools[%d] is nil", ErrInvalidOptions, i)
@@ -152,6 +147,9 @@ func New(opts Options) (*Agent, error) {
 		}
 		tools[name] = t
 		defs = append(defs, def)
+		if opts.ParallelTools != nil && opts.ParallelTools(name) {
+			parallel[name] = true
+		}
 	}
 
 	return &Agent{
@@ -160,9 +158,11 @@ func New(opts Options) (*Agent, error) {
 		systemPrompt: opts.SystemPrompt,
 		tools:        tools,
 		toolDefs:     defs,
+		parallel:     parallel,
 		hooks:        opts.Hooks,
 		maxTurns:     opts.MaxTurns,
 		oneShot:      opts.OneShot,
+		closing:      make(chan struct{}),
 	}, nil
 }
 
@@ -300,7 +300,10 @@ func (a *Agent) Abort() {
 // start behind it. It does not wait: follow with [Agent.WaitForIdle].
 func (a *Agent) Close() {
 	a.mu.Lock()
-	a.closed = true
+	if !a.closed {
+		a.closed = true
+		close(a.closing)
+	}
 	cancel := a.cancel
 	a.mu.Unlock()
 	if cancel != nil {

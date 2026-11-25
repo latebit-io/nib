@@ -6,18 +6,9 @@ import (
 	"github.com/latebit-io/nib/ai/llm"
 )
 
-// Tool is a capability the agent can invoke during the LLM loop. Each tool
-// publishes its OpenAI-compatible schema and runs the corresponding logic.
-//
-// The agent calls Definition once at registration to populate the tool list
-// sent to the LLM, and Execute every time the LLM dispatches a call. Tools
-// must be safe to invoke concurrently when registered with concurrent
-// execution; per-tool state (caches, retry counters) needs its own
-// synchronization.
-//
-// Implementations should pass [github.com/latebit-io/nib/kit/contracttest.Tool]
-// — the fixture verifies Definition() shape and stability, panic-free
-// handling of malformed/empty arguments, and concurrent Execute safety.
+// Tool is a capability the agent can invoke: a schema for the model and
+// the logic behind it. One admitted by [Options.ParallelTools] may run
+// concurrently and must guard its own state. kit/contracttest checks tools.
 type Tool interface {
 	// Definition returns the tool's function schema for the LLM.
 	Definition() llm.ToolDef

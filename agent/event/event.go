@@ -20,8 +20,8 @@ type Event interface {
 // Frontends use this to flip a "thinking" indicator on.
 type AgentStart struct{}
 
-// AgentEnd marks the end of a run. Messages contains the final transcript
-// after all turns have completed (or after an early termination).
+// AgentEnd marks the end of a run, exactly once per run. It waits for the
+// consumer, however slow; a closed agent gives up on it after 5s.
 type AgentEnd struct {
 	// Messages is the full conversation transcript at run-end.
 	Messages []llm.Message
@@ -153,14 +153,9 @@ type Error struct {
 	Err string
 }
 
-// MaxTurnsReached signals the run ended because it hit the configured
-// turn cap (Options.MaxTurns in the agent package) — the loop was about
-// to start another LLM turn without an intervening user message. A policy
-// outcome, not a failure: the transcript is well-formed (every dispatched
-// tool call has its result appended) and [AgentEnd] follows as usual, so
-// consumers can continue the conversation with a fresh prompt. Frontends
-// typically render this as "stopped at the turn limit" rather than as an
-// error.
+// MaxTurnsReached signals the turn cap (Options.MaxTurns in the agent
+// package) stopped the run: a policy outcome, not a failure. [AgentEnd]
+// follows, after one closing turn when the OnMaxTurns hook asks for it.
 type MaxTurnsReached struct {
 	// Turns is the number of LLM turns taken since the last user input
 	// when the cap fired — always equal to the configured maximum.

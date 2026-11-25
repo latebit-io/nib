@@ -70,10 +70,9 @@ func Tool(t *testing.T, ctor func() kit.Tool) {
 	t.Run("ExecuteHandlesMalformedArgs", func(t *testing.T) {
 		t.Parallel()
 		tool := ctor()
-		// Send a syntactically invalid arguments string. The tool must
-		// return a ToolResult (with IsError=true is the convention) —
-		// panicking would crash the agent loop, which is unrecoverable
-		// for a tool failure mode.
+		// Malformed arguments must come back as a ToolResult (IsError by
+		// convention). The agent recovers a panicking tool, but only as a
+		// last resort that hides what was wrong with the input.
 		defer func() {
 			if r := recover(); r != nil {
 				t.Fatalf("contract: Execute panicked on malformed args: %v", r)

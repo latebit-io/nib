@@ -75,6 +75,11 @@ type Hooks struct {
 	// equivalent to Retry=false with the foundation emitting a generic
 	// "provider truncated response" error.
 	OnTruncated func(ctx context.Context, c TruncationInput) (TruncationResult, error)
+
+	// OnMaxTurns fires when the turn cap ends the run. Non-empty messages
+	// are appended and the model gets one last turn without tools, so a
+	// capped run can end on an answer. That turn is never retried.
+	OnMaxTurns func(ctx context.Context) ([]llm.Message, error)
 }
 
 // BeforeToolCallInput carries the data BeforeToolCall needs to evaluate a

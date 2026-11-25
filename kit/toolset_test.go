@@ -904,7 +904,7 @@ func TestNew_NilToolPassesToFoundationValidation(t *testing.T) {
 // survive Merge with every hook still set, and the field count must
 // match what mergeHooks handles so a new field fails here first.
 func TestMergeHooks_CoversEveryHookField(t *testing.T) {
-	const handledByMergeHooks = 7
+	const handledByMergeHooks = 8
 	hooksType := reflect.TypeOf(agent.Hooks{})
 	if n := hooksType.NumField(); n != handledByMergeHooks {
 		t.Fatalf("agent.Hooks has %d fields; mergeHooks handles %d — add the new hook to mergeHooks and its chainX, then bump this constant", n, handledByMergeHooks)
@@ -924,6 +924,7 @@ func TestMergeHooks_CoversEveryHookField(t *testing.T) {
 		OnTruncated: func(context.Context, kit.TruncationInput) (kit.TruncationResult, error) {
 			return kit.TruncationResult{}, nil
 		},
+		OnMaxTurns: func(context.Context) ([]llm.Message, error) { return nil, nil },
 	}
 	fullVal := reflect.ValueOf(full)
 	for i := range hooksType.NumField() {

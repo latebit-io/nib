@@ -4,7 +4,9 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
@@ -74,6 +76,47 @@ func TestPanic_FailsTheRunNotTheHost(t *testing.T) {
 				t.Errorf("tool results = %v; want %v", got, want)
 			}
 		})
+	}
+}
+
+// TestPanic_AfterHookWaitsForRunningTools: c1's hook panics while c0 is
+// still executing. The run must fail without leaving c0 behind: by
+// AgentEnd it has finished, and its result is kept.
+func TestPanic_AfterHookWaitsForRunningTools(t *testing.T) {
+	t.Parallel()
+
+	hooked := make(chan struct{})
+	var finished atomic.Bool
+	tool := funcTool{namedTool{name: "echo"}, func(_ context.Context, call llm.ToolCall) ToolResult {
+		if call.ID == "c0" {
+			<-hooked
+			time.Sleep(50 * time.Millisecond) // outlast an unwinding run
+			finished.Store(true)
+		}
+		return ToolResult{Content: "ok"}
+	}}
+
+	end, before := runToEnd(t, Options{
+		Provider:      llmtest.NewScripted(llmtest.ToolCalls(callsOf("echo", 2)...)),
+		Tools:         []Tool{tool},
+		ParallelTools: admit("echo"),
+		Hooks: Hooks{AfterToolCall: func(_ context.Context, c AfterToolCallInput) (AfterToolCallResult, error) {
+			if c.CallID == "c1" {
+				close(hooked)
+				panic("hook bug")
+			}
+			return AfterToolCallResult{}, nil
+		}},
+	}, question, nil)
+
+	if !finished.Load() {
+		t.Error("the run ended while c0 was still executing")
+	}
+	if errEv, ok := findEvent[event.Error](before); end.Reason != event.EndError || !ok || !strings.Contains(errEv.Err, "panic in AfterToolCall(echo)") {
+		t.Errorf("Reason = %q, Error event = %q; want error, naming the hook's panic", end.Reason, errEv.Err)
+	}
+	if got, want := toolResults(end.Messages), []string{"c0=ok", "c1=" + unfinishedToolResult}; !slices.Equal(got, want) {
+		t.Errorf("tool results = %v; want %v", got, want)
 	}
 }
 

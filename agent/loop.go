@@ -565,10 +565,17 @@ func (a *Agent) runTool(ctx context.Context, call llm.ToolCall) (result ToolResu
 
 // afterTool runs AfterToolCall on a result, blocked ones included, and
 // folds in its overrides. The bool is the call's terminate request.
-func (a *Agent) afterTool(ctx context.Context, call llm.ToolCall, result ToolResult) (ToolResult, bool, error) {
+func (a *Agent) afterTool(ctx context.Context, call llm.ToolCall, result ToolResult) (_ ToolResult, _ bool, err error) {
 	if a.hooks.AfterToolCall == nil {
 		return result, false, nil
 	}
+	// A panicking hook fails its call as a hook error does. Unwinding
+	// from here would end the run with its other tools still running.
+	defer func() {
+		if r := recover(); r != nil {
+			err = recovered("AfterToolCall("+call.Function.Name+")", r)
+		}
+	}()
 	res, err := a.hooks.AfterToolCall(ctx, AfterToolCallInput{
 		CallID: call.ID,
 		Name:   call.Function.Name,

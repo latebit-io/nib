@@ -10,52 +10,8 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
-
-// scriptedProvider serves up a queue of pre-built stream responses,
-// one per Stream call. Tests construct the queue via [scripted] turns
-// so each turn is a sequence of StreamEvents terminated by a Done
-// event. Drains the queue in FIFO order; an empty queue produces an
-// empty stream that closes immediately, exercising the
-// errProviderClosedEarly path when needed.
-type scriptedProvider struct {
-	mu    sync.Mutex
-	turns [][]llm.StreamEvent
-	calls int
-	// offered is the number of tools each Stream call was given.
-	offered []int
-}
-
-func newScriptedProvider(turns ...[]llm.StreamEvent) *scriptedProvider {
-	return &scriptedProvider{turns: turns}
-}
-
-func (p *scriptedProvider) Stream(_ context.Context, _ []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	p.mu.Lock()
-	p.calls++
-	p.offered = append(p.offered, len(tools))
-	var events []llm.StreamEvent
-	if len(p.turns) > 0 {
-		events = p.turns[0]
-		p.turns = p.turns[1:]
-	}
-	p.mu.Unlock()
-
-	ch := make(chan llm.StreamEvent, len(events)+1)
-	for _, ev := range events {
-		ch <- ev
-	}
-	close(ch)
-	return ch, nil
-}
-
-// errorProvider returns the configured error from Stream. Used to
-// verify the Stream-error path emits [event.Error] and ends the run.
-type errorProvider struct{ err error }
-
-func (p errorProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	return nil, p.err
-}
 
 // recordingTool captures every call dispatched to it and returns a
 // configurable result. Tests inspect Calls() to assert the agent
@@ -82,31 +38,6 @@ func (t *recordingTool) Calls() []llm.ToolCall {
 	out := make([]llm.ToolCall, len(t.calls))
 	copy(out, t.calls)
 	return out
-}
-
-// streamDone is shorthand for a single-event "no content, no tool
-// calls, just done" stream — what an LLM would emit when it has
-// nothing more to say and the loop should park.
-func streamDone() []llm.StreamEvent {
-	return []llm.StreamEvent{{Done: true}}
-}
-
-// streamText returns a stream that emits content chunks then a clean
-// terminal Done event with usage. Helper keeps test data declarative.
-func streamText(chunks []string, usage *llm.Usage) []llm.StreamEvent {
-	out := make([]llm.StreamEvent, 0, len(chunks)+1)
-	for _, c := range chunks {
-		out = append(out, llm.StreamEvent{Token: c})
-	}
-	out = append(out, llm.StreamEvent{Done: true, Usage: usage})
-	return out
-}
-
-// streamWithToolCalls returns a stream whose Done event carries tool
-// calls. The caller-supplied ToolCalls slice is attached to the
-// terminal event verbatim.
-func streamWithToolCalls(calls []llm.ToolCall) []llm.StreamEvent {
-	return []llm.StreamEvent{{Done: true, ToolCalls: calls}}
 }
 
 // drainEvents reads at most max events with a 1s deadline. Returns
@@ -179,10 +110,10 @@ func countEvents[T event.Event](evs []event.Event) int {
 func TestPrompt_TerminatesOnNoToolCalls(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"Hello", " world"}, &llm.Usage{
+	provider := llmtest.NewScripted(llmtest.TextUsage(&llm.Usage{
 		PromptTokens:     10,
 		CompletionTokens: 2,
-	}))
+	}, "Hello", " world"))
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -267,7 +198,7 @@ func TestPrompt_CarriesReasoningTrace(t *testing.T) {
 	trace := &llm.ReasoningTrace{Blocks: []llm.ReasoningBlock{
 		{Type: "thinking", Text: "let me think", Signature: "sig-abc"},
 	}}
-	provider := newScriptedProvider([]llm.StreamEvent{
+	provider := llmtest.NewScripted([]llm.StreamEvent{
 		{Token: "answer"},
 		{Done: true, Reasoning: trace, Usage: &llm.Usage{PromptTokens: 5, CompletionTokens: 1}},
 	})
@@ -324,7 +255,7 @@ Parked:
 func TestPrompt_RejectsConcurrentRun(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone())
+	provider := llmtest.NewScripted(llmtest.Done())
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -369,17 +300,10 @@ func TestToolDispatch_RoutesCallsAndAppendsResult(t *testing.T) {
 		result: ToolResult{Content: "echoed"},
 	}
 
-	turn1 := streamWithToolCalls([]llm.ToolCall{{
-		ID:   "call_1",
-		Type: "function",
-		Function: llm.FunctionCall{
-			Name:      "echo",
-			Arguments: `{"text":"hi"}`,
-		},
-	}})
-	turn2 := streamDone() // post-tool turn, no more calls
+	turn1 := llmtest.ToolCalls(llmtest.Call("call_1", "echo", `{"text":"hi"}`))
+	turn2 := llmtest.Done() // post-tool turn, no more calls
 
-	provider := newScriptedProvider(turn1, turn2)
+	provider := llmtest.NewScripted(turn1, turn2)
 	events := make(chan event.Event, 64)
 
 	a, err := New(Options{
@@ -456,13 +380,10 @@ func TestBeforeToolCall_BlocksExecution(t *testing.T) {
 		result: ToolResult{Content: "should not appear"},
 	}
 
-	turn1 := streamWithToolCalls([]llm.ToolCall{{
-		ID:       "call_1",
-		Function: llm.FunctionCall{Name: "edit_file", Arguments: "{}"},
-	}})
-	turn2 := streamDone()
+	turn1 := llmtest.ToolCalls(llmtest.Call("call_1", "edit_file", "{}"))
+	turn2 := llmtest.Done()
 
-	provider := newScriptedProvider(turn1, turn2)
+	provider := llmtest.NewScripted(turn1, turn2)
 	events := make(chan event.Event, 64)
 
 	hookCalls := 0
@@ -531,12 +452,9 @@ func TestAfterToolCall_OverridesAndTerminates(t *testing.T) {
 		result: ToolResult{Content: "raw"},
 	}
 
-	turn1 := streamWithToolCalls([]llm.ToolCall{{
-		ID:       "c1",
-		Function: llm.FunctionCall{Name: "noop", Arguments: "{}"},
-	}})
+	turn1 := llmtest.ToolCalls(llmtest.Call("c1", "noop", "{}"))
 
-	provider := newScriptedProvider(turn1)
+	provider := llmtest.NewScripted(turn1)
 	events := make(chan event.Event, 64)
 
 	overridden := "overridden"
@@ -574,8 +492,8 @@ func TestAfterToolCall_OverridesAndTerminates(t *testing.T) {
 	}
 	// Provider must have been called exactly once — terminate after
 	// the first batch means no second turn.
-	if provider.calls != 1 {
-		t.Errorf("provider.calls = %d; want 1", provider.calls)
+	if provider.Calls() != 1 {
+		t.Errorf("provider.Calls() = %d; want 1", provider.Calls())
 	}
 }
 
@@ -585,7 +503,7 @@ func TestAfterToolCall_OverridesAndTerminates(t *testing.T) {
 func TestTransformContext_RewritesMessages(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone())
+	provider := llmtest.NewScripted(llmtest.Done())
 	events := make(chan event.Event, 32)
 
 	var sawMessages []llm.Message
@@ -643,7 +561,7 @@ Done:
 func TestSteeringMessages_ReentersLoop(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone(), streamDone())
+	provider := llmtest.NewScripted(llmtest.Done(), llmtest.Done())
 	events := make(chan event.Event, 64)
 
 	calls := 0
@@ -682,8 +600,8 @@ func TestSteeringMessages_ReentersLoop(t *testing.T) {
 	a.Abort()
 	a.WaitForIdle()
 
-	if provider.calls != 2 {
-		t.Errorf("provider.calls = %d; want 2 (steering should re-enter loop)", provider.calls)
+	if provider.Calls() != 2 {
+		t.Errorf("provider.Calls() = %d; want 2 (steering should re-enter loop)", provider.Calls())
 	}
 	if calls != 2 {
 		t.Errorf("SteeringMessages calls = %d; want 2 (one to inject, one to drain)", calls)
@@ -699,7 +617,7 @@ func TestSteeringMessages_ReentersLoop(t *testing.T) {
 func TestBeforePark_EmitsAgentParkedInStreamOrder(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"hello"}, nil))
+	provider := llmtest.NewScripted(llmtest.Text("hello"))
 	events := make(chan event.Event, 64)
 
 	hookCalls := 0
@@ -759,7 +677,7 @@ func TestBeforePark_EmitsAgentParkedInStreamOrder(t *testing.T) {
 func TestBeforePark_NilHookEmitsZeroValue(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone())
+	provider := llmtest.NewScripted(llmtest.Done())
 	events := make(chan event.Event, 64)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -794,7 +712,7 @@ func TestBeforePark_NilHookEmitsZeroValue(t *testing.T) {
 func TestReply_DeliversBetweenTurns(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone(), streamDone())
+	provider := llmtest.NewScripted(llmtest.Done(), llmtest.Done())
 	events := make(chan event.Event, 64)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -848,8 +766,8 @@ SecondDone:
 	a.Abort()
 	a.WaitForIdle()
 
-	if provider.calls != 2 {
-		t.Errorf("provider.calls = %d; want 2", provider.calls)
+	if provider.Calls() != 2 {
+		t.Errorf("provider.Calls() = %d; want 2", provider.Calls())
 	}
 	state := a.State()
 	// user(first) + assistant(empty) + user(second) + assistant(empty) → 4
@@ -866,7 +784,7 @@ SecondDone:
 func TestReply_RejectsWhenNotRunning(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider()
+	provider := llmtest.NewScripted()
 	events := make(chan event.Event, 1)
 	a, err := New(Options{Provider: provider, Events: events})
 	if err != nil {
@@ -882,7 +800,7 @@ func TestReply_RejectsWhenNotRunning(t *testing.T) {
 func TestAbort_UnwindsRun(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone())
+	provider := llmtest.NewScripted(llmtest.Done())
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -918,7 +836,7 @@ func TestAbort_UnwindsRun(t *testing.T) {
 func TestStreamError_EmitsErrorEvent(t *testing.T) {
 	t.Parallel()
 
-	provider := errorProvider{err: errors.New("boom")}
+	provider := llmtest.Failing(errors.New("boom"))
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -952,7 +870,7 @@ func TestStreamError_EmitsErrorEvent(t *testing.T) {
 func TestProviderClosedEarly_EmitsErrorEvent(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider([]llm.StreamEvent{{Token: "partial"}}) // no Done
+	provider := llmtest.NewScripted([]llm.StreamEvent{{Token: "partial"}}) // no Done
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -982,7 +900,7 @@ func TestStreamEventErr_EmitsErrorEvent(t *testing.T) {
 	t.Parallel()
 
 	tool := &recordingTool{def: llm.ToolDef{Function: llm.FunctionDef{Name: "echo"}}}
-	provider := newScriptedProvider([]llm.StreamEvent{
+	provider := llmtest.NewScripted([]llm.StreamEvent{
 		{Token: "partial"},
 		{Done: true, Err: errors.New("chatgpt: stream error: bad_schema: invalid"),
 			ToolCalls: []llm.ToolCall{{ID: "c1", Function: llm.FunctionCall{Name: "echo"}}}},
@@ -1020,7 +938,7 @@ func TestStreamEventErr_EmitsErrorEvent(t *testing.T) {
 func TestTruncated_EndsRunWithError(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider([]llm.StreamEvent{
+	provider := llmtest.NewScripted([]llm.StreamEvent{
 		{Token: "partial"},
 		{Done: true, Truncated: true},
 	})
@@ -1058,11 +976,11 @@ func TestOnTruncated_RetrySplicesAndContinues(t *testing.T) {
 		Type:     "function",
 		Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"x"`},
 	}
-	provider := newScriptedProvider(
+	provider := llmtest.NewScripted(
 		[]llm.StreamEvent{
 			{Done: true, Truncated: true, ToolCalls: []llm.ToolCall{tc}},
 		},
-		streamText([]string{"recovered"}, nil),
+		llmtest.Text("recovered"),
 	)
 	tool := &recordingTool{def: llm.ToolDef{Function: llm.FunctionDef{Name: "edit_file"}}}
 
@@ -1142,7 +1060,7 @@ func TestOnTruncated_RetrySplicesAndContinues(t *testing.T) {
 func TestOnTruncated_NoRetryEndsRunSilently(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider([]llm.StreamEvent{
+	provider := llmtest.NewScripted([]llm.StreamEvent{
 		{Done: true, Truncated: true},
 	})
 	events := make(chan event.Event, 32)
@@ -1199,7 +1117,7 @@ func TestOnTruncated_NoRetryEndsRunSilently(t *testing.T) {
 func TestOnTruncated_HookErrorIsTerminal(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider([]llm.StreamEvent{
+	provider := llmtest.NewScripted([]llm.StreamEvent{
 		{Done: true, Truncated: true},
 	})
 	events := make(chan event.Event, 32)
@@ -1238,7 +1156,7 @@ func TestOnTruncated_HookErrorIsTerminal(t *testing.T) {
 func TestSystemPrompt_PrependedToTranscript(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone())
+	provider := llmtest.NewScripted(llmtest.Done())
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{
@@ -1287,7 +1205,7 @@ Done:
 func TestPromptWithMessages_UsesCallerSuppliedTranscript(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone())
+	provider := llmtest.NewScripted(llmtest.Done())
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -1339,7 +1257,7 @@ Done:
 func TestPromptWithMessages_DefensiveCopy(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone())
+	provider := llmtest.NewScripted(llmtest.Done())
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -1392,7 +1310,7 @@ Done:
 func TestPromptWithMessages_RejectsEmpty(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone())
+	provider := llmtest.NewScripted(llmtest.Done())
 	events := make(chan event.Event, 1)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -1416,7 +1334,7 @@ func TestPromptWithMessages_RejectsEmpty(t *testing.T) {
 func TestPromptWithMessages_RejectsConcurrentRun(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone(), streamDone())
+	provider := llmtest.NewScripted(llmtest.Done(), llmtest.Done())
 	events := make(chan event.Event, 32)
 
 	a, err := New(Options{Provider: provider, Events: events})
@@ -1466,10 +1384,10 @@ func TestMaxTurns_EndsRunWhenCapReached(t *testing.T) {
 	}
 	// Three scripted tool-call turns queued; the cap must stop the loop
 	// after two, leaving the third unconsumed.
-	provider := newScriptedProvider(
-		streamWithToolCalls(call("c1")),
-		streamWithToolCalls(call("c2")),
-		streamWithToolCalls(call("c3")),
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(call("c1")...),
+		llmtest.ToolCalls(call("c2")...),
+		llmtest.ToolCalls(call("c3")...),
 	)
 	tool := &recordingTool{
 		def:    llm.ToolDef{Type: "function", Function: llm.FunctionDef{Name: "lookup"}},
@@ -1503,8 +1421,8 @@ func TestMaxTurns_EndsRunWhenCapReached(t *testing.T) {
 	if _, ok := findEvent[event.AgentEnd](all); !ok {
 		t.Errorf("missing AgentEnd")
 	}
-	if provider.calls != 2 {
-		t.Errorf("provider.calls = %d; want 2", provider.calls)
+	if provider.Calls() != 2 {
+		t.Errorf("provider.Calls() = %d; want 2", provider.Calls())
 	}
 	if got := len(tool.Calls()); got != 2 {
 		t.Errorf("tool call count = %d; want 2", got)
@@ -1531,7 +1449,7 @@ func TestMaxTurns_EndsRunWhenCapReached(t *testing.T) {
 func TestMaxTurns_ResetsOnReply(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamDone(), streamDone())
+	provider := llmtest.NewScripted(llmtest.Done(), llmtest.Done())
 	events := make(chan event.Event, 64)
 
 	a, err := New(Options{Provider: provider, Events: events, MaxTurns: 1})
@@ -1587,8 +1505,8 @@ SecondDone:
 	a.WaitForIdle()
 	all := append(collected, drainEvents(events, 8)...)
 
-	if provider.calls != 2 {
-		t.Errorf("provider.calls = %d; want 2 — reply must re-arm the cap", provider.calls)
+	if provider.Calls() != 2 {
+		t.Errorf("provider.Calls() = %d; want 2 — reply must re-arm the cap", provider.Calls())
 	}
 	if _, ok := findEvent[event.MaxTurnsReached](all); ok {
 		t.Errorf("unexpected MaxTurnsReached — cap resets on delivered reply")
@@ -1612,7 +1530,7 @@ func TestHookErrorMidBatch_EveryToolUseGetsResult(t *testing.T) {
 		{ID: "call_2", Type: "function", Function: llm.FunctionCall{Name: "echo"}},
 		{ID: "call_3", Type: "function", Function: llm.FunctionCall{Name: "echo"}},
 	}
-	provider := newScriptedProvider(streamWithToolCalls(calls))
+	provider := llmtest.NewScripted(llmtest.ToolCalls(calls...))
 	events := make(chan event.Event, 64)
 
 	hookErr := errors.New("gate exploded")

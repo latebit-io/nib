@@ -41,20 +41,13 @@ func NewProvider(projectRoot string) *ProviderResult {
 		slog.Warn("wire: failed to create OAuth store", "err", err)
 	}
 
-	// Create key store for TUI-entered API keys.
-	var keyStore *oauth.KeyStore
-	if keyPath, err := oauth.DefaultKeyStorePath(); err != nil {
-		slog.Warn("wire: key store unavailable", "err", err)
-	} else if keyStore, err = oauth.NewKeyStore(keyPath); err != nil {
-		slog.Warn("wire: failed to create key store", "err", err)
-	}
-
 	// If the resolved profile uses OAuth, wire up the authenticator.
 	llmconfig.WireOAuth(resolved, store)
 
-	// If no provider yet, check the key store for a stored API key.
-	if !resolved.HasProvider() && keyStore != nil {
-		llmconfig.WireStoredKey(resolved, keyStore)
+	// Still no credentials: fall back to a key entered through the TUI.
+	keyStore, err := llmconfig.WireDefaultKeyStore(resolved)
+	if err != nil {
+		slog.Warn("wire: key store unavailable", "err", err)
 	}
 
 	return &ProviderResult{

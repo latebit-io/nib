@@ -8,6 +8,7 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
 
 // TestOnMaxTurns: at the turn cap the hook can ask for one closing turn.
@@ -15,7 +16,7 @@ import (
 func TestOnMaxTurns(t *testing.T) {
 	t.Parallel()
 
-	toolTurn := streamWithToolCalls([]llm.ToolCall{echoCall})
+	toolTurn := llmtest.ToolCalls(echoCall)
 	nudge := func(context.Context) ([]llm.Message, error) {
 		return []llm.Message{{Role: "user", Content: "answer now"}}, nil
 	}
@@ -33,7 +34,7 @@ func TestOnMaxTurns(t *testing.T) {
 	}{
 		{
 			name:        "hook asks for a closing turn",
-			turns:       [][]llm.StreamEvent{toolTurn, streamText([]string{"the answer"}, nil)},
+			turns:       [][]llm.StreamEvent{toolTurn, llmtest.Text("the answer")},
 			hook:        nudge,
 			want:        event.EndMaxTurns,
 			wantOffered: []int{1, 0},
@@ -96,7 +97,7 @@ func TestOnMaxTurns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			provider := newScriptedProvider(tc.turns...)
+			provider := llmtest.NewScripted(tc.turns...)
 			end, before := runToEnd(t, Options{
 				Provider: provider,
 				MaxTurns: 1,
@@ -106,8 +107,8 @@ func TestOnMaxTurns(t *testing.T) {
 			if end.Reason != tc.want {
 				t.Errorf("Reason = %q; want %q", end.Reason, tc.want)
 			}
-			if !slices.Equal(provider.offered, tc.wantOffered) {
-				t.Errorf("tools offered per call = %v; want %v", provider.offered, tc.wantOffered)
+			if !slices.Equal(provider.Offered(), tc.wantOffered) {
+				t.Errorf("tools offered per call = %v; want %v", provider.Offered(), tc.wantOffered)
 			}
 			if end.FinalText != tc.wantFinal {
 				t.Errorf("FinalText = %q; want %q", end.FinalText, tc.wantFinal)

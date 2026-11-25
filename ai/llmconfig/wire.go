@@ -60,17 +60,14 @@ func (r *Resolved) CheckAuth(ctx context.Context) error {
 	return nil
 }
 
-// WireStoredKey applies an API key from the key store to a resolved
-// profile, keyed by profile name. Returns true only when a key was
-// actually applied — OAuth-only profiles short-circuit with false
-// because [Resolved.SetAPIKey] is a no-op for them, and a true return
-// in that case would mislead callers into believing credentials are
-// wired when they aren't.
+// WireStoredKey gives resolved the API key saved for its profile and
+// reports whether it did. It leaves a profile that already has credentials
+// alone (a key from the environment keeps priority), and OAuth profiles too.
 func WireStoredKey(resolved *Resolved, keyStore *oauth.KeyStore) bool {
 	if resolved == nil || keyStore == nil || resolved.Profile == "" {
 		return false
 	}
-	if resolved.OAuthProvider != "" {
+	if resolved.HasProvider() || resolved.OAuthProvider != "" {
 		return false
 	}
 	key := strings.TrimSpace(keyStore.Get(resolved.Profile))
@@ -79,4 +76,20 @@ func WireStoredKey(resolved *Resolved, keyStore *oauth.KeyStore) bool {
 	}
 	resolved.SetAPIKey(key)
 	return true
+}
+
+// WireDefaultKeyStore opens the key store at its default path and applies
+// [WireStoredKey] from it. It returns the store, or the error that kept
+// it from being opened.
+func WireDefaultKeyStore(resolved *Resolved) (*oauth.KeyStore, error) {
+	path, err := oauth.DefaultKeyStorePath()
+	if err != nil {
+		return nil, err
+	}
+	store, err := oauth.NewKeyStore(path)
+	if err != nil {
+		return nil, err
+	}
+	WireStoredKey(resolved, store)
+	return store, nil
 }

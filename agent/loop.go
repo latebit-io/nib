@@ -539,12 +539,11 @@ func (a *Agent) runTool(ctx context.Context, call llm.ToolCall) (result ToolResu
 	name := call.Function.Name
 	tool, ok := a.tools[name]
 	if !ok {
-		return ToolResult{Content: fmt.Sprintf("Error: unknown tool %q", name), IsError: true}
+		return toolError(fmt.Errorf("unknown tool %q", name))
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			err := recovered("tool "+name, r)
-			result = ToolResult{Content: "Error: " + err.Error(), IsError: true}
+			result = toolError(recovered("tool "+name, r))
 		}
 	}()
 	return tool.Execute(ctx, call)

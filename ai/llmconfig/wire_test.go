@@ -3,6 +3,7 @@ package llmconfig
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -199,6 +200,13 @@ func TestWireStoredKey(t *testing.T) {
 			want:     false,
 		},
 		{
+			name:     "credentials already present are kept",
+			resolved: &Resolved{Profile: "openrouter", apiKey: "sk-env"},
+			store:    keyStore,
+			want:     false,
+			wantKey:  "sk-env",
+		},
+		{
 			name:     "oauth-only profile short-circuits with false",
 			resolved: &Resolved{Profile: "openrouter", OAuthProvider: "openai"},
 			store:    keyStore,
@@ -215,6 +223,84 @@ func TestWireStoredKey(t *testing.T) {
 			}
 			if tc.resolved != nil && tc.resolved.apiKey != tc.wantKey {
 				t.Errorf("apiKey = %q, want %q", tc.resolved.apiKey, tc.wantKey)
+			}
+		})
+	}
+}
+
+// TestWireDefaultKeyStore points the user config dir at a temp dir, so
+// the default key store path is the test's own.
+func TestWireDefaultKeyStore(t *testing.T) {
+	tests := []struct {
+		name     string
+		saved    map[string]string // profile -> key in the store
+		corrupt  bool              // the store file is not JSON
+		resolved *Resolved
+		wantKey  string
+		wantErr  bool
+	}{
+		{
+			name:     "key saved for the profile is applied",
+			saved:    map[string]string{"openrouter": "sk-saved"},
+			resolved: &Resolved{Profile: "openrouter"},
+			wantKey:  "sk-saved",
+		},
+		{
+			name:     "a key from the environment keeps priority",
+			saved:    map[string]string{"openrouter": "sk-saved"},
+			resolved: &Resolved{Profile: "openrouter", apiKey: "sk-env"},
+			wantKey:  "sk-env",
+		},
+		{
+			name:     "nothing saved for the profile",
+			saved:    map[string]string{"other": "sk-other"},
+			resolved: &Resolved{Profile: "openrouter"},
+		},
+		{
+			name:     "unreadable store is an error, not a silent miss",
+			corrupt:  true,
+			resolved: &Resolved{Profile: "openrouter"},
+			wantErr:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			// Windows resolves the config dir from AppData alone.
+			t.Setenv("AppData", home)
+			path, err := oauth.DefaultKeyStorePath()
+			if err != nil {
+				t.Fatalf("DefaultKeyStorePath: %v", err)
+			}
+			if tc.corrupt {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			}
+			if len(tc.saved) > 0 {
+				seed, err := oauth.NewKeyStore(path)
+				if err != nil {
+					t.Fatalf("NewKeyStore: %v", err)
+				}
+				for profile, key := range tc.saved {
+					if err := seed.Put(profile, key); err != nil {
+						t.Fatalf("Put: %v", err)
+					}
+				}
+			}
+
+			store, err := WireDefaultKeyStore(tc.resolved)
+
+			if (err != nil) != tc.wantErr || (store == nil) != tc.wantErr {
+				t.Fatalf("store = %v, err = %v; want error: %v", store, err, tc.wantErr)
+			}
+			if tc.resolved.apiKey != tc.wantKey {
+				t.Errorf("key = %q; want %q", tc.resolved.apiKey, tc.wantKey)
 			}
 		})
 	}

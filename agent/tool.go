@@ -34,3 +34,8 @@ type ToolResult struct {
 	// Content; frontends can render the failure distinctively.
 	IsError bool
 }
+
+// toolError is the error result the model reads and can react to.
+func toolError(err error) ToolResult {
+	return ToolResult{Content: "Error: " + err.Error(), IsError: true}
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
 
 // panicProvider panics when asked for a turn.
@@ -30,7 +31,7 @@ func TestPanic_FailsTheRunNotTheHost(t *testing.T) {
 		{
 			name: "BeforeToolCall panics mid-batch",
 			opts: Options{
-				Provider: newScriptedProvider(streamWithToolCalls(callsOf("echo", 2))),
+				Provider: llmtest.NewScripted(llmtest.ToolCalls(callsOf("echo", 2)...)),
 				Hooks: Hooks{BeforeToolCall: func(context.Context, BeforeToolCallInput) (BeforeToolCallResult, error) {
 					panic("hook bug")
 				}},
@@ -40,7 +41,7 @@ func TestPanic_FailsTheRunNotTheHost(t *testing.T) {
 		{
 			name: "AfterToolCall panics mid-batch",
 			opts: Options{
-				Provider: newScriptedProvider(streamWithToolCalls(callsOf("echo", 2))),
+				Provider: llmtest.NewScripted(llmtest.ToolCalls(callsOf("echo", 2)...)),
 				Hooks: Hooks{AfterToolCall: func(context.Context, AfterToolCallInput) (AfterToolCallResult, error) {
 					panic("hook bug")
 				}},
@@ -81,10 +82,10 @@ func TestPanic_FailsTheRunNotTheHost(t *testing.T) {
 func TestPanic_ToolResultAndReuse(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(
-		streamWithToolCalls([]llm.ToolCall{echoCall}),
-		streamDone(),
-		streamDone(),
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(echoCall),
+		llmtest.Done(),
+		llmtest.Done(),
 	)
 	hooks := Hooks{TransformContext: func(_ context.Context, msgs []llm.Message) ([]llm.Message, error) {
 		if msgs[0].Content == "second" {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
 
 // TestOneShot_EndsRunInsteadOfParking covers every path that reaches the
@@ -36,23 +37,23 @@ func TestOneShot_EndsRunInsteadOfParking(t *testing.T) {
 	}{
 		{
 			name:      "text turn",
-			turns:     [][]llm.StreamEvent{streamText([]string{"done"}, nil)},
+			turns:     [][]llm.StreamEvent{llmtest.Text("done")},
 			wantRoles: []string{"user", "assistant"},
 		},
 		{
 			name:      "tool call then text",
-			turns:     [][]llm.StreamEvent{streamWithToolCalls([]llm.ToolCall{echoCall}), streamText([]string{"done"}, nil)},
+			turns:     [][]llm.StreamEvent{llmtest.ToolCalls(echoCall), llmtest.Text("done")},
 			wantRoles: []string{"user", "assistant", "tool", "assistant"},
 		},
 		{
 			name:      "steering continues the run",
-			turns:     [][]llm.StreamEvent{streamDone(), streamDone()},
+			turns:     [][]llm.StreamEvent{llmtest.Done(), llmtest.Done()},
 			hooks:     Hooks{SteeringMessages: once("steer")},
 			wantRoles: []string{"user", "assistant", "user", "assistant"},
 		},
 		{
 			name:      "follow-up continues the run",
-			turns:     [][]llm.StreamEvent{streamDone(), streamDone()},
+			turns:     [][]llm.StreamEvent{llmtest.Done(), llmtest.Done()},
 			hooks:     Hooks{FollowUpMessages: once("more")},
 			wantRoles: []string{"user", "assistant", "user", "assistant"},
 		},
@@ -63,7 +64,7 @@ func TestOneShot_EndsRunInsteadOfParking(t *testing.T) {
 
 			events := make(chan event.Event, 64)
 			a, err := New(Options{
-				Provider: newScriptedProvider(tc.turns...),
+				Provider: llmtest.NewScripted(tc.turns...),
 				Events:   events,
 				Tools:    []Tool{namedTool{name: "echo"}},
 				Hooks:    tc.hooks,
@@ -116,7 +117,7 @@ func TestOneShot_ReplyRefusedAndAgentReusable(t *testing.T) {
 	}}
 	events := make(chan event.Event, 64)
 	a, err := New(Options{
-		Provider: newScriptedProvider(streamDone(), streamDone()),
+		Provider: llmtest.NewScripted(llmtest.Done(), llmtest.Done()),
 		Events:   events,
 		Hooks:    hooks,
 		OneShot:  true,
@@ -158,7 +159,7 @@ func TestRunEnd_CancelsRunContext(t *testing.T) {
 		return nil, nil
 	}}
 	events := make(chan event.Event, 64)
-	a, err := New(Options{Provider: newScriptedProvider(streamDone()), Events: events, Hooks: hooks, OneShot: true})
+	a, err := New(Options{Provider: llmtest.NewScripted(llmtest.Done()), Events: events, Hooks: hooks, OneShot: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

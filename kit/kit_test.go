@@ -5,85 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 
 	agentevent "github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
 )
-
-// scriptedProvider serves up a queue of pre-built stream responses,
-// one per Stream call. Sufficient for facade-level tests; the agent
-// foundation has deeper provider-behavior coverage.
-type scriptedProvider struct {
-	mu    sync.Mutex
-	turns [][]llm.StreamEvent
-}
-
-func newScriptedProvider(turns ...[]llm.StreamEvent) *scriptedProvider {
-	return &scriptedProvider{turns: turns}
-}
-
-func (p *scriptedProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	p.mu.Lock()
-	var events []llm.StreamEvent
-	if len(p.turns) > 0 {
-		events = p.turns[0]
-		p.turns = p.turns[1:]
-	}
-	p.mu.Unlock()
-
-	ch := make(chan llm.StreamEvent, len(events)+1)
-	for _, ev := range events {
-		ch <- ev
-	}
-	close(ch)
-	return ch, nil
-}
-
-// errorProvider returns an error from Stream.
-type errorProvider struct{ err error }
-
-func (p errorProvider) Stream(_ context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	return nil, p.err
-}
-
-// blockingProvider blocks Stream until ctx cancellation. Used to keep
-// a run alive long enough to observe Cancel semantics deterministically.
-type blockingProvider struct{}
-
-func (blockingProvider) Stream(ctx context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent)
-	go func() {
-		<-ctx.Done()
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func streamText(chunks []string, usage *llm.Usage) []llm.StreamEvent {
-	out := make([]llm.StreamEvent, 0, len(chunks)+1)
-	for _, c := range chunks {
-		out = append(out, llm.StreamEvent{Token: c})
-	}
-	out = append(out, llm.StreamEvent{Done: true, Usage: usage})
-	return out
-}
-
-// streamWithToolCall returns a stream whose terminal Done event carries
-// a single tool call with the given id, name, and JSON-arg blob.
-func streamWithToolCall(id, name, args string) []llm.StreamEvent {
-	return []llm.StreamEvent{{
-		Done: true,
-		ToolCalls: []llm.ToolCall{{
-			ID:       id,
-			Function: llm.FunctionCall{Name: name, Arguments: args},
-		}},
-	}}
-}
 
 // drainUntil reads from ch until pred returns true on a received event
 // or the 2s deadline expires. Returns every event drained including the
@@ -165,7 +95,7 @@ func TestNew_RejectsNilProvider(t *testing.T) {
 func TestNew_PropagatesFoundationValidation(t *testing.T) {
 	t.Parallel()
 	_, err := kit.New(kit.Config{
-		Provider: errorProvider{err: errors.New("x")},
+		Provider: llmtest.Failing(errors.New("x")),
 		Toolset:  kit.Toolset{Tools: []kit.Tool{brokenTool{}}},
 	})
 	if !errors.Is(err, kit.ErrInvalidOptions) {
@@ -175,7 +105,7 @@ func TestNew_PropagatesFoundationValidation(t *testing.T) {
 
 func TestNew_RejectsNegativeMaxTurns(t *testing.T) {
 	t.Parallel()
-	_, err := kit.New(kit.Config{Provider: newScriptedProvider(), MaxTurns: -1})
+	_, err := kit.New(kit.Config{Provider: llmtest.NewScripted(), MaxTurns: -1})
 	if !errors.Is(err, kit.ErrInvalidOptions) {
 		t.Fatalf("want ErrInvalidOptions, got %v", err)
 	}
@@ -185,10 +115,10 @@ func TestMaxTurns_PublishesAgentMaxTurnsThenSuccessfulDone(t *testing.T) {
 	t.Parallel()
 
 	// Three tool-call turns scripted; the cap must stop the run after two.
-	provider := newScriptedProvider(
-		streamWithToolCall("c1", "nop", "{}"),
-		streamWithToolCall("c2", "nop", "{}"),
-		streamWithToolCall("c3", "nop", "{}"),
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(llmtest.Call("c1", "nop", "{}")),
+		llmtest.ToolCalls(llmtest.Call("c2", "nop", "{}")),
+		llmtest.ToolCalls(llmtest.Call("c3", "nop", "{}")),
 	)
 	a, err := kit.New(kit.Config{
 		Provider: provider,
@@ -220,10 +150,10 @@ func TestMaxTurns_PublishesAgentMaxTurnsThenSuccessfulDone(t *testing.T) {
 func TestPrompt_StreamsTokensAndEndsSuccess(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"Hello", " world"}, &llm.Usage{
+	provider := llmtest.NewScripted(llmtest.TextUsage(&llm.Usage{
 		PromptTokens:     10,
 		CompletionTokens: 2,
-	}))
+	}, "Hello", " world"))
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -296,7 +226,7 @@ func TestPrompt_StreamsTokensAndEndsSuccess(t *testing.T) {
 func TestPark_TranslatesAgentParkedToAgentWaitingInStreamOrder(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"a", "b", "c"}, nil))
+	provider := llmtest.NewScripted(llmtest.Text("a", "b", "c"))
 
 	hooks := kit.Hooks{
 		BeforePark: func(_ context.Context) (agentevent.AgentParked, error) {
@@ -349,7 +279,7 @@ func TestPark_TranslatesAgentParkedToAgentWaitingInStreamOrder(t *testing.T) {
 func TestStreamError_EmitsAgentErrorAndUnsuccessfulDone(t *testing.T) {
 	t.Parallel()
 
-	provider := errorProvider{err: errors.New("boom")}
+	provider := llmtest.Failing(errors.New("boom"))
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -397,7 +327,7 @@ func TestStreamError_EmitsAgentErrorAndUnsuccessfulDone(t *testing.T) {
 func TestSend_ControlEventsBlockNotDrop(t *testing.T) {
 	t.Parallel()
 
-	provider := errorProvider{err: errors.New("boom")}
+	provider := llmtest.Failing(errors.New("boom"))
 
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
@@ -447,7 +377,7 @@ func TestSend_ControlEventsBlockNotDrop(t *testing.T) {
 func TestErrRunInProgress(t *testing.T) {
 	t.Parallel()
 
-	provider := blockingProvider{}
+	provider := llmtest.Blocking()
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -472,7 +402,7 @@ func TestErrRunInProgress(t *testing.T) {
 func TestState_DelegatesToFoundation(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
+	provider := llmtest.NewScripted(llmtest.Text("hi"))
 	a, err := kit.New(kit.Config{
 		Provider:     provider,
 		SystemPrompt: "you are a test",
@@ -522,7 +452,7 @@ func TestEventTranslation_TurnUsageFieldByField(t *testing.T) {
 		CompletionTokens: 50,
 		CachedTokens:     20,
 	}
-	provider := newScriptedProvider(streamText([]string{"hi"}, usage))
+	provider := llmtest.NewScripted(llmtest.TextUsage(usage, "hi"))
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -558,7 +488,7 @@ func TestEventTranslation_TurnUsageFieldByField(t *testing.T) {
 func TestFoundationObservability_NotInConsumerStream(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
+	provider := llmtest.NewScripted(llmtest.Text("hi"))
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -593,7 +523,7 @@ func TestFoundationObservability_NotInConsumerStream(t *testing.T) {
 func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
+	provider := llmtest.NewScripted(llmtest.Text("hi"))
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -639,7 +569,7 @@ func TestClose_StopsTranslatorGoroutine(t *testing.T) {
 func TestClose_Idempotent(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
+	provider := llmtest.NewScripted(llmtest.Text("hi"))
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -662,7 +592,7 @@ func TestClose_Idempotent(t *testing.T) {
 func TestClose_DeliversFinalAgentDone(t *testing.T) {
 	t.Parallel()
 
-	provider := blockingProvider{}
+	provider := llmtest.Blocking()
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -694,7 +624,7 @@ func TestClose_DeliversFinalAgentDone(t *testing.T) {
 func TestPrompt_AfterCloseReturnsErrClosed(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(streamText([]string{"hi"}, nil))
+	provider := llmtest.NewScripted(llmtest.Text("hi"))
 	a, err := kit.New(kit.Config{Provider: provider})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -737,8 +667,8 @@ func lastDone(evs []event.Event) (event.AgentDone, bool) {
 func TestSubscribeProbeObservesAlongsideConsumer(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(
-		streamWithToolCall("call-1", "echo", `{"text":"hi"}`),
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(llmtest.Call("call-1", "echo", `{"text":"hi"}`)),
 	)
 	hooks := kit.Hooks{
 		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {

@@ -9,21 +9,10 @@ import (
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 )
 
-var echoCall = llm.ToolCall{ID: "c1", Type: "function", Function: llm.FunctionCall{Name: "echo", Arguments: "{}"}}
-
-// hangingProvider streams its tokens and then never finishes the turn,
-// so a run stays mid-turn until its ctx ends.
-type hangingProvider []string
-
-func (p hangingProvider) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	ch := make(chan llm.StreamEvent, len(p))
-	for _, tok := range p {
-		ch <- llm.StreamEvent{Token: tok}
-	}
-	return ch, nil
-}
+var echoCall = llmtest.Call("c1", "echo", "{}")
 
 // slowEcho is an echo tool that returns only once the run ctx is done.
 type slowEcho struct{ namedTool }
@@ -115,14 +104,14 @@ func TestAgentEnd_Reason(t *testing.T) {
 	}{
 		{
 			name: "one-shot run finishes",
-			opts: Options{Provider: newScriptedProvider(streamText([]string{"done"}, nil)), OneShot: true},
+			opts: Options{Provider: llmtest.NewScripted(llmtest.Text("done")), OneShot: true},
 			want: event.EndCompleted,
 		},
 		{
 			// The work is done but the run was cancelled: as when parked.
 			name: "one-shot run aborted at its last step",
 			opts: Options{
-				Provider: newScriptedProvider(streamDone()),
+				Provider: llmtest.NewScripted(llmtest.Done()),
 				Hooks: Hooks{SteeringMessages: func(ctx context.Context) ([]llm.Message, error) {
 					<-ctx.Done()
 					return nil, nil
@@ -136,7 +125,7 @@ func TestAgentEnd_Reason(t *testing.T) {
 			// The batch asks to stop, but the run was cancelled first.
 			name: "Abort during a terminating tool batch",
 			opts: Options{
-				Provider: newScriptedProvider(streamWithToolCalls([]llm.ToolCall{echoCall})),
+				Provider: llmtest.NewScripted(llmtest.ToolCalls(echoCall)),
 				Tools:    []Tool{slowEcho{namedTool{name: "echo"}}},
 				Hooks: Hooks{AfterToolCall: func(context.Context, AfterToolCallInput) (AfterToolCallResult, error) {
 					return AfterToolCallResult{Terminate: true}, nil
@@ -147,25 +136,25 @@ func TestAgentEnd_Reason(t *testing.T) {
 		},
 		{
 			name:  "Close while parked",
-			opts:  Options{Provider: newScriptedProvider(streamDone())},
+			opts:  Options{Provider: llmtest.NewScripted(llmtest.Done())},
 			react: on[event.AgentParked](func(a *Agent, _ context.CancelFunc) { a.Close() }),
 			want:  event.EndAborted,
 		},
 		{
 			name:  "Abort while parked",
-			opts:  Options{Provider: newScriptedProvider(streamDone())},
+			opts:  Options{Provider: llmtest.NewScripted(llmtest.Done())},
 			react: on[event.AgentParked](abort),
 			want:  event.EndAborted,
 		},
 		{
 			name:  "caller ctx cancelled while parked",
-			opts:  Options{Provider: newScriptedProvider(streamDone())},
+			opts:  Options{Provider: llmtest.NewScripted(llmtest.Done())},
 			react: on[event.AgentParked](cancelCaller),
 			want:  event.EndAborted,
 		},
 		{
 			name:  "Abort mid-turn",
-			opts:  Options{Provider: hangingProvider{}},
+			opts:  Options{Provider: llmtest.Blocking()},
 			react: on[event.MessageStart](abort),
 			want:  event.EndAborted,
 		},
@@ -173,7 +162,7 @@ func TestAgentEnd_Reason(t *testing.T) {
 			// The hook's own error is a consequence of the abort.
 			name: "hook fails after Abort",
 			opts: Options{
-				Provider: newScriptedProvider(streamDone()),
+				Provider: llmtest.NewScripted(llmtest.Done()),
 				Hooks: Hooks{TransformContext: func(ctx context.Context, _ []llm.Message) ([]llm.Message, error) {
 					<-ctx.Done()
 					return nil, failing
@@ -184,7 +173,7 @@ func TestAgentEnd_Reason(t *testing.T) {
 		},
 		{
 			name:      "provider fails",
-			opts:      Options{Provider: errorProvider{err: failing}},
+			opts:      Options{Provider: llmtest.Failing(failing)},
 			want:      event.EndError,
 			wantError: true,
 		},
@@ -192,14 +181,14 @@ func TestAgentEnd_Reason(t *testing.T) {
 			// A timeout of the provider's own is a failure, not an abort:
 			// the run ctx is still live.
 			name:      "provider times out on its own",
-			opts:      Options{Provider: errorProvider{err: context.DeadlineExceeded}},
+			opts:      Options{Provider: llmtest.Failing(context.DeadlineExceeded)},
 			want:      event.EndError,
 			wantError: true,
 		},
 		{
 			name: "hook fails",
 			opts: Options{
-				Provider: newScriptedProvider(streamDone()),
+				Provider: llmtest.NewScripted(llmtest.Done()),
 				Hooks: Hooks{TransformContext: func(context.Context, []llm.Message) ([]llm.Message, error) {
 					return nil, failing
 				}},
@@ -211,7 +200,7 @@ func TestAgentEnd_Reason(t *testing.T) {
 			// The loop never returns, yet AgentEnd must carry a reason.
 			name: "hook exits the goroutine",
 			opts: Options{
-				Provider: newScriptedProvider(streamDone()),
+				Provider: llmtest.NewScripted(llmtest.Done()),
 				Hooks: Hooks{TransformContext: func(context.Context, []llm.Message) ([]llm.Message, error) {
 					runtime.Goexit()
 					return nil, nil
@@ -222,13 +211,13 @@ func TestAgentEnd_Reason(t *testing.T) {
 		},
 		{
 			name: "turn cap reached",
-			opts: Options{Provider: newScriptedProvider(streamWithToolCalls([]llm.ToolCall{echoCall})), MaxTurns: 1},
+			opts: Options{Provider: llmtest.NewScripted(llmtest.ToolCalls(echoCall)), MaxTurns: 1},
 			want: event.EndMaxTurns,
 		},
 		{
 			name: "tool batch terminates",
 			opts: Options{
-				Provider: newScriptedProvider(streamWithToolCalls([]llm.ToolCall{echoCall})),
+				Provider: llmtest.NewScripted(llmtest.ToolCalls(echoCall)),
 				Hooks: Hooks{AfterToolCall: func(context.Context, AfterToolCallInput) (AfterToolCallResult, error) {
 					return AfterToolCallResult{Terminate: true}, nil
 				}},
@@ -237,14 +226,14 @@ func TestAgentEnd_Reason(t *testing.T) {
 		},
 		{
 			name:      "truncated without a hook",
-			opts:      Options{Provider: newScriptedProvider([]llm.StreamEvent{{Done: true, Truncated: true}})},
+			opts:      Options{Provider: llmtest.NewScripted([]llm.StreamEvent{{Done: true, Truncated: true}})},
 			want:      event.EndTruncated,
 			wantError: true,
 		},
 		{
 			name: "truncated, hook declines retry",
 			opts: Options{
-				Provider: newScriptedProvider([]llm.StreamEvent{{Done: true, Truncated: true}}),
+				Provider: llmtest.NewScripted([]llm.StreamEvent{{Done: true, Truncated: true}}),
 				Hooks: Hooks{OnTruncated: func(context.Context, TruncationInput) (TruncationResult, error) {
 					return TruncationResult{}, nil
 				}},
@@ -271,12 +260,12 @@ func TestAgentEnd_Reason(t *testing.T) {
 func TestAgentEnd_Usage(t *testing.T) {
 	t.Parallel()
 
-	provider := newScriptedProvider(
+	provider := llmtest.NewScripted(
 		[]llm.StreamEvent{{Done: true, ToolCalls: []llm.ToolCall{echoCall}, Usage: &llm.Usage{
 			PromptTokens: 10, CompletionTokens: 2, CachedTokens: 1, CacheWriteTokens: 4,
 		}}},
-		streamDone(), // a turn whose provider reports no usage still counts
-		streamText([]string{"done"}, &llm.Usage{PromptTokens: 20, CompletionTokens: 3}),
+		llmtest.Done(), // a turn whose provider reports no usage still counts
+		llmtest.TextUsage(&llm.Usage{PromptTokens: 20, CompletionTokens: 3}, "done"),
 	)
 	// Steering keeps the run going past the usage-less second turn.
 	steered := false
@@ -314,25 +303,25 @@ func TestAgentEnd_FinalText(t *testing.T) {
 	}{
 		{
 			name: "answer supersedes narration",
-			opts: Options{Provider: newScriptedProvider(narrate, streamText([]string{"The ", "answer."}, nil)), OneShot: true},
+			opts: Options{Provider: llmtest.NewScripted(narrate, llmtest.Text("The ", "answer.")), OneShot: true},
 			seed: question,
 			want: "The answer.",
 		},
 		{
 			name: "empty last turn keeps the narration",
-			opts: Options{Provider: newScriptedProvider(narrate, streamDone()), OneShot: true},
+			opts: Options{Provider: llmtest.NewScripted(narrate, llmtest.Done()), OneShot: true},
 			seed: question,
 			want: "Looking.",
 		},
 		{
 			name: "text of a turn that failed mid-stream is kept",
-			opts: Options{Provider: newScriptedProvider([]llm.StreamEvent{{Token: "partial"}, {Err: errors.New("boom")}})},
+			opts: Options{Provider: llmtest.NewScripted([]llm.StreamEvent{{Token: "partial"}, {Err: errors.New("boom")}})},
 			seed: question,
 			want: "partial",
 		},
 		{
 			name:  "text of a turn aborted mid-stream is kept",
-			opts:  Options{Provider: hangingProvider{"partial"}},
+			opts:  Options{Provider: llmtest.Blocking("partial")},
 			seed:  question,
 			react: on[event.MessageUpdate](func(a *Agent, _ context.CancelFunc) { a.Abort() }),
 			want:  "partial",
@@ -340,13 +329,13 @@ func TestAgentEnd_FinalText(t *testing.T) {
 		{
 			// The second turn fails before writing anything.
 			name: "earlier text survives a turn that broke off empty",
-			opts: Options{Provider: newScriptedProvider(narrate)},
+			opts: Options{Provider: llmtest.NewScripted(narrate)},
 			seed: question,
 			want: "Looking.",
 		},
 		{
 			name: "seeded history is not this run's text",
-			opts: Options{Provider: errorProvider{err: errors.New("boom")}},
+			opts: Options{Provider: llmtest.Failing(errors.New("boom"))},
 			seed: []llm.Message{{Role: "user", Content: "q"}, {Role: "assistant", Content: "old answer"}},
 			want: "",
 		},
@@ -354,7 +343,7 @@ func TestAgentEnd_FinalText(t *testing.T) {
 			// The scripted provider has no second turn: the run fails
 			// right after the reply, before any new text.
 			name: "a reply starts a new exchange",
-			opts: Options{Provider: newScriptedProvider(streamText([]string{"first"}, nil))},
+			opts: Options{Provider: llmtest.NewScripted(llmtest.Text("first"))},
 			seed: question,
 			react: on[event.AgentParked](func(a *Agent, _ context.CancelFunc) {
 				a.Reply(context.Background(), "more")

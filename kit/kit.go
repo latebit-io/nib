@@ -48,6 +48,12 @@ type Tool = agent.Tool
 // ToolResult is the foundation [agent.ToolResult] re-exported under kit.
 type ToolResult = agent.ToolResult
 
+// NewTool is the foundation's [agent.NewTool] under kit: a tool whose
+// schema and argument decoding come from the struct A.
+func NewTool[A any](name, description string, run func(ctx context.Context, args A) (string, error)) Tool {
+	return agent.NewTool(name, description, run)
+}
+
 // Hooks is the foundation [agent.Hooks] re-exported under kit.
 type Hooks = agent.Hooks
 

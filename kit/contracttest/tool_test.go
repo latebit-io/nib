@@ -39,3 +39,15 @@ func (happyTool) Execute(_ context.Context, _ llm.ToolCall) kit.ToolResult {
 func TestTool_HappyImplementationPasses(t *testing.T) {
 	Tool(t, func() kit.Tool { return happyTool{} })
 }
+
+// TestTool_TypedToolPasses: a tool built by [kit.NewTool] holds the
+// contract, malformed arguments included.
+func TestTool_TypedToolPasses(t *testing.T) {
+	type args struct {
+		Path string `json:"path"`
+	}
+	Tool(t, func() kit.Tool {
+		return kit.NewTool("typed_test_tool", "typed tool for contracttest verification",
+			func(context.Context, args) (string, error) { return "ok", nil })
+	})
+}

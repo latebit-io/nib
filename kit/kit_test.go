@@ -207,7 +207,11 @@ func TestMaxTurns_PublishesAgentMaxTurnsThenSuccessfulDone(t *testing.T) {
 	got := drainUntil(events, untilDone)
 
 	// A turn-cap stop is a policy outcome, not a failure: Success stays true.
-	want := []event.Event{event.AgentMaxTurns{Turns: 2}, event.AgentDone{Success: true}}
+	want := []event.Event{event.AgentMaxTurns{Turns: 2}, event.AgentDone{
+		Success: true,
+		Reason:  event.EndMaxTurns,
+		Usage:   event.RunUsage{Turns: 2, ToolCalls: 2},
+	}}
 	if n := len(got); n < 2 || !slices.Equal(got[n-2:], want) {
 		t.Fatalf("events = %v; want tail %v", eventTypeSeq(got), want)
 	}
@@ -279,49 +283,6 @@ func TestPrompt_StreamsTokensAndEndsSuccess(t *testing.T) {
 	done, _ := lastDone(got)
 	if done.Success {
 		t.Fatalf("AgentDone.Success=true after Cancel, want false")
-	}
-}
-
-// TestPrompt_CleanRunDoneSuccessTrue drives a run that completes
-// cleanly via [AfterToolCallResult.Terminate] and asserts the resulting
-// [event.AgentDone] reports Success=true. This is the only path that
-// produces a clean foundation AgentEnd without external Cancel or
-// stream error, so it's the only way to observe the success=true
-// branch of the kit translator.
-func TestPrompt_CleanRunDoneSuccessTrue(t *testing.T) {
-	t.Parallel()
-
-	provider := newScriptedProvider(
-		streamWithToolCall("call-1", "echo", `{"text":"hi"}`),
-	)
-	tool := nopTool{name: "echo"}
-	hooks := kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
-			return kit.AfterToolCallResult{Terminate: true}, nil
-		},
-	}
-	a, err := kit.New(kit.Config{
-		Provider: provider,
-		Toolset:  kit.Toolset{Tools: []kit.Tool{tool}, Hooks: hooks},
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer a.Close()
-	events := subscribeEvents(t, a)
-
-	if err := a.Prompt(context.Background(), "go"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	a.WaitForIdle()
-
-	got := drainUntil(events, untilDone)
-	done, ok := lastDone(got)
-	if !ok {
-		t.Fatalf("no AgentDone in events")
-	}
-	if !done.Success {
-		t.Fatalf("AgentDone.Success=false on clean run, want true")
 	}
 }
 
@@ -425,58 +386,6 @@ func TestStreamError_EmitsAgentErrorAndUnsuccessfulDone(t *testing.T) {
 	}
 }
 
-// TestUnsuccessful_ResetBetweenRuns exercises the contract that
-// [Agent.Prompt] clears the unsuccess flag set by a prior run. First
-// run errors mid-stream → flag set → AgentDone(false). Second run
-// terminates cleanly via Terminate hook; without the reset, the
-// translator would still emit AgentDone(false) on the second run.
-func TestUnsuccessful_ResetBetweenRuns(t *testing.T) {
-	t.Parallel()
-
-	provider := &swappableProvider{p: errorProvider{err: errors.New("first")}}
-	hooks := kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
-			return kit.AfterToolCallResult{Terminate: true}, nil
-		},
-	}
-	a, err := kit.New(kit.Config{
-		Provider: provider,
-		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer a.Close()
-	events := subscribeEvents(t, a)
-
-	if err := a.Prompt(context.Background(), "first"); err != nil {
-		t.Fatalf("Prompt(first): %v", err)
-	}
-	a.WaitForIdle()
-	first := drainUntil(events, untilDone)
-	if d, _ := lastDone(first); d.Success {
-		t.Fatalf("first AgentDone.Success=true, want false")
-	}
-
-	provider.swap(newScriptedProvider(
-		streamWithToolCall("call-1", "echo", `{"text":"hi"}`),
-	))
-
-	if err := a.Prompt(context.Background(), "second"); err != nil {
-		t.Fatalf("Prompt(second): %v", err)
-	}
-	a.WaitForIdle()
-
-	second := drainUntil(events, untilDone)
-	d, ok := lastDone(second)
-	if !ok {
-		t.Fatalf("no AgentDone on second run")
-	}
-	if !d.Success {
-		t.Fatalf("second AgentDone.Success=false, want true (reset failed)")
-	}
-}
-
 // TestSend_ControlEventsBlockNotDrop guards the contract that
 // terminal/control events are guaranteed delivery — never silently
 // dropped to a timeout. A slow consumer (here, an unbuffered channel
@@ -532,95 +441,6 @@ func TestSend_ControlEventsBlockNotDrop(t *testing.T) {
 	}
 	if !sawErr {
 		t.Fatalf("AgentError not delivered to slow consumer")
-	}
-}
-
-// TestUnsuccessful_NoCrossRunPoisoning exercises the race CodeRabbit
-// flagged: WaitForIdle returns when the foundation goroutine exits,
-// but the previous run's AgentEnd may still be in the foundation
-// events buffer awaiting translation. A fast next Prompt that resets
-// shared state on the user's goroutine would race the translator's
-// read of that state on the previous run's AgentEnd, mislabeling
-// run 1's success as the next run's prelude.
-//
-// Per-run outcome state in [Agent] eliminates the race: each run's
-// failure bit is bound to its own [runOutcome] so the next run's
-// allocation cannot poison the previous run's reading.
-//
-// Test shape: run 1 errors, immediately Prompt run 2 (no drain
-// between), then drain both AgentDones. Run 1 must report
-// Success=false; run 2 must report Success=true.
-func TestUnsuccessful_NoCrossRunPoisoning(t *testing.T) {
-	t.Parallel()
-
-	provider := &swappableProvider{p: errorProvider{err: errors.New("first")}}
-	hooks := kit.Hooks{
-		AfterToolCall: func(_ context.Context, _ kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
-			return kit.AfterToolCallResult{Terminate: true}, nil
-		},
-	}
-	a, err := kit.New(kit.Config{
-		Provider: provider,
-		Toolset:  kit.Toolset{Tools: []kit.Tool{nopTool{name: "echo"}}, Hooks: hooks},
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer a.Close()
-	events := subscribeEvents(t, a, kit.SubscribeOptions{BufferSize: 64})
-
-	if err := a.Prompt(context.Background(), "first"); err != nil {
-		t.Fatalf("Prompt(first): %v", err)
-	}
-	a.WaitForIdle()
-
-	provider.swap(newScriptedProvider(
-		streamWithToolCall("call-1", "echo", `{"text":"hi"}`),
-	))
-
-	// Crucial: no drain between runs. Prompt(second) immediately
-	// after WaitForIdle of first stresses the per-run binding.
-	// foundation.Prompt may return ErrRunInProgress if the
-	// foundation hasn't fully released the running flag yet — retry
-	// briefly to handle that without serializing through a drain
-	// (which would defeat the test's purpose).
-	deadline := time.After(2 * time.Second)
-	for {
-		err := a.Prompt(context.Background(), "second")
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, kit.ErrRunInProgress) {
-			t.Fatalf("Prompt(second): %v", err)
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("Prompt(second) stuck on ErrRunInProgress past deadline")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	a.WaitForIdle()
-
-	// Now drain both AgentDones and verify each run's success bit
-	// reflects that run, not the other.
-	var dones []event.AgentDone
-	drainUntil(events, func(ev event.Event) bool {
-		if d, ok := ev.(event.AgentDone); ok {
-			dones = append(dones, d)
-			return len(dones) == 2
-		}
-		return false
-	})
-
-	if len(dones) < 2 {
-		t.Fatalf("got %d AgentDone events, want 2", len(dones))
-	}
-	if dones[0].Success {
-		t.Fatalf("first AgentDone.Success=true, want false (run errored)")
-	}
-	if !dones[1].Success {
-		t.Fatalf("second AgentDone.Success=false, want true (run completed cleanly)")
 	}
 }
 
@@ -865,7 +685,7 @@ func TestClose_DeliversFinalAgentDone(t *testing.T) {
 	if !ok {
 		t.Fatalf("no AgentDone after Close")
 	}
-	// Close calls Cancel, which sets the unsuccess flag.
+	// Close calls Cancel, which aborts the run.
 	if d.Success {
 		t.Fatalf("AgentDone.Success=true after Close, want false (Close cancels)")
 	}
@@ -891,6 +711,9 @@ func TestPrompt_AfterCloseReturnsErrClosed(t *testing.T) {
 	if err := a.PromptWithMessages(context.Background(), []llm.Message{{Role: "user", Content: "x"}}); !errors.Is(err, kit.ErrClosed) {
 		t.Fatalf("PromptWithMessages after Close: want ErrClosed, got %v", err)
 	}
+	if _, err := a.Run(context.Background(), []llm.Message{{Role: "user", Content: "x"}}); !errors.Is(err, kit.ErrClosed) {
+		t.Fatalf("Run after Close: want ErrClosed, got %v", err)
+	}
 }
 
 // lastDone returns the final AgentDone in evs, if any.
@@ -908,21 +731,9 @@ func lastDone(evs []event.Event) (event.AgentDone, bool) {
 	return d, ok
 }
 
-// TestSubscribeProbeObservesAlongsideConsumer (P9) verifies the
-// concrete use case the bus migration enables: a kit-level test
-// attaches a probe subscriber to observe the agent's event stream
-// without owning the consumer position. Both subscribers see every
-// event in publish order; neither blocks the other.
-//
-// Pre-bus this was impossible — there was one Events channel; whoever
-// held it was the consumer. After the bus, every subscriber gets an
-// independent inbox, and the bus is the sole writer to each.
-//
-// Uses a terminating AfterToolCall hook so the run converges on a
-// clean AgentDone (Success=true) — see [TestPrompt_CleanRunDoneSuccessTrue]
-// for the same pattern. Avoids the slower Cancel-after-park dance
-// (~2s drainUntil timeout) that would otherwise double up across
-// two subscribers.
+// TestSubscribeProbeObservesAlongsideConsumer (P9): a probe subscriber
+// sees every event in publish order next to the consumer, and neither
+// blocks the other. A terminating tool hook ends the run without a Cancel.
 func TestSubscribeProbeObservesAlongsideConsumer(t *testing.T) {
 	t.Parallel()
 
@@ -1003,28 +814,4 @@ func pickTokenAndDone(evs []event.Event) (string, bool) {
 		}
 	}
 	return text, done
-}
-
-// swappableProvider lets a test swap the underlying provider mid-test.
-// Required for the unsuccess-reset test: first run uses an error
-// provider, second run uses a happy-path provider.
-type swappableProvider struct {
-	mu sync.Mutex
-	p  llm.Provider
-}
-
-func (s *swappableProvider) swap(p llm.Provider) {
-	s.mu.Lock()
-	s.p = p
-	s.mu.Unlock()
-}
-
-func (s *swappableProvider) Stream(ctx context.Context, msgs []llm.Message, defs []llm.ToolDef) (<-chan llm.StreamEvent, error) {
-	s.mu.Lock()
-	p := s.p
-	s.mu.Unlock()
-	if p == nil {
-		return nil, fmt.Errorf("no provider")
-	}
-	return p.Stream(ctx, msgs, defs)
 }

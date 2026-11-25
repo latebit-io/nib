@@ -44,6 +44,22 @@ type AgentToken = kitevent.AgentToken
 // AgentDone is the agent-loop-finished event. Aliased to [kitevent.AgentDone].
 type AgentDone = kitevent.AgentDone
 
+// EndReason says why a run ended. Aliased to [kitevent.EndReason].
+type EndReason = kitevent.EndReason
+
+// RunUsage totals a run's turns. Aliased to [kitevent.RunUsage].
+type RunUsage = kitevent.RunUsage
+
+// The end reasons, aliased from [kitevent].
+const (
+	EndCompleted  = kitevent.EndCompleted
+	EndAborted    = kitevent.EndAborted
+	EndError      = kitevent.EndError
+	EndMaxTurns   = kitevent.EndMaxTurns
+	EndTerminated = kitevent.EndTerminated
+	EndTruncated  = kitevent.EndTruncated
+)
+
 // AgentError is the agent-error event. Aliased to [kitevent.AgentError].
 type AgentError = kitevent.AgentError
 

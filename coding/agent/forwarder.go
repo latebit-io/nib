@@ -6,34 +6,9 @@ import (
 	"github.com/latebit-io/nib/coding/event"
 )
 
-// Kit-event forwarder.
-//
-// [Agent.forwardKitEvents] drains the kit agent's translated event
-// stream from [Agent.kitSub] and re-publishes each event on the agent's
-// bus. Two events get coding-specific treatment:
-//
-//   - [event.AgentTurnUsage] is filtered out. [providerProxy] emits
-//     the authoritative AgentTurnUsage (with per-turn estimates and
-//     completion estimate) directly to the frontend, synchronously
-//     in its Stream wrapper goroutine. Forwarding kit's would
-//     duplicate cost-panel ticks and worse: kit's AgentTurnUsage
-//     drops on full consumer channels, so any forwarder-side
-//     bookkeeping that depended on its delivery would desync.
-//   - [event.AgentDone] is intercepted to flip [Agent.running] off
-//     and to override Success with [Agent.runUnsuccessful] — kit's
-//     per-run outcome only knows about Cancels and foundation Errors,
-//     so coding-side AgentErrors emitted via [Agent.send] (autosave
-//     failure, RunWithMode rejection) need this wrapper-level flag
-//     to surface as Success=false.
-//
-// The forwarder also flips [Agent.waiting] off when AgentDone fires
-// — the BeforePark hook flips it on (synchronously on the foundation
-// goroutine, just before [event.AgentParked] is emitted); AgentDone
-// resets it.
-//
-// Lifecycle: spawned once in [Agent.buildKitAgent]; exits when
-// [kit.Agent.Close] closes [Agent.kitSub]'s inbox after the kit
-// translator has fully exited.
+// Kit-event forwarder: [Agent.forwardKitEvents] re-publishes the kit
+// agent's events on coding's bus. It drops kit's AgentTurnUsage
+// (providerProxy emits the authoritative one) and finalizes AgentDone.
 
 // forwardKitEvents drains [Agent.kitSub]'s inbox and forwards each
 // event (after coding-specific augmentation or filtering) to the
@@ -58,8 +33,11 @@ func (a *Agent) forwardKitEvents() {
 			a.running = false
 			a.waiting = false
 			a.mu.Unlock()
-			if unsuccessful && e.Success {
-				ev = event.AgentDone{Success: false}
+			// Coding fails a run for reasons the loop's end reason cannot
+			// see: an AgentError it emitted itself.
+			if unsuccessful {
+				e.Success = false
+				ev = e
 			}
 			// Stop fires at run completion. Async (own context) so a slow
 			// hook never stalls the forwarder — the sole kitSub reader —

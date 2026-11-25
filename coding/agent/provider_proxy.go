@@ -50,11 +50,9 @@ type providerProxy struct {
 	// going through [Agent.New].
 	emit func(event.Event)
 
-	// onTurnSettled fires after AgentTurnUsage emission. Bound at
-	// construction by [Agent.buildKitAgent] to a closure that runs
-	// the post-turn budget check + abort. Synchronous in the Stream
-	// wrapper goroutine; abort marks kit's outcome unsuccess so the
-	// next AgentDone surfaces with Success=false.
+	// onTurnSettled fires after AgentTurnUsage emission, synchronously in
+	// the Stream wrapper goroutine. It runs the post-turn budget check
+	// and may abort the run mid-turn.
 	onTurnSettled func()
 
 	sessionMu sync.Mutex

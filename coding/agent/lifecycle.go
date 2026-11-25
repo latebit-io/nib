@@ -202,7 +202,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 		a.running = false
 		a.mu.Unlock()
 		a.send(event.AgentError{Err: promptBlockedReason(dec.Reason)})
-		a.send(event.AgentDone{Success: false})
+		a.send(event.AgentDone{Reason: event.EndError})
 		return
 	}
 
@@ -231,7 +231,7 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 		a.mu.Unlock()
 		a.disarmRunDone(runDone)
 		a.send(event.AgentError{Err: fmt.Sprintf("agent run start failed: %v", err)})
-		a.send(event.AgentDone{Success: false})
+		a.send(event.AgentDone{Reason: event.EndError})
 		return
 	}
 }
@@ -366,7 +366,7 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 		a.mu.Unlock()
 		a.disarmRunDone(runDone)
 		a.send(event.AgentError{Err: fmt.Sprintf("agent resume failed: %v", err)})
-		a.send(event.AgentDone{Success: false})
+		a.send(event.AgentDone{Reason: event.EndError})
 		// Resume was attempted with valid saved state — the kit
 		// rejection is a transient condition the frontend can recover
 		// from. Returning true keeps the "we tried" semantics
@@ -393,14 +393,9 @@ func (a *Agent) IsRunning() bool {
 	return a.running
 }
 
-// Cancel stops the current agent run. Safe to call when no run is
-// active — the wrapper's cancel func is nil between runs and this is
-// a no-op in that case. Cancels the wrapper's runCtx (foundation
-// tools see ctx.Done) AND calls [kit.Agent.Cancel] so kit's per-run
-// outcome flips to unsuccess and the resulting [event.AgentDone]
-// surfaces with Success=false. runUnsuccessful is also flipped so
-// the forwarder's Success override stays consistent if kit's signal
-// races against a pre-existing AgentError.
+// Cancel stops the current agent run; a no-op when none is active. It
+// cancels the wrapper's runCtx (tools see ctx.Done) and the kit run, which
+// ends aborted, so the resulting [event.AgentDone] reports failure.
 func (a *Agent) Cancel() {
 	a.mu.Lock()
 	cancel := a.cancel
@@ -525,21 +520,9 @@ func (a *Agent) activeCoord() *approval.Coordinator {
 	return a.coord
 }
 
-// send publishes an event to every subscriber. Under default options,
-// streaming events (tokens, status) drop silently on a full inbox and
-// count in [Subscription.Drops]; control events (done, error) block
-// until the inbox accepts, with no timeout. Events that must not wedge
-// the agent go through [Agent.sendCritical] instead.
-//
-// Side effect: every [event.AgentError] flowing through this method
-// flips [Agent.runUnsuccessful] under the lock. [Agent.forwardKitEvents]
-// reads that flag on [event.AgentDone] to override kit's derived
-// Success — coding-side AgentErrors (autosave failures, post-turn
-// budget overrun, RunWithMode/Reply rejection) bypass kit's per-run
-// outcome tracking, so this flag is the only observable signal that
-// the run failed. Setting it at every emission point (rather than at
-// every callsite) means future call sites stay correct without having
-// to remember the bookkeeping.
+// send publishes ev on the agent's bus. Every [event.AgentError] passing
+// through also marks the run unsuccessful, so call sites need not
+// remember to. Events that must not wedge the agent use sendCritical.
 func (a *Agent) send(ev event.Event) {
 	if _, isErr := ev.(event.AgentError); isErr {
 		a.mu.Lock()

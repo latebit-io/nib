@@ -236,14 +236,9 @@ type Agent struct {
 	// emit the AgentError. Reset on RunWithMode/Reply alongside the
 	// providerProxy's session counter.
 	budgetExceeded bool
-	// runUnsuccessful is set by [Agent.send] when an [event.AgentError]
-	// is emitted and by [Agent.Cancel]. [Agent.forwardKitEvents] reads
-	// it on [event.AgentDone] to override the kit-derived Success flag
-	// — kit's per-run outcome only knows about Cancels and foundation
-	// Errors, so coding-side AgentErrors emitted via [Agent.send]
-	// (autosave failure, post-turn budget, RunWithMode rejection) need
-	// this wrapper-level flag to surface as Success=false. Reset on
-	// each new run.
+	// runUnsuccessful is set when coding emits an [event.AgentError] or
+	// cancels; the forwarder then clears AgentDone.Success. It covers
+	// failures the loop's end reason cannot see. Reset on each new run.
 	runUnsuccessful bool
 	// turnCounter is the 1-indexed turn number within the current run,
 	// incremented once per provider round-trip in [Agent.foundationTurnCheck].

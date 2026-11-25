@@ -126,7 +126,7 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 				return a.endOn(ctx, err)
 			}
 			if batchTerminate {
-				return event.EndTerminated
+				return stopped(ctx, event.EndTerminated)
 			}
 			continue
 		}
@@ -154,11 +154,7 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 		// One-shot: nothing is queued and no reply can arrive, so the
 		// run is complete. The deferred AgentEnd is the signal.
 		if oneShot {
-			// As for a parked run: a ctx cancelled by now is an abort.
-			if ctx.Err() != nil {
-				return event.EndAborted
-			}
-			return event.EndCompleted
+			return stopped(ctx, event.EndCompleted)
 		}
 
 		parked, err := a.callBeforePark(ctx)
@@ -198,6 +194,16 @@ type turnResult struct {
 	Truncated bool
 	// Usage is the provider-reported usage; nil when it reported none.
 	Usage *llm.Usage
+}
+
+// stopped returns reason for a run that ended by its own doing, unless
+// the run ctx was cancelled first: a cancelled run is aborted, however
+// far it got, as a parked one would be.
+func stopped(ctx context.Context, reason event.EndReason) event.EndReason {
+	if ctx.Err() != nil {
+		return event.EndAborted
+	}
+	return reason
 }
 
 // endOn ends the run on err. Once the run ctx is cancelled the run is an

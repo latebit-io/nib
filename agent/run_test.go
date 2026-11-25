@@ -179,6 +179,35 @@ func TestRun_NeverStarted(t *testing.T) {
 	a.WaitForIdle()
 }
 
+// TestClose_RefusesNewRuns: after Close no entry point may start a run.
+func TestClose_RefusesNewRuns(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	starts := map[string]func(a *Agent) error{
+		"Prompt":             func(a *Agent) error { return a.Prompt(ctx, "go") },
+		"PromptWithMessages": func(a *Agent) error { return a.PromptWithMessages(ctx, question) },
+		"Run":                func(a *Agent) error { _, err := a.Run(ctx, question); return err },
+	}
+	for name, start := range starts {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// A provider that finishes: a wrongly admitted run fails the
+			// test instead of hanging it.
+			a, err := New(Options{Provider: newScriptedProvider(streamDone())})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			a.Close()
+			a.Close() // idempotent
+			if err := start(a); !errors.Is(err, ErrClosed) {
+				t.Errorf("%s after Close: error = %v; want ErrClosed", name, err)
+			}
+		})
+	}
+}
+
 // TestRun_BackToBack: when Run returns, the agent must already be idle,
 // or the next Run would be refused.
 func TestRun_BackToBack(t *testing.T) {

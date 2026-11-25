@@ -45,11 +45,57 @@ type AgentToken struct {
 }
 
 // AgentDone signals the agent loop has finished.
-// Success is true unless the run was cancelled or errored; a turn-cap stop
-// ([AgentMaxTurns]) still counts as success.
 type AgentDone struct {
-	// Success is false when the run was cancelled or errored.
+	// Success is true when the run completed or stopped by policy (turn
+	// cap, tool terminate); false when it was aborted, failed or truncated.
+	// A layer above the kit may clear it for reasons of its own.
 	Success bool
+	// Reason says why the loop ended.
+	Reason EndReason
+	// Usage totals the run's turns.
+	Usage RunUsage
+	// FinalText is the last non-empty text the model wrote in this run
+	// since the last reply: the answer, with earlier narration superseded.
+	// A turn that broke off mid-stream counts with the text it streamed.
+	FinalText string
+}
+
+// EndReason says why a run ended; see [AgentDone.Reason].
+type EndReason string
+
+const (
+	// EndCompleted: a one-shot run finished with nothing left to do. A
+	// run that waits for replies never completes; it ends another way.
+	EndCompleted EndReason = "completed"
+	// EndAborted: the run was cancelled, by Cancel or the caller's context.
+	EndAborted EndReason = "aborted"
+	// EndError: the run failed; an [AgentError] carries the cause.
+	EndError EndReason = "error"
+	// EndMaxTurns: the turn cap was reached; [AgentMaxTurns] precedes.
+	EndMaxTurns EndReason = "max_turns"
+	// EndTerminated: every tool result of a batch asked the run to stop.
+	EndTerminated EndReason = "terminated"
+	// EndTruncated: the provider ran out of output budget and the turn
+	// was not retried.
+	EndTruncated EndReason = "truncated"
+)
+
+// RunUsage totals the provider-reported usage of every turn in a run.
+// Unlike [AgentTurnUsage] events, which are dropped when a subscriber
+// lags, the total is always complete.
+type RunUsage struct {
+	// Turns is the number of LLM turns that ran to their end.
+	Turns int
+	// ToolCalls is the number of tool calls the model requested.
+	ToolCalls int
+	// PromptTokens is the fresh (uncached) input tokens.
+	PromptTokens int
+	// CompletionTokens is the output tokens.
+	CompletionTokens int
+	// CachedTokens is the input tokens served from cache.
+	CachedTokens int
+	// CacheWriteTokens is the input tokens written to the cache.
+	CacheWriteTokens int
 }
 
 // AgentError carries an error from the agent.
@@ -79,8 +125,7 @@ type AgentWaiting struct {
 }
 
 // AgentMaxTurns signals the run stopped at the configured turn cap. A
-// policy stop, not a failure: [AgentDone] follows with Success true unless
-// the run also errored.
+// policy stop, not a failure: [AgentDone] follows with Success true.
 type AgentMaxTurns struct {
 	// Turns is the number of LLM turns taken since the last user input.
 	Turns int

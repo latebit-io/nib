@@ -25,6 +25,14 @@ func (p hangingProvider) Stream(context.Context, []llm.Message, []llm.ToolDef) (
 	return ch, nil
 }
 
+// slowEcho is an echo tool that returns only once the run ctx is done.
+type slowEcho struct{ namedTool }
+
+func (slowEcho) Execute(ctx context.Context, _ llm.ToolCall) ToolResult {
+	<-ctx.Done()
+	return ToolResult{Content: "late"}
+}
+
 // reaction lets a test act on a run from its event stream.
 type reaction func(ev event.Event, a *Agent, cancel context.CancelFunc)
 
@@ -37,16 +45,18 @@ func on[T event.Event](do func(a *Agent, cancel context.CancelFunc)) reaction {
 	}
 }
 
-// runToEnd starts a run from seed on an agent built from opts (an echo
-// tool is added), feeds every event to react and returns the AgentEnd
-// together with everything that preceded it.
+// runToEnd starts a run from seed on an agent built from opts (with an
+// echo tool unless opts has tools), feeds every event to react and
+// returns the AgentEnd together with everything that preceded it.
 func runToEnd(t *testing.T, opts Options, seed []llm.Message, react reaction) (event.AgentEnd, []event.Event) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	events := make(chan event.Event, 64)
 	opts.Events = events
-	opts.Tools = []Tool{namedTool{name: "echo"}}
+	if opts.Tools == nil {
+		opts.Tools = []Tool{namedTool{name: "echo"}}
+	}
 	a, err := New(opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -109,6 +119,25 @@ func TestAgentEnd_Reason(t *testing.T) {
 				OneShot: true,
 			},
 			react: on[event.TurnEnd](abort),
+			want:  event.EndAborted,
+		},
+		{
+			// The batch asks to stop, but the run was cancelled first.
+			name: "Abort during a terminating tool batch",
+			opts: Options{
+				Provider: newScriptedProvider(streamWithToolCalls([]llm.ToolCall{echoCall})),
+				Tools:    []Tool{slowEcho{namedTool{name: "echo"}}},
+				Hooks: Hooks{AfterToolCall: func(context.Context, AfterToolCallInput) (AfterToolCallResult, error) {
+					return AfterToolCallResult{Terminate: true}, nil
+				}},
+			},
+			react: on[event.ToolStart](abort),
+			want:  event.EndAborted,
+		},
+		{
+			name:  "Close while parked",
+			opts:  Options{Provider: newScriptedProvider(streamDone())},
+			react: on[event.AgentParked](func(a *Agent, _ context.CancelFunc) { a.Close() }),
 			want:  event.EndAborted,
 		},
 		{

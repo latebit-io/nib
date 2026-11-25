@@ -122,6 +122,12 @@ func TestParallelTools_Batches(t *testing.T) {
 		}
 		return AfterToolCallResult{}, nil
 	}
+	failC0After := func(_ context.Context, c AfterToolCallInput) (AfterToolCallResult, error) {
+		if c.CallID == "c0" {
+			return AfterToolCallResult{}, errors.New("boom")
+		}
+		return AfterToolCallResult{}, nil
+	}
 	terminate := func(context.Context, AfterToolCallInput) (AfterToolCallResult, error) {
 		return AfterToolCallResult{Terminate: true}, nil
 	}
@@ -188,6 +194,13 @@ func TestParallelTools_Batches(t *testing.T) {
 			hooks: Hooks{AfterToolCall: failC1After},
 			want:  event.EndError, wantTrace: []string{"start c0", "start c1", "end c0"},
 			wantResults: []string{"c0=ok", "c1=" + unfinishedToolResult},
+		},
+		{
+			// c1 ran as well: its result is kept, only c0's is withheld.
+			name: "AfterToolCall fails: later results stand too", calls: callsOf("echo", 2), fn: ok, admitted: admit("echo"),
+			hooks: Hooks{AfterToolCall: failC0After},
+			want:  event.EndError, wantTrace: []string{"start c0", "start c1", "end c1"},
+			wantResults: []string{"c1=ok", "c0=" + unfinishedToolResult},
 		},
 		{
 			name: "every result terminates", calls: callsOf("echo", 2), fn: ok, admitted: admit("echo"),

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -424,16 +425,20 @@ func (a *Agent) executeSegment(ctx context.Context, calls []llm.ToolCall) (bool,
 	done, cancelled := a.runTools(ctx, calls, run, results)
 
 	allTerminate := true
+	var failed error
 	for i, call := range calls[:done] {
 		result, terminate, err := a.afterTool(ctx, call, results[i])
 		if err != nil {
-			return false, err
+			// The other calls ran too and keep their results. This one's
+			// stays out: the hook that failed may redact or cap it.
+			failed = cmp.Or(failed, err)
+			continue
 		}
 		allTerminate = allTerminate && terminate
 		a.appendMessage(llm.Message{Role: "tool", ToolCallID: call.ID, Content: result.Content})
 		a.send(ctx, event.ToolEnd{CallID: call.ID, Result: result.Content, IsError: result.IsError})
 	}
-	return allTerminate, cancelled
+	return allTerminate, cmp.Or(failed, cancelled)
 }
 
 // runTools executes the calls marked in run, a single one on the loop
@@ -468,8 +473,9 @@ func (a *Agent) runTools(ctx context.Context, calls []llm.ToolCall, run []bool, 
 	return len(calls), nil
 }
 
-// unfinishedToolResult answers a tool call the run ended without finishing.
-const unfinishedToolResult = "Error: tool call did not complete: the run ended first."
+// unfinishedToolResult answers a tool call the run ended without recording.
+// It does not claim the tool never ran: a hook can fail after it did.
+const unfinishedToolResult = "Error: no result was recorded for this tool call: the run ended first. The tool may or may not have run."
 
 // settle answers every tool call the last assistant message left open. A
 // run can end mid-batch or on a truncated turn, and a provider rejects a

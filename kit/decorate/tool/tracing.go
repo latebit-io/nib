@@ -49,24 +49,9 @@ const (
 	PhaseAfter TracePhase = "after"
 )
 
-// WithTracing returns a [kit.ToolDecorator] that invokes emit once
-// before and once after every [kit.Tool.Execute] call.
-//
-// emit runs synchronously on the agent goroutine (Execute does too).
-// Long-running observers should dispatch off the call stack — emit
-// blocking blocks the agent. Panics inside emit propagate; the
-// decorator does not recover. Production callers should defensively
-// recover inside emit if their observer might panic on malformed
-// data.
-//
-// Recommended chain position: outermost. Tracing the tool as the
-// LLM sees it captures arguments and results faithfully; if other
-// decorators rewrite the result, tracing observes the rewritten
-// version when it runs outside them.
-//
-// Nil emit returns a no-op decorator (the wrapped tool passes through
-// unchanged) — useful for conditionally-enabled tracing where the
-// decorator slot is always allocated but the observer may be absent.
+// WithTracing returns a [kit.ToolDecorator] that calls emit before and
+// after every Execute; nil emit is a no-op. emit runs on the goroutine
+// executing the tool, several at once under ParallelTools. Chain it outermost.
 func WithTracing(emit func(TraceEvent)) kit.ToolDecorator {
 	if emit == nil {
 		return func(inner kit.Tool) kit.Tool { return inner }

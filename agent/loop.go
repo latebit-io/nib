@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
@@ -36,12 +37,15 @@ var errLoopExited = errors.New("agent: run goroutine exited before the loop retu
 // AgentStart and the cleanup that emits AgentEnd. The cleanup is the
 // only path that resets the run state; deferred so a Goexit runs it too.
 func (a *Agent) runLoop(ctx context.Context, oneShot bool, result chan<- runResult) {
-	a.send(event.AgentStart{})
+	a.send(ctx, event.AgentStart{})
 	var end event.AgentEnd
 	defer func() {
-		// No reason means loop never returned: a hook, tool or provider
-		// ended the goroutine (runtime.Goexit) or panicked.
-		if end.Reason == "" {
+		// A panic here came from a hook or the provider: it fails the
+		// run, not the host. No reason and no panic means a Goexit.
+		// Either way cleanupRun settles the transcript.
+		if r := recover(); r != nil {
+			end.Reason = a.endOn(ctx, recovered("run", r))
+		} else if end.Reason == "" {
 			end.Reason = a.endOn(ctx, errLoopExited)
 		}
 		a.cleanupRun(ctx, end, result)
@@ -49,65 +53,34 @@ func (a *Agent) runLoop(ctx context.Context, oneShot bool, result chan<- runResu
 	end.Reason = a.loop(ctx, &end, oneShot)
 }
 
-// loop owns the multi-turn cycle: invoke TransformContext → Stream →
-// drain → emit lifecycle events → dispatch tools → repeat. Between turns
-// with no tool calls it consults SteeringMessages and FollowUpMessages
-// before parking on the reply channel (a one-shot agent ends the run
-// instead); ctx cancellation unwinds it.
-//
-// It returns why the run ended and records the run's usage and final
-// text on end as turns finish; end.Usage.Turns also numbers the next turn.
+// loop runs turns until the run ends and returns why: turn, tool batch,
+// then steering and follow-up before parking for a reply (a one-shot run
+// ends instead). [Agent.turn] records usage and final text on end.
 func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) event.EndReason {
-	usage := &end.Usage
-	// turnsSinceInput counts turns taken since the last user message —
-	// the quantity [Options.MaxTurns] caps. A delivered reply resets it,
-	// so the cap bounds autonomous tool-call ping-pong rather than the
-	// conversation's total length.
+	// turnsSinceInput is what [Options.MaxTurns] caps. A delivered reply
+	// resets it, so the cap bounds autonomous turns, not the conversation.
 	turnsSinceInput := 0
 	for {
 		if ctx.Err() != nil {
 			return event.EndAborted
 		}
 
-		// The cap check sits at the loop top so it fires only between
-		// complete turns: the previous turn's tool results are already
-		// appended and the transcript is well-formed. Emitting the typed
-		// event (not event.Error) keeps limit-stop distinguishable from
-		// failure; cleanupRun's AgentEnd follows via the deferred path.
+		// The cap fires only between complete turns, so the previous
+		// turn's tool results are in and the transcript is well-formed.
 		if a.maxTurns > 0 && turnsSinceInput >= a.maxTurns {
-			a.send(event.MaxTurnsReached{Turns: turnsSinceInput})
-			return event.EndMaxTurns
+			a.send(ctx, event.MaxTurnsReached{Turns: turnsSinceInput})
+			return a.closeAtCap(ctx, end)
 		}
 
-		msgs, err := a.transformContext(ctx)
-		if err != nil {
-			return a.endOn(ctx, fmt.Errorf("TransformContext: %w", err))
-		}
-
-		turnsSinceInput++
-		a.send(event.TurnStart{})
-
-		result, err := a.processTurn(ctx, msgs, usage.Turns+1)
-		assistant := result.Assistant
-		// Before the error check: a turn that broke off mid-stream still
-		// returns the text it had written.
-		if assistant.Content != "" {
-			end.FinalText = assistant.Content
-		}
+		result, err := a.turn(ctx, end, a.toolDefs)
 		if err != nil {
 			return a.endOn(ctx, err)
 		}
-
-		usage.Turns++
-		usage.ToolCalls += len(assistant.ToolCalls)
-		if u := result.Usage; u != nil {
-			usage.PromptTokens += u.PromptTokens
-			usage.CompletionTokens += u.CompletionTokens
-			usage.CachedTokens += u.CachedTokens
-			usage.CacheWriteTokens += u.CacheWriteTokens
-		}
+		turnsSinceInput++
+		assistant := result.Assistant
+		end.Usage.ToolCalls += len(assistant.ToolCalls)
 		a.appendMessage(assistant)
-		a.send(event.TurnEnd{Message: assistant})
+		a.send(ctx, event.TurnEnd{Message: assistant})
 
 		if result.Truncated {
 			retry, err := a.handleTruncation(ctx, assistant)
@@ -161,7 +134,7 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 		if err != nil {
 			return a.endOn(ctx, fmt.Errorf("BeforePark: %w", err))
 		}
-		a.send(parked)
+		a.send(ctx, parked)
 
 		input, ok := a.awaitReply(ctx)
 		if !ok {
@@ -174,6 +147,64 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 		turnsSinceInput = 0
 		end.FinalText = ""
 	}
+}
+
+// turn runs one LLM turn offering tools: context transform, stream, then
+// token usage and final text recorded on end. The caller appends the
+// assistant message and counts the tool calls it dispatches.
+func (a *Agent) turn(ctx context.Context, end *event.AgentEnd, tools []llm.ToolDef) (turnResult, error) {
+	msgs, err := a.transformContext(ctx)
+	if err != nil {
+		return turnResult{}, fmt.Errorf("TransformContext: %w", err)
+	}
+	a.send(ctx, event.TurnStart{})
+
+	usage := &end.Usage
+	result, err := a.processTurn(ctx, msgs, tools, usage.Turns+1)
+	// Before the error check: a turn that broke off mid-stream still
+	// returns the text it had written.
+	if text := result.Assistant.Content; text != "" {
+		end.FinalText = text
+	}
+	if err != nil {
+		return result, err
+	}
+
+	usage.Turns++
+	if u := result.Usage; u != nil {
+		usage.PromptTokens += u.PromptTokens
+		usage.CompletionTokens += u.CompletionTokens
+		usage.CachedTokens += u.CachedTokens
+		usage.CacheWriteTokens += u.CacheWriteTokens
+	}
+	return result, nil
+}
+
+// closeAtCap ends a run stopped by the turn cap. When [Hooks.OnMaxTurns]
+// supplies messages the model first gets one turn without tools, so the
+// run ends on an answer instead of mid-work.
+func (a *Agent) closeAtCap(ctx context.Context, end *event.AgentEnd) event.EndReason {
+	if a.hooks.OnMaxTurns == nil {
+		return event.EndMaxTurns
+	}
+	msgs, err := a.hooks.OnMaxTurns(ctx)
+	if err != nil {
+		return a.endOn(ctx, fmt.Errorf("OnMaxTurns: %w", err))
+	}
+	if len(msgs) == 0 {
+		return event.EndMaxTurns
+	}
+	a.appendMessages(msgs)
+
+	result, err := a.turn(ctx, end, nil)
+	if err != nil {
+		return a.endOn(ctx, err)
+	}
+	// No tools were offered. A call the model made up anyway is not run;
+	// settle answers it when the run ends.
+	a.appendMessage(result.Assistant)
+	a.send(ctx, event.TurnEnd{Message: result.Assistant})
+	return event.EndMaxTurns
 }
 
 // turnResult bundles the per-turn outcomes [processTurn] computes.
@@ -206,6 +237,13 @@ func stopped(ctx context.Context, reason event.EndReason) event.EndReason {
 	return reason
 }
 
+// recovered turns a recovered panic into an error and logs its stack:
+// recovering keeps the host alive, it must not hide the bug.
+func recovered(where string, r any) error {
+	slog.Error("agent: recovered panic", "where", where, "panic", r, "stack", string(debug.Stack()))
+	return fmt.Errorf("agent: panic in %s: %v", where, r)
+}
+
 // endOn ends the run on err. Once the run ctx is cancelled the run is an
 // abort and err a consequence of it, so it stays silent. The ctx decides,
 // not err: a provider's own timeout also reads as DeadlineExceeded.
@@ -213,7 +251,7 @@ func (a *Agent) endOn(ctx context.Context, err error) event.EndReason {
 	if ctx.Err() != nil {
 		return event.EndAborted
 	}
-	a.emitError(err)
+	a.emitError(ctx, err)
 	return event.EndError
 }
 
@@ -225,11 +263,11 @@ func (a *Agent) endOn(ctx context.Context, err error) event.EndReason {
 // [event.MessageEnd]) are emitted as the stream progresses. A truncated
 // terminal event is reported via [turnResult.Truncated] (NOT as an
 // error) so the loop can route it to the [Hooks.OnTruncated] hook.
-func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (turnResult, error) {
-	a.send(event.MessageStart{})
+func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef, turn int) (turnResult, error) {
+	a.send(ctx, event.MessageStart{})
 
 	a.setStreaming(true)
-	ch, err := a.provider.Stream(ctx, msgs, a.toolDefs)
+	ch, err := a.provider.Stream(ctx, msgs, tools)
 	if err != nil {
 		a.setStreaming(false)
 		return turnResult{}, fmt.Errorf("provider.Stream: %w", err)
@@ -267,7 +305,7 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (
 			}
 			if ev.Token != "" {
 				content.WriteString(ev.Token)
-				a.send(event.MessageUpdate{Delta: ev.Token})
+				a.send(ctx, event.MessageUpdate{Delta: ev.Token})
 			}
 			if !ev.Done {
 				continue
@@ -286,8 +324,8 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (
 			// replayed on tool-use turns). Pure passthrough — mirrors
 			// ToolCalls above.
 			assistant.Reasoning = ev.Reasoning
-			a.send(event.MessageEnd{Message: assistant})
-			a.emitTurnUsage(usage, len(toolCalls), turn)
+			a.send(ctx, event.MessageEnd{Message: assistant})
+			a.emitTurnUsage(ctx, usage, len(toolCalls), turn)
 
 			return turnResult{Assistant: assistant, Truncated: truncated, Usage: usage}, nil
 		}
@@ -306,7 +344,7 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, turn int) (
 // and surfaced through [Agent.emitError] by the caller.
 func (a *Agent) handleTruncation(ctx context.Context, assistant llm.Message) (retry bool, err error) {
 	if a.hooks.OnTruncated == nil {
-		a.emitError(errProviderTruncated)
+		a.emitError(ctx, errProviderTruncated)
 		return false, nil
 	}
 	res, hookErr := a.hooks.OnTruncated(ctx, TruncationInput{
@@ -322,16 +360,12 @@ func (a *Agent) handleTruncation(ctx context.Context, assistant llm.Message) (re
 	return res.Retry, nil
 }
 
-// executeToolCalls dispatches every call in the batch through the
-// hook surface (BeforeToolCall / AfterToolCall), appends each result
-// as a tool-role message, and returns true when every finalized tool
-// result in the batch sets [AfterToolCallResult.Terminate] (matching
-// the contract spelled out on that field).
-//
-// A nil/empty calls slice returns (false, nil). An empty batch is not
-// the same as "every result terminates" — the contract requires at
-// least one terminate=true result, so an empty batch never terminates
-// the run.
+// maxParallelTools bounds how many calls of one segment execute at once.
+const maxParallelTools = 8
+
+// executeToolCalls runs the batch and appends one tool message per call.
+// It reports whether every result asked to terminate; an empty batch never
+// does. An error ends the run; [Agent.settle] answers what was left open.
 func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (bool, error) {
 	if len(calls) == 0 {
 		return false, nil
@@ -341,118 +375,168 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 	defer a.clearPendingToolCalls()
 
 	allTerminate := true
-	for i, call := range calls {
-		if err := ctx.Err(); err != nil {
-			// The assistant message already carries every tool_use block;
-			// a cancel here would leave the unfinished calls without
-			// matching tool_result blocks, which Anthropic rejects on
-			// resume. Synthesize a cancelled result for each so the
-			// transcript stays well-formed.
-			a.appendUnfinishedResults(calls[i:], "Error: tool call cancelled before execution.")
-			return false, err
+	for len(calls) > 0 {
+		// Consecutive calls to admitted tools run together; any other call
+		// runs alone, which is the sequential behaviour.
+		n := 0
+		for n < len(calls) && a.parallel[calls[n].Function.Name] {
+			n++
 		}
-
-		a.send(event.ToolStart{
-			CallID: call.ID,
-			Name:   call.Function.Name,
-			Args:   call.Function.Arguments,
-		})
-
-		result, terminate, err := a.dispatchTool(ctx, call)
+		n = max(n, 1)
+		terminate, err := a.executeSegment(ctx, calls[:n])
 		if err != nil {
-			// A hook error ends the run, but the assistant message already
-			// carries this and every later tool_use; give each a result so
-			// the transcript resumes cleanly. The raw error travels in
-			// event.Error only: the transcript may be replayed to the provider.
-			a.appendUnfinishedResults(calls[i:], "Error: tool call aborted before execution.")
 			return false, err
 		}
-		if !terminate {
-			allTerminate = false
-		}
-
-		a.appendMessage(llm.Message{
-			Role:       "tool",
-			ToolCallID: call.ID,
-			Content:    result.Content,
-		})
-
-		a.send(event.ToolEnd{
-			CallID:  call.ID,
-			Result:  result.Content,
-			IsError: result.IsError,
-		})
+		allTerminate = allTerminate && terminate
+		calls = calls[n:]
 	}
-
 	return allTerminate, nil
 }
 
-// appendUnfinishedResults appends a synthesized error tool_result carrying
-// content for each tool call that never completed, keeping the transcript
-// well-formed when the batch is abandoned mid-flight (ctx cancellation,
-// hook error). Anthropic rejects an assistant turn whose tool_use blocks
-// lack matching tool_result blocks on resume, so every unfinished call
-// must still get a result.
-func (a *Agent) appendUnfinishedResults(calls []llm.ToolCall, content string) {
-	for _, call := range calls {
-		a.appendMessage(llm.Message{
-			Role:       "tool",
-			ToolCallID: call.ID,
-			Content:    content,
+// executeSegment takes calls through three steps so hooks stay serial and
+// in call order: BeforeToolCall for each, the tools (together when there
+// are several), then AfterToolCall and the result for each.
+func (a *Agent) executeSegment(ctx context.Context, calls []llm.ToolCall) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	results := make([]ToolResult, len(calls))
+	run := make([]bool, len(calls))
+	for i, call := range calls {
+		a.send(ctx, event.ToolStart{CallID: call.ID, Name: call.Function.Name, Args: call.Function.Arguments})
+		var err error
+		if results[i], run[i], err = a.beforeTool(ctx, call); err != nil {
+			return false, err
+		}
+	}
+
+	if err := a.runTools(ctx, calls, run, results); err != nil {
+		return false, err
+	}
+
+	allTerminate := true
+	for i, call := range calls {
+		result, terminate, err := a.afterTool(ctx, call, results[i])
+		if err != nil {
+			return false, err
+		}
+		allTerminate = allTerminate && terminate
+		a.appendMessage(llm.Message{Role: "tool", ToolCallID: call.ID, Content: result.Content})
+		a.send(ctx, event.ToolEnd{CallID: call.ID, Result: result.Content, IsError: result.IsError})
+	}
+	return allTerminate, nil
+}
+
+// runTools executes the calls marked in run and stores their results. A
+// single call runs on the loop goroutine; several run concurrently, at
+// most maxParallelTools at once, and none is started once ctx is done.
+func (a *Agent) runTools(ctx context.Context, calls []llm.ToolCall, run []bool, results []ToolResult) error {
+	if len(calls) == 1 {
+		if run[0] {
+			results[0] = a.runTool(ctx, calls[0])
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	slots := make(chan struct{}, maxParallelTools)
+	for i, call := range calls {
+		if !run[i] {
+			continue
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			results[i] = a.runTool(ctx, call)
 		})
+	}
+	return nil
+}
+
+// unfinishedToolResult answers a tool call the run ended without finishing.
+const unfinishedToolResult = "Error: tool call did not complete: the run ended first."
+
+// settle answers every tool call the last assistant message left open. A
+// run can end mid-batch or on a truncated turn, and a provider rejects a
+// transcript whose tool calls lack results, so the run could not resume.
+func (a *Agent) settle() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	answered := make(map[string]bool)
+	for i, m := range slices.Backward(a.messages) {
+		switch m.Role {
+		case "tool":
+			answered[m.ToolCallID] = true
+		case "assistant":
+			// Results go right after the ones already there, before
+			// anything a hook appended later.
+			at := i + 1
+			for at < len(a.messages) && a.messages[at].Role == "tool" {
+				at++
+			}
+			var open []llm.Message
+			for _, call := range m.ToolCalls {
+				if !answered[call.ID] {
+					open = append(open, llm.Message{Role: "tool", ToolCallID: call.ID, Content: unfinishedToolResult})
+				}
+			}
+			a.messages = slices.Insert(a.messages, at, open...)
+			return
+		}
 	}
 }
 
-// dispatchTool runs a single tool call through the BeforeToolCall hook
-// (which can block execution), the registered Tool.Execute (or a
-// synthesized error for unknown names), and the AfterToolCall hook
-// (which can override Content / IsError or signal Terminate). Returns
-// the finalized result plus the per-call Terminate flag for the batch
-// aggregator. Hook errors are propagated up — they end the run, since
-// a hook returning an error usually means the application is in an
-// inconsistent state.
-func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) (ToolResult, bool, error) {
-	beforeCtx := BeforeToolCallInput{
+// beforeTool runs BeforeToolCall for call. When the hook blocks the call
+// it returns the blocked result and run=false.
+func (a *Agent) beforeTool(ctx context.Context, call llm.ToolCall) (blocked ToolResult, run bool, err error) {
+	if a.hooks.BeforeToolCall == nil {
+		return ToolResult{}, true, nil
+	}
+	res, err := a.hooks.BeforeToolCall(ctx, BeforeToolCallInput{
 		CallID: call.ID,
 		Name:   call.Function.Name,
 		Args:   call.Function.Arguments,
+	})
+	if err != nil {
+		return ToolResult{}, false, fmt.Errorf("BeforeToolCall(%s): %w", call.Function.Name, err)
 	}
-	if a.hooks.BeforeToolCall != nil {
-		res, err := a.hooks.BeforeToolCall(ctx, beforeCtx)
-		if err != nil {
-			return ToolResult{}, false, fmt.Errorf("BeforeToolCall(%s): %w", call.Function.Name, err)
-		}
-		if res.Block {
-			reason := res.Reason
-			if reason == "" {
-				reason = fmt.Sprintf("tool %q blocked", call.Function.Name)
-			}
-			blocked := ToolResult{Content: reason, IsError: true}
-			return a.applyAfterToolCall(ctx, call, blocked)
-		}
+	if !res.Block {
+		return ToolResult{}, true, nil
 	}
-
-	tool, ok := a.tools[call.Function.Name]
-	var result ToolResult
-	if !ok {
-		result = ToolResult{
-			Content: fmt.Sprintf("Error: unknown tool %q", call.Function.Name),
-			IsError: true,
-		}
-	} else {
-		result = tool.Execute(ctx, call)
+	reason := res.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("tool %q blocked", call.Function.Name)
 	}
-
-	return a.applyAfterToolCall(ctx, call, result)
+	return ToolResult{Content: reason, IsError: true}, false, nil
 }
 
-// applyAfterToolCall invokes the AfterToolCall hook (when configured)
-// and folds its overrides into the result. Returned bool is the
-// per-call Terminate flag. Extracted so the Block path and the
-// normal path share the same after-hook semantics — without this,
-// blocked calls would skip overrides that the application may want to
-// apply uniformly (e.g. logging).
-func (a *Agent) applyAfterToolCall(ctx context.Context, call llm.ToolCall, result ToolResult) (ToolResult, bool, error) {
+// runTool executes call's tool, or answers for one the model made up. A
+// panic becomes an error result the model can react to, so one faulty
+// tool does not end the run. Safe to call from several goroutines.
+func (a *Agent) runTool(ctx context.Context, call llm.ToolCall) (result ToolResult) {
+	name := call.Function.Name
+	tool, ok := a.tools[name]
+	if !ok {
+		return ToolResult{Content: fmt.Sprintf("Error: unknown tool %q", name), IsError: true}
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err := recovered("tool "+name, r)
+			result = ToolResult{Content: "Error: " + err.Error(), IsError: true}
+		}
+	}()
+	return tool.Execute(ctx, call)
+}
+
+// afterTool runs AfterToolCall on a result, blocked ones included, and
+// folds in its overrides. The bool is the call's terminate request.
+func (a *Agent) afterTool(ctx context.Context, call llm.ToolCall, result ToolResult) (ToolResult, bool, error) {
 	if a.hooks.AfterToolCall == nil {
 		return result, false, nil
 	}
@@ -551,18 +635,13 @@ func (a *Agent) awaitReply(ctx context.Context) (string, bool) {
 	}
 }
 
-// cleanupRun emits [event.AgentEnd], resets the run-state fields under
-// [Agent.mu], and closes the done channel [Agent.WaitForIdle] parks on.
-// Called from runLoop's defer so every return path — clean completion,
-// hook error, ctx cancellation — funnels through one place. There is no
-// recover: a panic in a hook or tool still crashes the process.
-//
-// AgentEnd is delivered while running is still true, so a consumer that
-// reacts to AgentEnd by calling Prompt must [Agent.WaitForIdle] first or
-// it may see [ErrRunInProgress].
+// cleanupRun emits [event.AgentEnd], resets the run state and releases
+// [Agent.WaitForIdle]; every way a run can end funnels through it. AgentEnd
+// goes out while the run still counts as active: wait for idle before Prompt.
 func (a *Agent) cleanupRun(ctx context.Context, end event.AgentEnd, result chan<- runResult) {
+	a.settle()
 	end.Messages = a.snapshotMessages()
-	a.send(end)
+	a.send(ctx, end)
 
 	a.mu.Lock()
 	// The error [Agent.Run] returns: what failed the run, or the ctx
@@ -657,52 +736,60 @@ func (a *Agent) clearPendingToolCalls() {
 
 // emitError records err (visible via State, returned by Run) and emits
 // an [event.Error]. Terminal at this layer: the loop unwinds after it.
-func (a *Agent) emitError(err error) {
+func (a *Agent) emitError(ctx context.Context, err error) {
 	a.mu.Lock()
 	a.lastErr = err
 	a.mu.Unlock()
-	a.send(event.Error{Err: err.Error()})
+	a.send(ctx, event.Error{Err: err.Error()})
 }
 
 // emitTurnUsage forwards the provider-reported usage (when available)
 // through [event.TurnUsage]. The foundation reports only what the
 // provider returned plus ToolCalls; client-side token estimation is
 // application-dependent and belongs in a provider wrapper.
-func (a *Agent) emitTurnUsage(usage *llm.Usage, toolCalls, turn int) {
+func (a *Agent) emitTurnUsage(ctx context.Context, usage *llm.Usage, toolCalls, turn int) {
 	tu := event.TurnUsage{Turn: turn, ToolCalls: toolCalls}
 	if usage != nil {
 		tu.PromptTokens = usage.PromptTokens
 		tu.CompletionTokens = usage.CompletionTokens
 		tu.CachedTokens = usage.CachedTokens
 	}
-	a.send(tu)
+	a.send(ctx, tu)
 }
 
-// send delivers an event to the frontend. High-volume streaming events
-// ([event.MessageUpdate], [event.TurnUsage]) are best-effort: dropped with a warning when the channel is full.
-// Control-flow events block up to 5s before being dropped with an error
-// log; an undrained channel that long indicates the consumer has
-// stalled and the agent cannot make progress regardless.
-func (a *Agent) send(ev event.Event) {
+// send delivers ev to the consumer. A control event waits for it or for
+// the run ctx: dropping one on a timer would corrupt the stream for a
+// consumer that is only slow. Past the ctx it goes out only if there is room.
+func (a *Agent) send(ctx context.Context, ev event.Event) {
 	if a.events == nil {
 		return
 	}
 	switch ev.(type) {
 	case event.MessageUpdate, event.TurnUsage:
+		a.offer(ev)
+	case event.AgentEnd:
+		// Consumers end their read loop on this, so it is never dropped
+		// for a slow one. The run ctx is done by now and cannot bound the
+		// wait: only [Agent.Close] gives up on a consumer that is gone.
 		select {
 		case a.events <- ev:
-		default:
-			slog.Warn("agent: dropping streaming event, channel full",
-				"type", fmt.Sprintf("%T", ev))
+		case <-a.closing:
+			a.offer(ev)
 		}
 	default:
-		timer := time.NewTimer(5 * time.Second)
-		defer timer.Stop()
 		select {
 		case a.events <- ev:
-		case <-timer.C:
-			slog.Error("agent: failed to deliver event, channel full",
-				"type", fmt.Sprintf("%T", ev))
+		case <-ctx.Done():
+			a.offer(ev)
 		}
+	}
+}
+
+// offer delivers ev if the channel has room and drops it otherwise.
+func (a *Agent) offer(ev event.Event) {
+	select {
+	case a.events <- ev:
+	default:
+		slog.Warn("agent: dropping event, channel full", "type", fmt.Sprintf("%T", ev))
 	}
 }

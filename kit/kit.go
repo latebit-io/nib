@@ -128,6 +128,11 @@ type Config struct {
 	// (see [agent.Options.MaxTurns]); hitting it publishes
 	// [event.AgentMaxTurns]. Zero means unlimited; negative is rejected.
 	MaxTurns int
+
+	// ParallelTools admits tools, by name, to run together when the model
+	// calls several in a row; see [agent.Options.ParallelTools]. Nil runs
+	// every call on its own.
+	ParallelTools func(name string) bool
 }
 
 // Agent is the kit-level handle on a running agent. Drive it with
@@ -200,12 +205,13 @@ func New(cfg Config) (*Agent, error) {
 	foundationEvents := make(chan agentevent.Event, 64)
 
 	f, err := agent.New(agent.Options{
-		Provider:     cfg.Provider,
-		Events:       foundationEvents,
-		SystemPrompt: cfg.SystemPrompt,
-		Tools:        tools,
-		Hooks:        cfg.Toolset.Hooks,
-		MaxTurns:     cfg.MaxTurns,
+		Provider:      cfg.Provider,
+		Events:        foundationEvents,
+		SystemPrompt:  cfg.SystemPrompt,
+		Tools:         tools,
+		Hooks:         cfg.Toolset.Hooks,
+		MaxTurns:      cfg.MaxTurns,
+		ParallelTools: cfg.ParallelTools,
 	})
 	if err != nil {
 		return nil, err

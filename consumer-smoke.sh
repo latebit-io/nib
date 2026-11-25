@@ -31,9 +31,10 @@ export GOENV=off
 export GOFLAGS="-mod=mod -modcacherw -trimpath"
 export GONOSUMDB="$PREFIX"
 export GOPRIVATE='' GONOPROXY=''
-# Real proxy first: a published sibling version resolves to published code.
-# Only versions this commit predicts fall through to the staged copies.
-export GOPROXY="$REAL_PROXY,file://$PROXY"
+# Staged copies first: they hold only the smoke and predicted versions, so
+# published ones still come from the real proxy. Asking it for a predicted
+# version would make it cache the miss past the release that publishes it.
+export GOPROXY="file://$PROXY,$REAL_PROXY"
 
 # stage <module> <version>: publish the working tree of <module> into the
 # file proxy as <version>.
@@ -68,9 +69,11 @@ sibling_requires() {
 		}'
 }
 
-# published <module>: print the module's published versions, one per line.
+# published <module>: print the module's tagged versions, one per line.
+# From the remote's tags, not the proxy's index: a tag the proxy has not
+# seen yet must never be mistaken for a prediction and staged over.
 published() {
-	(cd "$WORK" && GOPROXY=$REAL_PROXY go list -m -versions -f '{{join .Versions "\n"}}' "$PREFIX/$1")
+	git -C "$ROOT" ls-remote --tags --refs origin "refs/tags/$1/v*" | sed 's|.*refs/tags/'"$1"'/||'
 }
 
 for mod in "$@"; do
@@ -84,7 +87,7 @@ for mod in "$@"; do
 		grep -qxF "$ver" <<<"$tags" && continue # published: the real proxy serves it
 		# Unpublished is fine only as a prediction of the next release.
 		if [ "$(printf '%s\n' "$tags" "$ver" | sort -V | tail -n 1)" != "$ver" ]; then
-			echo "error: $mod requires $sibling $ver: not a published tag, and not newer than the latest ($(tail -n 1 <<<"$tags"))" >&2
+			echo "error: $mod requires $sibling $ver: not a published tag, and not newer than the latest ($(sort -V <<<"$tags" | tail -n 1))" >&2
 			exit 1
 		fi
 		stage "$sibling" "$ver"

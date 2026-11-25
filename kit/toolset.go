@@ -73,6 +73,7 @@ func mergeHooks(sets []Toolset) Hooks {
 		followUps   []func(context.Context) ([]llm.Message, error)
 		beforeParks []func(context.Context) (event.AgentParked, error)
 		truncs      []func(context.Context, TruncationInput) (TruncationResult, error)
+		onMaxTurns  []func(context.Context) ([]llm.Message, error)
 	)
 	for _, s := range sets {
 		if s.Hooks.BeforeToolCall != nil {
@@ -96,6 +97,9 @@ func mergeHooks(sets []Toolset) Hooks {
 		if s.Hooks.OnTruncated != nil {
 			truncs = append(truncs, s.Hooks.OnTruncated)
 		}
+		if s.Hooks.OnMaxTurns != nil {
+			onMaxTurns = append(onMaxTurns, s.Hooks.OnMaxTurns)
+		}
 	}
 
 	return Hooks{
@@ -106,6 +110,7 @@ func mergeHooks(sets []Toolset) Hooks {
 		FollowUpMessages: chainGetMessages(followUps),
 		BeforePark:       chainBeforePark(beforeParks),
 		OnTruncated:      chainOnTruncated(truncs),
+		OnMaxTurns:       chainGetMessages(onMaxTurns),
 	}
 }
 
@@ -214,8 +219,8 @@ func chainTransformContext(fns []func(context.Context, []llm.Message) ([]llm.Mes
 }
 
 // chainGetMessages concatenates message slices from all hooks. Errors
-// short-circuit. Returns nil when fns is empty. Used for both
-// SteeringMessages and FollowUpMessages.
+// short-circuit. Returns nil when fns is empty. Used for
+// SteeringMessages, FollowUpMessages and OnMaxTurns.
 func chainGetMessages(fns []func(context.Context) ([]llm.Message, error)) func(context.Context) ([]llm.Message, error) {
 	switch len(fns) {
 	case 0:

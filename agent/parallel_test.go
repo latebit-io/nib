@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -258,16 +259,19 @@ func TestParallelTools_Bounded(t *testing.T) {
 	}
 }
 
-// TestParallelTools_CancelStopsStartingTools: tools that outlast the
-// cancel hold every slot; the calls still waiting must not be started,
-// and every call is answered all the same.
-func TestParallelTools_CancelStopsStartingTools(t *testing.T) {
+// TestParallelTools_CancelWhileSlotsAreFull: the run is cancelled once
+// every slot is taken. No waiting call may start, the calls that ran keep
+// their results, and the rest are answered as unfinished.
+func TestParallelTools_CancelWhileSlotsAreFull(t *testing.T) {
 	t.Parallel()
 
 	const n = 4 * maxParallelTools
 	var started atomic.Int32
+	full := make(chan struct{})
 	tool := funcTool{namedTool{name: "echo"}, func(ctx context.Context, _ llm.ToolCall) ToolResult {
-		started.Add(1)
+		if started.Add(1) == maxParallelTools {
+			close(full)
+		}
 		<-ctx.Done()
 		return ToolResult{Content: "late"}
 	}}
@@ -276,20 +280,58 @@ func TestParallelTools_CancelStopsStartingTools(t *testing.T) {
 		Provider:      newScriptedProvider(streamWithToolCalls(callsOf("echo", n))),
 		Tools:         []Tool{tool},
 		ParallelTools: admit("echo"),
-	}, question, func(ev event.Event, a *Agent, _ context.CancelFunc) {
-		// The last ToolStart is out: the tools are being started.
-		if ts, ok := ev.(event.ToolStart); ok && ts.CallID == fmt.Sprintf("c%d", n-1) {
+	}, question, on[event.AgentStart](func(a *Agent, _ context.CancelFunc) {
+		go func() {
+			<-full
 			a.Abort()
-		}
-	})
+		}()
+	}))
 
 	if end.Reason != event.EndAborted {
 		t.Errorf("Reason = %q; want aborted", end.Reason)
 	}
-	if s := started.Load(); s > maxParallelTools {
-		t.Errorf("%d tools started; want at most %d", s, maxParallelTools)
+	if s := started.Load(); s != maxParallelTools {
+		t.Errorf("%d tools started; want exactly %d", s, maxParallelTools)
 	}
-	if got := len(toolResults(end.Messages)); got != n {
-		t.Errorf("%d tool results; want %d", got, n)
+	late, unfinished := 0, 0
+	for _, r := range toolResults(end.Messages) {
+		switch _, content, _ := strings.Cut(r, "="); content {
+		case "late":
+			late++
+		case unfinishedToolResult:
+			unfinished++
+		}
+	}
+	if late != maxParallelTools || unfinished != n-maxParallelTools {
+		t.Errorf("results: %d kept, %d unfinished; want %d and %d", late, unfinished, maxParallelTools, n-maxParallelTools)
+	}
+}
+
+// TestTools_NotStartedAfterCancel: a cancel that lands while BeforeToolCall
+// runs must keep the tool from starting, on the one-call path too.
+func TestTools_NotStartedAfterCancel(t *testing.T) {
+	t.Parallel()
+
+	var started atomic.Bool
+	tool := funcTool{namedTool{name: "echo"}, func(context.Context, llm.ToolCall) ToolResult {
+		started.Store(true)
+		return ToolResult{Content: "ok"}
+	}}
+	hooks := Hooks{BeforeToolCall: func(ctx context.Context, _ BeforeToolCallInput) (BeforeToolCallResult, error) {
+		<-ctx.Done()
+		return BeforeToolCallResult{}, nil
+	}}
+
+	end, _ := runToEnd(t, Options{
+		Provider: newScriptedProvider(streamWithToolCalls([]llm.ToolCall{echoCall})),
+		Tools:    []Tool{tool},
+		Hooks:    hooks,
+	}, question, on[event.ToolStart](func(a *Agent, _ context.CancelFunc) { a.Abort() }))
+
+	if started.Load() {
+		t.Error("the tool ran after the run was cancelled")
+	}
+	if got, want := toolResults(end.Messages), []string{"c1=" + unfinishedToolResult}; !slices.Equal(got, want) || end.Reason != event.EndAborted {
+		t.Errorf("Reason = %q, results = %v; want aborted, %v", end.Reason, got, want)
 	}
 }

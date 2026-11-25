@@ -21,7 +21,7 @@ type Event interface {
 type AgentStart struct{}
 
 // AgentEnd marks the end of a run, exactly once per run. It waits for the
-// consumer, however slow; only closing the agent gives up on delivering it.
+// consumer, however slow; a closed agent gives up on it after 5s.
 type AgentEnd struct {
 	// Messages is the full conversation transcript at run-end.
 	Messages []llm.Message

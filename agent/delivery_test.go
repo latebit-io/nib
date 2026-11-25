@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/latebit-io/nib/agent/event"
@@ -61,26 +62,55 @@ func TestSend_SlowConsumerLosesNoControlEvent(t *testing.T) {
 	}
 }
 
-// TestSend_CloseReleasesRunNobodyReads: with no reader the run stalls on
-// its first event, then on AgentEnd once its ctx expires. Closing the
-// agent is what gives up on that consumer and lets Run return.
-func TestSend_CloseReleasesRunNobodyReads(t *testing.T) {
+// TestSend_ClosedAgentAndAgentEnd runs under a fake clock. Without Close
+// AgentEnd waits for its reader; after Close the reader has endGrace left.
+func TestSend_ClosedAgentAndAgentEnd(t *testing.T) {
 	t.Parallel()
 
-	a, err := New(Options{Provider: hangingProvider{}, Events: make(chan event.Event)})
-	if err != nil {
-		t.Fatalf("New: %v", err)
+	tests := []struct {
+		name      string
+		readAfter time.Duration // the reader takes AgentEnd this long after Close
+		wantEnd   bool
+	}{
+		{name: "reader within the grace gets AgentEnd", readAfter: endGrace / 2, wantEnd: true},
+		{name: "reader gone: the run lets go", readAfter: 2 * endGrace},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	go func() {
-		<-ctx.Done()
-		a.Close()
-	}()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				events := make(chan event.Event) // nobody reads until readAfter
+				a, err := New(Options{Provider: hangingProvider{}, Events: events})
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				ran := make(chan runResult, 1)
+				go func() {
+					end, err := a.Run(ctx, question)
+					ran <- runResult{end: end, err: err}
+				}()
+				synctest.Wait() // the run is stalled on its first event
 
-	end, err := runBounded(ctx, t, a, question)
+				cancel()
+				a.Close()
+				time.Sleep(tc.readAfter)
+				gotEnd := false
+				select {
+				case ev := <-events:
+					_, gotEnd = ev.(event.AgentEnd)
+				default:
+				}
 
-	if !errors.Is(err, context.DeadlineExceeded) || end.Reason != event.EndAborted {
-		t.Errorf("Run = %q, %v; want aborted, DeadlineExceeded", end.Reason, err)
+				res := <-ran
+				if !errors.Is(res.err, context.Canceled) || res.end.Reason != event.EndAborted {
+					t.Errorf("Run = %q, %v; want aborted, Canceled", res.end.Reason, res.err)
+				}
+				if gotEnd != tc.wantEnd {
+					t.Errorf("reader got AgentEnd = %v; want %v", gotEnd, tc.wantEnd)
+				}
+			})
+		})
 	}
 }

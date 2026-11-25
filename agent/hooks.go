@@ -78,7 +78,7 @@ type Hooks struct {
 
 	// OnMaxTurns fires when the turn cap ends the run. Non-empty messages
 	// are appended and the model gets one last turn without tools, so a
-	// capped run can end on an answer. Nil or empty ends the run as is.
+	// capped run can end on an answer. That turn is never retried.
 	OnMaxTurns func(ctx context.Context) ([]llm.Message, error)
 }
 

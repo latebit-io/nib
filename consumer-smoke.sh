@@ -70,10 +70,10 @@ sibling_requires() {
 }
 
 # published <module>: print the module's tagged versions, one per line.
-# From the remote's tags, not the proxy's index: a tag the proxy has not
-# seen yet must never be mistaken for a prediction and staged over.
+# From the canonical repository's tags: neither the proxy's index nor a
+# fork's origin may lag, or a real tag is taken for a prediction and staged.
 published() {
-	git -C "$ROOT" ls-remote --tags --refs origin "refs/tags/$1/v*" | sed 's|.*refs/tags/'"$1"'/||'
+	git ls-remote --tags --refs "https://$PREFIX" "refs/tags/$1/v*" | sed 's|.*refs/tags/'"$1"'/||'
 }
 
 for mod in "$@"; do

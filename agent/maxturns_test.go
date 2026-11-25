@@ -23,6 +23,7 @@ func TestOnMaxTurns(t *testing.T) {
 		name  string
 		turns [][]llm.StreamEvent
 		hook  func(context.Context) ([]llm.Message, error)
+		react reaction
 		want  event.EndReason
 		// wantOffered is the tool count offered on each provider call.
 		wantOffered []int
@@ -48,14 +49,38 @@ func TestOnMaxTurns(t *testing.T) {
 			wantUsage:   event.RunUsage{Turns: 1, ToolCalls: 1},
 		},
 		{
-			// The model calls a tool it was not offered: it is answered, not run.
+			// The model calls a tool it was not offered: the call counts as
+			// requested and is answered, not run.
 			name:        "closing turn invents a tool call",
 			turns:       [][]llm.StreamEvent{toolTurn, {{Token: "partly"}, {Done: true, ToolCalls: []llm.ToolCall{echoCall}}}},
 			hook:        nudge,
 			want:        event.EndMaxTurns,
 			wantOffered: []int{1, 0},
 			wantFinal:   "partly",
+			wantUsage:   event.RunUsage{Turns: 2, ToolCalls: 2},
+		},
+		{
+			// No OnTruncated hook: the default error, and no retry at the cap.
+			name:        "closing turn is truncated",
+			turns:       [][]llm.StreamEvent{toolTurn, {{Token: "cut"}, {Done: true, Truncated: true}}},
+			hook:        nudge,
+			want:        event.EndTruncated,
+			wantOffered: []int{1, 0},
+			wantFinal:   "cut",
 			wantUsage:   event.RunUsage{Turns: 2, ToolCalls: 1},
+			wantError:   true,
+		},
+		{
+			name:  "run cancelled while the hook decides",
+			turns: [][]llm.StreamEvent{toolTurn},
+			hook: func(ctx context.Context) ([]llm.Message, error) {
+				<-ctx.Done()
+				return nil, nil
+			},
+			react:       on[event.MaxTurnsReached](func(a *Agent, _ context.CancelFunc) { a.Abort() }),
+			want:        event.EndAborted,
+			wantOffered: []int{1},
+			wantUsage:   event.RunUsage{Turns: 1, ToolCalls: 1},
 		},
 		{
 			name:        "hook fails",
@@ -76,7 +101,7 @@ func TestOnMaxTurns(t *testing.T) {
 				Provider: provider,
 				MaxTurns: 1,
 				Hooks:    Hooks{OnMaxTurns: tc.hook},
-			}, question, nil)
+			}, question, tc.react)
 
 			if end.Reason != tc.want {
 				t.Errorf("Reason = %q; want %q", end.Reason, tc.want)

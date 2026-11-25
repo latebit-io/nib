@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/latebit-io/nib/agent/event"
 	"github.com/latebit-io/nib/ai/llm"
@@ -78,7 +79,6 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 		}
 		turnsSinceInput++
 		assistant := result.Assistant
-		end.Usage.ToolCalls += len(assistant.ToolCalls)
 		a.appendMessage(assistant)
 		a.send(ctx, event.TurnEnd{Message: assistant})
 
@@ -150,8 +150,8 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 }
 
 // turn runs one LLM turn offering tools: context transform, stream, then
-// token usage and final text recorded on end. The caller appends the
-// assistant message and counts the tool calls it dispatches.
+// usage and final text recorded on end. The caller appends the assistant
+// message; end.Usage.Turns numbers the turn.
 func (a *Agent) turn(ctx context.Context, end *event.AgentEnd, tools []llm.ToolDef) (turnResult, error) {
 	msgs, err := a.transformContext(ctx)
 	if err != nil {
@@ -171,6 +171,7 @@ func (a *Agent) turn(ctx context.Context, end *event.AgentEnd, tools []llm.ToolD
 	}
 
 	usage.Turns++
+	usage.ToolCalls += len(result.Assistant.ToolCalls)
 	if u := result.Usage; u != nil {
 		usage.PromptTokens += u.PromptTokens
 		usage.CompletionTokens += u.CompletionTokens
@@ -185,14 +186,14 @@ func (a *Agent) turn(ctx context.Context, end *event.AgentEnd, tools []llm.ToolD
 // run ends on an answer instead of mid-work.
 func (a *Agent) closeAtCap(ctx context.Context, end *event.AgentEnd) event.EndReason {
 	if a.hooks.OnMaxTurns == nil {
-		return event.EndMaxTurns
+		return stopped(ctx, event.EndMaxTurns)
 	}
 	msgs, err := a.hooks.OnMaxTurns(ctx)
 	if err != nil {
 		return a.endOn(ctx, fmt.Errorf("OnMaxTurns: %w", err))
 	}
 	if len(msgs) == 0 {
-		return event.EndMaxTurns
+		return stopped(ctx, event.EndMaxTurns)
 	}
 	a.appendMessages(msgs)
 
@@ -204,7 +205,15 @@ func (a *Agent) closeAtCap(ctx context.Context, end *event.AgentEnd) event.EndRe
 	// settle answers it when the run ends.
 	a.appendMessage(result.Assistant)
 	a.send(ctx, event.TurnEnd{Message: result.Assistant})
-	return event.EndMaxTurns
+	if result.Truncated {
+		// The cap leaves no turn to retry in: the hook is told, but its
+		// wish to retry cannot be honoured.
+		if _, err := a.handleTruncation(ctx, result.Assistant); err != nil {
+			return a.endOn(ctx, err)
+		}
+		return event.EndTruncated
+	}
+	return stopped(ctx, event.EndMaxTurns)
 }
 
 // turnResult bundles the per-turn outcomes [processTurn] computes.
@@ -410,12 +419,12 @@ func (a *Agent) executeSegment(ctx context.Context, calls []llm.ToolCall) (bool,
 		}
 	}
 
-	if err := a.runTools(ctx, calls, run, results); err != nil {
-		return false, err
-	}
+	// On a cancel only calls[:done] have a result. They are kept: the
+	// work was done, and settle answers the calls that never started.
+	done, cancelled := a.runTools(ctx, calls, run, results)
 
 	allTerminate := true
-	for i, call := range calls {
+	for i, call := range calls[:done] {
 		result, terminate, err := a.afterTool(ctx, call, results[i])
 		if err != nil {
 			return false, err
@@ -424,20 +433,13 @@ func (a *Agent) executeSegment(ctx context.Context, calls []llm.ToolCall) (bool,
 		a.appendMessage(llm.Message{Role: "tool", ToolCallID: call.ID, Content: result.Content})
 		a.send(ctx, event.ToolEnd{CallID: call.ID, Result: result.Content, IsError: result.IsError})
 	}
-	return allTerminate, nil
+	return allTerminate, cancelled
 }
 
-// runTools executes the calls marked in run and stores their results. A
-// single call runs on the loop goroutine; several run concurrently, at
-// most maxParallelTools at once, and none is started once ctx is done.
-func (a *Agent) runTools(ctx context.Context, calls []llm.ToolCall, run []bool, results []ToolResult) error {
-	if len(calls) == 1 {
-		if run[0] {
-			results[0] = a.runTool(ctx, calls[0])
-		}
-		return nil
-	}
-
+// runTools executes the calls marked in run, a single one on the loop
+// goroutine, several concurrently (at most maxParallelTools at once). No
+// tool starts once ctx is done: it returns how many calls have a result.
+func (a *Agent) runTools(ctx context.Context, calls []llm.ToolCall, run []bool, results []ToolResult) (int, error) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	slots := make(chan struct{}, maxParallelTools)
@@ -448,14 +450,22 @@ func (a *Agent) runTools(ctx context.Context, calls []llm.ToolCall, run []bool, 
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
-			return ctx.Err()
+			return i, ctx.Err()
+		}
+		// Checked again: select picks at random when both were ready.
+		if err := ctx.Err(); err != nil {
+			return i, err
+		}
+		if len(calls) == 1 {
+			results[i] = a.runTool(ctx, call)
+			break
 		}
 		wg.Go(func() {
 			defer func() { <-slots }()
 			results[i] = a.runTool(ctx, call)
 		})
 	}
-	return nil
+	return len(calls), nil
 }
 
 // unfinishedToolResult answers a tool call the run ended without finishing.
@@ -757,6 +767,9 @@ func (a *Agent) emitTurnUsage(ctx context.Context, usage *llm.Usage, toolCalls, 
 	a.send(ctx, tu)
 }
 
+// endGrace is how long a closed agent still waits to deliver AgentEnd.
+const endGrace = 5 * time.Second
+
 // send delivers ev to the consumer. A control event waits for it or for
 // the run ctx: dropping one on a timer would corrupt the stream for a
 // consumer that is only slow. Past the ctx it goes out only if there is room.
@@ -774,7 +787,14 @@ func (a *Agent) send(ctx context.Context, ev event.Event) {
 		select {
 		case a.events <- ev:
 		case <-a.closing:
-			a.offer(ev)
+			// A consumer that is still draining gets its end event.
+			timer := time.NewTimer(endGrace)
+			defer timer.Stop()
+			select {
+			case a.events <- ev:
+			case <-timer.C:
+				slog.Error("agent: AgentEnd not delivered, consumer is gone")
+			}
 		}
 	default:
 		select {

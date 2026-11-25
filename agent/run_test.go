@@ -73,7 +73,7 @@ func TestRun(t *testing.T) {
 			name:    "truncation without a hook is a failure",
 			opts:    Options{Provider: llmtest.NewScripted([]llm.StreamEvent{{Done: true, Truncated: true}})},
 			want:    event.EndTruncated,
-			wantErr: errProviderTruncated,
+			wantErr: ErrTruncated,
 		},
 		{
 			name:    "cancelled ctx returns Canceled",
@@ -110,6 +110,9 @@ func TestRun(t *testing.T) {
 
 			if !errors.Is(err, tc.wantErr) {
 				t.Errorf("Run error = %v; want %v", err, tc.wantErr)
+			}
+			if end.Err != err {
+				t.Errorf("AgentEnd.Err = %v; want the error Run returned, %v", end.Err, err)
 			}
 			if end.Reason != tc.want {
 				t.Errorf("Reason = %q; want %q", end.Reason, tc.want)

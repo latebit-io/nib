@@ -66,5 +66,6 @@ func doneFrom(e agentevent.AgentEnd) event.AgentDone {
 		Reason:    reason,
 		Usage:     event.RunUsage(e.Usage),
 		FinalText: e.FinalText,
+		Err:       e.Err,
 	}
 }

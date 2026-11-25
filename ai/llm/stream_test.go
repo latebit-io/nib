@@ -393,6 +393,11 @@ func TestAgentAPI_StreamedErrorEndsStream(t *testing.T) {
 	if last.Err == nil || last.Err.Error() != want || tokens != 1 {
 		t.Fatalf("terminal Err = %v after %d tokens; want %q after 1", last.Err, tokens, want)
 	}
+	// Typed, so a host can tell a relayed 502 from a refused request.
+	reported, ok := errors.AsType[*StreamError](last.Err)
+	if !ok || reported.Provider != "openai-compat" || reported.Code != "502" || !reported.Temporary() {
+		t.Errorf("terminal Err = %#v; want a temporary StreamError from openai-compat with code 502", last.Err)
+	}
 }
 
 // TestAnthropicStream_ErrorEventDetail: a streamed error event surfaces its

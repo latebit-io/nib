@@ -55,16 +55,31 @@ func toolTrace(events []event.Event) []string {
 	return trace
 }
 
-// TestParallelTools_RunTogetherResultsInOrder: each call can only return
-// once every call of the batch is running, so the batch finishes only if
-// it is concurrent. The last call returns first; results stay in call order.
+// endsSorted sorts each run of consecutive "end" entries: calls that ran
+// together end in whatever order they finished.
+func endsSorted(trace []string) []string {
+	sorted := slices.Clone(trace)
+	for from := 0; from < len(sorted); {
+		to := from
+		for to < len(sorted) && strings.HasPrefix(sorted[to], "end ") {
+			to++
+		}
+		slices.Sort(sorted[from:to])
+		from = to + 1
+	}
+	return sorted
+}
+
+// TestParallelTools_RunTogetherResultsInOrder: no call returns until all
+// are running, so the batch finishes only if it is concurrent. The last
+// call returns first: hooks and ToolEnd follow, the transcript does not.
 func TestParallelTools_RunTogetherResultsInOrder(t *testing.T) {
 	t.Parallel()
 
 	const n = 3
 	var running sync.WaitGroup
 	running.Add(n)
-	release := make([]chan struct{}, n+1) // call i returns after call i+1
+	release := make([]chan struct{}, n+1) // call i returns once call i+1 is hooked
 	for i := range release {
 		release[i] = make(chan struct{})
 	}
@@ -79,26 +94,79 @@ func TestParallelTools_RunTogetherResultsInOrder(t *testing.T) {
 		case <-ctx.Done():
 			return ToolResult{Content: "cancelled"}
 		}
-		close(release[i])
 		return ToolResult{Content: "ok"}
 	}}
 
+	var hooked []string
 	end, before := runToEnd(t, Options{
 		Provider:      llmtest.NewScripted(llmtest.ToolCalls(calls...), llmtest.Done()),
 		Tools:         []Tool{tool},
 		ParallelTools: admit("echo"),
 		OneShot:       true,
+		Hooks: Hooks{AfterToolCall: func(_ context.Context, c AfterToolCallInput) (AfterToolCallResult, error) {
+			hooked = append(hooked, c.CallID)
+			close(release[slices.IndexFunc(calls, func(call llm.ToolCall) bool { return call.ID == c.CallID })])
+			return AfterToolCallResult{}, nil
+		}},
 	}, question, nil)
 
-	wantTrace := []string{"start c0", "start c1", "start c2", "end c0", "end c1", "end c2"}
+	wantTrace := []string{"start c0", "start c1", "start c2", "end c2", "end c1", "end c0"}
 	if trace := toolTrace(before); !slices.Equal(trace, wantTrace) {
 		t.Errorf("tool events = %v; want %v", trace, wantTrace)
+	}
+	if want := []string{"c2", "c1", "c0"}; !slices.Equal(hooked, want) {
+		t.Errorf("AfterToolCall order = %v; want %v", hooked, want)
 	}
 	if got, want := toolResults(end.Messages), []string{"c0=ok", "c1=ok", "c2=ok"}; !slices.Equal(got, want) {
 		t.Errorf("tool results = %v; want %v", got, want)
 	}
 	if end.Reason != event.EndCompleted {
 		t.Errorf("Reason = %q; want completed", end.Reason)
+	}
+}
+
+// TestParallelTools_EndsArriveAsCallsFinish: a slow call must not hold
+// back a finished sibling's ToolEnd. c0 returns only once c1's ToolEnd has
+// been seen, so reporting at the end of the batch would never get there.
+func TestParallelTools_EndsArriveAsCallsFinish(t *testing.T) {
+	t.Parallel()
+
+	fastEnded := make(chan struct{})
+	tool := funcTool{namedTool{name: "echo"}, func(ctx context.Context, call llm.ToolCall) ToolResult {
+		if call.ID == "c0" {
+			select {
+			case <-fastEnded:
+			case <-ctx.Done():
+				return ToolResult{Content: "cancelled"}
+			}
+		}
+		return ToolResult{Content: "ok " + call.ID}
+	}}
+	var ended []event.ToolEnd
+
+	end, _ := runToEnd(t, Options{
+		Provider:      llmtest.NewScripted(llmtest.ToolCalls(callsOf("echo", 2)...), llmtest.Done()),
+		Tools:         []Tool{tool},
+		ParallelTools: admit("echo"),
+		OneShot:       true,
+	}, question, func(ev event.Event, _ *Agent, _ context.CancelFunc) {
+		if e, ok := ev.(event.ToolEnd); ok {
+			ended = append(ended, e)
+			if e.CallID == "c1" {
+				close(fastEnded)
+			}
+		}
+	})
+
+	want := []event.ToolEnd{
+		{CallID: "c1", Name: "echo", Result: "ok c1"},
+		{CallID: "c0", Name: "echo", Result: "ok c0"},
+	}
+	if !slices.Equal(ended, want) {
+		t.Errorf("ToolEnd events = %+v; want %+v", ended, want)
+	}
+	if got, want := toolResults(end.Messages), []string{"c0=ok c0", "c1=ok c1"}; !slices.Equal(got, want) {
+		t.Errorf("tool results = %v; want %v", got, want)
 	}
 }
 
@@ -225,7 +293,7 @@ func TestParallelTools_Batches(t *testing.T) {
 			if end.Reason != tc.want {
 				t.Errorf("Reason = %q; want %q", end.Reason, tc.want)
 			}
-			if trace := toolTrace(before); !slices.Equal(trace, tc.wantTrace) {
+			if trace := endsSorted(toolTrace(before)); !slices.Equal(trace, tc.wantTrace) {
 				t.Errorf("tool events = %v; want %v", trace, tc.wantTrace)
 			}
 			if results := toolResults(end.Messages); !slices.Equal(results, tc.wantResults) {

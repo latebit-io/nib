@@ -105,6 +105,14 @@ var ErrRunInProgress = agent.ErrRunInProgress
 // [Agent.Subscribe] after [Agent.Close]. Other methods stay safe to call.
 var ErrClosed = agent.ErrClosed
 
+// ErrAborted is the foundation's [agent.ErrAborted]: the
+// [event.AgentDone.Err] of a run that [Agent.Cancel] stopped.
+var ErrAborted = agent.ErrAborted
+
+// ErrTruncated is the foundation's [agent.ErrTruncated]: the error of a
+// run the provider cut short with no OnTruncated hook to take it.
+var ErrTruncated = agent.ErrTruncated
+
 // Config bundles the construction-time inputs for [New]. Provider is
 // required; everything else is optional. Observe events via
 // [Agent.Subscribe], which returns a [Subscription] whose
@@ -293,8 +301,8 @@ func (a *Agent) Reply(ctx context.Context, content string) bool {
 }
 
 // Cancel stops the current run; a no-op when none is active. Subscribers
-// receive an [event.AgentDone] with Success=false once the loop unwinds;
-// [Agent.WaitForIdle] blocks until then.
+// receive an [event.AgentDone] with Success=false and Err [ErrAborted]
+// once the loop unwinds; [Agent.WaitForIdle] blocks until then.
 func (a *Agent) Cancel() {
 	a.foundation.Abort()
 }
@@ -322,9 +330,8 @@ func (a *Agent) ReplaceMessages(msgs []llm.Message) error {
 	return a.foundation.ReplaceMessages(msgs)
 }
 
-// WaitForIdle blocks until the current run (if any) has finished and
-// the foundation goroutine has unwound. Returns immediately when no
-// run is active.
+// WaitForIdle blocks until the latest run, if any, has fully unwound in
+// the foundation. Subscribers may still be reading its last events.
 func (a *Agent) WaitForIdle() {
 	a.foundation.WaitForIdle()
 }

@@ -201,8 +201,9 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 		a.mu.Lock()
 		a.running = false
 		a.mu.Unlock()
-		a.send(event.AgentError{Err: promptBlockedReason(dec.Reason)})
-		a.send(event.AgentDone{Reason: event.EndError})
+		reason := promptBlockedReason(dec.Reason)
+		a.send(event.AgentError{Err: reason})
+		a.send(event.AgentDone{Reason: event.EndError, Err: errors.New(reason)})
 		return
 	}
 
@@ -230,8 +231,9 @@ func (a *Agent) RunWithMode(ctx context.Context, fileName, fileContent, goal str
 		a.running = false
 		a.mu.Unlock()
 		a.disarmRunDone(runDone)
-		a.send(event.AgentError{Err: fmt.Sprintf("agent run start failed: %v", err)})
-		a.send(event.AgentDone{Reason: event.EndError})
+		err = fmt.Errorf("agent run start failed: %w", err)
+		a.send(event.AgentError{Err: err.Error()})
+		a.send(event.AgentDone{Reason: event.EndError, Err: err})
 		return
 	}
 }
@@ -365,8 +367,9 @@ func (a *Agent) Reply(ctx context.Context, input string) bool {
 		a.running = false
 		a.mu.Unlock()
 		a.disarmRunDone(runDone)
-		a.send(event.AgentError{Err: fmt.Sprintf("agent resume failed: %v", err)})
-		a.send(event.AgentDone{Reason: event.EndError})
+		err = fmt.Errorf("agent resume failed: %w", err)
+		a.send(event.AgentError{Err: err.Error()})
+		a.send(event.AgentDone{Reason: event.EndError, Err: err})
 		// Resume was attempted with valid saved state — the kit
 		// rejection is a transient condition the frontend can recover
 		// from. Returning true keeps the "we tried" semantics

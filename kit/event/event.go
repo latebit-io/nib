@@ -58,6 +58,10 @@ type AgentDone struct {
 	// since the last reply: the answer, with earlier narration superseded.
 	// A turn that broke off mid-stream counts with the text it streamed.
 	FinalText string
+	// Err is the error the run reported or, when Reason is aborted, the
+	// cause it was cancelled with: kit.ErrAborted for Cancel, a deadline, or
+	// the caller's own. Nil when it reported none, whatever Success says.
+	Err error
 }
 
 // EndReason says why a run ended; see [AgentDone.Reason].

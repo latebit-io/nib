@@ -321,7 +321,7 @@ type apiError struct {
 // bounded so a hostile or echoing payload cannot bloat the error.
 func (e apiError) detail() string {
 	msg := cmp.Or(oneLine(e.Message), "(no message)")
-	code := oneLine(cmp.Or(string(e.Code), e.Type))
+	code := e.code()
 	switch {
 	case code == "":
 		return msg
@@ -330,6 +330,17 @@ func (e apiError) detail() string {
 	default:
 		return code + ": " + msg
 	}
+}
+
+// code is the provider's error code or, when it sent none, its error type.
+func (e apiError) code() string {
+	return oneLine(cmp.Or(string(e.Code), e.Type))
+}
+
+// streamError is e as the typed terminal error of a stream; scanSSE fills
+// in the provider.
+func (e apiError) streamError() *StreamError {
+	return &StreamError{Code: e.code(), Detail: e.detail(), class: oneLine(e.Type)}
 }
 
 // errorCode is an error code that providers send as a JSON string or a
@@ -424,7 +435,13 @@ func scanSSE(ctx context.Context, body io.ReadCloser, ch chan<- StreamEvent, pro
 		}
 		stop, err := onEvent(typ, payload)
 		if err != nil {
-			trySend(ctx, ch, StreamEvent{Done: true, Err: fmt.Errorf("%s: %w", provider, err)})
+			// A typed provider error names its provider in a field.
+			if reported, ok := errors.AsType[*StreamError](err); ok {
+				reported.Provider = provider
+			} else {
+				err = fmt.Errorf("%s: %w", provider, err)
+			}
+			trySend(ctx, ch, StreamEvent{Done: true, Err: err})
 			return true
 		}
 		return stop

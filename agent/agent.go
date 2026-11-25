@@ -47,8 +47,8 @@ type Options struct {
 	OneShot bool
 
 	// ParallelTools admits tools, by name, to run together when the model
-	// calls several in a row. Hooks stay serial and in call order, so admit
-	// only tools whose hooks need no earlier call of the batch to have finished.
+	// calls several in a row. Hooks stay serial: BeforeToolCall for the whole
+	// batch first, AfterToolCall as each call finishes. Results keep call order.
 	ParallelTools func(name string) bool
 
 	// Hooks are the application-layer extension points. Nil disables a
@@ -79,10 +79,13 @@ type Agent struct {
 	// invoking the provider, hooks, or tool Execute calls — those
 	// would deadlock the public surface (Reply, State, Abort) the loop
 	// must remain responsive to.
-	mu               sync.Mutex
-	running          bool
-	streaming        bool
-	cancel           context.CancelFunc
+	mu        sync.Mutex
+	running   bool
+	streaming bool
+	cancel    context.CancelCauseFunc
+	// doneCh closes when the latest run has fully unwound, its AgentEnd
+	// delivered. That is after the agent reads as idle (see cleanupRun), so
+	// the next run holds its first event until then. Closed before any run.
 	doneCh           chan struct{}
 	inputCh          chan string
 	messages         []llm.Message
@@ -110,6 +113,15 @@ var ErrRunInProgress = errors.New("agent: a run is already in progress")
 // ErrClosed is returned by [Agent.Prompt], [Agent.PromptWithMessages] and
 // [Agent.Run] once [Agent.Close] has been called.
 var ErrClosed = errors.New("agent: agent is closed")
+
+// ErrAborted is why a run stopped by [Agent.Abort] ended: the
+// [event.AgentEnd.Err] that tells it from a deadline or a caller that
+// went away. It matches context.Canceled, as the bare ctx error did.
+var ErrAborted = fmt.Errorf("agent: run aborted: %w", context.Canceled)
+
+// errClosedMidRun is the cause [Agent.Close] aborts a run with. It
+// matches both ErrClosed and, as before causes existed, context.Canceled.
+var errClosedMidRun = fmt.Errorf("%w: %w", ErrClosed, context.Canceled)
 
 // New constructs an Agent from Options. Returns ErrInvalidOptions wrapped
 // with a specific reason when validation fails.
@@ -152,7 +164,10 @@ func New(opts Options) (*Agent, error) {
 		}
 	}
 
+	idle := make(chan struct{})
+	close(idle)
 	return &Agent{
+		doneCh:       idle,
 		provider:     opts.Provider,
 		events:       opts.Events,
 		systemPrompt: opts.SystemPrompt,
@@ -212,8 +227,8 @@ func (a *Agent) PromptWithMessages(ctx context.Context, messages []llm.Message) 
 }
 
 // Run starts a one-shot run from messages and blocks until it ends. The
-// [event.AgentEnd] is filled in even when err is non-nil: err is the
-// failure cause, the ctx error on abort, or why the run never started.
+// [event.AgentEnd] is filled in even when err is non-nil: err is its Err
+// (the failure, or the cause of an abort), or why the run never started.
 func (a *Agent) Run(ctx context.Context, messages []llm.Message) (event.AgentEnd, error) {
 	if len(messages) == 0 {
 		return event.AgentEnd{}, fmt.Errorf("%w: messages is empty", ErrInvalidOptions)
@@ -240,8 +255,9 @@ func (a *Agent) startRun(ctx context.Context, msgs []llm.Message, oneShot bool, 
 		return ErrRunInProgress
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	doneCh := make(chan struct{})
+	// With a cause, so AgentEnd can say who ended an aborted run.
+	runCtx, cancel := context.WithCancelCause(ctx)
+	previous, doneCh := a.doneCh, make(chan struct{})
 	// A one-shot run never reads a reply; a nil channel makes Reply
 	// refuse instead of queueing input the loop would drop.
 	var inputCh chan string
@@ -259,7 +275,7 @@ func (a *Agent) startRun(ctx context.Context, msgs []llm.Message, oneShot bool, 
 	a.lastErr = nil
 	a.mu.Unlock()
 
-	go a.runLoop(runCtx, oneShot, result)
+	go a.runLoop(runCtx, oneShot, result, previous)
 	return nil
 }
 
@@ -282,16 +298,15 @@ func (a *Agent) Reply(_ context.Context, content string) bool {
 	}
 }
 
-// Abort cancels the current run. Safe to call when no run is active —
-// it is a no-op in that case. The events channel receives an
-// [event.AgentEnd] once the loop unwinds; use [Agent.WaitForIdle] to
-// block until that happens.
+// Abort cancels the current run; a no-op when none is active. The run
+// ends with [event.EndAborted] and [ErrAborted] once the loop unwinds;
+// [Agent.WaitForIdle] blocks until then.
 func (a *Agent) Abort() {
 	a.mu.Lock()
 	cancel := a.cancel
 	a.mu.Unlock()
 	if cancel != nil {
-		cancel()
+		cancel(ErrAborted)
 	}
 }
 
@@ -307,7 +322,7 @@ func (a *Agent) Close() {
 	cancel := a.cancel
 	a.mu.Unlock()
 	if cancel != nil {
-		cancel()
+		cancel(errClosedMidRun)
 	}
 }
 
@@ -354,16 +369,12 @@ func (a *Agent) State() State {
 	}
 }
 
-// WaitForIdle blocks until the current run (if any) has finished and
-// the loop goroutine has unwound. Returns immediately when no run is
-// active.
+// WaitForIdle blocks until the latest run, if any, has fully unwound: its
+// [event.AgentEnd] delivered and the loop goroutine gone. A new run can be
+// started sooner than that, as soon as AgentEnd is on its way.
 func (a *Agent) WaitForIdle() {
 	a.mu.Lock()
 	ch := a.doneCh
-	running := a.running
 	a.mu.Unlock()
-	if !running || ch == nil {
-		return
-	}
 	<-ch
 }

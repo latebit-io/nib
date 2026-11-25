@@ -21,7 +21,8 @@ type Event interface {
 type AgentStart struct{}
 
 // AgentEnd marks the end of a run, exactly once per run. It waits for the
-// consumer, however slow; a closed agent gives up on it after 5s.
+// consumer, however slow; a closed agent gives up on it after 5s. By the
+// time it arrives the agent accepts the next run.
 type AgentEnd struct {
 	// Messages is the full conversation transcript at run-end.
 	Messages []llm.Message
@@ -34,6 +35,10 @@ type AgentEnd struct {
 	// superseded. Empty when it wrote none. A turn that broke off
 	// mid-stream counts with the text it had streamed, which Messages lacks.
 	FinalText string
+	// Err is the error the run reported (see [Error]) or, when Reason is
+	// aborted, the cause its context was cancelled with: agent.ErrAborted,
+	// a deadline, or the caller's own. Nil when it reported none.
+	Err error
 }
 
 // EndReason says why a run ended; see [AgentEnd.Reason].
@@ -118,12 +123,14 @@ type ToolStart struct {
 	Args string
 }
 
-// ToolEnd reports a tool call has completed. Result is the text returned
-// to the LLM as the tool result; IsError flags whether the tool execution
-// failed (the LLM still sees Result, but frontends can highlight the error).
+// ToolEnd reports a tool call has completed, after AfterToolCall has had
+// its say on the result. Calls that ran together report as each one
+// finishes, so their ToolEnds can arrive in any order.
 type ToolEnd struct {
 	// CallID identifies the tool call that ended.
 	CallID string
+	// Name is the tool name, as in the call's [ToolStart].
+	Name string
 	// Result is the text fed back to the LLM as the tool result.
 	Result string
 	// IsError is true when the tool execution failed.

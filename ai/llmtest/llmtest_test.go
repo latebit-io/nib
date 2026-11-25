@@ -16,13 +16,17 @@ func TestScripted_ServesTurnsInOrderThenHangsUp(t *testing.T) {
 	usage := &llm.Usage{PromptTokens: 3}
 	p := NewScripted(ToolCalls(Call("c1", "echo", "{}")), TextUsage(usage, "a", "b"))
 	tools := []llm.ToolDef{{}, {}}
+	transcript := []llm.Message{{Role: "user", Content: "first"}}
 
 	var texts [][]string
 	for range 3 {
-		ch, err := p.Stream(context.Background(), nil, tools)
+		ch, err := p.Stream(context.Background(), transcript, tools)
 		if err != nil {
 			t.Fatalf("Stream: %v", err)
 		}
+		// The caller reuses its slice; what was recorded must not follow.
+		transcript[0].Content = "overwritten"
+		transcript = append(transcript, llm.Message{Role: "assistant", Content: "reply"})
 		var text []string
 		for ev := range ch {
 			switch {
@@ -45,6 +49,13 @@ func TestScripted_ServesTurnsInOrderThenHangsUp(t *testing.T) {
 	if p.Calls() != 3 || !slices.Equal(p.Offered(), []int{2, 1, 1}) {
 		t.Errorf("Calls = %d, Offered = %v; want 3, [2 1 1]", p.Calls(), p.Offered())
 	}
+	var sizes []int
+	for _, request := range p.Requests() {
+		sizes = append(sizes, len(request.Messages))
+	}
+	if first := p.Requests()[0].Messages[0].Content; first != "first" || !slices.Equal(sizes, []int{1, 2, 3}) {
+		t.Errorf("first message = %q, transcript sizes = %v; want first, [1 2 3]", first, sizes)
+	}
 }
 
 func TestFailing_ReturnsItsError(t *testing.T) {
@@ -53,6 +64,27 @@ func TestFailing_ReturnsItsError(t *testing.T) {
 	boom := errors.New("boom")
 	if _, err := Failing(boom).Stream(context.Background(), nil, nil); !errors.Is(err, boom) {
 		t.Errorf("Stream error = %v; want %v", err, boom)
+	}
+}
+
+func TestFailingFirst_FailsThenHandsOver(t *testing.T) {
+	t.Parallel()
+
+	boom := errors.New("boom")
+	p := FailingFirst(2, boom, NewScripted(Text("ok")))
+
+	var outcomes []string
+	for range 3 {
+		ch, err := p.Stream(context.Background(), nil, nil)
+		if err != nil {
+			outcomes = append(outcomes, err.Error())
+			continue
+		}
+		outcomes = append(outcomes, (<-ch).Token)
+	}
+
+	if want := []string{"boom", "boom", "ok"}; !slices.Equal(outcomes, want) {
+		t.Errorf("calls gave %v; want %v", outcomes, want)
 	}
 }
 

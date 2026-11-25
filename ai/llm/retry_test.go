@@ -126,7 +126,7 @@ func TestWithRetry(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				inner := &flakyProvider{failUntil: 2, errFail: tc.err}
 				var got []retry
-				tc.policy.OnRetry = func(attempt int, wait time.Duration, err error) {
+				tc.policy.OnRetry = func(_ context.Context, attempt int, wait time.Duration, err error) {
 					if !errors.Is(err, tc.err) {
 						t.Errorf("OnRetry error = %v; want %v", err, tc.err)
 					}
@@ -182,7 +182,7 @@ func TestWithRetry_CancelWithoutWait(t *testing.T) {
 	policy := RetryPolicy{
 		MaxAttempts: 5,
 		IsRetryable: func(error) bool { return true },
-		OnRetry:     func(int, time.Duration, error) { cancel() },
+		OnRetry:     func(context.Context, int, time.Duration, error) { cancel() },
 	}
 
 	_, err := WithRetry(inner, policy).Stream(ctx, nil, nil)
@@ -243,6 +243,9 @@ func TestIsTemporary(t *testing.T) {
 		{"wrapped rate limit", errors.Join(errors.New("turn 3"), &StatusError{StatusCode: 429}), true},
 		{"bad request", &StatusError{StatusCode: 400}, false},
 		{"rejected credential", &AuthError{StatusCode: 401}, false},
+		{"overloaded mid-stream", &StreamError{Code: "overloaded_error"}, true},
+		{"wrapped overloaded mid-stream", errors.Join(errors.New("turn 3"), &StreamError{Code: "overloaded_error"}), true},
+		{"request refused mid-stream", &StreamError{Code: "invalid_request_error"}, false},
 		{"caller deadline", context.DeadlineExceeded, false},
 		{"nil", nil, false},
 	}

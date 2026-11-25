@@ -374,13 +374,15 @@ func (s *codexStreamState) handleEvent(evt codexSSEEvent, raw []byte) (*StreamEv
 	case "response.completed", "response.incomplete":
 		return s.handleCompleted(evt)
 	case "error":
-		return nil, fmt.Errorf("stream error: %s", codexEventError(evt, raw).detail())
+		return nil, codexEventError(evt, raw).streamError()
 	case "response.failed":
 		var cause apiError
 		if evt.Response != nil && evt.Response.Error != nil {
 			cause = *evt.Response.Error
 		}
-		return nil, fmt.Errorf("response failed: %s", cause.detail())
+		failed := cause.streamError()
+		failed.what = "response failed"
+		return nil, failed
 	}
 	return nil, nil
 }

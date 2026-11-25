@@ -214,6 +214,16 @@ func compact(t *testing.T, text string) string {
 
 type nested []nested
 
+// selfDecoder ignores its input: no schema could describe what it accepts.
+type selfDecoder struct {
+	Limit int `json:"limit" max:"25"`
+}
+
+func (s *selfDecoder) UnmarshalJSON([]byte) error {
+	s.Limit = 99
+	return nil
+}
+
 type loop *loop
 
 type selfRef struct {
@@ -243,6 +253,11 @@ func TestSchemaFor_Errors(t *testing.T) {
 			N int `json:"n,string"`
 		}], "json string option"},
 		{"self-decoding", SchemaFor[struct{ R json.RawMessage }], "decodes itself"},
+		{"self-decoding root", SchemaFor[selfDecoder], "selfDecoder decodes itself"},
+		{"self-decoding embed", SchemaFor[struct {
+			selfDecoder
+			Other string
+		}], "decodes itself"},
 		{"recursive", SchemaFor[selfRef], "contains itself"},
 		{"recursive embed", SchemaFor[selfEmbed], "contains itself"},
 		{"duplicate name", SchemaFor[struct {
@@ -387,6 +402,32 @@ func TestValidate(t *testing.T) {
 				t.Errorf("Validate reported %d problems, want %d: %q", got, len(tc.want), err)
 			}
 		})
+	}
+}
+
+// TestValidate_BoundsCompareExactly: 2^63+1 rounds to 2^63 as a float64,
+// which must not let it pass a maximum of 2^63. A number field compares as
+// the float64 it becomes, so 0.3 is not above a maximum of 0.3.
+func TestValidate_BoundsCompareExactly(t *testing.T) {
+	schema, err := SchemaFor[struct {
+		N uint64  `json:"n,omitempty" min:"9007199254740992" max:"9223372036854775808"`
+		F float64 `json:"f,omitempty" max:"0.3"`
+	}]()
+	if err != nil {
+		t.Fatalf("SchemaFor: %v", err)
+	}
+	for args, valid := range map[string]bool{
+		`{"n":9223372036854775808}`: true,
+		`{"n":9223372036854775809}`: false,
+		`{"n":9007199254740992}`:    true,
+		`{"n":9007199254740991}`:    false,
+		`{"f":0.3}`:                 true,
+		`{"f":0.30000000000000004}`: false,
+		`{"f":1e999}`:               false,
+	} {
+		if err := schema.Validate(args); (err == nil) != valid {
+			t.Errorf("Validate(%s) = %v; want valid: %v", args, err, valid)
+		}
 	}
 }
 

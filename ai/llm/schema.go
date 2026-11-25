@@ -51,13 +51,24 @@ func descend(path []reflect.Type, t reflect.Type) ([]reflect.Type, error) {
 	return append(slices.Clip(path), t), nil
 }
 
+// selfDecoding reports whether t's own method reads its JSON, so that
+// nothing derived from its fields would describe what it accepts.
+func selfDecoding(t reflect.Type) bool {
+	pointer := reflect.PointerTo(t)
+	return pointer.Implements(jsonUnmarshaler) || pointer.Implements(textUnmarshaler)
+}
+
+func errSelfDecoding(t reflect.Type) error {
+	return fmt.Errorf("%s decodes itself, so its schema is unknown", t)
+}
+
 // paramOf maps a Go type to its schema; path is the types it is inside.
 func paramOf(t reflect.Type, path []reflect.Type) (FunctionParam, error) {
 	switch {
 	case reflect.PointerTo(t).Implements(textUnmarshaler):
 		return FunctionParam{Type: "string"}, nil
-	case reflect.PointerTo(t).Implements(jsonUnmarshaler):
-		return FunctionParam{}, fmt.Errorf("%s decodes itself, so its schema is unknown", t)
+	case selfDecoding(t):
+		return FunctionParam{}, errSelfDecoding(t)
 	case t.Kind() == reflect.Struct:
 		return objectOf(t, path)
 	}
@@ -98,6 +109,10 @@ func paramOf(t reflect.Type, path []reflect.Type) (FunctionParam, error) {
 // structs flattened as encoding/json flattens them. Two fields with one
 // name are an error rather than a guess at which one json would pick.
 func objectOf(t reflect.Type, path []reflect.Type) (FunctionParam, error) {
+	// Checked here too: the root and embedded structs do not pass paramOf.
+	if selfDecoding(t) {
+		return FunctionParam{}, errSelfDecoding(t)
+	}
 	path, err := descend(path, t)
 	if err != nil {
 		return FunctionParam{}, err
@@ -321,18 +336,35 @@ func jsonType(value any) string {
 
 // checkNumber checks a JSON number against an integer or number schema.
 func (p FunctionParam) checkNumber(at string, n json.Number) []error {
-	number, err := n.Float64()
+	float, err := n.Float64()
 	// Any whole number passes; decoding enforces the Go field's range.
-	_, whole := new(big.Int).SetString(n.String(), 10)
-	switch {
-	case err != nil || p.Type == "integer" && !whole:
+	whole, isWhole := new(big.Int).SetString(n.String(), 10)
+	if err != nil || p.Type == "integer" && !isWhole {
 		return failAt(at, "%s is not a valid %s", n, p.Type)
-	case p.Minimum != nil && number < *p.Minimum:
+	}
+	// compare is the sign of n minus bound. A number is the float64 the
+	// field will hold; an integer that large would round onto its bound.
+	compare := func(bound float64) int { return cmp.Compare(float, bound) }
+	if p.Type == "integer" {
+		compare = func(bound float64) int { return compareExactly(whole, bound) }
+	}
+	switch {
+	case p.Minimum != nil && compare(*p.Minimum) < 0:
 		return failAt(at, "%s is below the minimum %v", n, *p.Minimum)
-	case p.Maximum != nil && number > *p.Maximum:
+	case p.Maximum != nil && compare(*p.Maximum) > 0:
 		return failAt(at, "%s is above the maximum %v", n, *p.Maximum)
 	}
 	return nil
+}
+
+// compareExactly is the sign of n minus bound, with no rounding of n. A
+// non-finite bound limits nothing.
+func compareExactly(n *big.Int, bound float64) int {
+	limit := new(big.Rat).SetFloat64(bound)
+	if limit == nil {
+		return 0
+	}
+	return new(big.Rat).SetInt(n).Cmp(limit)
 }
 
 // checkObject checks an object's fields in name order, so the report is

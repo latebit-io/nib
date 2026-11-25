@@ -568,9 +568,9 @@ func (s *anthropicStreamState) dispatchEvent(ctx context.Context, eventType, dat
 	case "error":
 		var evt anthropicErrorEvent
 		if err := json.Unmarshal([]byte(data), &evt); err != nil || evt.Error == nil {
-			return false, fmt.Errorf("stream error: %s", oneLine(data)) // unparseable: bounded raw snippet
+			return false, &StreamError{Detail: oneLine(data)} // unparseable: bounded raw snippet
 		}
-		return false, fmt.Errorf("stream error: %s", evt.Error.detail())
+		return false, evt.Error.streamError()
 	}
 	return false, nil
 }

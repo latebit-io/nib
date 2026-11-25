@@ -9,7 +9,6 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/latebit-io/nib/agent/event"
@@ -24,12 +23,10 @@ import (
 // silent partial completion.
 var errProviderClosedEarly = errors.New("agent: provider closed stream before completion")
 
-// errProviderTruncated is the sentinel surfaced when the provider's
-// terminal Done reports Truncated=true and either no [Hooks.OnTruncated]
-// is registered or the registered hook returns Retry=false without
-// emitting its own error event. Applications that want recovery wire
-// the hook; without it the foundation defaults to ending the run.
-var errProviderTruncated = errors.New("agent: provider truncated response")
+// ErrTruncated is the error of a run that ended because the provider cut
+// its output short and no [Hooks.OnTruncated] was there to take it. With
+// a hook the run ends truncated without an error unless the hook emits one.
+var ErrTruncated = errors.New("agent: provider truncated response")
 
 // errLoopExited is surfaced when the run goroutine unwinds without the
 // loop returning, so AgentEnd still carries a documented reason.
@@ -38,7 +35,11 @@ var errLoopExited = errors.New("agent: run goroutine exited before the loop retu
 // runLoop is the per-run goroutine: it brackets [Agent.loop] with
 // AgentStart and the cleanup that emits AgentEnd. The cleanup is the
 // only path that resets the run state; deferred so a Goexit runs it too.
-func (a *Agent) runLoop(ctx context.Context, oneShot bool, result chan<- runResult) {
+func (a *Agent) runLoop(ctx context.Context, oneShot bool, result chan<- runResult, previous <-chan struct{}) {
+	// The run before this one is over but its AgentEnd may still be on
+	// its way; nothing of this run may overtake it. Not bounded by ctx:
+	// this run's own AgentEnd would wait on the same consumer.
+	<-previous
 	a.send(ctx, event.AgentStart{})
 	var end event.AgentEnd
 	defer func() {
@@ -342,19 +343,12 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, tools []llm
 	}
 }
 
-// handleTruncation invokes the [Hooks.OnTruncated] hook (when
-// configured) on a truncated turn and returns whether the loop should
-// retry. Splice messages from the hook are appended before the next
-// turn — or before run-end on Retry=false.
-//
-// When no hook is registered, the foundation emits its own
-// [event.Error] for [errProviderTruncated] and returns retry=false. With
-// a hook, the hook owns user-facing error emission on Retry=false; the
-// foundation ends the run silently. A hook error is treated as terminal
-// and surfaced through [Agent.emitError] by the caller.
+// handleTruncation asks [Hooks.OnTruncated] whether to retry a truncated
+// turn and appends the messages it splices in. With no hook the run ends
+// with [ErrTruncated]; with one, the hook owns the error the user sees.
 func (a *Agent) handleTruncation(ctx context.Context, assistant llm.Message) (retry bool, err error) {
 	if a.hooks.OnTruncated == nil {
-		a.emitError(ctx, errProviderTruncated)
+		a.emitError(ctx, ErrTruncated)
 		return false, nil
 	}
 	res, hookErr := a.hooks.OnTruncated(ctx, TruncationInput{
@@ -403,9 +397,9 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []llm.ToolCall) (boo
 	return allTerminate, nil
 }
 
-// executeSegment takes calls through three steps so hooks stay serial and
-// in call order: BeforeToolCall for each, the tools (together when there
-// are several), then AfterToolCall and the result for each.
+// executeSegment runs BeforeToolCall for each call in order, then the
+// tools (together when there are several). Each call gets AfterToolCall and
+// its ToolEnd as it completes; the transcript still takes results in call order.
 func (a *Agent) executeSegment(ctx context.Context, calls []llm.ToolCall) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -420,57 +414,77 @@ func (a *Agent) executeSegment(ctx context.Context, calls []llm.ToolCall) (bool,
 		}
 	}
 
-	// On a cancel only calls[:done] have a result. They are kept: the
-	// work was done, and settle answers the calls that never started.
-	done, cancelled := a.runTools(ctx, calls, run, results)
-
 	allTerminate := true
 	var failed error
-	for i, call := range calls[:done] {
+	settled := make([]bool, len(calls)) // the call's hook has run
+	kept := make([]bool, len(calls))    // and left a result to record
+	next := 0                           // first call not yet in the transcript
+	finish := func(i int) {
+		call := calls[i]
 		result, terminate, err := a.afterTool(ctx, call, results[i])
+		settled[i], kept[i], results[i] = true, err == nil, result
+		for ; next < len(calls) && settled[next]; next++ {
+			if kept[next] {
+				a.appendMessage(llm.Message{Role: "tool", ToolCallID: calls[next].ID, Content: results[next].Content})
+			}
+		}
 		if err != nil {
-			// The other calls ran too and keep their results. This one's
-			// stays out: the hook that failed may redact or cap it.
+			// The other calls keep their results. This one's stays out:
+			// the hook that failed may redact or cap it.
 			failed = cmp.Or(failed, err)
-			continue
+			return
 		}
 		allTerminate = allTerminate && terminate
-		a.appendMessage(llm.Message{Role: "tool", ToolCallID: call.ID, Content: result.Content})
-		a.send(ctx, event.ToolEnd{CallID: call.ID, Result: result.Content, IsError: result.IsError})
+		a.send(ctx, event.ToolEnd{CallID: call.ID, Name: call.Function.Name, Result: result.Content, IsError: result.IsError})
 	}
+
+	// On a cancel the calls that never started have no result; settle
+	// answers them. Those that ran are kept: the work was done.
+	cancelled := a.runTools(ctx, calls, run, results, finish)
 	return allTerminate, cmp.Or(failed, cancelled)
 }
 
-// runTools executes the calls marked in run, a single one on the loop
-// goroutine, several concurrently (at most maxParallelTools at once). No
-// tool starts once ctx is done: it returns how many calls have a result.
-func (a *Agent) runTools(ctx context.Context, calls []llm.ToolCall, run []bool, results []ToolResult) (int, error) {
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	slots := make(chan struct{}, maxParallelTools)
+// runTools executes the calls marked in run, several at once (at most
+// maxParallelTools), and passes each call to finish on this goroutine as
+// it completes. No tool starts once ctx is done; that error is returned.
+func (a *Agent) runTools(ctx context.Context, calls []llm.ToolCall, run []bool, results []ToolResult, finish func(i int)) error {
+	completed := make(chan int, len(calls))
+	running := 0
+	defer func() {
+		for ; running > 0; running-- {
+			finish(<-completed)
+		}
+	}()
 	for i, call := range calls {
 		if !run[i] {
+			finish(i) // blocked by its hook: the result is already there
 			continue
 		}
-		select {
-		case slots <- struct{}{}:
-		case <-ctx.Done():
-			return i, ctx.Err()
+		for running == maxParallelTools {
+			select {
+			case done := <-completed:
+				running--
+				finish(done)
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
-		// Checked again: select picks at random when both were ready.
 		if err := ctx.Err(); err != nil {
-			return i, err
+			return err
 		}
 		if len(calls) == 1 {
 			results[i] = a.runTool(ctx, call)
-			break
+			finish(i)
+			return nil
 		}
-		wg.Go(func() {
-			defer func() { <-slots }()
+		running++
+		go func() {
+			// Deferred, so a tool that exits its goroutine is still counted.
+			defer func() { completed <- i }()
 			results[i] = a.runTool(ctx, call)
-		})
+		}()
 	}
-	return len(calls), nil
+	return nil
 }
 
 // unfinishedToolResult answers a tool call the run ended without recording.
@@ -551,10 +565,17 @@ func (a *Agent) runTool(ctx context.Context, call llm.ToolCall) (result ToolResu
 
 // afterTool runs AfterToolCall on a result, blocked ones included, and
 // folds in its overrides. The bool is the call's terminate request.
-func (a *Agent) afterTool(ctx context.Context, call llm.ToolCall, result ToolResult) (ToolResult, bool, error) {
+func (a *Agent) afterTool(ctx context.Context, call llm.ToolCall, result ToolResult) (_ ToolResult, _ bool, err error) {
 	if a.hooks.AfterToolCall == nil {
 		return result, false, nil
 	}
+	// A panicking hook fails its call as a hook error does. Unwinding
+	// from here would end the run with its other tools still running.
+	defer func() {
+		if r := recover(); r != nil {
+			err = recovered("AfterToolCall("+call.Function.Name+")", r)
+		}
+	}()
 	res, err := a.hooks.AfterToolCall(ctx, AfterToolCallInput{
 		CallID: call.ID,
 		Name:   call.Function.Name,
@@ -650,53 +671,37 @@ func (a *Agent) awaitReply(ctx context.Context) (string, bool) {
 	}
 }
 
-// cleanupRun emits [event.AgentEnd], resets the run state and releases
-// [Agent.WaitForIdle]; every way a run can end funnels through it. AgentEnd
-// goes out while the run still counts as active: wait for idle before Prompt.
+// cleanupRun ends a run: every way one can end funnels through it. The
+// run state is reset before [event.AgentEnd] goes out, so a consumer that
+// receives it can start the next run at once.
 func (a *Agent) cleanupRun(ctx context.Context, end event.AgentEnd, result chan<- runResult) {
 	a.settle()
-	end.Messages = a.snapshotMessages()
-	a.send(ctx, end)
 
 	a.mu.Lock()
-	// The error [Agent.Run] returns: what failed the run, or the ctx
-	// error when it was aborted (no Error is emitted for an abort).
-	err := a.lastErr
+	// In the same critical section as the reset: the next run replaces them.
+	end.Messages = slices.Clone(a.messages)
+	// What failed the run, or who aborted it (an abort emits no Error).
+	end.Err = a.lastErr
 	if end.Reason == event.EndAborted {
-		err = ctx.Err()
+		end.Err = context.Cause(ctx)
 	}
 	// A run that ends on its own must still release its ctx, or it stays
 	// registered with the caller's ctx. Under the lock so the ctx is done
 	// before the agent reads as idle; cancel neither blocks nor calls out.
-	if a.cancel != nil {
-		a.cancel()
-	}
+	a.cancel(nil)
 	doneCh := a.doneCh
 	a.running = false
 	a.streaming = false
 	a.cancel = nil
-	a.doneCh = nil
 	a.inputCh = nil
 	a.pendingToolCalls = nil
 	a.mu.Unlock()
 
-	// After the reset, so a caller holding the result can start a new run.
+	a.send(ctx, end)
 	if result != nil {
-		result <- runResult{end: end, err: err}
+		result <- runResult{end: end, err: end.Err}
 	}
-	if doneCh != nil {
-		close(doneCh)
-	}
-}
-
-// snapshotMessages returns a defensive copy of the current transcript
-// for inclusion in [event.AgentEnd]. Frontends inspecting the final
-// transcript can mutate the slice without affecting any subsequent
-// run's bookkeeping.
-func (a *Agent) snapshotMessages() []llm.Message {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return slices.Clone(a.messages)
+	close(doneCh)
 }
 
 // appendMessage appends a single message to the run's transcript

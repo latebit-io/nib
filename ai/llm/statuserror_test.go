@@ -132,3 +132,38 @@ func TestRetryAfter(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamError_Temporary: provider-side failures and rate limits are
+// worth another attempt; a request the provider refused is not.
+func TestStreamError_Temporary(t *testing.T) {
+	for code, want := range map[string]bool{
+		"overloaded_error": true, "rate_limit_error": true, "api_error": true, "timeout_error": true,
+		"server_error": true, "rate_limit_exceeded": true,
+		"529": true, "502": true, "429": true,
+		"400": false, "invalid_request_error": false, "insufficient_quota": false, "": false,
+	} {
+		if got := (&StreamError{Code: code}).Temporary(); got != want {
+			t.Errorf("Temporary(%q) = %v; want %v", code, got, want)
+		}
+	}
+}
+
+// TestStreamError_TemporaryByType: a provider that sends a specific code
+// with a general type is classified by either; quota is never temporary.
+func TestStreamError_TemporaryByType(t *testing.T) {
+	tests := []struct {
+		reported apiError
+		want     bool
+	}{
+		{apiError{Type: "server_error", Code: "internal_failure"}, true},
+		{apiError{Type: "overloaded_error"}, true},
+		{apiError{Type: "invalid_request_error", Code: "context_length_exceeded"}, false},
+		{apiError{Type: "rate_limit_error", Code: "insufficient_quota"}, false},
+		{apiError{Type: "insufficient_quota", Code: "rate_limit_exceeded"}, false},
+	}
+	for _, tc := range tests {
+		if got := tc.reported.streamError().Temporary(); got != tc.want {
+			t.Errorf("Temporary(%+v) = %v; want %v", tc.reported, got, tc.want)
+		}
+	}
+}

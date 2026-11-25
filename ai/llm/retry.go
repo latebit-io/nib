@@ -9,7 +9,8 @@ import (
 )
 
 // RetryPolicy configures [WithRetry]. Only MaxAttempts is required: the
-// zero value of every other field is a usable default.
+// zero value of every other field is a usable default. To test a policy's
+// waits, run the test in testing/synctest: they then cost no real time.
 type RetryPolicy struct {
 	// MaxAttempts is the maximum number of Stream calls including the
 	// first. Must be >= 1; a value of 1 means "no retries."
@@ -28,10 +29,10 @@ type RetryPolicy struct {
 	// means [IsTemporary]: timeouts, rate limits and provider-side failures.
 	IsRetryable func(error) bool
 
-	// OnRetry, when set, is called before each wait with the attempt that
-	// failed (1-based), the wait ahead and the error. It lets a host say
-	// "rate limited, retrying in 4s" instead of going silent.
-	OnRetry func(attempt int, wait time.Duration, err error)
+	// OnRetry, when set, is called before each wait with the Stream call's
+	// ctx, the attempt that failed (1-based), the wait ahead and the error.
+	// It lets a host say "rate limited, retrying in 4s" into the right run.
+	OnRetry func(ctx context.Context, attempt int, wait time.Duration, err error)
 }
 
 // Validate reports a policy [WithRetry] refuses to run with.
@@ -43,16 +44,19 @@ func (p RetryPolicy) Validate() error {
 }
 
 // IsTemporary reports whether err is a provider answer that may succeed
-// if the request is sent again; see [StatusError.Temporary]. A transport
-// failure is not one: the caller's own deadline would look the same.
+// if the request is sent again: a temporary [StatusError] or [StreamError].
+// A transport failure is not one: the caller's own deadline looks the same.
 func IsTemporary(err error) bool {
-	status, ok := errors.AsType[*StatusError](err)
-	return ok && status.Temporary()
+	if status, ok := errors.AsType[*StatusError](err); ok {
+		return status.Temporary()
+	}
+	reported, ok := errors.AsType[*StreamError](err)
+	return ok && reported.Temporary()
 }
 
-// WithRetry wraps inner so that an error Stream returns before any event
-// flows is retried under policy; a failure mid-stream never is. It
-// forwards [OutputCapEscalator]. Panics on an invalid policy.
+// WithRetry retries, under policy, a failure before any event is forwarded:
+// an error from Stream, or one its first event carries. So Stream returns at
+// that event, the last one for a turn of tool calls alone. Panics on an invalid policy.
 func WithRetry(inner Provider, policy RetryPolicy) Provider {
 	if err := policy.Validate(); err != nil {
 		panic(err)
@@ -86,30 +90,31 @@ type escalatingRetryProvider struct {
 	OutputCapEscalator
 }
 
-// Stream calls the inner provider's Stream, retrying per the policy. It
-// waits the longer of the backoff and the provider's Retry-After, and
-// returns ctx.Err() when ctx ends before the next attempt.
+// Stream opens a stream, retrying per the policy, and returns once its
+// first event is in. It waits the longer of the backoff and the provider's
+// Retry-After, and returns ctx.Err() when ctx ends before the next attempt.
 func (r *retryProvider) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
 	limit := r.policy.MaxDelay
 	delay := r.policy.BaseDelay
 	for attempt := 1; ; attempt++ {
-		ch, err := r.inner.Stream(ctx, messages, tools)
+		stream, err := r.attempt(ctx, messages, tools)
 		if err == nil {
-			return ch, nil
+			return stream, nil
 		}
-		if attempt == r.policy.MaxAttempts || !r.policy.IsRetryable(err) {
-			return nil, err
-		}
-
 		wait := min(delay, limit)
 		if status, ok := errors.AsType[*StatusError](err); ok {
 			wait = max(wait, status.RetryAfter)
 		}
-		if wait > limit {
+		if attempt == r.policy.MaxAttempts || !r.policy.IsRetryable(err) || wait > limit {
+			// A stream that failed at its first event is handed on as it
+			// came: its consumer reads the error where the provider put it.
+			if stream != nil {
+				return stream, nil
+			}
 			return nil, err
 		}
 		if r.policy.OnRetry != nil {
-			r.policy.OnRetry(attempt, wait, err)
+			r.policy.OnRetry(ctx, attempt, wait, err)
 		}
 		if wait > 0 {
 			select {
@@ -124,4 +129,41 @@ func (r *retryProvider) Stream(ctx context.Context, messages []Message, tools []
 		// Doubling stops at the cap, which also keeps it from overflowing.
 		delay = min(delay, limit/2) * 2
 	}
+}
+
+// attempt opens one stream and reads its first event. err is why the
+// attempt failed: what Stream returned, or what that first event carries,
+// in which case the returned stream still yields the event.
+func (r *retryProvider) attempt(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
+	ch, err := r.inner.Stream(ctx, messages, tools)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case first, open := <-ch:
+		if !open {
+			return ch, nil
+		}
+		return prepend(ctx, first, ch), first.Err
+	case <-ctx.Done():
+		// The provider closes ch on its own; the consumer sees that.
+		return ch, nil
+	}
+}
+
+// prepend returns a stream of first followed by rest. It may be dropped
+// unread, as a failed attempt is: the copying ends when rest closes or
+// ctx does.
+func prepend(ctx context.Context, first StreamEvent, rest <-chan StreamEvent) <-chan StreamEvent {
+	out := make(chan StreamEvent, 1)
+	out <- first
+	go func() {
+		defer close(out)
+		for ev := range rest {
+			if !trySend(ctx, out, ev) {
+				return
+			}
+		}
+	}()
+	return out
 }

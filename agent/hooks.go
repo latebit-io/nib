@@ -23,9 +23,9 @@ type Hooks struct {
 	// tool-result in that case so the LLM sees the rejection.
 	BeforeToolCall func(ctx context.Context, c BeforeToolCallInput) (BeforeToolCallResult, error)
 
-	// AfterToolCall fires after Execute returns, before the loop forwards
-	// the result to the LLM. The hook can override Content / IsError or
-	// signal early termination.
+	// AfterToolCall fires as each Execute returns, before the result goes
+	// to the LLM: it can override Content / IsError or end the run. Never
+	// two at once; calls that ran together come in the order they finished.
 	AfterToolCall func(ctx context.Context, c AfterToolCallInput) (AfterToolCallResult, error)
 
 	// TransformContext rewrites the message slice before each LLM call.

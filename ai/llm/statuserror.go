@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -46,13 +47,64 @@ func (e *StatusError) Temporary() bool {
 	if e.Code == codeQuotaExhausted {
 		return false
 	}
-	switch e.StatusCode {
+	return temporaryStatus(e.StatusCode)
+}
+
+// temporaryStatus reports whether an HTTP status is a timeout, a rate
+// limit or a failure on the provider's side.
+func temporaryStatus(status int) bool {
+	switch status {
 	case http.StatusRequestTimeout, http.StatusTooManyRequests,
 		http.StatusInternalServerError, http.StatusBadGateway,
 		http.StatusServiceUnavailable, http.StatusGatewayTimeout, statusOverloaded:
 		return true
 	}
 	return false
+}
+
+// StreamError is a failure the provider reported inside a successful
+// (HTTP 200) response stream, such as Anthropic's overloaded_error. It is
+// the terminal [StreamEvent.Err]; what was streamed before it is partial.
+type StreamError struct {
+	// Provider names the provider that reported it.
+	Provider string
+	// Code is the provider's machine-readable error code or type (some
+	// relays send an HTTP status as text); empty when it gave none.
+	Code string
+	// Detail is the provider's code and message, bounded and on one line.
+	Detail string
+
+	what  string // how the provider framed it; empty means "stream error"
+	class string // the provider's error type, which Code hides when both came
+}
+
+// Error keeps the wording these failures had before they were typed.
+func (e *StreamError) Error() string {
+	text := cmp.Or(e.what, "stream error") + ": " + e.Detail
+	if e.Provider == "" {
+		return text
+	}
+	return e.Provider + ": " + text
+}
+
+// temporaryCodes are the error codes and types providers stream for a
+// failure on their side or a rate limit.
+var temporaryCodes = []string{
+	"overloaded_error", "rate_limit_error", "api_error", "timeout_error", // Anthropic
+	"server_error", "rate_limit_exceeded", // OpenAI
+}
+
+// Temporary reports whether the same request may succeed later, going by
+// the provider's code and its error type. A numeric Code is read as the
+// HTTP status a relay passed on.
+func (e *StreamError) Temporary() bool {
+	if e.Code == codeQuotaExhausted || e.class == codeQuotaExhausted {
+		return false
+	}
+	if status, err := strconv.Atoi(e.Code); err == nil {
+		return temporaryStatus(status)
+	}
+	return slices.Contains(temporaryCodes, e.Code) || slices.Contains(temporaryCodes, e.class)
 }
 
 // retryAfter reads a Retry-After header: delay seconds or an HTTP date.
@@ -79,5 +131,5 @@ func codeOf(body []byte) string {
 	if json.Unmarshal(body, &envelope) != nil {
 		return ""
 	}
-	return oneLine(cmp.Or(string(envelope.Error.Code), envelope.Error.Type))
+	return envelope.Error.code()
 }

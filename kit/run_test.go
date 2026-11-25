@@ -18,6 +18,7 @@ import (
 func TestAgentDone_SuccessFollowsReason(t *testing.T) {
 	t.Parallel()
 
+	boom := errors.New("boom")
 	tests := []struct {
 		name     string
 		provider llm.Provider
@@ -26,6 +27,8 @@ func TestAgentDone_SuccessFollowsReason(t *testing.T) {
 		atWait      func(a *kit.Agent, cancelCaller context.CancelFunc)
 		want        event.EndReason
 		wantSuccess bool
+		// wantErr is matched with errors.Is; nil means AgentDone.Err is nil.
+		wantErr error
 	}{
 		{
 			name:     "tool batch terminates",
@@ -41,6 +44,7 @@ func TestAgentDone_SuccessFollowsReason(t *testing.T) {
 			provider: llmtest.NewScripted(llmtest.Text("hi")),
 			atWait:   func(a *kit.Agent, _ context.CancelFunc) { a.Cancel() },
 			want:     event.EndAborted,
+			wantErr:  kit.ErrAborted,
 		},
 		{
 			// No kit.Cancel involved: the foundation still knows it was aborted.
@@ -48,11 +52,13 @@ func TestAgentDone_SuccessFollowsReason(t *testing.T) {
 			provider: llmtest.NewScripted(llmtest.Text("hi")),
 			atWait:   func(_ *kit.Agent, cancelCaller context.CancelFunc) { cancelCaller() },
 			want:     event.EndAborted,
+			wantErr:  context.Canceled,
 		},
 		{
 			name:     "provider fails",
-			provider: llmtest.Failing(errors.New("boom")),
+			provider: llmtest.Failing(boom),
 			want:     event.EndError,
+			wantErr:  boom,
 		},
 		{
 			// No AgentError is published here, yet the run did not succeed.
@@ -97,6 +103,13 @@ func TestAgentDone_SuccessFollowsReason(t *testing.T) {
 			if done.Reason != tc.want || done.Success != tc.wantSuccess {
 				t.Errorf("AgentDone = {Reason: %q, Success: %v}; want {%q, %v}",
 					done.Reason, done.Success, tc.want, tc.wantSuccess)
+			}
+			if !errors.Is(done.Err, tc.wantErr) {
+				t.Errorf("AgentDone.Err = %v; want %v", done.Err, tc.wantErr)
+			}
+			// Only a run stopped by Cancel names it as the cause.
+			if errors.Is(done.Err, kit.ErrAborted) != (tc.wantErr == kit.ErrAborted) {
+				t.Errorf("AgentDone.Err = %v; matches ErrAborted on the wrong row", done.Err)
 			}
 		})
 	}

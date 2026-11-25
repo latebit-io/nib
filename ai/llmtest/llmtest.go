@@ -6,6 +6,7 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/latebit-io/nib/ai/llm"
 )
@@ -14,9 +15,15 @@ import (
 // in order. A call past the last one gets a stream that closes at once,
 // which a consumer sees as a provider that hung up early.
 type Scripted struct {
-	mu      sync.Mutex
-	turns   [][]llm.StreamEvent
-	offered []int // tools given to each call so far
+	mu       sync.Mutex
+	turns    [][]llm.StreamEvent
+	requests []Request
+}
+
+// Request is what one Stream call was given.
+type Request struct {
+	Messages []llm.Message
+	Tools    []llm.ToolDef
 }
 
 // NewScripted returns a [Scripted] that will serve turns.
@@ -25,9 +32,10 @@ func NewScripted(turns ...[]llm.StreamEvent) *Scripted {
 }
 
 // Stream serves the next prepared stream, fully buffered and closed.
-func (p *Scripted) Stream(_ context.Context, _ []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+func (p *Scripted) Stream(_ context.Context, messages []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	p.mu.Lock()
-	p.offered = append(p.offered, len(tools))
+	// Copied: the caller goes on appending to its transcript.
+	p.requests = append(p.requests, Request{Messages: slices.Clone(messages), Tools: slices.Clone(tools)})
 	var events []llm.StreamEvent
 	if len(p.turns) > 0 {
 		events, p.turns = p.turns[0], p.turns[1:]
@@ -46,14 +54,23 @@ func (p *Scripted) Stream(_ context.Context, _ []llm.Message, tools []llm.ToolDe
 func (p *Scripted) Calls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.offered)
+	return len(p.requests)
+}
+
+// Requests returns what each Stream call so far was given, in order.
+func (p *Scripted) Requests() []Request {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.requests)
 }
 
 // Offered returns the number of tools each Stream call was given.
 func (p *Scripted) Offered() []int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return slices.Clone(p.offered)
+	offered := []int{}
+	for _, request := range p.Requests() {
+		offered = append(offered, len(request.Tools))
+	}
+	return offered
 }
 
 // Failing returns a provider whose Stream fails with err.
@@ -63,6 +80,27 @@ type failing struct{ err error }
 
 func (p failing) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	return nil, p.err
+}
+
+// FailingFirst returns a provider whose first n Stream calls fail with
+// err; every later call goes to then.
+func FailingFirst(n int, err error, then llm.Provider) llm.Provider {
+	p := &failingFirst{err: err, then: then}
+	p.left.Store(int64(n))
+	return p
+}
+
+type failingFirst struct {
+	left atomic.Int64
+	err  error
+	then llm.Provider
+}
+
+func (p *failingFirst) Stream(ctx context.Context, messages []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	if p.left.Add(-1) >= 0 {
+		return nil, p.err
+	}
+	return p.then.Stream(ctx, messages, tools)
 }
 
 // Blocking returns a provider that streams tokens and then never finishes

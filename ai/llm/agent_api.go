@@ -387,7 +387,7 @@ func (s *sseStreamState) handleChunk(ctx context.Context, data string, ch chan<-
 	}
 
 	if chunk.Error != nil {
-		return false, fmt.Errorf("stream error: %s", chunk.Error.detail())
+		return false, chunk.Error.streamError()
 	}
 	if parsed := parseUsage(chunk.Usage); parsed != nil {
 		s.usage = parsed

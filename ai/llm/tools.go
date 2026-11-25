@@ -121,7 +121,12 @@ func (p *FunctionParam) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
-	if len(aux.Type) == 0 || json.Unmarshal(aux.Type, &p.Type) == nil {
+	if len(aux.Type) == 0 {
+		return nil
+	}
+	if json.Unmarshal(aux.Type, &p.Type) == nil {
+		// A plain type replaces a union the receiver may have held.
+		p.Nullable = false
 		return nil
 	}
 	var union []string

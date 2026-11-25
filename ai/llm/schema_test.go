@@ -74,6 +74,19 @@ func TestFunctionParam_UnmarshalOneTypeList(t *testing.T) {
 	}
 }
 
+// TestFunctionParam_UnmarshalPlainTypeClearsNullable: decoding into a
+// reused value must not keep the union it held before.
+func TestFunctionParam_UnmarshalPlainTypeClearsNullable(t *testing.T) {
+	p := FunctionParam{Type: "string", Nullable: true}
+	if err := json.Unmarshal([]byte(`{"type":"integer"}`), &p); err != nil || p.Type != "integer" || p.Nullable {
+		t.Errorf("Unmarshal = %+v, %v; want a plain integer", p, err)
+	}
+	p.Nullable = true
+	if err := json.Unmarshal([]byte(`{"description":"d"}`), &p); err != nil || !p.Nullable {
+		t.Errorf("Unmarshal without a type = %+v, %v; want Nullable kept", p, err)
+	}
+}
+
 func TestFunctionParam_UnmarshalRejectsOtherUnions(t *testing.T) {
 	for _, schema := range []string{
 		`{"type":["string","integer"]}`,
@@ -109,15 +122,16 @@ type embedded struct {
 
 type assessment struct {
 	embedded
-	Query    string            `json:"query" desc:"what to look up"`
-	Score    *int              `json:"score" min:"0" max:"5"`
-	Level    level             `json:"level,omitempty" enum:"low, high"`
-	Weights  []float64         `json:"weights,omitzero" min:"0.5"`
-	Tags     []string          `json:"tags,omitempty" enum:"a,b"`
-	Sources  []source          `json:"sources,omitempty"`
-	Since    time.Time         `json:"since,omitempty"`
-	Blob     []byte            `json:"blob,omitempty"`
-	Extra    map[string]string `json:"extra,omitempty"`
+	Query    string    `json:"query" desc:"what to look up"`
+	Score    *int      `json:"score" min:"0" max:"5"`
+	Level    level     `json:"level,omitempty" enum:"low, high"`
+	Weights  []float64 `json:"weights,omitzero" min:"0.5"`
+	Tags     []string  `json:"tags,omitempty" enum:"a,b"`
+	Sources  []source  `json:"sources,omitempty"`
+	Since    time.Time `json:"since,omitempty"`
+	Blob     []byte    `json:"blob,omitempty"`
+	Big      uint64    `json:"big,omitempty"`
+	Exact    int64     `json:"exact,omitempty" enum:"9007199254740992"`
 	Untagged bool
 	Skipped  string `json:"-"`
 	hidden   string
@@ -143,8 +157,9 @@ func TestSchemaFor(t *testing.T) {
  "type": "object",
  "properties": {
   "Untagged": {"type": "boolean", "description": ""},
+  "big": {"type": "integer", "description": ""},
   "blob": {"type": "string", "description": ""},
-  "extra": {"type": "object", "description": ""},
+  "exact": {"type": "integer", "description": "", "enum": [9007199254740992]},
   "level": {"type": "string", "description": "", "enum": ["low", "high"]},
   "query": {"type": "string", "description": "what to look up"},
   "score": {"type": ["integer", "null"], "description": "", "minimum": 0, "maximum": 5},
@@ -162,6 +177,19 @@ func TestSchemaFor(t *testing.T) {
 }`
 	if compact(t, string(got)) != compact(t, want) {
 		t.Errorf("schema =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestSchemaFor_SharedTypeIsNotACycle: two fields of one type, and a type
+// that recurs only in a sibling, must not read as recursion.
+func TestSchemaFor_SharedTypeIsNotACycle(t *testing.T) {
+	_, err := SchemaFor[struct {
+		A, B source
+		C    []source
+		D    [][]int
+	}]()
+	if err != nil {
+		t.Errorf("SchemaFor = %v; want a schema", err)
 	}
 }
 
@@ -184,6 +212,10 @@ func compact(t *testing.T, text string) string {
 	return b.String()
 }
 
+type nested []nested
+
+type loop *loop
+
 type selfRef struct {
 	Next *selfRef `json:"next"`
 }
@@ -204,7 +236,12 @@ func TestSchemaFor_Errors(t *testing.T) {
 		{"not a struct", SchemaFor[string], "not a struct"},
 		{"any", SchemaFor[struct{ V any }], ".V: interface {} has no JSON schema"},
 		{"channel", SchemaFor[struct{ C chan int }], "has no JSON schema"},
-		{"map key", SchemaFor[struct{ M map[int]string }], "map keys must be strings"},
+		{"map", SchemaFor[struct{ M map[string]int }], "maps are not supported"},
+		{"recursive slice", SchemaFor[struct{ V nested }], "nested contains itself"},
+		{"recursive pointer", SchemaFor[struct{ V loop }], "loop contains itself"},
+		{"json string option", SchemaFor[struct {
+			N int `json:"n,string"`
+		}], "json string option"},
 		{"self-decoding", SchemaFor[struct{ R json.RawMessage }], "decodes itself"},
 		{"recursive", SchemaFor[selfRef], "contains itself"},
 		{"recursive embed", SchemaFor[selfEmbed], "contains itself"},
@@ -240,6 +277,7 @@ func TestDecodeArguments(t *testing.T) {
 	type args struct {
 		Query string `json:"query,omitempty"`
 		Limit *int   `json:"limit,omitempty" max:"25"`
+		Depth int8   `json:"depth,omitempty" max:"5000"`
 	}
 	schema, err := SchemaFor[args]()
 	if err != nil {
@@ -255,6 +293,10 @@ func TestDecodeArguments(t *testing.T) {
 		{name: "blank is an empty object", raw: " "},
 		{name: "null optional stays unset", raw: `{"limit":null}`},
 		{name: "violation", raw: `{"limit":99}`, wantErr: "limit: 99 is above the maximum 25"},
+		{name: "a repeated member decodes as it was checked", raw: `{"depth":9999,"depth":null}`},
+		{name: "another spelling cannot bypass the check", raw: `{"depth":1,"Depth":9999}`,
+			wantErr: `Depth: unknown field; did you mean "depth"?`},
+		{name: "beyond the Go field's range", raw: `{"depth":300}`, wantErr: "depth"},
 		{name: "not JSON", raw: `{"query":`, wantErr: "not valid JSON"},
 	}
 	for _, tc := range tests {
@@ -291,7 +333,7 @@ func TestValidate(t *testing.T) {
 		{name: "minimal", schema: open, args: `{` + ok + `}`},
 		{name: "everything", schema: closed, args: `{` + ok + `,"score":5,"level":"high","weights":[0.5,2],
 			"tags":["a"],"sources":[{"url":"u","rank":2},{"url":"v","rank":null}],"since":"2026-01-02T03:04:05Z",
-			"extra":{"anything":"goes"},"world":"w"}`},
+			"big":18446744073709551615,"exact":9007199254740992,"world":"w"}`},
 		{name: "unknown field allowed when open", schema: open, args: `{` + ok + `,"other":1}`},
 		{name: "unknown field refused when closed", schema: closed, args: `{` + ok + `,"other":1}`,
 			want: []string{"other: unknown field"}},
@@ -315,6 +357,12 @@ func TestValidate(t *testing.T) {
 			want: []string{`level: "mid" is not one of "low","high"`}},
 		{name: "array elements are checked", schema: open, args: `{` + ok + `,"tags":["a","z"],"weights":[1,0.1]}`,
 			want: []string{`tags[1]: "z" is not one of "a","b"`, "weights[1]: 0.1 is below the minimum 0.5"}},
+		{name: "another spelling of a known field", schema: open, args: `{` + ok + `,"QUERY":"x"}`,
+			want: []string{`QUERY: unknown field; did you mean "query"?`}},
+		{name: "enum numbers compare exactly", schema: open, args: `{` + ok + `,"exact":9007199254740993}`,
+			want: []string{"exact: 9007199254740993 is not one of 9007199254740992"}},
+		{name: "enum number past any float", schema: open, args: `{` + ok + `,"exact":1e999999999}`,
+			want: []string{"exact: 1e999999999 is not one of 9007199254740992"}},
 		{name: "nested objects are checked", schema: open, args: `{` + ok + `,"sources":[{"rank":3}]}`,
 			want: []string{"sources[0].url: required", "sources[0].rank: 3 is not one of 1,2"}},
 	}
@@ -339,6 +387,18 @@ func TestValidate(t *testing.T) {
 				t.Errorf("Validate reported %d problems, want %d: %q", got, len(tc.want), err)
 			}
 		})
+	}
+}
+
+// TestValidate_NumberEnumComparesByValue: 1 and 1.0 are one number.
+func TestValidate_NumberEnumComparesByValue(t *testing.T) {
+	schema := FunctionParams{Type: "object", Properties: map[string]FunctionParam{
+		"x": {Type: "number", Enum: []any{1, 0.5}},
+	}}
+	for args, valid := range map[string]bool{`{"x":1.0}`: true, `{"x":5e-1}`: true, `{"x":0.51}`: false} {
+		if err := schema.Validate(args); (err == nil) != valid {
+			t.Errorf("Validate(%s) = %v; want valid: %v", args, err, valid)
+		}
 	}
 }
 

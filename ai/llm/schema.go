@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math/big"
 	"reflect"
 	"slices"
 	"strconv"
@@ -41,14 +42,28 @@ func SchemaFor[T any]() (FunctionParams, error) {
 var textUnmarshaler = reflect.TypeFor[encoding.TextUnmarshaler]()
 var jsonUnmarshaler = reflect.TypeFor[json.Unmarshaler]()
 
-// paramOf maps a Go type to its schema. path holds the structs being
-// described, so [objectOf] can report a type that contains itself.
+// descend adds t to path, the types being described, or reports that t
+// contains itself. Each branch gets its own path, so siblings may share a type.
+func descend(path []reflect.Type, t reflect.Type) ([]reflect.Type, error) {
+	if slices.Contains(path, t) {
+		return nil, fmt.Errorf("%s contains itself", t)
+	}
+	return append(slices.Clip(path), t), nil
+}
+
+// paramOf maps a Go type to its schema; path is the types it is inside.
 func paramOf(t reflect.Type, path []reflect.Type) (FunctionParam, error) {
 	switch {
 	case reflect.PointerTo(t).Implements(textUnmarshaler):
 		return FunctionParam{Type: "string"}, nil
 	case reflect.PointerTo(t).Implements(jsonUnmarshaler):
 		return FunctionParam{}, fmt.Errorf("%s decodes itself, so its schema is unknown", t)
+	case t.Kind() == reflect.Struct:
+		return objectOf(t, path)
+	}
+	path, err := descend(path, t)
+	if err != nil {
+		return FunctionParam{}, err
 	}
 	switch t.Kind() {
 	case reflect.Pointer:
@@ -72,12 +87,9 @@ func paramOf(t reflect.Type, path []reflect.Type) (FunctionParam, error) {
 		items, err := paramOf(t.Elem(), path)
 		return FunctionParam{Type: "array", Items: &items}, err
 	case reflect.Map:
-		if t.Key().Kind() != reflect.String {
-			return FunctionParam{}, fmt.Errorf("%s: map keys must be strings", t)
-		}
-		return FunctionParam{Type: "object"}, nil
-	case reflect.Struct:
-		return objectOf(t, path)
+		// The schema type cannot describe a map's values, so their
+		// constraints would go unchecked; refuse rather than accept anything.
+		return FunctionParam{}, fmt.Errorf("%s: maps are not supported", t)
 	}
 	return FunctionParam{}, fmt.Errorf("%s has no JSON schema", t)
 }
@@ -86,10 +98,10 @@ func paramOf(t reflect.Type, path []reflect.Type) (FunctionParam, error) {
 // structs flattened as encoding/json flattens them. Two fields with one
 // name are an error rather than a guess at which one json would pick.
 func objectOf(t reflect.Type, path []reflect.Type) (FunctionParam, error) {
-	if slices.Contains(path, t) {
-		return FunctionParam{}, fmt.Errorf("%s contains itself", t)
+	path, err := descend(path, t)
+	if err != nil {
+		return FunctionParam{}, err
 	}
-	path = append(slices.Clip(path), t)
 	object := FunctionParam{Type: "object", Properties: map[string]FunctionParam{}}
 	add := func(name string, p FunctionParam, required bool) error {
 		if _, taken := object.Properties[name]; taken {
@@ -134,6 +146,10 @@ func objectOf(t reflect.Type, path []reflect.Type) (FunctionParam, error) {
 		}
 		p.Description = field.Tag.Get(tagDescription)
 		optional := strings.Split(options, ",")
+		// With it json reads the value from a string the schema would refuse.
+		if slices.Contains(optional, "string") {
+			return FunctionParam{}, fmt.Errorf("%s.%s: the json string option is not supported", t.Name(), field.Name)
+		}
 		required := !slices.Contains(optional, "omitempty") && !slices.Contains(optional, "omitzero")
 		// An optional field is left out, not sent as null: no union needed.
 		p.Nullable = p.Nullable && required
@@ -209,37 +225,45 @@ func enumValue(schemaType, text string) (any, error) {
 // (see [FunctionParams.Validate]) and decodes them into A.
 func DecodeArguments[A any](params FunctionParams, arguments string) (A, error) {
 	var args A
-	arguments = orEmptyObject(arguments)
-	if err := params.Validate(arguments); err != nil {
+	value, err := params.parse(arguments)
+	if err != nil {
 		return args, err
 	}
-	err := json.Unmarshal([]byte(arguments), &args)
-	return args, err
-}
-
-// orEmptyObject reads blank arguments as {}: some models send "" for a
-// call with no arguments.
-func orEmptyObject(arguments string) string {
-	if strings.TrimSpace(arguments) == "" {
-		return "{}"
+	// Decode the value that was checked, not the raw text: where a member
+	// is repeated, json would build the struct from more than the last one.
+	checked, err := json.Marshal(value)
+	if err != nil {
+		return args, err
 	}
-	return arguments
+	err = json.Unmarshal(checked, &args)
+	return args, err
 }
 
 // Validate checks a tool call's raw JSON arguments against the schema and
 // reports every violation, joined. Empty arguments count as {}, and null
 // for an optional field counts as leaving it out, as it does to encoding/json.
 func (p FunctionParams) Validate(arguments string) error {
-	decoder := json.NewDecoder(strings.NewReader(orEmptyObject(arguments)))
+	_, err := p.parse(arguments)
+	return err
+}
+
+// parse decodes arguments and checks them against the schema. Of a
+// repeated member it sees the last; [DecodeArguments] decodes the same.
+func (p FunctionParams) parse(arguments string) (any, error) {
+	// Some models send "" for a call with no arguments.
+	if strings.TrimSpace(arguments) == "" {
+		arguments = "{}"
+	}
+	decoder := json.NewDecoder(strings.NewReader(arguments))
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {
-		return fmt.Errorf("arguments are not valid JSON: %w", err)
+		return nil, fmt.Errorf("arguments are not valid JSON: %w", err)
 	}
 	if _, err := decoder.Token(); err != io.EOF {
-		return errors.New("arguments are not valid JSON: data after the first value")
+		return nil, errors.New("arguments are not valid JSON: data after the first value")
 	}
-	return errors.Join(p.object().check("", value)...)
+	return value, errors.Join(p.object().check("", value)...)
 }
 
 // check returns what is wrong with value under this schema; at names the
@@ -298,9 +322,10 @@ func jsonType(value any) string {
 // checkNumber checks a JSON number against an integer or number schema.
 func (p FunctionParam) checkNumber(at string, n json.Number) []error {
 	number, err := n.Float64()
-	_, intErr := n.Int64()
+	// Any whole number passes; decoding enforces the Go field's range.
+	_, whole := new(big.Int).SetString(n.String(), 10)
 	switch {
-	case err != nil || p.Type == "integer" && intErr != nil:
+	case err != nil || p.Type == "integer" && !whole:
 		return failAt(at, "%s is not a valid %s", n, p.Type)
 	case p.Minimum != nil && number < *p.Minimum:
 		return failAt(at, "%s is below the minimum %v", n, *p.Minimum)
@@ -323,7 +348,11 @@ func (p FunctionParam) checkObject(at string, object map[string]any) []error {
 	for _, name := range slices.Sorted(maps.Keys(object)) {
 		property, known := p.Properties[name]
 		if !known {
-			if closed {
+			// json matches names without regard to case, so this one would
+			// reach the field unchecked.
+			if alias := p.aliasOf(name); alias != "" {
+				errs = append(errs, failAt(fieldAt(at, name), "unknown field; did you mean %q?", alias)...)
+			} else if closed {
 				errs = append(errs, failAt(fieldAt(at, name), "unknown field")...)
 			}
 			continue
@@ -335,6 +364,16 @@ func (p FunctionParam) checkObject(at string, object map[string]any) []error {
 		errs = append(errs, property.check(fieldAt(at, name), object[name])...)
 	}
 	return errs
+}
+
+// aliasOf returns the property that name spells in another case, if any.
+func (p FunctionParam) aliasOf(name string) string {
+	for property := range p.Properties {
+		if strings.EqualFold(property, name) {
+			return property
+		}
+	}
+	return ""
 }
 
 // failAt is one violation at the named value, worded for the model.
@@ -351,12 +390,16 @@ func fieldAt(parent, name string) string {
 }
 
 // sameJSON reports whether an enum entry and a decoded value are the same
-// JSON value; numbers compare by value, so 1 matches 1.0.
+// JSON value. Numbers compare exactly and by value, so 1 matches 1.0.
 func sameJSON(allowed, value any) bool {
 	if number, ok := value.(json.Number); ok {
-		got, err := number.Float64()
-		want, wantErr := strconv.ParseFloat(inJSON(allowed), 64)
-		return err == nil && wantErr == nil && got == want
+		// Past float64's range it is no valid argument, and costly to parse.
+		if _, err := number.Float64(); err != nil {
+			return false
+		}
+		got, gotOK := new(big.Rat).SetString(number.String())
+		want, wantOK := new(big.Rat).SetString(inJSON(allowed))
+		return gotOK && wantOK && got.Cmp(want) == 0
 	}
 	return inJSON(allowed) == inJSON(value)
 }

@@ -268,6 +268,8 @@ func TestWireDefaultKeyStore(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
 			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			// Windows resolves the config dir from AppData alone.
+			t.Setenv("AppData", home)
 			path, err := oauth.DefaultKeyStorePath()
 			if err != nil {
 				t.Fatalf("DefaultKeyStorePath: %v", err)

@@ -88,7 +88,7 @@ type escalatingRetryProvider struct {
 
 // Stream calls the inner provider's Stream, retrying per the policy. It
 // waits the longer of the backoff and the provider's Retry-After, and
-// returns ctx.Err() when ctx ends during a wait.
+// returns ctx.Err() when ctx ends before the next attempt.
 func (r *retryProvider) Stream(ctx context.Context, messages []Message, tools []ToolDef) (<-chan StreamEvent, error) {
 	limit := r.policy.MaxDelay
 	delay := r.policy.BaseDelay
@@ -115,8 +115,11 @@ func (r *retryProvider) Stream(ctx context.Context, messages []Message, tools []
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
-				return nil, ctx.Err()
 			}
+		}
+		// Checked after every wait, a zero one included: OnRetry may cancel.
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		// Doubling stops at the cap, which also keeps it from overflowing.
 		delay = min(delay, limit/2) * 2

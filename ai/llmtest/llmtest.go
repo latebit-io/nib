@@ -66,16 +66,18 @@ func (p failing) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan l
 }
 
 // Blocking returns a provider that streams tokens and then never finishes
-// the turn: it ends only when the caller's ctx does.
+// the turn: the stream closes, without a Done event, when ctx ends.
 func Blocking(tokens ...string) llm.Provider { return blocking(tokens) }
 
 type blocking []string
 
-func (p blocking) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+func (p blocking) Stream(ctx context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	ch := make(chan llm.StreamEvent, len(p))
 	for _, tok := range p {
 		ch <- llm.StreamEvent{Token: tok}
 	}
+	// AfterFunc costs no goroutine while ctx lives, so nothing leaks.
+	context.AfterFunc(ctx, func() { close(ch) })
 	return ch, nil
 }
 

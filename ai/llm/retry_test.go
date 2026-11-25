@@ -173,6 +173,25 @@ func TestWithRetry_CancelDuringWait(t *testing.T) {
 	})
 }
 
+// TestWithRetry_CancelWithoutWait: with no delay to interrupt, a ctx
+// cancelled between attempts still stops the retries.
+func TestWithRetry_CancelWithoutWait(t *testing.T) {
+	inner := &flakyProvider{failUntil: 99, errFail: context.Canceled}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	policy := RetryPolicy{
+		MaxAttempts: 5,
+		IsRetryable: func(error) bool { return true },
+		OnRetry:     func(int, time.Duration, error) { cancel() },
+	}
+
+	_, err := WithRetry(inner, policy).Stream(ctx, nil, nil)
+
+	if !errors.Is(err, context.Canceled) || inner.calls.Load() != 1 {
+		t.Errorf("Stream = %v after %d calls; want Canceled after 1", err, inner.calls.Load())
+	}
+}
+
 func TestWithRetry_PanicsOnInvalidPolicy(t *testing.T) {
 	for _, attempts := range []int{0, -1} {
 		func() {

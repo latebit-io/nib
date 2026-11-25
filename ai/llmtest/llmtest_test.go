@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/nib/ai/llm"
 )
@@ -55,10 +56,12 @@ func TestFailing_ReturnsItsError(t *testing.T) {
 	}
 }
 
-func TestBlocking_StreamsTokensAndStaysOpen(t *testing.T) {
+func TestBlocking_StreamsTokensThenClosesWithCtx(t *testing.T) {
 	t.Parallel()
 
-	ch, err := Blocking("a", "b").Stream(context.Background(), nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := Blocking("a", "b").Stream(ctx, nil, nil)
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -67,7 +70,18 @@ func TestBlocking_StreamsTokensAndStaysOpen(t *testing.T) {
 	}
 	select {
 	case ev, open := <-ch:
-		t.Errorf("stream yielded %+v (open %v); want it to stay open and silent", ev, open)
+		t.Fatalf("stream yielded %+v (open %v); want it to stay open and silent", ev, open)
 	default:
+	}
+
+	cancel()
+
+	select {
+	case ev, open := <-ch:
+		if open {
+			t.Errorf("stream yielded %+v after cancel; want it closed", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("stream still open after cancel")
 	}
 }

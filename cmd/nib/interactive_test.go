@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -135,5 +136,33 @@ func TestExtensionSwitchFlags(t *testing.T) {
 	}
 	if got := (config{}).switches(); len(got.Enable)+len(got.Disable) != 0 {
 		t.Errorf("no flags: switches = %+v, want none", got)
+	}
+}
+
+// TestCancelOn: Ctrl-C cancels the startup until the session takes it
+// over; afterwards the signal is left for the session to read.
+func TestCancelOn(t *testing.T) {
+	interrupt := make(chan os.Signal, 1)
+	startCtx, started := cancelOn(context.Background(), interrupt)
+	interrupt <- os.Interrupt
+	select {
+	case <-startCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Ctrl-C during startup did not cancel it")
+	}
+	started()
+
+	startCtx, started = cancelOn(context.Background(), interrupt)
+	started()
+	started() // releasing twice is harmless
+	// The goroutine has let go once a signal stays in the channel.
+	interrupt <- os.Interrupt
+	select {
+	case <-startCtx.Done():
+		t.Error("after the session took over, Ctrl-C must not cancel the startup context")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if len(interrupt) != 1 {
+		t.Error("the signal must be left for the session")
 	}
 }

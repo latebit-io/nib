@@ -1,10 +1,11 @@
 package mcp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -35,9 +36,10 @@ const (
 type Server struct {
 	// Name identifies the server and prefixes its tools' names.
 	Name string
-	// Command is the program, optionally followed by arguments.
+	// Command is the program to run, taken whole: a path with spaces
+	// in it is one program, not a program and its arguments.
 	Command string
-	// Args are appended after any arguments in Command.
+	// Args are the program's arguments.
 	Args []string
 	// Env is added to the inherited environment.
 	Env map[string]string
@@ -79,6 +81,9 @@ type DiscoverOptions struct {
 	// TrustProject lets the project's servers start. Off by default: a
 	// cloned repository must not start a process nobody asked for.
 	TrustProject bool
+	// Trust, when set, lets them start if the person approved the
+	// config file. It is asked about the bytes that are then parsed.
+	Trust *TrustStore
 	// User are the person's own servers, for example from [ParseSpec]
 	// on an environment variable. They win a name over the others.
 	User []Server
@@ -93,20 +98,43 @@ func Discover(opts DiscoverOptions) (Config, error) {
 	found := slices.Clone(opts.User)
 	var errs []error
 	for _, src := range opts.Plugins {
-		servers, err := readConfig(src.Path, OriginPlugin, src.Prefix+"__")
+		data, err := filecap.Read(src.Path, maxConfigBytes, "MCP config")
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("mcp: %w", err))
+			continue
+		}
+		servers, err := parseConfig(data, src.Path, OriginPlugin, src.Prefix+"__")
 		errs = append(errs, err)
 		found = append(found, servers...)
 	}
+	trusted := opts.TrustProject
 	if opts.ProjectDir != "" {
-		servers, err := readConfig(filepath.Join(opts.ProjectDir, ProjectConfigName), OriginProject, "")
+		project, err := readProject(opts.ProjectDir)
 		errs = append(errs, err)
-		found = append(found, servers...)
+		if project.found {
+			// Approval and parsing use the same bytes: a file swapped
+			// after the check cannot ride on the earlier answer.
+			if !trusted && opts.Trust != nil {
+				trusted, err = opts.Trust.approved(project)
+				errs = append(errs, err)
+			}
+			servers, err := parseConfig(project.data, project.path, OriginProject, "")
+			errs = append(errs, err)
+			found = append(found, servers...)
+		}
 	}
+	return admit(found, trusted), errors.Join(errs...)
+}
 
+// admit sorts found into the servers that may start and those refused.
+func admit(found []Server, trustProject bool) Config {
 	var cfg Config
 	taken := map[string]Origin{}
 	for _, s := range found {
-		if err := refusal(s, taken, opts.TrustProject); err != nil {
+		if err := refusal(s, taken, trustProject); err != nil {
 			cfg.Refused = append(cfg.Refused, Refusal{Server: s, Err: err})
 			continue
 		}
@@ -114,7 +142,7 @@ func Discover(opts DiscoverOptions) (Config, error) {
 		cfg.Servers = append(cfg.Servers, s)
 	}
 	slices.SortFunc(cfg.Servers, func(a, b Server) int { return strings.Compare(a.Name, b.Name) })
-	return cfg, errors.Join(errs...)
+	return cfg
 }
 
 // refusal returns why s may not start, or nil when it may.
@@ -134,8 +162,8 @@ func refusal(s Server, taken map[string]Origin, trustProject bool) error {
 	return nil
 }
 
-// readConfig parses one config file. A missing file is not an error.
-func readConfig(path string, origin Origin, prefix string) ([]Server, error) {
+// parseConfig parses a config file's bytes; path labels the result.
+func parseConfig(data []byte, path string, origin Origin, prefix string) ([]Server, error) {
 	var file struct {
 		Servers map[string]struct {
 			Command string            `json:"command"`
@@ -143,8 +171,8 @@ func readConfig(path string, origin Origin, prefix string) ([]Server, error) {
 			Env     map[string]string `json:"env"`
 		} `json:"mcpServers"`
 	}
-	if _, err := filecap.ReadJSON(path, maxConfigBytes, "MCP config", &file); err != nil {
-		return nil, fmt.Errorf("mcp: %w", err)
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("mcp: %s: %w", path, err)
 	}
 	servers := make([]Server, 0, len(file.Servers))
 	// Sorted: which of two colliding names wins must not depend on map order.
@@ -174,8 +202,11 @@ func ParseSpec(spec, source string) ([]Server, error) {
 			errs = append(errs, fmt.Errorf("mcp: %s: entry %q is not name=command", source, entry))
 			continue
 		}
+		// The list has no separate arguments, so here spaces split them.
+		fields := strings.Fields(command)
 		servers = append(servers, Server{
-			Name: strings.TrimSpace(name), Command: command, Origin: OriginUser, Source: source,
+			Name: strings.TrimSpace(name), Command: fields[0], Args: fields[1:],
+			Origin: OriginUser, Source: source,
 		})
 	}
 	return servers, errors.Join(errs...)

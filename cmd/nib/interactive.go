@@ -47,18 +47,24 @@ func (s *session) close() {
 }
 
 // runInteractive is the line-based session: the default when nib is
-// started without a message. interrupt delivers Ctrl-C.
-func runInteractive(ctx context.Context, root string, store memory.Store, switches extension.Switches, interrupt <-chan os.Signal) error {
+// started without a message. Ctrl-C cancels startCtx until started is
+// called; from then on interrupt delivers it to the session.
+func runInteractive(ctx, startCtx context.Context, started func(), root string, store memory.Store, switches extension.Switches, interrupt <-chan os.Signal) error {
 	provider, err := newProvider(root)
 	if err != nil {
 		return err
 	}
 	sessionID := newSessionID(time.Now(), "interactive")
-	s, err := newSession(ctx, root, buildSystemPrompt(sessionID), store, provider, switches)
+	s, err := newSession(startCtx, root, buildSystemPrompt(sessionID), store, provider, switches)
 	if err != nil {
 		return setupErr("%v", err)
 	}
 	defer s.close()
+	// A cancelled start can still assemble, with every server failed.
+	if startCtx.Err() != nil {
+		return setupErr("interrupted during startup")
+	}
+	started()
 
 	reg := command.NewRegistry()
 	r, err := repl.New(repl.Options{

@@ -65,6 +65,7 @@ func Connect(ctx context.Context, servers []Server) *Session {
 	wg.Wait()
 
 	s := &Session{}
+	taken := map[string]bool{}
 	for i, o := range outcomes {
 		for _, err := range o.errs {
 			s.Failed = append(s.Failed, Failure{Server: servers[i], Err: err})
@@ -72,9 +73,22 @@ func Connect(ctx context.Context, servers []Server) *Session {
 		if o.client == nil {
 			continue
 		}
+		// Two tools can sanitize to one name; the model could not tell
+		// them apart, so only the first is offered.
+		var tools []agent.Tool
+		for _, t := range o.tools {
+			name := t.Definition().Function.Name
+			if taken[name] {
+				s.Failed = append(s.Failed, Failure{Server: servers[i],
+					Err: fmt.Errorf("tool name %s is already taken by another tool", name)})
+				continue
+			}
+			taken[name] = true
+			tools = append(tools, t)
+		}
 		s.clients = append(s.clients, o.client)
-		s.Connected = append(s.Connected, Connected{Server: servers[i], Tools: o.tools})
-		s.Tools = append(s.Tools, o.tools...)
+		s.Connected = append(s.Connected, Connected{Server: servers[i], Tools: tools})
+		s.Tools = append(s.Tools, tools...)
 	}
 	return s
 }
@@ -82,11 +96,10 @@ func Connect(ctx context.Context, servers []Server) *Session {
 // start runs one server through its handshake. client is nil when the
 // server could not be used; errs also carries tools that were left out.
 func start(ctx context.Context, server Server) (client *Client, tools []agent.Tool, errs []error) {
-	fields := strings.Fields(server.Command)
-	if len(fields) == 0 {
+	if strings.TrimSpace(server.Command) == "" {
 		return nil, nil, []error{errors.New("no command")}
 	}
-	client, err := NewStdioClient(fields[0], slices.Concat(fields[1:], server.Args), environ(server.Env))
+	client, err := NewStdioClient(server.Command, server.Args, environ(server.Env))
 	if err != nil {
 		return nil, nil, []error{err}
 	}

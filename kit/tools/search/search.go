@@ -8,6 +8,7 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -36,7 +37,12 @@ type Options struct {
 	FileGlob      string // filter files by glob (e.g. "*.go"); empty matches all
 }
 
+// ErrIncomplete is in the chain of the error a [SearchFunc] returns
+// beside valid results when it could not cover the whole tree.
+var ErrIncomplete = errors.New("the search is incomplete")
+
 // SearchFunc performs a text search under root for the given pattern.
+// Results returned with an [ErrIncomplete] error are still shown.
 type SearchFunc func(ctx context.Context, root, pattern string, opts Options) ([]Result, error)
 
 // Tool lets the LLM search for text patterns across the project.
@@ -110,11 +116,16 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		MaxResults:    DefaultMaxResults,
 		FileGlob:      args.FileGlob,
 	})
+	incomplete := ""
+	if errors.Is(err, ErrIncomplete) {
+		incomplete = fmt.Sprintf("\n[%v; narrow it with file_glob]", err)
+		err = nil
+	}
 	if err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("Error: %v", err), IsError: true}
 	}
 	if len(results) == 0 {
-		return agent.ToolResult{Content: "No matches found."}
+		return agent.ToolResult{Content: "No matches found." + incomplete}
 	}
 
 	const truncSuffix = "\n\n[... truncated — use read_file for full content]"
@@ -131,7 +142,7 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		sb.WriteString(line)
 	}
 
-	return agent.ToolResult{Content: sb.String()}
+	return agent.ToolResult{Content: sb.String() + incomplete}
 }
 
 // PromptGuidelines returns the usage bullets this tool contributes to a

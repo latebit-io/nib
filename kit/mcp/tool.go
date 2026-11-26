@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 
@@ -111,6 +112,27 @@ func representable(p llm.FunctionParam) bool {
 	return true
 }
 
+// decodeArgs decodes a call's arguments object. Numbers keep their
+// digits: as float64 an identifier above 2^53 would change value.
+func decodeArgs(raw string) (map[string]any, error) {
+	args := map[string]any{}
+	if strings.TrimSpace(raw) == "" {
+		return args, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&args); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("content after the arguments object")
+	}
+	if args == nil {
+		args = map[string]any{} // the model sent null
+	}
+	return args, nil
+}
+
 // Definition returns the tool's schema for the model.
 func (t *tool) Definition() llm.ToolDef { return t.def }
 
@@ -121,11 +143,9 @@ func (t *tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 	if len(raw) > maxArgBytes {
 		return agent.ToolResult{Content: "Error: arguments too large", IsError: true}
 	}
-	args := map[string]any{}
-	if strings.TrimSpace(raw) != "" {
-		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return agent.ToolResult{Content: fmt.Sprintf("Error: invalid arguments: %v", err), IsError: true}
-		}
+	args, err := decodeArgs(raw)
+	if err != nil {
+		return agent.ToolResult{Content: fmt.Sprintf("Error: invalid arguments: %v", err), IsError: true}
 	}
 	result, err := t.client.CallToolResult(ctx, t.remote, args)
 	if err != nil {

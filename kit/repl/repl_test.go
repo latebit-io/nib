@@ -256,3 +256,52 @@ func TestNew_RequiresAgentAndStreams(t *testing.T) {
 		t.Error("New without an agent must fail")
 	}
 }
+
+// gated is a provider whose first turn waits to be released, so a test
+// can type while the agent is busy.
+type gated struct {
+	release chan struct{}
+	*llmtest.Scripted
+}
+
+func (g *gated) Stream(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	if g.Calls() == 0 {
+		select {
+		case <-g.release:
+		case <-ctx.Done():
+		}
+	}
+	return g.Scripted.Stream(ctx, msgs, tools)
+}
+
+// TestRun_LineTheAgentDidNotTakeIsKept: a line typed while the agent's
+// own queue is full is held and sent when the run next waits, not
+// dropped behind a message that says it was queued.
+func TestRun_LineTheAgentDidNotTakeIsKept(t *testing.T) {
+	provider := &gated{release: make(chan struct{}),
+		Scripted: llmtest.NewScripted(llmtest.Text("one"), llmtest.Text("two"), llmtest.Text("three"))}
+	h := start(t, newAgent(t, provider, "sys"), "sys", nil)
+
+	h.typeLine("a")
+	h.typeLine("b")
+	h.see("(queued")
+	h.typeLine("c")
+	h.typeLine("d")
+	h.see("one message is already waiting")
+	close(provider.release)
+	h.see("three\n> ")
+	h.typeLine("/quit")
+	h.ended()
+
+	reqs := provider.Requests()
+	if len(reqs) != 3 {
+		t.Fatalf("requests = %d, want 3:\n%s", len(reqs), h.out.String())
+	}
+	last := reqs[2].Messages
+	if got := last[len(last)-1]; got.Role != "user" || got.Content != "c" {
+		t.Errorf("the held line reached the model as %+v, want user:c\n%s", got, contents(last))
+	}
+	if strings.Contains(contents(last), "user:d") {
+		t.Errorf("the refused line must not be sent: %s", contents(last))
+	}
+}

@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
@@ -293,5 +295,101 @@ func TestSearch(t *testing.T) {
 	}
 	if _, err := ft.Search(context.Background(), "", "(", search.Options{Regex: true}); err == nil {
 		t.Error("a malformed expression must be an error")
+	}
+}
+
+// TestWrite_OnlyRegularFiles: a pipe would block the write and a link
+// would be replaced, so neither is written; the link's target is untouched.
+func TestWrite_OnlyRegularFiles(t *testing.T) {
+	root, tools := workspace(t)
+	pkg := filepath.Join(root, "pkg")
+	if err := os.Symlink("a.go", filepath.Join(pkg, "alias.go")); err != nil {
+		t.Fatal(err)
+	}
+	targets := []string{"alias.go", "deep"}
+	if err := syscall.Mkfifo(filepath.Join(pkg, "pipe"), 0o644); err == nil {
+		targets = append(targets, "pipe")
+	}
+	before, err := os.ReadFile(filepath.Join(pkg, "a.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range targets {
+		if res := run(t, tools["write_file"], map[string]any{"path": name, "content": "x"}); !res.IsError {
+			t.Errorf("write to %s must be refused", name)
+		}
+	}
+	if after, _ := os.ReadFile(filepath.Join(pkg, "a.go")); string(after) != string(before) {
+		t.Errorf("the link's target changed: %q", after)
+	}
+}
+
+// TestWrite_ReplacesInOneStep: a rewrite keeps the file's mode and
+// leaves no temporary file behind.
+func TestWrite_ReplacesInOneStep(t *testing.T) {
+	root, tools := workspace(t)
+	script := filepath.Join(root, "pkg", "run.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ok(t, tools["write_file"], map[string]any{"path": "run.sh", "content": "#!/bin/sh\necho hi\n"})
+	info, err := os.Stat(script)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %v, %v; want 0755 kept", info.Mode().Perm(), err)
+	}
+	if got := ok(t, tools["list_dir"], map[string]any{}); got != "a.go\ndeep/\nrun.sh" {
+		t.Errorf("directory after the write = %q, want no temporary file", got)
+	}
+}
+
+// TestEdit_RefusesExplosiveGrowth: the result's size is checked before
+// it is built, so a small file cannot be turned into gigabytes.
+func TestEdit_RefusesExplosiveGrowth(t *testing.T) {
+	root, tools := workspace(t)
+	file := filepath.Join(root, "pkg", "dots.txt")
+	if err := os.WriteFile(file, []byte(strings.Repeat("a", 100_000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := run(t, tools["edit_file"], map[string]any{
+		"path": "dots.txt", "old_string": "a", "new_string": strings.Repeat("b", 60_000), "replace_all": true,
+	})
+	if !res.IsError || !strings.Contains(res.Content, "write cap") {
+		t.Errorf("edit = %+v, want the write cap named", res)
+	}
+	if data, _ := os.ReadFile(file); len(data) != 100_000 {
+		t.Errorf("the file changed: %d bytes", len(data))
+	}
+}
+
+// TestMatch_BoundedWork: a pattern with many ** against a deep path
+// that does not match returns at once instead of backtracking.
+func TestMatch_BoundedWork(t *testing.T) {
+	pattern := strings.Split(strings.Repeat("**/a/", 16)+"**/missing", "/")
+	name := strings.Split(strings.Repeat("a/", 32)+"file.go", "/")
+	done := make(chan bool, 1)
+	go func() { done <- match(pattern, name) }()
+	select {
+	case got := <-done:
+		if got {
+			t.Error("the path must not match")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("match did not finish")
+	}
+	for _, tc := range []struct {
+		pattern, name string
+		want          bool
+	}{
+		{"**/*.go", "a.go", true},
+		{"**/*.go", "x/y/a.go", true},
+		{"a/**/b", "a/b", true},
+		{"a/**/b", "a/x/y/b", true},
+		{"a/**/b", "a/x/y/c", false},
+		{"*.go", "x/a.go", false},
+		{"**", "x/y", true},
+	} {
+		if got := match(strings.Split(tc.pattern, "/"), strings.Split(tc.name, "/")); got != tc.want {
+			t.Errorf("match(%q, %q) = %v, want %v", tc.pattern, tc.name, got, tc.want)
+		}
 	}
 }

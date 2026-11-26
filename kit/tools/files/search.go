@@ -44,13 +44,17 @@ func (t *Tools) Search(ctx context.Context, _, pattern string, opts search.Optio
 		limit = search.DefaultMaxResults
 	}
 	var results []search.Result
-	walked := 0
+	walked, exhausted := 0, false
 	err = fs.WalkDir(t.root.FS(), filepath.ToSlash(t.base), func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// An unreadable directory is skipped; the rest is still searched.
 			return fs.SkipDir
 		}
-		if walked++; walked > maxWalked || len(results) >= limit || ctx.Err() != nil {
+		if len(results) >= limit || ctx.Err() != nil {
+			return fs.SkipAll
+		}
+		if walked++; walked > maxWalked {
+			exhausted = true
 			return fs.SkipAll
 		}
 		if d.IsDir() {
@@ -73,7 +77,16 @@ func (t *Tools) Search(ctx context.Context, _, pattern string, opts search.Optio
 		results = t.grep(results, re, filepath.FromSlash(name), filepath.ToSlash(shown), limit)
 		return nil
 	})
-	return results, err
+	switch {
+	case err != nil:
+		return nil, err
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
+	case exhausted:
+		// Not the same as "no match": the rest of the tree was not read.
+		return results, fmt.Errorf("only the first %d entries were searched: %w", maxWalked, search.ErrIncomplete)
+	}
+	return results, nil
 }
 
 // grep appends the lines of one file that match, up to limit results

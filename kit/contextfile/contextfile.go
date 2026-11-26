@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 
@@ -57,16 +58,28 @@ func LoadChain(root, dir string) ([]File, error) {
 		return nil, fmt.Errorf("contextfile: %w", err)
 	}
 	// A dir outside root contributes nothing: only root's file loads.
-	if rel, err := filepath.Rel(root, dir); err != nil || !filepath.IsLocal(rel) {
-		dir = root
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || !filepath.IsLocal(rel) {
+		rel = "."
 	}
+	// Reads go through the root, so a file that is a symlink to
+	// somewhere outside the project cannot reach the prompt.
+	confined, err := os.OpenRoot(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("contextfile: %w", err)
+	}
+	defer func() { _ = confined.Close() }() // read-only handle; nothing to flush
+
 	var files []File
 	var errs []error
 	total := 0
 	// Walking up from dir visits the nearest first, so the total cap
-	// drops the farthest files.
-	for cur := dir; ; cur = filepath.Dir(cur) {
-		f, ok, err := loadDir(cur)
+	// drops the farthest files. A relative path always ends at ".".
+	for cur := rel; ; cur = filepath.Dir(cur) {
+		f, ok, err := loadDir(confined, root, cur)
 		switch {
 		case err != nil:
 			errs = append(errs, err)
@@ -76,7 +89,7 @@ func LoadChain(root, dir string) ([]File, error) {
 			total += len(f.Content)
 			files = append(files, f)
 		}
-		if cur == root {
+		if cur == "." {
 			break
 		}
 	}
@@ -84,19 +97,19 @@ func LoadChain(root, dir string) ([]File, error) {
 	return files, errors.Join(errs...)
 }
 
-// loadDir reads dir's context file: the first candidate that exists.
-// ok is false when dir carries none.
-func loadDir(dir string) (f File, ok bool, err error) {
+// loadDir reads the context file of dir, a path under root: the first
+// candidate that exists. ok is false when the directory carries none.
+func loadDir(confined *os.Root, root, dir string) (f File, ok bool, err error) {
 	for _, name := range candidates {
-		path := filepath.Join(dir, name)
-		body, err := filecap.Read(path, MaxBytes, "context file")
+		rel := filepath.Join(dir, name)
+		body, err := filecap.ReadRoot(confined, rel, MaxBytes)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return File{}, false, fmt.Errorf("contextfile: %w", err)
 		}
-		return File{Path: path, Content: string(body)}, true, nil
+		return File{Path: filepath.Join(root, rel), Content: string(body)}, true, nil
 	}
 	return File{}, false, nil
 }

@@ -19,7 +19,7 @@ In a session, a line goes to the agent and its answer streams back. Ctrl-C stops
 
 `AGENTS.md` (or `CLAUDE.md`) files from the repository root down to the working directory are added to the system prompt as reference data, nearest last.
 
-MCP servers come from `NIB_MCP` (`name=command args`, separated by `;`) and from the project's `.mcp.json`. A project's servers start only after `--trust-mcp`, and again after the file changes. Their tools are named `mcp__<server>__<tool>`.
+MCP servers come from `NIB_MCP` (`name=command args`, separated by `;`) and from the project's `.mcp.json`. In `.mcp.json`, `command` is the program, taken whole, and `args` are its arguments. A project's servers start only after `--trust-mcp`, and again after the file changes. Their tools are named `mcp__<server>__<tool>`.
 
 Extensions add tools. `workspace` (a shell, plus file and search tools confined to the project) is on by default. Switch them in `<user-config-dir>/nib/extensions.json` (`{"enable": [], "disable": []}`), per run with `--with` and `--without`, or in a session with `/extension on|off <name>`. The later level decides.
 

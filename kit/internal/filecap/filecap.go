@@ -15,17 +15,12 @@ import (
 	"syscall"
 )
 
-// Read reads at most max bytes from the file at path, rejecting the file
-// outright when it is larger. The Size() pre-check fails fast; the
-// LimitReader is belt-and-suspenders against a file that grows between
-// stat and read. kind labels the file in the size-exceeded error (e.g.
-// "skill", "command").
-//
-// Callers are responsible for constraining path (the loaders build it
-// from os.ReadDir entries under a configured root, so traversal is not
-// reachable — entry names are single path components).
+// Read returns the regular file at path, refusing one over max bytes;
+// kind labels the file in that error. Callers constrain path. A pipe
+// or device is refused without being read, so it cannot block the caller.
 func Read(path string, max int64, kind string) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // caller constrains path to a ReadDir-walked root; see callers.
+	// Non-blocking: opening a FIFO read-only otherwise waits for a writer.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // caller constrains path; see callers.
 	if err != nil {
 		return nil, err
 	}
@@ -34,9 +29,13 @@ func Read(path string, max int64, kind string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w", path, ErrNotRegular)
+	}
 	if info.Size() > max {
 		return nil, fmt.Errorf("%s is %d bytes, exceeds the %d-byte %s cap", path, info.Size(), max, kind)
 	}
+	// The limit covers a file that grows between the stat and the read.
 	return io.ReadAll(io.LimitReader(f, max))
 }
 

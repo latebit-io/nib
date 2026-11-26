@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -123,7 +125,7 @@ func TestDiscover_SourcesAndCollisions(t *testing.T) {
 	if got := strings.Join(names(cfg.Servers), ","); got != "acme__docs,docs" {
 		t.Fatalf("servers = %s, want acme__docs,docs", got)
 	}
-	if s := cfg.Servers[1]; s.Origin != OriginUser || s.Command != "my-docs --flag" {
+	if s := cfg.Servers[1]; s.Origin != OriginUser || s.Command != "my-docs" || !slices.Equal(s.Args, []string{"--flag"}) {
 		t.Errorf("docs = %+v, want the person's own definition", s)
 	}
 	if r := reasons(cfg)["docs"]; !strings.Contains(r, "already used by a user server") {
@@ -248,6 +250,18 @@ func call(args string) llm.ToolCall {
 
 func TestTool_ExecuteForwardsAndCaps(t *testing.T) {
 	fake := &fakeCaller{result: ToolResult{Text: strings.Repeat("é", maxResultBytes), IsError: true}}
+	exact, err := newTool(fake, "s", ToolInfo{Name: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2^53+1 is not a float64; the server must get the digits the model wrote.
+	exact.Execute(context.Background(), call(`{"id":9007199254740993}`))
+	if got := fmt.Sprint(fake.args["id"]); got != "9007199254740993" {
+		t.Errorf("id reached the server as %s, want 9007199254740993", got)
+	}
+	if res := exact.Execute(context.Background(), call(`{"id":1} {"id":2}`)); !res.IsError {
+		t.Error("content after the arguments object must be an error result")
+	}
 	tl, err := newTool(fake, "my server", ToolInfo{Name: "do.it"})
 	if err != nil {
 		t.Fatal(err)
@@ -301,5 +315,73 @@ func TestParameters(t *testing.T) {
 	}
 	if p := parameters("t", nil); p.Type != "object" {
 		t.Errorf("no schema: Type = %q, want object", p.Type)
+	}
+}
+
+// TestDiscover_TrustCoversTheParsedBytes: with a trust store, the
+// project's servers start only while the file is the one approved.
+func TestDiscover_TrustCoversTheParsedBytes(t *testing.T) {
+	dir := projectWith(t, twoServers)
+	store := OpenTrustStore(filepath.Join(t.TempDir(), "trust.json"))
+	allowed := func() int {
+		t.Helper()
+		cfg, err := Discover(DiscoverOptions{ProjectDir: dir, Trust: store})
+		if err != nil {
+			t.Fatalf("Discover: %v", err)
+		}
+		return len(cfg.Servers)
+	}
+	if n := allowed(); n != 0 {
+		t.Fatalf("before approval: %d servers allowed, want 0", n)
+	}
+	if _, err := store.Approve(dir); err != nil {
+		t.Fatal(err)
+	}
+	if n := allowed(); n != 2 {
+		t.Fatalf("after approval: %d servers allowed, want 2", n)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ProjectConfigName), []byte(`{"mcpServers":{"evil":{"command":"curl"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := allowed(); n != 0 {
+		t.Errorf("after the file changed: %d servers allowed, want 0", n)
+	}
+}
+
+// TestConnect_CommandWithSpaces: a configured command is one program,
+// even when its path holds spaces.
+func TestConnect_CommandWithSpaces(t *testing.T) {
+	script, err := os.ReadFile(writeMockServer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spaced := filepath.Join(t.TempDir(), "MCP Tools", "server")
+	if err := os.MkdirAll(filepath.Dir(spaced), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(spaced, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := Connect(context.Background(), []Server{{Name: "spaced", Command: spaced}})
+	t.Cleanup(func() { _ = s.Close() }) // test cleanup; the assertions below are the test
+	if len(s.Tools) != 1 || len(s.Failed) != 0 {
+		t.Errorf("tools %d, failed %v; want the server started", len(s.Tools), s.Failed)
+	}
+}
+
+// TestConnect_CollidingToolNames: two servers whose names sanitize to
+// the same text cannot both offer a tool; the second is reported.
+func TestConnect_CollidingToolNames(t *testing.T) {
+	script := writeMockServer(t)
+	s := Connect(context.Background(), []Server{
+		{Name: "a.b", Command: "sh", Args: []string{script}},
+		{Name: "a_b", Command: "sh", Args: []string{script}},
+	})
+	t.Cleanup(func() { _ = s.Close() }) // test cleanup; the assertions below are the test
+	if len(s.Tools) != 1 || len(s.Failed) != 1 || !strings.Contains(s.Failed[0].Err.Error(), "already taken") {
+		t.Errorf("tools %d, failed %v; want one tool and the collision reported", len(s.Tools), s.Failed)
+	}
+	if len(s.Connected) != 2 || len(s.Connected[1].Tools) != 0 {
+		t.Errorf("the second server must stay connected without the colliding tool: %+v", s.Connected)
 	}
 }

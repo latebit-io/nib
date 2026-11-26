@@ -67,6 +67,7 @@ type REPL struct {
 	system  string // the agent's system prompt, resent with each run
 	sub     *kit.Subscription
 	history []llm.Message // the conversation so far, without the system message
+	pending string        // a line typed during a run that the agent did not take
 	phase   phase
 	midLine bool // output so far does not end with a newline
 	quit    bool
@@ -127,7 +128,7 @@ func (r *REPL) Run(ctx context.Context) error {
 			}
 			r.line(ctx, line)
 		case ev := <-r.sub.Events():
-			r.event(ev)
+			r.event(ctx, ev)
 		}
 	}
 	return nil
@@ -189,12 +190,39 @@ func (r *REPL) SubmitPrompt(ctx context.Context, text string) error {
 		}
 		r.phase = running
 	case running:
+		// A refusal means the agent's queue is full or the run just
+		// ended. Either way the line is kept and sent when it can be.
 		if !r.agent.Reply(ctx, text) {
-			return errors.New("one message is already queued; press Ctrl-C to stop the run")
+			if r.pending != "" {
+				return errors.New("one message is already waiting; press Ctrl-C to stop the run")
+			}
+			r.pending = text
 		}
 		r.println("(queued; the agent reads it after the current step)")
 	}
 	return nil
+}
+
+// flush sends a held line now that the run has parked or ended. A
+// parked run that still does not take it keeps it for the next chance.
+func (r *REPL) flush(ctx context.Context) {
+	text := r.pending
+	if text == "" {
+		return
+	}
+	r.pending = ""
+	switch r.phase {
+	case waiting:
+		if !r.agent.Reply(ctx, text) {
+			r.pending = text
+			return
+		}
+		r.phase = running
+	case idle:
+		if err := r.start(ctx, text); err != nil {
+			r.println("error: your queued message was not sent: " + err.Error())
+		}
+	}
 }
 
 // start begins a run with the conversation so far and text. A new run
@@ -214,7 +242,7 @@ func (r *REPL) start(ctx context.Context, text string) error {
 }
 
 // event prints one event from the agent and tracks the run's phase.
-func (r *REPL) event(ev event.Event) {
+func (r *REPL) event(ctx context.Context, ev event.Event) {
 	switch e := ev.(type) {
 	case event.AgentToken:
 		r.print(e.Text)
@@ -228,10 +256,16 @@ func (r *REPL) event(ev event.Event) {
 		r.println("error: " + e.Err)
 	case event.AgentWaiting:
 		r.phase = waiting
-		r.prompt()
+		r.flush(ctx)
+		r.promptUnlessRunning()
 	case event.AgentDone:
 		r.finish(e)
-		r.prompt()
+		// A stopped run takes its queued line with it: the person hit Ctrl-C.
+		if errors.Is(e.Err, kit.ErrAborted) {
+			r.pending = ""
+		}
+		r.flush(ctx)
+		r.promptUnlessRunning()
 	}
 }
 

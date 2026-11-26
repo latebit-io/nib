@@ -10,6 +10,7 @@ import (
 
 	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/mcp"
 )
@@ -18,6 +19,13 @@ type noArgs struct{}
 
 func named(name string) kit.Tool {
 	return agent.NewTool(name, "A test tool.", func(context.Context, noArgs) (string, error) { return "", nil })
+}
+
+// slash is a command that does nothing, for manifest tests.
+type slash string
+
+func (s slash) Definition() command.Definition {
+	return command.Definition{Name: string(s), Description: "A test command."}
 }
 
 func write(t *testing.T, path, body string) {
@@ -72,7 +80,7 @@ func TestAssemble_Blocks(t *testing.T) {
 					t.Errorf("env = %+v, want dir %s and root %s", env, sub, root)
 				}
 				return extension.Extension{
-					Toolset: kit.Toolset{Tools: []kit.Tool{named("read")}},
+					Toolset: kit.Toolset{Tools: []kit.Tool{named("read")}, Commands: []command.Command{slash("scan")}},
 					Prompt:  "Read before you write.",
 					Close:   func() error { closed++; return nil },
 				}, nil
@@ -89,7 +97,7 @@ func TestAssemble_Blocks(t *testing.T) {
 
 	a, err := Assemble(context.Background(), Options{
 		Dir: sub, SystemPrompt: "You are nib.", Extensions: registry,
-		Toolset: kit.Toolset{Tools: []kit.Tool{named("host")}},
+		Toolset: kit.Toolset{Tools: []kit.Tool{named("host")}, Commands: []command.Command{slash("deploy")}},
 	})
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -112,6 +120,7 @@ func TestAssemble_Blocks(t *testing.T) {
 	for _, want := range []string{
 		"CONTEXT (2)", "pkg/AGENTS.md", "EXTENSION (2)", "(off) coding tools",
 		"[extension:files]", "skill_notes", "mcp__docs", "refused: this project's servers are not trusted",
+		"COMMAND (2)", "/deploy", "/scan",
 	} {
 		if !strings.Contains(manifest, want) {
 			t.Errorf("manifest lacks %q:\n%s", want, manifest)

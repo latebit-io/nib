@@ -35,7 +35,7 @@ type Options struct {
 	// Store, when set, adds the memory tools.
 	Store memory.Store
 	// MCP says where server definitions come from. An empty ProjectDir
-	// means the project root; its servers still need TrustProject.
+	// means the project root; its servers still need the person's approval.
 	MCP mcp.DiscoverOptions
 	// Extensions are the compiled extensions the binary offers.
 	Extensions *extension.Registry
@@ -171,7 +171,7 @@ func (a *Assembly) Switch(ctx context.Context, switches extension.Switches) (cha
 func (a *Assembly) compose() {
 	sets := []kit.Toolset{a.base}
 	prompt := []string{a.prompt}
-	rows := describe(a.base.Tools, "")
+	rows := describe(a.base, "")
 	for _, state := range a.Extensions() {
 		desc := state.Description
 		if !state.On {
@@ -181,7 +181,7 @@ func (a *Assembly) compose() {
 		if ext, on := a.running[state.Name]; on {
 			sets = append(sets, ext.Toolset)
 			prompt = append(prompt, ext.Prompt)
-			rows = append(rows, describe(ext.Toolset.Tools, "extension:"+state.Name)...)
+			rows = append(rows, describe(ext.Toolset, "extension:"+state.Name)...)
 		}
 	}
 	sets = append(sets, kit.Toolset{Tools: a.skills.Tools}, kit.Toolset{Tools: a.session.Tools})
@@ -193,16 +193,20 @@ func (a *Assembly) compose() {
 		skill.Plugins(a.skills), mcp.Plugins(a.servers, a.session))
 }
 
-// describe returns the manifest rows for tools. source, when set,
-// says which block brought them.
-func describe(tools []kit.Tool, source string) []kit.Plugin {
-	rows := make([]kit.Plugin, 0, len(tools))
-	for _, t := range tools {
-		p := kit.DescribeTool(t)
-		if source != "" {
-			p.Source = source
+// describe returns the manifest rows for a toolset's tools and slash
+// commands. source, when set, says which block brought them.
+func describe(set kit.Toolset, source string) []kit.Plugin {
+	rows := make([]kit.Plugin, 0, len(set.Tools)+len(set.Commands))
+	for _, t := range set.Tools {
+		rows = append(rows, kit.DescribeTool(t))
+	}
+	for _, c := range set.Commands {
+		rows = append(rows, kit.DescribeCommand(c))
+	}
+	if source != "" {
+		for i := range rows {
+			rows[i].Source = source
 		}
-		rows = append(rows, p)
 	}
 	return rows
 }

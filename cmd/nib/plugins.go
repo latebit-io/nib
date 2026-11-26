@@ -24,6 +24,11 @@ func assemble(ctx context.Context, root, prompt string, store memory.Store, swit
 	if err != nil {
 		return nil, err
 	}
+	// Without the store, the project's servers stay refused: the safe side.
+	trust, err := trustStore()
+	if err != nil {
+		warn("MCP trust store", err)
+	}
 	user, err := mcp.ParseSpec(os.Getenv(brand.EnvKeyMCP), brand.EnvKeyMCP)
 	if err != nil {
 		warn("MCP servers", err)
@@ -32,7 +37,7 @@ func assemble(ctx context.Context, root, prompt string, store memory.Store, swit
 		Dir:          root,
 		SystemPrompt: prompt,
 		Store:        store,
-		MCP:          mcp.DiscoverOptions{User: user, TrustProject: projectTrusted(root)},
+		MCP:          mcp.DiscoverOptions{User: user, Trust: trust},
 		Extensions:   registry,
 		Switches:     switches,
 	})
@@ -41,21 +46,6 @@ func assemble(ctx context.Context, root, prompt string, store memory.Store, swit
 	}
 	printWarnings(a.Warnings)
 	return a, nil
-}
-
-// projectTrusted reports whether the person approved the project's
-// .mcp.json. Any doubt counts as no: its servers then stay refused.
-func projectTrusted(dir string) bool {
-	store, err := trustStore()
-	if err != nil {
-		warn("MCP trust store", err)
-		return false
-	}
-	trusted, err := store.Trusted(nib.ProjectRoot(dir))
-	if err != nil {
-		warn("MCP trust store", err)
-	}
-	return trusted
 }
 
 // printWarnings reports what an assembly survived. Servers waiting

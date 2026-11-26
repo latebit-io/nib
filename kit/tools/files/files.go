@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -175,7 +176,8 @@ func (t *Tools) write(_ context.Context, args writeArgs) (string, error) {
 }
 
 // writeFile replaces name's content, creating its parent directories.
-// An existing file keeps its permissions.
+// The content is written beside the target and renamed over it, so a
+// failed write leaves the old file whole. Only regular files are replaced.
 func (t *Tools) writeFile(name, content string) error {
 	if len(content) > maxWriteBytes {
 		return fmt.Errorf("content is over the %d-byte write cap", maxWriteBytes)
@@ -184,10 +186,48 @@ func (t *Tools) writeFile(name, content string) error {
 	if err != nil {
 		return err
 	}
-	if err := t.root.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	perm := fs.FileMode(0o644)
+	info, err := t.root.Lstat(p)
+	switch {
+	case err == nil && !info.Mode().IsRegular():
+		// Opening a pipe to write blocks until something reads it; a
+		// link would be replaced by the rename, not written through.
+		return fmt.Errorf("%s is not a regular file", name)
+	case err == nil:
+		perm = info.Mode().Perm()
+	case !errors.Is(err, fs.ErrNotExist):
 		return err
 	}
-	return t.root.WriteFile(p, []byte(content), 0o644)
+	dir := filepath.Dir(p)
+	if err := t.root.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, "."+filepath.Base(p)+".nib-"+rand.Text()[:8])
+	err = t.writeNew(tmp, content, perm)
+	if err == nil {
+		err = t.root.Rename(tmp, p)
+	}
+	if err != nil {
+		_ = t.root.Remove(tmp) // best effort; the error above is the one to report
+		return err
+	}
+	return nil
+}
+
+// writeNew creates name with content and exactly perm, whatever the umask.
+func (t *Tools) writeNew(name, content string, perm fs.FileMode) error {
+	f, err := t.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(content)
+	if err == nil {
+		err = f.Chmod(perm)
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 type editArgs struct {
@@ -215,6 +255,12 @@ func (t *Tools) edit(_ context.Context, args editArgs) (string, error) {
 		return "", fmt.Errorf("old_string was not found in %s; read the file and copy the text exactly", args.Path)
 	case n > 1 && !args.ReplaceAll:
 		return "", fmt.Errorf("old_string occurs %d times in %s; add surrounding lines to make it unique, or set replace_all", n, args.Path)
+	}
+	// Checked before building it: a short string replaced many times by
+	// a long one can be far larger than anything the write cap allows.
+	grown := int64(len(text)) + int64(n)*(int64(len(args.NewString))-int64(len(args.OldString)))
+	if grown > maxWriteBytes {
+		return "", fmt.Errorf("the edit would make %s %d bytes, over the %d-byte write cap", args.Path, grown, maxWriteBytes)
 	}
 	if err := t.writeFile(args.Path, strings.ReplaceAll(text, args.OldString, args.NewString)); err != nil {
 		return "", err
@@ -291,25 +337,31 @@ func (t *Tools) glob(ctx context.Context, args globArgs) (string, error) {
 }
 
 // match reports whether the path segments match the pattern segments.
-// A ** segment matches zero or more whole segments.
+// A ** segment matches zero or more whole segments. The work is bounded
+// by pattern length times path length, whatever the pattern.
 func match(pattern, name []string) bool {
-	if len(pattern) == 0 {
-		return len(name) == 0
-	}
-	if pattern[0] == "**" {
-		for skip := 0; skip <= len(name); skip++ {
-			if match(pattern[1:], name[skip:]) {
-				return true
+	// reach[j] says the pattern so far matches the first j segments.
+	reach := make([]bool, len(name)+1)
+	reach[0] = true
+	for _, segment := range pattern {
+		next := make([]bool, len(name)+1)
+		if segment == "**" {
+			reached := false
+			for j := range reach {
+				reached = reached || reach[j]
+				next[j] = reached
+			}
+		} else {
+			for j, part := range name {
+				if reach[j] {
+					// The pattern's syntax was checked before the walk.
+					next[j+1], _ = path.Match(segment, part)
+				}
 			}
 		}
-		return false
+		reach = next
 	}
-	if len(name) == 0 {
-		return false
-	}
-	// The pattern's syntax was checked before the walk.
-	ok, _ := path.Match(pattern[0], name[0])
-	return ok && match(pattern[1:], name[1:])
+	return reach[len(name)]
 }
 
 type listArgs struct {

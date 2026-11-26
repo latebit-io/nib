@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -162,5 +163,42 @@ func TestLoadChain_TotalCapDropsFarthest(t *testing.T) {
 	}
 	if len(files) != 2 || files[0].Path != filepath.Join(filepath.Dir(leaf), "AGENTS.md") {
 		t.Errorf("want the two nearest files kept, got %d: %v", len(files), files)
+	}
+}
+
+// TestLoadChain_SymlinkCannotLeaveTheProject: a repository can carry
+// an AGENTS.md that is a link. One pointing outside must not put that
+// file's text in the prompt; one pointing inside loads.
+func TestLoadChain_SymlinkCannotLeaveTheProject(t *testing.T) {
+	root, leaf := tree(t)
+	outside := filepath.Join(t.TempDir(), "credentials")
+	write(t, filepath.Dir(outside), "credentials", "hunter2")
+	if err := os.Symlink(outside, filepath.Join(leaf, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, root, "CLAUDE.md", "root rules")
+	if err := os.Symlink("CLAUDE.md", filepath.Join(root, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := LoadChain(root, leaf)
+	if err == nil {
+		t.Error("the link out of the project must be reported")
+	}
+	if got, want := contents(files), []string{"root rules"}; !slices.Equal(got, want) {
+		t.Errorf("chain = %q, want %q", got, want)
+	}
+}
+
+// TestLoadChain_FIFOIsRefused: a pipe named AGENTS.md is reported
+// instead of holding the session up waiting for a writer.
+func TestLoadChain_FIFOIsRefused(t *testing.T) {
+	root := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(root, "AGENTS.md"), 0o644); err != nil {
+		t.Skipf("no FIFO support: %v", err)
+	}
+	files, err := LoadChain(root, root)
+	if err == nil || len(files) != 0 {
+		t.Errorf("LoadChain = %v, %v; want the pipe refused", files, err)
 	}
 }

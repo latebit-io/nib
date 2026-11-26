@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/latebit-io/nib/ai/brand"
@@ -123,8 +124,12 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	defer stop()
+	// Nothing reads interrupt until the session runs, so until then
+	// Ctrl-C cancels the startup instead.
+	startCtx, started := cancelOn(ctx, interrupt)
+	defer started()
 
-	mem, err := demarkus.Open(ctx, root)
+	mem, err := demarkus.Open(startCtx, root)
 	if err != nil {
 		return setupErr("memory: %v", err)
 	}
@@ -144,10 +149,33 @@ func run() error {
 	case cfg.show != "":
 		return showSession(ctx, mem.Store, cfg.show)
 	case cfg.interactive():
-		return runInteractive(ctx, root, mem.Store, switches, interrupt)
+		return runInteractive(ctx, startCtx, started, root, mem.Store, switches, interrupt)
 	default:
 		return runAgent(ctx, root, mem.Store, cfg.message, switches)
 	}
+}
+
+// cancelOn returns a context that the first value on interrupt
+// cancels, until release is called. After that interrupt belongs to
+// whoever reads it next, and the context lives as long as ctx.
+func cancelOn(ctx context.Context, interrupt <-chan os.Signal) (startCtx context.Context, release func()) {
+	startCtx, cancel := context.WithCancel(ctx)
+	released, gone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(gone)
+		select {
+		case <-interrupt:
+			cancel()
+		case <-released:
+		case <-ctx.Done():
+		}
+	}()
+	// Waits for the goroutine: a signal sent after release returns must
+	// find nobody else reading the channel.
+	return startCtx, sync.OnceFunc(func() {
+		close(released)
+		<-gone
+	})
 }
 
 // warn reports a problem the run survives. slog alone would hide it:

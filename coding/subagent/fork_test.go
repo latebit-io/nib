@@ -2,7 +2,10 @@ package subagent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/latebit-io/nib/ai/llm"
@@ -70,5 +73,50 @@ func TestForkDefinition_MapsProvenance(t *testing.T) {
 	}
 	if !d.Permissions().GrantsTool("Read") || d.Permissions().DeniesTool("Read") {
 		t.Errorf("grants not carried")
+	}
+}
+
+// TestAdaptForkSkill_ChildCanReadBundledFiles: a fork skill that bundles
+// files hands its child a reader for them, through the grant filter.
+func TestAdaptForkSkill_ChildCanReadBundledFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "references"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "references", "guide.md"), []byte("guide"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var gotTools []agent.Tool
+	var gotGoal string
+	s := &Spawner{
+		provider:  func() llm.Provider { return stubProvider{} },
+		baseTools: []agent.Tool{fakeTool{"Read"}, fakeTool{"Write"}},
+		run: func(_ context.Context, _ llm.Provider, _ *headless.DiskWorkspace, _ *agent.NewOptions, tools []agent.Tool, goal string, _ func(event.Event)) (headless.Result, error) {
+			gotTools, gotGoal = tools, goal
+			return headless.Result{Success: true, Summary: "ok"}, nil
+		},
+	}
+	sk := skill.Skill{
+		Name:         "f",
+		Description:  "forks",
+		Body:         "do the work",
+		Context:      "fork",
+		AllowedTools: []string{"Read"},
+		Dir:          dir,
+		Source:       skill.SourceGlobal,
+	}
+	if out := AdaptForkSkill(sk, s).Execute(context.Background(), llm.ToolCall{}); out.IsError {
+		t.Fatalf("execute = %+v", out)
+	}
+	if !strings.Contains(gotGoal, "<file>references/guide.md</file>") || !strings.Contains(gotGoal, skill.ResourceToolName) {
+		t.Errorf("child goal lacks the bundled-file note: %q", gotGoal)
+	}
+	if want := []string{"Read", skill.ResourceToolName}; !slices.Equal(toolNames(gotTools), want) {
+		t.Fatalf("child tools = %v, want %v", toolNames(gotTools), want)
+	}
+	call := llm.ToolCall{Function: llm.FunctionCall{Arguments: `{"file":"references/guide.md"}`}}
+	if res := gotTools[1].Execute(context.Background(), call); res.IsError || res.Content != "guide" {
+		t.Errorf("child read = %+v", res)
 	}
 }

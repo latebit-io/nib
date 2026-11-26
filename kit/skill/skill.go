@@ -64,6 +64,9 @@ type Skill struct {
 	DisallowedTools []string
 	// Path is the source SKILL.md path, kept for diagnostics.
 	Path string
+	// Dir is the skill's real directory: absolute, symlinks resolved.
+	// Bundled files are listed and read from it. Stamped by [Load].
+	Dir string
 	// Source is the layer this skill was loaded from. Stamped by [Load].
 	Source Source
 	// PluginID is the managed-plugin id this skill was imported from,

@@ -11,7 +11,7 @@ import "github.com/latebit-io/nib/kit"
 // [ToolNamePrefix]-named tools in their generic tool loop and append
 // these instead.
 func Plugins(r Result) []kit.Plugin {
-	out := make([]kit.Plugin, 0, len(r.Loaded)+len(r.Skipped)+len(r.Shadowed))
+	out := make([]kit.Plugin, 0, len(r.Loaded)+len(r.Skipped)+len(r.Shadowed)+len(r.Refused))
 	for _, s := range r.Loaded {
 		out = append(out, kit.Plugin{
 			Kind:        kit.KindTool,
@@ -33,6 +33,14 @@ func Plugins(r Result) []kit.Plugin {
 			Kind:        kit.KindTool,
 			Name:        ToolNamePrefix + s.Name,
 			Description: "shadowed by a higher-precedence skill of the same name",
+			Source:      string(s.Source),
+		})
+	}
+	for _, s := range r.Refused {
+		out = append(out, kit.Plugin{
+			Kind:        kit.KindTool,
+			Name:        ToolNamePrefix + s.Name,
+			Description: "refused: the skill directory links outside the project",
 			Source:      string(s.Source),
 		})
 	}

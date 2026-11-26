@@ -3,6 +3,7 @@ package skill
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,10 +80,22 @@ func Load(root string, source Source) ([]Skill, error) {
 	var skills []Skill
 	var errs []error
 	for _, e := range entries {
-		if !e.IsDir() {
+		entry := filepath.Join(root, e.Name())
+		isDir := e.IsDir()
+		// ReadDir does not follow links, and installers link skills into
+		// place. The link's own name stays the skill's directory name.
+		if e.Type()&fs.ModeSymlink != 0 {
+			info, statErr := os.Stat(entry)
+			if statErr != nil {
+				errs = append(errs, fmt.Errorf("skill link %s: %w", entry, statErr))
+				continue
+			}
+			isDir = info.IsDir()
+		}
+		if !isDir {
 			continue
 		}
-		path := filepath.Join(root, e.Name(), skillFile)
+		path := filepath.Join(entry, skillFile)
 		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
@@ -153,6 +166,11 @@ func parse(path, dirName string, source Source) (Skill, error) {
 		return Skill{}, fmt.Errorf("parse %s: skill %q sets agent:%q — agent references are not yet supported (omit it)", path, name, m.Agent)
 	}
 
+	dir, err := realDir(filepath.Dir(path))
+	if err != nil {
+		return Skill{}, fmt.Errorf("resolve %s: %w", path, err)
+	}
+
 	return Skill{
 		Name:            name,
 		Description:     desc,
@@ -162,6 +180,7 @@ func parse(path, dirName string, source Source) (Skill, error) {
 		Context:         ctxMode,
 		Agent:           strings.TrimSpace(m.Agent),
 		Path:            path,
+		Dir:             dir,
 		Source:          source,
 	}, nil
 }

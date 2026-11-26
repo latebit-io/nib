@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	upagent "github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/brand"
@@ -27,29 +28,35 @@ const ToolNamePrefix = "skill_"
 // dynamic-context directives gated by the skill's tool grants.
 type skillTool struct {
 	def    llm.ToolDef
-	body   string
+	skill  Skill
 	perm   *toolperm.Matcher
 	runner dyncontext.Runner
 }
 
 // Definition returns the advertised schema: the skill's description and
-// an empty-object parameter set (invoking a skill takes no arguments —
-// it pulls the instructions, then the model continues).
+// one optional argument, for reading a bundled file instead of the body.
 func (t skillTool) Definition() llm.ToolDef { return t.def }
 
-// Execute returns the skill body as the tool result. A directive-free
-// body (the common case) is returned verbatim. A body with dynamic
-// context (“ !`cmd` “ / fenced ` ```! `) has each directive expanded by
-// [dyncontext.Expand], which runs a command only if the skill's grants
-// permit it — so a prompt-only skill (deny-all matcher) never executes
-// shell, and a shell skill runs only its declared commands, through
-// whatever runner the hosting agent bound (see [skillTool.BindShell]).
-func (t skillTool) Execute(ctx context.Context, _ llm.ToolCall) upagent.ToolResult {
-	body := t.body
+// Execute returns the skill body, then its [Skill.ResourceNote]; with a
+// file argument it returns that bundled file instead. A dynamic-context
+// directive in the body runs only if the skill's grants permit it.
+func (t skillTool) Execute(ctx context.Context, call llm.ToolCall) upagent.ToolResult {
+	args, err := llm.DecodeArguments[resourceArgs](t.def.Function.Parameters, call.Function.Arguments)
+	if err != nil {
+		return upagent.ToolResult{Content: err.Error(), IsError: true}
+	}
+	if args.File != "" {
+		content, err := t.skill.ReadResource(args.File)
+		if err != nil {
+			return upagent.ToolResult{Content: "cannot read bundled file: " + err.Error(), IsError: true}
+		}
+		return upagent.ToolResult{Content: content}
+	}
+	body := t.skill.Body
 	if dyncontext.HasDirectives(body) {
 		body = dyncontext.Expand(ctx, body, t.perm, t.runner)
 	}
-	return upagent.ToolResult{Content: body}
+	return upagent.ToolResult{Content: body + t.skill.ResourceNote(t.def.Function.Name)}
 }
 
 // BindShell implements [kit.ShellBinder]: it returns a copy of the tool
@@ -76,12 +83,15 @@ func adaptTool(s Skill) skillTool {
 				Name:        ToolNamePrefix + s.Name,
 				Description: s.Description,
 				Parameters: llm.FunctionParams{
-					Type:       "object",
-					Properties: map[string]llm.FunctionParam{},
+					Type: "object",
+					Properties: map[string]llm.FunctionParam{"file": {
+						Type:        "string",
+						Description: "Bundled file to read instead of the instructions, as listed after them. Omit to load the skill.",
+					}},
 				},
 			},
 		},
-		body:   s.Body,
+		skill:  s,
 		perm:   s.Permissions(),
 		runner: dyncontext.NewShellRunner(0),
 	}
@@ -91,6 +101,28 @@ func adaptTool(s Skill) skillTool {
 // <projectRoot>/.project/skills.
 func ProjectDir(projectRoot string) string {
 	return filepath.Join(projectRoot, ".project", "skills")
+}
+
+// sharedDir is the skills directory, relative to a project root or the
+// user's home, that Agent Skills clients share (agentskills.io).
+var sharedDir = filepath.Join(".agents", "skills")
+
+// SharedProjectDir returns the cross-client project skills directory,
+// <projectRoot>/.agents/skills. [ProjectDir] shadows it by name.
+func SharedProjectDir(projectRoot string) string {
+	return filepath.Join(projectRoot, sharedDir)
+}
+
+// SharedGlobalDir returns the cross-client user skills directory,
+// ~/.agents/skills, and true, or ("", false) when the home directory
+// cannot be resolved. [GlobalDir] shadows it by name.
+func SharedGlobalDir() (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		slog.Warn("skill: cannot resolve home dir; skipping ~/.agents/skills", "err", err)
+		return "", false
+	}
+	return filepath.Join(home, sharedDir), true
 }
 
 // GlobalDir returns the user-global skills directory and true, or
@@ -127,6 +159,9 @@ type Result struct {
 	// skill (a project skill shadows a global one). Surfaced so the
 	// override is visible, not silent.
 	Shadowed []Skill
+	// Refused are the project skills whose link resolves outside the
+	// project. A cloned repository may not pull in a directory beyond it.
+	Refused []Skill
 	// Forking are skills with `context: fork`: they run as a child agent
 	// rather than injecting prompt text, so they are NOT adapted to a
 	// prompt tool here. The coding layer turns each into a spawn tool.
@@ -134,18 +169,9 @@ type Result struct {
 	Forking []Skill
 }
 
-// Discover loads skills for a project from both layers — project-local
-// (<projectRoot>/.project/skills) and user-global ([GlobalDir]) — merges
-// them with project shadowing global ([Merge]), and adapts the survivors
-// into tools. Shell-bearing skills ([Skill.NeedsShell]) load like any
-// other: the shell they request runs through the hosting agent's bash
-// gate (per-command approval / allowlist / subagent grants) once the
-// agent rebinds the tool via [kit.ShellBinder]. Only plugin-imported
-// shell skills carry an extra load-time gate; see [DiscoverWithPlugins].
-//
-// A missing directory on either layer is a no-op. A non-nil error
-// reports per-skill parse failures (see [Load]); everything that did
-// load is still returned, so callers may log and proceed.
+// Discover loads project skills ([ProjectDir], [SharedProjectDir]) and
+// user skills ([GlobalDir], [SharedGlobalDir]), merges them ([Merge]), and
+// adapts the survivors. Skills that parsed are returned even with an error.
 func Discover(projectRoot string) (Result, error) {
 	return DiscoverWithPlugins(projectRoot, nil, nil)
 }
@@ -186,18 +212,42 @@ type TrustFunc func(pluginID string) bool
 func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, trusted TrustFunc) (Result, error) {
 	var errs []error
 
-	project, err := Load(ProjectDir(projectRoot), SourceProject)
-	if err != nil {
-		errs = append(errs, err)
+	// Within a scope nib's own directory comes first, so it wins a name
+	// clash with the cross-client .agents/skills directory.
+	var globalDirs []string
+	if dir, ok := GlobalDir(); ok {
+		globalDirs = append(globalDirs, dir)
 	}
-
-	var global []Skill
-	if gdir, ok := GlobalDir(); ok {
-		global, err = Load(gdir, SourceGlobal)
-		if err != nil {
-			errs = append(errs, err)
+	if dir, ok := SharedGlobalDir(); ok {
+		globalDirs = append(globalDirs, dir)
+	}
+	load := func(source Source, dirs ...string) []Skill {
+		var layer []Skill
+		for _, dir := range dirs {
+			ss, err := Load(dir, source)
+			if err != nil {
+				errs = append(errs, err)
+			}
+			layer = append(layer, ss...)
 		}
+		return layer
 	}
+	project := load(SourceProject, ProjectDir(projectRoot), SharedProjectDir(projectRoot))
+	// A cloned repository is untrusted: a project skill link may not name
+	// a directory outside it. User-scope links may point anywhere.
+	var res Result
+	root, rootErr := realDir(projectRoot)
+	project = slices.DeleteFunc(project, func(s Skill) bool {
+		rel, err := filepath.Rel(root, s.Dir)
+		if rootErr == nil && err == nil && filepath.IsLocal(rel) {
+			return false
+		}
+		res.Refused = append(res.Refused, s)
+		slog.Warn("skill: refused project skill linked outside the project",
+			"skill", s.Name, "path", s.Path, "target", s.Dir)
+		return true
+	})
+	global := load(SourceGlobal, globalDirs...)
 
 	var plugin []Skill
 	for _, src := range pluginSkills {
@@ -222,7 +272,6 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 	// that order so earlier layers' names win.
 	winners, shadowed := Merge(project, global, plugin)
 
-	var res Result
 	res.Shadowed = shadowed
 	for _, s := range shadowed {
 		slog.Info("skill: shadowed by higher-precedence skill",

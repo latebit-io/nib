@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	upagent "github.com/latebit-io/nib/agent"
-	"github.com/latebit-io/nib/ai/brand"
 )
 
 func writeSkillFile(t *testing.T, dir, name, body string) {
@@ -81,7 +80,7 @@ func TestSkill_LoadRejectsMalformedGrant(t *testing.T) {
 }
 
 func TestDiscoverWithPlugins_EmptyIDNotTrusted(t *testing.T) {
-	t.Setenv(brand.EnvKeyGlobalSkillsDir, t.TempDir())
+	isolateUser(t)
 	pluginDir := t.TempDir()
 	writeSkillFile(t, pluginDir, "runner",
 		"---\ndescription: runs\nallowed-tools: Bash(git *)\n---\nrun\n")
@@ -130,7 +129,7 @@ func hasToolNamed(tools []upagent.Tool, name string) bool {
 }
 
 func TestDiscoverWithPlugins_ForkRouting(t *testing.T) {
-	t.Setenv(brand.EnvKeyGlobalSkillsDir, t.TempDir())
+	isolateUser(t)
 	projectRoot := t.TempDir()
 	writeSkillFile(t, ProjectDir(projectRoot), "forker", "---\ndescription: forks\ncontext: fork\n---\nwork\n")
 	pluginDir := t.TempDir()
@@ -166,7 +165,7 @@ func TestDiscoverWithPlugins_ForkRouting(t *testing.T) {
 // plugin's shell-bearing skill loads only when its plugin is trusted;
 // untrusted it is refused, and a non-shell plugin skill always loads.
 func TestDiscoverWithPlugins_TrustGate(t *testing.T) {
-	t.Setenv(brand.EnvKeyGlobalSkillsDir, t.TempDir())
+	isolateUser(t)
 	projectRoot := t.TempDir()
 
 	pluginDir := t.TempDir()
@@ -210,7 +209,7 @@ func TestDiscoverWithPlugins_TrustGate(t *testing.T) {
 // the lowest layer and a same-named project skill shadows the plugin one.
 func TestDiscoverWithPlugins_LoadsAndShadows(t *testing.T) {
 	// Isolate the global layer so the host's real skills don't leak in.
-	t.Setenv(brand.EnvKeyGlobalSkillsDir, t.TempDir())
+	isolateUser(t)
 
 	projectRoot := t.TempDir()
 	writeSkillFile(t, ProjectDir(projectRoot), "shared", "---\ndescription: project version\n---\nproject body\n")

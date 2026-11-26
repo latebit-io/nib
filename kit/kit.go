@@ -7,7 +7,7 @@
 //
 // The consumer pattern: the composition root builds a [Toolset]
 // literal from the tools, hooks and commands it wants (see
-// cmd/nibster and coding/agent) — [Merge] combines several bundles
+// cmd/nib and coding/agent) — [Merge] combines several bundles
 // when a root assembles more than one. Events flow through a fan-out
 // bus — register a [Subscription] via [Agent.Subscribe] to observe them.
 //

@@ -18,11 +18,9 @@ const sessionIDTimeFormat = "2006-01-02-150405"
 // at a glance, short enough to keep the full ID under terminal width.
 const slugMaxLen = 30
 
-// entropyBytes is the size in bytes of the random suffix appended to
-// every session ID. Two prompts started in the same second with the
-// same slug would otherwise collide on /nibster/sessions/<id>.md and
-// the index entry. 4 bytes = 8 hex chars = 2^32 collision space, more
-// than enough for any plausible per-second nibster fan-out.
+// entropyBytes is the size of the random suffix on a session ID, so
+// two prompts started in the same second with the same slug do not
+// collide on one session page.
 const entropyBytes = 4
 
 // sessionIDPattern is the strict shape of a session ID. Used by

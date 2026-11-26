@@ -262,7 +262,7 @@ ai → agent → kit → coding → tui
 | `tui/` | Bubble Tea reference frontend, `keymap`, `/clear` `/quit` commands |
 | `cmd/nib-code` | Interactive TUI binary (composition root) |
 | `cmd/agent` | `nib-agent` — headless CI/scripting binary |
-| `cmd/nibster` | Kit-boundary smoke test: general-purpose CLI agent on `kit/` + `ai/` only |
+| `cmd/nib` | `nib`, the base agent: the default assembly of `kit/` blocks, on `kit/` + `ai/` only |
 
 `ai`, `agent`, and `kit` are released for other programs to import. [STABILITY.md](STABILITY.md) says which of their packages carry a compatibility promise and how a breaking change is marked.
 
@@ -270,7 +270,7 @@ ai → agent → kit → coding → tui
 
 ```bash
 make build      # compile every module and produce the three binaries under cmd/*/bin
-make install    # symlink nib-code, nib-agent, nibster into ~/.local/bin
+make install    # symlink nib-code, nib-agent, nib into ~/.local/bin
 make test       # go test -race across every module
 bash pre-commit.sh   # gofmt, module tidy, vet, and golangci-lint checks per module
 ```
@@ -297,8 +297,8 @@ cmd/nib-code/bin/nib-code --plugins
 cmd/agent/bin/nib-agent "fix the failing test" internal/foo.go
 echo "fix lint" | cmd/agent/bin/nib-agent --output json
 
-# nibster — kit-only CLI agent (see cmd/nibster/README.md)
-cmd/nibster/bin/nibster -m "summarize this repo"
+# nib, the base agent (see cmd/nib/README.md)
+cmd/nib/bin/nib -m "summarize this repo"
 ```
 
 Runtime knobs are `NIB_*` environment variables (e.g. `NIB_BASH_APPROVAL`, `NIB_VALIDATORS_DISABLED`, `NIB_TASK_TOKEN_BUDGET`, `NIB_MCP`); the catalog with doc comments lives in `ai/brand/brand.go`.

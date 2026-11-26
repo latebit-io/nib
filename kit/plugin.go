@@ -9,29 +9,9 @@ import (
 	"github.com/latebit-io/nib/kit/command"
 )
 
-// Plugin is the descriptive surface for any kit-composable artifact —
-// tool, slash command, provider, or memory store. It drives `--plugins`
-// CLI introspection, structured diagnostics, and (eventually) /help
-// auto-generation.
-//
-// Plugin is a value type. Construct directly or derive from an existing
-// port method via [DescribeTool] / [DescribeCommand]. A concrete
-// implementation that wants to override default derivation implements
-// the optional [Described] interface.
-//
-// Concrete use cases that motivated the type:
-//
-//   - `nib-code --plugins` prints the active wiring (provider, store,
-//     tools, commands) so a daily-driver user can confirm which
-//     markdown commands loaded and which MCP tools are exposed without
-//     consulting docs that drift.
-//   - `nibster --plugins` prints the small kit-only surface as a smoke
-//     test that the kit boundary still holds.
-//   - A third-party `Plugins() kit.Toolset` author runs `--plugins`
-//     after wiring their package into a binary to verify their tools
-//     and commands flowed through.
-//   - Bug reports paste `--plugins` output so the maintainer sees the
-//     active setup without follow-up questions.
+// Plugin describes one kit-composable artifact for the `--plugins`
+// manifest and diagnostics. Build it directly or with [DescribeTool] /
+// [DescribeCommand]; an artifact overrides those by implementing [Described].
 type Plugin struct {
 	// Kind classifies the artifact for grouped rendering.
 	Kind PluginKind
@@ -58,8 +38,7 @@ type Plugin struct {
 	Source string
 }
 
-// PluginKind classifies a [Plugin] for grouped rendering. The renderer
-// orders groups: provider, store, tool, command.
+// PluginKind classifies a [Plugin] for grouped rendering.
 type PluginKind string
 
 const (
@@ -74,6 +53,12 @@ const (
 	// KindStore tags a memory.Store (binary supplies the metadata
 	// for the same layering reason as KindProvider).
 	KindStore PluginKind = "store"
+	// KindContext tags text injected into the system prompt. Source
+	// names its origin, such as a repository's AGENTS.md.
+	KindContext PluginKind = "context"
+	// KindExtension tags an extension a session can switch on or off;
+	// its tools are listed as tools.
+	KindExtension PluginKind = "extension"
 )
 
 // Described is the optional interface a kit-composable artifact may
@@ -117,13 +102,10 @@ func DescribeTool(t Tool) Plugin {
 	}
 }
 
-// firstSentence returns the leading sentence of s — text up to the
-// first period followed by a space or end of string. If no terminating
-// period exists, the whole string is returned. Tool definitions
-// frequently begin with a one-line summary followed by detailed
-// LLM-facing instructions; this surface produces the summary alone
-// for human-readable listings.
+// firstSentence returns a tool description's summary for a one-line
+// listing: its first sentence, or its first line when that ends sooner.
 func firstSentence(s string) string {
+	s, _, _ = strings.Cut(s, "\n")
 	rest := s
 	for {
 		i := strings.IndexByte(rest, '.')
@@ -169,27 +151,9 @@ func commandSource(s command.Source) string {
 	return kind + ":" + s.Path
 }
 
-// RenderPlugins returns a grouped, human-readable summary of plugins.
-// Output is stable and line-parseable; each line within a group is
-// "  <name>  <description>" with two-space indent. Groups are emitted
-// in the order Provider, Store, Tool, Command, separated by a blank
-// line. Within a group, entries sort by Name. Empty groups are
-// omitted. Caller writes the returned string to its preferred sink so
-// I/O error handling stays at the boundary.
-//
-// Format example:
-//
-//	PROVIDER (1)
-//	  openrouter           google/gemini-3.8-flash
-//
-//	TOOL (3)
-//	  bash                 Run shell commands with output cap + timeout
-//	  memory_fetch         Fetch a versioned memory document
-//	  search               Project search (engine-backed)
-//
-// The renderer pads names to a per-group width so descriptions
-// align. Version and Source are appended in brackets when present:
-// "  foo@1.2.0          Description [module:foo/bar]".
+// RenderPlugins returns a line-parseable summary: one group per kind in
+// pluginKindOrder, entries sorted by name, empty groups omitted. A line
+// reads "  <name>[@version]  <description> [<source>]".
 func RenderPlugins(plugins []Plugin) string {
 	var b strings.Builder
 	groups := groupPlugins(plugins)
@@ -219,13 +183,13 @@ func RenderPlugins(plugins []Plugin) string {
 	return b.String()
 }
 
-// pluginKindOrder is the stable group emission order used by
-// [RenderPlugins]. Provider first (the most user-visible identity),
-// then Store (durable state), Tool, and finally Command (the
-// largest and least operational group).
+// pluginKindOrder is the group order [RenderPlugins] emits: identity
+// first, then what shapes every turn, then the largest groups.
 var pluginKindOrder = []PluginKind{
 	KindProvider,
 	KindStore,
+	KindContext,
+	KindExtension,
 	KindTool,
 	KindCommand,
 }

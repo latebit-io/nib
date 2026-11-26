@@ -33,7 +33,7 @@ go.work.sum
 bin/
 cmd/agent/agent
 cmd/nib-code/nib-code
-cmd/nibster/nibster
+cmd/nib/nib
 
 .mcp.json
 log.txt
@@ -44,9 +44,9 @@ log.txt
 # you want them tracked.
 /.project/*
 !/.project/commands/
-# nibster carries its own runtime .project/ for kit-boundary smoke
-# testing — wholly ignored, no commands surface there.
-cmd/nibster/.project/
+# nib carries its own runtime .project/ when run from its source
+# directory. Wholly ignored, no commands surface there.
+cmd/nib/.project/
 .claude
 
 # Editor/IDE

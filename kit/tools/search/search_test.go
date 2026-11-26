@@ -178,3 +178,41 @@ func TestTool_SatisfiesContract(t *testing.T) {
 		})
 	})
 }
+
+// TestExecute_IncompleteSearch: a backend that could not cover the
+// tree still has its matches shown, with the reason, and an empty
+// result does not read as "no matches anywhere".
+func TestExecute_IncompleteSearch(t *testing.T) {
+	partial := []Result{{Path: "a.go", Line: 3, Text: "func A()"}}
+	for name, results := range map[string][]Result{"with matches": partial, "without": nil} {
+		tool := New("/tmp", func(context.Context, string, string, Options) ([]Result, error) {
+			return results, errors.Join(errors.New("only the first 50000 entries were searched"), ErrIncomplete)
+		})
+		res := tool.Execute(context.Background(), call(`{"pattern":"func"}`))
+		if res.IsError || !strings.Contains(res.Content, "incomplete") {
+			t.Errorf("%s: result = %+v, want the search reported as incomplete", name, res)
+		}
+		if len(results) > 0 && !strings.Contains(res.Content, "a.go:3") {
+			t.Errorf("%s: the matches found were dropped: %s", name, res.Content)
+		}
+	}
+}
+
+// TestExecute_IncompleteSearchWithCutPreview: when the matches alone
+// overflow the preview, the result still says the tree was not covered.
+func TestExecute_IncompleteSearchWithCutPreview(t *testing.T) {
+	many := make([]Result, 100)
+	for i := range many {
+		many[i] = Result{Path: "a.go", Line: i + 1, Text: strings.Repeat("x", 300)}
+	}
+	tool := New("/tmp", func(context.Context, string, string, Options) ([]Result, error) {
+		return many, ErrIncomplete
+	})
+	res := tool.Execute(context.Background(), call(`{"pattern":"x"}`))
+	if !strings.Contains(res.Content, "truncated") || !strings.Contains(res.Content, "incomplete") {
+		t.Errorf("result lacks one of the two notices:\n%.200s ... %s", res.Content, res.Content[max(0, len(res.Content)-200):])
+	}
+	if len(res.Content) > maxPreviewBytes {
+		t.Errorf("result is %d bytes, over the %d-byte preview cap", len(res.Content), maxPreviewBytes)
+	}
+}

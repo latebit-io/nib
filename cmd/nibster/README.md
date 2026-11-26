@@ -10,8 +10,10 @@ If a kit consumer needs anything `coding/` provides, the kit boundary has a leak
 nibster -m "<message>"      # run an agent on the given prompt
 nibster --list              # print the session index
 nibster --show <id>         # print a specific session's memory page
-nibster --plugins           # print the wired plug-in manifest (provider, store, tools) and exit
+nibster --plugins           # print the wired plug-in manifest (provider, store, context files, tools) and exit
 ```
+
+An `AGENTS.md` (or `CLAUDE.md`) at the root is added to the system prompt as reference data.
 
 Optional flags:
 

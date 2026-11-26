@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/contextfile"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/skill"
 	"github.com/latebit-io/nib/kit/tools/bash"
@@ -78,6 +79,8 @@ func printPlugins(root string, store memory.Store) error {
 		Name:        "demarkus",
 		Description: "Mark Protocol versioned memory",
 	})
+
+	plugins = append(plugins, contextfile.Plugins(loadContextFiles(root))...)
 
 	ts, skills := nibsterToolset(root, store)
 	for _, t := range ts.Tools {

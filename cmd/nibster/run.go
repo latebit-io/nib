@@ -53,7 +53,7 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 	toolset, _ := nibsterToolset(root, store)
 	ag, err := kit.New(kit.Config{
 		Provider:     provider,
-		SystemPrompt: buildSystemPrompt(sessionID),
+		SystemPrompt: withProjectInstructions(buildSystemPrompt(sessionID), loadContextFiles(root)),
 		Toolset:      toolset,
 	})
 	if err != nil {

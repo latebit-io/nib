@@ -1,14 +1,6 @@
-// Package contextfile loads repo-local agent instruction files
-// (AGENTS.md / CLAUDE.md) for injection into a consumer's system prompt.
-// The file is developer-authored, repo-carried context — build commands,
-// conventions, style rules — that an agent should honor on any project
-// without a memory bootstrap.
-//
-// Trust: the loaded content is reference data from the repository, not
-// an instruction channel. Consumers must inject it behind the same trust
-// framing as any external input (never overrides system or developer
-// instructions; commands found inside are not executed). The loader
-// enforces only the mechanical half of that posture: a hard size cap.
+// Package contextfile loads repo-carried agent instruction files
+// (AGENTS.md / CLAUDE.md) and renders them as a system-prompt section
+// that marks them as reference data, not instructions.
 package contextfile
 
 import (

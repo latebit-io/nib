@@ -20,10 +20,13 @@ cd "$ROOT"
 # pull request title), else HEAD's subject.
 TITLE=${API_CHECK_TITLE:-$(git log -1 --format=%s)}
 
-# The nearest release HEAD contains, so a branch behind main is not
-# compared with a release it has not merged.
-BASE=$(git describe --tags --match 'agent/v*' --abbrev=0 HEAD) || {
-	echo "error: no agent/v* tag reachable from HEAD (shallow clone?)" >&2
+# The nearest release at or before API_CHECK_FROM (default HEAD), so a
+# branch behind main is not compared with a release it has not merged.
+# Empty or all zeros (GitHub's "no previous commit") also means HEAD.
+FROM=${API_CHECK_FROM:-}
+[ -n "${FROM//0/}" ] || FROM=HEAD
+BASE=$(git describe --tags --match 'agent/v*' --abbrev=0 "$FROM") || {
+	echo "error: no agent/v* tag reachable from $FROM (shallow clone?)" >&2
 	exit 1
 }
 VERSION=${BASE#agent/}
@@ -49,9 +52,12 @@ for mod in "$@"; do
 	# Listed from the old tree: a removed package is seen, and a new one,
 	# which cannot break anyone, is skipped.
 	paths=$(cd "$WORK/$mod" && go list $(covered "$mod") | grep -Ev '/internal(/|$)')
+	current=$(cd "$ROOT/$mod" && go list ./...)
 	for path in $paths; do
 		name=${path#"$PREFIX/"}
-		if [ ! -d "$ROOT/$name" ]; then
+		# Membership, not directory: a package can lose its Go files
+		# while its directory stays.
+		if ! grep -qxF "$path" <<<"$current"; then
 			breaks="$breaks$name: package removed"$'\n'
 			continue
 		fi

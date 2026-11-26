@@ -44,4 +44,7 @@ jobs:
           # Passed through env, never interpolated into the script: a
           # title is untrusted input. Empty on push; HEAD's subject is used.
           API_CHECK_TITLE: ${{ github.event.pull_request.title }}
+          # On push, measure from the commit before it: once release.yml
+          # tags HEAD, HEAD's own tag would compare the commit with itself.
+          API_CHECK_FROM: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: make api-check

@@ -22,7 +22,9 @@ change in any release.
 
 A release is compatible when code that compiled against the previous release
 still compiles: nothing exported from the stable surface is removed, renamed,
-or given a different type. Additions are always allowed.
+or given a different type. Additions are allowed when they keep that true.
+A new method on an exported interface does not: it breaks every
+implementation outside nib, so it is a break.
 
 Behaviour described in a doc comment is part of the contract too. Changing it
 (event order, error identity, when a call returns) is a break.

@@ -65,11 +65,13 @@ jobs:
         id: semver
         with:
           tag_prefix: "agent/v"
-          major_pattern: "BREAKING CHANGE:"
-          # Anchored regex (slash-wrapped): plain "feat:" is a substring
-          # match that misses scoped "feat(x):" — the demarkus-library
-          # semver bug, not repeated here.
-          minor_pattern: '/^feat(\(.+\))?:/'
+          # No major release while on v0 (STABILITY.md): this regex never
+          # matches, so no commit message can cut v1.0.0.
+          major_pattern: '/(?!)/'
+          # Anchored regex (slash-wrapped): a plain "feat:" substring match
+          # misses scoped "feat(x):". The second branch is api-check.sh's
+          # break marker, a minor bump too; keep the two in step.
+          minor_pattern: '/^(feat(\(.+\))?|[a-z]+(\([^)]+\))?!):/'
           # Only changes to the released modules cut a release — tui/coding
           # churn does not bump them.
           change_path: "agent ai kit"

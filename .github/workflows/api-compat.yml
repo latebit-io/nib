@@ -1,0 +1,47 @@
+name: API compatibility
+
+# Fails when the stable surface (STABILITY.md) changes incompatibly and the
+# pull request title does not mark the break.
+#
+# Separate from ci.yml because it also runs on `edited`: adding the marker
+# to a title must re-run this check, and a plain re-run replays the old title.
+#
+# The push run gates nothing (release.yml tags on its own). It flags a
+# squash subject edited at merge time so it no longer carries the marker.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The check finds the last release by its tag.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: "**/go.sum"
+      - name: Install apidiff
+        run: |
+          go install golang.org/x/exp/cmd/apidiff@v0.0.0-20261124000051-d6646c509b6d
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: API compatibility
+        env:
+          # Passed through env, never interpolated into the script: a
+          # title is untrusted input. Empty on push; HEAD's subject is used.
+          API_CHECK_TITLE: ${{ github.event.pull_request.title }}
+        run: make api-check

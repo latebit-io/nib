@@ -92,8 +92,15 @@ func (h *harness) typeLine(line string) {
 // see waits until the output contains want.
 func (h *harness) see(want string) {
 	h.t.Helper()
+	h.seeTimes(want, 1)
+}
+
+// seeTimes waits until the output contains want n times, for text
+// that repeats, such as a question asked again.
+func (h *harness) seeTimes(want string, n int) {
+	h.t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(h.out.String(), want) {
+	for strings.Count(h.out.String(), want) < n {
 		if time.Now().After(deadline) {
 			h.t.Fatalf("output never showed %q:\n%s", want, h.out.String())
 		}
@@ -410,11 +417,13 @@ func TestRun_AnswersApprovalRequests(t *testing.T) {
 	h.see("allow? [y]es, [a]lways, [n]o: ")
 	h.typeLine("maybe")
 	h.typeLine("n")
-	h.see("! touch failed")
+	// The first call's question, asked again after "maybe", then the
+	// second call's: only then is there something for "y" to answer.
+	h.seeTimes("? touch wants to run", 3)
 	h.typeLine("y")
 	h.see("all done\n> ")
-	if ran != 1 {
-		t.Errorf("the tool ran %d times, want once: refused, then allowed", ran)
+	if ran != 1 || !strings.Contains(h.out.String(), "! touch failed") {
+		t.Errorf("the tool ran %d times; want once, after a refusal shown as a failed call", ran)
 	}
 	if got := strings.Count(h.out.String(), "? touch wants to run"); got != 3 {
 		t.Errorf("the question was shown %d times, want 3 (two calls, one repeat)", got)

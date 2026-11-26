@@ -8,7 +8,7 @@ require (
 )
 
 require (
-	github.com/latebit-io/nib/agent v0.10.0 // indirect
+	github.com/latebit-io/nib/agent v0.13.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 

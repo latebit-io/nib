@@ -320,4 +320,7 @@ func TestChoices(t *testing.T) {
 	if _, err := (config{}).choices(); err == nil {
 		t.Error("a budget that is not a number must be an error, not no budget")
 	}
+	if chosen, err := (config{budget: 1000}).choices(); err != nil || chosen.limits.TokenBudget != 1000 {
+		t.Errorf("choices = %+v, %v; with --budget a bad environment value must not matter", chosen, err)
+	}
 }

@@ -58,7 +58,7 @@ type Tool struct {
 	// improve on.
 	approvalManaged bool
 	// approved, when set, says whether the person allowed one call.
-	approved func(callID string) bool
+	approved func(call llm.ToolCall) bool
 }
 
 // Option configures a [Tool] at construction.
@@ -78,7 +78,7 @@ func ApprovalManaged() Option {
 // ApprovedBy lets a file-write or destructive command run when approved
 // reports that the person allowed that very call. Without the option,
 // or when it says no, the guard refuses such commands as always.
-func ApprovedBy(approved func(callID string) bool) Option {
+func ApprovedBy(approved func(call llm.ToolCall) bool) Option {
 	return func(t *Tool) { t.approved = approved }
 }
 
@@ -103,8 +103,8 @@ func New(projectRoot string, opts ...Option) *Tool {
 
 // allowsRisky reports whether a file-write or destructive command may
 // run: every one under [ApprovalManaged], else only an approved call.
-func (t *Tool) allowsRisky(callID string) bool {
-	return t.approvalManaged || (t.approved != nil && t.approved(callID))
+func (t *Tool) allowsRisky(call llm.ToolCall) bool {
+	return t.approvalManaged || (t.approved != nil && t.approved(call))
 }
 
 // Definition returns the OpenAI-compatible tool schema for bash.
@@ -150,7 +150,7 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		return errorResult("Error: command is required")
 	}
 
-	if class, msg := Classify(args.Command); msg != "" && (class == GuardSearch || !t.allowsRisky(call.ID)) {
+	if class, msg := Classify(args.Command); msg != "" && (class == GuardSearch || !t.allowsRisky(call)) {
 		// Approval-managed mode passes file-write and destructive
 		// classes through — the wrapping gate already proposed them and
 		// the developer approved. The search class blocks regardless

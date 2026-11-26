@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
 )
 
@@ -86,13 +87,13 @@ type Gate struct {
 	mode     Mode
 	asker    Asker
 	policies map[string]Policy
-	always   map[string]bool // tool + "\x00" + scope
-	approved map[string]bool // call IDs the person allowed, until claimed
+	always   map[string]bool  // tool + "\x00" + scope
+	approved map[string]grant // calls the person allowed, by ID, until they end
 }
 
 // New returns a Gate in the autonomous mode, with nobody to ask yet.
 func New() *Gate {
-	return &Gate{policies: map[string]Policy{}, always: map[string]bool{}, approved: map[string]bool{}}
+	return &Gate{policies: map[string]Policy{}, always: map[string]bool{}, approved: map[string]grant{}}
 }
 
 // SetAsker sets who is asked in the approve mode. Without one, every
@@ -125,19 +126,33 @@ func (g *Gate) Mode() Mode {
 	return g.mode
 }
 
-// Approved reports, once, whether the person allowed the call with
-// this ID. A tool with a refusal of its own lifts it for such a call.
-func (g *Gate) Approved(callID string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	ok := g.approved[callID]
-	delete(g.approved, callID)
-	return ok
+// grant is what one approval covers: the tool and its exact arguments.
+type grant struct {
+	tool, args string
 }
 
-// Hooks returns the hook that puts the gate in front of every call.
+// Approved reports, once, whether the person allowed this very call:
+// same ID, same tool, same arguments, while it runs. A tool with a
+// refusal of its own lifts it for such a call and no other.
+func (g *Gate) Approved(c llm.ToolCall) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	allowed, ok := g.approved[c.ID]
+	delete(g.approved, c.ID)
+	return ok && allowed == grant{tool: c.Function.Name, args: c.Function.Arguments}
+}
+
+// Hooks returns the hooks that put the gate in front of every call and
+// end each approval with its call, whether the tool used it or not.
 func (g *Gate) Hooks() kit.Hooks {
-	return kit.Hooks{BeforeToolCall: g.before}
+	return kit.Hooks{BeforeToolCall: g.before, AfterToolCall: g.after}
+}
+
+func (g *Gate) after(_ context.Context, c kit.AfterToolCallInput) (kit.AfterToolCallResult, error) {
+	g.mu.Lock()
+	delete(g.approved, c.CallID)
+	g.mu.Unlock()
+	return kit.AfterToolCallResult{}, nil
 }
 
 func (g *Gate) before(ctx context.Context, c kit.BeforeToolCallInput) (kit.BeforeToolCallResult, error) {
@@ -160,7 +175,7 @@ func (g *Gate) before(ctx context.Context, c kit.BeforeToolCallInput) (kit.Befor
 	case check.Skip:
 		return kit.BeforeToolCallResult{}, nil
 	case known:
-		return g.allow(c.CallID), nil
+		return g.allow(c), nil
 	case asker == nil:
 		return kit.BeforeToolCallResult{Block: true, Reason: nobody}, nil
 	}
@@ -173,17 +188,17 @@ func (g *Gate) before(ctx context.Context, c kit.BeforeToolCallInput) (kit.Befor
 		g.mu.Lock()
 		g.always[key] = true
 		g.mu.Unlock()
-		return g.allow(c.CallID), nil
+		return g.allow(c), nil
 	case Allow:
-		return g.allow(c.CallID), nil
+		return g.allow(c), nil
 	}
 	return kit.BeforeToolCallResult{Block: true, Reason: rejected}, nil
 }
 
 // allow lets the call run and records the approval for [Gate.Approved].
-func (g *Gate) allow(callID string) kit.BeforeToolCallResult {
+func (g *Gate) allow(c kit.BeforeToolCallInput) kit.BeforeToolCallResult {
 	g.mu.Lock()
-	g.approved[callID] = true
+	g.approved[c.CallID] = grant{tool: c.Name, args: c.Args}
 	g.mu.Unlock()
 	return kit.BeforeToolCallResult{}
 }

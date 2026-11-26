@@ -66,23 +66,31 @@ func (m *Provider) Stream(ctx context.Context, msgs []llm.Message, tools []llm.T
 	go func() {
 		defer close(out)
 		for ev := range in {
-			if ev.Done {
-				m.mu.Lock()
-				m.used.AddUsage(ev.Usage)
-				m.used.Turns++
-				m.mu.Unlock()
-			}
+			m.count(ev)
 			select {
 			case out <- ev:
 			case <-ctx.Done():
-				// Nobody reads any more; drain so the provider can finish.
-				for range in {
+				// Nobody reads any more. Drain so the provider can finish,
+				// still counting: a stopped request is paid for too.
+				for ev := range in {
+					m.count(ev)
 				}
 				return
 			}
 		}
 	}()
 	return out, nil
+}
+
+// count adds the usage a stream's final event reports.
+func (m *Provider) count(ev llm.StreamEvent) {
+	if !ev.Done {
+		return
+	}
+	m.mu.Lock()
+	m.used.AddUsage(ev.Usage)
+	m.used.Turns++
+	m.mu.Unlock()
 }
 
 // escalator returns the current provider's output limit control, or

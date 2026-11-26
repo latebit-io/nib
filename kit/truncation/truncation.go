@@ -56,7 +56,11 @@ func Hooks(limit llm.OutputCapEscalator) kit.Hooks {
 }
 
 // escalated returns the output limit to try after one of cur was hit:
-// double, at least the first step, at most the ceiling.
+// double, at least the first step, at most the ceiling. A limit already
+// above the ceiling is kept: recovery must never give the model less room.
 func escalated(cur int) int {
+	if cur >= ceiling {
+		return cur
+	}
 	return min(max(cur*2, firstEscalation), ceiling)
 }

@@ -78,12 +78,13 @@ func (c config) choices() (choices, error) {
 	if c.approve && !c.interactive() {
 		return chosen, errors.New("--approve needs a session: a single run has nobody to ask")
 	}
-	budgetCap, err := budget.ParseEnvCap(os.Getenv(brand.EnvKeyTaskTokenBudget))
-	if err != nil {
-		return chosen, fmt.Errorf("%s: %w", brand.EnvKeyTaskTokenBudget, err)
-	}
-	if c.budget != 0 {
-		budgetCap = c.budget
+	// The flag decides, so a bad environment value does not matter then.
+	budgetCap := c.budget
+	if budgetCap == 0 {
+		var err error
+		if budgetCap, err = budget.ParseEnvCap(os.Getenv(brand.EnvKeyTaskTokenBudget)); err != nil {
+			return chosen, fmt.Errorf("%s: %w", brand.EnvKeyTaskTokenBudget, err)
+		}
 	}
 	chosen.limits = nib.Limits{
 		TokenBudget: budgetCap,
@@ -166,6 +167,13 @@ func run() error {
 		}
 	}()
 
+	// Reading past sessions runs no agent, so run settings cannot stop it.
+	switch {
+	case cfg.list:
+		return listSessions(ctx, mem.Store)
+	case cfg.show != "":
+		return showSession(ctx, mem.Store, cfg.show)
+	}
 	chosen, err := cfg.choices()
 	if err != nil {
 		return setupErr("%v", err)
@@ -173,10 +181,6 @@ func run() error {
 	switch {
 	case cfg.plugins:
 		return printPlugins(ctx, root, mem.Store, chosen)
-	case cfg.list:
-		return listSessions(ctx, mem.Store)
-	case cfg.show != "":
-		return showSession(ctx, mem.Store, cfg.show)
 	case cfg.interactive():
 		return runInteractive(ctx, startCtx, started, root, mem.Store, chosen, interrupt)
 	default:

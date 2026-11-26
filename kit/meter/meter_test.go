@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/ai/llmtest"
@@ -83,5 +84,52 @@ func TestProvider_SetSwapsTheModel(t *testing.T) {
 	}
 	if m.SetMaxTokens(8192); second.max != 8192 || m.MaxTokens() != 8192 {
 		t.Errorf("output limit = %d, want it set on the provider in use", second.max)
+	}
+}
+
+// held streams a token, then waits for release before its final event.
+type held struct {
+	release chan struct{}
+	usage   *llm.Usage
+}
+
+func (h held) Stream(ctx context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	ch := make(chan llm.StreamEvent)
+	go func() {
+		defer close(ch)
+		ch <- llm.StreamEvent{Token: "partial"}
+		<-h.release
+		// Sent after the consumer has gone, as a provider winding down does.
+		ch <- llm.StreamEvent{Done: true, Usage: h.usage}
+	}()
+	return ch, nil
+}
+
+// TestProvider_CountsAStoppedRequest: usage a provider reports after
+// the consumer stopped reading still counts, so stopping requests
+// cannot get around the budget.
+func TestProvider_CountsAStoppedRequest(t *testing.T) {
+	inner := held{release: make(chan struct{}), usage: usage(40, 20)}
+	m := New(50)
+	m.Set(inner)
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := m.Stream(ctx, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel() // the consumer stops before reading anything
+	close(inner.release)
+	// Not reading ch leaves the meter only the cancelled path to take.
+	deadline := time.Now().Add(5 * time.Second)
+	for m.Usage().Total() != 60 {
+		if time.Now().After(deadline) {
+			t.Fatalf("usage = %+v, want the stopped request's 60 tokens counted", m.Usage())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for range ch {
+	}
+	if _, err := m.Stream(context.Background(), nil, nil); !errors.Is(err, ErrBudgetExceeded) {
+		t.Errorf("next request: err = %v, want ErrBudgetExceeded", err)
 	}
 }

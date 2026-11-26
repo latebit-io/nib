@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
 )
 
@@ -32,6 +33,11 @@ func call(t *testing.T, g *Gate, id, tool, args string) kit.BeforeToolCallResult
 	return res
 }
 
+// tc is the tool call the agent would hand the tool.
+func tc(id, tool, args string) llm.ToolCall {
+	return llm.ToolCall{ID: id, Function: llm.FunctionCall{Name: tool, Arguments: args}}
+}
+
 // shell is a policy like a shell's: always-allow covers the exact command.
 func shell(args string) Check {
 	if args == "rm" {
@@ -50,8 +56,8 @@ func TestGate_Autonomous(t *testing.T) {
 	if call(t, g, "1", "bash", "rm").Block || call(t, g, "2", "unknown", "{}").Block {
 		t.Error("the autonomous mode must not refuse a call")
 	}
-	if len(a.seen) != 0 || g.Approved("1") {
-		t.Errorf("asked %d times, call approved: %v; want neither", len(a.seen), g.Approved("1"))
+	if len(a.seen) != 0 || g.Approved(tc("1", "bash", "rm")) {
+		t.Errorf("asked %d times, or the call counted as approved; want neither", len(a.seen))
 	}
 }
 
@@ -65,13 +71,13 @@ func TestGate_Approve(t *testing.T) {
 	g.Register("read_file", Unasked)
 	g.SetMode(Approve)
 
-	if call(t, g, "1", "bash", "rm").Block || !g.Approved("1") || g.Approved("1") {
+	if call(t, g, "1", "bash", "rm").Block || !g.Approved(tc("1", "bash", "rm")) || g.Approved(tc("1", "bash", "rm")) {
 		t.Error("an allowed call must run and count as approved, once")
 	}
-	if res := call(t, g, "2", "bash", "make"); !res.Block || res.Reason != rejected || g.Approved("2") {
+	if res := call(t, g, "2", "bash", "make"); !res.Block || res.Reason != rejected || g.Approved(tc("2", "bash", "make")) {
 		t.Errorf("denied call = %+v, want it refused and not approved", res)
 	}
-	if call(t, g, "3", "bash", "make").Block || call(t, g, "4", "bash", "make").Block || !g.Approved("4") {
+	if call(t, g, "3", "bash", "make").Block || call(t, g, "4", "bash", "make").Block || !g.Approved(tc("4", "bash", "make")) {
 		t.Error("an always-allowed command must run, and run again unasked")
 	}
 	if call(t, g, "5", "read_file", `{"path":"a"}`).Block {
@@ -104,5 +110,36 @@ func TestGate_NobodyToAsk(t *testing.T) {
 	g.SetAsker(func(context.Context, Request) (Decision, error) { return Deny, context.Canceled })
 	if _, err := g.Hooks().BeforeToolCall(context.Background(), kit.BeforeToolCallInput{CallID: "2", Name: "bash", Args: "make"}); !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want the asker's error", err)
+	}
+}
+
+// TestGate_ApprovalCoversOneCallOnly: an approval lifts a refusal for
+// the call that was asked about, and for nothing else: not another tool
+// or other arguments under the same ID, and not after the call ended.
+func TestGate_ApprovalCoversOneCallOnly(t *testing.T) {
+	a := &answers{next: []Decision{Allow, Allow}}
+	g := New()
+	g.SetAsker(a.ask)
+	g.Register("bash", shell)
+	g.SetMode(Approve)
+
+	if call(t, g, "1", "write_file", `{"path":"a"}`).Block {
+		t.Fatal("the approved write must pass")
+	}
+	if _, err := g.Hooks().AfterToolCall(context.Background(), kit.AfterToolCallInput{CallID: "1", Name: "write_file"}); err != nil {
+		t.Fatal(err)
+	}
+	// The write never asked whether it was approved; its call has ended.
+	g.SetMode(Autonomous)
+	if g.Approved(tc("1", "bash", "rm")) {
+		t.Error("an approval must end with its call, claimed or not")
+	}
+
+	g.SetMode(Approve)
+	if call(t, g, "2", "bash", "make").Block {
+		t.Fatal("the approved command must pass")
+	}
+	if g.Approved(tc("2", "bash", "rm")) || g.Approved(tc("2", "write_file", "make")) {
+		t.Error("an approval must cover only the tool and arguments that were asked about")
 	}
 }

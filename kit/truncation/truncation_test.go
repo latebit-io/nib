@@ -16,7 +16,7 @@ func (l *limit) MaxTokens() int     { return l.max }
 func (l *limit) SetMaxTokens(n int) { l.max = n }
 
 func TestEscalated(t *testing.T) {
-	for cur, want := range map[int]int{0: 32768, 4096: 32768, 20000: 40000, 40000: 65536, 65536: 65536} {
+	for cur, want := range map[int]int{0: 32768, 4096: 32768, 20000: 40000, 40000: 65536, 65536: 65536, 131072: 131072} {
 		if got := escalated(cur); got != want {
 			t.Errorf("escalated(%d) = %d, want %d", cur, got, want)
 		}

@@ -133,3 +133,43 @@ func TestOnMaxTurns(t *testing.T) {
 		})
 	}
 }
+
+// TestOnTruncated_Consecutive: the hook is told how many responses in a
+// row were cut off. A complete response starts the count over, and the
+// closing turn at the cap continues the streak the last turns left.
+func TestOnTruncated_Consecutive(t *testing.T) {
+	t.Parallel()
+
+	cut := []llm.StreamEvent{{Token: "cut"}, {Done: true, Truncated: true}}
+	nudge := func(context.Context) ([]llm.Message, error) {
+		return []llm.Message{{Role: "user", Content: "answer now"}}, nil
+	}
+	tests := []struct {
+		name     string
+		maxTurns int
+		turns    [][]llm.StreamEvent
+		want     []int
+	}{
+		{"every response cut off, the last at the cap", 2, [][]llm.StreamEvent{cut, cut, cut}, []int{1, 2, 3}},
+		{"a complete response in between", 3, [][]llm.StreamEvent{cut, llmtest.ToolCalls(echoCall), cut, cut}, []int{1, 1, 2}},
+		{"the closing turn after a complete one", 1, [][]llm.StreamEvent{llmtest.ToolCalls(echoCall), cut}, []int{1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var seen []int
+			retry := func(_ context.Context, in TruncationInput) (TruncationResult, error) {
+				seen = append(seen, in.Consecutive)
+				return TruncationResult{Retry: true}, nil
+			}
+			runToEnd(t, Options{
+				Provider: llmtest.NewScripted(tc.turns...),
+				MaxTurns: tc.maxTurns,
+				Hooks:    Hooks{OnTruncated: retry, OnMaxTurns: nudge},
+			}, question, nil)
+			if !slices.Equal(seen, tc.want) {
+				t.Errorf("Consecutive = %v; want %v", seen, tc.want)
+			}
+		})
+	}
+}

@@ -9,9 +9,7 @@ import (
 // its kit equivalent on [Agent.bus]; events without one are dropped.
 // Runs until [Agent.Close], which drains what the last run left behind.
 func (a *Agent) translateEvents() {
-	// Signal Close that the translator has fully exited and will not
-	// publish to the bus again, so Close can safely call Bus.Close
-	// without racing a still-running drain.
+	// Closed on exit, so Close can shut the bus without racing a publish.
 	defer close(a.translatorDone)
 	for {
 		select {
@@ -45,6 +43,10 @@ func (a *Agent) translate(ev agentevent.Event) {
 			CachedTokens:     e.CachedTokens,
 			ToolCalls:        e.ToolCalls,
 		})
+	case agentevent.ToolStart:
+		a.bus.Publish(event.AgentToolCall{Name: e.Name, Args: e.Args, CallID: e.CallID})
+	case agentevent.ToolEnd:
+		a.bus.Publish(event.AgentToolResult{CallID: e.CallID, Name: e.Name, IsError: e.IsError})
 	case agentevent.Error:
 		a.bus.Publish(event.AgentError{Err: e.Err})
 	case agentevent.AgentParked:

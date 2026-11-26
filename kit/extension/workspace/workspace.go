@@ -4,10 +4,13 @@ package workspace
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/extension"
+	"github.com/latebit-io/nib/kit/permission"
 	"github.com/latebit-io/nib/kit/tools/bash"
 	"github.com/latebit-io/nib/kit/tools/files"
 	"github.com/latebit-io/nib/kit/tools/search"
@@ -37,7 +40,20 @@ func build(_ context.Context, env extension.Env) (extension.Extension, error) {
 	if err != nil {
 		return extension.Extension{}, err
 	}
-	tools := append([]kit.Tool{bash.New(env.Dir)}, ft.Tools()...)
+	var shellOptions []bash.Option
+	if gate := env.Permission; gate != nil {
+		// The shell still refuses risky commands by itself; an approval
+		// for one call lifts that for the call, and nothing else does.
+		shellOptions = append(shellOptions, bash.ApprovedBy(gate.Approved))
+		gate.Register("bash", shellPolicy)
+		gate.Register("write_file", pathPolicy)
+		gate.Register("edit_file", pathPolicy)
+		for _, reader := range []string{"read_file", "glob", "list_dir", "search_project"} {
+			gate.Register(reader, permission.Unasked)
+		}
+	}
+	shell := bash.New(env.Dir, shellOptions...)
+	tools := append([]kit.Tool{shell}, ft.Tools()...)
 	// bash refuses grep and find and names this tool instead.
 	tools = append(tools, search.New(env.Dir, ft.Search))
 	return extension.Extension{
@@ -45,4 +61,31 @@ func build(_ context.Context, env extension.Env) (extension.Extension, error) {
 		Prompt:  fmt.Sprintf(prompt, env.Root),
 		Close:   ft.Close,
 	}, nil
+}
+
+// shellPolicy shows the command and why the shell would refuse it.
+// Allowing it always covers that exact command. Search commands are
+// not asked about: the shell redirects them to the search tool itself.
+func shellPolicy(args string) permission.Check {
+	command := strings.TrimSpace(bash.CommandOf(args))
+	if command == "" {
+		// Nothing to run: the shell reports the bad arguments.
+		return permission.Check{Skip: true}
+	}
+	class, _ := bash.Classify(command)
+	if class == bash.GuardSearch {
+		return permission.Check{Skip: true}
+	}
+	return permission.Check{Detail: command, Reason: class.Reason(), Scope: command}
+}
+
+// pathPolicy shows the path of a file change. Allowing it always
+// covers the tool, not the one file.
+func pathPolicy(args string) permission.Check {
+	var call struct {
+		Path string `json:"path"`
+	}
+	// Arguments that do not parse are still asked about, without a path.
+	_ = json.Unmarshal([]byte(args), &call)
+	return permission.Check{Detail: call.Path}
 }

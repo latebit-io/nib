@@ -63,6 +63,8 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 	// turnsSinceInput is what [Options.MaxTurns] caps. A delivered reply
 	// resets it, so the cap bounds autonomous turns, not the conversation.
 	turnsSinceInput := 0
+	// truncations counts cut-off responses in a row, for the hook.
+	truncations := 0
 	for {
 		if ctx.Err() != nil {
 			return event.EndAborted
@@ -72,7 +74,7 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 		// turn's tool results are in and the transcript is well-formed.
 		if a.maxTurns > 0 && turnsSinceInput >= a.maxTurns {
 			a.send(ctx, event.MaxTurnsReached{Turns: turnsSinceInput})
-			return a.closeAtCap(ctx, end)
+			return a.closeAtCap(ctx, end, truncations)
 		}
 
 		result, err := a.turn(ctx, end, a.toolDefs)
@@ -85,7 +87,8 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 		a.send(ctx, event.TurnEnd{Message: assistant})
 
 		if result.Truncated {
-			retry, err := a.handleTruncation(ctx, assistant)
+			truncations++
+			retry, err := a.handleTruncation(ctx, assistant, truncations)
 			if err != nil {
 				return a.endOn(ctx, err)
 			}
@@ -94,6 +97,7 @@ func (a *Agent) loop(ctx context.Context, end *event.AgentEnd, oneShot bool) eve
 			}
 			continue
 		}
+		truncations = 0
 
 		if len(assistant.ToolCalls) > 0 {
 			batchTerminate, err := a.executeToolCalls(ctx, assistant.ToolCalls)
@@ -184,9 +188,9 @@ func (a *Agent) turn(ctx context.Context, end *event.AgentEnd, tools []llm.ToolD
 }
 
 // closeAtCap ends a run stopped by the turn cap. When [Hooks.OnMaxTurns]
-// supplies messages the model first gets one turn without tools, so the
-// run ends on an answer instead of mid-work.
-func (a *Agent) closeAtCap(ctx context.Context, end *event.AgentEnd) event.EndReason {
+// supplies messages the model gets one turn without tools to answer in;
+// truncations is the streak of cut-off responses that turn continues.
+func (a *Agent) closeAtCap(ctx context.Context, end *event.AgentEnd, truncations int) event.EndReason {
 	if a.hooks.OnMaxTurns == nil {
 		return stopped(ctx, event.EndMaxTurns)
 	}
@@ -210,7 +214,7 @@ func (a *Agent) closeAtCap(ctx context.Context, end *event.AgentEnd) event.EndRe
 	if result.Truncated {
 		// The cap leaves no turn to retry in: the hook is told, but its
 		// wish to retry cannot be honoured.
-		if _, err := a.handleTruncation(ctx, result.Assistant); err != nil {
+		if _, err := a.handleTruncation(ctx, result.Assistant, truncations+1); err != nil {
 			return a.endOn(ctx, err)
 		}
 		return event.EndTruncated
@@ -346,14 +350,15 @@ func (a *Agent) processTurn(ctx context.Context, msgs []llm.Message, tools []llm
 // handleTruncation asks [Hooks.OnTruncated] whether to retry a truncated
 // turn and appends the messages it splices in. With no hook the run ends
 // with [ErrTruncated]; with one, the hook owns the error the user sees.
-func (a *Agent) handleTruncation(ctx context.Context, assistant llm.Message) (retry bool, err error) {
+func (a *Agent) handleTruncation(ctx context.Context, assistant llm.Message, consecutive int) (retry bool, err error) {
 	if a.hooks.OnTruncated == nil {
 		a.emitError(ctx, ErrTruncated)
 		return false, nil
 	}
 	res, hookErr := a.hooks.OnTruncated(ctx, TruncationInput{
-		Assistant: assistant,
-		ToolCalls: assistant.ToolCalls,
+		Assistant:   assistant,
+		ToolCalls:   assistant.ToolCalls,
+		Consecutive: consecutive,
 	})
 	if hookErr != nil {
 		return false, fmt.Errorf("OnTruncated: %w", hookErr)

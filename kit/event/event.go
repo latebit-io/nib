@@ -115,6 +115,21 @@ type AgentToolCall struct {
 	Name string
 	// Args is the raw JSON arguments for the tool call.
 	Args string
+	// CallID identifies the call; its [AgentToolResult] carries the same
+	// one. Empty when the publisher does not track calls.
+	CallID string
+}
+
+// AgentToolResult signals a tool call finished. Calls that ran together
+// report as each one finishes. A call cut short by a cancelled run, or
+// refused before it ran, may have no result event at all.
+type AgentToolResult struct {
+	// CallID is the [AgentToolCall.CallID] of the call that finished.
+	CallID string
+	// Name is the tool name, as in the call's [AgentToolCall].
+	Name string
+	// IsError is true when the tool reported a failure.
+	IsError bool
 }
 
 // AgentWaiting signals the agent finished its turn and is waiting for user input.
@@ -236,6 +251,9 @@ func (AgentError) Event() {}
 
 // Event marks AgentToolCall as a kit agent event.
 func (AgentToolCall) Event() {}
+
+// Event marks AgentToolResult as a kit agent event.
+func (AgentToolResult) Event() {}
 
 // Event marks AgentWaiting as a kit agent event.
 func (AgentWaiting) Event() {}

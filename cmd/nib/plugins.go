@@ -16,10 +16,18 @@ import (
 	"github.com/latebit-io/nib/kit/nib"
 )
 
+// choices is what the person chose for a session, from configuration
+// and flags.
+type choices struct {
+	switches extension.Switches
+	approve  bool
+	limits   nib.Limits
+}
+
 // assemble builds the session's blocks for root: the one assembly a
 // run, a session and `--plugins` all use, so the manifest cannot drift
 // from the run. Warnings go to stderr. The caller closes the result.
-func assemble(ctx context.Context, root, prompt string, store memory.Store, switches extension.Switches) (*nib.Assembly, error) {
+func assemble(ctx context.Context, root, prompt string, store memory.Store, chosen choices) (*nib.Assembly, error) {
 	registry, err := extension.NewRegistry(workspace.Spec())
 	if err != nil {
 		return nil, err
@@ -39,7 +47,8 @@ func assemble(ctx context.Context, root, prompt string, store memory.Store, swit
 		Store:        store,
 		MCP:          mcp.DiscoverOptions{User: user, Trust: trust},
 		Extensions:   registry,
-		Switches:     switches,
+		Switches:     chosen.switches,
+		Limits:       chosen.limits,
 	})
 	if err != nil {
 		return nil, err
@@ -87,7 +96,7 @@ func closeAssembly(a *nib.Assembly) {
 // printPlugins prints the manifest: the provider, the store, and every
 // block the session would run with. A broken sign-in store degrades to
 // "(none)": the manifest is a diagnostic and must still print.
-func printPlugins(ctx context.Context, root string, store memory.Store, switches extension.Switches) error {
+func printPlugins(ctx context.Context, root string, store memory.Store, chosen choices) error {
 	resolved, err := nib.ResolveProvider(root)
 	if err != nil {
 		slog.Debug("plugins: oauth store unavailable", "err", err)
@@ -96,7 +105,7 @@ func printPlugins(ctx context.Context, root string, store memory.Store, switches
 	if resolved.HasProvider() {
 		provider = kit.Plugin{Kind: kit.KindProvider, Name: resolved.Profile, Description: resolved.DisplayModel()}
 	}
-	a, err := assemble(ctx, root, "", store, switches)
+	a, err := assemble(ctx, root, "", store, chosen)
 	if err != nil {
 		return setupErr("%v", err)
 	}

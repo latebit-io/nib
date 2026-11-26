@@ -19,9 +19,11 @@ import (
 
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llmconfig"
+	"github.com/latebit-io/nib/kit/budget"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/memory/demarkus"
+	"github.com/latebit-io/nib/kit/nib"
 )
 
 //go:embed prompt.md
@@ -58,6 +60,8 @@ type config struct {
 	trustMCP bool
 	with     string
 	without  string
+	approve  bool
+	budget   int
 	debug    bool
 }
 
@@ -65,6 +69,28 @@ type config struct {
 // default is a session in the terminal.
 func (c config) interactive() bool {
 	return c.message == "" && !c.list && c.show == "" && !c.plugins && !c.trustMCP
+}
+
+// choices merges configuration, environment and flags; the later one
+// decides. Approve mode needs a session, since a single run cannot ask.
+func (c config) choices() (choices, error) {
+	chosen := choices{switches: configuredSwitches().Then(c.switches()), approve: c.approve}
+	if c.approve && !c.interactive() {
+		return chosen, errors.New("--approve needs a session: a single run has nobody to ask")
+	}
+	// The flag decides, so a bad environment value does not matter then.
+	budgetCap := c.budget
+	if budgetCap == 0 {
+		var err error
+		if budgetCap, err = budget.ParseEnvCap(os.Getenv(brand.EnvKeyTaskTokenBudget)); err != nil {
+			return chosen, fmt.Errorf("%s: %w", brand.EnvKeyTaskTokenBudget, err)
+		}
+	}
+	chosen.limits = nib.Limits{
+		TokenBudget: budgetCap,
+		NoTrimming:  os.Getenv(brand.EnvKeyToolOutputCapDisabled) != "",
+	}
+	return chosen, nil
 }
 
 // switches returns the extensions this run's flags switch on and off.
@@ -90,6 +116,8 @@ func parseArgs() config {
 	flag.BoolVar(&c.plugins, "plugins", false, "Print the wired plug-in manifest (provider, store, tools, commands) and exit")
 	flag.StringVar(&c.with, "with", "", "Extensions to switch on for this run, comma-separated")
 	flag.StringVar(&c.without, "without", "", "Extensions to switch off for this run, comma-separated")
+	flag.BoolVar(&c.approve, "approve", false, "Start the session in approve mode: ask before each command and file change")
+	flag.IntVar(&c.budget, "budget", 0, "End the session's runs once this many tokens are used (default: "+brand.EnvKeyTaskTokenBudget+", else none)")
 	flag.BoolVar(&c.trustMCP, "trust-mcp", false, "Allow the MCP servers this project's .mcp.json names, and exit")
 	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/nib-debug.log")
 	flag.Parse()
@@ -139,19 +167,24 @@ func run() error {
 		}
 	}()
 
-	// Flags decide over the configuration file.
-	switches := configuredSwitches().Then(cfg.switches())
+	// Reading past sessions runs no agent, so run settings cannot stop it.
 	switch {
-	case cfg.plugins:
-		return printPlugins(ctx, root, mem.Store, switches)
 	case cfg.list:
 		return listSessions(ctx, mem.Store)
 	case cfg.show != "":
 		return showSession(ctx, mem.Store, cfg.show)
+	}
+	chosen, err := cfg.choices()
+	if err != nil {
+		return setupErr("%v", err)
+	}
+	switch {
+	case cfg.plugins:
+		return printPlugins(ctx, root, mem.Store, chosen)
 	case cfg.interactive():
-		return runInteractive(ctx, startCtx, started, root, mem.Store, switches, interrupt)
+		return runInteractive(ctx, startCtx, started, root, mem.Store, chosen, interrupt)
 	default:
-		return runAgent(ctx, root, mem.Store, cfg.message, switches)
+		return runAgent(ctx, root, mem.Store, cfg.message, chosen)
 	}
 }
 

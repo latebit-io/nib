@@ -13,9 +13,14 @@ nib --list              # print the session index
 nib --show <id>         # print a specific session's memory page
 nib --plugins           # print the manifest (provider, store, context files, extensions, tools, MCP servers) and exit
 nib --trust-mcp         # allow the MCP servers this project's .mcp.json names, and exit
+nib --approve           # start a session that asks before each command and file change
 ```
 
-In a session, a line goes to the agent and its answer streams back. Ctrl-C stops a run, or leaves when nothing is running. A line typed while the agent works is queued as a follow-up. `/help` lists the commands: `/clear`, `/quit`, and `/extension`.
+In a session, a line goes to the agent and its answer streams back, with one line per tool call. Ctrl-C stops a run, or leaves when nothing is running. A line typed while the agent works is queued as a follow-up. `/help` lists the commands: `/clear`, `/quit`, `/extension`, `/approve`, `/model` and `/usage`.
+
+nib acts without asking by default; the shell still refuses in-place edits and destructive commands. In approve mode (`--approve`, or `/approve on` in a session) it asks before every call that may change something: shell commands, file changes, memory writes, skills and MCP tools. Reads are not asked about. Answer `y`, `a` (always, for the rest of the session) or `n`. A risky shell command runs only when you approve that call.
+
+Long sessions are kept in bounds automatically. Tool output is sent whole once, then cut to its head; when the conversation is long, older output is reduced to a line (`NIB_TOOL_OUTPUT_CAP_DISABLED=1` turns both off). A response cut off at the output limit is retried with a higher limit. `--budget <tokens>` (or `NIB_TASK_TOKEN_BUDGET`) ends the session's runs once that many tokens are used.
 
 `AGENTS.md` (or `CLAUDE.md`) files from the repository root down to the working directory are added to the system prompt as reference data, nearest last.
 

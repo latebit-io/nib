@@ -10,17 +10,20 @@ import (
 	"time"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/nib"
+	"github.com/latebit-io/nib/kit/permission"
 	"github.com/latebit-io/nib/kit/repl"
 )
 
 // session is an interactive session's agent and the blocks behind it.
 // Switching an extension replaces the agent and keeps the blocks.
 type session struct {
+	resolved *llmconfig.Resolved // the model profile; /model changes its model
 	provider llm.Provider
 	switches extension.Switches
 	assembly *nib.Assembly
@@ -28,8 +31,8 @@ type session struct {
 }
 
 // newSession assembles the blocks for root and an agent on them.
-func newSession(ctx context.Context, root, prompt string, store memory.Store, provider llm.Provider, switches extension.Switches) (*session, error) {
-	assembly, err := assemble(ctx, root, prompt, store, switches)
+func newSession(ctx context.Context, root, prompt string, store memory.Store, resolved *llmconfig.Resolved, provider llm.Provider, chosen choices) (*session, error) {
+	assembly, err := assemble(ctx, root, prompt, store, chosen)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +41,16 @@ func newSession(ctx context.Context, root, prompt string, store memory.Store, pr
 		closeAssembly(assembly)
 		return nil, err
 	}
-	return &session{provider: provider, switches: switches, assembly: assembly, agent: agent}, nil
+	return &session{resolved: resolved, provider: provider, switches: chosen.switches, assembly: assembly, agent: agent}, nil
+}
+
+// attach makes r the frontend the permission gate asks, and starts in
+// the approve mode when the person chose it.
+func (s *session) attach(r *repl.REPL, approve bool) {
+	s.assembly.Permission.SetAsker(r.Ask)
+	if approve {
+		s.assembly.Permission.SetMode(permission.Approve)
+	}
 }
 
 // close stops the agent and the blocks it ran on.
@@ -50,13 +62,13 @@ func (s *session) close() {
 // runInteractive is the line-based session: the default when nib is
 // started without a message. Ctrl-C cancels startCtx until started is
 // called; from then on interrupt delivers it to the session.
-func runInteractive(ctx, startCtx context.Context, started func(), root string, store memory.Store, switches extension.Switches, interrupt <-chan os.Signal) error {
-	provider, err := newProvider(root)
+func runInteractive(ctx, startCtx context.Context, started func(), root string, store memory.Store, chosen choices, interrupt <-chan os.Signal) error {
+	resolved, provider, err := newProvider(root)
 	if err != nil {
 		return err
 	}
 	sessionID := newSessionID(time.Now(), "interactive")
-	s, err := newSession(startCtx, root, buildSystemPrompt(sessionID), store, provider, switches)
+	s, err := newSession(startCtx, root, buildSystemPrompt(sessionID), store, resolved, provider, chosen)
 	if err != nil {
 		return setupErr("%v", err)
 	}
@@ -74,6 +86,7 @@ func runInteractive(ctx, startCtx context.Context, started func(), root string, 
 	if err != nil {
 		return setupErr("%v", err)
 	}
+	s.attach(r, chosen.approve)
 	reg, err := (&extensionCommand{session: s, repl: r}).registry()
 	if err != nil {
 		return setupErr("command: %v", err)
@@ -94,12 +107,9 @@ type extensionCommand struct {
 
 // Definition implements [command.Command].
 func (c *extensionCommand) Definition() command.Definition {
-	return command.Definition{
-		Name:        "extension",
-		Aliases:     []string{"ext"},
-		Description: "List extensions, or switch one: /extension on|off <name>.",
-		Source:      command.Source{Kind: command.SourceBuiltin, Path: "cmd/nib"},
-	}
+	def := builtin("extension", "List extensions, or switch one: /extension on|off <name>.")
+	def.Aliases = []string{"ext"}
+	return def
 }
 
 // registry returns the commands that match the session's extensions
@@ -107,8 +117,13 @@ func (c *extensionCommand) Definition() command.Definition {
 // fresh each time, since a command cannot be taken out of a registry.
 func (c *extensionCommand) registry() (*command.Registry, error) {
 	reg := command.NewRegistry()
-	commands := append(repl.Commands(c.repl), c, command.NewHelp(reg))
-	commands = append(commands, c.session.assembly.Toolset.Commands...)
+	s := c.session
+	commands := append(repl.Commands(c.repl), c,
+		handler{builtin("approve", "Ask before commands and file changes: /approve on|off."), s.approve},
+		handler{builtin("model", "Show the model, or switch to another: /model <name>."), s.model},
+		handler{builtin("usage", "Show the tokens this session has used."), s.usage},
+		command.NewHelp(reg))
+	commands = append(commands, s.assembly.Toolset.Commands...)
 	for _, cmd := range commands {
 		if err := reg.Register(cmd); err != nil {
 			return nil, err
@@ -191,20 +206,92 @@ func (c *extensionCommand) list() string {
 	return strings.Join(lines, "\n")
 }
 
-// newProvider resolves the model provider for root, or says which
-// credentials are missing.
-func newProvider(root string) (llm.Provider, error) {
+// handler is a slash command that is one function on the session.
+type handler struct {
+	def command.Definition
+	run func(sess command.Session, args string) error
+}
+
+// Definition implements [command.Command].
+func (h handler) Definition() command.Definition { return h.def }
+
+// Handle implements [command.HandlerCommand].
+func (h handler) Handle(_ context.Context, sess command.Session, args string) error {
+	return h.run(sess, args)
+}
+
+// builtin describes one of nib's own commands.
+func builtin(name, description string) command.Definition {
+	return command.Definition{
+		Name: name, Description: description,
+		Source: command.Source{Kind: command.SourceBuiltin, Path: "cmd/nib"},
+	}
+}
+
+// approve is /approve: it shows the permission mode, or switches it
+// for the rest of the session.
+func (s *session) approve(sess command.Session, args string) error {
+	gate := s.assembly.Permission
+	switch strings.TrimSpace(args) {
+	case "on":
+		gate.SetMode(permission.Approve)
+	case "off":
+		gate.SetMode(permission.Autonomous)
+	case "":
+	default:
+		return errors.New("usage: /approve on|off")
+	}
+	if gate.Mode() == permission.Approve {
+		sess.Display("Approve mode: nib asks before each call that may change something.")
+		return nil
+	}
+	sess.Display("Autonomous mode: nib acts without asking. The shell still refuses risky commands.")
+	return nil
+}
+
+// model is /model: it shows the model in use, or switches to another
+// model of the same provider from the next request on.
+func (s *session) model(sess command.Session, args string) error {
+	name := strings.TrimSpace(args)
+	if name == "" {
+		sess.Display("Model: " + s.resolved.DisplayModel())
+		return nil
+	}
+	// A copy: a model the provider cannot build must leave the session as it is.
+	next := *s.resolved
+	next.Model = name
+	provider := next.NewProvider()
+	if provider == nil {
+		return fmt.Errorf("no provider could be built for model %q", name)
+	}
+	s.assembly.SetProvider(provider)
+	s.resolved, s.provider = &next, provider
+	sess.Display("Model is now " + next.DisplayModel() + ". The conversation continues.")
+	return nil
+}
+
+// usage is /usage: the tokens the session has used.
+func (s *session) usage(sess command.Session, _ string) error {
+	u := s.assembly.Usage()
+	sess.Display(fmt.Sprintf("%d requests: %d input, %d cached, %d cache-write, %d output tokens.",
+		u.Turns, u.TotalPromptTokens, u.TotalCachedTokens, u.TotalCacheWriteTokens, u.TotalCompletionTokens))
+	return nil
+}
+
+// newProvider resolves the model profile for root and builds its
+// provider, or says which credentials are missing.
+func newProvider(root string) (*llmconfig.Resolved, llm.Provider, error) {
 	resolved, err := nib.ResolveProvider(root)
 	if err != nil {
-		return nil, setupErr("oauth store: %v", err)
+		return nil, nil, setupErr("oauth store: %v", err)
 	}
 	if !resolved.HasProvider() {
-		return nil, setupErr("no LLM credentials — %s", credentialHint(resolved))
+		return nil, nil, setupErr("no LLM credentials — %s", credentialHint(resolved))
 	}
 	provider := resolved.NewProvider()
 	if provider == nil {
-		return nil, setupErr("provider construction failed for profile %q", resolved.Profile)
+		return nil, nil, setupErr("provider construction failed for profile %q", resolved.Profile)
 	}
 	slog.Debug("provider resolved", "profile", resolved.Profile, "model", resolved.Model)
-	return provider, nil
+	return resolved, provider, nil
 }

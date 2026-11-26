@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/latebit-io/nib/coding/event"
+	kitevent "github.com/latebit-io/nib/kit/event"
 )
 
 // Kit-event forwarder: [Agent.forwardKitEvents] re-publishes the kit
@@ -26,6 +27,11 @@ func (a *Agent) forwardKitEvents() {
 			// Drop. providerProxy emits the authoritative AgentTurnUsage
 			// directly to the frontend, with per-turn estimates baked in
 			// and synchronized with the originating Stream.
+			continue
+		case event.AgentToolCall, kitevent.AgentToolResult:
+			// Drop. The kit now reports tool calls itself; coding sends its
+			// own AgentToolCall from the hook, and forwarding both would
+			// show every call twice.
 			continue
 		case event.AgentDone:
 			a.mu.Lock()

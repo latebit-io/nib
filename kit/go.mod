@@ -6,7 +6,7 @@ go 1.27
 // an untagged version here breaks `go get .../nib/kit` for consumers.
 // release.yml tags ai, agent, kit together; bump both when kit needs more.
 require (
-	github.com/latebit-io/nib/agent v0.10.0
+	github.com/latebit-io/nib/agent v0.13.0
 	github.com/latebit-io/nib/ai v0.10.0
 	gopkg.in/yaml.v3 v3.0.1
 )

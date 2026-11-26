@@ -14,12 +14,17 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/budget"
+	"github.com/latebit-io/nib/kit/compact"
 	"github.com/latebit-io/nib/kit/contextfile"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
+	"github.com/latebit-io/nib/kit/meter"
+	"github.com/latebit-io/nib/kit/permission"
 	"github.com/latebit-io/nib/kit/skill"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
+	"github.com/latebit-io/nib/kit/truncation"
 )
 
 // Options selects what a session is assembled from. Only Dir is
@@ -41,6 +46,18 @@ type Options struct {
 	Extensions *extension.Registry
 	// Switches turns extensions on and off for this session.
 	Switches extension.Switches
+	// Limits tunes the run machinery. The zero value is the default.
+	Limits Limits
+}
+
+// Limits switches parts of the run machinery off and sets the budget.
+type Limits struct {
+	// NoTrimming sends tool output whole in every request: no cutting
+	// of results already seen, no reduction of older ones.
+	NoTrimming bool
+	// TokenBudget ends the session's runs once this many tokens are
+	// used. Zero or less means no budget.
+	TokenBudget int
 }
 
 // Assembly is the base agent without a model: what a session runs
@@ -57,18 +74,23 @@ type Assembly struct {
 	// Warnings are problems the session survives, such as a file that
 	// could not be loaded. The host decides how to show them.
 	Warnings []error
+	// Permission is the session's gate. A frontend switches its mode and
+	// sets who is asked ([permission.Gate.SetAsker]).
+	Permission *permission.Gate
 
 	env      extension.Env
 	registry *extension.Registry
 	running  map[string]extension.Extension // the extensions that are on, by name
 
 	// What a switch leaves alone.
-	base    kit.Toolset // the host's tools and the memory tools
-	prompt  string      // the host's prompt
-	skills  skill.Result
-	files   []contextfile.File
-	servers mcp.Config
-	session *mcp.Session
+	meter     *meter.Provider // between the agent and its model
+	machinery kit.Toolset     // the run machinery's hooks; they run first
+	base      kit.Toolset     // the host's tools and the memory tools
+	prompt    string          // the host's prompt
+	skills    skill.Result
+	files     []contextfile.File
+	servers   mcp.Config
+	session   *mcp.Session
 }
 
 // ExtensionState is one registered extension and whether it is on.
@@ -94,20 +116,27 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 		return nil, fmt.Errorf("nib: %w", err)
 	}
 	root := ProjectRoot(dir)
+	gate := permission.New()
 	a := &Assembly{
-		Root:     root,
-		env:      extension.Env{Dir: dir, Root: root},
-		registry: opts.Extensions,
-		running:  map[string]extension.Extension{},
-		base:     opts.Toolset,
-		prompt:   opts.SystemPrompt,
+		Root:       root,
+		Permission: gate,
+		env:        extension.Env{Dir: dir, Root: root, Permission: gate},
+		meter:      meter.New(opts.Limits.TokenBudget),
+		registry:   opts.Extensions,
+		running:    map[string]extension.Extension{},
+		base:       opts.Toolset,
+		prompt:     opts.SystemPrompt,
 	}
 	if opts.Store != nil {
+		gate.Register("memory_fetch", permission.Unasked)
+		gate.Register("memory_list", permission.Unasked)
 		a.base = kit.Merge(a.base, kit.Toolset{Tools: []kit.Tool{
 			memorytools.NewFetchTool(opts.Store), memorytools.NewPublishTool(opts.Store),
 			memorytools.NewAppendTool(opts.Store), memorytools.NewListTool(opts.Store),
 		}})
 	}
+
+	a.machinery = machinery(a, opts.Limits)
 
 	a.skills, err = skill.Discover(root)
 	a.warn(err)
@@ -129,6 +158,19 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 		return nil, errors.Join(fmt.Errorf("nib: %w", err), a.Close())
 	}
 	return a, nil
+}
+
+// machinery returns the hooks every run goes through: output
+// trimming, truncation recovery and the permission gate. The budget
+// needs no hook: the meter refuses the request itself.
+func machinery(a *Assembly, limits Limits) kit.Toolset {
+	sets := []kit.Toolset{{Hooks: truncation.Hooks(a.meter)}, {Hooks: a.Permission.Hooks()}}
+	if !limits.NoTrimming {
+		// A skill's instructions arrive as a tool result and must stay whole.
+		skillTool := func(tool string) bool { return strings.HasPrefix(tool, skill.ToolNamePrefix) }
+		sets = append(sets, kit.Toolset{Hooks: compact.Hooks(skillTool)})
+	}
+	return kit.Merge(sets...)
 }
 
 // Switch turns extensions on and off to match switches, then rebuilds
@@ -169,7 +211,7 @@ func (a *Assembly) Switch(ctx context.Context, switches extension.Switches) (cha
 
 // compose rebuilds what the host reads from the blocks as they are now.
 func (a *Assembly) compose() {
-	sets := []kit.Toolset{a.base}
+	sets := []kit.Toolset{a.machinery, a.base}
 	prompt := []string{a.prompt}
 	rows := describe(a.base, "")
 	for _, state := range a.Extensions() {
@@ -270,8 +312,16 @@ func (a *Assembly) warn(err error) {
 // Agent returns the session's agent on provider. The Assembly still
 // owns the blocks: close the agent first, then the Assembly.
 func (a *Assembly) Agent(provider llm.Provider) (*kit.Agent, error) {
-	return kit.New(kit.Config{Provider: provider, SystemPrompt: a.SystemPrompt, Toolset: a.Toolset})
+	a.meter.Set(provider)
+	return kit.New(kit.Config{Provider: a.meter, SystemPrompt: a.SystemPrompt, Toolset: a.Toolset})
 }
+
+// SetProvider switches the model for the session's agent, from its
+// next request on. The conversation and the token count carry over.
+func (a *Assembly) SetProvider(provider llm.Provider) { a.meter.Set(provider) }
+
+// Usage returns the tokens the session has used.
+func (a *Assembly) Usage() budget.Session { return a.meter.Usage() }
 
 // Close releases every block. A second call does nothing.
 func (a *Assembly) Close() error {

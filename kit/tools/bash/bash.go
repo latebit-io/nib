@@ -57,6 +57,8 @@ type Tool struct {
 	// regardless — it redirects to better tools, which approval cannot
 	// improve on.
 	approvalManaged bool
+	// approved, when set, says whether the person allowed one call.
+	approved func(call llm.ToolCall) bool
 }
 
 // Option configures a [Tool] at construction.
@@ -73,6 +75,23 @@ func ApprovalManaged() Option {
 	return func(t *Tool) { t.approvalManaged = true }
 }
 
+// ApprovedBy lets a file-write or destructive command run when approved
+// reports that the person allowed that very call. Without the option,
+// or when it says no, the guard refuses such commands as always.
+func ApprovedBy(approved func(call llm.ToolCall) bool) Option {
+	return func(t *Tool) { t.approved = approved }
+}
+
+// CommandOf returns the command in a call's raw arguments, as Execute
+// reads it, or "" when there is none. For code that judges a call first.
+func CommandOf(arguments string) string {
+	var args bashArgs
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return ""
+	}
+	return args.Command
+}
+
 // New creates a [Tool] rooted at the given project directory.
 func New(projectRoot string, opts ...Option) *Tool {
 	t := &Tool{projectRoot: projectRoot}
@@ -80,6 +99,12 @@ func New(projectRoot string, opts ...Option) *Tool {
 		o(t)
 	}
 	return t
+}
+
+// allowsRisky reports whether a file-write or destructive command may
+// run: every one under [ApprovalManaged], else only an approved call.
+func (t *Tool) allowsRisky(call llm.ToolCall) bool {
+	return t.approvalManaged || (t.approved != nil && t.approved(call))
 }
 
 // Definition returns the OpenAI-compatible tool schema for bash.
@@ -125,7 +150,7 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		return errorResult("Error: command is required")
 	}
 
-	if class, msg := Classify(args.Command); msg != "" && (class == GuardSearch || !t.approvalManaged) {
+	if class, msg := Classify(args.Command); msg != "" && (class == GuardSearch || !t.allowsRisky(call)) {
 		// Approval-managed mode passes file-write and destructive
 		// classes through — the wrapping gate already proposed them and
 		// the developer approved. The search class blocks regardless

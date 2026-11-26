@@ -4,13 +4,16 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/ai/llmtest"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
@@ -18,6 +21,17 @@ import (
 	"github.com/latebit-io/nib/kit/nib"
 	"github.com/latebit-io/nib/kit/repl"
 )
+
+// isolate keeps the person's own config, trust store and skills out
+// of a test.
+func isolate(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv(brand.EnvKeyGlobalSkillsDir, t.TempDir())
+	t.Setenv(brand.EnvKeyMCP, "")
+}
 
 // screen is the session's output, safe to read while it is written.
 type screen struct {
@@ -37,6 +51,65 @@ func (s *screen) String() string {
 	return s.buf.String()
 }
 
+// term is a session a test types into.
+type term struct {
+	t     *testing.T
+	keys  *io.PipeWriter
+	out   *screen
+	shown int // output up to here was matched by an earlier say
+	done  chan error
+}
+
+// open runs s the way runInteractive does, on a pipe.
+func open(t *testing.T, s *session, approve bool) *term {
+	t.Helper()
+	in, keys := io.Pipe()
+	tm := &term{t: t, keys: keys, out: &screen{}, done: make(chan error, 1)}
+	r, err := repl.New(repl.Options{Agent: s.agent, SystemPrompt: s.assembly.SystemPrompt, In: in, Out: tm.out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.attach(r, approve)
+	reg, err := (&extensionCommand{session: s, repl: r}).registry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetCommands(reg)
+	go func() { tm.done <- r.Run(context.Background()) }()
+	t.Cleanup(func() { _ = keys.Close() }) // ends the loop if the test did not
+	return tm
+}
+
+// say types a line and waits until the output after it shows want.
+func (tm *term) say(line, want string) {
+	tm.t.Helper()
+	if _, err := io.WriteString(tm.keys, line+"\n"); err != nil {
+		tm.t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(tm.out.String()[tm.shown:], want) {
+		if time.Now().After(deadline) {
+			tm.t.Fatalf("after %q the output never showed %q:\n%s", line, want, tm.out.String()[tm.shown:])
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	tm.shown = len(tm.out.String())
+}
+
+// quit ends the session and waits for the loop to return.
+func (tm *term) quit() {
+	tm.t.Helper()
+	tm.say("/quit", "")
+	select {
+	case err := <-tm.done:
+		if err != nil {
+			tm.t.Errorf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		tm.t.Fatal("the session did not end")
+	}
+}
+
 func toolNames(tools []llm.ToolDef) string {
 	names := make([]string, 0, len(tools))
 	for _, t := range tools {
@@ -48,65 +121,26 @@ func toolNames(tools []llm.ToolDef) string {
 // TestExtensionCommand_SwitchesTools: /extension off removes an
 // extension's tools from the next request and keeps the conversation.
 func TestExtensionCommand_SwitchesTools(t *testing.T) {
-	// Keep the person's own config, trust store and skills out of it.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
-	t.Setenv("NIB_GLOBAL_SKILLS_DIR", t.TempDir())
-	t.Setenv("NIB_MCP", "")
-
-	ctx := context.Background()
+	isolate(t)
 	provider := llmtest.NewScripted(llmtest.Text("one"), llmtest.Text("two"))
-	s, err := newSession(ctx, t.TempDir(), "base", nil, provider, extension.Switches{})
+	s, err := newSession(context.Background(), t.TempDir(), "base", nil, &llmconfig.Resolved{}, provider, choices{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.close()
+	defer func() { s.close() }() // the agent is replaced during the test
+	tm := open(t, s, false)
 
-	in, keys := io.Pipe()
-	out := &screen{}
-	r, err := repl.New(repl.Options{Agent: s.agent, SystemPrompt: s.assembly.SystemPrompt, In: in, Out: out})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reg, err := (&extensionCommand{session: s, repl: r}).registry()
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.SetCommands(reg)
-	done := make(chan error, 1)
-	go func() { done <- r.Run(ctx) }()
-
-	say := func(line, want string) {
-		t.Helper()
-		if _, err := io.WriteString(keys, line+"\n"); err != nil {
-			t.Fatal(err)
-		}
-		deadline := time.Now().Add(5 * time.Second)
-		for !strings.Contains(out.String(), want) {
-			if time.Now().After(deadline) {
-				t.Fatalf("after %q the output never showed %q:\n%s", line, want, out.String())
-			}
-			time.Sleep(2 * time.Millisecond)
-		}
-	}
-	say("hi", "one\n> ")
-	say("/extension", "on   workspace")
-	say("/extension on nope", "unknown extension")
-	say("/extension sideways", "usage:")
-	say("/extension off workspace", "workspace is now off")
-	say("/extension off workspace", "workspace is already off")
-	say("next", "two\n> ")
-	say("/ext", "off  workspace")
-	say("/quit", "")
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("Run: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the session did not end")
-	}
+	tm.say("hi", "one\n> ")
+	tm.say("/extension", "on   workspace")
+	tm.say("/extension on nope", "unknown extension")
+	tm.say("/extension sideways", "usage:")
+	tm.say("/extension off workspace", "workspace is now off")
+	tm.say("/extension off workspace", "workspace is already off")
+	tm.say("next", "two\n> ")
+	tm.say("/ext", "off  workspace")
+	tm.say("/model", "Model:")
+	tm.say("/usage", "2 requests")
+	tm.quit()
 
 	reqs := provider.Requests()
 	if len(reqs) != 2 {
@@ -175,8 +209,9 @@ type noted struct {
 }
 
 func (n noted) Definition() command.Definition {
-	return command.Definition{Name: n.name, Aliases: n.aliases, Description: "A test command.",
-		Source: command.Source{Kind: command.SourceBuiltin, Path: "test"}}
+	def := builtin(n.name, "A test command.")
+	def.Aliases = n.aliases
+	return def
 }
 
 func (n noted) Handle(_ context.Context, sess command.Session, _ string) error {
@@ -188,11 +223,7 @@ func (n noted) Handle(_ context.Context, sess command.Session, _ string) error {
 // come and go with it, and one whose commands clash with the session's
 // is not switched on at all.
 func TestExtensionCommand_CommandsFollowTheSwitch(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", home)
-	t.Setenv("NIB_GLOBAL_SKILLS_DIR", t.TempDir())
-
+	isolate(t)
 	ext := func(name string, cmd noted) extension.Spec {
 		return extension.Spec{Name: name, Description: name + " commands",
 			New: func(context.Context, extension.Env) (extension.Extension, error) {
@@ -206,8 +237,7 @@ func TestExtensionCommand_CommandsFollowTheSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	assembly, err := nib.Assemble(ctx, nib.Options{Dir: t.TempDir(), Extensions: registry})
+	assembly, err := nib.Assemble(context.Background(), nib.Options{Dir: t.TempDir(), Extensions: registry})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,59 +245,82 @@ func TestExtensionCommand_CommandsFollowTheSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &session{provider: llmtest.NewScripted(), assembly: assembly, agent: agent}
+	s := &session{resolved: &llmconfig.Resolved{}, provider: llmtest.NewScripted(), assembly: assembly, agent: agent}
 	defer func() { s.close() }() // the agent is replaced during the test
+	tm := open(t, s, false)
 
-	in, keys := io.Pipe()
-	out := &screen{}
-	r, err := repl.New(repl.Options{Agent: s.agent, In: in, Out: out})
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := &extensionCommand{session: s, repl: r}
-	reg, err := c.registry()
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.SetCommands(reg)
-	done := make(chan error, 1)
-	go func() { done <- r.Run(ctx) }()
-
-	shown := 0
-	say := func(line, want string) {
-		t.Helper()
-		if _, err := io.WriteString(keys, line+"\n"); err != nil {
-			t.Fatal(err)
-		}
-		deadline := time.Now().Add(5 * time.Second)
-		// Only output since the last line counts: the phrases repeat.
-		for !strings.Contains(out.String()[shown:], want) {
-			if time.Now().After(deadline) {
-				t.Fatalf("after %q the output never showed %q:\n%s", line, want, out.String()[shown:])
-			}
-			time.Sleep(2 * time.Millisecond)
-		}
-		shown = len(out.String())
-	}
-	say("/scan", "error:")
-	say("/extension on good", "good is now on")
-	say("/scan", "ran scan")
-	say("/extension on clash", "clash stays as it was")
-	say("/extension", "off  clash")
-	say("/leave", "error:")
-	say("/scan", "ran scan")
-	say("/extension off good", "good is now off")
-	say("/scan", "error:")
-	say("/quit", "")
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("Run: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the session did not end")
-	}
+	tm.say("/scan", "error:")
+	tm.say("/extension on good", "good is now on")
+	tm.say("/scan", "ran scan")
+	tm.say("/extension on clash", "clash stays as it was")
+	tm.say("/extension", "off  clash")
+	tm.say("/leave", "error:")
+	tm.say("/scan", "ran scan")
+	tm.say("/extension off good", "good is now off")
+	tm.say("/scan", "error:")
+	tm.quit()
 	if got := s.assembly.Extensions(); got[0].On || got[1].On {
 		t.Errorf("extensions at the end = %+v, want both off", got)
+	}
+}
+
+// TestSession_ApproveModeAsksBeforeAWrite: started in approve mode, a
+// file is written only after the person says yes, and /approve off
+// returns the session to acting on its own.
+func TestSession_ApproveModeAsksBeforeAWrite(t *testing.T) {
+	isolate(t)
+	root := t.TempDir()
+	write := func(id, name string) []llm.StreamEvent {
+		return llmtest.ToolCalls(llmtest.Call(id, "write_file", `{"path":"`+name+`","content":"hello\n"}`))
+	}
+	provider := llmtest.NewScripted(
+		write("c1", "no.txt"), llmtest.Text("refused"),
+		write("c2", "yes.txt"), llmtest.Text("written"),
+		write("c3", "free.txt"), llmtest.Text("on my own"),
+	)
+	s, err := newSession(context.Background(), root, "base", nil, &llmconfig.Resolved{}, provider, choices{approve: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	tm := open(t, s, true)
+
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(root, name))
+		return err == nil
+	}
+	tm.say("first", "? write_file wants to run: no.txt")
+	tm.say("n", "refused\n> ")
+	tm.say("second", "? write_file wants to run: yes.txt")
+	tm.say("y", "written\n> ")
+	tm.say("/approve off", "Autonomous mode")
+	tm.say("third", "on my own\n> ")
+	tm.quit()
+	if exists("no.txt") || !exists("yes.txt") || !exists("free.txt") {
+		t.Errorf("files: no.txt %v, yes.txt %v, free.txt %v; want only the last two", exists("no.txt"), exists("yes.txt"), exists("free.txt"))
+	}
+}
+
+func TestChoices(t *testing.T) {
+	isolate(t)
+	t.Setenv(brand.EnvKeyTaskTokenBudget, "5000")
+	t.Setenv(brand.EnvKeyToolOutputCapDisabled, "")
+
+	chosen, err := config{}.choices()
+	if err != nil || chosen.limits.TokenBudget != 5000 || chosen.limits.NoTrimming || chosen.approve {
+		t.Errorf("choices = %+v, %v; want the budget from the environment", chosen, err)
+	}
+	if chosen, _ := (config{budget: 900, approve: true}).choices(); chosen.limits.TokenBudget != 900 || !chosen.approve {
+		t.Errorf("choices = %+v, want the flag to decide over the environment", chosen)
+	}
+	if _, err := (config{approve: true, message: "do it"}).choices(); err == nil {
+		t.Error("--approve with -m must be refused: a single run cannot ask")
+	}
+	t.Setenv(brand.EnvKeyTaskTokenBudget, "2m")
+	if _, err := (config{}).choices(); err == nil {
+		t.Error("a budget that is not a number must be an error, not no budget")
+	}
+	if chosen, err := (config{budget: 1000}).choices(); err != nil || chosen.limits.TokenBudget != 1000 {
+		t.Errorf("choices = %+v, %v; with --budget a bad environment value must not matter", chosen, err)
 	}
 }

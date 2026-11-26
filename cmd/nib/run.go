@@ -8,7 +8,6 @@ import (
 
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
-	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/headless"
 	"github.com/latebit-io/nib/kit/memory"
 )
@@ -28,8 +27,8 @@ const indexWriteTimeout = 5 * time.Second
 //
 // The binary owns the index write — not the agent — so the index stays
 // consistent even when the agent runs out of budget mid-update.
-func runAgent(ctx context.Context, root string, store memory.Store, message string, switches extension.Switches) error {
-	provider, err := newProvider(root)
+func runAgent(ctx context.Context, root string, store memory.Store, message string, chosen choices) error {
+	_, provider, err := newProvider(root)
 	if err != nil {
 		return err
 	}
@@ -37,7 +36,7 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 	sessionID := newSessionID(time.Now(), message)
 	slog.Debug("session", "id", sessionID)
 
-	assembly, err := assemble(ctx, root, buildSystemPrompt(sessionID), store, switches)
+	assembly, err := assemble(ctx, root, buildSystemPrompt(sessionID), store, chosen)
 	if err != nil {
 		return setupErr("%v", err)
 	}

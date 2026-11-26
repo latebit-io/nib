@@ -55,10 +55,9 @@ func (s *Session) AddUsage(usage *llm.Usage) {
 	s.TotalCacheWriteTokens += usage.CacheWriteTokens
 }
 
-// totalTokens returns every input-side token category summed with the
-// output: prompt, cached and cache-write are documented disjoint in
-// [llm.Usage], so adding all three counts the input footprint once.
-func (s Session) totalTokens() int {
+// Total returns every token the session was charged for: the three
+// input categories, which [llm.Usage] documents as disjoint, and the output.
+func (s Session) Total() int {
 	return s.TotalPromptTokens + s.TotalCachedTokens + s.TotalCacheWriteTokens + s.TotalCompletionTokens
 }
 
@@ -159,7 +158,7 @@ func Exceeded(committed Session, limit int) (msg string, exceeded bool) {
 	if limit <= 0 {
 		return "", false
 	}
-	used := committed.totalTokens()
+	used := committed.Total()
 	if used < limit {
 		return "", false
 	}

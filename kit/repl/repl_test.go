@@ -2,6 +2,7 @@ package repl
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -9,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/ai/llmtest"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
+	"github.com/latebit-io/nib/kit/permission"
 )
 
 // screen is the session's output, safe to read while it is written.
@@ -345,4 +348,106 @@ func TestSetCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.ended()
+}
+
+type noArgs struct{}
+
+// TestRun_ShowsToolCalls: while a tool runs the session says which,
+// and says so when it failed.
+func TestRun_ShowsToolCalls(t *testing.T) {
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(llmtest.Call("c1", "boom", `{}`)),
+		llmtest.Text("gave up"),
+	)
+	boom := agent.NewTool("boom", "Always fails.", func(context.Context, noArgs) (string, error) {
+		return "", errors.New("no luck")
+	})
+	ag, err := kit.New(kit.Config{Provider: provider, Toolset: kit.Toolset{Tools: []kit.Tool{boom}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ag.Close)
+	h := start(t, ag, "", nil)
+	h.typeLine("try it")
+	h.see("gave up\n> ")
+	for _, want := range []string{"· boom {}", "! boom failed"} {
+		if !strings.Contains(h.out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, h.out.String())
+		}
+	}
+	if err := h.keys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.ended()
+}
+
+// TestRun_AnswersApprovalRequests: in the approve mode a tool call
+// waits for the person; "n" refuses it and the model is told, "y" lets
+// it run, and an unclear answer asks again.
+func TestRun_AnswersApprovalRequests(t *testing.T) {
+	ran := 0
+	touch := agent.NewTool("touch", "Changes something.", func(context.Context, noArgs) (string, error) {
+		ran++
+		return "touched", nil
+	})
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(llmtest.Call("c1", "touch", `{}`)),
+		llmtest.ToolCalls(llmtest.Call("c2", "touch", `{}`)),
+		llmtest.Text("all done"),
+	)
+	gate := permission.New()
+	gate.Register("touch", func(string) permission.Check { return permission.Check{Detail: "the thing", Reason: "risky"} })
+	gate.SetMode(permission.Approve)
+	ag, err := kit.New(kit.Config{Provider: provider, Toolset: kit.Toolset{Tools: []kit.Tool{touch}, Hooks: gate.Hooks()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ag.Close)
+	h := start(t, ag, "", func(r *REPL, _ *command.Registry) { gate.SetAsker(r.Ask) })
+
+	h.typeLine("do it")
+	h.see("? touch wants to run: the thing  (risky)")
+	h.see("allow? [y]es, [a]lways, [n]o: ")
+	h.typeLine("maybe")
+	h.typeLine("n")
+	h.see("! touch failed")
+	h.typeLine("y")
+	h.see("all done\n> ")
+	if ran != 1 {
+		t.Errorf("the tool ran %d times, want once: refused, then allowed", ran)
+	}
+	if got := strings.Count(h.out.String(), "? touch wants to run"); got != 3 {
+		t.Errorf("the question was shown %d times, want 3 (two calls, one repeat)", got)
+	}
+	if err := h.keys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.ended()
+}
+
+// TestRun_ApprovalWithNoInputLeftIsRefused: piped input ends before
+// the question comes; the call is refused and the run still finishes.
+func TestRun_ApprovalWithNoInputLeftIsRefused(t *testing.T) {
+	ran := 0
+	touch := agent.NewTool("touch", "Changes something.", func(context.Context, noArgs) (string, error) {
+		ran++
+		return "touched", nil
+	})
+	provider := llmtest.NewScripted(llmtest.ToolCalls(llmtest.Call("c1", "touch", `{}`)), llmtest.Text("could not"))
+	gate := permission.New()
+	gate.SetMode(permission.Approve)
+	ag, err := kit.New(kit.Config{Provider: provider, Toolset: kit.Toolset{Tools: []kit.Tool{touch}, Hooks: gate.Hooks()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ag.Close)
+	h := start(t, ag, "", func(r *REPL, _ *command.Registry) { gate.SetAsker(r.Ask) })
+	h.typeLine("do it")
+	if err := h.keys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.ended()
+	if ran != 0 || !strings.Contains(h.out.String(), "could not") {
+		t.Errorf("tool ran %d times; output:\n%s\nwant the call refused and the run finished", ran, h.out.String())
+	}
 }

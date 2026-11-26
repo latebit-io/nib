@@ -16,6 +16,7 @@ import (
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/event"
+	"github.com/latebit-io/nib/kit/permission"
 )
 
 // maxArgPreview is how much of a tool call's arguments one line shows.
@@ -62,12 +63,15 @@ type REPL struct {
 	out       io.Writer
 	commands  *command.Registry
 	interrupt <-chan os.Signal
+	questions chan question // approval requests on their way into the loop
 
 	agent   *kit.Agent
 	system  string // the agent's system prompt, resent with each run
 	sub     *kit.Subscription
 	history []llm.Message // the conversation so far, without the system message
 	pending string        // a line typed during a run that the agent did not take
+	asking  *question     // the approval request the person is looking at
+	ended   bool          // the input is at its end: nobody can answer
 	phase   phase
 	midLine bool // output so far does not end with a newline
 	quit    bool
@@ -80,7 +84,8 @@ func New(opts Options) (*REPL, error) {
 	}
 	r := &REPL{
 		in: opts.In, out: opts.Out, commands: opts.Commands, interrupt: opts.Interrupt,
-		system: opts.SystemPrompt,
+		questions: make(chan question),
+		system:    opts.SystemPrompt,
 	}
 	if err := r.attach(opts.Agent); err != nil {
 		return nil, err
@@ -124,9 +129,18 @@ func (r *REPL) Run(ctx context.Context) error {
 		case line, ok := <-lines:
 			if !ok {
 				lines = nil
+				r.ended = true
+				r.refuse()
 				continue
 			}
 			r.line(ctx, line)
+		case q := <-r.questions:
+			r.asking = &q
+			if r.ended {
+				r.refuse()
+				continue
+			}
+			r.ask()
 		case ev := <-r.sub.Events():
 			r.event(ctx, ev)
 		}
@@ -154,6 +168,11 @@ func (r *REPL) line(ctx context.Context, line string) {
 	// During a run the output stream is the agent's; otherwise ask again.
 	defer r.promptUnlessRunning()
 	line = strings.TrimSpace(line)
+	// While the agent waits for a decision, a line is the decision.
+	if r.asking != nil {
+		r.answer(line)
+		return
+	}
 	if line == "" {
 		return
 	}
@@ -252,6 +271,10 @@ func (r *REPL) event(ctx context.Context, ev event.Event) {
 			args = strings.ToValidUTF8(args[:maxArgPreview], "") + "…"
 		}
 		r.println("· " + e.Name + " " + args)
+	case event.AgentToolResult:
+		if e.IsError {
+			r.println("  ! " + e.Name + " failed")
+		}
 	case event.AgentError:
 		r.println("error: " + e.Err)
 	case event.AgentWaiting:
@@ -269,11 +292,77 @@ func (r *REPL) event(ctx context.Context, ev event.Event) {
 	}
 }
 
+// question is one approval request and where its answer goes.
+type question struct {
+	req    permission.Request
+	answer chan permission.Decision
+}
+
+// Ask puts an approval request to the person and waits for the answer.
+// It is the session's [permission.Asker]; unlike every other method it
+// is called from the agent's goroutine, and hands over to the loop.
+func (r *REPL) Ask(ctx context.Context, req permission.Request) (permission.Decision, error) {
+	q := question{req: req, answer: make(chan permission.Decision, 1)}
+	select {
+	case r.questions <- q:
+	case <-ctx.Done():
+		return permission.Deny, ctx.Err()
+	}
+	select {
+	case d := <-q.answer:
+		return d, nil
+	case <-ctx.Done():
+		return permission.Deny, ctx.Err()
+	}
+}
+
+// ask shows the request that waits for a decision.
+func (r *REPL) ask() {
+	line := "? " + r.asking.req.Tool + " wants to run: " + r.asking.req.Detail
+	if r.asking.req.Reason != "" {
+		line += "  (" + r.asking.req.Reason + ")"
+	}
+	r.println(line)
+	r.print("  allow? [y]es, [a]lways, [n]o: ")
+}
+
+// answer takes the person's decision. Anything but a clear answer
+// asks again.
+func (r *REPL) answer(line string) {
+	var decision permission.Decision
+	switch strings.ToLower(line) {
+	case "y", "yes":
+		decision = permission.Allow
+	case "a", "always":
+		decision = permission.AllowAlways
+	case "n", "no":
+		decision = permission.Deny
+	default:
+		r.ask()
+		return
+	}
+	r.midLine = false // the person's Enter ended the question's line
+	r.asking.answer <- decision
+	r.asking = nil
+}
+
+// refuse answers a waiting request with no: the input has ended and
+// nobody is left to decide.
+func (r *REPL) refuse() {
+	if r.asking == nil {
+		return
+	}
+	r.println("(no input left to answer with; refused)")
+	r.asking.answer <- permission.Deny
+	r.asking = nil
+}
+
 // finish records the end of a run and keeps its transcript, so the
 // next line continues the conversation.
 func (r *REPL) finish(done event.AgentDone) {
 	r.settle()
 	r.phase = idle
+	r.asking = nil // the run is over, and with it the wait for an answer
 	if msgs := r.agent.State().Messages; len(msgs) > 0 {
 		if msgs[0].Role == "system" {
 			msgs = msgs[1:]

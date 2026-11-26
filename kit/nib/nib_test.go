@@ -9,10 +9,13 @@ import (
 	"testing"
 
 	"github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmtest"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/mcp"
+	"github.com/latebit-io/nib/kit/meter"
 )
 
 type noArgs struct{}
@@ -239,5 +242,33 @@ func TestProjectRoot(t *testing.T) {
 	write(t, filepath.Join(root, ".git"), "gitdir: elsewhere")
 	if got := ProjectRoot(leaf); got != root {
 		t.Errorf("ProjectRoot = %q, want %q", got, root)
+	}
+}
+
+// TestAgent_BudgetEndsTheRun: once the session has used its token
+// budget, the next request is refused and the run ends with that error.
+func TestAgent_BudgetEndsTheRun(t *testing.T) {
+	_, sub := project(t)
+	a, err := Assemble(context.Background(), Options{Dir: sub, Limits: Limits{TokenBudget: 50}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }() // nothing was started that can fail to stop
+	spend := &llm.Usage{PromptTokens: 40, CompletionTokens: 20}
+	provider := llmtest.NewScripted(llmtest.TextUsage(spend, "first"), llmtest.Text("never sent"))
+	ag, err := a.Agent(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ag.Close()
+	user := func(text string) []llm.Message { return []llm.Message{{Role: "user", Content: text}} }
+	if _, err := ag.Run(context.Background(), user("one")); err != nil {
+		t.Fatalf("first run under the budget: %v", err)
+	}
+	if _, err := ag.Run(context.Background(), user("two")); !errors.Is(err, meter.ErrBudgetExceeded) {
+		t.Errorf("run past the budget: err = %v, want ErrBudgetExceeded", err)
+	}
+	if provider.Calls() != 1 || a.Usage().TotalPromptTokens != 40 {
+		t.Errorf("provider called %d times, usage %+v; want one call and its usage counted", provider.Calls(), a.Usage())
 	}
 }

@@ -146,6 +146,9 @@ type TruncationInput struct {
 	// tool-role reply for every entry before the next assistant turn;
 	// hooks that retry must include those replies in [TruncationResult].
 	ToolCalls []llm.ToolCall
+	// Consecutive counts the truncated responses in a row in this run,
+	// this one included: 1 for the first after a complete response.
+	Consecutive int
 }
 
 // TruncationResult is the optional decision returned from

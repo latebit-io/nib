@@ -510,7 +510,7 @@ func TestFoundationObservability_NotInConsumerStream(t *testing.T) {
 		switch ev.(type) {
 		case event.AgentToken, event.AgentTurnUsage, event.AgentInputEstimate,
 			event.AgentCompacted, event.AgentError, event.AgentDone,
-			event.AgentToolCall, event.AgentWaiting, event.AgentStatus,
+			event.AgentToolCall, event.AgentToolResult, event.AgentWaiting, event.AgentStatus,
 			event.AgentMaxTurns:
 			// allowed — every kit/event type a Phase 2 facade can produce
 			// or that an application hook may have emitted directly.

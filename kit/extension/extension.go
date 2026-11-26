@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/permission"
 	"github.com/latebit-io/nib/kit/toolperm"
 )
 
@@ -30,6 +31,10 @@ type Env struct {
 	Dir string
 	// Root is the project root Dir belongs to.
 	Root string
+	// Permission is the session's gate. An extension registers a policy
+	// for each of its tools, saying what to show the person or that the
+	// tool only reads. Nil means the session has no gate.
+	Permission *permission.Gate
 }
 
 // Factory builds an extension for one session.

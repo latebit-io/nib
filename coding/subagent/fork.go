@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	upagent "github.com/latebit-io/nib/agent"
@@ -34,9 +35,8 @@ func AdaptForkSkill(s skill.Skill, spawner *Spawner) upagent.Tool {
 				},
 			},
 		},
-		agentDef: forkDefinition(s),
-		skill:    s,
-		spawner:  spawner,
+		skill:   s,
+		spawner: spawner,
 	}
 }
 
@@ -44,10 +44,16 @@ func AdaptForkSkill(s skill.Skill, spawner *Spawner) upagent.Tool {
 // body is the TASK (not the persona), so SystemPrompt is left empty; the
 // skill's grants flow through as the child's tool filter.
 func forkDefinition(s skill.Skill) agentdef.Definition {
+	allowed := s.AllowedTools
+	// An allow list would otherwise filter out the reader for the
+	// skill's own bundled files.
+	if len(allowed) > 0 {
+		allowed = append(slices.Clone(allowed), skill.ResourceToolName)
+	}
 	return agentdef.Definition{
 		Name:            s.Name,
 		Description:     s.Description,
-		AllowedTools:    s.AllowedTools,
+		AllowedTools:    allowed,
 		DisallowedTools: s.DisallowedTools,
 		Source:          agentdef.Source(string(s.Source)),
 		PluginID:        s.PluginID,
@@ -57,10 +63,9 @@ func forkDefinition(s skill.Skill) agentdef.Definition {
 // forkSkillTool is the agent tool for a forking skill. Unlike the prompt
 // skill tool, Execute spawns a child agent instead of returning text.
 type forkSkillTool struct {
-	def      llm.ToolDef
-	agentDef agentdef.Definition
-	skill    skill.Skill
-	spawner  *Spawner
+	def     llm.ToolDef
+	skill   skill.Skill
+	spawner *Spawner
 }
 
 // Definition returns the advertised schema (no arguments — the skill body
@@ -70,7 +75,13 @@ func (t forkSkillTool) Definition() llm.ToolDef { return t.def }
 // Execute runs the skill body, with its bundled-file note, as a child
 // agent and returns its summary.
 func (t forkSkillTool) Execute(ctx context.Context, _ llm.ToolCall) upagent.ToolResult {
-	res, err := t.spawner.Spawn(ctx, t.agentDef, t.skill.Body+t.skill.ResourceNote())
+	task := t.skill.Body
+	var extra []upagent.Tool
+	if note := t.skill.ResourceNote(skill.ResourceToolName); note != "" {
+		task += note
+		extra = append(extra, skill.ResourceTool(t.skill))
+	}
+	res, err := t.spawner.Spawn(ctx, forkDefinition(t.skill), task, extra...)
 	if err != nil {
 		return upagent.ToolResult{Content: "fork skill error: " + err.Error(), IsError: true}
 	}

@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	upagent "github.com/latebit-io/nib/agent"
@@ -148,7 +149,9 @@ func (s *Spawner) progressSink(name string) func(event.Event) {
 }
 
 // Spawn runs def against task to completion and returns the result.
-func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task string) (headless.Result, error) {
+// extra tools join the base tools for this spawn only and pass the
+// same grant filter.
+func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task string, extra ...agent.Tool) (headless.Result, error) {
 	// Translate the definition's CC-named tool grants into a nib-keyed
 	// matcher so agent.New can gate the child's BUILT-IN tools (drop the
 	// ungranted, per-command gate bash). Malformed grants refuse the spawn
@@ -178,7 +181,7 @@ func (s *Spawner) Spawn(ctx context.Context, def agentdef.Definition, task strin
 		return headless.Result{}, fmt.Errorf("subagent %q: no LLM provider available", def.Name)
 	}
 
-	tools := grantFilter(s.baseTools, def.Permissions())
+	tools := grantFilter(append(slices.Clone(s.baseTools), extra...), def.Permissions())
 	opts := &agent.NewOptions{
 		Interaction:         agent.Headless,
 		Terse:               true,

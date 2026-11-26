@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	upagent "github.com/latebit-io/nib/agent"
 	"github.com/latebit-io/nib/ai/brand"
@@ -33,19 +34,29 @@ type skillTool struct {
 }
 
 // Definition returns the advertised schema: the skill's description and
-// an empty-object parameter set (invoking a skill takes no arguments —
-// it pulls the instructions, then the model continues).
+// one optional argument, for reading a bundled file instead of the body.
 func (t skillTool) Definition() llm.ToolDef { return t.def }
 
-// Execute returns the skill body, then its [Skill.ResourceNote]. Each
-// dynamic-context directive in the body runs only if the skill's grants
-// permit it, through the runner the hosting agent bound.
-func (t skillTool) Execute(ctx context.Context, _ llm.ToolCall) upagent.ToolResult {
+// Execute returns the skill body, then its [Skill.ResourceNote]; with a
+// file argument it returns that bundled file instead. A dynamic-context
+// directive in the body runs only if the skill's grants permit it.
+func (t skillTool) Execute(ctx context.Context, call llm.ToolCall) upagent.ToolResult {
+	args, err := llm.DecodeArguments[resourceArgs](t.def.Function.Parameters, call.Function.Arguments)
+	if err != nil {
+		return upagent.ToolResult{Content: err.Error(), IsError: true}
+	}
+	if args.File != "" {
+		content, err := t.skill.ReadResource(args.File)
+		if err != nil {
+			return upagent.ToolResult{Content: "cannot read bundled file: " + err.Error(), IsError: true}
+		}
+		return upagent.ToolResult{Content: content}
+	}
 	body := t.skill.Body
 	if dyncontext.HasDirectives(body) {
 		body = dyncontext.Expand(ctx, body, t.perm, t.runner)
 	}
-	return upagent.ToolResult{Content: body + t.skill.ResourceNote()}
+	return upagent.ToolResult{Content: body + t.skill.ResourceNote(t.def.Function.Name)}
 }
 
 // BindShell implements [kit.ShellBinder]: it returns a copy of the tool
@@ -72,8 +83,11 @@ func adaptTool(s Skill) skillTool {
 				Name:        ToolNamePrefix + s.Name,
 				Description: s.Description,
 				Parameters: llm.FunctionParams{
-					Type:       "object",
-					Properties: map[string]llm.FunctionParam{},
+					Type: "object",
+					Properties: map[string]llm.FunctionParam{"file": {
+						Type:        "string",
+						Description: "Bundled file to read instead of the instructions, as listed after them. Omit to load the skill.",
+					}},
 				},
 			},
 		},
@@ -145,6 +159,9 @@ type Result struct {
 	// skill (a project skill shadows a global one). Surfaced so the
 	// override is visible, not silent.
 	Shadowed []Skill
+	// Refused are the project skills whose link resolves outside the
+	// project. A cloned repository may not pull in a directory beyond it.
+	Refused []Skill
 	// Forking are skills with `context: fork`: they run as a child agent
 	// rather than injecting prompt text, so they are NOT adapted to a
 	// prompt tool here. The coding layer turns each into a spawn tool.
@@ -197,7 +214,7 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 
 	// Within a scope nib's own directory comes first, so it wins a name
 	// clash with the cross-client .agents/skills directory.
-	globalDirs := make([]string, 0, 2)
+	var globalDirs []string
 	if dir, ok := GlobalDir(); ok {
 		globalDirs = append(globalDirs, dir)
 	}
@@ -216,6 +233,20 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 		return layer
 	}
 	project := load(SourceProject, ProjectDir(projectRoot), SharedProjectDir(projectRoot))
+	// A cloned repository is untrusted: a project skill link may not name
+	// a directory outside it. User-scope links may point anywhere.
+	var res Result
+	root, rootErr := realDir(projectRoot)
+	project = slices.DeleteFunc(project, func(s Skill) bool {
+		rel, err := filepath.Rel(root, s.Dir)
+		if rootErr == nil && err == nil && filepath.IsLocal(rel) {
+			return false
+		}
+		res.Refused = append(res.Refused, s)
+		slog.Warn("skill: refused project skill linked outside the project",
+			"skill", s.Name, "path", s.Path, "target", s.Dir)
+		return true
+	})
 	global := load(SourceGlobal, globalDirs...)
 
 	var plugin []Skill
@@ -241,7 +272,6 @@ func DiscoverWithPlugins(projectRoot string, pluginSkills []PluginSkillSource, t
 	// that order so earlier layers' names win.
 	winners, shadowed := Merge(project, global, plugin)
 
-	var res Result
 	res.Shadowed = shadowed
 	for _, s := range shadowed {
 		slog.Info("skill: shadowed by higher-precedence skill",

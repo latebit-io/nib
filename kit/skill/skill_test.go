@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -390,10 +391,7 @@ func TestDiscover_SharedDirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	got := map[string]Skill{}
-	for _, s := range res.Loaded {
-		got[s.Name] = s
-	}
+	got := loadedByName(res)
 	if got["shared-proj"].Source != SourceProject || got["shared-glob"].Source != SourceGlobal {
 		t.Errorf("shared skills not loaded at their scope: %v", got)
 	}
@@ -421,31 +419,78 @@ func TestSharedProjectShadowsGlobal(t *testing.T) {
 	}
 }
 
+// writeFile writes content at path, creating its parent directories.
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// link creates a symlink at path naming target, or skips the test where
+// symlinks are unavailable.
+func link(t *testing.T, target, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+}
+
+func loadedByName(res Result) map[string]Skill {
+	got := map[string]Skill{}
+	for _, s := range res.Loaded {
+		got[s.Name] = s
+	}
+	return got
+}
+
+// loadOne writes a minimal skill under root and returns it as loaded.
+func loadOne(t *testing.T, root, name string) Skill {
+	t.Helper()
+	writeSkill(t, root, name, "---\ndescription: d.\n---\nbody")
+	skills, err := Load(root, SourceProject)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, s := range skills {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("skill %q not loaded from %s", name, root)
+	return Skill{}
+}
+
+// bundle is loadOne plus one bundled reference file.
+func bundle(t *testing.T, root, name string) Skill {
+	t.Helper()
+	writeFile(t, filepath.Join(root, name, "references", "forms.md"), "form notes")
+	return loadOne(t, root, name)
+}
+
+func fileCall(file string) llm.ToolCall {
+	return llm.ToolCall{Function: llm.FunctionCall{Arguments: `{"file":"` + file + `"}`}}
+}
+
 func TestResourceNote(t *testing.T) {
 	root := t.TempDir()
-	writeSkill(t, root, "pdf", "---\ndescription: d.\n---\nbody")
-	skills, err := Load(root, SourceProject)
-	if err != nil || len(skills) != 1 {
-		t.Fatalf("Load: %v %v", skills, err)
-	}
-	s := skills[0]
-	if note := s.ResourceNote(); note != "" {
+	s := loadOne(t, root, "pdf")
+	if note := s.ResourceNote("skill_pdf"); note != "" {
 		t.Errorf("a skill that bundles nothing gets no note, got %q", note)
 	}
-
-	dir := filepath.Join(root, "pdf")
 	for _, f := range []string{"scripts/extract.py", "references/forms.md", ".git/config"} {
-		path := filepath.Join(dir, filepath.FromSlash(f))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeFile(t, filepath.Join(root, "pdf", filepath.FromSlash(f)), "x")
 	}
-	note := s.ResourceNote()
+	note := s.ResourceNote("skill_pdf")
 	for _, want := range []string{
-		"Skill directory: " + dir + "\n",
+		"Skill directory: " + s.Dir + "\n",
+		`call skill_pdf with the "file" argument`,
 		"<file>references/forms.md</file>",
 		"<file>scripts/extract.py</file>",
 	} {
@@ -467,21 +512,172 @@ func TestResourceNote(t *testing.T) {
 
 func TestResourceNote_CapsListing(t *testing.T) {
 	root := t.TempDir()
-	writeSkill(t, root, "big", "---\ndescription: d.\n---\nbody")
+	s := loadOne(t, root, "big")
 	for i := range maxListedResources + 1 {
-		path := filepath.Join(root, "big", "assets", fmt.Sprintf("f%03d.txt", i))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeFile(t, filepath.Join(root, "big", "assets", fmt.Sprintf("f%03d.txt", i)), "")
 	}
-	note := Skill{Name: "big", Path: filepath.Join(root, "big", skillFile)}.ResourceNote()
+	note := s.ResourceNote("skill_big")
 	if got := strings.Count(note, "<file>"); got != maxListedResources {
 		t.Errorf("listed %d files, want the cap %d", got, maxListedResources)
 	}
 	if !strings.Contains(note, "listing incomplete") {
 		t.Errorf("a capped listing must say so:\n%s", note)
+	}
+}
+
+// TestBundled_BoundsWalk: a tree of many entries and few files stops at
+// the walk budget and reports the listing as cut short.
+func TestBundled_BoundsWalk(t *testing.T) {
+	dir := t.TempDir()
+	for i := range maxWalkedEntries + 1 {
+		if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("d%04d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, more, err := bundled(dir)
+	if err != nil || len(files) != 0 || !more {
+		t.Errorf("bundled = %v, more=%v, err=%v; want no files, more, no error", files, more, err)
+	}
+}
+
+// TestResourceNote_UnreadableSubtree: a listing that failed part-way
+// still names the directory and says it is incomplete, even with no
+// file collected.
+func TestResourceNote_UnreadableSubtree(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any directory")
+	}
+	root := t.TempDir()
+	s := loadOne(t, root, "locked")
+	sub := filepath.Join(root, "locked", "assets")
+	if err := os.Mkdir(sub, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(sub, 0o755); err != nil {
+			t.Errorf("restore %s: %v", sub, err)
+		}
+	})
+	if _, err := os.ReadDir(sub); err == nil {
+		t.Skip("permission bits are not enforced here")
+	}
+	note := s.ResourceNote("skill_locked")
+	if !strings.Contains(note, "Skill directory: ") || !strings.Contains(note, "listing incomplete") {
+		t.Errorf("a failed listing must keep the directory and the marker, got %q", note)
+	}
+}
+
+func TestReadResource_ConfinedToSkillDir(t *testing.T) {
+	root := t.TempDir()
+	s := bundle(t, root, "pdf")
+	writeFile(t, filepath.Join(root, "secret.txt"), "secret")
+	link(t, filepath.Join(root, "secret.txt"), filepath.Join(root, "pdf", "leak.txt"))
+
+	got, err := s.ReadResource("references/forms.md")
+	if err != nil || got != "form notes" {
+		t.Fatalf("ReadResource = %q, %v", got, err)
+	}
+	for name, why := range map[string]string{
+		"../secret.txt": "a path leaving the skill directory",
+		"references":    "a directory",
+		"leak.txt":      "a symlink leaving the skill directory",
+	} {
+		if _, err := s.ReadResource(name); err == nil {
+			t.Errorf("%s must be refused (%s)", why, name)
+		}
+	}
+}
+
+func TestReadResource_Cap(t *testing.T) {
+	root := t.TempDir()
+	s := bundle(t, root, "big")
+	writeFile(t, filepath.Join(root, "big", "assets.bin"), strings.Repeat("x", maxResourceBytes+1))
+	if _, err := s.ReadResource("assets.bin"); err == nil || !strings.Contains(err.Error(), "read cap") {
+		t.Errorf("an oversize file must be refused with the cap named, got %v", err)
+	}
+}
+
+// TestFileReaders: the skill's own tool and the standalone reader both
+// return a bundled file and report an escaping path as a tool error.
+func TestFileReaders(t *testing.T) {
+	s := bundle(t, t.TempDir(), "pdf")
+	own, reader := adaptTool(s), ResourceTool(s)
+	if p := own.Definition().Function.Parameters; len(p.Properties) != 1 || len(p.Required) != 0 {
+		t.Errorf("the skill tool takes one optional argument, got %+v", p)
+	}
+	def := reader.Definition().Function
+	if def.Name != ResourceToolName || !slices.Equal(def.Parameters.Required, []string{"file"}) {
+		t.Errorf("reader definition = %+v", def)
+	}
+	if strings.HasPrefix(def.Name, ToolNamePrefix) {
+		t.Errorf("the reader must not look like a skill: %q", def.Name)
+	}
+	for name, tool := range map[string]kit.Tool{"own": own, "reader": reader} {
+		if res := tool.Execute(context.Background(), fileCall("references/forms.md")); res.IsError || res.Content != "form notes" {
+			t.Errorf("%s: file read = %+v", name, res)
+		}
+		if res := tool.Execute(context.Background(), fileCall("../x")); !res.IsError {
+			t.Errorf("%s: an escaping path must be a tool error, got %+v", name, res)
+		}
+	}
+	if res := reader.Execute(context.Background(), llm.ToolCall{}); !res.IsError {
+		t.Errorf("the reader needs a file, got %+v", res)
+	}
+}
+
+// TestDiscover_LinkedSkills: a symlinked skill directory loads under the
+// link's name at project and user scope, and lists its target's files.
+func TestDiscover_LinkedSkills(t *testing.T) {
+	projectRoot, globalDir := newProject(t)
+	inRepo := filepath.Join(projectRoot, "vendor-skills")
+	bundle(t, inRepo, "real-proj")
+	outside := t.TempDir()
+	bundle(t, outside, "real-glob")
+	link(t, filepath.Join(inRepo, "real-proj"), filepath.Join(SharedProjectDir(projectRoot), "linked-proj"))
+	link(t, filepath.Join(outside, "real-glob"), filepath.Join(globalDir, "linked-glob"))
+
+	res, err := Discover(projectRoot)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := loadedByName(res)
+	if got["linked-proj"].Source != SourceProject || got["linked-glob"].Source != SourceGlobal {
+		t.Fatalf("linked skills must load under the link's name: %v", loadedNames(res))
+	}
+	if note := got["linked-glob"].ResourceNote("t"); !strings.Contains(note, "<file>references/forms.md</file>") {
+		t.Errorf("a linked skill must list its target's files:\n%s", note)
+	}
+}
+
+// TestDiscover_ProjectLinkOutsideRefused: a project skill link that
+// names a directory outside the project is refused and surfaced.
+func TestDiscover_ProjectLinkOutsideRefused(t *testing.T) {
+	projectRoot, _ := newProject(t)
+	outside := t.TempDir()
+	bundle(t, outside, "elsewhere")
+	link(t, filepath.Join(outside, "elsewhere"), filepath.Join(SharedProjectDir(projectRoot), "sneaky"))
+
+	res, err := Discover(projectRoot)
+	if err != nil {
+		t.Fatalf("a refusal is not a load error: %v", err)
+	}
+	if len(res.Loaded) != 0 || len(res.Refused) != 1 || res.Refused[0].Name != "sneaky" {
+		t.Fatalf("Loaded=%v Refused=%v, want only sneaky refused", loadedNames(res), res.Refused)
+	}
+	if out := kit.RenderPlugins(Plugins(res)); !strings.Contains(out, "links outside the project") {
+		t.Errorf("the refusal must show in the plugin manifest:\n%s", out)
+	}
+}
+
+func TestLoad_DanglingLinkReported(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "ok", "---\ndescription: d.\n---\nbody")
+	link(t, filepath.Join(root, "missing"), filepath.Join(root, "dangling"))
+	skills, err := Load(root, SourceGlobal)
+	if err == nil || !strings.Contains(err.Error(), "dangling") {
+		t.Errorf("a dangling link must be reported, got %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "ok" {
+		t.Errorf("the other skill must still load, got %v", skills)
 	}
 }

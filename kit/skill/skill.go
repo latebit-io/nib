@@ -62,7 +62,8 @@ type Skill struct {
 	// grants explicitly denied even if otherwise allowed. Deny wins; see
 	// [Skill.Permissions].
 	DisallowedTools []string
-	// Path is the source SKILL.md path, kept for diagnostics.
+	// Path is the source SKILL.md path. Its directory is the base for
+	// the skill's relative paths; see [Skill.ResourceNote].
 	Path string
 	// Source is the layer this skill was loaded from. Stamped by [Load].
 	Source Source

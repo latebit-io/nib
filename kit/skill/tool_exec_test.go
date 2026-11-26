@@ -37,7 +37,7 @@ func TestSkillTool_Execute_GatesDynamicContext(t *testing.T) {
 	r := &recordingRunner{out: "on branch main"}
 	granted := skillTool{
 		def:    llm.ToolDef{},
-		body:   "Status: !`git status`",
+		skill:  Skill{Body: "Status: !`git status`"},
 		perm:   mustMatcher(t, "Bash(git *)"),
 		runner: r,
 	}
@@ -53,7 +53,7 @@ func TestSkillTool_Execute_GatesDynamicContext(t *testing.T) {
 	r2 := &recordingRunner{out: "NOPE"}
 	promptOnly := skillTool{
 		def:    llm.ToolDef{},
-		body:   "Status: !`git status`",
+		skill:  Skill{Body: "Status: !`git status`"},
 		perm:   toolperm.DenyAll(),
 		runner: r2,
 	}
@@ -69,7 +69,7 @@ func TestSkillTool_Execute_GatesDynamicContext(t *testing.T) {
 func TestSkillTool_Execute_PassthroughWhenNoDirectives(t *testing.T) {
 	t.Parallel()
 	r := &recordingRunner{out: "x"}
-	st := skillTool{body: "Plain body, no directives.", perm: mustMatcher(t, "Bash(git *)"), runner: r}
+	st := skillTool{skill: Skill{Body: "Plain body, no directives."}, perm: mustMatcher(t, "Bash(git *)"), runner: r}
 	res := st.Execute(context.Background(), llm.ToolCall{})
 	if res.Content != "Plain body, no directives." {
 		t.Errorf("verbatim body expected, got %q", res.Content)
@@ -89,7 +89,7 @@ func TestSkillTool_BindShell_ReturnsReboundCopy(t *testing.T) {
 	orig := &recordingRunner{out: "orig"}
 	st := skillTool{
 		def:    llm.ToolDef{},
-		body:   "Status: !`git status`",
+		skill:  Skill{Body: "Status: !`git status`"},
 		perm:   mustMatcher(t, "Bash(git *)"),
 		runner: orig,
 	}

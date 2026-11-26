@@ -35,7 +35,7 @@ func AdaptForkSkill(s skill.Skill, spawner *Spawner) upagent.Tool {
 			},
 		},
 		agentDef: forkDefinition(s),
-		body:     s.Body,
+		skill:    s,
 		spawner:  spawner,
 	}
 }
@@ -59,7 +59,7 @@ func forkDefinition(s skill.Skill) agentdef.Definition {
 type forkSkillTool struct {
 	def      llm.ToolDef
 	agentDef agentdef.Definition
-	body     string
+	skill    skill.Skill
 	spawner  *Spawner
 }
 
@@ -67,9 +67,10 @@ type forkSkillTool struct {
 // is the task).
 func (t forkSkillTool) Definition() llm.ToolDef { return t.def }
 
-// Execute runs the skill body as a child agent and returns its summary.
+// Execute runs the skill body, with its bundled-file note, as a child
+// agent and returns its summary.
 func (t forkSkillTool) Execute(ctx context.Context, _ llm.ToolCall) upagent.ToolResult {
-	res, err := t.spawner.Spawn(ctx, t.agentDef, t.body)
+	res, err := t.spawner.Spawn(ctx, t.agentDef, t.skill.Body+t.skill.ResourceNote())
 	if err != nil {
 		return upagent.ToolResult{Content: "fork skill error: " + err.Error(), IsError: true}
 	}

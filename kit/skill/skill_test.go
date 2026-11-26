@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,16 +196,25 @@ func TestNeedsShell(t *testing.T) {
 	}
 }
 
-// newProject creates a temp project root and points the global skills
-// dir at a sibling temp dir (so Discover never reads the developer's
-// real ~/.config/nib/skills). Returns (projectRoot, globalDir); project
+// isolateUser points both user-global skill directories at temp dirs,
+// so Discover never reads the developer's real ones. Returns the nib
+// global dir; the shared one is SharedGlobalDir().
+func isolateUser(t *testing.T) (globalDir string) {
+	t.Helper()
+	globalDir = t.TempDir()
+	t.Setenv("NIB_GLOBAL_SKILLS_DIR", globalDir)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	return globalDir
+}
+
+// newProject creates a temp project root with the user-global skill
+// directories isolated. Returns (projectRoot, globalDir); project
 // skills go under ProjectDir(projectRoot), global under globalDir.
 func newProject(t *testing.T) (projectRoot, globalDir string) {
 	t.Helper()
-	projectRoot = t.TempDir()
-	globalDir = t.TempDir()
-	t.Setenv("NIB_GLOBAL_SKILLS_DIR", globalDir)
-	return projectRoot, globalDir
+	return t.TempDir(), isolateUser(t)
 }
 
 // TestDiscover_AdaptsPromptAndShellSkills: project (and global) shell
@@ -358,4 +368,120 @@ func TestSkillToolContract(t *testing.T) {
 			Body:        "body",
 		})
 	})
+}
+
+// TestDiscover_SharedDirs: the cross-client .agents/skills directories
+// load at both scopes, and nib's own directory wins a name clash within
+// a scope.
+func TestDiscover_SharedDirs(t *testing.T) {
+	projectRoot, globalDir := newProject(t)
+	sharedGlobal, ok := SharedGlobalDir()
+	if !ok {
+		t.Fatal("SharedGlobalDir unresolved")
+	}
+	writeSkill(t, SharedProjectDir(projectRoot), "shared-proj", "---\ndescription: shared project.\n---\nSP")
+	writeSkill(t, sharedGlobal, "shared-glob", "---\ndescription: shared global.\n---\nSG")
+	writeSkill(t, ProjectDir(projectRoot), "clash", "---\ndescription: nib project.\n---\nNP")
+	writeSkill(t, SharedProjectDir(projectRoot), "clash", "---\ndescription: shared project.\n---\nSP")
+	writeSkill(t, globalDir, "gclash", "---\ndescription: nib global.\n---\nNG")
+	writeSkill(t, sharedGlobal, "gclash", "---\ndescription: shared global.\n---\nSG")
+
+	res, err := Discover(projectRoot)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	got := map[string]Skill{}
+	for _, s := range res.Loaded {
+		got[s.Name] = s
+	}
+	if got["shared-proj"].Source != SourceProject || got["shared-glob"].Source != SourceGlobal {
+		t.Errorf("shared skills not loaded at their scope: %v", got)
+	}
+	if got["clash"].Description != "nib project." || got["gclash"].Description != "nib global." {
+		t.Errorf("nib's own directory must win a same-scope clash: %v", got)
+	}
+	if len(res.Shadowed) != 2 {
+		t.Errorf("expected both shared clashes shadowed, got %v", res.Shadowed)
+	}
+}
+
+// TestSharedProjectShadowsGlobal: project scope wins over user scope
+// whichever directory convention each side uses.
+func TestSharedProjectShadowsGlobal(t *testing.T) {
+	projectRoot, globalDir := newProject(t)
+	writeSkill(t, SharedProjectDir(projectRoot), "review", "---\ndescription: project.\n---\nP")
+	writeSkill(t, globalDir, "review", "---\ndescription: global.\n---\nG")
+
+	res, err := Discover(projectRoot)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(res.Loaded) != 1 || res.Loaded[0].Description != "project." {
+		t.Errorf("project skill must shadow the global one, got %v", res.Loaded)
+	}
+}
+
+func TestResourceNote(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "pdf", "---\ndescription: d.\n---\nbody")
+	skills, err := Load(root, SourceProject)
+	if err != nil || len(skills) != 1 {
+		t.Fatalf("Load: %v %v", skills, err)
+	}
+	s := skills[0]
+	if note := s.ResourceNote(); note != "" {
+		t.Errorf("a skill that bundles nothing gets no note, got %q", note)
+	}
+
+	dir := filepath.Join(root, "pdf")
+	for _, f := range []string{"scripts/extract.py", "references/forms.md", ".git/config"} {
+		path := filepath.Join(dir, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	note := s.ResourceNote()
+	for _, want := range []string{
+		"Skill directory: " + dir + "\n",
+		"<file>references/forms.md</file>",
+		"<file>scripts/extract.py</file>",
+	} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note lacks %q:\n%s", want, note)
+		}
+	}
+	for _, reject := range []string{skillFile, ".git", "incomplete"} {
+		if strings.Contains(note, reject) {
+			t.Errorf("note must not mention %q:\n%s", reject, note)
+		}
+	}
+
+	res := adaptTool(s).Execute(context.Background(), llm.ToolCall{})
+	if res.Content != "body"+note {
+		t.Errorf("Execute must append the note to the body, got %q", res.Content)
+	}
+}
+
+func TestResourceNote_CapsListing(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "big", "---\ndescription: d.\n---\nbody")
+	for i := range maxListedResources + 1 {
+		path := filepath.Join(root, "big", "assets", fmt.Sprintf("f%03d.txt", i))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	note := Skill{Name: "big", Path: filepath.Join(root, "big", skillFile)}.ResourceNote()
+	if got := strings.Count(note, "<file>"); got != maxListedResources {
+		t.Errorf("listed %d files, want the cap %d", got, maxListedResources)
+	}
+	if !strings.Contains(note, "listing incomplete") {
+		t.Errorf("a capped listing must say so:\n%s", note)
+	}
 }

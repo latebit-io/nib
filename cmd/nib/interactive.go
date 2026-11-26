@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -73,9 +74,11 @@ func runInteractive(ctx, startCtx context.Context, started func(), root string, 
 	if err != nil {
 		return setupErr("%v", err)
 	}
-	if err := (&extensionCommand{session: s, repl: r}).refresh(); err != nil {
+	reg, err := (&extensionCommand{session: s, repl: r}).registry()
+	if err != nil {
 		return setupErr("command: %v", err)
 	}
+	r.SetCommands(reg)
 	fmt.Fprintln(os.Stderr, "nib: /help lists commands; Ctrl-C stops a run, or leaves when nothing is running.")
 	err = r.Run(ctx)
 	recordSession(store, sessionID, "(interactive session)", statusSuccess)
@@ -99,20 +102,19 @@ func (c *extensionCommand) Definition() command.Definition {
 	}
 }
 
-// refresh gives the session the commands that match its extensions
-// now: its own, and those of every extension that is on. The registry
-// is rebuilt, since a command cannot be taken out of one.
-func (c *extensionCommand) refresh() error {
+// registry returns the commands that match the session's extensions
+// now: its own, and those of every extension that is on. It is built
+// fresh each time, since a command cannot be taken out of a registry.
+func (c *extensionCommand) registry() (*command.Registry, error) {
 	reg := command.NewRegistry()
 	commands := append(repl.Commands(c.repl), c, command.NewHelp(reg))
 	commands = append(commands, c.session.assembly.Toolset.Commands...)
 	for _, cmd := range commands {
 		if err := reg.Register(cmd); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	c.repl.SetCommands(reg)
-	return nil
+	return reg, nil
 }
 
 // Handle implements [command.HandlerCommand].
@@ -137,11 +139,20 @@ func (c *extensionCommand) Handle(ctx context.Context, sess command.Session, arg
 	if err != nil {
 		return err
 	}
-	s.switches = next
 	printWarnings(s.assembly.Warnings[seen:])
 	if !changed {
+		s.switches = next
 		sess.Display(fmt.Sprintf("%s is already %s.", name, state))
 		return nil
+	}
+	// Checked before anything else changes: a command that clashes with
+	// one the session has must undo the switch, not half apply it.
+	reg, err := c.registry()
+	if err != nil {
+		if _, undoErr := s.assembly.Switch(ctx, s.switches); undoErr != nil {
+			err = errors.Join(err, undoErr)
+		}
+		return fmt.Errorf("%s stays as it was: %w", name, err)
 	}
 	// The old agent still holds the tools as they were: replace it.
 	agent, err := s.assembly.Agent(s.provider)
@@ -157,11 +168,8 @@ func (c *extensionCommand) Handle(ctx context.Context, sess command.Session, arg
 		return err
 	}
 	s.agent.Close()
-	s.agent = agent
-	if err := c.refresh(); err != nil {
-		// The switch stands; the commands are those from before it.
-		sess.Display("warning: the commands were not updated: " + err.Error())
-	}
+	s.agent, s.switches = agent, next
+	c.repl.SetCommands(reg)
 	sess.Display(fmt.Sprintf("%s is now %s. The conversation continues.", name, state))
 	return nil
 }

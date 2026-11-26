@@ -213,31 +213,56 @@ func (t *Tools) writeFile(name, content string) error {
 // maxLinkHops bounds how many links a write follows to its target.
 const maxLinkHops = 8
 
-// target follows p through symlinks to the file a write replaces, so
-// the rename lands on the file and not on a link to it. info is nil
-// when nothing exists there yet. The root refuses a link that leaves it.
+// target resolves p, link by link, to the file a write replaces; info
+// is nil when nothing exists there yet. It walks one component at a time
+// as the filesystem does: ".." after a linked directory leaves its target.
 func (t *Tools) target(p string) (string, fs.FileInfo, error) {
-	for range maxLinkHops {
-		info, err := t.root.Lstat(p)
-		if errors.Is(err, fs.ErrNotExist) {
-			return p, nil, nil
+	pending := strings.Split(filepath.ToSlash(p), "/")
+	var resolved []string // free of links, so ".." can drop its last part
+	for hops := 0; len(pending) > 0; {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(resolved) == 0 {
+				return "", nil, fmt.Errorf("%s is outside the project", p)
+			}
+			resolved = resolved[:len(resolved)-1]
+			continue
 		}
-		if err != nil {
+		cur := filepath.Join(filepath.Join(resolved...), part)
+		info, err := t.root.Lstat(cur)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return "", nil, err
 		}
-		if info.Mode()&fs.ModeSymlink == 0 {
-			return p, info, nil
+		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+			resolved = append(resolved, part)
+			continue
 		}
-		link, err := t.root.Readlink(p)
+		if hops++; hops > maxLinkHops {
+			return "", nil, fmt.Errorf("%s: too many links", p)
+		}
+		link, err := t.root.Readlink(cur)
 		if err != nil {
 			return "", nil, err
 		}
 		if filepath.IsAbs(link) {
-			return "", nil, fmt.Errorf("%s links to an absolute path", p)
+			return "", nil, fmt.Errorf("%s links to an absolute path", cur)
 		}
-		p = filepath.Join(filepath.Dir(p), link)
+		// The link's text takes the place of the component it replaces.
+		pending = append(strings.Split(filepath.ToSlash(link), "/"), pending...)
 	}
-	return "", nil, fmt.Errorf("%s: too many links", p)
+	if len(resolved) == 0 {
+		return "", nil, fmt.Errorf("%s is the project directory", p)
+	}
+	final := filepath.Join(resolved...)
+	info, err := t.root.Lstat(final)
+	if errors.Is(err, fs.ErrNotExist) {
+		return final, nil, nil
+	}
+	return final, info, err
 }
 
 // writeNew creates name with content. Replacing a file keeps that

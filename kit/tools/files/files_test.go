@@ -390,3 +390,50 @@ func TestMatch_BoundedWork(t *testing.T) {
 		}
 	}
 }
+
+// TestWrite_LinkThroughLinkedDirectory: "jump/.." names the parent of
+// the directory jump points to, not the one jump sits in. Collapsing
+// the link text first would write to an unrelated file of the same name.
+func TestWrite_LinkThroughLinkedDirectory(t *testing.T) {
+	root, tools := workspace(t)
+	pkg := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(filepath.Join(pkg, "deep", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"victim.go": "decoy\n", "deep/victim.go": "real one\n"} {
+		if err := os.WriteFile(filepath.Join(pkg, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, to := range map[string]string{"jump": "deep/sub", "alias.go": "jump/../victim.go"} {
+		if err := os.Symlink(filepath.FromSlash(to), filepath.Join(pkg, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(pkg, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	ok(t, tools["edit_file"], map[string]any{"path": "alias.go", "old_string": "real one", "new_string": "edited"})
+	if got := read("deep/victim.go"); got != "edited\n" {
+		t.Errorf("the link's real target = %q, want the edit", got)
+	}
+	ok(t, tools["write_file"], map[string]any{"path": "alias.go", "content": "rewritten\n"})
+	if got := read("deep/victim.go"); got != "rewritten\n" {
+		t.Errorf("the link's real target = %q, want the new content", got)
+	}
+	if got := read("victim.go"); got != "decoy\n" {
+		t.Errorf("the file of the same name beside the link changed: %q", got)
+	}
+	// A link whose ".." would climb out of the project is refused.
+	if err := os.Symlink("../../../outside.txt", filepath.Join(pkg, "up.go")); err != nil {
+		t.Fatal(err)
+	}
+	if res := run(t, tools["write_file"], map[string]any{"path": "up.go", "content": "x"}); !res.IsError {
+		t.Error("a link that leaves the project must be refused")
+	}
+}

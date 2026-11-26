@@ -15,7 +15,7 @@ QUERY_LANGS := \
 	lua:github.com/tree-sitter-grammars/tree-sitter-lua \
 	yaml:github.com/tree-sitter-grammars/tree-sitter-yaml
 
-.PHONY: all build clean install uninstall test fmt fmt-check mod-tidy-check vet lint consumer-smoke sync-queries run-nibster
+.PHONY: all build clean install uninstall test fmt fmt-check mod-tidy-check vet lint consumer-smoke api-check sync-queries run-nibster
 
 all: build
 
@@ -68,6 +68,11 @@ lint:
 # replace). Needs network; run by CI, not by pre-commit.sh.
 consumer-smoke:
 	@bash consumer-smoke.sh $(RELEASED_MODULES)
+
+# Compare the stable surface (STABILITY.md) with the last release. Needs
+# apidiff on PATH and release tags; run by CI, not by pre-commit.sh.
+api-check:
+	@bash api-check.sh $(RELEASED_MODULES)
 
 clean:
 	rm -f cmd/nib-code/bin/*

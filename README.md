@@ -264,6 +264,8 @@ ai → agent → kit → coding → tui
 | `cmd/agent` | `nib-agent` — headless CI/scripting binary |
 | `cmd/nibster` | Kit-boundary smoke test: general-purpose CLI agent on `kit/` + `ai/` only |
 
+`ai`, `agent`, and `kit` are released for other programs to import. [STABILITY.md](STABILITY.md) says which of their packages carry a compatibility promise and how a breaking change is marked.
+
 ## Building
 
 ```bash

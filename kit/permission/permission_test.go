@@ -117,29 +117,35 @@ func TestGate_NobodyToAsk(t *testing.T) {
 // the call that was asked about, and for nothing else: not another tool
 // or other arguments under the same ID, and not after the call ended.
 func TestGate_ApprovalCoversOneCallOnly(t *testing.T) {
-	a := &answers{next: []Decision{Allow, Allow}}
+	a := &answers{next: []Decision{Allow, Allow, Allow}}
 	g := New()
 	g.SetAsker(a.ask)
 	g.Register("bash", shell)
 	g.SetMode(Approve)
-
-	if call(t, g, "1", "write_file", `{"path":"a"}`).Block {
-		t.Fatal("the approved write must pass")
+	approve := func(id, tool, args string) {
+		t.Helper()
+		if call(t, g, id, tool, args).Block {
+			t.Fatalf("the approved %s call must pass", tool)
+		}
 	}
+
+	// The write never asks whether it was approved; its call then ends.
+	// Probed exactly as approved, so only the cleanup can make it false.
+	approve("1", "write_file", `{"path":"a"}`)
 	if _, err := g.Hooks().AfterToolCall(context.Background(), kit.AfterToolCallInput{CallID: "1", Name: "write_file"}); err != nil {
 		t.Fatal(err)
 	}
-	// The write never asked whether it was approved; its call has ended.
-	g.SetMode(Autonomous)
-	if g.Approved(tc("1", "bash", "rm")) {
+	if g.Approved(tc("1", "write_file", `{"path":"a"}`)) {
 		t.Error("an approval must end with its call, claimed or not")
 	}
 
-	g.SetMode(Approve)
-	if call(t, g, "2", "bash", "make").Block {
-		t.Fatal("the approved command must pass")
+	// One approval per probe: a probe consumes the approval it checks.
+	approve("2", "bash", "make")
+	if g.Approved(tc("2", "bash", "rm")) {
+		t.Error("an approval must not cover other arguments")
 	}
-	if g.Approved(tc("2", "bash", "rm")) || g.Approved(tc("2", "write_file", "make")) {
-		t.Error("an approval must cover only the tool and arguments that were asked about")
+	approve("3", "bash", "make")
+	if g.Approved(tc("3", "write_file", "make")) {
+		t.Error("an approval must not cover another tool")
 	}
 }

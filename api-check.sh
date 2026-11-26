@@ -52,7 +52,9 @@ for mod in "$@"; do
 	# Listed from the old tree: a removed package is seen, and a new one,
 	# which cannot break anyone, is skipped.
 	paths=$(cd "$WORK/$mod" && go list $(covered "$mod") | grep -Ev '/internal(/|$)')
-	current=$(cd "$ROOT/$mod" && go list ./...)
+	# A module deleted outright has no packages left: all count as removed.
+	current=""
+	[ ! -d "$ROOT/$mod" ] || current=$(cd "$ROOT/$mod" && go list ./...)
 	for path in $paths; do
 		name=${path#"$PREFIX/"}
 		# Membership, not directory: a package can lose its Go files

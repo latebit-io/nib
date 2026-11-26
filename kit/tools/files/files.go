@@ -219,6 +219,7 @@ const maxLinkHops = 8
 func (t *Tools) target(p string) (string, fs.FileInfo, error) {
 	pending := strings.Split(filepath.ToSlash(p), "/")
 	var resolved []string // free of links, so ".." can drop its last part
+	missing := false      // a component did not exist; nothing after it can
 	for hops := 0; len(pending) > 0; {
 		part := pending[0]
 		pending = pending[1:]
@@ -229,6 +230,10 @@ func (t *Tools) target(p string) (string, fs.FileInfo, error) {
 			if len(resolved) == 0 {
 				return "", nil, fmt.Errorf("%s is outside the project", p)
 			}
+			// The kernel cannot step back out of what is not there.
+			if missing {
+				return "", nil, fmt.Errorf("%s: %s does not exist", p, filepath.Join(resolved...))
+			}
 			resolved = resolved[:len(resolved)-1]
 			continue
 		}
@@ -237,7 +242,16 @@ func (t *Tools) target(p string) (string, fs.FileInfo, error) {
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return "", nil, err
 		}
-		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		if err != nil {
+			missing = true
+			resolved = append(resolved, part)
+			continue
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			// Only a directory can have anything after it, ".." included.
+			if len(pending) > 0 && !info.IsDir() {
+				return "", nil, fmt.Errorf("%s is not a directory", cur)
+			}
 			resolved = append(resolved, part)
 			continue
 		}

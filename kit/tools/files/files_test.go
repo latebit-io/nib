@@ -437,3 +437,36 @@ func TestWrite_LinkThroughLinkedDirectory(t *testing.T) {
 		t.Error("a link that leaves the project must be refused")
 	}
 }
+
+// TestWrite_LinkThroughAFileIsRefused: a link whose text passes through
+// a regular file, or backs out of a directory that does not exist, names
+// nothing the kernel would resolve, so nothing is written.
+func TestWrite_LinkThroughAFileIsRefused(t *testing.T) {
+	root, tools := workspace(t)
+	pkg := filepath.Join(root, "pkg")
+	for name, body := range map[string]string{"plain": "a file\n", "victim.go": "original\n"} {
+		if err := os.WriteFile(filepath.Join(pkg, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, to := range map[string]string{
+		"alias.go":   "plain/../victim.go",
+		"ghost.go":   "nowhere/../victim.go",
+		"slash.go":   "plain/",
+		"through.go": "plain/inside.go",
+	} {
+		if err := os.Symlink(filepath.FromSlash(to), filepath.Join(pkg, link)); err != nil {
+			t.Fatal(err)
+		}
+		if res := run(t, tools["write_file"], map[string]any{"path": link, "content": "x"}); !res.IsError {
+			t.Errorf("write through %s -> %s must be refused", link, to)
+		}
+	}
+	for name, want := range map[string]string{"victim.go": "original\n", "plain": "a file\n"} {
+		if data, _ := os.ReadFile(filepath.Join(pkg, name)); string(data) != want {
+			t.Errorf("%s changed: %q", name, data)
+		}
+	}
+	// A parent that does not exist yet is still created for a new file.
+	ok(t, tools["write_file"], map[string]any{"path": "fresh/dir/new.go", "content": "package dir\n"})
+}

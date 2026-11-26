@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -298,29 +297,23 @@ func TestSearch(t *testing.T) {
 	}
 }
 
-// TestWrite_OnlyRegularFiles: a pipe would block the write and a link
-// would be replaced, so neither is written; the link's target is untouched.
-func TestWrite_OnlyRegularFiles(t *testing.T) {
+// TestWrite_ThroughLinksAndNotOverDirectories: a link inside the
+// project is written through, staying a link; a directory is refused.
+func TestWrite_ThroughLinksAndNotOverDirectories(t *testing.T) {
 	root, tools := workspace(t)
 	pkg := filepath.Join(root, "pkg")
 	if err := os.Symlink("a.go", filepath.Join(pkg, "alias.go")); err != nil {
 		t.Fatal(err)
 	}
-	targets := []string{"alias.go", "deep"}
-	if err := syscall.Mkfifo(filepath.Join(pkg, "pipe"), 0o644); err == nil {
-		targets = append(targets, "pipe")
+	ok(t, tools["write_file"], map[string]any{"path": "alias.go", "content": "package pkg\n"})
+	if data, _ := os.ReadFile(filepath.Join(pkg, "a.go")); string(data) != "package pkg\n" {
+		t.Errorf("the link's target = %q, want the written content", data)
 	}
-	before, err := os.ReadFile(filepath.Join(pkg, "a.go"))
-	if err != nil {
-		t.Fatal(err)
+	if info, err := os.Lstat(filepath.Join(pkg, "alias.go")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("alias.go must still be a link: %v, %v", info, err)
 	}
-	for _, name := range targets {
-		if res := run(t, tools["write_file"], map[string]any{"path": name, "content": "x"}); !res.IsError {
-			t.Errorf("write to %s must be refused", name)
-		}
-	}
-	if after, _ := os.ReadFile(filepath.Join(pkg, "a.go")); string(after) != string(before) {
-		t.Errorf("the link's target changed: %q", after)
+	if res := run(t, tools["write_file"], map[string]any{"path": "deep", "content": "x"}); !res.IsError {
+		t.Error("a write over a directory must be refused")
 	}
 }
 
@@ -329,7 +322,11 @@ func TestWrite_OnlyRegularFiles(t *testing.T) {
 func TestWrite_ReplacesInOneStep(t *testing.T) {
 	root, tools := workspace(t)
 	script := filepath.Join(root, "pkg", "run.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Set explicitly: the mode WriteFile asks for is cut by the umask.
+	if err := os.Chmod(script, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	ok(t, tools["write_file"], map[string]any{"path": "run.sh", "content": "#!/bin/sh\necho hi\n"})

@@ -129,7 +129,7 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 	}
 
 	const truncSuffix = "\n\n[... truncated — use read_file for full content]"
-	limit := maxPreviewBytes - len(truncSuffix)
+	limit := maxPreviewBytes - len(truncSuffix) - len(incomplete)
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d match(es) found:\n\n", len(results))
@@ -137,7 +137,7 @@ func (t *Tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 		line := fmt.Sprintf("%s:%d: %s\n", r.Path, r.Line, r.Text)
 		if sb.Len()+len(line) > limit {
 			sb.WriteString(truncSuffix)
-			return agent.ToolResult{Content: sb.String()}
+			return agent.ToolResult{Content: sb.String() + incomplete}
 		}
 		sb.WriteString(line)
 	}

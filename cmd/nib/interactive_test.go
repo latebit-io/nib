@@ -12,7 +12,6 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/ai/llmtest"
-	"github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/repl"
 )
@@ -63,15 +62,12 @@ func TestExtensionCommand_SwitchesTools(t *testing.T) {
 
 	in, keys := io.Pipe()
 	out := &screen{}
-	reg := command.NewRegistry()
-	r, err := repl.New(repl.Options{Agent: s.agent, SystemPrompt: s.assembly.SystemPrompt, In: in, Out: out, Commands: reg})
+	r, err := repl.New(repl.Options{Agent: s.agent, SystemPrompt: s.assembly.SystemPrompt, In: in, Out: out})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range append(repl.Commands(r), &extensionCommand{session: s, repl: r}) {
-		if err := reg.Register(c); err != nil {
-			t.Fatal(err)
-		}
+	if err := (&extensionCommand{session: s, repl: r}).refresh(); err != nil {
+		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()

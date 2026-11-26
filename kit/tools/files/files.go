@@ -186,24 +186,20 @@ func (t *Tools) writeFile(name, content string) error {
 	if err != nil {
 		return err
 	}
-	perm := fs.FileMode(0o644)
-	info, err := t.root.Lstat(p)
-	switch {
-	case err == nil && !info.Mode().IsRegular():
-		// Opening a pipe to write blocks until something reads it; a
-		// link would be replaced by the rename, not written through.
-		return fmt.Errorf("%s is not a regular file", name)
-	case err == nil:
-		perm = info.Mode().Perm()
-	case !errors.Is(err, fs.ErrNotExist):
+	p, info, err := t.target(p)
+	if err != nil {
 		return err
+	}
+	if info != nil && !info.Mode().IsRegular() {
+		// Opening a pipe to write blocks until something reads it.
+		return fmt.Errorf("%s is not a regular file", name)
 	}
 	dir := filepath.Dir(p)
 	if err := t.root.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	tmp := filepath.Join(dir, "."+filepath.Base(p)+".nib-"+rand.Text()[:8])
-	err = t.writeNew(tmp, content, perm)
+	err = t.writeNew(tmp, content, info)
 	if err == nil {
 		err = t.root.Rename(tmp, p)
 	}
@@ -214,14 +210,51 @@ func (t *Tools) writeFile(name, content string) error {
 	return nil
 }
 
-// writeNew creates name with content and exactly perm, whatever the umask.
-func (t *Tools) writeNew(name, content string, perm fs.FileMode) error {
+// maxLinkHops bounds how many links a write follows to its target.
+const maxLinkHops = 8
+
+// target follows p through symlinks to the file a write replaces, so
+// the rename lands on the file and not on a link to it. info is nil
+// when nothing exists there yet. The root refuses a link that leaves it.
+func (t *Tools) target(p string) (string, fs.FileInfo, error) {
+	for range maxLinkHops {
+		info, err := t.root.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			return p, nil, nil
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			return p, info, nil
+		}
+		link, err := t.root.Readlink(p)
+		if err != nil {
+			return "", nil, err
+		}
+		if filepath.IsAbs(link) {
+			return "", nil, fmt.Errorf("%s links to an absolute path", p)
+		}
+		p = filepath.Join(filepath.Dir(p), link)
+	}
+	return "", nil, fmt.Errorf("%s: too many links", p)
+}
+
+// writeNew creates name with content. Replacing a file keeps that
+// file's mode exactly; a new file gets 0644 less the process umask.
+func (t *Tools) writeNew(name, content string, replaces fs.FileInfo) error {
+	perm := fs.FileMode(0o644)
+	if replaces != nil {
+		perm = replaces.Mode().Perm()
+	}
 	f, err := t.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
 	}
 	_, err = f.WriteString(content)
-	if err == nil {
+	// Chmod only to restore an existing mode: on a new file it would
+	// undo the umask and could make a private file readable by others.
+	if err == nil && replaces != nil {
 		err = f.Chmod(perm)
 	}
 	if closeErr := f.Close(); err == nil {

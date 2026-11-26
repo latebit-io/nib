@@ -197,3 +197,22 @@ func TestExecute_IncompleteSearch(t *testing.T) {
 		}
 	}
 }
+
+// TestExecute_IncompleteSearchWithCutPreview: when the matches alone
+// overflow the preview, the result still says the tree was not covered.
+func TestExecute_IncompleteSearchWithCutPreview(t *testing.T) {
+	many := make([]Result, 100)
+	for i := range many {
+		many[i] = Result{Path: "a.go", Line: i + 1, Text: strings.Repeat("x", 300)}
+	}
+	tool := New("/tmp", func(context.Context, string, string, Options) ([]Result, error) {
+		return many, ErrIncomplete
+	})
+	res := tool.Execute(context.Background(), call(`{"pattern":"x"}`))
+	if !strings.Contains(res.Content, "truncated") || !strings.Contains(res.Content, "incomplete") {
+		t.Errorf("result lacks one of the two notices:\n%.200s ... %s", res.Content, res.Content[max(0, len(res.Content)-200):])
+	}
+	if len(res.Content) > maxPreviewBytes {
+		t.Errorf("result is %d bytes, over the %d-byte preview cap", len(res.Content), maxPreviewBytes)
+	}
+}

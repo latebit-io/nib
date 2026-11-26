@@ -333,6 +333,10 @@ func (r *REPL) Swap(next *kit.Agent, systemPrompt string) error {
 	return r.attach(next)
 }
 
+// SetCommands replaces the slash commands, for a host whose commands
+// change during the session. Nil means none.
+func (r *REPL) SetCommands(commands *command.Registry) { r.commands = commands }
+
 // Clear forgets the conversation, stopping any run first.
 func (r *REPL) Clear() {
 	r.stopRun()

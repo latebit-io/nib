@@ -305,3 +305,44 @@ func TestRun_LineTheAgentDidNotTakeIsKept(t *testing.T) {
 		t.Errorf("the refused line must not be sent: %s", contents(last))
 	}
 }
+
+// reload is a test command that replaces the session's commands.
+type reload struct {
+	repl *REPL
+	next *command.Registry
+}
+
+func (reload) Definition() command.Definition {
+	return command.Definition{Name: "reload", Description: "Replace the commands.", Source: command.Source{Kind: command.SourceBuiltin}}
+}
+
+func (c reload) Handle(context.Context, command.Session, string) error {
+	c.repl.SetCommands(c.next)
+	return nil
+}
+
+// TestSetCommands: a host that replaces the command set gets the new
+// commands and loses the old ones, as when an extension is switched.
+func TestSetCommands(t *testing.T) {
+	next := command.NewRegistry()
+	if err := next.Register(command.NewHelp(next)); err != nil {
+		t.Fatal(err)
+	}
+	h := start(t, newAgent(t, llmtest.NewScripted(), ""), "", func(r *REPL, reg *command.Registry) {
+		if err := reg.Register(reload{repl: r, next: next}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	h.typeLine("/reload")
+	h.typeLine("/quit")
+	h.see("error:")
+	h.typeLine("/help")
+	h.see("/help")
+	if strings.Contains(h.out.String(), "/clear") {
+		t.Errorf("the old commands must be gone:\n%s", h.out.String())
+	}
+	if err := h.keys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.ended()
+}

@@ -66,21 +66,15 @@ func runInteractive(ctx, startCtx context.Context, started func(), root string, 
 	}
 	started()
 
-	reg := command.NewRegistry()
 	r, err := repl.New(repl.Options{
 		Agent: s.agent, SystemPrompt: s.assembly.SystemPrompt,
-		In: os.Stdin, Out: os.Stdout, Commands: reg, Interrupt: interrupt,
+		In: os.Stdin, Out: os.Stdout, Interrupt: interrupt,
 	})
 	if err != nil {
 		return setupErr("%v", err)
 	}
-	commands := append(repl.Commands(r), &extensionCommand{session: s, repl: r}, command.NewHelp(reg))
-	// Commands the extensions on at start bring with them.
-	commands = append(commands, s.assembly.Toolset.Commands...)
-	for _, c := range commands {
-		if err := reg.Register(c); err != nil {
-			return setupErr("command: %v", err)
-		}
+	if err := (&extensionCommand{session: s, repl: r}).refresh(); err != nil {
+		return setupErr("command: %v", err)
 	}
 	fmt.Fprintln(os.Stderr, "nib: /help lists commands; Ctrl-C stops a run, or leaves when nothing is running.")
 	err = r.Run(ctx)
@@ -103,6 +97,22 @@ func (c *extensionCommand) Definition() command.Definition {
 		Description: "List extensions, or switch one: /extension on|off <name>.",
 		Source:      command.Source{Kind: command.SourceBuiltin, Path: "cmd/nib"},
 	}
+}
+
+// refresh gives the session the commands that match its extensions
+// now: its own, and those of every extension that is on. The registry
+// is rebuilt, since a command cannot be taken out of one.
+func (c *extensionCommand) refresh() error {
+	reg := command.NewRegistry()
+	commands := append(repl.Commands(c.repl), c, command.NewHelp(reg))
+	commands = append(commands, c.session.assembly.Toolset.Commands...)
+	for _, cmd := range commands {
+		if err := reg.Register(cmd); err != nil {
+			return err
+		}
+	}
+	c.repl.SetCommands(reg)
+	return nil
 }
 
 // Handle implements [command.HandlerCommand].
@@ -148,6 +158,10 @@ func (c *extensionCommand) Handle(ctx context.Context, sess command.Session, arg
 	}
 	s.agent.Close()
 	s.agent = agent
+	if err := c.refresh(); err != nil {
+		// The switch stands; the commands are those from before it.
+		sess.Display("warning: the commands were not updated: " + err.Error())
+	}
 	sess.Display(fmt.Sprintf("%s is now %s. The conversation continues.", name, state))
 	return nil
 }

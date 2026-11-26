@@ -2,13 +2,16 @@ package skill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 
 	upagent "github.com/latebit-io/nib/agent"
 )
@@ -17,8 +20,8 @@ import (
 // says the listing is incomplete.
 const maxListedResources = 50
 
-// maxWalkedEntries bounds the listing walk itself, so a project skill
-// with a huge tree and few files cannot stall an activation.
+// maxWalkedEntries bounds the directory entries the listing reads, so a
+// project skill with a huge tree cannot stall an activation.
 const maxWalkedEntries = 1000
 
 // maxResourceBytes caps one bundled file read through a skill tool.
@@ -70,39 +73,61 @@ func (s Skill) ResourceNote(readTool string) string {
 
 // bundled lists the files under dir other than SKILL.md, slash-separated
 // and relative to dir, in lexical order. more reports that a cap cut the
-// listing short.
+// listing short. A directory that cannot be read does not stop the rest.
 func bundled(dir string) (files []string, more bool, err error) {
-	walked := 0
-	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	budget := maxWalkedEntries
+	var errs []error
+	pending := []string{"."}
+	for len(pending) > 0 && budget > 0 {
+		rel := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		// One past the budget tells a full directory from a cut one.
+		entries, readErr := readEntries(filepath.Join(dir, rel), budget+1)
+		if readErr != nil {
+			errs = append(errs, readErr)
 		}
-		if walked++; walked > maxWalkedEntries {
-			more = true
-			return filepath.SkipAll
+		if len(entries) > budget {
+			entries, more = entries[:budget], true
 		}
-		if d.IsDir() {
-			// Dot directories (.git) are tooling state, not skill content.
-			if path != dir && strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
+		budget -= len(entries)
+		for _, e := range entries {
+			name := filepath.Join(rel, e.Name())
+			switch t := e.Type(); {
+			case t.IsDir():
+				// Dot directories (.git) are tooling state, not skill content.
+				if !strings.HasPrefix(e.Name(), ".") {
+					pending = append(pending, name)
+				}
+			case name == skillFile:
+			case t.IsRegular() || t&fs.ModeSymlink != 0:
+				// Pipes, sockets and devices are not readable resources.
+				files = append(files, filepath.ToSlash(name))
 			}
-			return nil
 		}
-		rel, relErr := filepath.Rel(dir, path)
-		if relErr != nil {
-			return relErr
-		}
-		if rel == skillFile {
-			return nil
-		}
-		if len(files) == maxListedResources {
-			more = true
-			return filepath.SkipAll
-		}
-		files = append(files, filepath.ToSlash(rel))
-		return nil
-	})
-	return files, more, err
+	}
+	if len(pending) > 0 {
+		more = true
+	}
+	slices.Sort(files)
+	if len(files) > maxListedResources {
+		files, more = files[:maxListedResources], true
+	}
+	return files, more, errors.Join(errs...)
+}
+
+// readEntries returns at most n entries of dir, in directory order.
+// WalkDir would read and sort the whole directory before any cap applies.
+func readEntries(dir string, n int) ([]fs.DirEntry, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }() // read-only handle; nothing to flush
+	entries, err := f.ReadDir(n)
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	return entries, err
 }
 
 // ReadResource returns a file bundled with the skill. name is relative
@@ -117,7 +142,9 @@ func (s Skill) ReadResource(name string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = root.Close() }() // read-only handle; nothing to flush
-	f, err := root.Open(filepath.FromSlash(name))
+	// Non-blocking: a read-only open of a FIFO otherwise waits for a
+	// writer, and the regular-file check below would never run.
+	f, err := root.OpenFile(filepath.FromSlash(name), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
 	}

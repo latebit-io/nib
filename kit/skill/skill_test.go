@@ -525,18 +525,45 @@ func TestResourceNote_CapsListing(t *testing.T) {
 	}
 }
 
-// TestBundled_BoundsWalk: a tree of many entries and few files stops at
-// the walk budget and reports the listing as cut short.
-func TestBundled_BoundsWalk(t *testing.T) {
+// TestBundled_BoundsEntries: a directory larger than the entry budget is
+// read only up to it, and the listing is reported as cut short.
+func TestBundled_BoundsEntries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		make func(path string) error
+		max  int
+	}{
+		{"directories", func(p string) error { return os.Mkdir(p, 0o755) }, 0},
+		{"files", func(p string) error { return os.WriteFile(p, nil, 0o644) }, maxListedResources},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for i := range maxWalkedEntries + 1 {
+				if err := tc.make(filepath.Join(dir, fmt.Sprintf("e%04d", i))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			files, more, err := bundled(dir)
+			if err != nil || len(files) != tc.max || !more {
+				t.Errorf("bundled: %d files, more=%v, err=%v; want %d, more, no error", len(files), more, err, tc.max)
+			}
+			if !slices.IsSorted(files) {
+				t.Errorf("the retained paths must be sorted: %v", files)
+			}
+		})
+	}
+}
+
+// TestBundled_ExactBudget: a tree that fits the budget exactly is not
+// reported as cut short.
+func TestBundled_ExactBudget(t *testing.T) {
 	dir := t.TempDir()
-	for i := range maxWalkedEntries + 1 {
-		if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("d%04d", i)), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	for i := range maxListedResources {
+		writeFile(t, filepath.Join(dir, "sub", fmt.Sprintf("f%02d", i)), "")
 	}
 	files, more, err := bundled(dir)
-	if err != nil || len(files) != 0 || !more {
-		t.Errorf("bundled = %v, more=%v, err=%v; want no files, more, no error", files, more, err)
+	if err != nil || len(files) != maxListedResources || more {
+		t.Errorf("bundled: %d files, more=%v, err=%v; want %d, complete", len(files), more, err, maxListedResources)
 	}
 }
 

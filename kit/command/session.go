@@ -18,10 +18,8 @@ import "context"
 // convenience methods — answer them with frontend-side commands
 // instead.
 type Session interface {
-	// Display renders text without involving the LLM. /help uses
-	// this; any handler that wants to surface a result inline uses
-	// this. The frontend decides how to render — the agent pane
-	// in the TUI, stdout in nibster, etc.
+	// Display renders text without involving the LLM, as /help does.
+	// The frontend decides how: the agent pane in a TUI, stdout in nib.
 	Display(text string)
 
 	// SubmitPrompt synthesizes a user message and submits it to

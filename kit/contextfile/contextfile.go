@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"slices"
 
 	"github.com/latebit-io/nib/kit/internal/filecap"
 )
@@ -18,9 +19,9 @@ import (
 // instruction file mid-sentence could drop the constraint that mattered.
 const MaxBytes = 64 << 10 // 64 KiB
 
-// candidates are the accepted file names at the project root, in
-// preference order. First found wins; the rest are ignored so a repo
-// carrying both AGENTS.md and CLAUDE.md injects one coherent document.
+// candidates are the accepted file names in one directory, in
+// preference order. First found wins, so a directory carrying both
+// AGENTS.md and CLAUDE.md injects one document.
 var candidates = []string{"AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"}
 
 // File is one loaded context file.
@@ -33,26 +34,69 @@ type File struct {
 	Content string
 }
 
-// Load returns the project root's context file, if one exists. The
-// result slice has zero or one element in v1 (the slice shape leaves
-// room for an ancestor walk without a signature break). A candidate
-// that exists but exceeds [MaxBytes] yields an error naming the cap;
-// the caller decides whether to log-and-continue or fail.
+// MaxTotalBytes caps a chain's combined size, so a deep tree of
+// instruction files cannot fill the context window.
+const MaxTotalBytes = 2 * MaxBytes
+
+// Load returns root's context file, if one exists: [LoadChain] for a
+// working directory that is the root.
 func Load(root string) ([]File, error) {
+	return LoadChain(root, root)
+}
+
+// LoadChain returns the context files from root down to dir, nearest
+// last: AGENTS.md gives the nearest file precedence. A file that cannot
+// be used is reported in err, and the usable ones are still returned.
+func LoadChain(root, dir string) ([]File, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("contextfile: %w", err)
+	}
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("contextfile: %w", err)
+	}
+	// A dir outside root contributes nothing: only root's file loads.
+	if rel, err := filepath.Rel(root, dir); err != nil || !filepath.IsLocal(rel) {
+		dir = root
+	}
+	var files []File
+	var errs []error
+	total := 0
+	// Walking up from dir visits the nearest first, so the total cap
+	// drops the farthest files.
+	for cur := dir; ; cur = filepath.Dir(cur) {
+		f, ok, err := loadDir(cur)
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+		case ok && total+len(f.Content) > MaxTotalBytes:
+			errs = append(errs, fmt.Errorf("contextfile: %s skipped: the chain exceeds the %d-byte total cap", f.Path, MaxTotalBytes))
+		case ok:
+			total += len(f.Content)
+			files = append(files, f)
+		}
+		if cur == root {
+			break
+		}
+	}
+	slices.Reverse(files)
+	return files, errors.Join(errs...)
+}
+
+// loadDir reads dir's context file: the first candidate that exists.
+// ok is false when dir carries none.
+func loadDir(dir string) (f File, ok bool, err error) {
 	for _, name := range candidates {
-		path := filepath.Join(root, name)
+		path := filepath.Join(dir, name)
 		body, err := filecap.Read(path, MaxBytes, "context file")
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("contextfile: %w", err)
+			return File{}, false, fmt.Errorf("contextfile: %w", err)
 		}
-		abs, absErr := filepath.Abs(path)
-		if absErr != nil {
-			abs = path // fall back to the joined path; labeling only, never dereferenced.
-		}
-		return []File{{Path: abs, Content: string(body)}}, nil
+		return File{Path: path, Content: string(body)}, true, nil
 	}
-	return nil, nil
+	return File{}, false, nil
 }

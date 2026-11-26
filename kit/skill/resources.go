@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 
 	upagent "github.com/latebit-io/nib/agent"
+	"github.com/latebit-io/nib/kit/internal/filecap"
 )
 
 // maxListedResources caps the bundled-file listing; past it the note
@@ -142,27 +142,12 @@ func (s Skill) ReadResource(name string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = root.Close() }() // read-only handle; nothing to flush
-	// Non-blocking: a read-only open of a FIFO otherwise waits for a
-	// writer, and the regular-file check below would never run.
-	f, err := root.OpenFile(filepath.FromSlash(name), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	data, err := filecap.ReadRoot(root, filepath.FromSlash(name), maxResourceBytes)
+	if errors.Is(err, filecap.ErrTooLarge) {
+		return "", fmt.Errorf("%w; process it with a script instead", err)
+	}
 	if err != nil {
 		return "", err
-	}
-	defer func() { _ = f.Close() }() // read-only handle; nothing to flush
-	info, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%s is not a regular file", name)
-	}
-	// Read one byte past the cap: the size from Stat can be stale.
-	data, err := io.ReadAll(io.LimitReader(f, maxResourceBytes+1))
-	if err != nil {
-		return "", err
-	}
-	if len(data) > maxResourceBytes {
-		return "", fmt.Errorf("%s is over the %d-byte read cap; process it with a script instead", name, maxResourceBytes)
 	}
 	return string(data), nil
 }

@@ -56,6 +56,9 @@ const (
 	// KindContext tags text injected into the system prompt. Source
 	// names its origin, such as a repository's AGENTS.md.
 	KindContext PluginKind = "context"
+	// KindExtension tags an extension a session can switch on or off;
+	// its tools are listed as tools.
+	KindExtension PluginKind = "extension"
 )
 
 // Described is the optional interface a kit-composable artifact may
@@ -99,13 +102,10 @@ func DescribeTool(t Tool) Plugin {
 	}
 }
 
-// firstSentence returns the leading sentence of s — text up to the
-// first period followed by a space or end of string. If no terminating
-// period exists, the whole string is returned. Tool definitions
-// frequently begin with a one-line summary followed by detailed
-// LLM-facing instructions; this surface produces the summary alone
-// for human-readable listings.
+// firstSentence returns a tool description's summary for a one-line
+// listing: its first sentence, or its first line when that ends sooner.
 func firstSentence(s string) string {
+	s, _, _ = strings.Cut(s, "\n")
 	rest := s
 	for {
 		i := strings.IndexByte(rest, '.')
@@ -189,6 +189,7 @@ var pluginKindOrder = []PluginKind{
 	KindProvider,
 	KindStore,
 	KindContext,
+	KindExtension,
 	KindTool,
 	KindCommand,
 }

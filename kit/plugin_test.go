@@ -203,13 +203,14 @@ func TestRenderPlugins_GroupsAndOrders(t *testing.T) {
 		{Kind: kit.KindProvider, Name: "openrouter", Description: "google/gemini-3.8-flash"},
 		{Kind: kit.KindStore, Name: "demarkus", Description: "Mark Protocol versioned memory"},
 		{Kind: kit.KindContext, Name: "AGENTS.md", Description: "project instructions", Source: "/repo/AGENTS.md"},
+		{Kind: kit.KindExtension, Name: "files", Description: "shell and file tools"},
 		{Kind: kit.KindTool, Name: "bash", Description: "Run a shell command", Source: "builtin"},
 		{Kind: kit.KindCommand, Name: "clear", Description: "Reset agent history", Source: "builtin"},
 	}
 
 	out := kit.RenderPlugins(plugins)
 
-	wantOrder := []string{"PROVIDER", "STORE", "CONTEXT", "TOOL", "COMMAND"}
+	wantOrder := []string{"PROVIDER", "STORE", "CONTEXT", "EXTENSION", "TOOL", "COMMAND"}
 	idx := 0
 	for _, header := range wantOrder {
 		pos := strings.Index(out[idx:], header)

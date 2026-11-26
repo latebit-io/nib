@@ -14,7 +14,7 @@ import (
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 )
 
-// TestKitWiring_ToolCallAndPark exercises the kit primitives nibster
+// TestKitWiring_ToolCallAndPark exercises the kit primitives nib
 // relies on: bash + memory tools registered through [kit.New], driven
 // by [headless.Runner] in single-shot mode against a mock provider that
 // issues a memory_publish tool call then a final text response. The
@@ -23,9 +23,9 @@ import (
 // page should land in the store, and the summary should contain the
 // final assistant text.
 //
-// This is the kit-boundary smoke nibster was designed to surface — if
+// This is the kit-boundary smoke nib was designed to surface — if
 // any tool-plumbing or event-ordering invariant breaks, the test fails
-// before nibster ever boots a real LLM.
+// before nib ever boots a real LLM.
 func TestKitWiring_ToolCallAndPark(t *testing.T) {
 	t.Parallel()
 

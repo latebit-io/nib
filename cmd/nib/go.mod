@@ -1,4 +1,4 @@
-module github.com/latebit-io/nib/cmd/nibster
+module github.com/latebit-io/nib/cmd/nib
 
 go 1.27
 

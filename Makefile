@@ -2,7 +2,7 @@ BIN_DIR := $(HOME)/.local/bin
 
 # Every Go module in the repo (each has its own go.mod). Library modules
 # first, binaries last. Per-module targets below loop over this list.
-MODULES := ai agent engine kit coding tui cmd/nib-code cmd/agent cmd/nibster
+MODULES := ai agent engine kit coding tui cmd/nib-code cmd/agent cmd/nib
 
 # Modules published for external consumers, in dependency order.
 # release.yml tags exactly these, in lockstep.
@@ -15,27 +15,27 @@ QUERY_LANGS := \
 	lua:github.com/tree-sitter-grammars/tree-sitter-lua \
 	yaml:github.com/tree-sitter-grammars/tree-sitter-yaml
 
-.PHONY: all build clean install uninstall test fmt fmt-check mod-tidy-check vet lint consumer-smoke api-check sync-queries run-nibster
+.PHONY: all build clean install uninstall test fmt fmt-check mod-tidy-check vet lint consumer-smoke api-check sync-queries run-nib
 
 all: build
 
 # Compile every module, then link the three binaries.
 build:
 	@set -e; for mod in $(MODULES); do echo "build $$mod"; (cd $$mod && go build ./...); done
-	mkdir -p cmd/nib-code/bin cmd/agent/bin cmd/nibster/bin
+	mkdir -p cmd/nib-code/bin cmd/agent/bin cmd/nib/bin
 	cd cmd/nib-code && go build -o bin/nib-code .
 	cd cmd/agent && go build -o bin/nib-agent .
-	cd cmd/nibster && go build -o bin/nibster .
+	cd cmd/nib && go build -o bin/nib .
 
 install: build
 	mkdir -p $(BIN_DIR)
 	ln -sf $(CURDIR)/cmd/nib-code/bin/nib-code $(BIN_DIR)/nib-code
 	ln -sf $(CURDIR)/cmd/agent/bin/nib-agent $(BIN_DIR)/nib-agent
-	ln -sf $(CURDIR)/cmd/nibster/bin/nibster $(BIN_DIR)/nibster
+	ln -sf $(CURDIR)/cmd/nib/bin/nib $(BIN_DIR)/nib
 	@echo "Installed. Ensure $(BIN_DIR) is in PATH."
 
 uninstall:
-	rm -f $(BIN_DIR)/nib-code $(BIN_DIR)/nib-agent $(BIN_DIR)/nibster
+	rm -f $(BIN_DIR)/nib-code $(BIN_DIR)/nib-agent $(BIN_DIR)/nib
 
 test:
 	@set -e; for mod in $(MODULES); do echo "test $$mod"; (cd $$mod && go test -race ./...); done
@@ -77,12 +77,12 @@ api-check:
 clean:
 	rm -f cmd/nib-code/bin/*
 	rm -f cmd/agent/bin/*
-	rm -f cmd/nibster/bin/*
+	rm -f cmd/nib/bin/*
 
-# Run nibster from source. Pass extra flags via ARGS, e.g.:
-#   make run-nibster ARGS="-m 'list files' -debug"
-run-nibster:
-	cd cmd/nibster && go run . $(ARGS)
+# Run nib from source. Pass extra flags via ARGS, e.g.:
+#   make run-nib ARGS="-m 'list files' -debug"
+run-nib:
+	cd cmd/nib && go run . $(ARGS)
 
 # Re-vendor highlights.scm for every language in QUERY_LANGS, resolving the
 # exact on-disk path from each module's current pinned version. Run after

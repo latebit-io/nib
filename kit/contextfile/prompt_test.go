@@ -1,6 +1,7 @@
 package contextfile
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,15 +56,25 @@ func TestPrompt_EscapesPath(t *testing.T) {
 	}
 }
 
-func TestPlugins_OneEntryPerFile(t *testing.T) {
-	got := Plugins([]File{{Path: "/repo/AGENTS.md", Content: "x"}})
-	if len(got) != 1 {
-		t.Fatalf("entries = %d, want 1", len(got))
+// TestPlugins_NamesByPathUnderRoot: nested files would all be named
+// AGENTS.md by base name, so each entry carries its path under root.
+func TestPlugins_NamesByPathUnderRoot(t *testing.T) {
+	root := filepath.FromSlash("/repo")
+	got := Plugins(root, []File{
+		{Path: filepath.Join(root, "AGENTS.md")},
+		{Path: filepath.Join(root, "pkg", "AGENTS.md")},
+		{Path: filepath.FromSlash("/elsewhere/AGENTS.md")},
+	})
+	want := []string{"AGENTS.md", "pkg/AGENTS.md", "AGENTS.md"}
+	if len(got) != len(want) {
+		t.Fatalf("entries = %d, want %d", len(got), len(want))
 	}
-	if p := got[0]; p.Kind != kit.KindContext || p.Name != "AGENTS.md" || p.Source != "/repo/AGENTS.md" {
-		t.Errorf("entry = %+v, want the context kind, base name and full path", p)
+	for i, p := range got {
+		if p.Kind != kit.KindContext || p.Name != want[i] {
+			t.Errorf("entry %d = %s %q, want context %q", i, p.Kind, p.Name, want[i])
+		}
 	}
-	if got := Plugins(nil); len(got) != 0 {
-		t.Errorf("Plugins(nil) = %v, want none", got)
+	if got[1].Source != filepath.Join(root, "pkg", "AGENTS.md") {
+		t.Errorf("Source = %q, want the full path", got[1].Source)
 	}
 }

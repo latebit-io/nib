@@ -1,15 +1,5 @@
-// Command nibster is the kit-boundary smoke test: a general-purpose CLI
-// agent built on kit/, ai/, and stdlib. Single-shot; writes session
-// findings to a demarkus memory store and maintains an index of past runs.
-//
-// Usage:
-//
-//	nibster -m "<message>"      run an agent with the given prompt
-//	nibster --list              print the session index
-//	nibster --show <id>         print a specific session's memory page
-//
-// nibster intentionally has no dependency on coding/, engine/, or tui/.
-// The depguard rule in .golangci.yml enforces that boundary.
+// Command nib is the base agent: the default assembly of kit blocks,
+// built on kit/, ai/ and stdlib only. See README.md for usage.
 package main
 
 import (
@@ -28,6 +18,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llmconfig"
+	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/memory/demarkus"
 )
@@ -58,22 +49,48 @@ func main() {
 
 // config holds parsed command-line arguments.
 type config struct {
-	message string
-	root    string
-	list    bool
-	show    string
-	plugins bool
-	debug   bool
+	message  string
+	root     string
+	list     bool
+	show     string
+	plugins  bool
+	trustMCP bool
+	with     string
+	without  string
+	debug    bool
+}
+
+// interactive reports whether no flag asked for anything else: the
+// default is a session in the terminal.
+func (c config) interactive() bool {
+	return c.message == "" && !c.list && c.show == "" && !c.plugins && !c.trustMCP
+}
+
+// switches returns the extensions this run's flags switch on and off.
+func (c config) switches() extension.Switches {
+	list := func(s string) []string {
+		var names []string
+		for name := range strings.SplitSeq(s, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				names = append(names, name)
+			}
+		}
+		return names
+	}
+	return extension.Switches{Enable: list(c.with), Disable: list(c.without)}
 }
 
 func parseArgs() config {
 	var c config
-	flag.StringVar(&c.message, "m", "", "Message — runs nibster headlessly with this prompt")
+	flag.StringVar(&c.message, "m", "", "Message: runs nib once with this prompt instead of starting a session")
 	flag.StringVar(&c.root, "root", "", "Working directory for bash and demarkus root (default: cwd)")
 	flag.BoolVar(&c.list, "list", false, "Print the session index and exit")
 	flag.StringVar(&c.show, "show", "", "Print a specific session's memory page and exit")
 	flag.BoolVar(&c.plugins, "plugins", false, "Print the wired plug-in manifest (provider, store, tools, commands) and exit")
-	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/nibster-debug.log")
+	flag.StringVar(&c.with, "with", "", "Extensions to switch on for this run, comma-separated")
+	flag.StringVar(&c.without, "without", "", "Extensions to switch off for this run, comma-separated")
+	flag.BoolVar(&c.trustMCP, "trust-mcp", false, "Allow the MCP servers this project's .mcp.json names, and exit")
+	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/nib-debug.log")
 	flag.Parse()
 	return c
 }
@@ -88,7 +105,23 @@ func run() error {
 		return setupErr("resolve root: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Needs no memory store and no model: do it before either starts.
+	if cfg.trustMCP {
+		return trustMCP(root)
+	}
+
+	// An interactive session takes Ctrl-C itself: it stops a run
+	// without ending the session.
+	signals := []os.Signal{syscall.SIGTERM}
+	var interrupt chan os.Signal
+	if cfg.interactive() {
+		interrupt = make(chan os.Signal, 1)
+		signal.Notify(interrupt, os.Interrupt)
+		defer signal.Stop(interrupt)
+	} else {
+		signals = append(signals, os.Interrupt)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	defer stop()
 
 	mem, err := demarkus.Open(ctx, root)
@@ -101,19 +134,27 @@ func run() error {
 		}
 	}()
 
+	// Flags decide over the configuration file.
+	switches := configuredSwitches().Then(cfg.switches())
 	switch {
 	case cfg.plugins:
-		return printPlugins(root, mem.Store)
+		return printPlugins(ctx, root, mem.Store, switches)
 	case cfg.list:
 		return listSessions(ctx, mem.Store)
 	case cfg.show != "":
 		return showSession(ctx, mem.Store, cfg.show)
-	case cfg.message != "":
-		return runAgent(ctx, root, mem.Store, cfg.message)
+	case cfg.interactive():
+		return runInteractive(ctx, root, mem.Store, switches, interrupt)
 	default:
-		flag.Usage()
-		return setupErr("provide -m <message>, --list, --show <id>, or --plugins")
+		return runAgent(ctx, root, mem.Store, cfg.message, switches)
 	}
+}
+
+// warn reports a problem the run survives. slog alone would hide it:
+// without --debug it is discarded.
+func warn(what string, err error) {
+	fmt.Fprintf(os.Stderr, "warning: %s: %v\n", what, err)
+	slog.Warn(what, "err", err)
 }
 
 // setupLogging configures slog. Debug mode writes to a per-user cache
@@ -127,7 +168,7 @@ func setupLogging(debug bool) {
 	if !debug {
 		return
 	}
-	f, err := openDebugLog("nibster-debug.log")
+	f, err := openDebugLog("nib-debug.log")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v — proceeding without debug log\n", err)
 		return

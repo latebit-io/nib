@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
+
+	"github.com/latebit-io/nib/kit/internal/atomicfile"
 )
 
 // registryVersion is the schema version of registry.json. Bumped only
@@ -98,20 +99,12 @@ func loadRegistry(path string) (*Registry, error) {
 // crash mid-write cannot corrupt the ledger.
 func (r *Registry) save(path string) error {
 	r.Version = registryVersion
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("pluginstore: create store dir: %w", err)
-	}
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return fmt.Errorf("pluginstore: marshal registry: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("pluginstore: write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp) // best-effort cleanup of the orphaned temp file
-		return fmt.Errorf("pluginstore: rename %s → %s: %w", tmp, path, err)
+	if err := atomicfile.Write(path, data, 0o700, 0o600); err != nil {
+		return fmt.Errorf("pluginstore: save registry: %w", err)
 	}
 	return nil
 }

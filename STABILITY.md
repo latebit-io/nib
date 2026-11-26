@@ -13,7 +13,7 @@ happens when that part changes, and when v1 will be considered.
 | `kit`   | package `kit` and package `kit/event`  |
 
 Every other `kit` package is plumbing for nib's own binaries (nib-code,
-nib-agent, nibster). It is exported so those binaries can share it, and it can
+nib-agent, nib). It is exported so those binaries can share it, and it can
 change in any release.
 
 `coding`, `tui`, `engine`, and `cmd/*` are not released and carry no promise.

@@ -490,43 +490,30 @@ func PathOf(args string) string {
 	return call.Path
 }
 
-// Resolve returns the file a call's path reaches, relative to root and
-// slash-separated: against dir when relative, with links followed. A
-// grant is judged on that, not on what the call wrote. Outside root is an error.
+// Resolve returns the file a call's path reaches from dir, relative to
+// root and slash-separated. It is found as a write finds its file, link
+// by link, so a grant judged on it holds for the write too.
 func Resolve(root, dir, name string) (string, error) {
-	realRoot, err := filepath.EvalSymlinks(root)
+	t, err := New(root, dir)
 	if err != nil {
-		return "", fmt.Errorf("files: %w", err)
+		return "", err
 	}
-	p := filepath.FromSlash(name)
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(dir, p)
-	}
-	real, err := existingTarget(filepath.Clean(p))
-	if err != nil {
-		return "", fmt.Errorf("files: %w", err)
-	}
-	rel, err := filepath.Rel(realRoot, real)
-	if err != nil || !filepath.IsLocal(rel) {
-		return "", fmt.Errorf("%s is outside the project", name)
-	}
-	return filepath.ToSlash(rel), nil
+	defer func() { _ = t.Close() }() // a directory handle only read from
+	return t.resolve(name)
 }
 
-// existingTarget follows the links of p, or of its nearest existing
-// parent for a file not written yet.
-func existingTarget(p string) (string, error) {
-	real, err := filepath.EvalSymlinks(p)
-	if err == nil || !errors.Is(err, fs.ErrNotExist) {
-		return real, err
-	}
-	parent := filepath.Dir(p)
-	if parent == p {
-		return "", err
-	}
-	realParent, err := existingTarget(parent)
+// resolve is [Resolve] over an open root.
+func (t *Tools) resolve(name string) (string, error) {
+	p, err := t.rel(name)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(realParent, filepath.Base(p)), nil
+	if p == "." {
+		return ".", nil
+	}
+	final, _, err := t.target(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(final), nil
 }

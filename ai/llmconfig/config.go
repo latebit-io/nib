@@ -151,13 +151,18 @@ func plainHTTP(base string) error {
 		return nil // https, or a URL the request itself will reject
 	}
 	host := u.Hostname()
+	refused := fmt.Errorf("refusing to send credentials over plain http to %s; use https", host)
+	// An address first: an IPv6 one has no dot but may be anywhere.
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() {
+			return nil
+		}
+		return refused
+	}
 	if host == "localhost" || !strings.Contains(host, ".") {
 		return nil
 	}
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
-		return nil
-	}
-	return fmt.Errorf("refusing to send credentials over plain http to %s; use https", host)
+	return refused
 }
 
 // SetAPIKey sets the API key on the resolved configuration.

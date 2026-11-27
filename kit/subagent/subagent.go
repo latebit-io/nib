@@ -73,7 +73,7 @@ type task struct {
 // newTask builds one child kind. A fork's task argument is optional: its
 // instructions are already the task.
 func newTask(name, description string, allowed, disallowed []string, t task) (*task, error) {
-	grants, err := nibGrants(allowed, disallowed)
+	grants, err := nibGrants(allowed, disallowed, t.host.Resolve)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func ForkTools(skills []skill.Skill, host Host) ([]kit.Tool, []error) {
 
 // nibGrants parses a definition's tool grants, naming tools as nib does
 // as well as Claude Code: "Read" grants read_file.
-func nibGrants(allowed, disallowed []string) (*toolperm.Matcher, error) {
+func nibGrants(allowed, disallowed []string, resolve func(string) (string, error)) (*toolperm.Matcher, error) {
 	parse := func(raw []string) ([]toolperm.Rule, error) {
 		rules, err := toolperm.ParseField(raw)
 		if err != nil {
@@ -152,6 +152,14 @@ func nibGrants(allowed, disallowed []string) (*toolperm.Matcher, error) {
 		}
 		var out []toolperm.Rule
 		for _, r := range rules {
+			// A file pattern is resolved as a call's path is, so ./x.key and
+			// x.key match alike. One outside the project stays as written:
+			// a call there is refused before any grant is read.
+			if r.Arg != "" && !r.IsShell() {
+				if target, err := fileTarget(r.Arg, resolve); err == nil {
+					r.Arg = target
+				}
+			}
 			out = append(out, r)
 			for _, nib := range hookmap.NibNames(r.Tool) {
 				alias := r
@@ -265,7 +273,7 @@ func (s *scoped) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResul
 		return failed("this agent may run only single commands that its grants name")
 	}
 	if name != "bash" {
-		target, err := s.target(arg)
+		target, err := fileTarget(arg, s.resolve)
 		if err != nil {
 			return failed("%v", err)
 		}
@@ -277,11 +285,12 @@ func (s *scoped) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResul
 	return s.Tool.Execute(ctx, call)
 }
 
-// target is the file a path reaches, as a grant names files: src/../x
-// is x, and a link is the file it points to.
-func (s *scoped) target(p string) (string, error) {
-	if s.resolve != nil {
-		return s.resolve(p)
+// fileTarget is the file a path reaches, as grants name files: src/../x
+// is x, and a link is the file it points to. Without resolve the path is
+// only cleaned.
+func fileTarget(p string, resolve func(string) (string, error)) (string, error) {
+	if resolve != nil {
+		return resolve(p)
 	}
 	clean := path.Clean(filepath.ToSlash(p))
 	if clean == ".." || strings.HasPrefix(clean, "../") {

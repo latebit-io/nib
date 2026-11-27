@@ -248,6 +248,7 @@ func parseOutput(out string) Result {
 	return res
 }
 
+// capBuffer keeps the first limit bytes of a hook's output, bounding
 // the memory and prompt cost of a noisy hook.
 type capBuffer struct {
 	b         bytes.Buffer
@@ -255,6 +256,8 @@ type capBuffer struct {
 	truncated bool
 }
 
+// Write keeps what fits and reports all of p written, so the hook is
+// never stopped by a short write.
 func (w *capBuffer) Write(p []byte) (int, error) {
 	if rem := w.limit - w.b.Len(); rem > 0 {
 		if len(p) <= rem {
@@ -269,6 +272,7 @@ func (w *capBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// String returns the kept output, marked when some was dropped.
 func (w *capBuffer) String() string {
 	if w.truncated {
 		return w.b.String() + fmt.Sprintf("\n[output truncated at %d bytes]", w.limit)

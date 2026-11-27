@@ -197,9 +197,11 @@ func TestSchemaFor_SharedTypeIsNotACycle(t *testing.T) {
 // schema with an empty required array.
 func TestSchemaFor_EmptyStruct(t *testing.T) {
 	schema, err := SchemaFor[struct{}]()
-	got, _ := json.Marshal(schema)
-	if want := `{"type":"object","properties":{},"required":[]}`; err != nil || string(got) != want {
-		t.Errorf("schema = %s, %v; want %s", got, err, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(mustJSON(t, schema)), `{"type":"object","properties":{},"required":[]}`; got != want {
+		t.Errorf("schema = %s; want %s", got, want)
 	}
 }
 

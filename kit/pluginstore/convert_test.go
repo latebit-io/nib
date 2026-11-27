@@ -356,3 +356,75 @@ func TestStore_TrustStaysWithItsSource(t *testing.T) {
 		t.Errorf("install from another source: %+v, %v; want the same id, not trusted", swapped, err)
 	}
 }
+
+// TestStore_RelativeSourceIsItsDirectory: "." installed from two
+// directories is two sources, so trust does not pass between them.
+func TestStore_RelativeSourceIsItsDirectory(t *testing.T) {
+	first, other := t.TempDir(), t.TempDir()
+	for _, dir := range []string{first, other} {
+		writeFile(t, filepath.Join(dir, ".claude-plugin", "plugin.json"), `{"name":"helper"}`)
+	}
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	t.Chdir(first)
+	p, err := st.Install(ctx, LocalSource("."), InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(p.Source.Path) {
+		t.Errorf("recorded source %q; want it absolute", p.Source.Path)
+	}
+	if err := st.SetTrusted(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(other)
+	if again, err := st.Install(ctx, LocalSource("."), InstallOptions{}); err != nil || again.Trusted {
+		t.Errorf("install of . from another directory: trusted=%v, %v; want not trusted", again.Trusted, err)
+	}
+}
+
+// TestStore_FailedReplaceLeavesNoTrust: when a replacement from another
+// source fails part way, the registry on disk no longer trusts the plugin.
+func TestStore_FailedReplaceLeavesNoTrust(t *testing.T) {
+	t.Parallel()
+	first, other := t.TempDir(), t.TempDir()
+	for _, dir := range []string{first, other} {
+		writeFile(t, filepath.Join(dir, ".claude-plugin", "plugin.json"), `{"name":"helper"}`)
+	}
+	root := t.TempDir()
+	st, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	p, err := st.Install(ctx, LocalSource(first), InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetTrusted(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// Conversion stages under converted/; a read-only one fails the promotion.
+	conv := filepath.Join(root, "converted")
+	if err := os.Chmod(conv, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(conv, 0o755); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := st.Install(ctx, LocalSource(other), InstallOptions{}); err == nil {
+		t.Skip("directory permissions are not enforced here (running as root?)")
+	}
+	reloaded, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := reloaded.Get(p.ID); !ok || got.Trusted {
+		t.Errorf("after a failed replacement the registry has %+v; want the plugin untrusted", got)
+	}
+}

@@ -759,6 +759,7 @@ func TestValidate(t *testing.T) {
 	for base, ok := range map[string]bool{
 		"https://api.example.com/v1": true, "http://localhost:11434/v1": true, "http://127.0.0.1:8000/v1": true,
 		"http://192.168.1.20:8000/v1": true, "http://gpu-box:8000/v1": true, "http://api.example.com/v1": false,
+		"http://[::1]:8000/v1": true, "http://[fd00::5]/v1": true, "http://[2606:4700:4700::1111]/v1": false, "http://8.8.8.8/v1": false,
 	} {
 		r := &Resolved{Profile: "p", BaseURL: base, Model: "m", apiKey: "k"}
 		if (r.Validate() == nil) != ok || r.HasProvider() != ok {

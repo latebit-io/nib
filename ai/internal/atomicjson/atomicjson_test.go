@@ -26,8 +26,8 @@ func TestWrite_RoundTripAndNoTempLeft(t *testing.T) {
 	if out["a"] != 1 {
 		t.Errorf("round trip = %v; want a=1", out)
 	}
-	if left, _ := filepath.Glob(filepath.Join(dir, "nested", "*.tmp")); len(left) != 0 {
-		t.Errorf("temp files left behind: %v", left)
+	if left, err := filepath.Glob(filepath.Join(dir, "nested", "*.tmp")); err != nil || len(left) != 0 {
+		t.Errorf("temp files left behind: %v, %v", left, err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestWrite_ConcurrentWritersLeaveValidJSON(t *testing.T) {
 	if v := out["n"]; v < 0 || v >= n {
 		t.Errorf("final n = %d; want a complete write from one of the %d writers", v, n)
 	}
-	if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) != 0 {
-		t.Errorf("temp files left behind: %v", left)
+	if left, err := filepath.Glob(filepath.Join(dir, "*.tmp")); err != nil || len(left) != 0 {
+		t.Errorf("temp files left behind: %v, %v", left, err)
 	}
 }

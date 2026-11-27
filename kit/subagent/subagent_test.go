@@ -3,8 +3,10 @@ package subagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/agentdef"
 	"github.com/latebit-io/nib/kit/skill"
+	"github.com/latebit-io/nib/kit/tools/files"
 )
 
 // tool is a fake tool that records its calls.
@@ -202,5 +205,49 @@ func TestPreloadedSkills(t *testing.T) {
 	tools[0].Execute(context.Background(), call(`{"task":"x"}`))
 	if sys := provider.Requests()[0].Messages[0].Content; !strings.Contains(sys, "You help.\n\n## Skills\n\n### policy\n\nNever push.") {
 		t.Errorf("system prompt = %q", sys)
+	}
+}
+
+// TestGrants_FilePatterns: a file pattern and a call's path are compared
+// as the same file: ./x and x alike, and a pattern through a linked
+// directory names where it points.
+func TestGrants_FilePatterns(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".vault"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".vault", filepath.Join(root, "secrets")); err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(p string) (string, error) { return files.Resolve(root, root, p) }
+	cases := []struct {
+		name        string
+		allow, deny []string
+		resolve     func(string) (string, error)
+		paths       []string
+	}{
+		{"a ./ deny blocks both spellings", []string{"Read"}, []string{"Read(./private.key)"}, nil, []string{"private.key", "./private.key", "src/a.go"}},
+		{"a ./ allow admits plain paths", []string{"Read(./src/*)"}, nil, nil, []string{"src/a.go", "private.key"}},
+		{"the same with a resolver", []string{"Read"}, []string{"Read(./private.key)"}, resolve, []string{"./private.key", "src/a.go"}},
+		{"a deny through a linked directory", []string{"Read"}, []string{"Read(secrets/*)"}, resolve, []string{".vault/key", "secrets/key", "src/a.go"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls, stopped []string
+			var reqs []llm.ToolCall
+			for i, p := range tc.paths {
+				reqs = append(reqs, llmtest.Call(strconv.Itoa(i), "read_file", fmt.Sprintf(`{"path":%q}`, p)))
+			}
+			h := host(llmtest.NewScripted(llmtest.ToolCalls(reqs...), llmtest.Text("done")), []kit.Tool{tool("read_file", &calls)}, &stopped)
+			h.Resolve = tc.resolve
+			tools, errs := AgentTools([]agentdef.Definition{{Name: "a", Description: "x", AllowedTools: tc.allow, DisallowedTools: tc.deny}}, h)
+			if len(errs) != 0 {
+				t.Fatal(errs)
+			}
+			tools[0].Execute(context.Background(), call(`{"task":"read"}`))
+			if got := strings.Join(calls, "|"); got != "read_file src/a.go" {
+				t.Errorf("read %q; want only src/a.go", got)
+			}
+		})
 	}
 }

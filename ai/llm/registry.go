@@ -171,8 +171,8 @@ func (r *ModelRegistry) filterModels(c *registryCache, providerID string) []Mode
 	return out
 }
 
-// modelsDevResponse is the top-level structure of https://models.dev/api.json.
-// Each key is a provider ID mapping to provider metadata.
+// modelsDevProvider is one provider in https://models.dev/api.json, whose
+// top level maps provider IDs to these.
 type modelsDevProvider struct {
 	ID     string                    `json:"id"`
 	Name   string                    `json:"name"`

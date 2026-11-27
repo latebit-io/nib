@@ -1,6 +1,7 @@
 package llmconfig
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -704,5 +705,35 @@ func assertResolved(t *testing.T, got *Resolved, tc resolveTestCase) {
 	}
 	if got.PromptCaching != tc.wantCaching {
 		t.Errorf("PromptCaching = %v, want %v", got.PromptCaching, tc.wantCaching)
+	}
+}
+
+// TestNewProvider_API: the profile's api picks the wire format; without
+// one the base URL decides; an unknown one builds nothing.
+func TestNewProvider_API(t *testing.T) {
+	for _, c := range []struct {
+		api, base string
+		want      string
+	}{
+		{"", "https://api.example.com/v1", "*llm.AgentAPI"},
+		{"", "https://api.anthropic.com/v1", "*llm.AnthropicAPI"},
+		{APIChat, "https://api.anthropic.com/v1", "*llm.AgentAPI"},
+		{APIMessages, "https://proxy.example/v1", "*llm.AnthropicAPI"},
+		{APIResponses, "https://api.example.com/v1", "*llm.ResponsesAPI"},
+		{"carrier-pigeon", "https://api.example.com/v1", "<nil>"},
+	} {
+		r := &Resolved{BaseURL: c.base, Model: "m", API: c.api, apiKey: "k"}
+		if got := fmt.Sprintf("%T", r.NewProvider()); got != c.want {
+			t.Errorf("api %q at %s: %s, want %s", c.api, c.base, got, c.want)
+		}
+	}
+}
+
+// TestResolveProfile_API: a profile's api survives merging and resolution.
+func TestResolveProfile_API(t *testing.T) {
+	cfg := &Config{Profiles: map[string]Profile{"open": {BaseURL: "https://x/v1"}}}
+	mergeConfigs(cfg, &Config{Profiles: map[string]Profile{"open": {API: APIResponses}}})
+	if r := ResolveProfile(cfg, "open"); r == nil || r.API != APIResponses || r.BaseURL != "https://x/v1" {
+		t.Errorf("resolved = %+v", r)
 	}
 }

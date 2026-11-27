@@ -26,13 +26,12 @@ func errBody(data string, err error) io.ReadCloser {
 // would otherwise treat possibly partial tool calls as a completion — and
 // the incomplete event pending at the failure is discarded.
 func TestCodexSSE_ScannerErrorEmitsTerminalErr(t *testing.T) {
-	c := NewCodexAPI("m", staticAuth{}, "")
 	body := errBody(
 		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"+
 			"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"f\"}}\n",
 		errors.New("connection reset"))
 	ch := make(chan StreamEvent, 8)
-	c.readCodexSSE(context.Background(), body, ch)
+	readResponsesSSE(context.Background(), body, ch, codexProviderName)
 	close(ch)
 
 	last, tokens := terminalOf(t, collectStream(ch))

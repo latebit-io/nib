@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -29,13 +30,15 @@ const (
 	SubagentStop Event = "SubagentStop"
 	// PreCompact fires before conversation history is compacted.
 	PreCompact Event = "PreCompact"
+	// SessionEnd fires once when a session ends.
+	SessionEnd Event = "SessionEnd"
 )
 
 // known is the set of events the engine can emit. Others parse fine but
 // are reported as unsupported by consumers.
 var known = map[Event]bool{
 	PreToolUse: true, PostToolUse: true, UserPromptSubmit: true,
-	SessionStart: true, Stop: true, SubagentStop: true, PreCompact: true,
+	SessionStart: true, Stop: true, SubagentStop: true, PreCompact: true, SessionEnd: true,
 }
 
 // Known reports whether the engine recognizes (and can emit) the event.
@@ -67,10 +70,14 @@ type Hook struct {
 	// authored form — a bare string runs via the shell, an argv array runs
 	// without one (see [CommandSpec]).
 	Command CommandSpec `json:"command"`
+	// Args, when set, run Command as a program with these arguments and
+	// no shell (Claude Code's exec form).
+	Args []string `json:"args,omitempty"`
 	// Env are extra environment variables for a command hook.
 	Env map[string]string `json:"env,omitempty"`
-	// TimeoutMS bounds a command/http hook (0 = caller default).
-	TimeoutMS int `json:"timeout,omitempty"`
+	// Timeout bounds a command/http hook, in seconds as in Claude Code
+	// (0 = caller default).
+	Timeout int `json:"timeout,omitempty"`
 	// URL is the endpoint for [HTTP] hooks.
 	URL string `json:"url,omitempty"`
 	// Server / Tool name an [MCPTool] hook.
@@ -133,14 +140,15 @@ func (c CommandSpec) MarshalJSON() ([]byte, error) {
 
 // Group binds a tool-name matcher to a set of hooks under one event.
 type Group struct {
-	// Matcher is a regular expression tested against the tool name. An
-	// empty matcher matches every tool (and non-tool events, where the
-	// matcher is irrelevant).
+	// Matcher selects tools as Claude Code does: empty or "*" matches
+	// every tool; names (letters, digits, _ - and spaces) separated by |
+	// or , match exactly; anything else is an unanchored regex.
 	Matcher string `json:"matcher"`
 	// Hooks run when the event fires and Matcher matches.
 	Hooks []Hook `json:"hooks"`
 
-	re *regexp.Regexp // compiled Matcher; nil ⇒ compile lazily
+	re    *regexp.Regexp // compiled Matcher; nil ⇒ compile lazily
+	names []string       // a matcher of names, split by compile
 }
 
 // matcherCache memoizes lazily compiled matchers for Groups built by
@@ -148,13 +156,18 @@ type Group struct {
 // cheap without a shared mutable Group.
 var matcherCache sync.Map // pattern → *regexp.Regexp
 
-// Matches reports whether the group applies to a call of the named tool.
-// An empty matcher always matches; otherwise the matcher regex is tested
-// (unanchored) against the tool name. A Group not produced by [Parse]
-// compiles its matcher on first use; an invalid pattern never matches.
+// Matches reports whether the group applies to a call of the named tool
+// (see [Group.Matcher]). A Group not produced by [Parse] compiles its
+// matcher on first use; an invalid pattern never matches.
 func (g Group) Matches(tool string) bool {
-	if g.Matcher == "" {
+	if g.Matcher == "" || g.Matcher == "*" {
 		return true
+	}
+	if g.names != nil {
+		return slices.Contains(g.names, tool)
+	}
+	if names, ok := nameList(g.Matcher); ok {
+		return slices.Contains(names, tool)
 	}
 	re := g.re
 	if re == nil {
@@ -171,10 +184,33 @@ func (g Group) Matches(tool string) bool {
 	return re.MatchString(tool)
 }
 
-// compile builds the matcher regex. A blank matcher leaves re nil
-// (match-all); an invalid regex is an error.
+// nameList splits a matcher made only of names into them; ok is false
+// for a matcher that is a regex.
+func nameList(matcher string) (names []string, ok bool) {
+	for _, c := range matcher {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_' || c == '-' || c == ' ' || c == ',' || c == '|':
+		default:
+			return nil, false
+		}
+	}
+	for name := range strings.FieldsFuncSeq(matcher, func(c rune) bool { return c == '|' || c == ',' }) {
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, true
+}
+
+// compile builds the matcher regex. A matcher of names, or one that
+// matches everything, needs none; an invalid regex is an error.
 func (g *Group) compile() error {
-	if g.Matcher == "" {
+	if g.Matcher == "" || g.Matcher == "*" {
+		return nil
+	}
+	if names, ok := nameList(g.Matcher); ok {
+		g.names = names
 		return nil
 	}
 	re, err := regexp.Compile(g.Matcher)

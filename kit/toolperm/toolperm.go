@@ -237,6 +237,12 @@ func (m *Matcher) GrantsTool(tool string) bool {
 	return false
 }
 
+// Admits reports whether a tool is offered at all: with an allow list,
+// only one it names; in either case, none it denies outright.
+func (m *Matcher) Admits(tool string) bool {
+	return !m.DeniesTool(tool) && (!m.HasAllowList() || m.GrantsTool(tool))
+}
+
 // DeniesTool reports whether the tool is denied outright — a bare deny
 // rule names it with no argument pattern (e.g. `Write`). An
 // argument-scoped deny like `Bash(rm *)` does NOT deny the tool itself,

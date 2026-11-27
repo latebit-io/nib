@@ -113,8 +113,7 @@ func Restrict(e Extension, m *toolperm.Matcher) Extension {
 		return e
 	}
 	e.Toolset.Tools = slices.DeleteFunc(slices.Clone(e.Toolset.Tools), func(t kit.Tool) bool {
-		name := t.Definition().Function.Name
-		return m.DeniesTool(name) || (m.HasAllowList() && !m.GrantsTool(name))
+		return !m.Admits(t.Definition().Function.Name)
 	})
 	return e
 }

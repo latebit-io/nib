@@ -63,11 +63,11 @@ func TestChatRequest_ReasoningEffortSerialization(t *testing.T) {
 }
 
 func TestCodexRequest_ReasoningSerialization(t *testing.T) {
-	data, _ := json.Marshal(codexRequest{Model: "m", Reasoning: &codexReasoning{Effort: "medium"}})
+	data, _ := json.Marshal(responsesRequest{Model: "m", Reasoning: &responsesReasoning{Effort: "medium"}})
 	if !strings.Contains(string(data), `"reasoning":{"effort":"medium"}`) {
 		t.Errorf("want reasoning object in codex request; got %s", data)
 	}
-	data, _ = json.Marshal(codexRequest{Model: "m"})
+	data, _ = json.Marshal(responsesRequest{Model: "m"})
 	if strings.Contains(string(data), "reasoning") {
 		t.Errorf("nil reasoning must be omitted; got %s", data)
 	}

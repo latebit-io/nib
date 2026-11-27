@@ -2,6 +2,7 @@ package pluginstore
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -144,4 +145,31 @@ func gitRefString(base, ref string) string {
 		return base
 	}
 	return base + "@" + ref
+}
+
+// ParseSource reads a plugin source from one command-line word: an
+// existing path (~ and $VARS expanded), a git URL ("://", "git@"), a
+// path starting with . or /, or a GitHub "owner/repo".
+func ParseSource(s string) (Source, error) {
+	if s == "~" || strings.HasPrefix(s, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return Source{}, fmt.Errorf("pluginstore: resolve home dir: %w", err)
+		}
+		s = home + strings.TrimPrefix(s, "~")
+	}
+	s = os.ExpandEnv(s)
+	// An existing path wins: a relative dir can look like owner/repo.
+	if _, err := os.Stat(s); err == nil {
+		return LocalSource(s), nil
+	}
+	switch {
+	case strings.Contains(s, "://"), strings.HasPrefix(s, "git@"):
+		return GitSource(s, ""), nil
+	case strings.HasPrefix(s, "."), strings.HasPrefix(s, "/"):
+		return LocalSource(s), nil
+	case strings.Count(s, "/") == 1 && !strings.Contains(s, " "):
+		return GitHubSource(s, ""), nil
+	}
+	return Source{}, fmt.Errorf("pluginstore: cannot tell what %q is (use a path, owner/repo, or a git URL)", s)
 }

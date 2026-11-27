@@ -588,3 +588,41 @@ func TestRun_ServerTextCannotForgeLines(t *testing.T) {
 	}
 	h.ended()
 }
+
+// TestRun_PromptAndStopHooks: a prompt hook changes or refuses what is
+// sent; a stop hook sends the agent back to work, at most a few times.
+func TestRun_PromptAndStopHooks(t *testing.T) {
+	provider := llmtest.NewScripted(llmtest.Text("first"), llmtest.Text("second"), llmtest.Text("third"))
+	stops := 0
+	h := start(t, newAgentWith(t, provider), "", func(r *REPL, _ *command.Registry) {
+		r.onPrompt = func(_ context.Context, text string) (string, error) {
+			if text == "forbidden" {
+				return "", errors.New("a hook blocked the prompt: no")
+			}
+			return text + " (with context)", nil
+		}
+		r.onStop = func(_ context.Context, answer string, active bool) string {
+			stops++
+			if answer == "first" && !active {
+				return "check your work"
+			}
+			return ""
+		}
+	})
+	h.typeLine("forbidden")
+	h.see("error: a hook blocked the prompt: no")
+	h.typeLine("hi")
+	h.see("(a hook asks the agent to go on: check your work)")
+	h.see("second\n> ")
+	reqs := provider.Requests()
+	if len(reqs) != 2 || reqs[0].Messages[0].Content != "hi (with context)" || reqs[1].Messages[len(reqs[1].Messages)-1].Content != "check your work" {
+		t.Fatalf("requests = %+v", reqs)
+	}
+	if stops != 2 {
+		t.Errorf("stop hook ran %d times, want twice (after each answer)", stops)
+	}
+	if err := h.keys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.ended()
+}

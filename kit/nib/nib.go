@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
@@ -23,7 +24,10 @@ import (
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/meter"
 	"github.com/latebit-io/nib/kit/permission"
+	"github.com/latebit-io/nib/kit/pluginhooks"
+	"github.com/latebit-io/nib/kit/pluginstore"
 	"github.com/latebit-io/nib/kit/skill"
+	"github.com/latebit-io/nib/kit/subagent"
 	memorytools "github.com/latebit-io/nib/kit/tools/memory"
 	"github.com/latebit-io/nib/kit/truncation"
 )
@@ -46,6 +50,14 @@ type Options struct {
 	// MCPTokens are the person's sign-ins to HTTP servers. Nil means a
 	// server that asks for one does not start.
 	MCPTokens *mcp.TokenStore
+	// Plugins are the installed plugins. Their skills load; a trusted
+	// plugin's MCP servers, hooks and agents too. Nil means none.
+	Plugins *pluginstore.Store
+	// SessionID names the session to hooks.
+	SessionID string
+	// ProviderFor builds a provider for a subagent that names its own
+	// model or effort. Nil means such a subagent cannot start.
+	ProviderFor func(model, effort string) (llm.Provider, error)
 	// Extensions are the compiled extensions the binary offers.
 	Extensions *extension.Registry
 	// Switches turns extensions on and off for this session.
@@ -81,6 +93,9 @@ type Assembly struct {
 	// Permission is the session's gate. A frontend switches its mode and
 	// sets who is asked ([permission.Gate.SetAsker]).
 	Permission *permission.Gate
+	// Hooks runs the trusted plugins' hooks. The tool-call hooks are in
+	// Toolset; a frontend calls the rest (Prompt, Stop). Never nil-unsafe.
+	Hooks *pluginhooks.Dispatcher
 
 	env      extension.Env
 	registry *extension.Registry
@@ -92,6 +107,12 @@ type Assembly struct {
 	base      kit.Toolset     // the host's tools and the memory tools
 	prompt    string          // the host's prompt
 	skills    skill.Result
+	plugins   installed
+	started   string // what SessionStart hooks added for the model
+	limits    Limits
+	delegates []kit.Tool // the tools that start a subagent
+	agentRows []kit.Plugin
+	child     atomic.Pointer[child]
 	files     []contextfile.File
 	servers   mcp.Config
 	session   *mcp.Session
@@ -140,16 +161,25 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 		}})
 	}
 
-	a.machinery = machinery(a, opts.Limits)
+	a.machinery = machinery(a.meter, gate, opts.Limits)
+	a.limits = opts.Limits
 
-	a.skills, err = skill.Discover(root)
+	if opts.Plugins != nil {
+		a.plugins = installed{active: opts.Plugins.ActivePlugins()}
+		a.warn(a.plugins.untrustedNote())
+	}
+	a.skills, err = skill.DiscoverWithPlugins(root, a.plugins.skillSources(), a.plugins.trusted)
 	a.warn(err)
+	sources, hookErrs := pluginhooks.FromPlugins(opts.Plugins, a.plugins.active)
+	a.Warnings = append(a.Warnings, hookErrs...)
+	a.Hooks = pluginhooks.New(root, opts.SessionID, sources)
 	a.files, err = contextfile.LoadChain(root, dir)
 	a.warn(err)
 
 	if opts.MCP.ProjectDir == "" {
 		opts.MCP.ProjectDir = root
 	}
+	opts.MCP.Plugins = append(opts.MCP.Plugins, a.plugins.mcpSources()...)
 	a.servers, err = mcp.Discover(opts.MCP)
 	a.warn(err)
 	a.warnRefused()
@@ -161,6 +191,10 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 	gate.Register(mcp.ListResourcesTool, permission.Unasked)
 	gate.Register(mcp.ReadResourceTool, permission.Unasked)
 
+	defs, errs := subagent.Discover(root, a.plugins.agentDirs())
+	a.Warnings = append(a.Warnings, errs...)
+	a.delegation(defs, opts.ProviderFor)
+
 	if _, err := a.Switch(ctx, opts.Switches); err != nil {
 		return nil, errors.Join(fmt.Errorf("nib: %w", err), a.Close())
 	}
@@ -170,8 +204,8 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 // machinery returns the hooks every run goes through: output
 // trimming, truncation recovery and the permission gate. The budget
 // needs no hook: the meter refuses the request itself.
-func machinery(a *Assembly, limits Limits) kit.Toolset {
-	sets := []kit.Toolset{{Hooks: truncation.Hooks(a.meter)}, {Hooks: a.Permission.Hooks()}}
+func machinery(limit llm.OutputCapEscalator, gate *permission.Gate, limits Limits) kit.Toolset {
+	sets := []kit.Toolset{{Hooks: truncation.Hooks(limit)}, {Hooks: gate.Hooks()}}
 	if !limits.NoTrimming {
 		// A skill's instructions arrive as a tool result and must stay whole.
 		skillTool := func(tool string) bool { return strings.HasPrefix(tool, skill.ToolNamePrefix) }
@@ -218,7 +252,8 @@ func (a *Assembly) Switch(ctx context.Context, switches extension.Switches) (cha
 
 // compose rebuilds what the host reads from the blocks as they are now.
 func (a *Assembly) compose() {
-	sets := []kit.Toolset{a.machinery, a.base}
+	// Plugin hooks see a call once nib's own gate has let it through.
+	sets := []kit.Toolset{a.machinery, {Hooks: a.Hooks.Hooks()}, a.base}
 	prompt := []string{a.prompt}
 	rows := describe(a.base, "")
 	for _, state := range a.Extensions() {
@@ -237,9 +272,20 @@ func (a *Assembly) compose() {
 		kit.Toolset{Tools: a.session.Tools(), Commands: a.session.Commands()})
 	prompt = append(prompt, contextfile.Prompt(a.files), a.session.Prompt())
 
+	join := func(parts []string) string {
+		return strings.Join(slices.DeleteFunc(slices.Clone(parts), func(s string) bool { return s == "" }), "\n\n")
+	}
+	// A subagent gets the session's tools, hooks and project text: not the
+	// run machinery, which keeps state per run, nor the delegation tools.
+	shared := kit.Merge(sets[1:]...)
+	a.child.Store(&child{tools: shared.Tools, hooks: shared.Hooks, prompt: join(prompt[1:])})
+	if a.started != "" {
+		prompt = append(prompt, "## Session start\n\n"+a.started)
+	}
+	sets = append(sets, kit.Toolset{Tools: a.delegates})
 	a.Toolset = kit.Merge(sets...)
-	a.SystemPrompt = strings.Join(slices.DeleteFunc(prompt, func(s string) bool { return s == "" }), "\n\n")
-	a.Plugins = slices.Concat(rows, contextfile.Plugins(a.Root, a.files),
+	a.SystemPrompt = join(prompt)
+	a.Plugins = slices.Concat(rows, a.plugins.manifest(), a.agentRows, contextfile.Plugins(a.Root, a.files),
 		skill.Plugins(a.skills), mcp.Plugins(a.servers, a.session))
 }
 
@@ -343,6 +389,15 @@ func (a *Assembly) WatchServers(onChange func()) { a.session.Watch(onChange) }
 // Refresh rebuilds Toolset, SystemPrompt and Plugins from the blocks
 // as they are now. An agent built before must be rebuilt.
 func (a *Assembly) Refresh() { a.compose() }
+
+// StartSession runs the SessionStart hooks; source says why, such as
+// "startup". What they add joins the system prompt of agents built after.
+func (a *Assembly) StartSession(ctx context.Context, source string) {
+	if text := a.Hooks.SessionStart(ctx, source); text != a.started {
+		a.started = text
+		a.compose()
+	}
+}
 
 // Close releases every block. A second call does nothing.
 func (a *Assembly) Close() error {

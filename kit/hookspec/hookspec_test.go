@@ -38,7 +38,7 @@ func TestParse_StructureAndNormalization(t *testing.T) {
 	if h.Type != Command || !slices.Equal(h.Command.Parts, []string{"fmt.sh"}) || !h.Command.Shell {
 		t.Errorf("command string form not preserved: %+v", h)
 	}
-	if h.Env["X"] != "1" || h.TimeoutMS != 5000 {
+	if h.Env["X"] != "1" || h.Timeout != 5000 {
 		t.Errorf("env/timeout: %+v", h)
 	}
 	if !h.Runnable() {

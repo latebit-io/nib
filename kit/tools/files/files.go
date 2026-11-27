@@ -8,6 +8,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -475,4 +476,16 @@ func listing(names []string, cut bool) string {
 		out += "\n[more entries exist; narrow the pattern or path]"
 	}
 	return out
+}
+
+// PathOf returns the path a file tool's call names, or "" when the
+// arguments do not parse: for policies that look at a call before it runs.
+func PathOf(args string) string {
+	var call struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal([]byte(args), &call) != nil {
+		return ""
+	}
+	return call.Path
 }

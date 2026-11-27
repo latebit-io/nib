@@ -31,7 +31,20 @@ type Profile struct {
 	// (e.g., "openai" for ChatGPT, "copilot" for GitHub Copilot).
 	// When set, auth uses OAuth tokens instead of the APIKeyEnv static key.
 	OAuthProvider string `json:"oauth_provider,omitempty"`
+	// API is the wire format the endpoint speaks: [APIChat], [APIMessages]
+	// or [APIResponses]. Empty picks one from the base URL and sign-in.
+	API string `json:"api,omitempty"`
 }
+
+// Wire formats a [Profile] can name in API.
+const (
+	// APIChat is OpenAI-compatible chat completions (/chat/completions).
+	APIChat = "chat"
+	// APIMessages is the Anthropic Messages API (/v1/messages).
+	APIMessages = "messages"
+	// APIResponses is Open Responses (/responses), the Responses API format.
+	APIResponses = "responses"
+)
 
 // Config represents the on-disk shape of an LLM configuration file.
 // Both global and project files share this format. Fields left unset
@@ -68,6 +81,8 @@ type Resolved struct {
 	// uses it instead of creating a StaticKeyAuth from apiKey. This is set
 	// by the OAuth wiring layer after a successful login.
 	Auth llm.Auth
+	// API is the profile's wire format; empty means picked by heuristic.
+	API string
 	// Effort is the reasoning effort providers apply (low|medium|high|xhigh|
 	// max). Empty means the provider default. Set on a cloned Resolved to
 	// build a provider with a specific effort (e.g. a subagent's override),
@@ -117,23 +132,48 @@ func (r *Resolved) NewProvider() llm.Provider {
 		slog.Warn("llmconfig: unknown effort, using provider default", "effort", r.Effort)
 		effort = ""
 	}
-	if r.apiKey != "" {
-		if r.isAnthropicEndpoint() {
-			return llm.NewAnthropicAPI(r.BaseURL, r.Model, llm.AnthropicKeyAuth(r.apiKey), r.PromptCaching, effort)
-		}
-		return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching, effort)
+	api, ok := r.wireAPI()
+	if !ok {
+		slog.Warn("llmconfig: unknown api, no provider built", "profile", r.Profile, "api", r.API)
+		return nil
 	}
-
-	// Fall back to OAuth if configured and authenticated. Only OpenAI
-	// (Codex) and Copilot (OpenAI-compatible) OAuth flows exist.
-	if r.OAuthProvider != "" && r.Auth != nil {
-		if r.OAuthProvider == string(oauth.ProviderOpenAI) {
+	var auth llm.Auth
+	switch {
+	case r.apiKey != "" && api == APIMessages:
+		auth = llm.AnthropicKeyAuth(r.apiKey)
+	case r.apiKey != "":
+		auth = llm.StaticKeyAuth(r.apiKey)
+	case r.OAuthProvider != "" && r.Auth != nil:
+		// ChatGPT sign-in speaks the Codex backend unless the profile names a format.
+		if r.OAuthProvider == string(oauth.ProviderOpenAI) && r.API == "" {
 			return llm.NewCodexAPI(r.Model, r.Auth, effort)
 		}
-		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching, effort)
+		auth = r.Auth
+	default:
+		return nil
 	}
+	switch api {
+	case APIMessages:
+		return llm.NewAnthropicAPI(r.BaseURL, r.Model, auth, r.PromptCaching, effort)
+	case APIResponses:
+		return llm.NewResponsesAPI(r.BaseURL, r.Model, auth, effort)
+	}
+	return llm.NewAgentAPI(r.BaseURL, r.Model, auth, r.PromptCaching, effort)
+}
 
-	return nil
+// wireAPI returns the wire format to speak: the profile's, or one picked
+// from the base URL. ok is false for a name nib does not know.
+func (r *Resolved) wireAPI() (api string, ok bool) {
+	switch r.API {
+	case APIChat, APIMessages, APIResponses:
+		return r.API, true
+	case "":
+		if r.isAnthropicEndpoint() {
+			return APIMessages, true
+		}
+		return APIChat, true
+	}
+	return "", false
 }
 
 // isAnthropicEndpoint reports whether the resolved base URL points to

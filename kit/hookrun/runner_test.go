@@ -19,29 +19,59 @@ func TestRun_JSONDecision(t *testing.T) {
 	t.Parallel()
 	res := Runner{}.Run(context.Background(),
 		cmdHook(`echo '{"decision":"deny","reason":"not allowed"}'`),
-		Input{Event: "PreToolUse", Tool: "write_file"})
+		Input{HookEventName: "PreToolUse", ToolName: "Write"})
 	if res.Decision != Deny || res.Reason != "not allowed" {
 		t.Errorf("deny decision = %+v", res)
 	}
 
-	res = Runner{}.Run(context.Background(), cmdHook(`echo '{"decision":"allow"}'`), Input{})
-	if res.Decision != Proceed {
-		t.Errorf("allow → proceed, got %+v", res)
+	res = Runner{}.Run(context.Background(), cmdHook(`echo '{"decision":"approve"}'`), Input{})
+	if res.Decision != Allow {
+		t.Errorf("the legacy approve is an allow, got %+v", res)
+	}
+	res = Runner{}.Run(context.Background(),
+		cmdHook(`echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"check it","additionalContext":"ctx"}}'`), Input{})
+	if res.Decision != Ask || res.Reason != "check it" || res.Context != "ctx" {
+		t.Errorf("hookSpecificOutput = %+v", res)
+	}
+	res = Runner{}.Run(context.Background(), cmdHook(`echo '{"continue":false,"stopReason":"done for today"}'`), Input{})
+	if !res.Stop || res.StopReason != "done for today" {
+		t.Errorf("continue false = %+v", res)
 	}
 }
 
-func TestRun_ExitCodeFallback(t *testing.T) {
+// TestRun_ExitCodes: as in Claude Code, exit 2 blocks with stderr as the
+// reason, another non-zero exit is an error that does not block, and a
+// clean exit's plain stdout is context.
+func TestRun_ExitCodes(t *testing.T) {
 	t.Parallel()
-	// Non-zero exit with no JSON → Deny, output as reason.
 	res := Runner{}.Run(context.Background(), cmdHook(`echo blocked >&2; exit 2`), Input{})
-	if res.Decision != Deny || !strings.Contains(res.Reason, "blocked") || res.ExitCode != 2 {
-		t.Errorf("non-zero exit = %+v", res)
+	if res.Decision != Deny || res.Reason != "blocked" || res.ExitCode != 2 {
+		t.Errorf("exit 2 = %+v", res)
 	}
-
-	// Zero exit, non-JSON output → Proceed.
+	res = Runner{}.Run(context.Background(), cmdHook(`echo oops >&2; exit 1`), Input{})
+	if res.Decision != Proceed || res.Err == nil || res.ExitCode != 1 {
+		t.Errorf("exit 1 must not block, but report an error: %+v", res)
+	}
 	res = Runner{}.Run(context.Background(), cmdHook(`echo fine`), Input{})
-	if res.Decision != Proceed {
-		t.Errorf("zero exit → proceed, got %+v", res)
+	if res.Decision != Proceed || res.Context != "fine" {
+		t.Errorf("zero exit = %+v, want proceed with the stdout as context", res)
+	}
+}
+
+// TestRun_ExecFormAndDir: args run the command without a shell, in the
+// runner's directory, with its environment.
+func TestRun_ExecFormAndDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	h := hookspec.Hook{Type: hookspec.Command, Command: hookspec.CommandSpec{Parts: []string{"sh"}, Shell: true},
+		Args: []string{"-c", `printf '%s %s' "$(pwd -P)" "$CLAUDE_PROJECT_DIR"`}}
+	res := Runner{Dir: dir, Env: map[string]string{"CLAUDE_PROJECT_DIR": "/proj"}}.Run(context.Background(), h, Input{})
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Context != real+" /proj" {
+		t.Errorf("output = %q, want the directory and the environment", res.Context)
 	}
 }
 
@@ -63,8 +93,8 @@ func TestRun_DecisionFromStdoutNotStderr(t *testing.T) {
 func TestRun_StdinDelivered(t *testing.T) {
 	t.Parallel()
 	// `cat` echoes the JSON payload; assert the event reached stdin.
-	res := Runner{}.Run(context.Background(), cmdHook(`cat`), Input{Event: "PreToolUse", Tool: "edit_file"})
-	if !strings.Contains(res.Output, "PreToolUse") || !strings.Contains(res.Output, "edit_file") {
+	res := Runner{}.Run(context.Background(), cmdHook(`cat`), Input{HookEventName: "PreToolUse", ToolName: "Edit"})
+	if !strings.Contains(res.Output, `"hook_event_name":"PreToolUse"`) || !strings.Contains(res.Output, `"tool_name":"Edit"`) {
 		t.Errorf("input not delivered on stdin: %q", res.Output)
 	}
 }

@@ -1,12 +1,16 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 
+	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/extension/workspace"
@@ -21,6 +25,34 @@ type choices struct {
 	switches extension.Switches
 	approve  bool
 	limits   nib.Limits
+	session  string // the session's id, for hooks
+	// providerFor builds a subagent's model on the profile in use.
+	providerFor func(model, effort string) (llm.Provider, error)
+}
+
+// providerFor builds providers on the profile current returns, with a
+// subagent's model and effort in place of the session's. Each is built
+// once and kept: a provider holds its connections and its output limit.
+func providerFor(current func() *llmconfig.Resolved) func(model, effort string) (llm.Provider, error) {
+	var mu sync.Mutex
+	built := map[string]llm.Provider{}
+	return func(model, effort string) (llm.Provider, error) {
+		next := *current()
+		next.Model = cmp.Or(model, next.Model)
+		next.Effort = cmp.Or(effort, next.Effort)
+		key := next.Profile + "\x00" + next.Model + "\x00" + next.Effort
+		mu.Lock()
+		defer mu.Unlock()
+		if p, ok := built[key]; ok {
+			return p, nil
+		}
+		p := next.NewProvider()
+		if p == nil {
+			return nil, fmt.Errorf("no provider for model %q on profile %s", next.Model, next.Profile)
+		}
+		built[key] = p
+		return p, nil
+	}
 }
 
 // assemble builds the session's blocks for root: the one assembly a
@@ -36,6 +68,11 @@ func assemble(ctx context.Context, root, prompt string, store memory.Store, chos
 	if err != nil {
 		warn("MCP sign-in store", err)
 	}
+	// Without the store, no plugin loads: the session still works.
+	plugins, err := pluginStore()
+	if err != nil {
+		warn("plugin store", err)
+	}
 	a, err := nib.Assemble(ctx, nib.Options{
 		Dir:          root,
 		SystemPrompt: prompt,
@@ -45,6 +82,9 @@ func assemble(ctx context.Context, root, prompt string, store memory.Store, chos
 		Extensions:   registry,
 		Switches:     chosen.switches,
 		Limits:       chosen.limits,
+		Plugins:      plugins,
+		SessionID:    chosen.session,
+		ProviderFor:  chosen.providerFor,
 	})
 	if err != nil {
 		return nil, err

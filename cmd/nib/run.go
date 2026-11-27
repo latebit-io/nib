@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/latebit-io/nib/ai/llmconfig"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/event"
 	"github.com/latebit-io/nib/kit/headless"
@@ -28,19 +29,27 @@ const indexWriteTimeout = 5 * time.Second
 // The binary owns the index write — not the agent — so the index stays
 // consistent even when the agent runs out of budget mid-update.
 func runAgent(ctx context.Context, root string, store memory.Store, message string, chosen choices) error {
-	_, provider, err := newProvider(root)
+	resolved, provider, err := newProvider(root)
 	if err != nil {
 		return err
 	}
+	chosen.providerFor = providerFor(func() *llmconfig.Resolved { return resolved })
 
 	sessionID := newSessionID(time.Now(), message)
 	slog.Debug("session", "id", sessionID)
+	chosen.session = sessionID
 
 	assembly, err := assemble(ctx, root, buildSystemPrompt(sessionID), store, chosen)
 	if err != nil {
 		return setupErr("%v", err)
 	}
 	defer closeAssembly(assembly)
+	defer assembly.Hooks.SessionEnd(context.WithoutCancel(ctx), "other")
+	assembly.StartSession(ctx, "startup")
+	prompt, err := assembly.Hooks.Prompt(ctx, message)
+	if err != nil {
+		return err
+	}
 	ag, err := assembly.Agent(provider)
 	if err != nil {
 		return setupErr("agent: %v", err)
@@ -56,7 +65,11 @@ func runAgent(ctx context.Context, root string, store memory.Store, message stri
 	// before parking on awaitReply, translated by kit) triggers Cancel +
 	// Success=true. AgentToken events accumulate into Result.Summary.
 	runner := headless.New(ag, events)
-	result := runner.Run(ctx, message)
+	result := runner.Run(ctx, prompt)
+	if again := assembly.Hooks.Stop(ctx, result.Summary, false); again != "" {
+		// A single run has no conversation to go on in.
+		slog.Info("a Stop hook asked the agent to go on; a single run does not", "reason", again)
+	}
 
 	// Close drains the translator and any trailing AgentEnd → AgentDone
 	// the foundation emits in response to the Runner's Cancel; without a

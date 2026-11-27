@@ -285,6 +285,9 @@ type ActivePlugin struct {
 	// HooksConfigPath is the converted hooks config
 	// (<converted>/hooks/hooks.json).
 	HooksConfigPath string
+	// Trusted is whether the person lets the plugin's code run: its
+	// hooks, MCP servers, shell skills and agents.
+	Trusted bool
 }
 
 // ActivePlugins returns the converted component locations of every
@@ -308,6 +311,7 @@ func (s *Store) ActivePlugins() []ActivePlugin {
 			AgentsDir:       filepath.Join(conv, "agents"),
 			MCPConfigPath:   filepath.Join(conv, ".mcp.json"),
 			HooksConfigPath: filepath.Join(conv, "hooks", "hooks.json"),
+			Trusted:         p.Trusted,
 		})
 	}
 	slices.SortFunc(out, func(a, b ActivePlugin) int { return strings.Compare(a.ID, b.ID) })

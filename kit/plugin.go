@@ -59,6 +59,11 @@ const (
 	// KindExtension tags an extension a session can switch on or off;
 	// its tools are listed as tools.
 	KindExtension PluginKind = "extension"
+	// KindPlugin tags an installed plugin; what it brings is listed
+	// under its own kinds.
+	KindPlugin PluginKind = "plugin"
+	// KindAgent tags a subagent the model can delegate a task to.
+	KindAgent PluginKind = "agent"
 )
 
 // Described is the optional interface a kit-composable artifact may
@@ -189,7 +194,9 @@ var pluginKindOrder = []PluginKind{
 	KindProvider,
 	KindStore,
 	KindContext,
+	KindPlugin,
 	KindExtension,
+	KindAgent,
 	KindTool,
 	KindCommand,
 }

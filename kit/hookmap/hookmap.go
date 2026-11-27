@@ -6,33 +6,26 @@ import (
 	"github.com/latebit-io/nib/kit/hookspec"
 )
 
-// nibToCC maps a nib builtin tool name to its Claude Code equivalent.
-// Keys are the canonical nib names (lowercase, as the builtin registry
-// keys them); values are CC's canonical tool names. Only tools with a
-// genuine CC counterpart appear here — a nib tool with no entry (e.g.
-// apply_patch, replace_file) matches a hook group only by its nib name.
-//
-// Lookups in either direction are case-insensitive (see [CCName] /
-// [NibName]); the table is keyed in canonical case for readability.
-var nibToCC = map[string]string{
-	"write_file":     "Write",
-	"edit_file":      "Edit",
-	"read_file":      "Read",
-	"bash":           "Bash",
-	"glob":           "Glob",
-	"search_project": "Grep",
-	"list_files":     "LS",
+// pairs maps nib builtin tool names to their Claude Code equivalents. A
+// nib tool with no entry (e.g. apply_patch) matches a hook group only by
+// its nib name. Lookups either way are case-insensitive.
+var pairs = []struct{ nib, cc string }{
+	{"write_file", "Write"}, {"edit_file", "Edit"}, {"read_file", "Read"}, {"bash", "Bash"},
+	{"glob", "Glob"}, {"search_project", "Grep"},
+	// Two generations of the listing tool share LS; the parked agent's first.
+	{"list_files", "LS"}, {"list_dir", "LS"},
 }
 
-// ccToNib is the reverse of [nibToCC], keyed by the lowercased CC name so
-// lookups are case-insensitive. Built once at init from the single source
-// of truth above to keep the two directions from drifting.
-var ccToNib = func() map[string]string {
-	m := make(map[string]string, len(nibToCC))
-	for nib, cc := range nibToCC {
-		m[strings.ToLower(cc)] = nib
+// nibToCC and ccToNib are derived from pairs, so the two directions
+// cannot drift apart.
+var nibToCC, ccToNib = func() (map[string]string, map[string][]string) {
+	forward, reverse := map[string]string{}, map[string][]string{}
+	for _, p := range pairs {
+		forward[p.nib] = p.cc
+		key := strings.ToLower(p.cc)
+		reverse[key] = append(reverse[key], p.nib)
 	}
-	return m
+	return forward, reverse
 }()
 
 // CCName returns the Claude Code alias for a nib builtin tool name. The
@@ -47,8 +40,17 @@ func CCName(nibTool string) (cc string, ok bool) {
 // The lookup is case-insensitive. ok is false when CC names a tool nib
 // has no builtin equivalent for.
 func NibName(ccTool string) (nib string, ok bool) {
-	nib, ok = ccToNib[strings.ToLower(ccTool)]
-	return nib, ok
+	names := ccToNib[strings.ToLower(ccTool)]
+	if len(names) == 0 {
+		return "", false
+	}
+	return names[0], true
+}
+
+// NibNames returns every nib tool name a Claude Code alias stands for:
+// two generations of nib tools share some aliases.
+func NibNames(ccTool string) []string {
+	return ccToNib[strings.ToLower(ccTool)]
 }
 
 // Matches reports whether a hook group applies to a nib tool call. A CC

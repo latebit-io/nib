@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llm"
@@ -69,12 +73,9 @@ func open(t *testing.T, s *session, approve bool) *term {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.attach(r, approve)
-	reg, err := (&extensionCommand{session: s, repl: r}).registry()
-	if err != nil {
+	if err := s.attach(r, approve); err != nil {
 		t.Fatal(err)
 	}
-	r.SetCommands(reg)
 	go func() { tm.done <- r.Run(context.Background()) }()
 	t.Cleanup(func() { _ = keys.Close() }) // ends the loop if the test did not
 	return tm
@@ -86,10 +87,16 @@ func (tm *term) say(line, want string) {
 	if _, err := io.WriteString(tm.keys, line+"\n"); err != nil {
 		tm.t.Fatal(err)
 	}
+	tm.wait(want)
+}
+
+// wait waits until the output not yet looked at shows want.
+func (tm *term) wait(want string) {
+	tm.t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for !strings.Contains(tm.out.String()[tm.shown:], want) {
 		if time.Now().After(deadline) {
-			tm.t.Fatalf("after %q the output never showed %q:\n%s", line, want, tm.out.String()[tm.shown:])
+			tm.t.Fatalf("the output never showed %q:\n%s", want, tm.out.String()[tm.shown:])
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -322,5 +329,43 @@ func TestChoices(t *testing.T) {
 	}
 	if chosen, err := (config{budget: 1000}).choices(); err != nil || chosen.limits.TokenBudget != 1000 {
 		t.Errorf("choices = %+v, %v; with --budget a bad environment value must not matter", chosen, err)
+	}
+}
+
+// TestSession_FollowsServerChanges: a tool an MCP server adds during the
+// session reaches the next request; the conversation carries over.
+func TestSession_FollowsServerChanges(t *testing.T) {
+	isolate(t)
+	server := sdk.NewServer(&sdk.Implementation{Name: "web", Version: "1"}, nil)
+	noop := func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{}, nil
+	}
+	server.AddTool(&sdk.Tool{Name: "first", InputSchema: map[string]any{"type": "object"}}, noop)
+	srv := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return server }, nil))
+	t.Cleanup(srv.Close) // after the session's: the server waits for open streams
+	t.Setenv(brand.EnvKeyMCP, "web="+srv.URL)
+
+	provider := llmtest.NewScripted(llmtest.Text("one"), llmtest.Text("two"))
+	s, err := newSession(context.Background(), t.TempDir(), "base", nil, &llmconfig.Resolved{}, provider, choices{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.close() }) // the agent is replaced during the test
+	tm := open(t, s, false)
+	tm.say("hi", "one\n> ")
+	server.AddTool(&sdk.Tool{Name: "later", InputSchema: map[string]any{"type": "object"}}, noop)
+	tm.wait("changed its tools or prompts")
+	tm.say("next", "two\n> ")
+	tm.quit()
+
+	reqs := provider.Requests()
+	if got := toolNames(reqs[0].Tools); !strings.Contains(got, "mcp__web__first") || strings.Contains(got, "later") {
+		t.Errorf("first request tools = %s", got)
+	}
+	if got := toolNames(reqs[1].Tools); !strings.Contains(got, "mcp__web__later") {
+		t.Errorf("after the change, tools = %s, want the new one", got)
+	}
+	if n := len(reqs[1].Messages); n != 4 {
+		t.Errorf("the second request has %d messages, want the conversation carried over (4)", n)
 	}
 }

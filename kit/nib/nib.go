@@ -17,6 +17,7 @@ import (
 	"github.com/latebit-io/nib/kit/budget"
 	"github.com/latebit-io/nib/kit/compact"
 	"github.com/latebit-io/nib/kit/contextfile"
+	"github.com/latebit-io/nib/kit/elicit"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/memory"
@@ -42,6 +43,9 @@ type Options struct {
 	// MCP says where server definitions come from. An empty ProjectDir
 	// means the project root; its servers still need the person's approval.
 	MCP mcp.DiscoverOptions
+	// MCPTokens are the person's sign-ins to HTTP servers. Nil means a
+	// server that asks for one does not start.
+	MCPTokens *mcp.TokenStore
 	// Extensions are the compiled extensions the binary offers.
 	Extensions *extension.Registry
 	// Switches turns extensions on and off for this session.
@@ -149,10 +153,13 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 	a.servers, err = mcp.Discover(opts.MCP)
 	a.warn(err)
 	a.warnRefused()
-	a.session = mcp.Connect(ctx, a.servers.Servers)
+	a.session = mcp.Connect(ctx, a.servers.Servers, mcp.ConnectOptions{Tokens: opts.MCPTokens})
 	for _, f := range a.session.Failed {
 		a.warn(fmt.Errorf("MCP server %s: %w", f.Server.Name, f.Err))
 	}
+	// Resources are read, never changed.
+	gate.Register(mcp.ListResourcesTool, permission.Unasked)
+	gate.Register(mcp.ReadResourceTool, permission.Unasked)
 
 	if _, err := a.Switch(ctx, opts.Switches); err != nil {
 		return nil, errors.Join(fmt.Errorf("nib: %w", err), a.Close())
@@ -226,8 +233,9 @@ func (a *Assembly) compose() {
 			rows = append(rows, describe(ext.Toolset, "extension:"+state.Name)...)
 		}
 	}
-	sets = append(sets, kit.Toolset{Tools: a.skills.Tools}, kit.Toolset{Tools: a.session.Tools})
-	prompt = append(prompt, contextfile.Prompt(a.files))
+	sets = append(sets, kit.Toolset{Tools: a.skills.Tools},
+		kit.Toolset{Tools: a.session.Tools(), Commands: a.session.Commands()})
+	prompt = append(prompt, contextfile.Prompt(a.files), a.session.Prompt())
 
 	a.Toolset = kit.Merge(sets...)
 	a.SystemPrompt = strings.Join(slices.DeleteFunc(prompt, func(s string) bool { return s == "" }), "\n\n")
@@ -322,6 +330,19 @@ func (a *Assembly) SetProvider(provider llm.Provider) { a.meter.Set(provider) }
 
 // Usage returns the tokens the session has used.
 func (a *Assembly) Usage() budget.Session { return a.meter.Usage() }
+
+// SetAsker sets who answers the MCP servers' questions to the person.
+// Without one, every question is answered as dismissed.
+func (a *Assembly) SetAsker(ask elicit.Asker) { a.session.SetAsker(ask) }
+
+// WatchServers sets what is called, on a goroutine of its own, when an
+// MCP server's tools or prompts changed. The host then calls
+// [Assembly.Refresh] and rebuilds its agent when no run is active.
+func (a *Assembly) WatchServers(onChange func()) { a.session.Watch(onChange) }
+
+// Refresh rebuilds Toolset, SystemPrompt and Plugins from the blocks
+// as they are now. An agent built before must be rebuilt.
+func (a *Assembly) Refresh() { a.compose() }
 
 // Close releases every block. A second call does nothing.
 func (a *Assembly) Close() error {

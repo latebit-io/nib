@@ -75,14 +75,27 @@ linters:
             - pkg: "os/exec"
               desc: "process execution only in proc, tools/bash, tools/git, dyncontext, hookrun, mcp, pluginstore, memory/demarkus/server"
 
-        # Network access is confined to the demarkus binary installer.
+        # Network access is confined to the demarkus binary installer and
+        # the MCP client's HTTP transport and sign-in.
         http-allowlist:
           files:
             - "$all"
             - "!**/kit/memory/demarkus/server/*.go"
+            - "!**/kit/mcp/http.go"
+            - "!**/kit/mcp/oauth.go"
+            - "!**/kit/mcp/*_test.go"
           deny:
             - pkg: "net/http"
-              desc: "kit is offline except the demarkus binary installer"
+              desc: "kit is offline except the demarkus binary installer and the MCP client's HTTP transport"
+
+        # The MCP SDK reaches the network: only kit/mcp may use it.
+        mcp-sdk-confined:
+          files:
+            - "$all"
+            - "!**/kit/mcp/*.go"
+          deny:
+            - pkg: "github.com/modelcontextprotocol/go-sdk"
+              desc: "the MCP SDK is wrapped by kit/mcp; use that"
 
         # Test scaffolding never links into production code.
         contracttest-tests-only:

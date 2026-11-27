@@ -58,6 +58,7 @@ type config struct {
 	show     string
 	plugins  bool
 	trustMCP bool
+	mcpLogin string
 	with     string
 	without  string
 	approve  bool
@@ -68,7 +69,7 @@ type config struct {
 // interactive reports whether no flag asked for anything else: the
 // default is a session in the terminal.
 func (c config) interactive() bool {
-	return c.message == "" && !c.list && c.show == "" && !c.plugins && !c.trustMCP
+	return c.message == "" && !c.list && c.show == "" && !c.plugins && !c.trustMCP && c.mcpLogin == ""
 }
 
 // choices merges configuration, environment and flags; the later one
@@ -119,6 +120,7 @@ func parseArgs() config {
 	flag.BoolVar(&c.approve, "approve", false, "Start the session in approve mode: ask before each command and file change")
 	flag.IntVar(&c.budget, "budget", 0, "End the session's runs once this many tokens are used (default: "+brand.EnvKeyTaskTokenBudget+", else none)")
 	flag.BoolVar(&c.trustMCP, "trust-mcp", false, "Allow the MCP servers this project's .mcp.json names, and exit")
+	flag.StringVar(&c.mcpLogin, "mcp-login", "", "Sign in to the named HTTP MCP server in the browser, keep the sign-in, and exit")
 	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/nib-debug.log")
 	flag.Parse()
 	return c
@@ -137,6 +139,9 @@ func run() error {
 	// Needs no memory store and no model: do it before either starts.
 	if cfg.trustMCP {
 		return trustMCP(root)
+	}
+	if cfg.mcpLogin != "" {
+		return mcpLogin(root, cfg.mcpLogin)
 	}
 
 	// An interactive session takes Ctrl-C itself: it stops a run

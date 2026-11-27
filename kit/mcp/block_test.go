@@ -195,24 +195,25 @@ func TestConnect_ToolsAndFailures(t *testing.T) {
 		},
 		Refused: []Refusal{{Server: Server{Name: "repo", Origin: OriginProject, Source: ".mcp.json"}, Err: ErrUntrusted}},
 	}
-	s := Connect(context.Background(), cfg.Servers)
+	s := Connect(context.Background(), cfg.Servers, ConnectOptions{})
 	t.Cleanup(func() {
 		if err := s.Close(); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 	})
 
-	if len(s.Tools) != 1 || len(s.Connected) != 1 || len(s.Failed) != 1 {
-		t.Fatalf("tools %d, connected %d, failed %d; want 1 each", len(s.Tools), len(s.Connected), len(s.Failed))
+	tools := s.Tools()
+	if len(tools) != 1 || len(s.Servers()) != 1 || len(s.Failed) != 1 {
+		t.Fatalf("tools %d, connected %d, failed %d; want 1 each", len(tools), len(s.Servers()), len(s.Failed))
 	}
-	def := s.Tools[0].Definition().Function
+	def := tools[0].Definition().Function
 	if def.Name != "mcp__mock__mark_fetch" {
 		t.Errorf("tool name = %q, want mcp__mock__mark_fetch", def.Name)
 	}
 	if p := def.Parameters; p.Properties["url"].Type != "string" || len(p.Required) != 1 {
 		t.Errorf("parameters = %+v, want the server's schema", p)
 	}
-	res := s.Tools[0].Execute(context.Background(), llm.ToolCall{Function: llm.FunctionCall{Name: def.Name, Arguments: `{"url":"/x"}`}})
+	res := tools[0].Execute(context.Background(), llm.ToolCall{Function: llm.FunctionCall{Name: def.Name, Arguments: `{"url":"/x"}`}})
 	if res.IsError || res.Content != "hello from mock" {
 		t.Errorf("Execute = %+v, want the server's reply", res)
 	}
@@ -362,10 +363,10 @@ func TestConnect_CommandWithSpaces(t *testing.T) {
 	if err := os.WriteFile(spaced, script, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s := Connect(context.Background(), []Server{{Name: "spaced", Command: spaced}})
+	s := Connect(context.Background(), []Server{{Name: "spaced", Command: spaced}}, ConnectOptions{})
 	t.Cleanup(func() { _ = s.Close() }) // test cleanup; the assertions below are the test
-	if len(s.Tools) != 1 || len(s.Failed) != 0 {
-		t.Errorf("tools %d, failed %v; want the server started", len(s.Tools), s.Failed)
+	if len(s.Tools()) != 1 || len(s.Failed) != 0 {
+		t.Errorf("tools %d, failed %v; want the server started", len(s.Tools()), s.Failed)
 	}
 }
 
@@ -376,12 +377,12 @@ func TestConnect_CollidingToolNames(t *testing.T) {
 	s := Connect(context.Background(), []Server{
 		{Name: "a.b", Command: "sh", Args: []string{script}},
 		{Name: "a_b", Command: "sh", Args: []string{script}},
-	})
+	}, ConnectOptions{})
 	t.Cleanup(func() { _ = s.Close() }) // test cleanup; the assertions below are the test
-	if len(s.Tools) != 1 || len(s.Failed) != 1 || !strings.Contains(s.Failed[0].Err.Error(), "already taken") {
-		t.Errorf("tools %d, failed %v; want one tool and the collision reported", len(s.Tools), s.Failed)
+	if len(s.Tools()) != 1 || len(s.Failed) != 1 || !strings.Contains(s.Failed[0].Err.Error(), "already taken") {
+		t.Errorf("tools %d, failed %v; want one tool and the collision reported", len(s.Tools()), s.Failed)
 	}
-	if len(s.Connected) != 2 || len(s.Connected[1].Tools) != 0 {
-		t.Errorf("the second server must stay connected without the colliding tool: %+v", s.Connected)
+	if servers := s.Servers(); len(servers) != 2 || len(servers[1].Tools) != 0 {
+		t.Errorf("the second server must stay connected without the colliding tool: %+v", servers)
 	}
 }

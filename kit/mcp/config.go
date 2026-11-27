@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"os"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -32,7 +34,8 @@ const (
 	OriginProject Origin = "project"
 )
 
-// Server is one stdio server definition.
+// Server is one server definition: a program spoken to over stdio, or
+// a Streamable HTTP endpoint.
 type Server struct {
 	// Name identifies the server and prefixes its tools' names.
 	Name string
@@ -43,6 +46,13 @@ type Server struct {
 	Args []string
 	// Env is added to the inherited environment.
 	Env map[string]string
+	// URL is an HTTP server's endpoint. A server has a Command or a URL.
+	URL string
+	// Headers are sent with every request to an HTTP server.
+	Headers map[string]string
+	// ClientID is an OAuth client registered for the server ahead of
+	// time, for [Login]. Empty means the client registers itself.
+	ClientID string
 	// Origin says who supplied the definition.
 	Origin Origin
 	// Source is the file or environment variable it came from.
@@ -96,6 +106,7 @@ type DiscoverOptions struct {
 // file that cannot be used is reported in err and the rest still load.
 func Discover(opts DiscoverOptions) (Config, error) {
 	found := slices.Clone(opts.User)
+	var refused []Refusal
 	var errs []error
 	for _, src := range opts.Plugins {
 		data, err := filecap.Read(src.Path, maxConfigBytes, "MCP config")
@@ -106,9 +117,9 @@ func Discover(opts DiscoverOptions) (Config, error) {
 			errs = append(errs, fmt.Errorf("mcp: %w", err))
 			continue
 		}
-		servers, err := parseConfig(data, src.Path, OriginPlugin, src.Prefix+"__")
+		servers, bad, err := parseConfig(data, src.Path, OriginPlugin, src.Prefix+"__")
 		errs = append(errs, err)
-		found = append(found, servers...)
+		found, refused = append(found, servers...), append(refused, bad...)
 	}
 	trusted := opts.TrustProject
 	if opts.ProjectDir != "" {
@@ -121,17 +132,18 @@ func Discover(opts DiscoverOptions) (Config, error) {
 				trusted, err = opts.Trust.approved(project)
 				errs = append(errs, err)
 			}
-			servers, err := parseConfig(project.data, project.path, OriginProject, "")
+			servers, bad, err := parseConfig(project.data, project.path, OriginProject, "")
 			errs = append(errs, err)
-			found = append(found, servers...)
+			found, refused = append(found, servers...), append(refused, bad...)
 		}
 	}
-	return admit(found, trusted), errors.Join(errs...)
+	return admit(found, refused, trusted), errors.Join(errs...)
 }
 
-// admit sorts found into the servers that may start and those refused.
-func admit(found []Server, trustProject bool) Config {
-	var cfg Config
+// admit sorts found into the servers that may start and those refused,
+// after the ones already refused while the files were read.
+func admit(found []Server, refused []Refusal, trustProject bool) Config {
+	cfg := Config{Refused: refused}
 	taken := map[string]Origin{}
 	for _, s := range found {
 		if err := refusal(s, taken, trustProject); err != nil {
@@ -145,9 +157,25 @@ func admit(found []Server, trustProject bool) Config {
 	return cfg
 }
 
+// Target is what the server is reached through: its endpoint, or its
+// command line.
+func (s Server) Target() string {
+	if s.URL != "" {
+		return s.URL
+	}
+	return strings.TrimSpace(s.Command + " " + strings.Join(s.Args, " "))
+}
+
 // refusal returns why s may not start, or nil when it may.
 func refusal(s Server, taken map[string]Origin, trustProject bool) error {
-	if strings.TrimSpace(s.Command) == "" {
+	switch {
+	case s.URL != "" && s.Command != "":
+		return errors.New("has both a command and a url")
+	case s.URL != "":
+		if err := checkEndpoint(s.URL); err != nil {
+			return err
+		}
+	case strings.TrimSpace(s.Command) == "":
 		return errors.New("no command")
 	}
 	if key := deniedEnvKey(s.Env); key != "" {
@@ -162,33 +190,98 @@ func refusal(s Server, taken map[string]Origin, trustProject bool) error {
 	return nil
 }
 
-// parseConfig parses a config file's bytes; path labels the result.
-func parseConfig(data []byte, path string, origin Origin, prefix string) ([]Server, error) {
+// definition is one entry of a config file, in the format other
+// agents read.
+type definition struct {
+	Type    string            `json:"type"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+	OAuth   struct {
+		ClientID string `json:"clientId"`
+	} `json:"oauth"`
+}
+
+// parseConfig parses a config file's bytes; path labels the result. A
+// definition that cannot be used becomes a refusal with its reason.
+func parseConfig(data []byte, path string, origin Origin, prefix string) ([]Server, []Refusal, error) {
 	var file struct {
-		Servers map[string]struct {
-			Command string            `json:"command"`
-			Args    []string          `json:"args"`
-			Env     map[string]string `json:"env"`
-		} `json:"mcpServers"`
+		Servers map[string]definition `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, fmt.Errorf("mcp: %s: %w", path, err)
+		return nil, nil, fmt.Errorf("mcp: %s: %w", path, err)
 	}
-	servers := make([]Server, 0, len(file.Servers))
+	var servers []Server
+	var refused []Refusal
 	// Sorted: which of two colliding names wins must not depend on map order.
 	for _, name := range slices.Sorted(maps.Keys(file.Servers)) {
 		def := file.Servers[name]
-		servers = append(servers, Server{
+		s := Server{
 			Name: prefix + name, Command: def.Command, Args: def.Args, Env: def.Env,
-			Origin: origin, Source: path,
-		})
+			URL: def.URL, ClientID: def.OAuth.ClientID, Origin: origin, Source: path,
+		}
+		var err error
+		if s.Headers, err = expandHeaders(def.Headers, origin); err == nil {
+			err = transport(def)
+		}
+		if err != nil {
+			refused = append(refused, Refusal{Server: s, Err: err})
+			continue
+		}
+		servers = append(servers, s)
 	}
-	return servers, nil
+	return servers, refused, nil
 }
 
-// ParseSpec parses the person's own list, "name=command args" entries
-// separated by semicolons, as a binary reads it from its environment.
-// source names where the list came from. A bad entry does not stop the rest.
+// transport checks that the definition names a transport this client has.
+func transport(def definition) error {
+	switch def.Type {
+	case "", "stdio", "http", "streamable-http", "streamableHttp":
+		return nil
+	case "sse":
+		return errors.New("the HTTP+SSE transport is deprecated and not supported; use the server's Streamable HTTP endpoint")
+	}
+	return fmt.Errorf("unknown transport type %q", def.Type)
+}
+
+// envReference is a ${NAME} in a header value.
+var envReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandHeaders fills ${NAME} references from the environment. A
+// project's file may not use them: a repository could otherwise send
+// any of the person's secrets to a server it names.
+func expandHeaders(headers map[string]string, origin Origin) (map[string]string, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(headers))
+	for _, key := range slices.Sorted(maps.Keys(headers)) {
+		value := headers[key]
+		var missing []string
+		expanded := envReference.ReplaceAllStringFunc(value, func(ref string) string {
+			name := ref[2 : len(ref)-1] // inside ${...}
+			v, ok := os.LookupEnv(name)
+			if !ok {
+				missing = append(missing, name)
+			}
+			return v
+		})
+		switch {
+		case expanded != value && origin == OriginProject:
+			return nil, fmt.Errorf("header %s reads the environment, which a project's file may not do", key)
+		case len(missing) > 0:
+			return nil, fmt.Errorf("header %s uses %s, which is not set", key, strings.Join(missing, ", "))
+		}
+		out[key] = expanded
+	}
+	return out, nil
+}
+
+// ParseSpec parses the person's own list from the environment:
+// "name=command args" or "name=https://endpoint", separated by
+// semicolons. source labels the result; a bad entry does not stop the rest.
 func ParseSpec(spec, source string) ([]Server, error) {
 	var servers []Server
 	var errs []error
@@ -202,10 +295,15 @@ func ParseSpec(spec, source string) ([]Server, error) {
 			errs = append(errs, fmt.Errorf("mcp: %s: entry %q is not name=command", source, entry))
 			continue
 		}
+		name, command = strings.TrimSpace(name), strings.TrimSpace(command)
+		if strings.HasPrefix(command, "https://") || strings.HasPrefix(command, "http://") {
+			servers = append(servers, Server{Name: name, URL: command, Origin: OriginUser, Source: source})
+			continue
+		}
 		// The list has no separate arguments, so here spaces split them.
 		fields := strings.Fields(command)
 		servers = append(servers, Server{
-			Name: strings.TrimSpace(name), Command: fields[0], Args: fields[1:],
+			Name: name, Command: fields[0], Args: fields[1:],
 			Origin: OriginUser, Source: source,
 		})
 	}

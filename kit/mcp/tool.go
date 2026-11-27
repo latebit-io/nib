@@ -151,10 +151,17 @@ func (t *tool) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 	if err != nil {
 		return agent.ToolResult{Content: fmt.Sprintf("Error: %v", err), IsError: true}
 	}
-	text := result.Text
-	if len(text) > maxResultBytes {
-		// Cut on a rune boundary; a split rune would garble the tail.
-		text = strings.ToValidUTF8(text[:maxResultBytes], "") + "\n[... output truncated]"
+	return agent.ToolResult{Content: capText(result.Text), IsError: result.IsError}
+}
+
+// capText cuts a reply to [maxResultBytes].
+func capText(text string) string { return truncate(text, maxResultBytes, "\n[... output truncated]") }
+
+// truncate cuts text to n bytes and marks the cut. It cuts on a rune
+// boundary: a split rune would garble the tail.
+func truncate(text string, n int, mark string) string {
+	if len(text) <= n {
+		return text
 	}
-	return agent.ToolResult{Content: text, IsError: result.IsError}
+	return strings.ToValidUTF8(text[:n], "") + mark
 }

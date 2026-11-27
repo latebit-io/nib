@@ -75,7 +75,7 @@ func (t *TrustStore) Approve(projectDir string) (Config, error) {
 		return Config{}, fmt.Errorf("mcp: %s has no %s to trust", projectDir, ProjectConfigName)
 	}
 	// Parsed from the bytes that are approved, before anything is recorded.
-	servers, err := parseConfig(project.data, project.path, OriginProject, "")
+	servers, refused, err := parseConfig(project.data, project.path, OriginProject, "")
 	if err != nil {
 		return Config{}, err
 	}
@@ -91,7 +91,7 @@ func (t *TrustStore) Approve(projectDir string) (Config, error) {
 	if err := atomicfile.Write(t.path, data, 0o700, 0o600); err != nil {
 		return Config{}, fmt.Errorf("mcp: save trust store: %w", err)
 	}
-	return admit(servers, true), nil
+	return admit(servers, refused, true), nil
 }
 
 // read loads the store; a missing file is an empty store.

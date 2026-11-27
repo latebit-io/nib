@@ -94,6 +94,24 @@ func originClient(address string) *http.Client {
 	}}
 }
 
+// signInClient is the client for sign-in, which talks to the server and
+// its authorization server. Every hop must be https (or this machine),
+// and a request with a body (the code and PKCE verifier) keeps its origin.
+func signInClient() *http.Client {
+	return &http.Client{Timeout: refreshTimeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("stopped after %d redirects", maxRedirects)
+		}
+		if err := checkEndpoint(req.URL.String()); err != nil {
+			return fmt.Errorf("refusing a redirect: %w", err)
+		}
+		if from := origin(via[0].URL.String()); req.Method != http.MethodGet && origin(req.URL.String()) != from {
+			return fmt.Errorf("refusing to send a %s from %s on to another origin", req.Method, from)
+		}
+		return nil
+	}}
+}
+
 // origin is an address's scheme and host, lowercase; "" if it does not parse.
 func origin(address string) string {
 	u, err := url.Parse(address)

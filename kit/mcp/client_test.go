@@ -337,7 +337,8 @@ func TestClient_ChangesBeforeWatch(t *testing.T) {
 	}
 }
 
-// hangOnCall answers the handshake, then never answers a tool call.
+// hangOnCall answers the handshake, then never answers a tool call; it
+// creates the file $NIB_TEST_RECEIVED when one arrives.
 const hangOnCall = `#!/bin/sh
 while IFS= read -r line; do
   id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
@@ -347,7 +348,7 @@ while IFS= read -r line; do
     "initialize")
       echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"stuck\",\"version\":\"1\"}}}"
       ;;
-    "tools/call") ;;
+    "tools/call") : > "$NIB_TEST_RECEIVED" ;;
     *) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"no\"}}" ;;
   esac
 done
@@ -362,7 +363,8 @@ func TestClient_CloseDoesNotWaitOnAStuckCall(t *testing.T) {
 	if err := os.WriteFile(path, []byte(hangOnCall), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	client, err := NewStdioClient("sh", []string{path}, nil)
+	received := filepath.Join(t.TempDir(), "received")
+	client, err := NewStdioClient("sh", []string{path}, environ(map[string]string{"NIB_TEST_RECEIVED": received}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +378,15 @@ func TestClient_CloseDoesNotWaitOnAStuckCall(t *testing.T) {
 		_, err := client.CallTool(context.Background(), "anything", nil) // no deadline: it waits for ever
 		called <- err
 	}()
-	time.Sleep(100 * time.Millisecond) // let the call reach the server
+	// Close only once the call is outstanding at the server.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(received); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the tool call never reached the server")
+		}
+	}
 	closed := make(chan error, 1)
 	go func() { closed <- client.Close() }()
 	select {
@@ -390,6 +400,9 @@ func TestClient_CloseDoesNotWaitOnAStuckCall(t *testing.T) {
 	case err := <-called:
 		if err == nil {
 			t.Error("the stuck call must fail once the server is gone")
+		}
+		if errors.Is(err, ErrClientClosed) && !errors.Is(err, sdk.ErrConnectionClosed) {
+			t.Errorf("the call failed before it was sent (%v), not by the shutdown", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the stuck call never returned")

@@ -208,7 +208,7 @@ type grantSource struct {
 
 	mu    sync.Mutex
 	grant grant
-	saved string // the access token last kept in the store
+	saved oauth2.Token // the token as last kept in the store
 }
 
 func newGrantSource(server, endpoint string, store *TokenStore, g grant) *grantSource {
@@ -219,7 +219,7 @@ func newGrantSource(server, endpoint string, store *TokenStore, g grant) *grantS
 	client.Timeout, client.Transport = refreshTimeout, resourceParam{resource: g.Resource}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
 	return &grantSource{server: server, endpoint: endpoint, store: store,
-		base: cfg.TokenSource(ctx, g.Token), grant: g, saved: g.Token.AccessToken}
+		base: cfg.TokenSource(ctx, g.Token), grant: g, saved: *g.Token}
 }
 
 // Token implements [oauth2.TokenSource]. The lock covers the refresh and
@@ -241,15 +241,21 @@ func (s *grantSource) Token() (*oauth2.Token, error) {
 		return nil, err
 	}
 	s.grant.Token = tok
-	if tok.AccessToken != s.saved {
+	if !sameToken(tok, &s.saved) {
 		if err := s.store.update(s.endpoint, &s.grant); err != nil {
 			// The token works for this session; the save is tried again on the next call.
 			slog.Warn("mcp: keep refreshed token", "server", s.server, "err", err)
 		} else {
-			s.saved = tok.AccessToken
+			s.saved = *tok
 		}
 	}
 	return tok, nil
+}
+
+// sameToken reports whether two tokens hold the same credentials. A
+// refresh can rotate the refresh token and keep the access token.
+func sameToken(a, b *oauth2.Token) bool {
+	return a.AccessToken == b.AccessToken && a.RefreshToken == b.RefreshToken && a.Expiry.Equal(b.Expiry)
 }
 
 // resourceParam names the granted resource in a refresh, which oauth2
@@ -313,6 +319,7 @@ func Login(ctx context.Context, server Server, store *TokenStore, opts LoginOpti
 			TokenEndpointAuthMethod: "none",
 		}},
 		RedirectURL:         cb.redirect,
+		Client:              signInClient(),
 		RequestRefreshToken: true,
 		AuthorizationCodeFetcher: func(ctx context.Context, args *sdkauth.AuthorizationArgs) (*sdkauth.AuthorizationResult, error) {
 			if u, err := url.Parse(args.URL); err == nil {

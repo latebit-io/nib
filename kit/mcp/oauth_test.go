@@ -385,3 +385,54 @@ func definitionNames(s *Session) string {
 	}
 	return strings.Join(names, ",")
 }
+
+// TestGrantSource_KeepsARotatedRefreshToken: a refresh that keeps the
+// access token but rotates the refresh token is still saved.
+func TestGrantSource_KeepsARotatedRefreshToken(t *testing.T) {
+	endpoint := &tokenEndpoint{reply: func(url.Values) (int, string) {
+		return http.StatusOK, `{"access_token":"same","token_type":"Bearer","refresh_token":"rotated","expires_in":3600}`
+	}}
+	as := httptest.NewServer(endpoint)
+	defer as.Close()
+	store := OpenTokenStore(filepath.Join(t.TempDir(), "auth.json"))
+	g := grant{ClientID: "c", TokenURL: as.URL, AuthStyle: oauth2.AuthStyleInParams,
+		Token: &oauth2.Token{AccessToken: "same", RefreshToken: "first", Expiry: time.Now().Add(-time.Minute)}}
+	if _, err := newGrantSource("s", "https://mcp.example", store, g).Token(); err != nil {
+		t.Fatal(err)
+	}
+	if kept, err := store.load("https://mcp.example"); err != nil || kept == nil || kept.Token.RefreshToken != "rotated" {
+		t.Errorf("kept = %+v, %v; want the rotated refresh token", kept, err)
+	}
+}
+
+// TestSignInClient: every sign-in hop stays on https, and a request with
+// a body (the code exchange) is not sent on to another origin.
+func TestSignInClient(t *testing.T) {
+	check := signInClient().CheckRedirect
+	hop := func(method, from, to string) error {
+		prev, err := http.NewRequest(method, from, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := http.NewRequest(method, to, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return check(next, []*http.Request{prev})
+	}
+	for _, c := range []struct {
+		method, from, to string
+		ok               bool
+	}{
+		{http.MethodPost, "https://as.example/token", "http://as.example/token", false},
+		{http.MethodPost, "https://as.example/token", "https://other.example/token", false},
+		{http.MethodPost, "https://as.example/token", "https://as.example/v2/token", true},
+		{http.MethodGet, "https://mcp.example/.well-known/x", "https://meta.example/x", true},
+		{http.MethodGet, "https://mcp.example/.well-known/x", "http://meta.example/x", false},
+		{http.MethodGet, "http://127.0.0.1:8080/a", "http://localhost:8080/b", true},
+	} {
+		if err := hop(c.method, c.from, c.to); (err == nil) != c.ok {
+			t.Errorf("%s %s -> %s: %v, want allowed=%v", c.method, c.from, c.to, err, c.ok)
+		}
+	}
+}

@@ -128,17 +128,25 @@ type job struct {
 	env    map[string]string
 }
 
-// jobs are the runnable hooks of ev whose matcher fits tool ("" for
-// events that have none).
-func (d *Dispatcher) jobs(ev hookspec.Event, tool string) []job {
+// jobs are the runnable hooks of ev whose matcher fits subject: a tool
+// name (matched by Claude Code's names too), why a session starts or
+// ends, or a subagent's type. Events without one ignore the matcher.
+func (d *Dispatcher) jobs(ev hookspec.Event, subject string) []job {
 	if d == nil {
 		return nil
 	}
 	var out []job
 	for _, s := range d.sources {
 		for _, g := range s.Config.Hooks[ev] {
-			if tool != "" && !hookmap.Matches(g, tool) {
-				continue
+			switch ev {
+			case hookspec.PreToolUse, hookspec.PostToolUse:
+				if !hookmap.Matches(g, subject) {
+					continue
+				}
+			case hookspec.SessionStart, hookspec.SessionEnd, hookspec.SubagentStop:
+				if !g.Matches(subject) {
+					continue
+				}
 			}
 			for _, h := range g.Hooks {
 				if h.Runnable() {
@@ -150,11 +158,11 @@ func (d *Dispatcher) jobs(ev hookspec.Event, tool string) []job {
 	return out
 }
 
-// run runs every hook of ev that fits tool, all at once as Claude Code
-// does. fill completes the input, which is built only when a hook runs.
-// Failures are logged and do not block.
-func (d *Dispatcher) run(ctx context.Context, ev hookspec.Event, tool string, timeout time.Duration, fill func(*hookrun.Input)) []hookrun.Result {
-	jobs := d.jobs(ev, tool)
+// run runs every hook of ev that fits subject (see jobs), all at once as
+// Claude Code does. fill completes the input, built only when a hook
+// runs. Failures are logged and do not block.
+func (d *Dispatcher) run(ctx context.Context, ev hookspec.Event, subject string, timeout time.Duration, fill func(*hookrun.Input)) []hookrun.Result {
+	jobs := d.jobs(ev, subject)
 	if len(jobs) == 0 {
 		return nil
 	}
@@ -291,12 +299,12 @@ func (d *Dispatcher) Prompt(ctx context.Context, prompt string) (string, error) 
 // SessionStart runs the SessionStart hooks; source is why the session
 // starts, such as "startup". It returns the context they add.
 func (d *Dispatcher) SessionStart(ctx context.Context, source string) string {
-	return contexts(d.run(ctx, hookspec.SessionStart, "", 0, func(in *hookrun.Input) { in.Source = source }))
+	return contexts(d.run(ctx, hookspec.SessionStart, source, 0, func(in *hookrun.Input) { in.Source = source }))
 }
 
 // SessionEnd runs the SessionEnd hooks for their side effects.
 func (d *Dispatcher) SessionEnd(ctx context.Context, reason string) {
-	d.run(ctx, hookspec.SessionEnd, "", 0, func(in *hookrun.Input) { in.Reason = reason })
+	d.run(ctx, hookspec.SessionEnd, reason, 0, func(in *hookrun.Input) { in.Reason = reason })
 }
 
 // Stop runs the Stop hooks when the agent has finished answering. A block
@@ -318,7 +326,7 @@ func (d *Dispatcher) Stop(ctx context.Context, last string, active bool) string 
 // SubagentStop runs the SubagentStop hooks after a subagent of type
 // agentType finished, for their side effects.
 func (d *Dispatcher) SubagentStop(ctx context.Context, agentType, last string) {
-	d.run(ctx, hookspec.SubagentStop, "", 0, func(in *hookrun.Input) {
+	d.run(ctx, hookspec.SubagentStop, agentType, 0, func(in *hookrun.Input) {
 		in.AgentType, in.LastAssistantMessage = agentType, last
 	})
 }
@@ -332,8 +340,9 @@ func ccName(tool string) string {
 	return tool
 }
 
-// ccInput passes a call's arguments as Claude Code names them: nib's
-// Read, Write and Edit tools say path where Claude Code says file_path.
+// ccInput passes a call's arguments as Claude Code names them: nib's file
+// tools say path for file_path. file_path is always the path the tool
+// uses, never one the call sets beside it: a hook judges the file read.
 func ccInput(tool, args string) json.RawMessage {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal([]byte(args), &obj) != nil {
@@ -342,9 +351,7 @@ func ccInput(tool, args string) json.RawMessage {
 	switch ccName(tool) {
 	case "Read", "Write", "Edit":
 		if path, ok := obj["path"]; ok {
-			if _, has := obj["file_path"]; !has {
-				obj["file_path"] = path
-			}
+			obj["file_path"] = path
 		}
 	default:
 		return json.RawMessage(args)

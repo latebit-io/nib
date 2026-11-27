@@ -9,7 +9,9 @@ import (
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/agentdef"
 	"github.com/latebit-io/nib/kit/permission"
+	"github.com/latebit-io/nib/kit/skill"
 	"github.com/latebit-io/nib/kit/subagent"
+	"github.com/latebit-io/nib/kit/tools/files"
 )
 
 // child is what a subagent is built from, as compose last left it: the
@@ -48,6 +50,10 @@ func (a *Assembly) delegation(defs []agentdef.Definition, providerFor func(model
 			return strings.TrimSpace(strings.TrimSpace(persona) + "\n\n" + a.child.Load().prompt)
 		},
 		OnStop: a.Hooks.SubagentStop,
+		Skills: a.skillText,
+		Resolve: func(p string) (string, error) {
+			return files.Resolve(a.Root, a.env.Dir, p)
+		},
 	}
 	agents, errs := subagent.AgentTools(defs, host)
 	a.Warnings = append(a.Warnings, errs...)
@@ -67,4 +73,19 @@ func (a *Assembly) delegation(defs []agentdef.Definition, providerFor func(model
 		}
 		a.agentRows = append(a.agentRows, kit.Plugin{Kind: kit.KindAgent, Name: name, Description: defs[i].Description, Source: source})
 	}
+}
+
+// skillText returns the instructions of the named skills, each under its
+// name, and the names the session has no skill for.
+func (a *Assembly) skillText(names []string) (text string, missing []string) {
+	var parts []string
+	for _, name := range names {
+		i := slices.IndexFunc(a.skills.Loaded, func(s skill.Skill) bool { return s.Name == name })
+		if i < 0 {
+			missing = append(missing, name)
+			continue
+		}
+		parts = append(parts, "### "+name+"\n\n"+strings.TrimSpace(a.skills.Loaded[i].Body))
+	}
+	return strings.Join(parts, "\n\n"), missing
 }

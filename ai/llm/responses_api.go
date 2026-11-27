@@ -47,7 +47,7 @@ func NewResponsesAPI(baseURL, model string, auth Auth, effort Effort) *Responses
 
 func newResponses(endpoint, provider, model string, auth Auth, effort Effort) *responses {
 	return &responses{auth: auth, endpoint: endpoint, provider: provider, model: model, effort: effort,
-		client: &http.Client{Transport: agentTransport()}}
+		client: apiClient()}
 }
 
 // Stream sends a request to the endpoint and returns a channel of
@@ -286,12 +286,15 @@ type responsesStreamState struct {
 // emit (if any; Done marks the end of the stream) or a terminal error.
 func (s *responsesStreamState) handleEvent(evt responsesSSEEvent, raw []byte) (*StreamEvent, error) {
 	switch evt.Type {
-	case "response.output_text.delta":
+	case "response.output_text.delta", "response.refusal.delta":
+		// A refusal is the model's answer too: dropping it would end the turn empty.
 		if evt.Delta != "" {
 			return &StreamEvent{Token: evt.Delta}, nil
 		}
 	case "response.output_item.added":
-		s.handleItemAdded(evt)
+		if err := s.handleItemAdded(evt); err != nil {
+			return nil, err
+		}
 	case "response.function_call_arguments.delta":
 		s.handleCallDelta(evt)
 	case "response.output_item.done":
@@ -340,11 +343,18 @@ func incompleteReason(evt responsesSSEEvent) (reason string, incomplete bool) {
 	return reason, incomplete
 }
 
-func (s *responsesStreamState) handleItemAdded(evt responsesSSEEvent) {
+// handleItemAdded starts a tool call. Output indices are sparse, since
+// other items take them too, so the bound is on how many calls there are.
+func (s *responsesStreamState) handleItemAdded(evt responsesSSEEvent) error {
 	var item responsesOutputItem
-	if err := json.Unmarshal(evt.Item, &item); err == nil && item.Type == "function_call" {
-		s.calls[evt.OutputIndex] = &pendingCall{id: item.CallID, name: item.Name}
+	if err := json.Unmarshal(evt.Item, &item); err != nil || item.Type != "function_call" {
+		return nil
 	}
+	if _, known := s.calls[evt.OutputIndex]; !known && len(s.calls) >= maxToolCalls {
+		return fmt.Errorf("response has more than %d tool calls", maxToolCalls)
+	}
+	s.calls[evt.OutputIndex] = &pendingCall{id: item.CallID, name: item.Name}
+	return nil
 }
 
 func (s *responsesStreamState) handleCallDelta(evt responsesSSEEvent) {
@@ -412,10 +422,9 @@ func responsesUsageOf(evt responsesSSEEvent) *Usage {
 		cached = d.CachedTokens
 	}
 	fresh := gross - cached
-	if fresh < 0 {
-		// Provider mis-report (cached > gross). Clamp + drop to a
-		// safe split that preserves the gross total downstream.
-		slog.Warn("responses: cached_tokens > input_tokens — clamping",
+	if fresh < 0 || cached < 0 {
+		// A mis-report: keep the gross total and count none of it as cached.
+		slog.Warn("responses: cached_tokens outside 0..input_tokens, ignoring it",
 			"input_tokens", gross, "cached_tokens", cached)
 		fresh = gross
 		cached = 0

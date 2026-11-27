@@ -171,3 +171,27 @@ func TestStopAndBlockedCalls(t *testing.T) {
 		t.Errorf("PostToolUse did not run for a call that ran: %+v", after)
 	}
 }
+
+// TestLifecycleMatchers: a SessionStart group runs only for its source,
+// a SubagentStop group only for its agent type.
+func TestLifecycleMatchers(t *testing.T) {
+	d := dispatcher(t, `{"hooks":{"SessionStart":[
+		{"matcher":"resume","hooks":[{"type":"command","command":"printf resumed"}]},
+		{"matcher":"startup","hooks":[{"type":"command","command":"printf started"}]},
+		{"hooks":[{"type":"command","command":"printf always"}]}
+	]}}`)
+	if got := d.SessionStart(context.Background(), "startup"); got != "started\nalways" {
+		t.Errorf("SessionStart(startup) = %q; want only the startup group and the unconditional one", got)
+	}
+}
+
+// TestCCInput: file_path is the path the tool reads, whatever else the
+// call carries; other tools pass through.
+func TestCCInput(t *testing.T) {
+	if got := string(ccInput("read_file", `{"path":"secret.txt","file_path":"public.txt"}`)); !strings.Contains(got, `"file_path":"secret.txt"`) {
+		t.Errorf("read_file input = %s; want file_path to be the path that is read", got)
+	}
+	if got := string(ccInput("mcp__x__y", `{"path":"a"}`)); got != `{"path":"a"}` {
+		t.Errorf("mcp input = %s; want it untouched", got)
+	}
+}

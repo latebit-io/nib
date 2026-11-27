@@ -470,3 +470,34 @@ func TestWrite_LinkThroughAFileIsRefused(t *testing.T) {
 	// A parent that does not exist yet is still created for a new file.
 	ok(t, tools["write_file"], map[string]any{"path": "fresh/dir/new.go", "content": "package dir\n"})
 }
+
+// TestResolve: a path is the file it reaches: .. folded, links followed,
+// a file not written yet named under its parent, outside refused.
+func TestResolve(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "private.key"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "private.key"), filepath.Join(root, "src", "link")); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "src")
+	for in, want := range map[string]string{
+		"src/../private.key": "private.key",
+		"src/link":           "private.key",
+		"src/new.go":         "src/new.go",
+	} {
+		if got, err := Resolve(root, root, in); err != nil || got != want {
+			t.Errorf("Resolve(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if got, err := Resolve(root, sub, "a.go"); err != nil || got != "src/a.go" {
+		t.Errorf("relative to a subdirectory: %q, %v", got, err)
+	}
+	if _, err := Resolve(root, root, "../outside"); err == nil {
+		t.Error("a path outside the project must be refused")
+	}
+}

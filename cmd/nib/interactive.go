@@ -344,6 +344,9 @@ func newProvider(root string) (*llmconfig.Resolved, llm.Provider, error) {
 	if err != nil {
 		return nil, nil, setupErr("oauth store: %v", err)
 	}
+	if err := resolved.Validate(); err != nil {
+		return nil, nil, setupErr("%v", err)
+	}
 	if !resolved.HasProvider() {
 		return nil, nil, setupErr("no LLM credentials — %s", credentialHint(resolved))
 	}

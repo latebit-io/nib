@@ -122,8 +122,10 @@ func (s *Store) Install(ctx context.Context, src Source, opts InstallOptions) (I
 	if i := s.reg.pluginIndex(id); i >= 0 {
 		prev := s.reg.Plugins[i]
 		entry.Enabled = prev.Enabled
-		entry.Trusted = prev.Trusted
 		entry.UserConfig = prev.UserConfig
+		// Trust was given to code from one place: another source with the
+		// same name has to earn it again.
+		entry.Trusted = prev.Trusted && prev.Source == src
 	}
 
 	if err := s.promoteInstall(id, st.name, st.version, st.dir); err != nil {

@@ -467,6 +467,11 @@ func convertHooks(src, dst string, vars Vars, report *ConvertReport) error {
 					noteVars(report, un)
 					h.Command.Parts[i] = ex // Shell form preserved
 				}
+				for i, arg := range h.Args {
+					ex, un := expandVars(arg, vars)
+					noteVars(report, un)
+					h.Args[i] = ex
+				}
 				for k, v := range h.Env {
 					ev, un := expandVars(v, vars)
 					noteVars(report, un)

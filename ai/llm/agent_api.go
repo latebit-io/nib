@@ -43,11 +43,31 @@ func NewAgentAPI(baseURL, model string, auth Auth, promptCaching bool, effort Ef
 		model:         model,
 		promptCaching: promptCaching,
 		effort:        effort,
-		client: &http.Client{
-			Transport: agentTransport(),
-			// No client-level Timeout — would kill SSE streams mid-flight.
-		},
+		client:        apiClient(),
 	}
+}
+
+// apiClient is the client a provider sends its credentials with. It has
+// no overall timeout, which would cut a stream, and follows a redirect
+// only within the endpoint's origin: a key or a replayed body stays there.
+func apiClient() *http.Client {
+	return &http.Client{Transport: agentTransport(), CheckRedirect: sameOrigin}
+}
+
+// maxRedirects is how many redirects a request may follow, as net/http does.
+const maxRedirects = 10
+
+// sameOrigin refuses a redirect to another scheme or host.
+func sameOrigin(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	from := via[0].URL
+	if req.URL.Scheme != from.Scheme || !strings.EqualFold(req.URL.Host, from.Host) {
+		return fmt.Errorf("refusing a redirect from %s://%s to %s://%s: credentials stay with the endpoint",
+			from.Scheme, from.Host, req.URL.Scheme, req.URL.Host)
+	}
+	return nil
 }
 
 // agentTransport clones http.DefaultTransport and adds connection timeouts.

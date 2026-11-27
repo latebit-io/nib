@@ -64,14 +64,14 @@ func TestRun_ExecFormAndDir(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	h := hookspec.Hook{Type: hookspec.Command, Command: hookspec.CommandSpec{Parts: []string{"sh"}, Shell: true},
-		Args: []string{"-c", `printf '%s %s' "$(pwd -P)" "$CLAUDE_PROJECT_DIR"`}}
+		Args: []string{"-c", `printf '%s %s %s' "$(pwd -P)" "$PWD" "$CLAUDE_PROJECT_DIR"`}}
 	res := Runner{Dir: dir, Env: map[string]string{"CLAUDE_PROJECT_DIR": "/proj"}}.Run(context.Background(), h, Input{})
 	real, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Context != real+" /proj" {
-		t.Errorf("output = %q, want the directory and the environment", res.Context)
+	if res.Context != real+" "+dir+" /proj" {
+		t.Errorf("output = %q, want the directory, PWD naming it, and the environment", res.Context)
 	}
 }
 

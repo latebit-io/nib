@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,18 @@ var openResponsesStream = []string{
 // each event's name matching its type, and records the request.
 func responsesServer(t *testing.T, frames []string) (*httptest.Server, *http.Request, *[]byte) {
 	t.Helper()
+	// Each frame's type is read here, on the test's goroutine: a bad
+	// fixture must stop the test, not the server's handler.
+	var sse strings.Builder
+	for _, f := range frames {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(f), &head); err != nil {
+			t.Fatalf("bad fixture %s: %v", f, err)
+		}
+		sse.WriteString("event: " + head.Type + "\ndata: " + f + "\n\n")
+	}
 	var got http.Request
 	var body []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,16 +58,8 @@ func responsesServer(t *testing.T, frames []string) (*httptest.Server, *http.Req
 			t.Error(err)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		for _, f := range frames {
-			var head struct {
-				Type string `json:"type"`
-			}
-			if err := json.Unmarshal([]byte(f), &head); err != nil {
-				t.Fatalf("bad fixture %s: %v", f, err)
-			}
-			if _, err := io.WriteString(w, "event: "+head.Type+"\ndata: "+f+"\n\n"); err != nil {
-				t.Error(err)
-			}
+		if _, err := io.WriteString(w, sse.String()); err != nil {
+			t.Error(err)
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -93,7 +98,7 @@ func TestResponsesAPI_SpecStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sent.Model != "open-model" || !sent.Stream || sent.Store == nil || *sent.Store || sent.Instructions != nil || len(sent.Input) != 3 || len(sent.Tools) != 1 {
-		t.Errorf("body = %s", *body)
+		t.Fatalf("body = %s", *body)
 	}
 	for i, want := range []string{`"type":"message"`, `"type":"function_call"`, `"type":"function_call_output"`} {
 		if !strings.Contains(string(sent.Input[i]), want) {
@@ -129,5 +134,58 @@ func TestResponsesAPI_InstructionsAndEffort(t *testing.T) {
 		if !strings.Contains(string(*body), want) {
 			t.Errorf("body lacks %s: %s", want, *body)
 		}
+	}
+}
+
+// TestResponsesAPI_RefusalAndLimits: a refusal reaches the person as the
+// answer; a response with more tool calls than allowed ends in an error;
+// a negative cached count is not taken as cached.
+func TestResponsesAPI_RefusalAndLimits(t *testing.T) {
+	stream := func(frames []string) []StreamEvent {
+		t.Helper()
+		srv, _, _ := responsesServer(t, frames)
+		ch, err := NewResponsesAPI(srv.URL, "m", StaticKeyAuth("k"), "").Stream(context.Background(), []Message{{Role: "user", Content: "x"}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return collectStream(ch)
+	}
+	evs := stream([]string{
+		`{"type":"response.refusal.delta","sequence_number":1,"item_id":"m","output_index":0,"content_index":0,"delta":"I can't help with that."}`,
+		`{"type":"response.completed","sequence_number":2,"response":{"status":"completed","usage":{"input_tokens":12,"output_tokens":3,"input_tokens_details":{"cached_tokens":-1}}}}`,
+	})
+	last, tokens := terminalOf(t, evs)
+	if tokens != 1 || evs[0].Token != "I can't help with that." {
+		t.Errorf("events = %+v; want the refusal as the answer", evs)
+	}
+	if u := last.Usage; u == nil || u.PromptTokens != 12 || u.CachedTokens != 0 {
+		t.Errorf("usage = %+v; want 12 fresh, none cached", last.Usage)
+	}
+
+	var many []string
+	for i := range maxToolCalls + 1 {
+		many = append(many, fmt.Sprintf(`{"type":"response.output_item.added","output_index":%d,"item":{"type":"function_call","call_id":"c%d","name":"f"}}`, i*2, i))
+	}
+	evs = stream(append(many, openResponsesStream[len(openResponsesStream)-1]))
+	if err := evs[len(evs)-1].Err; err == nil || !strings.Contains(err.Error(), "tool calls") {
+		t.Errorf("last = %+v; want the stream ended over too many calls", evs[len(evs)-1])
+	}
+}
+
+// TestResponsesAPI_RedirectStaysOnOrigin: the key is not sent where the
+// endpoint redirects.
+func TestResponsesAPI_RedirectStaysOnOrigin(t *testing.T) {
+	var leaked bool
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { leaked = true }))
+	defer other.Close()
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/v1/responses", http.StatusTemporaryRedirect)
+	}))
+	defer redirecting.Close()
+	if _, err := NewResponsesAPI(redirecting.URL, "m", StaticKeyAuth("k"), "").Stream(context.Background(), []Message{{Role: "user", Content: "x"}}, nil); err == nil {
+		t.Error("a redirect to another origin must fail")
+	}
+	if leaked {
+		t.Error("the request reached the other origin")
 	}
 }

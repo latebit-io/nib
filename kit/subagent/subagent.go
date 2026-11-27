@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -47,6 +48,13 @@ type Host struct {
 	Prompt func(persona string) string
 	// OnStop is told when a child finished, with its answer. Optional.
 	OnStop func(ctx context.Context, agentType, answer string)
+	// Skills returns the instructions of the named skills, for an agent
+	// that preloads them, and the names it does not know. Optional.
+	Skills func(names []string) (text string, missing []string)
+	// Resolve returns the project-relative file a call's path reaches, so
+	// a grant like Read(src/*) is checked on it. Optional: without it the
+	// path is only cleaned.
+	Resolve func(path string) (string, error)
 }
 
 // task is one kind of child.
@@ -94,8 +102,18 @@ func AgentTools(defs []agentdef.Definition, host Host) ([]kit.Tool, []error) {
 			errs = append(errs, fmt.Errorf("agent %s asks for a worktree, which nib does not offer yet; left out", d.Name))
 			continue
 		}
+		persona := d.SystemPrompt
+		if len(d.Skills) > 0 && host.Skills != nil {
+			text, missing := host.Skills(d.Skills)
+			if len(missing) > 0 {
+				errs = append(errs, fmt.Errorf("agent %s preloads skills nib does not have: %s", d.Name, strings.Join(missing, ", ")))
+			}
+			if text != "" {
+				persona += "\n\n## Skills\n\n" + text
+			}
+		}
 		t, err := newTask(ToolNamePrefix+d.Name, d.Description, d.AllowedTools, d.DisallowedTools, task{
-			kind: d.Name, persona: d.SystemPrompt, model: d.Model, effort: d.Effort, maxTurns: d.MaxTurns, host: host,
+			kind: d.Name, persona: persona, model: d.Model, effort: d.Effort, maxTurns: d.MaxTurns, host: host,
 		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("agent %s: %w", d.Name, err))
@@ -175,7 +193,7 @@ func (t *task) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResult 
 	}
 	child, err := kit.New(kit.Config{
 		Provider: provider,
-		Toolset:  kit.Toolset{Tools: grant(t.host.Tools(), t.grants), Hooks: t.host.Hooks(provider)},
+		Toolset:  kit.Toolset{Tools: grant(t.host.Tools(), t.grants, t.host.Resolve), Hooks: t.host.Hooks(provider)},
 		MaxTurns: t.maxTurns,
 	})
 	if err != nil {
@@ -213,7 +231,7 @@ func failed(format string, args ...any) agent.ToolResult {
 // grant returns the tools a child may use: with an allow list only those
 // it names, never one it denies outright, and a tool whose grant is
 // scoped by argument (Bash(git *)) checked call by call.
-func grant(tools []kit.Tool, m *toolperm.Matcher) []kit.Tool {
+func grant(tools []kit.Tool, m *toolperm.Matcher, resolve func(string) (string, error)) []kit.Tool {
 	if m == nil {
 		return tools
 	}
@@ -224,7 +242,7 @@ func grant(tools []kit.Tool, m *toolperm.Matcher) []kit.Tool {
 			continue
 		}
 		if m.HasArgRules(name) {
-			t = &scoped{Tool: t, grants: m}
+			t = &scoped{Tool: t, grants: m, resolve: resolve}
 		}
 		out = append(out, t)
 	}
@@ -234,7 +252,8 @@ func grant(tools []kit.Tool, m *toolperm.Matcher) []kit.Tool {
 // scoped is a tool whose grant depends on the call's argument.
 type scoped struct {
 	kit.Tool
-	grants *toolperm.Matcher
+	grants  *toolperm.Matcher
+	resolve func(string) (string, error)
 }
 
 // Execute implements [agent.Tool].
@@ -245,10 +264,30 @@ func (s *scoped) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResul
 	if name == "bash" && toolperm.HasShellControl(arg) {
 		return failed("this agent may run only single commands that its grants name")
 	}
+	if name != "bash" {
+		target, err := s.target(arg)
+		if err != nil {
+			return failed("%v", err)
+		}
+		arg = target
+	}
 	if !s.grants.PermitsArg(name, arg) {
 		return failed("this agent is not granted %s %q", name, arg)
 	}
 	return s.Tool.Execute(ctx, call)
+}
+
+// target is the file a path reaches, as a grant names files: src/../x
+// is x, and a link is the file it points to.
+func (s *scoped) target(p string) (string, error) {
+	if s.resolve != nil {
+		return s.resolve(p)
+	}
+	clean := path.Clean(filepath.ToSlash(p))
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("%s is outside the project", p)
+	}
+	return clean, nil
 }
 
 // argument is what an argument-scoped grant is matched against: the

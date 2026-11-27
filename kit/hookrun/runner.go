@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -102,7 +101,7 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 	cmd := buildCmd(ctx, h)
 	cmd.Dir = r.Dir
 	if len(r.Env) > 0 || len(h.Env) > 0 {
-		cmd.Env = os.Environ()
+		cmd.Env = cmd.Environ() // the process's, with PWD set to Dir
 		for _, env := range []map[string]string{r.Env, h.Env} {
 			for _, k := range slices.Sorted(maps.Keys(env)) {
 				cmd.Env = append(cmd.Env, k+"="+env[k])

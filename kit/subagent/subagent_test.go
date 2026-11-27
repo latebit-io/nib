@@ -169,3 +169,38 @@ func TestDiscover(t *testing.T) {
 		t.Errorf("defs = %+v", defs)
 	}
 }
+
+// TestGrants_ResolvedPath: a path grant is checked on the file the call
+// reaches, not on what it wrote.
+func TestGrants_ResolvedPath(t *testing.T) {
+	var calls, stopped []string
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(llmtest.Call("1", "read_file", `{"path":"src/../private.key"}`), llmtest.Call("2", "read_file", `{"path":"src/a.go"}`)),
+		llmtest.Text("done"))
+	h := host(provider, []kit.Tool{tool("read_file", &calls)}, &stopped)
+	tools, errs := AgentTools([]agentdef.Definition{{Name: "src", Description: "x", AllowedTools: []string{"Read(src/*)"}}}, h)
+	if len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	tools[0].Execute(context.Background(), call(`{"task":"read"}`))
+	if strings.Join(calls, "|") != "read_file src/a.go" {
+		t.Errorf("read %v; want only src/a.go", calls)
+	}
+}
+
+// TestPreloadedSkills: the skills a definition names join its persona;
+// one the host lacks is reported.
+func TestPreloadedSkills(t *testing.T) {
+	var stopped []string
+	provider := llmtest.NewScripted(llmtest.Text("ok"))
+	h := host(provider, nil, &stopped)
+	h.Skills = func(names []string) (string, []string) { return "### policy\n\nNever push.", names[1:] }
+	tools, errs := AgentTools([]agentdef.Definition{{Name: "p", Description: "x", SystemPrompt: "You help.", Skills: []string{"policy", "gone"}}}, h)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "gone") {
+		t.Errorf("errs = %v; want the missing skill named", errs)
+	}
+	tools[0].Execute(context.Background(), call(`{"task":"x"}`))
+	if sys := provider.Requests()[0].Messages[0].Content; !strings.Contains(sys, "You help.\n\n## Skills\n\n### policy\n\nNever push.") {
+		t.Errorf("system prompt = %q", sys)
+	}
+}

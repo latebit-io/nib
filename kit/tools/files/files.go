@@ -489,3 +489,44 @@ func PathOf(args string) string {
 	}
 	return call.Path
 }
+
+// Resolve returns the file a call's path reaches, relative to root and
+// slash-separated: against dir when relative, with links followed. A
+// grant is judged on that, not on what the call wrote. Outside root is an error.
+func Resolve(root, dir, name string) (string, error) {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("files: %w", err)
+	}
+	p := filepath.FromSlash(name)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	real, err := existingTarget(filepath.Clean(p))
+	if err != nil {
+		return "", fmt.Errorf("files: %w", err)
+	}
+	rel, err := filepath.Rel(realRoot, real)
+	if err != nil || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("%s is outside the project", name)
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// existingTarget follows the links of p, or of its nearest existing
+// parent for a file not written yet.
+func existingTarget(p string) (string, error) {
+	real, err := filepath.EvalSymlinks(p)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return real, err
+	}
+	parent := filepath.Dir(p)
+	if parent == p {
+		return "", err
+	}
+	realParent, err := existingTarget(parent)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(realParent, filepath.Base(p)), nil
+}

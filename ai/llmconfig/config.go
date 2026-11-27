@@ -3,8 +3,11 @@
 package llmconfig
 
 import (
+	"fmt"
 	"log/slog"
 	"maps"
+	"net"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -102,12 +105,59 @@ func (r *Resolved) DisplayModel() string {
 }
 
 // HasProvider reports whether enough configuration exists to create
-// an LLM provider. API key takes priority; OAuth is the fallback.
+// an LLM provider: credentials (an API key, else OAuth) and a
+// configuration [Resolved.Validate] accepts.
 func (r *Resolved) HasProvider() bool {
-	if r.apiKey != "" {
-		return true
+	if r.apiKey == "" && (r.OAuthProvider == "" || r.Auth == nil) {
+		return false
 	}
-	return r.OAuthProvider != "" && r.Auth != nil
+	return r.Validate() == nil
+}
+
+// Validate reports what keeps the profile from building a provider other
+// than missing credentials: an api nib does not know, a ChatGPT sign-in
+// pointed away from its backend, or credentials sent over plain http.
+func (r *Resolved) Validate() error {
+	if _, ok := r.wireAPI(); !ok {
+		return fmt.Errorf("profile %s: unknown api %q (use %s, %s or %s)", r.Profile, r.API, APIChat, APIMessages, APIResponses)
+	}
+	if r.chatGPT() {
+		// Its token is for the Codex backend alone, whatever base_url says.
+		if r.API != "" && r.API != APIResponses {
+			return fmt.Errorf("profile %s: a ChatGPT sign-in works only with the Codex backend, not api %q", r.Profile, r.API)
+		}
+		return nil
+	}
+	if r.apiKey != "" || r.OAuthProvider != "" {
+		if err := plainHTTP(r.BaseURL); err != nil {
+			return fmt.Errorf("profile %s: %w", r.Profile, err)
+		}
+	}
+	return nil
+}
+
+// chatGPT reports whether the profile signs in with ChatGPT rather than
+// a key: its credentials then speak to the Codex backend only.
+func (r *Resolved) chatGPT() bool {
+	return r.apiKey == "" && r.OAuthProvider == string(oauth.ProviderOpenAI)
+}
+
+// plainHTTP refuses an http base URL on another machine, where a key
+// would cross the network in the clear. A server on this machine, a
+// private address or a bare host name on the local network is allowed.
+func plainHTTP(base string) error {
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme != "http" {
+		return nil // https, or a URL the request itself will reject
+	}
+	host := u.Hostname()
+	if host == "localhost" || !strings.Contains(host, ".") {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
+		return nil
+	}
+	return fmt.Errorf("refusing to send credentials over plain http to %s; use https", host)
 }
 
 // SetAPIKey sets the API key on the resolved configuration.
@@ -132,22 +182,22 @@ func (r *Resolved) NewProvider() llm.Provider {
 		slog.Warn("llmconfig: unknown effort, using provider default", "effort", r.Effort)
 		effort = ""
 	}
-	api, ok := r.wireAPI()
-	if !ok {
-		slog.Warn("llmconfig: unknown api, no provider built", "profile", r.Profile, "api", r.API)
+	if err := r.Validate(); err != nil {
+		slog.Warn("llmconfig: no provider built", "err", err)
 		return nil
 	}
+	api, _ := r.wireAPI() // Validate accepted it
 	var auth llm.Auth
 	switch {
 	case r.apiKey != "" && api == APIMessages:
 		auth = llm.AnthropicKeyAuth(r.apiKey)
 	case r.apiKey != "":
 		auth = llm.StaticKeyAuth(r.apiKey)
-	case r.OAuthProvider != "" && r.Auth != nil:
-		// ChatGPT sign-in speaks the Codex backend unless the profile names a format.
-		if r.OAuthProvider == string(oauth.ProviderOpenAI) && r.API == "" {
-			return llm.NewCodexAPI(r.Model, r.Auth, effort)
-		}
+	case r.Auth == nil:
+		return nil
+	case r.chatGPT():
+		return llm.NewCodexAPI(r.Model, r.Auth, effort)
+	case r.OAuthProvider != "":
 		auth = r.Auth
 	default:
 		return nil

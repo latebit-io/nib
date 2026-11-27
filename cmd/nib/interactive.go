@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/latebit-io/nib/ai/llm"
@@ -44,13 +45,32 @@ func newSession(ctx context.Context, root, prompt string, store memory.Store, re
 	return &session{resolved: resolved, provider: provider, switches: chosen.switches, assembly: assembly, agent: agent}, nil
 }
 
-// attach makes r the frontend the permission gate asks, and starts in
-// the approve mode when the person chose it.
-func (s *session) attach(r *repl.REPL, approve bool) {
+// attach makes r the session's frontend: asked by the permission gate
+// and the MCP servers, given the commands, and rebuilt when a server's
+// tools change. It starts in the approve mode when the person chose it.
+func (s *session) attach(r *repl.REPL, approve bool) error {
 	s.assembly.Permission.SetAsker(r.Ask)
+	s.assembly.SetAsker(r.Elicit)
 	if approve {
 		s.assembly.Permission.SetMode(permission.Approve)
 	}
+	ext := &extensionCommand{session: s, repl: r}
+	reg, err := ext.registry()
+	if err != nil {
+		return fmt.Errorf("command: %w", err)
+	}
+	r.SetCommands(reg)
+	// One rebuild waits at a time; a burst of changes is followed once.
+	var waiting atomic.Bool
+	s.assembly.WatchServers(func() {
+		if waiting.CompareAndSwap(false, true) {
+			r.Post(func() {
+				waiting.Store(false)
+				ext.serversChanged()
+			})
+		}
+	})
+	return nil
 }
 
 // close stops the agent and the blocks it ran on.
@@ -86,12 +106,9 @@ func runInteractive(ctx, startCtx context.Context, started func(), root string, 
 	if err != nil {
 		return setupErr("%v", err)
 	}
-	s.attach(r, chosen.approve)
-	reg, err := (&extensionCommand{session: s, repl: r}).registry()
-	if err != nil {
-		return setupErr("command: %v", err)
+	if err := s.attach(r, chosen.approve); err != nil {
+		return setupErr("%v", err)
 	}
-	r.SetCommands(reg)
 	fmt.Fprintln(os.Stderr, "nib: /help lists commands; Ctrl-C stops a run, or leaves when nothing is running.")
 	err = r.Run(ctx)
 	recordSession(store, sessionID, "(interactive session)", statusSuccess)
@@ -169,7 +186,19 @@ func (c *extensionCommand) Handle(ctx context.Context, sess command.Session, arg
 		}
 		return fmt.Errorf("%s stays as it was: %w", name, err)
 	}
-	// The old agent still holds the tools as they were: replace it.
+	if err := c.replaceAgent(reg); err != nil {
+		return err
+	}
+	s.switches = next
+	sess.Display(fmt.Sprintf("%s is now %s. The conversation continues.", name, state))
+	return nil
+}
+
+// replaceAgent gives the session an agent built from the blocks as they
+// are now, and the commands in reg; the conversation carries over. The
+// old agent still holds the tools as they were.
+func (c *extensionCommand) replaceAgent(reg *command.Registry) error {
+	s := c.session
 	agent, err := s.assembly.Agent(s.provider)
 	if err == nil {
 		err = c.repl.Swap(agent, s.assembly.SystemPrompt)
@@ -183,10 +212,24 @@ func (c *extensionCommand) Handle(ctx context.Context, sess command.Session, arg
 		return err
 	}
 	s.agent.Close()
-	s.agent, s.switches = agent, next
+	s.agent = agent
 	c.repl.SetCommands(reg)
-	sess.Display(fmt.Sprintf("%s is now %s. The conversation continues.", name, state))
 	return nil
+}
+
+// serversChanged follows an MCP server whose tools or prompts changed.
+// It runs in the session's loop while the agent is not working.
+func (c *extensionCommand) serversChanged() {
+	c.session.assembly.Refresh()
+	reg, err := c.registry()
+	if err == nil {
+		err = c.replaceAgent(reg)
+	}
+	if err != nil {
+		c.repl.Display("error: an MCP server changed its tools and the session could not follow: " + err.Error())
+		return
+	}
+	c.repl.Display("(an MCP server changed its tools or prompts; the conversation continues)")
 }
 
 // list renders the extensions and whether each is on.

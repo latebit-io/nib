@@ -188,6 +188,13 @@ type PromptCommand interface {
 	Render(args string) (prompt string, err error)
 }
 
+// Poster is an optional [Session] that runs work later on its own loop.
+// A command that waits on something outside hands the rest back this
+// way, so the frontend stays free to ask the person meanwhile.
+type Poster interface {
+	Post(fn func())
+}
+
 // Completer is implemented by commands that offer argument
 // autocomplete. Optional — frontends type-assert and skip if
 // absent. Phase 1 ships zero implementations; the interface exists

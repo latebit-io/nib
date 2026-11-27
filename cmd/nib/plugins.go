@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/extension/workspace"
@@ -32,20 +31,17 @@ func assemble(ctx context.Context, root, prompt string, store memory.Store, chos
 	if err != nil {
 		return nil, err
 	}
-	// Without the store, the project's servers stay refused: the safe side.
-	trust, err := trustStore()
+	// Without the store, servers that need a sign-in fail with a reason.
+	tokens, err := tokenStore()
 	if err != nil {
-		warn("MCP trust store", err)
-	}
-	user, err := mcp.ParseSpec(os.Getenv(brand.EnvKeyMCP), brand.EnvKeyMCP)
-	if err != nil {
-		warn("MCP servers", err)
+		warn("MCP sign-in store", err)
 	}
 	a, err := nib.Assemble(ctx, nib.Options{
 		Dir:          root,
 		SystemPrompt: prompt,
 		Store:        store,
-		MCP:          mcp.DiscoverOptions{User: user, Trust: trust},
+		MCP:          mcpDiscovery(root),
+		MCPTokens:    tokens,
 		Extensions:   registry,
 		Switches:     chosen.switches,
 		Limits:       chosen.limits,
@@ -63,6 +59,10 @@ func printWarnings(warnings []error) {
 	for _, w := range warnings {
 		if errors.Is(w, mcp.ErrUntrusted) {
 			fmt.Fprintf(os.Stderr, "note: %v; run nib --trust-mcp to allow them\n", w)
+			continue
+		}
+		if login, ok := errors.AsType[*mcp.LoginRequiredError](w); ok {
+			fmt.Fprintf(os.Stderr, "note: %v; run nib --mcp-login %s\n", w, login.Server)
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "warning: %v\n", w)

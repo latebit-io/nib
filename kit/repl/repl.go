@@ -13,10 +13,10 @@ import (
 	"strings"
 
 	"github.com/latebit-io/nib/ai/llm"
+	"github.com/latebit-io/nib/ai/oauth"
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/event"
-	"github.com/latebit-io/nib/kit/permission"
 )
 
 // maxArgPreview is how much of a tool call's arguments one line shows.
@@ -63,14 +63,18 @@ type REPL struct {
 	out       io.Writer
 	commands  *command.Registry
 	interrupt <-chan os.Signal
-	questions chan question // approval requests on their way into the loop
+	openURL   func(string) error // opens a page a server asks the person to visit
+	asks      chan interaction   // questions on their way into the loop
+	posted    chan func()        // work handed to the loop from other goroutines
+	stopped   chan struct{}      // closed when Run returns
+	deferred  []func()           // posted work waiting for the run to end
 
 	agent   *kit.Agent
 	system  string // the agent's system prompt, resent with each run
 	sub     *kit.Subscription
 	history []llm.Message // the conversation so far, without the system message
 	pending string        // a line typed during a run that the agent did not take
-	asking  *question     // the approval request the person is looking at
+	asking  interaction   // the question the person is answering
 	ended   bool          // the input is at its end: nobody can answer
 	phase   phase
 	midLine bool // output so far does not end with a newline
@@ -84,8 +88,11 @@ func New(opts Options) (*REPL, error) {
 	}
 	r := &REPL{
 		in: opts.In, out: opts.Out, commands: opts.Commands, interrupt: opts.Interrupt,
-		questions: make(chan question),
-		system:    opts.SystemPrompt,
+		openURL: oauth.OpenBrowser,
+		asks:    make(chan interaction),
+		posted:  make(chan func()),
+		stopped: make(chan struct{}),
+		system:  opts.SystemPrompt,
 	}
 	if err := r.attach(opts.Agent); err != nil {
 		return nil, err
@@ -107,6 +114,7 @@ func (r *REPL) attach(agent *kit.Agent) error {
 // the person quits, or ctx is cancelled. A run still active at the end
 // of input is allowed to finish. The caller closes the agent afterwards.
 func (r *REPL) Run(ctx context.Context) error {
+	defer close(r.stopped)
 	defer r.detach()
 	// Cancelled on return, so the reader does not wait on a line nobody
 	// takes. It can still sit in Read until In is closed.
@@ -117,6 +125,11 @@ func (r *REPL) Run(ctx context.Context) error {
 	r.prompt()
 	// After the end of input, only a run in progress keeps the loop alive.
 	for !r.quit && (lines != nil || r.phase == running) {
+		// One question at a time: the next waits until this one is answered.
+		asks := r.asks
+		if r.asking != nil {
+			asks = nil
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -134,13 +147,18 @@ func (r *REPL) Run(ctx context.Context) error {
 				continue
 			}
 			r.line(ctx, line)
-		case q := <-r.questions:
-			r.asking = &q
+		case in := <-asks:
+			r.asking = in
 			if r.ended {
 				r.refuse()
 				continue
 			}
-			r.ask()
+			in.show(r)
+		case fn := <-r.posted:
+			r.deferred = append(r.deferred, fn)
+			if r.runDeferred() {
+				r.promptUnlessRunning()
+			}
 		case ev := <-r.sub.Events():
 			r.event(ctx, ev)
 		}
@@ -167,10 +185,13 @@ func readLines(ctx context.Context, in io.Reader, out chan<- string) {
 func (r *REPL) line(ctx context.Context, line string) {
 	// During a run the output stream is the agent's; otherwise ask again.
 	defer r.promptUnlessRunning()
+	r.midLine = false // the person's Enter ended the line
 	line = strings.TrimSpace(line)
-	// While the agent waits for a decision, a line is the decision.
+	// While a question waits, a line is its answer.
 	if r.asking != nil {
-		r.answer(line)
+		if r.asking.take(r, line) {
+			r.asking = nil
+		}
 		return
 	}
 	if line == "" {
@@ -280,6 +301,7 @@ func (r *REPL) event(ctx context.Context, ev event.Event) {
 	case event.AgentWaiting:
 		r.phase = waiting
 		r.flush(ctx)
+		r.runDeferred()
 		r.promptUnlessRunning()
 	case event.AgentDone:
 		r.finish(e)
@@ -288,73 +310,33 @@ func (r *REPL) event(ctx context.Context, ev event.Event) {
 			r.pending = ""
 		}
 		r.flush(ctx)
+		r.runDeferred()
 		r.promptUnlessRunning()
 	}
 }
 
-// question is one approval request and where its answer goes.
-type question struct {
-	req    permission.Request
-	answer chan permission.Decision
-}
-
-// Ask puts an approval request to the person and waits for the answer.
-// It is the session's [permission.Asker]; unlike every other method it
-// is called from the agent's goroutine, and hands over to the loop.
-func (r *REPL) Ask(ctx context.Context, req permission.Request) (permission.Decision, error) {
-	q := question{req: req, answer: make(chan permission.Decision, 1)}
+// Post hands fn to the session's loop, which runs it while the agent is
+// not working, so a rebuilt agent never cuts a step short. Any goroutine
+// may call it; after the session ends it does nothing.
+func (r *REPL) Post(fn func()) {
 	select {
-	case r.questions <- q:
-	case <-ctx.Done():
-		return permission.Deny, ctx.Err()
-	}
-	select {
-	case d := <-q.answer:
-		return d, nil
-	case <-ctx.Done():
-		return permission.Deny, ctx.Err()
+	case r.posted <- fn:
+	case <-r.stopped:
 	}
 }
 
-// ask shows the request that waits for a decision.
-func (r *REPL) ask() {
-	line := "? " + r.asking.req.Tool + " wants to run: " + r.asking.req.Detail
-	if r.asking.req.Reason != "" {
-		line += "  (" + r.asking.req.Reason + ")"
+// runDeferred runs posted work unless the agent is working, and
+// reports whether it ran any.
+func (r *REPL) runDeferred() bool {
+	if r.phase == running || len(r.deferred) == 0 {
+		return false
 	}
-	r.println(line)
-	r.print("  allow? [y]es, [a]lways, [n]o: ")
-}
-
-// answer takes the person's decision. Anything but a clear answer
-// asks again.
-func (r *REPL) answer(line string) {
-	var decision permission.Decision
-	switch strings.ToLower(line) {
-	case "y", "yes":
-		decision = permission.Allow
-	case "a", "always":
-		decision = permission.AllowAlways
-	case "n", "no":
-		decision = permission.Deny
-	default:
-		r.ask()
-		return
+	work := r.deferred
+	r.deferred = nil
+	for _, fn := range work {
+		fn()
 	}
-	r.midLine = false // the person's Enter ended the question's line
-	r.asking.answer <- decision
-	r.asking = nil
-}
-
-// refuse answers a waiting request with no: the input has ended and
-// nobody is left to decide.
-func (r *REPL) refuse() {
-	if r.asking == nil {
-		return
-	}
-	r.println("(no input left to answer with; refused)")
-	r.asking.answer <- permission.Deny
-	r.asking = nil
+	return true
 }
 
 // finish records the end of a run and keeps its transcript, so the
@@ -456,13 +438,14 @@ func (r *REPL) println(text string) {
 	r.midLine = false
 }
 
-// prompt asks for the next line.
+// prompt asks for the next line. The cursor stays after it, so output
+// before the person types starts on a new line.
 func (r *REPL) prompt() {
 	if r.midLine {
 		r.write("\n")
 	}
 	r.write(prompt)
-	r.midLine = false
+	r.midLine = true
 }
 
 // promptUnlessRunning asks for a line when one is wanted.

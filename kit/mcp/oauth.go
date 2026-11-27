@@ -25,6 +25,7 @@ import (
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/kit/internal/atomicfile"
 	"github.com/latebit-io/nib/kit/internal/filecap"
+	"github.com/latebit-io/nib/kit/internal/filelock"
 )
 
 // ErrNoLoginNeeded is returned by [Login] for a server that did not ask
@@ -105,11 +106,16 @@ func (s *TokenStore) load(endpoint string) (*grant, error) {
 	return &g, nil
 }
 
-// update changes one entry. The file is read again first, so two nib
-// processes do not drop each other's sign-ins.
+// update changes one entry. The read, the change and the write hold a
+// lock shared with other nib processes, so none drops another's sign-in.
 func (s *TokenStore) update(endpoint string, g *grant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := filelock.Lock(s.path + ".lock")
+	if err != nil {
+		return fmt.Errorf("mcp: lock token store: %w", err)
+	}
+	defer unlock()
 	f, err := s.read()
 	if err != nil {
 		return err
@@ -127,7 +133,8 @@ func (s *TokenStore) update(endpoint string, g *grant) error {
 }
 
 // canonical is a server address as a key: lowercase scheme and host,
-// default port, fragment and trailing slash dropped.
+// default port, fragment and trailing slash dropped. The path stays
+// escaped: /a%2Fb and /a/b are different servers.
 func canonical(endpoint string) string {
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -138,8 +145,12 @@ func canonical(endpoint string) string {
 		u.Host = u.Hostname()
 	}
 	u.Fragment, u.RawFragment = "", ""
-	u.Path = strings.TrimSuffix(u.Path, "/")
-	u.RawPath = ""
+	escaped := strings.TrimSuffix(u.EscapedPath(), "/")
+	path, err := url.PathUnescape(escaped)
+	if err != nil {
+		return endpoint
+	}
+	u.Path, u.RawPath = path, escaped
 	return u.String()
 }
 
@@ -197,21 +208,31 @@ type grantSource struct {
 
 	mu    sync.Mutex
 	grant grant
+	saved string // the access token last kept in the store
 }
 
 func newGrantSource(server, endpoint string, store *TokenStore, g grant) *grantSource {
 	cfg := &oauth2.Config{ClientID: g.ClientID, ClientSecret: g.ClientSecret,
 		Endpoint: oauth2.Endpoint{TokenURL: g.TokenURL, AuthStyle: g.AuthStyle}}
-	client := &http.Client{Timeout: refreshTimeout, Transport: resourceParam{resource: g.Resource}}
+	// The refresh token is in the body: it must not follow a redirect off the token endpoint.
+	client := originClient(g.TokenURL)
+	client.Timeout, client.Transport = refreshTimeout, resourceParam{resource: g.Resource}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
-	return &grantSource{server: server, endpoint: endpoint, store: store, base: cfg.TokenSource(ctx, g.Token), grant: g}
+	return &grantSource{server: server, endpoint: endpoint, store: store,
+		base: cfg.TokenSource(ctx, g.Token), grant: g, saved: g.Token.AccessToken}
 }
 
-// Token implements [oauth2.TokenSource].
+// Token implements [oauth2.TokenSource]. The lock covers the refresh and
+// the save, so a caller holding an older token cannot overwrite a newer one.
 func (s *grantSource) Token() (*oauth2.Token, error) {
-	tok, err := s.base.Token()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.grant.Token.Valid() {
+		if err := checkEndpoint(s.grant.TokenURL); err != nil {
+			return nil, fmt.Errorf("mcp: refresh: %w", err)
+		}
+	}
+	tok, err := s.base.Token()
 	if err != nil {
 		retrieve, ok := errors.AsType[*oauth2.RetrieveError](err)
 		if s.grant.Token.RefreshToken == "" || (ok && retrieve.ErrorCode == "invalid_grant") {
@@ -219,11 +240,13 @@ func (s *grantSource) Token() (*oauth2.Token, error) {
 		}
 		return nil, err
 	}
-	if tok.AccessToken != s.grant.Token.AccessToken {
-		s.grant.Token = tok
+	s.grant.Token = tok
+	if tok.AccessToken != s.saved {
 		if err := s.store.update(s.endpoint, &s.grant); err != nil {
-			// The token works for this session; a later one signs in again.
+			// The token works for this session; the save is tried again on the next call.
 			slog.Warn("mcp: keep refreshed token", "server", s.server, "err", err)
+		} else {
+			s.saved = tok.AccessToken
 		}
 	}
 	return tok, nil
@@ -268,14 +291,11 @@ type LoginOptions struct {
 }
 
 // Login signs the person in to an HTTP server with OAuth in the browser
-// and keeps the sign-in in store, replacing an earlier one. A server
-// that never asks returns [ErrNoLoginNeeded].
+// and keeps the sign-in in store, replacing an earlier one only once the
+// new one is granted. A server that never asks returns [ErrNoLoginNeeded].
 func Login(ctx context.Context, server Server, store *TokenStore, opts LoginOptions) error {
 	if server.URL == "" {
 		return fmt.Errorf("mcp: %s is not an HTTP server", server.Name)
-	}
-	if err := store.update(server.URL, nil); err != nil {
-		return err
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

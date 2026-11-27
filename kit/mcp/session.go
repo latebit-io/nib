@@ -41,6 +41,7 @@ type Session struct {
 	pending   []pending    // by server index: listings asked for after a change
 	resources []agent.Tool // the resource tools; which servers have resources never changes
 	onChange  func()
+	missed    bool // a change was listed before anyone watched
 }
 
 // Connected is one running server and what it offers.
@@ -282,6 +283,7 @@ func (s *Session) refresh(i int) {
 		}
 		failed := s.rebuild()
 		onChange := s.onChange
+		s.missed = onChange == nil
 		s.mu.Unlock()
 		for _, err := range slices.Concat(errs, []error{toolsErr, promptsErr}) {
 			if err != nil {
@@ -329,13 +331,18 @@ func (s *Session) Servers() []Connected {
 	return slices.Clone(s.servers)
 }
 
-// Watch sets what is called after a server's tools or prompts changed
-// and the session listed them again. It runs on a goroutine of its
-// own; the caller rebuilds its agent from [Session.Tools] when it can.
+// Watch sets what is called, on a goroutine of its own, after a server's
+// tools or prompts changed and were listed again; a change listed before
+// Watch is reported at once. The caller rebuilds from [Session.Tools].
 func (s *Session) Watch(onChange func()) {
 	s.mu.Lock()
 	s.onChange = onChange
+	missed := s.missed && onChange != nil
+	s.missed = false
 	s.mu.Unlock()
+	if missed {
+		go onChange()
+	}
 }
 
 // SetAsker sets who answers the servers' questions to the person. Each

@@ -98,20 +98,47 @@ func (p *promptCommand) usage() string {
 	return strings.Join(names, " ")
 }
 
-// Handle implements [command.HandlerCommand].
+// Handle implements [command.HandlerCommand]. The server may ask the
+// person something before it answers, so where the frontend can take
+// the result later, the prompt is fetched off its loop.
 func (p *promptCommand) Handle(ctx context.Context, sess command.Session, args string) error {
 	values, err := p.values(args)
 	if err != nil {
 		return err
 	}
+	poster, ok := sess.(command.Poster)
+	if !ok {
+		text, err := p.fetch(ctx, values)
+		if err != nil {
+			return err
+		}
+		return sess.SubmitPrompt(ctx, text)
+	}
+	sess.Display("(getting the prompt from " + p.server + ")")
+	go func() {
+		text, err := p.fetch(ctx, values)
+		poster.Post(func() {
+			if err == nil {
+				err = sess.SubmitPrompt(ctx, text)
+			}
+			if err != nil {
+				sess.Display("error: /" + p.Definition().Name + ": " + err.Error())
+			}
+		})
+	}()
+	return nil
+}
+
+// fetch fills the prompt on the server.
+func (p *promptCommand) fetch(ctx context.Context, values map[string]string) (string, error) {
 	text, err := p.client.getPrompt(ctx, p.prompt.name, values)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if strings.TrimSpace(text) == "" {
-		return fmt.Errorf("the prompt %s came back empty", p.prompt.name)
+		return "", fmt.Errorf("the prompt %s came back empty", p.prompt.name)
 	}
-	return sess.SubmitPrompt(ctx, text)
+	return text, nil
 }
 
 // values assigns the typed words to the arguments in order; the last

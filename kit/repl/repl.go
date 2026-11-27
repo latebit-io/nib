@@ -157,7 +157,7 @@ func (r *REPL) Run(ctx context.Context) error {
 		case fn := <-r.posted:
 			r.deferred = append(r.deferred, fn)
 			if r.runDeferred() {
-				r.prompt()
+				r.promptUnlessRunning()
 			}
 		case ev := <-r.sub.Events():
 			r.event(ctx, ev)

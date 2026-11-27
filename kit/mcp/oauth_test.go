@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,13 +22,45 @@ import (
 
 func TestCanonical(t *testing.T) {
 	for in, want := range map[string]string{
-		"HTTPS://Example.COM:443/mcp/": "https://example.com/mcp",
-		"http://127.0.0.1:8080/mcp#x":  "http://127.0.0.1:8080/mcp",
-		"https://example.com":          "https://example.com",
+		"HTTPS://Example.COM:443/mcp/":   "https://example.com/mcp",
+		"http://127.0.0.1:8080/mcp#x":    "http://127.0.0.1:8080/mcp",
+		"https://example.com":            "https://example.com",
+		"https://example.com/t%2Fa/mcp/": "https://example.com/t%2Fa/mcp",
+		"https://example.com/a%2F":       "https://example.com/a%2F",
 	} {
 		if got := canonical(in); got != want {
 			t.Errorf("canonical(%q) = %q, want %q", in, got, want)
 		}
+	}
+	// An escaped slash names another server: its sign-in must not be shared.
+	for _, pair := range [][2]string{
+		{"https://example.com/t%2Fa/mcp", "https://example.com/t/a/mcp"},
+		{"https://example.com/t%2Fa/mcp/", "https://example.com/t/a/mcp"},
+		{"https://example.com/a%2F", "https://example.com/a"},
+	} {
+		if canonical(pair[0]) == canonical(pair[1]) {
+			t.Errorf("%s and %s share a key", pair[0], pair[1])
+		}
+	}
+}
+
+// TestTokenStore_ConcurrentWriters: stores opened on one file, as two
+// nib processes would, keep every entry.
+func TestTokenStore_ConcurrentWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Go(func() {
+			store := OpenTokenStore(path) // a store of its own, like another process
+			if err := store.update(fmt.Sprintf("https://s%d.example", i), &grant{Token: &oauth2.Token{AccessToken: "t"}}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	f, err := OpenTokenStore(path).read()
+	if err != nil || len(f.Servers) != 16 {
+		t.Errorf("entries = %d, %v; want all 16", len(f.Servers), err)
 	}
 }
 
@@ -127,6 +160,76 @@ func TestGrantSource(t *testing.T) {
 	none.Token = &oauth2.Token{AccessToken: "old", Expiry: time.Now().Add(-time.Minute)}
 	if _, err := newGrantSource("s", "x", store, none).Token(); !isLoginRequired(err) {
 		t.Errorf("no refresh token = %v, want a sign-in required", err)
+	}
+}
+
+// TestGrantSource_SaveIsRetried: a refreshed token that could not be
+// kept is kept on the next call, without another refresh.
+func TestGrantSource_SaveIsRetried(t *testing.T) {
+	endpoint := &tokenEndpoint{reply: func(url.Values) (int, string) {
+		return http.StatusOK, `{"access_token":"fresh","token_type":"Bearer","refresh_token":"rotated","expires_in":3600}`
+	}}
+	as := httptest.NewServer(endpoint)
+	defer as.Close()
+	dir := t.TempDir()
+	store := OpenTokenStore(dir) // a directory: every write fails
+	g := grant{ClientID: "c", TokenURL: as.URL, AuthStyle: oauth2.AuthStyleInParams,
+		Token: &oauth2.Token{AccessToken: "old", RefreshToken: "r", Expiry: time.Now().Add(-time.Minute)}}
+	src := newGrantSource("s", "https://mcp.example", store, g)
+	if tok, err := src.Token(); err != nil || tok.AccessToken != "fresh" {
+		t.Fatalf("Token = %+v, %v; want the refreshed token even when it cannot be kept", tok, err)
+	}
+	store.path = filepath.Join(dir, "auth.json") // the disk is back
+	if _, err := src.Token(); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := store.load("https://mcp.example")
+	if err != nil || kept == nil || kept.Token.RefreshToken != "rotated" || len(endpoint.forms) != 1 {
+		t.Errorf("kept = %+v, %v after %d refreshes; want the rotated token saved without a second refresh", kept, err, len(endpoint.forms))
+	}
+}
+
+// TestGrantSource_RefreshStaysOnTheTokenEndpoint: the refresh token is
+// not replayed to wherever the token endpoint redirects.
+func TestGrantSource_RefreshStaysOnTheTokenEndpoint(t *testing.T) {
+	var elsewhere atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { elsewhere.Store(true) }))
+	defer other.Close()
+	as := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/token", http.StatusTemporaryRedirect)
+	}))
+	defer as.Close()
+	g := grant{ClientID: "c", TokenURL: as.URL, AuthStyle: oauth2.AuthStyleInParams,
+		Token: &oauth2.Token{AccessToken: "old", RefreshToken: "secret", Expiry: time.Now().Add(-time.Minute)}}
+	if _, err := newGrantSource("s", "x", OpenTokenStore(filepath.Join(t.TempDir(), "a.json")), g).Token(); err == nil {
+		t.Error("a refresh redirected to another origin must fail")
+	}
+	if elsewhere.Load() {
+		t.Error("the refresh token reached the other origin")
+	}
+	plain := g
+	plain.TokenURL = "http://as.example/token"
+	if _, err := newGrantSource("s", "x", OpenTokenStore(filepath.Join(t.TempDir(), "b.json")), plain).Token(); err == nil {
+		t.Error("a refresh over plain http to another machine must be refused")
+	}
+}
+
+// TestLogin_FailureKeepsTheSignIn: a sign-in that does not complete
+// leaves the earlier one in place.
+func TestLogin_FailureKeepsTheSignIn(t *testing.T) {
+	as, _ := fakeAS(t, "good")
+	srv := guarded(t, "good", as.URL)
+	server := Server{Name: "remote", URL: srv.URL + "/mcp", Origin: OriginUser}
+	store := OpenTokenStore(filepath.Join(t.TempDir(), "auth.json"))
+	if err := store.update(server.URL, &grant{Token: &oauth2.Token{AccessToken: "earlier"}}); err != nil {
+		t.Fatal(err)
+	}
+	opts := LoginOptions{Open: func(string) error { return errors.New("no browser") }, Timeout: 200 * time.Millisecond}
+	if err := Login(context.Background(), server, store, opts); err == nil {
+		t.Fatal("a sign-in nobody completed must fail")
+	}
+	if g, err := store.load(server.URL); err != nil || g == nil || g.Token.AccessToken != "earlier" {
+		t.Errorf("after the failed sign-in: %+v, %v; want the earlier one kept", g, err)
 	}
 }
 

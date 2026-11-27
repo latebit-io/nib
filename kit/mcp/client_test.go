@@ -323,3 +323,75 @@ func TestClient_ServerExitsOnDiscover(t *testing.T) {
 		t.Errorf("protocol = %q, want the earlier handshake", got)
 	}
 }
+
+// TestClient_ChangesBeforeWatch: a change announced before anyone
+// watches is passed on once someone does.
+func TestClient_ChangesBeforeWatch(t *testing.T) {
+	c := &Client{}
+	c.changed(ToolsChanged)
+	c.changed(ToolsChanged)
+	var got []Change
+	c.Watch(func(ch Change) { got = append(got, ch) })
+	if len(got) != 1 || got[0] != ToolsChanged {
+		t.Errorf("replayed %v, want one ToolsChanged", got)
+	}
+}
+
+// hangOnCall answers the handshake, then never answers a tool call.
+const hangOnCall = `#!/bin/sh
+while IFS= read -r line; do
+  id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  method=$(echo "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  [ -z "$id" ] && continue
+  case "$method" in
+    "initialize")
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"stuck\",\"version\":\"1\"}}}"
+      ;;
+    "tools/call") ;;
+    *) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"no\"}}" ;;
+  esac
+done
+`
+
+// TestClient_CloseDoesNotWaitOnAStuckCall: a call the server never
+// answers cannot hold Close; the process is killed.
+func TestClient_CloseDoesNotWaitOnAStuckCall(t *testing.T) {
+	closeGrace = 200 * time.Millisecond
+	t.Cleanup(func() { closeGrace = 5 * time.Second })
+	path := filepath.Join(t.TempDir(), "stuck.sh")
+	if err := os.WriteFile(path, []byte(hangOnCall), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewStdioClient("sh", []string{path}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	called := make(chan error, 1)
+	go func() {
+		_, err := client.CallTool(context.Background(), "anything", nil) // no deadline: it waits for ever
+		called <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // let the call reach the server
+	closed := make(chan error, 1)
+	go func() { closed <- client.Close() }()
+	select {
+	case err := <-closed:
+		// The server was killed, so Close may report how it ended; only the wait matters.
+		t.Logf("Close: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close waited on the stuck call")
+	}
+	select {
+	case err := <-called:
+		if err == nil {
+			t.Error("the stuck call must fail once the server is gone")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stuck call never returned")
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,5 +185,80 @@ func TestTokenPathInUserConfig(t *testing.T) {
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		t.Fail()
+	}
+}
+
+// TestHTTP_CredentialsStayWithTheServer: a configured header is not sent
+// where the server redirects, to another host or to plain http.
+func TestHTTP_CredentialsStayWithTheServer(t *testing.T) {
+	var leaked atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		leaked.Store(leaked.Load() || r.Header.Get("Authorization") != "")
+	}))
+	t.Cleanup(other.Close)
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+	client, err := NewHTTPClient(redirecting.URL, HTTPOptions{Headers: map[string]string{"Authorization": "Bearer secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() }) // test cleanup
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.Initialize(ctx); err == nil {
+		t.Error("a server that redirects elsewhere must not be connected to")
+	}
+	if leaked.Load() {
+		t.Error("the configured Authorization header reached another origin")
+	}
+}
+
+// TestSession_ChangeBeforeWatch: a change the session listed before
+// anyone watched is reported once someone does.
+func TestSession_ChangeBeforeWatch(t *testing.T) {
+	s := &Session{missed: true}
+	called := make(chan struct{}, 1)
+	s.Watch(func() { called <- struct{}{} })
+	select {
+	case <-called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the earlier change was not reported")
+	}
+}
+
+// poster is a session that takes work back on its own loop.
+type poster struct {
+	session
+	posted chan func()
+}
+
+func (p *poster) Post(fn func()) { p.posted <- fn }
+
+// TestPromptCommand_FetchesOffTheLoop: with a frontend that can take the
+// result later, Handle returns before the server answers.
+func TestPromptCommand_FetchesOffTheLoop(t *testing.T) {
+	client := inMemory(t, testServer())
+	prompts, err := client.prompts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := &promptCommand{client: client, server: "web", prompt: prompts[0]}
+	sess := &poster{posted: make(chan func(), 1)}
+	if err := cmd.Handle(context.Background(), sess, "Ada"); err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.sent) != 0 {
+		t.Fatal("the prompt was sent before it came back through the loop")
+	}
+	select {
+	case fn := <-sess.posted:
+		fn()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the prompt never came back")
+	}
+	if len(sess.sent) != 1 || !strings.HasPrefix(sess.sent[0], "Greet Ada") {
+		t.Errorf("sent %q", sess.sent)
 	}
 }

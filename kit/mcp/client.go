@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -24,9 +25,9 @@ import (
 // legacyVersion is the newest revision that starts with initialize.
 const legacyVersion = "2025-11-25"
 
-// closeGrace bounds how long Close waits for a stdio server to exit
-// once its input is closed, before it is killed.
-const closeGrace = 5 * time.Second
+// closeGrace bounds each wait in Close: for the session to end, and for
+// a stdio server to exit before it is killed. A variable for tests.
+var closeGrace = 5 * time.Second
 
 // ErrClientClosed is returned by [Client] methods once the connection
 // is gone: after [Client.Close], or when a server process has exited.
@@ -81,8 +82,10 @@ type Client struct {
 	mu       sync.Mutex
 	session  *sdk.ClientSession
 	closed   bool
+	process  *exec.Cmd // the stdio server's latest process
 	ask      elicit.Asker
 	onChange func(Change)
+	missed   []Change // changes announced before anyone watched
 }
 
 // NewStdioClient prepares a server subprocess, started by
@@ -91,13 +94,18 @@ func NewStdioClient(command string, args []string, env []string) (*Client, error
 	if _, err := exec.LookPath(command); err != nil {
 		return nil, fmt.Errorf("mcp: start %q: %w", command, err)
 	}
-	return &Client{stdio: true, transport: func() sdk.Transport {
+	c := &Client{stdio: true}
+	c.transport = func() sdk.Transport {
 		cmd := exec.Command(command, args...)
 		if len(env) > 0 {
 			cmd.Env = env
 		}
+		c.mu.Lock()
+		c.process = cmd
+		c.mu.Unlock()
 		return &sdk.CommandTransport{Command: cmd, TerminateDuration: closeGrace}
-	}}, nil
+	}
+	return c, nil
 }
 
 // Initialize connects: newest revision first, the earlier handshake when
@@ -196,17 +204,26 @@ func (c *Client) Server() ServerInfo {
 }
 
 // Watch sets what is called when the server says a list changed. It is
-// called on the SDK's goroutine and must not block.
+// called on the SDK's goroutine and must not block. Changes announced
+// before Watch are passed to it at once.
 func (c *Client) Watch(onChange func(Change)) {
 	c.mu.Lock()
 	c.onChange = onChange
+	missed := c.missed
+	c.missed = nil
 	c.mu.Unlock()
+	for _, change := range missed {
+		onChange(change)
+	}
 }
 
-// changed passes a change to the watcher.
+// changed passes a change to the watcher, or keeps it for one.
 func (c *Client) changed(change Change) {
 	c.mu.Lock()
 	onChange := c.onChange
+	if onChange == nil && !slices.Contains(c.missed, change) {
+		c.missed = append(c.missed, change)
+	}
 	c.mu.Unlock()
 	if onChange != nil {
 		onChange(change)
@@ -286,12 +303,32 @@ func (c *Client) CallToolResult(ctx context.Context, name string, args map[strin
 // [ErrClientClosed]. Calling it again does nothing.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	session := c.session
+	session, process := c.session, c.process
 	already := c.closed
 	c.closed, c.session = true, nil
 	c.mu.Unlock()
 	if already || session == nil {
 		return nil
 	}
-	return session.Close()
+	// The SDK waits for calls in flight before it closes the transport,
+	// so a server that stopped answering would hold Close forever.
+	done := make(chan error, 1)
+	go func() { done <- session.Close() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(closeGrace):
+	}
+	if process == nil || process.Process == nil {
+		return errors.New("mcp: the server did not end its session in time")
+	}
+	if err := process.Process.Kill(); err != nil {
+		slog.Debug("mcp: kill after grace", "err", err)
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(closeGrace):
+		return errors.New("mcp: the server did not exit after it was killed")
+	}
 }

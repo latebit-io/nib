@@ -349,6 +349,10 @@ func (r compiledRule) matches(tool, arg string) bool {
 	return r.re != nil && r.re.MatchString(arg)
 }
 
+// HasWildcard reports whether s holds a character an argument glob
+// gives meaning to, as opposed to matching it literally.
+func HasWildcard(s string) bool { return strings.ContainsAny(s, "*?") }
+
 // globRegexp compiles a glob into an anchored regexp. `*` matches any
 // run of characters (including separators), `?` matches exactly one. All
 // other characters are literal. Unlike path.Match, `*` crosses `/` — a

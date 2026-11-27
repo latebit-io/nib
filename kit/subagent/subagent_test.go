@@ -219,6 +219,13 @@ func TestGrants_FilePatterns(t *testing.T) {
 	if err := os.Symlink(".vault", filepath.Join(root, "secrets")); err != nil {
 		t.Fatal(err)
 	}
+	// An entry literally named "*", pointing out of src.
+	if err := os.Mkdir(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "private.key"), filepath.Join(root, "src", "*")); err != nil {
+		t.Fatal(err)
+	}
 	resolve := func(p string) (string, error) { return files.Resolve(root, root, p) }
 	cases := []struct {
 		name        string
@@ -230,6 +237,7 @@ func TestGrants_FilePatterns(t *testing.T) {
 		{"a ./ allow admits plain paths", []string{"Read(./src/*)"}, nil, nil, []string{"src/a.go", "private.key"}},
 		{"the same with a resolver", []string{"Read"}, []string{"Read(./private.key)"}, resolve, []string{"./private.key", "src/a.go"}},
 		{"a deny through a linked directory", []string{"Read"}, []string{"Read(secrets/*)"}, resolve, []string{".vault/key", "secrets/key", "src/a.go"}},
+		{"a wildcard is not an entry", []string{"Read(src/*)"}, nil, resolve, []string{"private.key", "src/a.go"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,6 +255,35 @@ func TestGrants_FilePatterns(t *testing.T) {
 			tools[0].Execute(context.Background(), call(`{"task":"read"}`))
 			if got := strings.Join(calls, "|"); got != "read_file src/a.go" {
 				t.Errorf("read %q; want only src/a.go", got)
+			}
+		})
+	}
+}
+
+// TestGrants_OmittedPath: a call without a path is judged on the working
+// directory, which list_dir lists by default.
+func TestGrants_OmittedPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		deny []string
+		want string
+	}{
+		{"a deny elsewhere lets it list", []string{"LS(secret/*)"}, "list_dir"},
+		{"a deny of everything refuses it", []string{"LS(*)"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls, stopped []string
+			provider := llmtest.NewScripted(llmtest.ToolCalls(llmtest.Call("1", "list_dir", `{}`)), llmtest.Text("done"))
+			h := host(provider, []kit.Tool{tool("list_dir", &calls)}, &stopped)
+			root := t.TempDir()
+			h.Resolve = func(p string) (string, error) { return files.Resolve(root, root, p) }
+			tools, errs := AgentTools([]agentdef.Definition{{Name: "a", Description: "x", DisallowedTools: tc.deny}}, h)
+			if len(errs) != 0 {
+				t.Fatal(errs)
+			}
+			tools[0].Execute(context.Background(), call(`{"task":"list"}`))
+			if got := strings.Join(calls, "|"); got != tc.want {
+				t.Errorf("ran %q; want %q", got, tc.want)
 			}
 		})
 	}

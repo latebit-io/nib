@@ -156,7 +156,7 @@ func nibGrants(allowed, disallowed []string, resolve func(string) (string, error
 			// x.key match alike. One outside the project stays as written:
 			// a call there is refused before any grant is read.
 			if r.Arg != "" && !r.IsShell() {
-				if target, err := fileTarget(r.Arg, resolve); err == nil {
+				if target, err := patternTarget(r.Arg, resolve); err == nil {
 					r.Arg = target
 				}
 			}
@@ -273,7 +273,9 @@ func (s *scoped) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResul
 		return failed("this agent may run only single commands that its grants name")
 	}
 	if name != "bash" {
-		target, err := fileTarget(arg, s.resolve)
+		// An omitted path is the working directory, where glob and list_dir
+		// default; a tool that needs a path still refuses the call itself.
+		target, err := fileTarget(cmp.Or(arg, "."), s.resolve)
 		if err != nil {
 			return failed("%v", err)
 		}
@@ -283,6 +285,33 @@ func (s *scoped) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResul
 		return failed("this agent is not granted %s %q", name, arg)
 	}
 	return s.Tool.Execute(ctx, call)
+}
+
+// patternTarget resolves a file pattern as fileTarget resolves a path, up
+// to the component with its first wildcard. The rest names no entry, not
+// even one called "*", so it stays as written.
+func patternTarget(pattern string, resolve func(string) (string, error)) (string, error) {
+	parts := strings.Split(filepath.ToSlash(pattern), "/")
+	i := slices.IndexFunc(parts, toolperm.HasWildcard)
+	if i < 0 {
+		return fileTarget(pattern, resolve)
+	}
+	prefix := strings.Join(parts[:i], "/")
+	switch {
+	case i == 0:
+		prefix = "."
+	case prefix == "":
+		prefix = "/" // the pattern was /*...
+	}
+	dir, err := fileTarget(prefix, resolve)
+	if err != nil {
+		return "", err
+	}
+	rest := strings.Join(parts[i:], "/")
+	if dir == "." {
+		return rest, nil
+	}
+	return strings.TrimSuffix(dir, "/") + "/" + rest, nil
 }
 
 // fileTarget is the file a path reaches, as grants name files: src/../x

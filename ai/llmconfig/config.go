@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"net"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -153,7 +153,8 @@ func plainHTTP(base string) error {
 	host := u.Hostname()
 	refused := fmt.Errorf("refusing to send credentials over plain http to %s; use https", host)
 	// An address first: an IPv6 one has no dot but may be anywhere.
-	if ip := net.ParseIP(host); ip != nil {
+	// netip takes a zone (fe80::1%eth0), which net.ParseIP refuses.
+	if ip, err := netip.ParseAddr(host); err == nil {
 		if ip.IsLoopback() || ip.IsPrivate() {
 			return nil
 		}

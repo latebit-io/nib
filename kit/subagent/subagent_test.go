@@ -260,6 +260,24 @@ func TestGrants_FilePatterns(t *testing.T) {
 	}
 }
 
+// TestGrants_PatternSpelling: a file pattern cleaning would change is
+// refused with its definition, not rewritten into one that may miss.
+func TestGrants_PatternSpelling(t *testing.T) {
+	for pattern, ok := range map[string]bool{
+		"src/*.go": true, "./src/*.go": true, "*": true, ".": true, "/etc/*": true, "../x": true,
+		"src/*/./private.key": false, "src/*//private.key": false, "src/*/../private.key": false,
+		"src/../x": false, "src/": false, ".//x": false, "//x": false, "./": false,
+	} {
+		var stopped []string
+		h := host(llmtest.NewScripted(llmtest.Text("done")), nil, &stopped)
+		_, errs := AgentTools([]agentdef.Definition{{Name: "a", Description: "x", DisallowedTools: []string{"Read(" + pattern + ")"}}}, h)
+		refused := len(errs) == 1 && errors.Is(errs[0], errUnclean)
+		if ok && len(errs) != 0 || !ok && !refused {
+			t.Errorf("%s: errs = %v; want accepted %v", pattern, errs, ok)
+		}
+	}
+}
+
 // TestGrants_OmittedPath: a call without a path is judged on the working
 // directory, which list_dir lists by default.
 func TestGrants_OmittedPath(t *testing.T) {

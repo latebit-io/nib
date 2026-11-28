@@ -6,6 +6,7 @@ package subagent
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -156,7 +157,11 @@ func nibGrants(allowed, disallowed []string, resolve func(string) (string, error
 			// x.key match alike. One outside the project stays as written:
 			// a call there is refused before any grant is read.
 			if r.Arg != "" && !r.IsShell() {
-				if target, err := patternTarget(r.Arg, resolve); err == nil {
+				target, err := patternTarget(r.Arg, resolve)
+				switch {
+				case errors.Is(err, errUnclean):
+					return nil, err
+				case err == nil:
 					r.Arg = target
 				}
 			}
@@ -287,14 +292,23 @@ func (s *scoped) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResul
 	return s.Tool.Execute(ctx, call)
 }
 
+// errUnclean refuses a file pattern that cleaning would change. Call
+// paths are cleaned, and a pattern rewritten to match them can miss.
+var errUnclean = errors.New("write it as a clean path, such as src/*.go or ./src/*.go")
+
 // patternTarget resolves a file pattern as fileTarget resolves a path, up
 // to the component with its first wildcard. The rest names no entry, not
 // even one called "*", so it stays as written.
 func patternTarget(pattern string, resolve func(string) (string, error)) (string, error) {
-	parts := strings.Split(filepath.ToSlash(pattern), "/")
+	p := filepath.ToSlash(pattern)
+	clean := path.Clean(p)
+	if p != clean && p != "./"+clean {
+		return "", fmt.Errorf("pattern %s: %w", pattern, errUnclean)
+	}
+	parts := strings.Split(clean, "/")
 	i := slices.IndexFunc(parts, toolperm.HasWildcard)
 	if i < 0 {
-		return fileTarget(pattern, resolve)
+		return fileTarget(clean, resolve)
 	}
 	prefix := strings.Join(parts[:i], "/")
 	switch {
@@ -307,11 +321,7 @@ func patternTarget(pattern string, resolve func(string) (string, error)) (string
 	if err != nil {
 		return "", err
 	}
-	rest := strings.Join(parts[i:], "/")
-	if dir == "." {
-		return rest, nil
-	}
-	return strings.TrimSuffix(dir, "/") + "/" + rest, nil
+	return path.Join(dir, strings.Join(parts[i:], "/")), nil
 }
 
 // fileTarget is the file a path reaches, as grants name files: src/../x

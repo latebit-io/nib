@@ -103,7 +103,9 @@ func TestHeadTailNoTruncation(t *testing.T) {
 	t.Parallel()
 
 	w := NewHeadTailWriter(100, 100)
-	_, _ = w.Write([]byte("hello world"))
+	if _, err := w.Write([]byte("hello world")); err != nil {
+		t.Fatal(err)
+	}
 	if got := w.String(); got != "hello world" {
 		t.Errorf("String() = %q, want %q", got, "hello world")
 	}
@@ -121,7 +123,9 @@ func TestHeadTailTruncation(t *testing.T) {
 	mid := "BBBBBBBBBB"  // 10 B's (will be discarded)
 	tail := "CCCCCCCCCC" // 10 C's
 	all := []byte(head + mid + tail)
-	_, _ = w.Write(all)
+	if _, err := w.Write(all); err != nil {
+		t.Fatal(err)
+	}
 
 	got := w.String()
 	if !strings.HasPrefix(got, head) {
@@ -258,7 +262,9 @@ func TestNewHeadTailWriterDefaultsZeroAndNegative(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				_, _ = w.Write([]byte("hello world"))
+				if _, err := w.Write([]byte("hello world")); err != nil {
+					t.Error(err)
+				}
 			}()
 			select {
 			case <-done:

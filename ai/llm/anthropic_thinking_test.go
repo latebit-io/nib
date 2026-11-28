@@ -11,23 +11,48 @@ func newAnthropicState() *anthropicStreamState {
 	return &anthropicStreamState{blocks: make(map[int]*anthropicBlockState)}
 }
 
+// feedStart and feedDelta pass one stream event, failing the test on an error.
+func feedStart(t *testing.T, s *anthropicStreamState, data string) {
+	t.Helper()
+	if err := s.handleBlockStart(data); err != nil {
+		t.Fatalf("handleBlockStart(%s): %v", data, err)
+	}
+}
+
+func feedDelta(t *testing.T, s *anthropicStreamState, data string) string {
+	t.Helper()
+	tok, err := s.handleBlockDelta(data)
+	if err != nil {
+		t.Fatalf("handleBlockDelta(%s): %v", data, err)
+	}
+	return tok
+}
+
+// mustJSON marshals v, failing the test on an error.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 func TestAnthropicStream_CapturesThinking(t *testing.T) {
 	s := newAnthropicState()
 
 	// A thinking block, then a tool_use block — reasoning must be captured
 	// alongside the tool call, in order.
-	if err := s.handleBlockStart(`{"index":0,"content_block":{"type":"thinking"}}`); err != nil {
-		t.Fatalf("handleBlockStart(thinking): %v", err)
-	}
-	if tok, _ := s.handleBlockDelta(`{"index":0,"delta":{"type":"thinking_delta","thinking":"step one "}}`); tok != "" {
+	feedStart(t, s, `{"index":0,"content_block":{"type":"thinking"}}`)
+	if tok := feedDelta(t, s, `{"index":0,"delta":{"type":"thinking_delta","thinking":"step one "}}`); tok != "" {
 		t.Errorf("thinking_delta surfaced a token %q; reasoning must not be streamed as output", tok)
 	}
-	if tok, _ := s.handleBlockDelta(`{"index":0,"delta":{"type":"thinking_delta","thinking":"step two"}}`); tok != "" {
+	if tok := feedDelta(t, s, `{"index":0,"delta":{"type":"thinking_delta","thinking":"step two"}}`); tok != "" {
 		t.Errorf("thinking_delta surfaced a token %q", tok)
 	}
-	_, _ = s.handleBlockDelta(`{"index":0,"delta":{"type":"signature_delta","signature":"SIG=="}}`)
-	_ = s.handleBlockStart(`{"index":1,"content_block":{"type":"tool_use","id":"t1","name":"bash"}}`)
-	_, _ = s.handleBlockDelta(`{"index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)
+	feedDelta(t, s, `{"index":0,"delta":{"type":"signature_delta","signature":"SIG=="}}`)
+	feedStart(t, s, `{"index":1,"content_block":{"type":"tool_use","id":"t1","name":"bash"}}`)
+	feedDelta(t, s, `{"index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}`)
 
 	ev := s.finalEvent()
 	if ev.Reasoning == nil || len(ev.Reasoning.Blocks) != 1 {
@@ -44,7 +69,7 @@ func TestAnthropicStream_CapturesThinking(t *testing.T) {
 
 func TestAnthropicStream_CapturesRedactedThinking(t *testing.T) {
 	s := newAnthropicState()
-	_ = s.handleBlockStart(`{"index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}}`)
+	feedStart(t, s, `{"index":0,"content_block":{"type":"redacted_thinking","data":"ENCRYPTED"}}`)
 	ev := s.finalEvent()
 	if ev.Reasoning == nil || len(ev.Reasoning.Blocks) != 1 {
 		t.Fatalf("Reasoning = %+v; want one redacted block", ev.Reasoning)
@@ -64,7 +89,7 @@ func TestAnthropicStream_ThinkingOverflowAborts(t *testing.T) {
 		t.Fatal(err)
 	}
 	big := strings.Repeat("x", maxThinkingBytes+1)
-	payload, _ := json.Marshal(map[string]any{
+	payload := mustJSON(t, map[string]any{
 		"index": 0,
 		"delta": map[string]string{"type": "thinking_delta", "thinking": big},
 	})
@@ -80,7 +105,7 @@ func TestAnthropicStream_ThinkingOverflowAborts(t *testing.T) {
 func TestAnthropicStream_RedactedThinkingOverflowAborts(t *testing.T) {
 	s := newAnthropicState()
 	big := strings.Repeat("x", maxThinkingBytes+1)
-	payload, _ := json.Marshal(map[string]any{
+	payload := mustJSON(t, map[string]any{
 		"index":         0,
 		"content_block": map[string]string{"type": "redacted_thinking", "data": big},
 	})
@@ -95,8 +120,8 @@ func TestAnthropicStream_RedactedThinkingOverflowAborts(t *testing.T) {
 
 func TestAnthropicStream_NoThinkingLeavesReasoningNil(t *testing.T) {
 	s := newAnthropicState()
-	_ = s.handleBlockStart(`{"index":0,"content_block":{"type":"text"}}`)
-	_, _ = s.handleBlockDelta(`{"index":0,"delta":{"type":"text_delta","text":"hi"}}`)
+	feedStart(t, s, `{"index":0,"content_block":{"type":"text"}}`)
+	feedDelta(t, s, `{"index":0,"delta":{"type":"text_delta","text":"hi"}}`)
 	if ev := s.finalEvent(); ev.Reasoning != nil {
 		t.Errorf("Reasoning = %+v; want nil for a non-thinking response", ev.Reasoning)
 	}
@@ -132,7 +157,7 @@ func TestConvertAssistantMessage_ReplaysReasoningFirst(t *testing.T) {
 	}
 
 	// The wire form must place thinking before text so the API accepts it.
-	data, _ := json.Marshal(am)
+	data := mustJSON(t, am)
 	if strings.Index(string(data), `"thinking"`) > strings.Index(string(data), `"text"`) {
 		t.Errorf("thinking block must serialize before text; got %s", data)
 	}
@@ -269,7 +294,7 @@ func TestAnthropicRequest_ThinkingDisabledByDefault(t *testing.T) {
 	}
 	// The thinking field must be omitted entirely so existing runs are
 	// byte-identical.
-	data, _ := json.Marshal(req)
+	data := mustJSON(t, req)
 	if strings.Contains(string(data), "thinking") || strings.Contains(string(data), "output_config") {
 		t.Errorf("request JSON must omit thinking and output_config when effort is unset; got %s", data)
 	}

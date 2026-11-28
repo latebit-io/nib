@@ -47,10 +47,10 @@ func (d *Dispatcher) PreToolUse(ctx context.Context, toolName, argsJSON string) 
 		return Decision{}
 	}
 	in := hookrun.Input{
-		Event:    string(hookspec.PreToolUse),
-		Tool:     toolName,
-		ToolArgs: rawJSON(argsJSON),
-		Cwd:      d.cwd,
+		HookEventName: string(hookspec.PreToolUse),
+		ToolName:      toolName,
+		ToolInput:     rawJSON(argsJSON),
+		Cwd:           d.cwd,
 	}
 	return d.dispatch(ctx, hookspec.PreToolUse, in, toolName, true, true)
 }
@@ -65,11 +65,11 @@ func (d *Dispatcher) PostToolUse(ctx context.Context, toolName, argsJSON, result
 		return nil, nil
 	}
 	in := hookrun.Input{
-		Event:      string(hookspec.PostToolUse),
-		Tool:       toolName,
-		ToolArgs:   rawJSON(argsJSON),
-		ToolResult: resultText,
-		Cwd:        d.cwd,
+		HookEventName: string(hookspec.PostToolUse),
+		ToolName:      toolName,
+		ToolInput:     rawJSON(argsJSON),
+		ToolResponse:  resultText,
+		Cwd:           d.cwd,
 	}
 	dec := d.dispatch(ctx, hookspec.PostToolUse, in, toolName, true, true)
 	if !dec.Deny {
@@ -87,9 +87,9 @@ func (d *Dispatcher) UserPromptSubmit(ctx context.Context, prompt string) Decisi
 		return Decision{}
 	}
 	in := hookrun.Input{
-		Event:  string(hookspec.UserPromptSubmit),
-		Prompt: prompt,
-		Cwd:    d.cwd,
+		HookEventName: string(hookspec.UserPromptSubmit),
+		Prompt:        prompt,
+		Cwd:           d.cwd,
 	}
 	return d.dispatch(ctx, hookspec.UserPromptSubmit, in, "", false, true)
 }
@@ -129,7 +129,7 @@ func (d *Dispatcher) fireAndForget(ctx context.Context, ev hookspec.Event) {
 	if d == nil {
 		return
 	}
-	in := hookrun.Input{Event: string(ev), Cwd: d.cwd}
+	in := hookrun.Input{HookEventName: string(ev), Cwd: d.cwd}
 	// stopOnDeny=false: dispatch logs each deny itself and always returns
 	// the zero Decision, so there is nothing to act on here.
 	_ = d.dispatch(ctx, ev, in, "", false, false)

@@ -55,10 +55,7 @@ func NewAnthropicAPI(baseURL, model string, auth Auth, promptCaching bool, effor
 		promptCaching:  promptCaching,
 		effort:         effort,
 		maxTokensState: maxTokensState{maxTokens: anthropicDefaultMaxTokens},
-		client: &http.Client{
-			Transport: agentTransport(),
-			// No client-level Timeout — would kill SSE streams mid-flight.
-		},
+		client:         apiClient(),
 	}
 }
 

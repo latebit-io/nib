@@ -127,6 +127,10 @@ func parseArgs() config {
 }
 
 func run() error {
+	// A subcommand of its own, before the flags: nib plugin <command>.
+	if len(os.Args) > 1 && os.Args[1] == "plugin" {
+		return runPlugin(os.Args[2:])
+	}
 	cfg := parseArgs()
 
 	setupLogging(cfg.debug)

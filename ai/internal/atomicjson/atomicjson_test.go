@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -26,7 +27,7 @@ func TestWrite_RoundTripAndNoTempLeft(t *testing.T) {
 	if out["a"] != 1 {
 		t.Errorf("round trip = %v; want a=1", out)
 	}
-	if left, _ := filepath.Glob(filepath.Join(dir, "nested", "*.tmp")); len(left) != 0 {
+	if left := tempLeft(t, filepath.Join(dir, "nested")); len(left) != 0 {
 		t.Errorf("temp files left behind: %v", left)
 	}
 	info, err := os.Stat(path)
@@ -79,7 +80,24 @@ func TestWrite_ConcurrentWritersLeaveValidJSON(t *testing.T) {
 	if v := out["n"]; v < 0 || v >= n {
 		t.Errorf("final n = %d; want a complete write from one of the %d writers", v, n)
 	}
-	if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) != 0 {
+	if left := tempLeft(t, dir); len(left) != 0 {
 		t.Errorf("temp files left behind: %v", left)
 	}
+}
+
+// tempLeft lists the temporary files left in dir. The directory is read,
+// not globbed: its own name may hold pattern characters such as [.
+func tempLeft(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			left = append(left, e.Name())
+		}
+	}
+	return left
 }

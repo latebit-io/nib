@@ -7,8 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
+	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -19,7 +20,7 @@ import (
 const (
 	// defaultTimeout bounds a hook command when neither the hook nor the
 	// runner specifies one.
-	defaultTimeout = 30 * time.Second
+	defaultTimeout = 60 * time.Second
 	// maxHookOutput caps captured stdout/stderr. A hook's reason is fed
 	// back into the agent, so it needs an explicit upper bound.
 	maxHookOutput = 32 << 10 // 32 KiB
@@ -33,39 +34,51 @@ const (
 	Proceed Decision = "proceed"
 	// Deny means block the action that triggered the hook.
 	Deny Decision = "deny"
+	// Allow means the hook approved a tool call outright (PreToolUse).
+	Allow Decision = "allow"
+	// Ask means the hook wants the person asked about a tool call.
+	Ask Decision = "ask"
 )
 
-// Result is the outcome of running one hook command.
+// Result is the outcome of running one hook command, read the way
+// Claude Code reads it.
 type Result struct {
-	// Decision is Deny when the hook objects, else Proceed.
+	// Decision is Deny when the hook blocks, else what it decided.
 	Decision Decision
-	// Reason is the hook's feedback (surfaced to the agent on Deny).
+	// Reason is the hook's explanation (surfaced to the agent on Deny).
 	Reason string
+	// Context is text the hook adds for the model: additionalContext,
+	// or plain stdout from a clean run.
+	Context string
+	// Stop is set when the hook asks to end the session's work
+	// ("continue": false), with StopReason to show.
+	Stop       bool
+	StopReason string
 	// Output is the captured combined stdout+stderr (capped).
 	Output string
 	// ExitCode is the process exit code (-1 if it never ran).
 	ExitCode int
-	// Err is set on an infrastructure failure (spawn error, timeout). On
-	// such a failure the runner FAILS OPEN (Decision=Proceed): a broken
-	// hook must not wedge all work, though a clean non-zero exit IS a Deny.
+	// Err is set when the hook failed: a spawn error, a timeout, or an
+	// exit code other than 0 and 2. Such a failure FAILS OPEN
+	// (Decision=Proceed): a broken hook must not wedge all work.
 	Err error
 }
 
 // Runner executes command hooks. The zero value is usable (default
-// timeout); set Timeout to override.
+// timeout, the process's directory and environment).
 type Runner struct {
 	// Timeout is the per-hook cap; <=0 uses [defaultTimeout]. A hook's own
-	// TimeoutMS, when set, takes precedence over this.
+	// Timeout, when set, takes precedence over this.
 	Timeout time.Duration
+	// Dir is where hooks run; empty means the process's directory.
+	Dir string
+	// Env is added to every hook's environment, before the hook's own.
+	Env map[string]string
 }
 
-// Run executes a command hook with the given input on stdin and returns
-// its decision. A non-command/empty hook is a no-op Proceed.
-//
-// Decision resolution: if stdout is JSON with a "decision" field, that
-// wins ("deny"/"block" → Deny, else Proceed). Otherwise the exit code
-// decides — zero proceeds, non-zero denies (CC's convention), with the
-// captured output as the reason.
+// Run executes a command hook with in as JSON on stdin. As in Claude
+// Code, exit 2 blocks (stderr is the reason), exit 0 proceeds and may
+// print a JSON decision, any other exit is an error that does not block.
 func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 	if !h.Runnable() {
 		return Result{Decision: Proceed, ExitCode: -1}
@@ -76,8 +89,8 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 	}
 
 	timeout := r.Timeout
-	if h.TimeoutMS > 0 {
-		timeout = time.Duration(h.TimeoutMS) * time.Millisecond
+	if h.Timeout > 0 {
+		timeout = time.Duration(h.Timeout) * time.Second
 	}
 	if timeout <= 0 {
 		timeout = defaultTimeout
@@ -85,16 +98,18 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := buildCmd(ctx, h.Command)
-	if len(h.Env) > 0 {
-		cmd.Env = os.Environ()
-		for k, v := range h.Env {
-			cmd.Env = append(cmd.Env, k+"="+v)
+	cmd := buildCmd(ctx, h)
+	cmd.Dir = r.Dir
+	if len(r.Env) > 0 || len(h.Env) > 0 {
+		cmd.Env = cmd.Environ() // the process's, with PWD set to Dir
+		for _, env := range []map[string]string{r.Env, h.Env} {
+			for _, k := range slices.Sorted(maps.Keys(env)) {
+				cmd.Env = append(cmd.Env, k+"="+env[k])
+			}
 		}
 	}
 	cmd.Stdin = bytes.NewReader(payload)
-	// Own process group + SIGKILL on cancel + drain grace: a hook that
-	// backgrounds a child holding stdout must not defeat the timeout.
+	// Own process group so the timeout kills the whole tree, not just sh.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -103,9 +118,6 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = time.Second
-	// Keep stdout and stderr SEPARATE: the decision is parsed from stdout
-	// only, so a hook may write diagnostics to stderr without corrupting
-	// its JSON decision. Output keeps both for display.
 	stdout := &capBuffer{limit: maxHookOutput}
 	stderr := &capBuffer{limit: maxHookOutput}
 	cmd.Stdout = stdout
@@ -116,8 +128,6 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 	out, errOut := stdout.String(), stderr.String()
 	combined := joinStreams(out, errOut)
 
-	// Infrastructure failures fail OPEN (a broken/slow hook must not wedge
-	// all work): a timeout/cancel, or a process that never started.
 	if runErr != nil {
 		if ctx.Err() != nil {
 			return Result{Decision: Proceed, ExitCode: -1, Output: combined, Err: fmt.Errorf("hookrun: hook timed out: %w", ctx.Err())}
@@ -125,24 +135,31 @@ func (r Runner) Run(ctx context.Context, h hookspec.Hook, in Input) Result {
 		if cmd.ProcessState == nil {
 			return Result{Decision: Proceed, ExitCode: -1, Output: combined, Err: fmt.Errorf("hookrun: run hook: %w", runErr)}
 		}
-		// Otherwise the hook ran and exited non-zero — a real Deny, handled
-		// by the exit-code logic below.
 	}
 	exit := cmd.ProcessState.ExitCode()
-
-	// A JSON decision on stdout wins.
-	if dec, reason, ok := parseDecision(out); ok {
-		return Result{Decision: dec, Reason: reason, Output: combined, ExitCode: exit}
-	}
-	// No JSON decision: exit code decides. Prefer stderr as the reason.
-	if exit != 0 {
+	switch exit {
+	case 0:
+		res := parseOutput(out)
+		res.Output, res.ExitCode = combined, exit
+		return res
+	case blockingExit:
 		reason := strings.TrimSpace(errOut)
-		if reason == "" {
-			reason = strings.TrimSpace(out)
+		if parsed := parseOutput(out); parsed.Reason != "" {
+			reason = parsed.Reason
 		}
 		return Result{Decision: Deny, Reason: reason, Output: combined, ExitCode: exit}
 	}
-	return Result{Decision: Proceed, Output: combined, ExitCode: exit}
+	return Result{Decision: Proceed, Output: combined, ExitCode: exit,
+		Err: fmt.Errorf("hookrun: hook exited %d: %s", exit, firstLine(errOut))}
+}
+
+// blockingExit is the exit code that blocks, as in Claude Code.
+const blockingExit = 2
+
+// firstLine is the first line of s, for an error message.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	return line
 }
 
 // reapGroup kills whatever is left of the hook's process group once Run
@@ -172,43 +189,66 @@ func joinStreams(out, errOut string) string {
 }
 
 // buildCmd builds the exec command, honoring the authored form: a shell
-// string runs via `sh -c` (pipes/quotes supported); an argv array runs
-// directly with no shell. Hooks run only for trusted plugins, so shell
-// execution is acceptable.
-func buildCmd(ctx context.Context, c hookspec.CommandSpec) *exec.Cmd {
-	if c.Shell {
+// string runs via `sh -c`; an argv array, or a command with args, runs
+// with no shell. Hooks run only for trusted plugins, so shell is acceptable.
+func buildCmd(ctx context.Context, h hookspec.Hook) *exec.Cmd {
+	c := h.Command
+	switch {
+	case len(h.Args) > 0:
+		// Claude Code's exec form: command is the program, args its arguments.
+		return exec.CommandContext(ctx, c.Parts[0], h.Args...)
+	case c.Shell:
 		return exec.CommandContext(ctx, "sh", "-c", strings.Join(c.Parts, " "))
 	}
 	return exec.CommandContext(ctx, c.Parts[0], c.Parts[1:]...)
 }
 
-// hookOutput is the recognized JSON decision shape on a hook's stdout.
+// hookOutput is the JSON a hook may print on a clean exit.
 type hookOutput struct {
-	Decision string `json:"decision"`
-	Reason   string `json:"reason"`
+	Continue           *bool  `json:"continue"`
+	StopReason         string `json:"stopReason"`
+	Decision           string `json:"decision"`
+	Reason             string `json:"reason"`
+	HookSpecificOutput struct {
+		PermissionDecision       string `json:"permissionDecision"`
+		PermissionDecisionReason string `json:"permissionDecisionReason"`
+		AdditionalContext        string `json:"additionalContext"`
+	} `json:"hookSpecificOutput"`
 }
 
-// parseDecision tries to read a JSON decision from output. ok is false
-// when output is not a JSON object with a decision, so the caller falls
-// back to exit-code semantics.
-func parseDecision(output string) (dec Decision, reason string, ok bool) {
-	trimmed := strings.TrimSpace(output)
-	if !strings.HasPrefix(trimmed, "{") {
-		return "", "", false
-	}
+// parseOutput reads a clean run's stdout: a JSON object with decisions,
+// or plain text, which is context for the events that take it.
+func parseOutput(out string) Result {
+	trimmed := strings.TrimSpace(out)
 	var ho hookOutput
-	if err := json.Unmarshal([]byte(trimmed), &ho); err != nil || ho.Decision == "" {
-		return "", "", false
+	if !strings.HasPrefix(trimmed, "{") || json.Unmarshal([]byte(trimmed), &ho) != nil {
+		return Result{Decision: Proceed, Context: trimmed}
+	}
+	res := Result{Decision: Proceed, Reason: ho.Reason, Context: ho.HookSpecificOutput.AdditionalContext}
+	if ho.Continue != nil && !*ho.Continue {
+		res.Stop, res.StopReason = true, ho.StopReason
 	}
 	switch strings.ToLower(ho.Decision) {
-	case "deny", "block":
-		return Deny, ho.Reason, true
-	default:
-		return Proceed, ho.Reason, true
+	case "block", "deny":
+		res.Decision = Deny
+	case "approve", "allow":
+		res.Decision = Allow
 	}
+	switch strings.ToLower(ho.HookSpecificOutput.PermissionDecision) {
+	case "deny":
+		res.Decision = Deny
+	case "ask":
+		res.Decision = Ask
+	case "allow":
+		res.Decision = Allow
+	}
+	if r := ho.HookSpecificOutput.PermissionDecisionReason; r != "" {
+		res.Reason = r
+	}
+	return res
 }
 
-// capBuffer accumulates up to limit bytes and discards the rest, bounding
+// capBuffer keeps the first limit bytes of a hook's output, bounding
 // the memory and prompt cost of a noisy hook.
 type capBuffer struct {
 	b         bytes.Buffer
@@ -216,6 +256,8 @@ type capBuffer struct {
 	truncated bool
 }
 
+// Write keeps what fits and reports all of p written, so the hook is
+// never stopped by a short write.
 func (w *capBuffer) Write(p []byte) (int, error) {
 	if rem := w.limit - w.b.Len(); rem > 0 {
 		if len(p) <= rem {
@@ -230,6 +272,7 @@ func (w *capBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// String returns the kept output, marked when some was dropped.
 func (w *capBuffer) String() string {
 	if w.truncated {
 		return w.b.String() + fmt.Sprintf("\n[output truncated at %d bytes]", w.limit)

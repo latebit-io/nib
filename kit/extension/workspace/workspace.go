@@ -4,7 +4,6 @@ package workspace
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -82,10 +81,6 @@ func shellPolicy(args string) permission.Check {
 // pathPolicy shows the path of a file change. Allowing it always
 // covers the tool, not the one file.
 func pathPolicy(args string) permission.Check {
-	var call struct {
-		Path string `json:"path"`
-	}
 	// Arguments that do not parse are still asked about, without a path.
-	_ = json.Unmarshal([]byte(args), &call)
-	return permission.Check{Detail: call.Path}
+	return permission.Check{Detail: files.PathOf(args)}
 }

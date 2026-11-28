@@ -2,6 +2,7 @@ package hookmap
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/latebit-io/nib/kit/hookspec"
@@ -65,13 +66,16 @@ func TestNibName(t *testing.T) {
 	}
 }
 
-// roundTrip guards the two directions against drifting apart.
+// roundTrip guards the two directions against drifting apart: every
+// nib name is among those its alias stands for.
 func TestNameRoundTrip(t *testing.T) {
 	for nib, cc := range nibToCC {
-		got, ok := NibName(cc)
-		if !ok || got != nib {
-			t.Fatalf("NibName(CCName(%q)=%q) = (%q, %v), want %q", nib, cc, got, ok, nib)
+		if !slices.Contains(NibNames(cc), nib) {
+			t.Fatalf("NibNames(CCName(%q)=%q) = %v, want it to include %q", nib, cc, NibNames(cc), nib)
 		}
+	}
+	if got, _ := NibName("LS"); got != "list_files" {
+		t.Errorf("NibName(LS) = %q, want the parked agent's list_files first", got)
 	}
 }
 
@@ -121,8 +125,13 @@ func TestMatches(t *testing.T) {
 		{"unmapped no cc alias", "Write", "apply_patch", false},
 		{"unmapped no false alias", "Edit", "replace_file", false},
 
-		// Regex anchoring is CC's (unanchored) — substring matchers fire.
-		{"unanchored substring", "ash", "bash", true},
+		// As in Claude Code, a plain name matches exactly; anything else
+		// is an unanchored regex.
+		{"plain name is exact", "ash", "bash", false},
+		{"regex is unanchored", "as.", "bash", true},
+		{"star matches any", "*", "bash", true},
+		{"comma list", "Read, Write", "write_file", true},
+		{"mcp regex", "mcp__.*", "mcp__docs__search", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

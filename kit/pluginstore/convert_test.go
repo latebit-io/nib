@@ -236,6 +236,7 @@ func TestConvert_Hooks(t *testing.T) {
 	writeFile(t, filepath.Join(src, "hooks", "hooks.json"), `{
       "hooks": {
         "PostToolUse": [{"matcher":"Write|Edit","hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/fmt.sh"}]}],
+        "PreToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"sh","args":["${CLAUDE_PLUGIN_ROOT}/check.sh"]}]}],
         "SessionStart": [{"hooks":[{"type":"http","url":"https://x/hook"}]}],
         "Bogus": [{"hooks":[{"type":"command","command":"x.sh"}]}]
       }
@@ -248,7 +249,8 @@ func TestConvert_Hooks(t *testing.T) {
 	}
 
 	// Only known events with a runnable command hook are listed.
-	if !slices.Equal(report.Hooks, []string{"PostToolUse"}) {
+	slices.Sort(report.Hooks)
+	if !slices.Equal(report.Hooks, []string{"PostToolUse", "PreToolUse"}) {
 		t.Errorf("report.Hooks = %v", report.Hooks)
 	}
 	// Converted config written with the var frozen.
@@ -256,8 +258,8 @@ func TestConvert_Hooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("converted hooks missing: %v", err)
 	}
-	if !strings.Contains(string(out), "/ROOT/fmt.sh") {
-		t.Errorf("hook command var not frozen:\n%s", out)
+	if !strings.Contains(string(out), "/ROOT/fmt.sh") || !strings.Contains(string(out), "/ROOT/check.sh") {
+		t.Errorf("hook command or args var not frozen:\n%s", out)
 	}
 	// http hook + unknown event reported, not silently dropped.
 	wantUnsupported := map[string]string{"SessionStart": `"http" hook type not yet runnable`, "Bogus": "unrecognized event"}
@@ -324,5 +326,105 @@ func TestStore_InstallConverts(t *testing.T) {
 	}
 	if len(report.Unsupported) == 0 {
 		t.Errorf("expected unsupported entries in report")
+	}
+}
+
+// TestStore_TrustStaysWithItsSource: a reinstall from the same source
+// keeps the trust; another source with the same name does not get it.
+func TestStore_TrustStaysWithItsSource(t *testing.T) {
+	t.Parallel()
+	first, other := t.TempDir(), t.TempDir()
+	for _, dir := range []string{first, other} {
+		writeFile(t, filepath.Join(dir, ".claude-plugin", "plugin.json"), `{"name":"helper"}`)
+	}
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	p, err := st.Install(ctx, LocalSource(first), InstallOptions{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetTrusted(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := st.Install(ctx, LocalSource(first), InstallOptions{}); err != nil || !again.Trusted {
+		t.Errorf("reinstall from the same source: trusted=%v, %v; want kept", again.Trusted, err)
+	}
+	if swapped, err := st.Install(ctx, LocalSource(other), InstallOptions{}); err != nil || swapped.Trusted || swapped.ID != p.ID {
+		t.Errorf("install from another source: %+v, %v; want the same id, not trusted", swapped, err)
+	}
+}
+
+// TestStore_RelativeSourceIsItsDirectory: "." installed from two
+// directories is two sources, so trust does not pass between them.
+func TestStore_RelativeSourceIsItsDirectory(t *testing.T) {
+	first, other := t.TempDir(), t.TempDir()
+	for _, dir := range []string{first, other} {
+		writeFile(t, filepath.Join(dir, ".claude-plugin", "plugin.json"), `{"name":"helper"}`)
+	}
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	t.Chdir(first)
+	p, err := st.Install(ctx, LocalSource("."), InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(p.Source.Path) {
+		t.Errorf("recorded source %q; want it absolute", p.Source.Path)
+	}
+	if err := st.SetTrusted(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(other)
+	if again, err := st.Install(ctx, LocalSource("."), InstallOptions{}); err != nil || again.Trusted {
+		t.Errorf("install of . from another directory: trusted=%v, %v; want not trusted", again.Trusted, err)
+	}
+}
+
+// TestStore_FailedReplaceLeavesNoTrust: when a replacement from another
+// source fails part way, the registry on disk no longer trusts the plugin.
+func TestStore_FailedReplaceLeavesNoTrust(t *testing.T) {
+	t.Parallel()
+	first, other := t.TempDir(), t.TempDir()
+	for _, dir := range []string{first, other} {
+		writeFile(t, filepath.Join(dir, ".claude-plugin", "plugin.json"), `{"name":"helper"}`)
+	}
+	root := t.TempDir()
+	st, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	p, err := st.Install(ctx, LocalSource(first), InstallOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetTrusted(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// Conversion stages under converted/; a read-only one fails the promotion.
+	conv := filepath.Join(root, "converted")
+	if err := os.Chmod(conv, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(conv, 0o755); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := st.Install(ctx, LocalSource(other), InstallOptions{}); err == nil {
+		t.Skip("directory permissions are not enforced here (running as root?)")
+	}
+	reloaded, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := reloaded.Get(p.ID); !ok || got.Trusted {
+		t.Errorf("after a failed replacement the registry has %+v; want the plugin untrusted", got)
 	}
 }

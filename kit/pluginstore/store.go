@@ -93,6 +93,15 @@ func (s *Store) Install(ctx context.Context, src Source, opts InstallOptions) (I
 	if err := src.Validate(); err != nil {
 		return InstalledPlugin{}, err
 	}
+	if src.Type == SourceLocal {
+		// Recorded absolute: "." from two directories is two sources, and
+		// trust follows the source.
+		abs, err := filepath.Abs(src.Path)
+		if err != nil {
+			return InstalledPlugin{}, fmt.Errorf("pluginstore: resolve local source path: %w", err)
+		}
+		src.Path = abs
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -122,8 +131,19 @@ func (s *Store) Install(ctx context.Context, src Source, opts InstallOptions) (I
 	if i := s.reg.pluginIndex(id); i >= 0 {
 		prev := s.reg.Plugins[i]
 		entry.Enabled = prev.Enabled
-		entry.Trusted = prev.Trusted
 		entry.UserConfig = prev.UserConfig
+		// Trust was given to code from one place: another source with the
+		// same name has to earn it again.
+		entry.Trusted = prev.Trusted && prev.Source == src
+		if prev.Trusted && !entry.Trusted {
+			// Revoke on disk before the new code lands, so no failure
+			// later leaves the registry vouching for it.
+			s.reg.Plugins[i].Trusted = false
+			if err := s.reg.save(s.registryPath()); err != nil {
+				s.reg.Plugins[i].Trusted = true // the file kept it
+				return InstalledPlugin{}, err
+			}
+		}
 	}
 
 	if err := s.promoteInstall(id, st.name, st.version, st.dir); err != nil {
@@ -285,6 +305,9 @@ type ActivePlugin struct {
 	// HooksConfigPath is the converted hooks config
 	// (<converted>/hooks/hooks.json).
 	HooksConfigPath string
+	// Trusted is whether the person lets the plugin's code run: its
+	// hooks, MCP servers, shell skills and agents.
+	Trusted bool
 }
 
 // ActivePlugins returns the converted component locations of every
@@ -308,6 +331,7 @@ func (s *Store) ActivePlugins() []ActivePlugin {
 			AgentsDir:       filepath.Join(conv, "agents"),
 			MCPConfigPath:   filepath.Join(conv, ".mcp.json"),
 			HooksConfigPath: filepath.Join(conv, "hooks", "hooks.json"),
+			Trusted:         p.Trusted,
 		})
 	}
 	slices.SortFunc(out, func(a, b ActivePlugin) int { return strings.Compare(a.ID, b.ID) })

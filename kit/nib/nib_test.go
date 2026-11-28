@@ -3,6 +3,7 @@ package nib
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/latebit-io/nib/kit/extension"
 	"github.com/latebit-io/nib/kit/mcp"
 	"github.com/latebit-io/nib/kit/meter"
+	"github.com/latebit-io/nib/kit/pluginstore"
 )
 
 type noArgs struct{}
@@ -270,5 +272,107 @@ func TestAgent_BudgetEndsTheRun(t *testing.T) {
 	}
 	if provider.Calls() != 1 || a.Usage().TotalPromptTokens != 40 {
 		t.Errorf("provider called %d times, usage %+v; want one call and its usage counted", provider.Calls(), a.Usage())
+	}
+}
+
+// TestAgent_Delegates: a project's agent definition becomes a tool; the
+// child runs on the session's model and budget, with the session's tools
+// but not the delegation tools, and its answer reaches the parent.
+func TestAgent_Delegates(t *testing.T) {
+	root, sub := project(t)
+	t.Setenv("NIB_GLOBAL_AGENTS_DIR", t.TempDir())
+	write(t, filepath.Join(root, ".project", "agents", "helper.md"), "---\nname: helper\ndescription: Helps.\n---\nYou help.\n")
+	a, err := Assemble(context.Background(), Options{Dir: sub, Toolset: kit.Toolset{Tools: []kit.Tool{named("host_tool")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }() // nothing was started that can fail to stop
+	if !strings.Contains(kit.RenderPlugins(a.Plugins), "agent_helper") {
+		t.Errorf("manifest lacks the agent:\n%s", kit.RenderPlugins(a.Plugins))
+	}
+	provider := llmtest.NewScripted(
+		llmtest.ToolCalls(llmtest.Call("p1", "agent_helper", `{"task":"say hi"}`)),
+		llmtest.TextUsage(&llm.Usage{PromptTokens: 7}, "hi from the child"),
+		llmtest.Text("the child said hi"),
+	)
+	ag, err := a.Agent(provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ag.Close()
+	res, err := ag.Run(context.Background(), []llm.Message{{Role: "user", Content: "ask the helper"}})
+	if err != nil || res.Done.FinalText != "the child said hi" {
+		t.Fatalf("run = %+v, %v", res.Done, err)
+	}
+	reqs := provider.Requests()
+	if len(reqs) != 3 {
+		t.Fatalf("requests = %d, want parent, child, parent", len(reqs))
+	}
+	child := reqs[1]
+	if child.Messages[0].Role != "system" || !strings.HasPrefix(child.Messages[0].Content, "You help.") || strings.Contains(child.Messages[0].Content, "agent_helper") {
+		t.Errorf("child system prompt = %q", child.Messages[0].Content)
+	}
+	var names []string
+	for _, d := range child.Tools {
+		names = append(names, d.Function.Name)
+	}
+	if got := strings.Join(names, ","); !strings.Contains(got, "host_tool") || strings.Contains(got, "agent_") {
+		t.Errorf("child tools = %s; want the session's, without delegation", got)
+	}
+	if !strings.Contains(reqs[2].Messages[len(reqs[2].Messages)-1].Content, "hi from the child") {
+		t.Errorf("the parent did not get the child's answer: %+v", reqs[2].Messages)
+	}
+	if a.Usage().Turns != 3 || a.Usage().TotalPromptTokens != 7 {
+		t.Errorf("usage = %+v; want the child's request counted in the session", a.Usage())
+	}
+}
+
+// TestAssemble_Plugins: an installed plugin's skills load at once; its
+// hooks and agents only once it is trusted.
+func TestAssemble_Plugins(t *testing.T) {
+	_, sub := project(t)
+	t.Setenv("NIB_GLOBAL_AGENTS_DIR", t.TempDir())
+	src := t.TempDir()
+	write(t, filepath.Join(src, ".claude-plugin", "plugin.json"), `{"name":"kit"}`)
+	write(t, filepath.Join(src, "skills", "tidy", "SKILL.md"), "---\nname: tidy\ndescription: Tidy up.\n---\nTidy.\n")
+	write(t, filepath.Join(src, "agents", "scout.md"), "---\nname: scout\ndescription: Scouts.\n---\nYou scout.\n")
+	write(t, filepath.Join(src, "hooks", "hooks.json"), `{"hooks":{"PreToolUse":[{"matcher":"host_tool","hooks":[{"type":"command","command":"echo nope >&2; exit 2"}]}]}}`)
+	store, err := pluginstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := store.Install(context.Background(), pluginstore.LocalSource(src), pluginstore.InstallOptions{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assemble := func() *Assembly {
+		t.Helper()
+		a, err := Assemble(context.Background(), Options{Dir: sub, Plugins: store, Toolset: kit.Toolset{Tools: []kit.Tool{named("host_tool")}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = a.Close() }) // nothing was started that can fail to stop
+		return a
+	}
+	blocked := func(a *Assembly) bool {
+		res, err := a.Toolset.Hooks.BeforeToolCall(context.Background(), kit.BeforeToolCallInput{CallID: "1", Name: "host_tool", Args: "{}"})
+		return err == nil && res.Block
+	}
+
+	a := assemble()
+	tools := strings.Join(toolNames(a.Toolset), ",")
+	if !strings.Contains(tools, "skill_kit-tidy") || strings.Contains(tools, "agent_kit-scout") || blocked(a) {
+		t.Errorf("untrusted: tools %s, blocked %v; want the skill only", tools, blocked(a))
+	}
+	if !strings.Contains(fmt.Sprint(a.Warnings), "not trusted") {
+		t.Errorf("warnings = %v; want the untrusted plugin named", a.Warnings)
+	}
+
+	if err := store.SetTrusted(p.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	a = assemble()
+	if tools := strings.Join(toolNames(a.Toolset), ","); !strings.Contains(tools, "agent_kit-scout") || !blocked(a) {
+		t.Errorf("trusted: tools %s, blocked %v; want the agent and the hook", tools, blocked(a))
 	}
 }

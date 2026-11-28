@@ -566,14 +566,14 @@ func TestCodexAPI_SetMaxTokens(t *testing.T) {
 func TestCodexRequest_MaxOutputTokensSerialization(t *testing.T) {
 	// Omitted when zero so we preserve the provider default for callers
 	// that never escalate.
-	data, err := json.Marshal(codexRequest{Model: "m"})
+	data, err := json.Marshal(responsesRequest{Model: "m"})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	if strings.Contains(string(data), "max_output_tokens") {
 		t.Errorf("zero value should omit max_output_tokens; got %s", data)
 	}
-	data, err = json.Marshal(codexRequest{Model: "m", MaxOutputTokens: 32768})
+	data, err = json.Marshal(responsesRequest{Model: "m", MaxOutputTokens: 32768})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -600,7 +600,7 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 	tests := []struct {
 		name        string
 		inputTokens int // gross, as the API reports it (uncached + cached)
-		details     *codexInputTokensDetails
+		details     *responsesInputTokensDetails
 		outputTok   int
 		wantCached  int
 		wantPrompt  int // fresh-only after normalization
@@ -609,7 +609,7 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 		{
 			name:        "cached tokens present — prompt normalized to fresh",
 			inputTokens: 11500,
-			details:     &codexInputTokensDetails{CachedTokens: 8192},
+			details:     &responsesInputTokensDetails{CachedTokens: 8192},
 			outputTok:   86,
 			wantCached:  8192,
 			wantPrompt:  11500 - 8192, // 3308 = fresh-only
@@ -627,7 +627,7 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 		{
 			name:        "cached > input would underflow — clamp keeps prompt non-negative",
 			inputTokens: 100,
-			details:     &codexInputTokensDetails{CachedTokens: 500},
+			details:     &responsesInputTokensDetails{CachedTokens: 500},
 			outputTok:   10,
 			wantCached:  0,   // dropped on clamp
 			wantPrompt:  100, // gross preserved as fresh fallback
@@ -636,11 +636,11 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &codexStreamState{calls: map[int]*pendingCall{}}
-			evt := codexSSEEvent{
+			s := &responsesStreamState{calls: map[int]*pendingCall{}}
+			evt := responsesSSEEvent{
 				Type: "response.completed",
-				Response: &codexResponse{
-					Usage: &codexUsage{
+				Response: &responsesResponse{
+					Usage: &responsesUsage{
 						InputTokens:        tc.inputTokens,
 						OutputTokens:       tc.outputTok,
 						InputTokensDetails: tc.details,
@@ -673,7 +673,7 @@ func TestCodexHandleCompleted_PopulatesCachedTokens(t *testing.T) {
 // cache hit before handleCompleted ever ran.
 func TestCodexUsage_UnmarshalsInputTokensDetails(t *testing.T) {
 	raw := []byte(`{"input_tokens":11500,"output_tokens":86,"input_tokens_details":{"cached_tokens":8192}}`)
-	var u codexUsage
+	var u responsesUsage
 	if err := json.Unmarshal(raw, &u); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

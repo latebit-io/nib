@@ -15,6 +15,7 @@ import (
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/command"
 	"github.com/latebit-io/nib/kit/extension"
+	"github.com/latebit-io/nib/kit/hookspec"
 	"github.com/latebit-io/nib/kit/memory"
 	"github.com/latebit-io/nib/kit/nib"
 	"github.com/latebit-io/nib/kit/permission"
@@ -33,16 +34,21 @@ type session struct {
 
 // newSession assembles the blocks for root and an agent on them.
 func newSession(ctx context.Context, root, prompt string, store memory.Store, resolved *llmconfig.Resolved, provider llm.Provider, chosen choices) (*session, error) {
+	s := &session{resolved: resolved, provider: provider, switches: chosen.switches}
+	// A subagent's model follows /model: the profile is read when it starts.
+	chosen.providerFor = providerFor(func() *llmconfig.Resolved { return s.resolved })
 	assembly, err := assemble(ctx, root, prompt, store, chosen)
 	if err != nil {
 		return nil, err
 	}
+	assembly.StartSession(ctx, "startup")
 	agent, err := assembly.Agent(provider)
 	if err != nil {
 		closeAssembly(assembly)
 		return nil, err
 	}
-	return &session{resolved: resolved, provider: provider, switches: chosen.switches, assembly: assembly, agent: agent}, nil
+	s.assembly, s.agent = assembly, agent
+	return s, nil
 }
 
 // attach makes r the session's frontend: asked by the permission gate
@@ -76,6 +82,7 @@ func (s *session) attach(r *repl.REPL, approve bool) error {
 // close stops the agent and the blocks it ran on.
 func (s *session) close() {
 	s.agent.Close()
+	s.assembly.Hooks.SessionEnd(context.Background(), "prompt_input_exit")
 	closeAssembly(s.assembly)
 }
 
@@ -88,6 +95,7 @@ func runInteractive(ctx, startCtx context.Context, started func(), root string, 
 		return err
 	}
 	sessionID := newSessionID(time.Now(), "interactive")
+	chosen.session = sessionID
 	s, err := newSession(startCtx, root, buildSystemPrompt(sessionID), store, resolved, provider, chosen)
 	if err != nil {
 		return setupErr("%v", err)
@@ -99,10 +107,18 @@ func runInteractive(ctx, startCtx context.Context, started func(), root string, 
 	}
 	started()
 
-	r, err := repl.New(repl.Options{
+	opts := repl.Options{
 		Agent: s.agent, SystemPrompt: s.assembly.SystemPrompt,
 		In: os.Stdin, Out: os.Stdout, Interrupt: interrupt,
-	})
+	}
+	// Only where a plugin listens: each costs work at every prompt or answer.
+	if hooks := s.assembly.Hooks; hooks.Has(hookspec.UserPromptSubmit) {
+		opts.OnPrompt = hooks.Prompt
+	}
+	if hooks := s.assembly.Hooks; hooks.Has(hookspec.Stop) {
+		opts.OnStop = hooks.Stop
+	}
+	r, err := repl.New(opts)
 	if err != nil {
 		return setupErr("%v", err)
 	}
@@ -327,6 +343,9 @@ func newProvider(root string) (*llmconfig.Resolved, llm.Provider, error) {
 	resolved, err := nib.ResolveProvider(root)
 	if err != nil {
 		return nil, nil, setupErr("oauth store: %v", err)
+	}
+	if err := resolved.Validate(); err != nil {
+		return nil, nil, setupErr("%v", err)
 	}
 	if !resolved.HasProvider() {
 		return nil, nil, setupErr("no LLM credentials — %s", credentialHint(resolved))

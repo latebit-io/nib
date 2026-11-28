@@ -123,6 +123,7 @@ func ResolveProfile(cfg *Config, name string) *Resolved {
 		APIKeyEnv:     p.APIKeyEnv,
 		Profile:       name,
 		OAuthProvider: p.OAuthProvider,
+		API:           p.API,
 	}
 	if p.PromptCaching != nil {
 		r.PromptCaching = *p.PromptCaching
@@ -174,6 +175,7 @@ func applyProfile(r *Resolved, p Profile, name string) {
 	}
 	r.PromptCaching = p.PromptCaching != nil && *p.PromptCaching
 	r.OAuthProvider = p.OAuthProvider
+	r.API = p.API
 }
 
 // resolve converts a merged Config into a Resolved by looking up the active
@@ -292,6 +294,9 @@ func mergeConfigs(dst, src *Config) {
 		}
 		if sp.OAuthProvider != "" {
 			dp.OAuthProvider = sp.OAuthProvider
+		}
+		if sp.API != "" {
+			dp.API = sp.API
 		}
 		dst.Profiles[name] = dp
 	}

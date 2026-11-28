@@ -50,7 +50,49 @@ func (m *Provider) Usage() budget.Session {
 // up it refuses the request, which ends the run.
 func (m *Provider) Stream(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	m.mu.RLock()
-	inner, used := m.inner, m.used.Total()
+	inner := m.inner
+	m.mu.RUnlock()
+	return m.stream(ctx, inner, msgs, tools)
+}
+
+// Branch returns a provider that sends requests to p and counts them in
+// this session, budget included: a subagent on another model still
+// spends the session's tokens.
+func (m *Provider) Branch(p llm.Provider) llm.Provider { return &branch{meter: m, inner: p} }
+
+// branch is a provider counted by another's meter.
+type branch struct {
+	meter *Provider
+	inner llm.Provider
+}
+
+// Stream implements [llm.Provider].
+func (b *branch) Stream(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	return b.meter.stream(ctx, b.inner, msgs, tools)
+}
+
+// MaxTokens implements [llm.OutputCapEscalator] for the branch's own
+// provider. Zero when it has none.
+func (b *branch) MaxTokens() int {
+	if esc, ok := b.inner.(llm.OutputCapEscalator); ok {
+		return esc.MaxTokens()
+	}
+	return 0
+}
+
+// SetMaxTokens implements [llm.OutputCapEscalator]: a retry after a cut
+// raises this provider's limit, not the session's.
+func (b *branch) SetMaxTokens(n int) {
+	if esc, ok := b.inner.(llm.OutputCapEscalator); ok {
+		esc.SetMaxTokens(n)
+	}
+}
+
+// stream sends a request to inner, refusing it once the budget is used,
+// and counts what it uses.
+func (m *Provider) stream(ctx context.Context, inner llm.Provider, msgs []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
+	m.mu.RLock()
+	used := m.used.Total()
 	m.mu.RUnlock()
 	if inner == nil {
 		return nil, errors.New("meter: no provider set")

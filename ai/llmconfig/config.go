@@ -3,8 +3,11 @@
 package llmconfig
 
 import (
+	"fmt"
 	"log/slog"
 	"maps"
+	"net/netip"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -31,7 +34,20 @@ type Profile struct {
 	// (e.g., "openai" for ChatGPT, "copilot" for GitHub Copilot).
 	// When set, auth uses OAuth tokens instead of the APIKeyEnv static key.
 	OAuthProvider string `json:"oauth_provider,omitempty"`
+	// API is the wire format the endpoint speaks: [APIChat], [APIMessages]
+	// or [APIResponses]. Empty picks one from the base URL and sign-in.
+	API string `json:"api,omitempty"`
 }
+
+// Wire formats a [Profile] can name in API.
+const (
+	// APIChat is OpenAI-compatible chat completions (/chat/completions).
+	APIChat = "chat"
+	// APIMessages is the Anthropic Messages API (/v1/messages).
+	APIMessages = "messages"
+	// APIResponses is Open Responses (/responses), the Responses API format.
+	APIResponses = "responses"
+)
 
 // Config represents the on-disk shape of an LLM configuration file.
 // Both global and project files share this format. Fields left unset
@@ -68,6 +84,8 @@ type Resolved struct {
 	// uses it instead of creating a StaticKeyAuth from apiKey. This is set
 	// by the OAuth wiring layer after a successful login.
 	Auth llm.Auth
+	// API is the profile's wire format; empty means picked by heuristic.
+	API string
 	// Effort is the reasoning effort providers apply (low|medium|high|xhigh|
 	// max). Empty means the provider default. Set on a cloned Resolved to
 	// build a provider with a specific effort (e.g. a subagent's override),
@@ -87,12 +105,65 @@ func (r *Resolved) DisplayModel() string {
 }
 
 // HasProvider reports whether enough configuration exists to create
-// an LLM provider. API key takes priority; OAuth is the fallback.
+// an LLM provider: credentials (an API key, else OAuth) and a
+// configuration [Resolved.Validate] accepts.
 func (r *Resolved) HasProvider() bool {
-	if r.apiKey != "" {
-		return true
+	if r.apiKey == "" && (r.OAuthProvider == "" || r.Auth == nil) {
+		return false
 	}
-	return r.OAuthProvider != "" && r.Auth != nil
+	return r.Validate() == nil
+}
+
+// Validate reports what keeps the profile from building a provider other
+// than missing credentials: an api nib does not know, a ChatGPT sign-in
+// pointed away from its backend, or credentials sent over plain http.
+func (r *Resolved) Validate() error {
+	if _, ok := r.wireAPI(); !ok {
+		return fmt.Errorf("profile %s: unknown api %q (use %s, %s or %s)", r.Profile, r.API, APIChat, APIMessages, APIResponses)
+	}
+	if r.chatGPT() {
+		// Its token is for the Codex backend alone, whatever base_url says.
+		if r.API != "" && r.API != APIResponses {
+			return fmt.Errorf("profile %s: a ChatGPT sign-in works only with the Codex backend, not api %q", r.Profile, r.API)
+		}
+		return nil
+	}
+	if r.apiKey != "" || r.OAuthProvider != "" {
+		if err := plainHTTP(r.BaseURL); err != nil {
+			return fmt.Errorf("profile %s: %w", r.Profile, err)
+		}
+	}
+	return nil
+}
+
+// chatGPT reports whether the profile signs in with ChatGPT rather than
+// a key: its credentials then speak to the Codex backend only.
+func (r *Resolved) chatGPT() bool {
+	return r.apiKey == "" && r.OAuthProvider == string(oauth.ProviderOpenAI)
+}
+
+// plainHTTP refuses an http base URL on another machine, where a key
+// would cross the network in the clear. A server on this machine, a
+// private address or a bare host name on the local network is allowed.
+func plainHTTP(base string) error {
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme != "http" {
+		return nil // https, or a URL the request itself will reject
+	}
+	host := u.Hostname()
+	refused := fmt.Errorf("refusing to send credentials over plain http to %s; use https", host)
+	// An address first: an IPv6 one has no dot but may be anywhere.
+	// netip takes a zone (fe80::1%eth0), which net.ParseIP refuses.
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if ip.IsLoopback() || ip.IsPrivate() {
+			return nil
+		}
+		return refused
+	}
+	if host == "localhost" || !strings.Contains(host, ".") {
+		return nil
+	}
+	return refused
 }
 
 // SetAPIKey sets the API key on the resolved configuration.
@@ -117,23 +188,48 @@ func (r *Resolved) NewProvider() llm.Provider {
 		slog.Warn("llmconfig: unknown effort, using provider default", "effort", r.Effort)
 		effort = ""
 	}
-	if r.apiKey != "" {
+	if err := r.Validate(); err != nil {
+		slog.Warn("llmconfig: no provider built", "err", err)
+		return nil
+	}
+	api, _ := r.wireAPI() // Validate accepted it
+	var auth llm.Auth
+	switch {
+	case r.apiKey != "" && api == APIMessages:
+		auth = llm.AnthropicKeyAuth(r.apiKey)
+	case r.apiKey != "":
+		auth = llm.StaticKeyAuth(r.apiKey)
+	case r.Auth == nil:
+		return nil
+	case r.chatGPT():
+		return llm.NewCodexAPI(r.Model, r.Auth, effort)
+	case r.OAuthProvider != "":
+		auth = r.Auth
+	default:
+		return nil
+	}
+	switch api {
+	case APIMessages:
+		return llm.NewAnthropicAPI(r.BaseURL, r.Model, auth, r.PromptCaching, effort)
+	case APIResponses:
+		return llm.NewResponsesAPI(r.BaseURL, r.Model, auth, effort)
+	}
+	return llm.NewAgentAPI(r.BaseURL, r.Model, auth, r.PromptCaching, effort)
+}
+
+// wireAPI returns the wire format to speak: the profile's, or one picked
+// from the base URL. ok is false for a name nib does not know.
+func (r *Resolved) wireAPI() (api string, ok bool) {
+	switch r.API {
+	case APIChat, APIMessages, APIResponses:
+		return r.API, true
+	case "":
 		if r.isAnthropicEndpoint() {
-			return llm.NewAnthropicAPI(r.BaseURL, r.Model, llm.AnthropicKeyAuth(r.apiKey), r.PromptCaching, effort)
+			return APIMessages, true
 		}
-		return llm.NewAgentAPI(r.BaseURL, r.Model, llm.StaticKeyAuth(r.apiKey), r.PromptCaching, effort)
+		return APIChat, true
 	}
-
-	// Fall back to OAuth if configured and authenticated. Only OpenAI
-	// (Codex) and Copilot (OpenAI-compatible) OAuth flows exist.
-	if r.OAuthProvider != "" && r.Auth != nil {
-		if r.OAuthProvider == string(oauth.ProviderOpenAI) {
-			return llm.NewCodexAPI(r.Model, r.Auth, effort)
-		}
-		return llm.NewAgentAPI(r.BaseURL, r.Model, r.Auth, r.PromptCaching, effort)
-	}
-
-	return nil
+	return "", false
 }
 
 // isAnthropicEndpoint reports whether the resolved base URL points to

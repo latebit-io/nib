@@ -83,8 +83,8 @@ func TestParseField(t *testing.T) {
 
 func TestMatcher_Allows(t *testing.T) {
 	t.Parallel()
-	allow, _ := ParseField("Bash(git *) Read")
-	deny, _ := ParseField("Bash(git push *)")
+	allow := mustParse(t, "Bash(git *) Read")
+	deny := mustParse(t, "Bash(git push *)")
 	m := New(allow, deny)
 
 	cases := []struct {
@@ -111,7 +111,7 @@ func TestMatcher_PermitsArg(t *testing.T) {
 
 	t.Run("allowlist scopes the tool", func(t *testing.T) {
 		// `tools: Bash(git *)` — bash is admitted only for git commands.
-		allow, _ := ParseField("Bash(git *)")
+		allow := mustParse(t, "Bash(git *)")
 		m := New(allow, nil)
 		cases := []struct {
 			arg  string
@@ -132,7 +132,7 @@ func TestMatcher_PermitsArg(t *testing.T) {
 		// `disallowedTools: Bash(rm *)` with no allow list — bash is
 		// unrestricted except for the denied pattern. Allows would wrongly
 		// deny everything here (empty allow list); PermitsArg does not.
-		deny, _ := ParseField("Bash(rm *)")
+		deny := mustParse(t, "Bash(rm *)")
 		m := New(nil, deny)
 		if !m.PermitsArg("bash", "git status") {
 			t.Error("deny-only grant must permit a non-denied command")
@@ -149,8 +149,8 @@ func TestMatcher_PermitsArg(t *testing.T) {
 	t.Run("tool not named is permitted (deny-aware)", func(t *testing.T) {
 		// An allow list that names other tools imposes no arg restriction
 		// on bash, but a bash deny still blocks.
-		allow, _ := ParseField("Read")
-		deny, _ := ParseField("Bash(sudo *)")
+		allow := mustParse(t, "Read")
+		deny := mustParse(t, "Bash(sudo *)")
 		m := New(allow, deny)
 		if !m.PermitsArg("bash", "ls") {
 			t.Error("tool absent from allow list should be permitted")
@@ -178,8 +178,8 @@ func TestMatcher_HasArgRules(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			allow, _ := ParseField(c.allow)
-			deny, _ := ParseField(c.deny)
+			allow := mustParse(t, c.allow)
+			deny := mustParse(t, c.deny)
 			if got := New(allow, deny).HasArgRules(c.tool); got != c.want {
 				t.Fatalf("HasArgRules(%q) = %v, want %v", c.tool, got, c.want)
 			}
@@ -200,8 +200,8 @@ func TestMatcher_EmptyAllowDeniesAll(t *testing.T) {
 
 func TestGrantsAndDeniesTool(t *testing.T) {
 	t.Parallel()
-	allow, _ := ParseField("Read Bash(git *)")
-	deny, _ := ParseField("Write Bash(rm *)")
+	allow := mustParse(t, "Read Bash(git *)")
+	deny := mustParse(t, "Write Bash(rm *)")
 	m := New(allow, deny)
 
 	if !m.GrantsTool("Read") || !m.GrantsTool("bash") {
@@ -264,4 +264,14 @@ func TestAnyShell(t *testing.T) {
 	if AnyShell(prompt) {
 		t.Errorf("prompt-only grants should not register as shell")
 	}
+}
+
+// mustParse parses a tools field, failing the test on an error.
+func mustParse(t *testing.T, v any) []Rule {
+	t.Helper()
+	rules, err := ParseField(v)
+	if err != nil {
+		t.Fatalf("ParseField(%v): %v", v, err)
+	}
+	return rules
 }

@@ -1,6 +1,8 @@
 package llmconfig
 
 import (
+	"fmt"
+	"github.com/latebit-io/nib/ai/llm"
 	"os"
 	"path/filepath"
 	"testing"
@@ -704,5 +706,68 @@ func assertResolved(t *testing.T, got *Resolved, tc resolveTestCase) {
 	}
 	if got.PromptCaching != tc.wantCaching {
 		t.Errorf("PromptCaching = %v, want %v", got.PromptCaching, tc.wantCaching)
+	}
+}
+
+// TestNewProvider_API: the profile's api picks the wire format; without
+// one the base URL decides; an unknown one builds nothing.
+func TestNewProvider_API(t *testing.T) {
+	for _, c := range []struct {
+		api, base string
+		want      string
+	}{
+		{"", "https://api.example.com/v1", "*llm.AgentAPI"},
+		{"", "https://api.anthropic.com/v1", "*llm.AnthropicAPI"},
+		{APIChat, "https://api.anthropic.com/v1", "*llm.AgentAPI"},
+		{APIMessages, "https://proxy.example/v1", "*llm.AnthropicAPI"},
+		{APIResponses, "https://api.example.com/v1", "*llm.ResponsesAPI"},
+		{"carrier-pigeon", "https://api.example.com/v1", "<nil>"},
+	} {
+		r := &Resolved{BaseURL: c.base, Model: "m", API: c.api, apiKey: "k"}
+		if got := fmt.Sprintf("%T", r.NewProvider()); got != c.want {
+			t.Errorf("api %q at %s: %s, want %s", c.api, c.base, got, c.want)
+		}
+	}
+}
+
+// TestResolveProfile_API: a profile's api survives merging and resolution.
+func TestResolveProfile_API(t *testing.T) {
+	t.Setenv("LLM_BASE_URL", "") // an inherited override would replace the profile's
+	cfg := &Config{Profiles: map[string]Profile{"open": {BaseURL: "https://x/v1"}}}
+	mergeConfigs(cfg, &Config{Profiles: map[string]Profile{"open": {API: APIResponses}}})
+	if r := ResolveProfile(cfg, "open"); r == nil || r.API != APIResponses || r.BaseURL != "https://x/v1" {
+		t.Errorf("resolved = %+v", r)
+	}
+}
+
+// TestValidate: credentials are not sent in the clear to another
+// machine, and a ChatGPT sign-in stays with its backend whatever the
+// profile says.
+func TestValidate(t *testing.T) {
+	codex := &Resolved{Profile: "chatgpt", OAuthProvider: "openai", BaseURL: "https://evil.example/v1", Model: "m", Auth: llm.StaticKeyAuth("t")}
+	if p := codex.NewProvider(); fmt.Sprintf("%T", p) != "*llm.CodexAPI" {
+		t.Errorf("ChatGPT sign-in with another base_url built %T; want the Codex backend", p)
+	}
+	codex.API = APIResponses
+	if p := codex.NewProvider(); fmt.Sprintf("%T", p) != "*llm.CodexAPI" {
+		t.Errorf("ChatGPT sign-in with api responses built %T; want the Codex backend", p)
+	}
+	codex.API = APIChat
+	if codex.Validate() == nil || codex.HasProvider() || codex.NewProvider() != nil {
+		t.Error("ChatGPT sign-in with api chat must be refused")
+	}
+	for base, ok := range map[string]bool{
+		"https://api.example.com/v1": true, "http://localhost:11434/v1": true, "http://127.0.0.1:8000/v1": true,
+		"http://192.168.1.20:8000/v1": true, "http://gpu-box:8000/v1": true, "http://api.example.com/v1": false,
+		"http://[::1]:8000/v1": true, "http://[fd00::5]/v1": true, "http://[2606:4700:4700::1111]/v1": false, "http://8.8.8.8/v1": false,
+		"http://[2606:4700:4700::1111%251]/v1": false, "http://[fe80::1%25en0]:8000/v1": false, "http://[::ffff:127.0.0.1]/v1": true,
+	} {
+		r := &Resolved{Profile: "p", BaseURL: base, Model: "m", apiKey: "k"}
+		if (r.Validate() == nil) != ok || r.HasProvider() != ok {
+			t.Errorf("%s: Validate = %v, HasProvider = %v; want allowed=%v", base, r.Validate(), r.HasProvider(), ok)
+		}
+	}
+	if r := (&Resolved{Profile: "p", BaseURL: "https://x/v1", Model: "m", API: "carrier-pigeon", apiKey: "k"}); r.HasProvider() {
+		t.Error("an unknown api must not count as a provider")
 	}
 }

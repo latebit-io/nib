@@ -42,7 +42,18 @@ type Options struct {
 	// Interrupt delivers Ctrl-C: it stops the active run, or ends the
 	// session when no run is active. Nil means no interrupts.
 	Interrupt <-chan os.Signal
+	// OnPrompt sees each prompt before the agent does and returns what
+	// to send instead, or an error to refuse it. Nil sends it as typed.
+	OnPrompt func(ctx context.Context, text string) (string, error)
+	// OnStop is called when the agent has finished answering, with its
+	// answer; a non-empty return is sent to it as the next message.
+	// active says the agent is answering such a message. Nil means none.
+	OnStop func(ctx context.Context, answer string, active bool) string
 }
+
+// maxStopContinuations bounds how often an OnStop hook may send the
+// agent back to work before the person speaks again.
+const maxStopContinuations = 3
 
 // prompt is printed when the session wants a line.
 const prompt = "> "
@@ -64,10 +75,13 @@ type REPL struct {
 	commands  *command.Registry
 	interrupt <-chan os.Signal
 	openURL   func(string) error // opens a page a server asks the person to visit
-	asks      chan interaction   // questions on their way into the loop
-	posted    chan func()        // work handed to the loop from other goroutines
-	stopped   chan struct{}      // closed when Run returns
-	deferred  []func()           // posted work waiting for the run to end
+	onPrompt  func(context.Context, string) (string, error)
+	onStop    func(context.Context, string, bool) string
+	continued int              // messages OnStop sent since the person last typed
+	asks      chan interaction // questions on their way into the loop
+	posted    chan func()      // work handed to the loop from other goroutines
+	stopped   chan struct{}    // closed when Run returns
+	deferred  []func()         // posted work waiting for the run to end
 
 	agent   *kit.Agent
 	system  string // the agent's system prompt, resent with each run
@@ -88,7 +102,7 @@ func New(opts Options) (*REPL, error) {
 	}
 	r := &REPL{
 		in: opts.In, out: opts.Out, commands: opts.Commands, interrupt: opts.Interrupt,
-		openURL: oauth.OpenBrowser,
+		openURL: oauth.OpenBrowser, onPrompt: opts.OnPrompt, onStop: opts.OnStop,
 		asks:    make(chan interaction),
 		posted:  make(chan func()),
 		stopped: make(chan struct{}),
@@ -187,6 +201,9 @@ func (r *REPL) line(ctx context.Context, line string) {
 	defer r.promptUnlessRunning()
 	r.midLine = false // the person's Enter ended the line
 	line = strings.TrimSpace(line)
+	if line != "" {
+		r.continued = 0
+	}
 	// While a question waits, a line is its answer.
 	if r.asking != nil {
 		if r.asking.take(r, line) {
@@ -221,6 +238,17 @@ func (r *REPL) Display(text string) { r.println(text) }
 // run, a reply to a parked one, or a follow-up queued behind the work
 // in progress. It implements [command.Session].
 func (r *REPL) SubmitPrompt(ctx context.Context, text string) error {
+	if r.onPrompt != nil {
+		var err error
+		if text, err = r.onPrompt(ctx, text); err != nil {
+			return err
+		}
+	}
+	return r.send(ctx, text)
+}
+
+// send gives text to the agent as SubmitPrompt does, without OnPrompt.
+func (r *REPL) send(ctx context.Context, text string) error {
 	switch r.phase {
 	case idle:
 		return r.start(ctx, text)
@@ -302,6 +330,7 @@ func (r *REPL) event(ctx context.Context, ev event.Event) {
 		r.phase = waiting
 		r.flush(ctx)
 		r.runDeferred()
+		r.stopHook(ctx, r.lastAnswer())
 		r.promptUnlessRunning()
 	case event.AgentDone:
 		r.finish(e)
@@ -311,8 +340,40 @@ func (r *REPL) event(ctx context.Context, ev event.Event) {
 		}
 		r.flush(ctx)
 		r.runDeferred()
+		if e.Success {
+			r.stopHook(ctx, e.FinalText)
+		}
 		r.promptUnlessRunning()
 	}
+}
+
+// stopHook asks OnStop, once the agent has finished answering and
+// nothing else set it going, whether to send it back to work.
+func (r *REPL) stopHook(ctx context.Context, answer string) {
+	if r.onStop == nil || r.phase == running || r.continued >= maxStopContinuations {
+		return
+	}
+	again := r.onStop(ctx, answer, r.continued > 0)
+	if again == "" {
+		return
+	}
+	r.continued++
+	r.println("(a hook asks the agent to go on: " + strings.Join(strings.Fields(again), " ") + ")")
+	if err := r.send(ctx, again); err != nil {
+		r.println("error: " + err.Error())
+	}
+}
+
+// lastAnswer is the agent's latest message to the person, for a run
+// that has parked: only a finished run's event carries its answer.
+func (r *REPL) lastAnswer() string {
+	msgs := r.agent.State().Messages
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" && msgs[i].Content != "" {
+			return msgs[i].Content
+		}
+	}
+	return ""
 }
 
 // Post hands fn to the session's loop, which runs it while the agent is

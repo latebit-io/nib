@@ -8,6 +8,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -475,4 +476,44 @@ func listing(names []string, cut bool) string {
 		out += "\n[more entries exist; narrow the pattern or path]"
 	}
 	return out
+}
+
+// PathOf returns the path a file tool's call names, or "" when the
+// arguments do not parse: for policies that look at a call before it runs.
+func PathOf(args string) string {
+	var call struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal([]byte(args), &call) != nil {
+		return ""
+	}
+	return call.Path
+}
+
+// Resolve returns the file a call's path reaches from dir, relative to
+// root and slash-separated. It is found as a write finds its file, link
+// by link, so a grant judged on it holds for the write too.
+func Resolve(root, dir, name string) (string, error) {
+	t, err := New(root, dir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = t.Close() }() // a directory handle only read from
+	return t.resolve(name)
+}
+
+// resolve is [Resolve] over an open root.
+func (t *Tools) resolve(name string) (string, error) {
+	p, err := t.rel(name)
+	if err != nil {
+		return "", err
+	}
+	if p == "." {
+		return ".", nil
+	}
+	final, _, err := t.target(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(final), nil
 }

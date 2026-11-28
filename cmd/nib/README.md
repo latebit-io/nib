@@ -15,6 +15,7 @@ nib --plugins           # print the manifest (provider, store, context files, ex
 nib --trust-mcp         # allow the MCP servers this project's .mcp.json names, and exit
 nib --mcp-login <name>  # sign in to an HTTP MCP server in the browser, keep the sign-in, and exit
 nib --approve           # start a session that asks before each command and file change
+nib plugin list         # installed plugins; also install <source>, remove, enable, disable, trust, untrust <id>
 ```
 
 In a session, a line goes to the agent and its answer streams back, with one line per tool call. Ctrl-C stops a run, or leaves when nothing is running. A line typed while the agent works is queued as a follow-up. `/help` lists the commands: `/clear`, `/quit`, `/extension`, `/approve`, `/model` and `/usage`.
@@ -28,6 +29,12 @@ Long sessions are kept in bounds automatically. Tool output is sent whole once, 
 MCP servers come from `NIB_MCP` (`name=command args` or `name=https://endpoint`, separated by `;`) and from the project's `.mcp.json`. In `.mcp.json`, `command` is the program, taken whole, and `args` are its arguments; an HTTP server has `url` (and optionally `"type": "http"`, `headers`, and `oauth.clientId` for a client registered ahead of time). An HTTP endpoint must be https unless it is on this machine. The deprecated HTTP+SSE transport (`"type": "sse"`) is refused. Header values may use `${NAME}` from the environment, except in a project's file. A project's servers start only after `--trust-mcp`, and again after the file changes.
 
 nib speaks MCP revision 2026-07-28 and falls back to 2024-11-05 through 2025-11-25 for older servers. A server's tools are named `mcp__<server>__<tool>`; its prompts are slash commands of the same form (`/mcp__<server>__<prompt> args`, the last argument taking the rest of the line); its resources are reached through `list_mcp_resources` and `read_mcp_resource`; its instructions join the system prompt. When a server's tools or prompts change, the session picks them up after the current step. A server that asks you something mid-call (elicitation) is answered in the session: a form field by field with a review before it is sent, or a page to open in the browser after a yes; without a session (`-m`) the question is dismissed.
+
+Plugins are Claude Code plugins, installed with `nib plugin install <path|owner/repo|git-url>` into `<user-config-dir>/nib/plugins`. An installed plugin's skills load at once. Its hooks, MCP servers and agents run code, so they start only after `nib plugin trust <id>`; the session names the plugins that are not trusted.
+
+Hooks follow Claude Code's protocol: `PreToolUse` and `PostToolUse` around each tool call (matched by Claude Code's tool names, such as `Bash` or `Write`, or by nib's), `UserPromptSubmit` before a prompt is sent, `Stop` when the agent has answered (in a session, a hook that blocks sends it back to work, at most three times before you type again), `SubagentStop`, `SessionStart` (its output joins the system prompt) and `SessionEnd`. A hook gets Claude Code's JSON on stdin and runs in the project with `CLAUDE_PROJECT_DIR`, `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` set; exit 2 blocks, `timeout` is in seconds. A hook that asks for approval (`"permissionDecision": "ask"`) refuses the call: a session cannot ask from inside a hook yet.
+
+Subagents are agent definitions (Markdown with `name`, `description`, `tools`, `model`, `maxTurns` frontmatter) in `.project/agents`, `<user-config-dir>/nib/agents`, or a trusted plugin. Each becomes a tool `agent_<name>`; the model gives it a task, and a separate agent does it with the session's tools (narrowed by `tools`, which may scope the shell, like `Bash(git *)`) and the session's approvals, budget and hooks, and returns its answer. A skill marked `context: fork` runs the same way, as `skill_<name>`. A definition asking for `isolation: worktree` is left out for now.
 
 An HTTP server that needs OAuth is signed in to once with `nib --mcp-login <name>`. The sign-in is kept in `<user-config-dir>/nib/mcp-auth.json` (readable only by you) and refreshed by later sessions; a session never opens a browser itself, and a server whose sign-in is missing or expired is reported with the command to run.
 
@@ -57,6 +64,8 @@ Resolved via `ai/llmconfig`:
 2. `<UserConfigDir>/<brand>/llm.json` (global)
 3. `<root>/.project/llm.json` (project-local)
 4. Env vars (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, or profile-specific keys)
+
+A profile's `api` names the wire format: `chat` (OpenAI-compatible chat completions), `messages` (Anthropic) or `responses` (Open Responses, `<base_url>/responses`). Without it, an `anthropic.com` base URL speaks `messages` and anything else `chat`.
 
 Same `llm.json` as `nib-code` and `nib-agent` — one global config across all three binaries.
 

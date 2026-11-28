@@ -8,14 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/kit/internal/filecap"
 	"github.com/latebit-io/nib/kit/internal/httporigin"
+	"github.com/latebit-io/nib/kit/internal/userconfig"
 )
 
 // EnvKey names the environment variable that holds the person's agent
@@ -64,11 +63,11 @@ func DefaultConfigPath() (string, error) {
 
 // configFile is name in nib's user config directory.
 func configFile(name string) (string, error) {
-	dir, err := os.UserConfigDir()
+	path, err := userconfig.Path(name)
 	if err != nil {
 		return "", fmt.Errorf("a2a: %w", err)
 	}
-	return filepath.Join(dir, brand.ConfigDirName, name), nil
+	return path, nil
 }
 
 // LoadConfig reads the agent list at path, where a missing file is an

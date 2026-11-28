@@ -181,14 +181,33 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 	a.files, err = contextfile.LoadChain(root, dir)
 	a.warn(err)
 
+	a.connect(ctx, opts)
+	// Resources are read, never changed.
+	gate.Register(mcp.ListResourcesTool, permission.Unasked)
+	gate.Register(mcp.ReadResourceTool, permission.Unasked)
+
+	defs, errs := subagent.Discover(root, a.plugins.agentDirs())
+	a.Warnings = append(a.Warnings, errs...)
+	a.delegation(defs, opts.ProviderFor)
+
+	if _, err := a.Switch(ctx, opts.Switches); err != nil {
+		return nil, errors.Join(fmt.Errorf("nib: %w", err), a.Close())
+	}
+	return a, nil
+}
+
+// connect starts the MCP servers and reaches the A2A agents opts name,
+// recording each one left out. Both wait on the network, so they run at
+// once: a slow agent card must not add to a slow server.
+func (a *Assembly) connect(ctx context.Context, opts Options) {
 	if opts.MCP.ProjectDir == "" {
-		opts.MCP.ProjectDir = root
+		opts.MCP.ProjectDir = a.Root
 	}
 	opts.MCP.Plugins = append(opts.MCP.Plugins, a.plugins.mcpSources()...)
+	var err error
 	a.servers, err = mcp.Discover(opts.MCP)
 	a.warn(err)
 	a.warnRefused()
-	// Both wait on the network: a slow agent card must not add to a slow server.
 	remote := make(chan *a2a.Session, 1)
 	go func() { remote <- a2a.Connect(ctx, opts.A2A) }()
 	a.session = mcp.Connect(ctx, a.servers.Servers, mcp.ConnectOptions{Tokens: opts.MCPTokens})
@@ -202,18 +221,6 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 	for _, f := range a.remote.Failed {
 		a.warn(fmt.Errorf("A2A agent %s: %w", f.Agent.Name, f.Err))
 	}
-	// Resources are read, never changed.
-	gate.Register(mcp.ListResourcesTool, permission.Unasked)
-	gate.Register(mcp.ReadResourceTool, permission.Unasked)
-
-	defs, errs := subagent.Discover(root, a.plugins.agentDirs())
-	a.Warnings = append(a.Warnings, errs...)
-	a.delegation(defs, opts.ProviderFor)
-
-	if _, err := a.Switch(ctx, opts.Switches); err != nil {
-		return nil, errors.Join(fmt.Errorf("nib: %w", err), a.Close())
-	}
-	return a, nil
 }
 
 // machinery returns the hooks every run goes through: output

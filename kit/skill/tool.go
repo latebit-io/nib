@@ -13,6 +13,7 @@ import (
 	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit/dyncontext"
+	"github.com/latebit-io/nib/kit/internal/userconfig"
 	"github.com/latebit-io/nib/kit/toolperm"
 )
 
@@ -134,12 +135,12 @@ func GlobalDir() (string, bool) {
 	if dir := os.Getenv(brand.EnvKeyGlobalSkillsDir); dir != "" {
 		return dir, true
 	}
-	cfg, err := os.UserConfigDir()
+	dir, err := userconfig.Path("skills")
 	if err != nil {
-		slog.Warn("skill: cannot resolve user config dir; skipping global skills layer", "err", err)
+		slog.Warn("skill: skipping the global skills layer", "err", err)
 		return "", false
 	}
-	return filepath.Join(cfg, brand.ConfigDirName, "skills"), true
+	return dir, true
 }
 
 // Result is the outcome of [Discover]: the adapted tools plus the skills

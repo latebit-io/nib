@@ -21,6 +21,7 @@ import (
 	"github.com/latebit-io/nib/kit"
 	"github.com/latebit-io/nib/kit/agentdef"
 	"github.com/latebit-io/nib/kit/hookmap"
+	"github.com/latebit-io/nib/kit/internal/userconfig"
 	"github.com/latebit-io/nib/kit/skill"
 	"github.com/latebit-io/nib/kit/toolperm"
 	"github.com/latebit-io/nib/kit/tools/bash"
@@ -387,10 +388,10 @@ func globalDir() (string, bool) {
 	if dir := os.Getenv(brand.EnvKeyGlobalAgentsDir); dir != "" {
 		return dir, true
 	}
-	cfg, err := os.UserConfigDir()
+	dir, err := userconfig.Path("agents")
 	if err != nil {
-		slog.Warn("subagent: no user config dir, so no personal agents", "err", err)
+		slog.Warn("subagent: no personal agents", "err", err)
 		return "", false
 	}
-	return filepath.Join(cfg, brand.ConfigDirName, "agents"), true
+	return dir, true
 }

@@ -48,38 +48,50 @@ const serveUsage = `usage: nib serve [--addr host:port] [--root dir] [--debug]
   Serves this project's nib as an A2A agent on this machine. Requests
   carry the bearer token kept in the file the start line names.`
 
-// runServe is `nib serve`: the session's agent, served over A2A.
-func runServe(args []string) error {
+// serveSettings is what `nib serve` was told and found before starting.
+type serveSettings struct {
+	addr, url, root  string
+	tokenPath, token string
+}
+
+// parseServe reads the flags and checks what needs no startup: the
+// address, the root and the token.
+func parseServe(args []string) (serveSettings, error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := flags.String("addr", defaultServeAddr, "Address to listen on; must be on this machine")
 	rootFlag := flags.String("root", "", "Working directory (default: cwd)")
 	debugLog := flags.Bool("debug", false, debugUsage)
 	flags.Usage = func() { fmt.Fprintln(os.Stderr, serveUsage); flags.PrintDefaults() }
 	if err := flags.Parse(args); err != nil {
-		return setupErr("%v", err)
+		return serveSettings{}, setupErr("%v", err)
 	}
 	setupLogging(*debugLog)
-	// Checked before anything starts: a wrong address must not cost a startup.
-	url, err := a2a.ServeURL(*addr)
-	if err != nil {
-		return setupErr("%v", err)
+	s := serveSettings{addr: *addr}
+	var err error
+	if s.url, err = a2a.ServeURL(*addr); err != nil {
+		return s, setupErr("%v", err)
 	}
-	root, err := resolveRoot(*rootFlag)
-	if err != nil {
-		return setupErr("resolve root: %v", err)
+	if s.root, err = resolveRoot(*rootFlag); err != nil {
+		return s, setupErr("resolve root: %v", err)
 	}
-	tokenPath, err := a2a.DefaultTokenPath()
-	if err != nil {
-		return setupErr("%v", err)
+	if s.tokenPath, err = a2a.DefaultTokenPath(); err != nil {
+		return s, setupErr("%v", err)
 	}
-	token, err := a2a.Token(tokenPath)
-	if err != nil {
-		return setupErr("%v", err)
+	if s.token, err = a2a.Token(s.tokenPath); err != nil {
+		return s, setupErr("%v", err)
 	}
+	return s, nil
+}
 
+// runServe is `nib serve`: the session's agent, served over A2A.
+func runServe(args []string) error {
+	s, err := parseServe(args)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	mem, err := demarkus.Open(ctx, root)
+	mem, err := demarkus.Open(ctx, s.root)
 	if err != nil {
 		return setupErr("memory: %v", err)
 	}
@@ -88,7 +100,7 @@ func runServe(args []string) error {
 			slog.Warn("memory close", "err", cerr)
 		}
 	}()
-	resolved, provider, err := newProvider(root)
+	resolved, provider, err := newProvider(s.root)
 	if err != nil {
 		return err
 	}
@@ -98,7 +110,7 @@ func runServe(args []string) error {
 	}
 	chosen.providerFor = providerFor(func() *llmconfig.Resolved { return resolved })
 	chosen.session = newSessionID(time.Now(), "serve")
-	assembly, err := assemble(ctx, root, buildSystemPrompt(chosen.session), mem.Store, chosen)
+	assembly, err := assemble(ctx, s.root, buildSystemPrompt(chosen.session), mem.Store, chosen)
 	if err != nil {
 		return setupErr("%v", err)
 	}
@@ -110,20 +122,26 @@ func runServe(args []string) error {
 		Name:        brand.Name,
 		Description: "A general agent working in " + filepath.Base(assembly.Root) + ", with its tools, skills and memory.",
 		Version:     binaryVersion(),
-		URL:         url,
-		Token:       token,
+		URL:         s.url,
+		Token:       s.token,
 		Skills:      []a2a.Skill{{ID: "general", Name: "General", Description: "Any task in the project: reading, changing and running what it holds."}},
 		Run:         serveRun(assembly, provider),
 	})
 	if err != nil {
 		return setupErr("%v", err)
 	}
-	listener, err := net.Listen("tcp", *addr)
+	return listen(ctx, s, handler)
+}
+
+// listen serves handler at s.addr until ctx ends, then stops within
+// the grace period.
+func listen(ctx context.Context, s serveSettings, handler http.Handler) error {
+	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return setupErr("listen: %v", err)
 	}
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-	fmt.Fprintf(os.Stderr, "nib serves A2A at %s (bearer token in %s)\n", url, tokenPath)
+	fmt.Fprintf(os.Stderr, "nib serves A2A at %s (bearer token in %s)\n", s.url, s.tokenPath)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(listener) }()
 	select {

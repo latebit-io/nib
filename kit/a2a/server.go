@@ -55,8 +55,10 @@ type ServerConfig struct {
 
 // Skill is one capability listed on the card.
 type Skill struct {
+	// ID identifies the skill to clients; Name and Description are read by people.
 	ID, Name, Description string
-	Tags                  []string
+	// Tags are keywords clients may search the card by.
+	Tags []string
 }
 
 // ServeURL is the address clients reach a server listening on addr at.

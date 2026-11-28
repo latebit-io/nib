@@ -11,8 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +25,7 @@ import (
 	"github.com/latebit-io/nib/kit/internal/filecap"
 	"github.com/latebit-io/nib/kit/internal/filelock"
 	"github.com/latebit-io/nib/kit/internal/httporigin"
+	"github.com/latebit-io/nib/kit/internal/userconfig"
 )
 
 // ErrNoLoginNeeded is returned by [Login] for a server that did not ask
@@ -58,11 +57,11 @@ func OpenTokenStore(path string) *TokenStore { return &TokenStore{path: path} }
 // DefaultTokenPath is where a binary keeps the store: in the user's
 // config directory, which a repository cannot write to.
 func DefaultTokenPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	path, err := userconfig.Path("mcp-auth.json")
 	if err != nil {
-		return "", fmt.Errorf("mcp: resolve user config dir: %w", err)
+		return "", fmt.Errorf("mcp: %w", err)
 	}
-	return filepath.Join(dir, brand.ConfigDirName, "mcp-auth.json"), nil
+	return path, nil
 }
 
 // grant is one sign-in.

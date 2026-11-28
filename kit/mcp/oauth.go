@@ -26,6 +26,7 @@ import (
 	"github.com/latebit-io/nib/kit/internal/atomicfile"
 	"github.com/latebit-io/nib/kit/internal/filecap"
 	"github.com/latebit-io/nib/kit/internal/filelock"
+	"github.com/latebit-io/nib/kit/internal/httporigin"
 )
 
 // ErrNoLoginNeeded is returned by [Login] for a server that did not ask
@@ -215,7 +216,7 @@ func newGrantSource(server, endpoint string, store *TokenStore, g grant) *grantS
 	cfg := &oauth2.Config{ClientID: g.ClientID, ClientSecret: g.ClientSecret,
 		Endpoint: oauth2.Endpoint{TokenURL: g.TokenURL, AuthStyle: g.AuthStyle}}
 	// The refresh token is in the body: it must not follow a redirect off the token endpoint.
-	client := originClient(g.TokenURL)
+	client := httporigin.Client(g.TokenURL, nil)
 	client.Timeout, client.Transport = refreshTimeout, resourceParam{resource: g.Resource}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
 	return &grantSource{server: server, endpoint: endpoint, store: store,
@@ -228,7 +229,7 @@ func (s *grantSource) Token() (*oauth2.Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.grant.Token.Valid() {
-		if err := checkEndpoint(s.grant.TokenURL); err != nil {
+		if err := httporigin.CheckEndpoint(s.grant.TokenURL); err != nil {
 			return nil, fmt.Errorf("mcp: refresh: %w", err)
 		}
 	}
@@ -405,7 +406,7 @@ func (cb *callback) serve(w http.ResponseWriter, r *http.Request) {
 // The SDK checks state and issuer; an error the server reports is not
 // shown, since it may come from a server that is not the issuer.
 func (cb *callback) wait(ctx context.Context, address string, opts LoginOptions) (*sdkauth.AuthorizationResult, error) {
-	if err := checkEndpoint(address); err != nil {
+	if err := httporigin.CheckEndpoint(address); err != nil {
 		return nil, fmt.Errorf("mcp: refusing to open the sign-in page: %w", err)
 	}
 	notify := func(msg string) {

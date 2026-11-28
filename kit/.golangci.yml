@@ -75,18 +75,21 @@ linters:
             - pkg: "os/exec"
               desc: "process execution only in proc, tools/bash, tools/git, dyncontext, hookrun, mcp, pluginstore, memory/demarkus/server"
 
-        # Network access is confined to the demarkus binary installer and
-        # the MCP client's HTTP transport and sign-in.
+        # Network access is confined to the demarkus binary installer, the
+        # MCP client's HTTP transport and sign-in, A2A, and the origin rules.
         http-allowlist:
           files:
             - "$all"
             - "!**/kit/memory/demarkus/server/*.go"
+            - "!$test"
             - "!**/kit/mcp/http.go"
             - "!**/kit/mcp/oauth.go"
-            - "!**/kit/mcp/*_test.go"
+            - "!**/kit/a2a/client.go"
+            - "!**/kit/a2a/server.go"
+            - "!**/kit/internal/httporigin/httporigin.go"
           deny:
             - pkg: "net/http"
-              desc: "kit is offline except the demarkus binary installer and the MCP client's HTTP transport"
+              desc: "kit is offline except the demarkus binary installer, the MCP client's HTTP transport and A2A"
 
         # The MCP SDK reaches the network: only kit/mcp may use it.
         mcp-sdk-confined:
@@ -96,6 +99,15 @@ linters:
           deny:
             - pkg: "github.com/modelcontextprotocol/go-sdk"
               desc: "the MCP SDK is wrapped by kit/mcp; use that"
+
+        # The A2A SDK reaches the network: only kit/a2a may use it.
+        a2a-sdk-confined:
+          files:
+            - "$all"
+            - "!**/kit/a2a/*.go"
+          deny:
+            - pkg: "github.com/a2aproject/a2a-go"
+              desc: "the A2A SDK is wrapped by kit/a2a; use that"
 
         # Test scaffolding never links into production code.
         contracttest-tests-only:

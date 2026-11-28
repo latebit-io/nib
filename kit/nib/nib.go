@@ -15,6 +15,7 @@ import (
 
 	"github.com/latebit-io/nib/ai/llm"
 	"github.com/latebit-io/nib/kit"
+	"github.com/latebit-io/nib/kit/a2a"
 	"github.com/latebit-io/nib/kit/budget"
 	"github.com/latebit-io/nib/kit/compact"
 	"github.com/latebit-io/nib/kit/contextfile"
@@ -50,6 +51,9 @@ type Options struct {
 	// MCPTokens are the person's sign-ins to HTTP servers. Nil means a
 	// server that asks for one does not start.
 	MCPTokens *mcp.TokenStore
+	// A2A is the person's list of remote agents, from [a2a.LoadConfig].
+	// Each one reached becomes a tool.
+	A2A a2a.Config
 	// Plugins are the installed plugins. Their skills load; a trusted
 	// plugin's MCP servers, hooks and agents too. Nil means none.
 	Plugins *pluginstore.Store
@@ -116,6 +120,7 @@ type Assembly struct {
 	files     []contextfile.File
 	servers   mcp.Config
 	session   *mcp.Session
+	remote    *a2a.Session
 }
 
 // ExtensionState is one registered extension and whether it is on.
@@ -183,9 +188,19 @@ func Assemble(ctx context.Context, opts Options) (*Assembly, error) {
 	a.servers, err = mcp.Discover(opts.MCP)
 	a.warn(err)
 	a.warnRefused()
+	// Both wait on the network: a slow agent card must not add to a slow server.
+	remote := make(chan *a2a.Session, 1)
+	go func() { remote <- a2a.Connect(ctx, opts.A2A) }()
 	a.session = mcp.Connect(ctx, a.servers.Servers, mcp.ConnectOptions{Tokens: opts.MCPTokens})
 	for _, f := range a.session.Failed {
 		a.warn(fmt.Errorf("MCP server %s: %w", f.Server.Name, f.Err))
+	}
+	a.remote = <-remote
+	for _, r := range a.remote.Refused {
+		a.warn(fmt.Errorf("A2A agent %s not used: %w", r.Agent.Name, r.Err))
+	}
+	for _, f := range a.remote.Failed {
+		a.warn(fmt.Errorf("A2A agent %s: %w", f.Agent.Name, f.Err))
 	}
 	// Resources are read, never changed.
 	gate.Register(mcp.ListResourcesTool, permission.Unasked)
@@ -269,7 +284,7 @@ func (a *Assembly) compose() {
 		}
 	}
 	sets = append(sets, kit.Toolset{Tools: a.skills.Tools},
-		kit.Toolset{Tools: a.session.Tools(), Commands: a.session.Commands()})
+		kit.Toolset{Tools: a.session.Tools(), Commands: a.session.Commands()}, kit.Toolset{Tools: a.remote.Tools()})
 	prompt = append(prompt, contextfile.Prompt(a.files), a.session.Prompt())
 
 	join := func(parts []string) string {
@@ -286,7 +301,7 @@ func (a *Assembly) compose() {
 	a.Toolset = kit.Merge(sets...)
 	a.SystemPrompt = join(prompt)
 	a.Plugins = slices.Concat(rows, a.plugins.manifest(), a.agentRows, contextfile.Plugins(a.Root, a.files),
-		skill.Plugins(a.skills), mcp.Plugins(a.servers, a.session))
+		skill.Plugins(a.skills), mcp.Plugins(a.servers, a.session), a2a.Plugins(a.remote))
 }
 
 // describe returns the manifest rows for a toolset's tools and slash
@@ -410,5 +425,6 @@ func (a *Assembly) Close() error {
 	}
 	errs = append(errs, a.session.Close())
 	a.session = nil
+	errs = append(errs, a.remote.Close())
 	return errors.Join(errs...)
 }

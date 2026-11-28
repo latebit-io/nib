@@ -79,6 +79,7 @@ func assemble(ctx context.Context, root, prompt string, store memory.Store, chos
 		Store:        store,
 		MCP:          mcpDiscovery(root),
 		MCPTokens:    tokens,
+		A2A:          a2aAgents(),
 		Extensions:   registry,
 		Switches:     chosen.switches,
 		Limits:       chosen.limits,

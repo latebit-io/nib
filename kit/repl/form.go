@@ -6,9 +6,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/latebit-io/nib/kit/elicit"
+	"github.com/latebit-io/nib/kit/internal/termsafe"
 )
 
 // form is a question from outside the session (an MCP server) and the
@@ -38,7 +38,7 @@ func (r *REPL) Elicit(ctx context.Context, req elicit.Request) (elicit.Result, e
 
 // show introduces the question and asks the first thing.
 func (f *form) show(r *REPL) {
-	from, message := printable(f.req.From), printable(f.req.Message)
+	from, message := termsafe.Text(f.req.From), termsafe.Text(f.req.Message)
 	if f.req.Mode != elicit.Page {
 		r.println("? " + from + " asks: " + message)
 		f.ask(r)
@@ -67,7 +67,7 @@ func (f *form) ask(r *REPL) {
 	default:
 		for _, field := range f.req.Fields {
 			if v, ok := f.values[field.Name]; ok {
-				r.println(fmt.Sprintf("  %s = %v", printable(field.Label()), v))
+				r.println(fmt.Sprintf("  %s = %v", termsafe.Text(field.Label()), v))
 			}
 		}
 		r.print("  send? [y]es, [e]dit, [d]ecline, [c]ancel: ")
@@ -81,7 +81,7 @@ func fieldPrompt(field elicit.Field, values map[string]any) string {
 	case len(field.Options) > 0:
 		opts := make([]string, len(field.Options))
 		for i, l := range field.Labels {
-			opts[i] = strconv.Itoa(i+1) + " " + printable(l)
+			opts[i] = strconv.Itoa(i+1) + " " + termsafe.Text(l)
 		}
 		hint := strings.Join(opts, ", ")
 		if field.Multiple {
@@ -102,9 +102,9 @@ func fieldPrompt(field elicit.Field, values map[string]any) string {
 	} else if !field.Required {
 		hints = append(hints, "optional")
 	}
-	text := printable(field.Label())
+	text := termsafe.Text(field.Label())
 	if field.Description != "" {
-		text += " (" + printable(field.Description) + ")"
+		text += " (" + termsafe.Text(field.Description) + ")"
 	}
 	if len(hints) > 0 {
 		text += " [" + strings.Join(hints, "; ") + "]"
@@ -170,18 +170,6 @@ func (f *form) fill(r *REPL, field elicit.Field, line string) {
 	}
 	f.values[field.Name] = v
 	f.next++
-}
-
-// printable makes a server's text safe to print: a control character
-// (a newline, an escape sequence) or a direction override could forge
-// a line of the question, so each becomes a space.
-func printable(text string) string {
-	return strings.Map(func(c rune) rune {
-		if unicode.IsControl(c) || unicode.Is(unicode.Bidi_Control, c) {
-			return ' '
-		}
-		return c
-	}, text)
 }
 
 // done delivers the answer and reports the question over.

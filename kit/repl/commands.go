@@ -12,8 +12,10 @@ type builtin struct {
 	run func()
 }
 
+// Definition implements [command.Command].
 func (b builtin) Definition() command.Definition { return b.def }
 
+// Handle implements [command.Command].
 func (b builtin) Handle(context.Context, command.Session, string) error {
 	b.run()
 	return nil

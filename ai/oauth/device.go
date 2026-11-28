@@ -23,6 +23,7 @@ type tokenEndpointError struct {
 	detail string // error description, falling back to code
 }
 
+// Error implements [error].
 func (e *tokenEndpointError) Error() string {
 	if e.detail == "" {
 		return fmt.Sprintf("%s: HTTP %d", e.label, e.status)

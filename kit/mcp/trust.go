@@ -7,12 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 
-	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/kit/internal/atomicfile"
 	"github.com/latebit-io/nib/kit/internal/filecap"
+	"github.com/latebit-io/nib/kit/internal/userconfig"
 )
 
 // TrustStore remembers which projects' server lists the person
@@ -37,11 +36,11 @@ func OpenTrustStore(path string) *TrustStore {
 // DefaultTrustPath is where a binary keeps the store: in the user's
 // config directory, which a repository cannot write to.
 func DefaultTrustPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	path, err := userconfig.Path("mcp-trust.json")
 	if err != nil {
-		return "", fmt.Errorf("mcp: resolve user config dir: %w", err)
+		return "", fmt.Errorf("mcp: %w", err)
 	}
-	return filepath.Join(dir, brand.ConfigDirName, "mcp-trust.json"), nil
+	return path, nil
 }
 
 // Trusted reports whether projectDir's config file is the one approved.

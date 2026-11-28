@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
-	"os"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/latebit-io/nib/kit/internal/filecap"
+	"github.com/latebit-io/nib/kit/internal/httporigin"
 )
 
 // ProjectConfigName is the file a project names its servers in, the
@@ -172,7 +171,7 @@ func refusal(s Server, taken map[string]Origin, trustProject bool) error {
 	case s.URL != "" && s.Command != "":
 		return errors.New("has both a command and a url")
 	case s.URL != "":
-		if err := checkEndpoint(s.URL); err != nil {
+		if err := httporigin.CheckEndpoint(s.URL); err != nil {
 			return err
 		}
 	case strings.TrimSpace(s.Command) == "":
@@ -246,37 +245,14 @@ func transport(def definition) error {
 	return fmt.Errorf("unknown transport type %q", def.Type)
 }
 
-// envReference is a ${NAME} in a header value.
-var envReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-
 // expandHeaders fills ${NAME} references from the environment. A
 // project's file may not use them: a repository could otherwise send
 // any of the person's secrets to a server it names.
 func expandHeaders(headers map[string]string, origin Origin) (map[string]string, error) {
-	if len(headers) == 0 {
-		return nil, nil
+	if key := httporigin.ReadsEnv(headers); key != "" && origin == OriginProject {
+		return nil, fmt.Errorf("header %s reads the environment, which a project's file may not do", key)
 	}
-	out := make(map[string]string, len(headers))
-	for _, key := range slices.Sorted(maps.Keys(headers)) {
-		value := headers[key]
-		var missing []string
-		expanded := envReference.ReplaceAllStringFunc(value, func(ref string) string {
-			name := ref[2 : len(ref)-1] // inside ${...}
-			v, ok := os.LookupEnv(name)
-			if !ok {
-				missing = append(missing, name)
-			}
-			return v
-		})
-		switch {
-		case expanded != value && origin == OriginProject:
-			return nil, fmt.Errorf("header %s reads the environment, which a project's file may not do", key)
-		case len(missing) > 0:
-			return nil, fmt.Errorf("header %s uses %s, which is not set", key, strings.Join(missing, ", "))
-		}
-		out[key] = expanded
-	}
-	return out, nil
+	return httporigin.ExpandHeaders(headers)
 }
 
 // ParseSpec parses the person's own list from the environment:

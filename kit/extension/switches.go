@@ -2,12 +2,10 @@ package extension
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 
-	"github.com/latebit-io/nib/ai/brand"
 	"github.com/latebit-io/nib/kit/internal/filecap"
+	"github.com/latebit-io/nib/kit/internal/userconfig"
 )
 
 // maxSwitchesBytes caps the configuration file; it holds two short lists.
@@ -37,11 +35,11 @@ func (s Switches) Then(next Switches) Switches {
 // DefaultSwitchesPath is where a binary keeps the person's choices:
 // extensions.json in the user's config directory.
 func DefaultSwitchesPath() (string, error) {
-	dir, err := os.UserConfigDir()
+	path, err := userconfig.Path("extensions.json")
 	if err != nil {
-		return "", fmt.Errorf("extension: resolve user config dir: %w", err)
+		return "", fmt.Errorf("extension: %w", err)
 	}
-	return filepath.Join(dir, brand.ConfigDirName, "extensions.json"), nil
+	return path, nil
 }
 
 // LoadSwitches reads a configuration file of the form

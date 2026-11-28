@@ -78,6 +78,7 @@ func Failing(err error) llm.Provider { return failing{err} }
 
 type failing struct{ err error }
 
+// Stream implements [llm.Provider]: it fails at once.
 func (p failing) Stream(context.Context, []llm.Message, []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	return nil, p.err
 }
@@ -96,6 +97,7 @@ type failingFirst struct {
 	then llm.Provider
 }
 
+// Stream implements [llm.Provider]: it fails until its count runs out.
 func (p *failingFirst) Stream(ctx context.Context, messages []llm.Message, tools []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	if p.left.Add(-1) >= 0 {
 		return nil, p.err
@@ -109,6 +111,7 @@ func Blocking(tokens ...string) llm.Provider { return blocking(tokens) }
 
 type blocking []string
 
+// Stream implements [llm.Provider]: it sends its tokens, then waits for ctx.
 func (p blocking) Stream(ctx context.Context, _ []llm.Message, _ []llm.ToolDef) (<-chan llm.StreamEvent, error) {
 	ch := make(chan llm.StreamEvent, len(p))
 	for _, tok := range p {

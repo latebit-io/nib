@@ -29,6 +29,9 @@ import (
 //go:embed prompt.md
 var systemPromptTemplate string
 
+// debugUsage is the --debug flag's help, for nib and nib serve alike.
+const debugUsage = "Debug logging to <user-cache-dir>/" + brand.ConfigDirName + "/nib-debug.log"
+
 // errSetup wraps configuration / environment failures so main can exit
 // with code 2 (vs code 1 for agent runtime errors).
 var errSetup = errors.New("setup")
@@ -121,15 +124,18 @@ func parseArgs() config {
 	flag.IntVar(&c.budget, "budget", 0, "End the session's runs once this many tokens are used (default: "+brand.EnvKeyTaskTokenBudget+", else none)")
 	flag.BoolVar(&c.trustMCP, "trust-mcp", false, "Allow the MCP servers this project's .mcp.json names, and exit")
 	flag.StringVar(&c.mcpLogin, "mcp-login", "", "Sign in to the named HTTP MCP server in the browser, keep the sign-in, and exit")
-	flag.BoolVar(&c.debug, "debug", false, "Debug logging to <user-cache-dir>/"+brand.ConfigDirName+"/nib-debug.log")
+	flag.BoolVar(&c.debug, "debug", false, debugUsage)
 	flag.Parse()
 	return c
 }
 
 func run() error {
-	// A subcommand of its own, before the flags: nib plugin <command>.
+	// Subcommands of their own, before the flags: nib plugin, nib serve.
 	if len(os.Args) > 1 && os.Args[1] == "plugin" {
 		return runPlugin(os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		return runServe(os.Args[2:])
 	}
 	cfg := parseArgs()
 

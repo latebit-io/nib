@@ -9,6 +9,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/latebit-io/nib/kit/elicit"
+	"github.com/latebit-io/nib/kit/internal/httporigin"
 )
 
 // handleElicit answers a server's question through the asker. The SDK
@@ -46,7 +47,7 @@ func request(p *sdk.ElicitParams) (elicit.Request, error) {
 	r := elicit.Request{Mode: elicit.Form, Message: p.Message}
 	if p.Mode == elicit.Page {
 		// Shown as a page to open, so only a web address will do.
-		if err := checkPage(p.URL); err != nil {
+		if _, err := httporigin.Page(p.URL); err != nil {
 			return elicit.Request{}, err
 		}
 		r.Mode, r.URL = elicit.Page, p.URL

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,18 +49,30 @@ func Token(path string) (string, error) {
 	return token, nil
 }
 
-// newToken writes a random token to path, which must not exist yet.
+// newToken writes a random token to path, which must not exist yet. It
+// is written beside path first and linked in whole: a reader never sees
+// it half written, and a token already there is never replaced.
 func newToken(path string) (string, error) {
 	token := rand.Text()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("a2a: token: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.CreateTemp(dir, ".a2a-token-*") // 0600
 	if err != nil {
 		return "", fmt.Errorf("a2a: token: %w", err)
 	}
+	tmp := f.Name()
+	defer func() {
+		if err := os.Remove(tmp); err != nil {
+			slog.Warn("a2a: remove temporary token file", "path", tmp, "err", err)
+		}
+	}()
 	_, werr := f.WriteString(token + "\n")
 	if err := errors.Join(werr, f.Close()); err != nil {
+		return "", fmt.Errorf("a2a: token: %w", err)
+	}
+	if err := os.Link(tmp, path); err != nil {
 		return "", fmt.Errorf("a2a: token: %w", err)
 	}
 	return token, nil

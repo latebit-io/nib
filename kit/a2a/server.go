@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -61,9 +62,13 @@ type Skill struct {
 // ServeURL is the address clients reach a server listening on addr at.
 // Only an address on this machine will do: the server speaks plain http.
 func ServeURL(addr string) (string, error) {
-	host, _, err := net.SplitHostPort(addr)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return "", fmt.Errorf("a2a: listen address %s: %w", addr, err)
+	}
+	// The card states the address, so the port must be the one listened on.
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("a2a: listen address %s needs a port from 1 to 65535", addr)
 	}
 	if !httporigin.Loopback(host) {
 		return "", fmt.Errorf("a2a: %s is reachable from other machines; serve on this machine only (127.0.0.1)", addr)
@@ -112,11 +117,23 @@ func NewServer(cfg ServerConfig) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("a2a: %w", err)
 	}
-	handler := a2asrv.NewHandler(exec, a2asrv.WithCallInterceptors(enforcer))
+	handler := a2asrv.NewHandler(exec, a2asrv.WithCallInterceptors(tokenHolder{}, enforcer))
 	mux := http.NewServeMux()
 	mux.Handle(a2asrv.WellKnownAgentCardPath, a2asrv.NewStaticAgentCardHandler(card, a2asrv.WithAgentCardCacheControl(cardCacheControl)))
 	mux.Handle("/", bearer(cfg.Token, a2asrv.NewJSONRPCHandler(handler)))
 	return mux, nil
+}
+
+// tokenHolder names the caller of every call that reaches the handler:
+// [bearer] let it through. The SDK's task store keeps tasks per caller.
+type tokenHolder struct {
+	a2asrv.PassthroughCallInterceptor
+}
+
+// Before implements [a2asrv.CallInterceptor].
+func (tokenHolder) Before(ctx context.Context, call *a2asrv.CallContext, _ *a2asrv.Request) (context.Context, any, error) {
+	call.User = a2asrv.NewAuthenticatedUser("token-holder", nil)
+	return ctx, nil, nil
 }
 
 // bearer lets a request through only with the token.

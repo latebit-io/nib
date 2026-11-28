@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -19,6 +20,10 @@ const (
 	maxPoll   = 5 * time.Second
 )
 
+// callTimeout bounds one call, the send and any polling together. An
+// agent's task can be long work, so the bound is generous.
+const callTimeout = 30 * time.Minute
+
 // Text from a card is cut to these lengths in a tool's description.
 const (
 	maxDescription      = 600
@@ -29,9 +34,10 @@ const (
 // remote is one connected agent and its tool. It keeps no conversation:
 // each answer names its own, so callers that share the tool stay apart.
 type remote struct {
-	agent  Agent
-	client *a2aclient.Client
-	def    llm.ToolDef
+	agent   Agent
+	client  *a2aclient.Client
+	def     llm.ToolDef
+	timeout time.Duration // for one call
 }
 
 // newRemote returns the tool for a's agent, described from its card.
@@ -54,7 +60,7 @@ func newRemote(a Agent, card *a2a.AgentCard, c *a2aclient.Client) *remote {
 		"conversation": {Type: "string", Description: "The conversation an earlier answer named, to continue it. Omit to start a new one."},
 		"task":         {Type: "string", Description: "The task an earlier answer said waits for input, when this message answers it."},
 	}}
-	return &remote{agent: a, client: c, def: llm.ToolDef{Type: "function", Function: llm.FunctionDef{
+	return &remote{agent: a, client: c, timeout: callTimeout, def: llm.ToolDef{Type: "function", Function: llm.FunctionDef{
 		Name: ToolNamePrefix + a.Name, Description: desc.String(), Parameters: params,
 	}}}
 }
@@ -76,11 +82,15 @@ func (r *remote) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResul
 	if strings.TrimSpace(args.Message) == "" {
 		return failed("message is empty")
 	}
+	// One bound for the send and the polling: an agent that never answers
+	// must not hold the run for as long as the run lives.
+	ctx, cancel := context.WithTimeoutCause(ctx, r.timeout, errCallTimeout)
+	defer cancel()
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(args.Message))
 	msg.ContextID, msg.TaskID = args.Conversation, a2a.TaskID(args.Task)
 	res, err := r.client.SendMessage(ctx, &a2a.SendMessageRequest{Message: msg})
 	if err != nil {
-		return failed("%s: %v", r.agent.Name, err)
+		return r.callFailed(ctx, err)
 	}
 	switch v := res.(type) {
 	case *a2a.Message:
@@ -88,11 +98,20 @@ func (r *remote) Execute(ctx context.Context, call llm.ToolCall) agent.ToolResul
 	case *a2a.Task:
 		task, err := r.finish(ctx, v)
 		if err != nil {
-			return failed("%s: %v", r.agent.Name, err)
+			return r.callFailed(ctx, err)
 		}
 		return r.answer(task)
 	}
 	return failed("%s answered with %T, which nib does not read", r.agent.Name, res)
+}
+
+// callFailed is the result for a call that err ended, naming the bound
+// when that is what ended it.
+func (r *remote) callFailed(ctx context.Context, err error) agent.ToolResult {
+	if errors.Is(context.Cause(ctx), errCallTimeout) {
+		return failed("%s gave no answer within %v", r.agent.Name, r.timeout)
+	}
+	return failed("%s: %v", r.agent.Name, err)
 }
 
 // finish polls task until it ends or asks for something.
@@ -192,3 +211,6 @@ func name(f string) string {
 func failed(format string, args ...any) agent.ToolResult {
 	return agent.ToolResult{Content: "Error: " + fmt.Sprintf(format, args...), IsError: true}
 }
+
+// errCallTimeout is why a call that ran out of time ended.
+var errCallTimeout = errors.New("a2a: no answer in time")

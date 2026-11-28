@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"iter"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -62,6 +64,17 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if _, err := LoadConfig("", "{"); err == nil {
 		t.Error("a bad variable was accepted")
+	}
+	// A list that half decodes is dropped whole: the file's agent stays.
+	partial := `{"agents": {"helper": {"url": "https://env.example/", "headers": 5}}}`
+	cfg, err = LoadConfig(path, partial)
+	if err == nil {
+		t.Error("a bad variable was accepted")
+	}
+	for _, a := range cfg.Agents {
+		if a.Name == "helper" && a.URL != "https://helper.example/" {
+			t.Errorf("a half-decoded list replaced the file's agent: %+v", a)
+		}
 	}
 }
 
@@ -155,6 +168,10 @@ func TestRoundTrip(t *testing.T) {
 	if got, isErr := call(t, r, `{"message":"fail"}`); !isErr || !strings.Contains(got, "the model is gone") {
 		t.Errorf("a failed run = %q, %v", got, isErr)
 	}
+	// The task store answers only a known caller: the token must make one.
+	if list, err := r.client.ListTasks(context.Background(), &a2a.ListTasksRequest{}); err != nil || len(list.Tasks) == 0 {
+		t.Errorf("list tasks = %+v, %v", list, err)
+	}
 	if len(seen) < 2 || seen[1][0].Content != "hello" || seen[1][1].Role != "assistant" {
 		t.Errorf("history = %+v", seen)
 	}
@@ -199,7 +216,7 @@ func TestServer_Token(t *testing.T) {
 func TestServeURL(t *testing.T) {
 	for addr, ok := range map[string]bool{
 		"127.0.0.1:8765": true, "localhost:1": true, "[::1]:80": true,
-		":8765": false, "0.0.0.0:80": false, "192.168.1.2:80": false, "example.com:80": false, "nope": false,
+		":8765": false, "0.0.0.0:80": false, "127.0.0.1:0": false, "127.0.0.1:": false, "127.0.0.1:http": false, "192.168.1.2:80": false, "example.com:80": false, "nope": false,
 	} {
 		if _, err := ServeURL(addr); (err == nil) != ok {
 			t.Errorf("%s: %v; want accepted %v", addr, err, ok)
@@ -216,6 +233,13 @@ func TestToken(t *testing.T) {
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v, %v", info, err)
+	}
+	// A second writer, as from a server started at once, keeps the first token.
+	if _, err := newToken(path); !errors.Is(err, fs.ErrExist) {
+		t.Errorf("a second token over the first: %v", err)
+	}
+	if entries, err := os.ReadDir(filepath.Dir(path)); err != nil || len(entries) != 1 {
+		t.Errorf("files left beside the token: %v, %v", entries, err)
 	}
 	if again, err := Token(path); err != nil || again != first {
 		t.Errorf("again = %q, %v; want the same token", again, err)
@@ -328,5 +352,18 @@ func TestConnect_ResponseTooLarge(t *testing.T) {
 	s := Connect(context.Background(), Config{Agents: []Agent{{Name: "big", URL: srv.URL}}})
 	if len(s.Failed) != 1 || !strings.Contains(s.Failed[0].Err.Error(), "over") {
 		t.Errorf("failed = %v", s.Failed)
+	}
+}
+
+func TestTool_Timeout(t *testing.T) {
+	release := make(chan struct{})
+	exec := executorFunc(func(context.Context, *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+		return func(func(a2a.Event, error) bool) { <-release }
+	})
+	r := connectOne(t, sdkServer(t, exec, func(url string) string { return url }), nil)
+	t.Cleanup(func() { close(release) }) // before the server closes: it waits for the call
+	r.timeout = 200 * time.Millisecond
+	if got, isErr := call(t, r, `{"message":"hello"}`); !isErr || !strings.Contains(got, "no answer within") {
+		t.Errorf("a silent agent = %q, %v", got, isErr)
 	}
 }

@@ -73,3 +73,19 @@ func TestExpandHeaders(t *testing.T) {
 		t.Error("an unset variable was accepted")
 	}
 }
+
+func TestOf(t *testing.T) {
+	for address, want := range map[string]string{
+		"https://Peer.Example/x":       "https://peer.example",
+		"https://peer.example:443/rpc": "https://peer.example",
+		"http://peer.example:80/":      "http://peer.example",
+		"https://peer.example:8443/":   "https://peer.example:8443",
+		"http://peer.example:443/":     "http://peer.example:443",
+		"http://[::1]:80/":             "http://[::1]",
+		"http://[::1]:8080/":           "http://[::1]:8080",
+	} {
+		if got := Of(address); got != want {
+			t.Errorf("Of(%s) = %s; want %s", address, got, want)
+		}
+	}
+}

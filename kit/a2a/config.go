@@ -81,20 +81,23 @@ func LoadConfig(path, env string) (Config, error) {
 			byName[name] = Agent{Name: name, URL: def.URL, Headers: def.Headers, Source: source}
 		}
 	}
+	// A list that failed to decode may be half filled in: none of it is used.
 	var errs []error
 	if path != "" {
 		var file list
 		if _, err := filecap.ReadJSON(path, maxConfigBytes, "A2A config", &file); err != nil {
 			errs = append(errs, fmt.Errorf("a2a: %w", err))
+		} else {
+			add(file, path)
 		}
-		add(file, path)
 	}
 	if env != "" {
 		var fromEnv list
 		if err := json.Unmarshal([]byte(env), &fromEnv); err != nil {
 			errs = append(errs, fmt.Errorf("a2a: %s: %w", EnvKey, err))
+		} else {
+			add(fromEnv, EnvKey)
 		}
-		add(fromEnv, EnvKey)
 	}
 	var cfg Config
 	for _, name := range slices.Sorted(maps.Keys(byName)) {

@@ -6,6 +6,7 @@ package httporigin
 import (
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -18,13 +19,22 @@ import (
 // MaxRedirects is how many redirects a request may follow, as net/http does.
 const MaxRedirects = 10
 
-// Of is an address's scheme and host, lowercase; "" if it does not parse.
+// Of is an address's scheme and host, lowercase, with a default port
+// left out (https://h:443 is https://h); "" if it does not parse.
 func Of(address string) string {
 	u, err := url.Parse(address)
 	if err != nil {
 		return ""
 	}
-	return strings.ToLower(u.Scheme + "://" + u.Host)
+	scheme, host, port := strings.ToLower(u.Scheme), strings.ToLower(u.Hostname()), u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" || strings.Contains(host, ":") {
+		host = net.JoinHostPort(host, port) // brackets an IPv6 address
+		host = strings.TrimSuffix(host, ":")
+	}
+	return scheme + "://" + host
 }
 
 // Page parses a web address: http or https, with a host.
